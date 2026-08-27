@@ -1337,8 +1337,16 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
         // `stop_race`/`discard_laps` don't touch heat rows, but ordering keeps RH idle while we set
         // the current heat). The seated heat is remembered so the finish-time dense save reuses it
         // (it is already current + savable) rather than adding a separate empty heat. Best-effort: a
-        // seating that can't complete (a slow RH) leaves `seated_heat = None` and the flow falls back
-        // to practice mode, which still records via RH's `current_heat is HEAT_ID_NONE` gate branch.
+        // seating that can't complete leaves `seated_heat = None` and the flow falls back to practice
+        // mode, which still records via RH's `current_heat is HEAT_ID_NONE` gate branch.
+        //
+        // Since #423 that `None` has two causes, and the second is the important one: a slow RH that
+        // never answers, **or** a seating RotorHazard did not actually apply. `seat_heat` now reads
+        // the seating back out of RH's own `heat_data` and refuses to hand back a heat it cannot
+        // confirm — because `alter_heat` answers `noself` (excluding the socket that wrote) and
+        // swallows failures into RH's log, so before that a silently-failed seat still arrived here
+        // as `Some(heat)`, and RH's pass gate then dismissed every crossing on the unseated node.
+        // Both causes are announced through the diag sink, the second naming the callsigns.
         let pending_seat = seat.lock().expect("seat lock poisoned").take();
         if let Some(seats) = pending_seat {
             match conn.seat_heat(&seats) {

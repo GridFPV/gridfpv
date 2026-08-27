@@ -333,6 +333,301 @@ flowchart LR
       </tbody>
     </table>
 
+    <h2 id="emit-audit">4b. The socket-emit audit (#423)</h2>
+    <p>
+      Grid drives RotorHazard by emitting <strong>internal socket handler names</strong> — reverse
+      engineered, not a supported API. Three of those writes shipped doing <em>nothing</em>, each
+      returning success and each found by hand on the race director's bench <em>after</em> shipping:
+      <code>set_min_lap_time</code> wrote an option RotorHazard does not have; <code>frequencyset_alter</code>
+      wrote the threshold to the database and never pushed it to the detector; <code>set_frequency</code>'s label sent
+      <code>"R8"</code> where RH does <code>int(data['channel'])</code>, aborting the whole handler on a
+      <code>ValueError</code>. A fire-and-forget emit has no failure signal, so
+      <strong>a dead write that reports success is the failure mode this audit exists to find.</strong>
+    </p>
+    <p>
+      Every row below was checked by reading RotorHazard's own source on <strong>both</strong> supported
+      versions — v4.3.0 from the running container (the RHAPI 1.3 floor, and what the field timer runs)
+      and the v4.4.0 tag — never inferred from a handler's name. A name is evidence of nothing:
+      <code>MIN_LAP_TIME</code> named an option RotorHazard has never had, and
+      <code>unlimited_time</code> is stored in a column called <code>race_mode</code>.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>One correction the audit owes the record.</strong> &ldquo;<code>unlimited_time</code>
+        means the opposite of what it says&rdquo; has been repeated in three issues, and against these
+        two versions it is <strong>not true</strong>. On 4.3.0 and 4.4.0 alike,
+        <code>RHRace</code> reads <code>unlimited_time == 0</code> as &ldquo;count down&rdquo; and
+        <code>== 1</code> as &ldquo;no time limit&rdquo; — the attribute is honest, and Grid's
+        <code>unlimited_time: 1</code> lands correctly. What is confusing is one layer down: the ORM
+        maps it onto a DB column still named <code>race_mode</code>
+        (<code>DB.Column('race_mode', …)</code>), with a deprecated <code>race_mode</code> property
+        kept beside it that logs a warning. So the hazard is real but it is a <em>column</em> name,
+        not the field Grid writes. Restating the stronger claim would have been the same mistake this
+        audit exists to stop.
+      </p>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>The headline: RHAPI 1.3 and 1.4 are the same API for every one of these.</strong> The
+        whole 1.3&rarr;1.4 diff is four additions — <code>ui.register_function_binding</code>,
+        <code>interface.add</code>, <code>server.set_min_mocks</code>,
+        <code>server.set_restart_required</code> — and not one of them touches an emit in this table.
+        &ldquo;Verify against 1.3 <em>and</em> 1.4&rdquo; therefore collapses to a single answer
+        everywhere, and &ldquo;newer&rdquo; was never a reason to move.
+      </p>
+    </div>
+
+    <p>
+      <strong>Legend.</strong> <em>Lands?</em> = does the emit actually reach a handler and take effect.
+      <em>Readback</em> = how Grid confirms it, since <em>none</em> of RotorHazard's write handlers
+      returns a value and several deliberately exclude the writing socket from their echo
+      (<code>noself=True</code>). <em>RHAPI verdict</em> = would routing this through the plugin be
+      genuinely better, not merely newer.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Emit</th><th>What it really does (RH source)</th><th>Lands?</th><th>4.3.0 vs 4.4.0</th><th>RHAPI verdict</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>load_data</code><br><small>node_data, enter_and_exit_at_levels, race_status, frequency_data, heat_data, pilot_data, min_lap, race_list</small></td>
+          <td>Dispatches to the matching <code>RHUI.emit_*</code> with <code>nobroadcast=True</code> — i.e. addressed to <strong>this</strong> socket. Every readback in the system rides on it.</td>
+          <td>Yes. All 8 types exist on both.</td>
+          <td><strong>Byte-identical</strong> handler on both versions.</td>
+          <td><strong>Keep.</strong> RHAPI has no &ldquo;serialise this to my socket&rdquo; equivalent; the plugin would have to re-implement each emitter. This is the load-bearing readback path — moving it would cost readbacks to gain nothing.</td>
+        </tr>
+        <tr>
+          <td><code>add_heat</code></td>
+          <td><code>rhdata.add_heat()</code>, then broadcasts <code>heat_data</code> + <code>race_status</code> (no <code>noself</code>, so we do see it).</td>
+          <td>Yes.</td>
+          <td>Same, bar a <code>data['group']</code> truthiness guard on a key Grid never sends.</td>
+          <td><strong>Defer to clean_control.</strong> <code>db.heat_add()</code> <em>returns the row</em>, retiring the &ldquo;emit, wait for a broadcast, take the highest id&rdquo; heuristic and its 3&nbsp;s timeout. A real win — but it needs a plugin capability plus a socket fallback for the v0.3.0 field plugin, which is the clean_control slice, not a doc-fix.</td>
+        </tr>
+        <tr>
+          <td><code>add_pilot</code></td>
+          <td><code>rhdata.add_pilot()</code>, then broadcasts <code>pilot_data</code> + <code>heat_data</code>.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Defer to clean_control</strong> — same argument, and stronger: <code>db.pilot_add(callsign=…)</code> returns the pilot <em>and</em> names it in one call, so it retires the <code>alter_pilot</code> round below as well.</td>
+        </tr>
+        <tr>
+          <td><code>alter_pilot</code> <span class="tag">not in the original list</span></td>
+          <td>Renames the pilot to the Grid callsign. Answers <code>emit_pilot_data(<strong>noself=True</strong>)</code> — <code>include_self=False</code>, so <strong>the writer never sees it</strong>.</td>
+          <td>Yes, but unverifiable from its own echo.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep</strong> (cosmetic — it only decides what RH's own screen calls the pilot). Its silence is why the seating chain needed an explicit readback.</td>
+        </tr>
+        <tr>
+          <td><code>alter_heat</code> <span class="tag">not in the original list</span></td>
+          <td><strong>The seating write.</strong> Assigns a pilot to a <code>HeatNode</code> slot. Answers <code>emit_heat_data(<strong>noself=True</strong>)</code>, and <code>@catchLogExcWithDBWrapper</code> swallows a failure into RH's log.</td>
+          <td>Yes — but it was <strong>completely unconfirmed</strong>. See the finding below.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep the emit, add the readback.</strong> Done: <code>load_data{heat_data}</code> now checks each slot's <code>pilot_id</code> before the heat may be selected.</td>
+        </tr>
+        <tr>
+          <td><code>set_current_heat</code></td>
+          <td><code>race.set_heat(id)</code>, then a full <code>emit_race_status()</code> broadcast.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.heat = id</code> calls the same <code>race.set_heat</code>. Routing it Director&rarr;plugin&rarr;RHAPI adds a hop and a version gate to reach the identical call.</td>
+        </tr>
+        <tr>
+          <td><code>stage_race</code></td>
+          <td><code>race.stage()</code>.</td>
+          <td>Yes.</td>
+          <td>4.4.0 additionally re-emits <code>race_status</code> when staging is refused, and its <code>RHRace.stage</code> gains <code>immediate=</code> / <code>from_scheduler=</code> — <strong>4.4.0-only</strong>, so unusable at the floor.</td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.stage()</code> is literally the handler's body. Observable either way via the <code>race_status</code> stream.</td>
+        </tr>
+        <tr>
+          <td><code>stop_race</code></td>
+          <td><code>race.stop()</code>.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep</strong> — same reasoning as <code>stage_race</code>.</td>
+        </tr>
+        <tr>
+          <td><code>save_laps</code></td>
+          <td><code>race.save()</code>. ⚠️ While <code>current_heat == HEAT_ID_NONE</code> (practice mode) it <strong>discards</strong> rather than saves.</td>
+          <td>Yes — but a no-op-that-deletes without a current heat, which is why the savable-heat step exists.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep</strong> — <code>race.save()</code> is the same call, with the same practice-mode trapdoor.</td>
+        </tr>
+        <tr>
+          <td><code>discard_laps</code></td>
+          <td><code>race.discard_laps(**kwargs)</code>. Note the signature: it takes <strong>keyword args only</strong>, so Grid's zero-arg emit is correct and sending a payload dict would be a <code>TypeError</code>.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.clear()</code> is a thin alias for the same method.</td>
+        </tr>
+        <tr>
+          <td><code>current_race_marshal</code></td>
+          <td>Asks for the aggregate dense post-race trace (<code>current_marshal_data</code>).</td>
+          <td><strong>4.4.0: yes. v4.3.0: NO — nothing at all.</strong></td>
+          <td><strong>The one real divergence.</strong> Neither the handler nor <code>RHUI.emit_race_marshal_data</code> exists anywhere in the v4.3.0 tree. Socket.IO discards an emit with no handler, so on the floor version it returns <code>Ok</code>, replies nothing, and logs nothing.</td>
+          <td><strong>No RHAPI equivalent</strong> (the plugin reads <code>interface.seats[i].history_values</code> live instead, which is what supersedes this entirely). Kept, with the per-pilotrace route driven alongside it on every version.</td>
+        </tr>
+        <tr>
+          <td><code>get_pilotrace</code></td>
+          <td>Answers <code>race_details</code> with one saved seat's <code>history_values</code>/<code>history_times</code>. <strong>The only dense route on v4.3.0.</strong></td>
+          <td>Yes.</td>
+          <td>Same shape; 4.4.0 adds a per-lap <code>peak_rssi</code> and a <code>marshal_type</code>, both ignored.</td>
+          <td><strong>Keep.</strong> <code>db.pilotruns_by_race()</code> exposes the same rows, but needs a <code>race_id</code> Grid does not hold and buys no readback the socket route lacks.</td>
+        </tr>
+        <tr>
+          <td><code>set_race_format</code></td>
+          <td>Selects the current format. Refused unless <code>race_status == READY</code>.</td>
+          <td>Yes, when READY.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep as the fallback.</strong> RHAPI's <code>race.raceformat</code> setter is monkey-patched to <em>this exact handler</em> (<code>RHAPI.race._raceformat_set = on_set_race_format</code>, both versions) — so it is the same code, and the plugin already uses it on the owned-format path. Note the handler guards its UI re-emits behind <code>if request:</code>, so an RHAPI call made <em>outside</em> a request context (a load-time hook, a background greenlet) selects the format while broadcasting nothing — which is why the plugin confirms by re-reading <code>race.raceformat.id</code> rather than by any echo.</td>
+        </tr>
+        <tr>
+          <td><code>alter_race_format</code> <span class="tag">not in the original list</span></td>
+          <td>The legacy in-place neutralisation — zeroes staging on the RD's <em>own</em> format row.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep as the announced fallback.</strong> Superseded by the Grid-owned format for any plugin ≥ <code>owned_format</code>; still the only path for older plugin builds, and already loud when engaged.</td>
+        </tr>
+        <tr>
+          <td><code>set_frequency</code></td>
+          <td>Writes the active profile's <code>b</code>/<code>c</code>/<code>f</code> arrays <strong>and</strong> retunes the receiver via <code>interface.set_frequency</code>. Echoes <code>frequency_data</code>.</td>
+          <td>Yes.</td>
+          <td>Same handler; 4.4.0 additionally passes <code>band, channel</code> through to the interface, so the label reaches the hardware layer there. <code>int(data['channel'])</code> on <strong>both</strong> — the <code>ValueError</code> trap that ate the whole handler.</td>
+          <td><strong>Keep.</strong> <code>db.frequencyset_alter(frequencies=…)</code> <em>does</em> push to the hardware — but only for the active profile, by rewriting the <strong>whole</strong> array and re-pushing <strong>every</strong> node, and without firing <code>Evt.FREQUENCY_SET</code>. Trading a per-node write that fires the event for a whole-set write that does not is a regression, not a migration.</td>
+        </tr>
+        <tr>
+          <td><code>set_enter_at_level</code> / <code>set_exit_at_level</code> <span class="tag">not in the original list</span></td>
+          <td><code>calibration.set_*_at_level</code>: writes the profile row, <strong>pushes the level to the timing hardware</strong>, fires the event. No echo at all.</td>
+          <td>Yes — but <code>0</code> is falsy to <code>calibration.py</code> and silently re-reads the node's own level instead. Callers clamp to ≥ 1.</td>
+          <td>Same; 4.4.0 adds an <code>int(… or 0)</code> coercion.</td>
+          <td><strong>Keep — RHAPI is strictly worse, and provably so.</strong> The <em>same</em> <code>frequencyset_alter</code> that pushes <code>frequencies</code> to the hardware does <strong>not</strong> push <code>enter_ats</code>/<code>exit_ats</code>: it writes the profile row and stops, on 1.3 and 1.4 alike. That asymmetry inside one function is exactly the shipped dead write of #423 — the threshold persisted, the detector kept its old level. Migrating here would re-create the bug by name. Readback is <code>load_data{enter_and_exit_at_levels}</code>.</td>
+        </tr>
+        <tr>
+          <td><code>cap_enter_at_btn</code> / <code>cap_exit_at_btn</code> <span class="tag">not in the original list</span></td>
+          <td>Arms a <strong>3-second</strong> sampling window <em>starting now</em>; the level becomes the window's mean. Refusals (capture already running, invalid node, out-of-range index) are all <strong>silent on the socket</strong>.</td>
+          <td>Yes — and the payload key is <code>node_index</code>, not <code>node</code> as its neighbours use. A wrong key is a swallowed <code>KeyError</code>.</td>
+          <td><strong>Byte-identical</strong> across <code>server.py</code>, <code>calibration.py</code> and <code>BaseHardwareInterface.py</code>.</td>
+          <td><strong>Keep.</strong> No RHAPI surface exists for the capture path. Confirmed by the <code>node_enter_at_level</code> echo the finished window emits, plus a threshold readback.</td>
+        </tr>
+        <tr>
+          <td><code>set_min_lap</code></td>
+          <td>Writes the <code>MinLapSec</code> <strong>DB option</strong>. Answers <code>emit_min_lap(<strong>noself=True</strong>)</code> — the writer does not get the echo.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong> (4.4.0 adds an unrelated <code>set_min_first_crossing</code> sibling.)</td>
+          <td><strong>Already migrated (#407), correctly.</strong> The plugin does it in-process through <code>db.option_set</code> and re-asserts per stage; this socket route is the announced fallback for older plugin builds, confirmed by a <code>load_data{min_lap}</code> re-read rather than by the write.</td>
+        </tr>
+        <tr>
+          <td><code>set_min_lap_behavior</code></td>
+          <td>Writes <code>serverconfig</code> <code>TIMING</code>/<code>MinLapBehavior</code> — a <strong>different store</strong> from <code>MinLapSec</code>, which is why neutralising the filter takes two writes.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Already migrated (#407), correctly</strong> — <code>config.set("TIMING", "MinLapBehavior", 0)</code>, same fallback shape.</td>
+        </tr>
+        <tr>
+          <td><code>simulate_lap</code></td>
+          <td>Fires <code>CROSSING_EXIT</code> and <code>interface.intf_simulate_lap</code> — a synthetic pass down the <strong>real detector path</strong>. Test driver only.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.lap_add()</code> is <em>not</em> the same thing — it injects a lap record, bypassing the detection path the harness exists to exercise. Migrating would make the test prove less.</td>
+        </tr>
+        <tr>
+          <td><code>restart_server</code></td>
+          <td>Re-executes the RH process so it re-imports plugins. No authentication (<code>@requires_auth</code> guards Flask HTTP routes, not socket handlers).</td>
+          <td>Yes.</td>
+          <td>Same; 4.4.0 first emits <code>server_restarting</code> and honours a configurable <code>restart_sleep_secs</code>.</td>
+          <td><strong>Keep — no RHAPI equivalent exists.</strong> (1.4's <code>server.set_restart_required</code> only <em>flags</em> that a restart is needed.) Observable by the socket dropping and the reconnect re-probing the plugin.</td>
+        </tr>
+        <tr>
+          <td><code>gridfpv_hello</code> <span class="tag">not in the original list</span> / <code>gridfpv_select_format</code></td>
+          <td>Grid's own plugin protocol, registered through <code>ui.socket_listen</code>. Both answer with an explicit ack carrying the outcome.</td>
+          <td>Yes, where the plugin is loaded; nothing on a stock RH, which <em>is</em> the probe's answer.</td>
+          <td>N/A — plugin-side, and <code>socket_listen</code> is identical on RHAPI 1.3 and 1.4.</td>
+          <td><strong>Already RHAPI.</strong> The only two emits in the system with a real acknowledgement, which is exactly why they are the model for the rest.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      <strong>The original enumeration listed 17 emits; there are 25.</strong> Missing from it were
+      <code>alter_pilot</code>, <code>alter_heat</code>, <code>alter_race_format</code>,
+      <code>set_enter_at_level</code>, <code>set_exit_at_level</code>, <code>cap_enter_at_btn</code>,
+      <code>cap_exit_at_btn</code> and <code>gridfpv_hello</code> — and <code>alter_heat</code>, the one
+      that turned out to carry the unconfirmed write below, was among them.
+    </p>
+
+    <div class="callout">
+      <p>
+        <strong>The fourth dead write: <code>current_race_marshal</code> does not exist on v4.3.0.</strong>
+        Not &ldquo;behaves differently&rdquo; — <em>absent</em>. Grid's own code called the two dense
+        routes &ldquo;newer RH&rdquo; and &ldquo;older RH&rdquo; without ever naming which, and drove both,
+        so the gap never showed in behaviour. It was invisible because it was driven, not because the
+        emit worked. Both routes stay; the version each one serves is now stated where it is emitted,
+        and <code>request_marshal_data()</code> — which previously sent <em>only</em> the 4.4.0 event and
+        was therefore a silent no-op against the floor — now drives both.
+      </p>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>The fifth, and the expensive one: the seating chain was never confirmed.</strong>
+        <code>seat_heat</code> emitted <code>add_pilot</code> &rarr; <code>alter_pilot</code> &rarr;
+        <code>alter_heat</code> per seat and then selected the heat as current — with
+        <strong>no readback on the assignment at all</strong>. It could not have had one by accident:
+        <code>alter_heat</code> answers <code>noself=True</code>, so its echo is delivered to every
+        socket <em>except</em> the one that wrote, and <code>@catchLogExcWithDBWrapper</code> turns a
+        handler exception into a log line. If a seat did not take, RH then held a current heat with an
+        empty node — and its pass gate
+        (<code>pilot_id is not None and pilot_id != PILOT_ID_NONE</code>) <strong>dismisses every
+        crossing on that node</strong>, losing that pilot's entire run, while Grid reported a seated
+        heat. That is the exact shape of the three writes that already cost bench time, with the largest
+        blast radius of any of them.
+      </p>
+      <p>
+        And it is <strong>reachable, not theoretical</strong>. <code>RHData.alter_heat</code> resolves the
+        slot as <code>HeatNode.query.get(slot_id)</code> — a bare primary-key lookup,
+        <strong>not scoped to the heat</strong> — and then assigns <code>slot.pilot_id</code>
+        unconditionally. A slot id that no longer exists gives an <code>AttributeError</code> on
+        <code>None</code>, straight into the swallow. Worse, a slot id belonging to a <em>different</em>
+        heat seats the pilot happily — on the wrong heat — while the heat Grid then makes current stays
+        empty. Grid can produce exactly that: the slot ids come from &ldquo;the freshest heat in whatever
+        <code>heat_data</code> arrives&rdquo;, and RotorHazard dispatches every socket event on its own
+        greenlet, so a pre-<code>add_heat</code> snapshot is a legal thing to receive.
+      </p>
+      <p>
+        Fixed: after seating, Grid re-reads <code>load_data{heat_data}</code> and checks each slot's
+        <code>pilot_id</code> <strong>on the heat it is about to race</strong> — which closes the
+        wrong-heat case as well as the failed-write one. Every intended seat must be confirmed; anything
+        less falls back to practice mode (no current heat), which still records every lap through RH's
+        <code>current_heat is HEAT_ID_NONE</code> branch and costs only the dense RSSI trace — and says
+        so, naming the <strong>callsigns</strong> that did not seat. The check re-asks until it confirms
+        or times out, for the same greenlet reason: a single ask could read the pre-write snapshot and
+        condemn a perfectly good heat.
+      </p>
+      <p>
+        ⚠️ The readback itself needed care, because <code>RHUtils.PILOT_ID_NONE</code> is
+        <strong><code>0</code> on v4.3.0 and <code>None</code> on v4.4.0</strong>. Checking for one
+        sentinel would have made every 4.4.0 slot read as seated — a confirmation step that confirms
+        nothing, which is worse than the blind write it replaced. Both collapse to &ldquo;empty&rdquo; in
+        one place, and a test pins both.
+      </p>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>Noted, not fixed: the same sentinel split shows up on the way in.</strong>
+        <code>HEAT_ID_NONE</code> moved <code>0</code>&nbsp;&rarr;&nbsp;<code>None</code> alongside
+        <code>PILOT_ID_NONE</code>, so a practice-mode race (no current heat) reports
+        <code>race_heat_id: 0</code> from a v4.3.0 timer and <code>null</code> from a v4.4.0 one. Grid's
+        <code>session_id</code> turns those into <code>heat-0</code> and <code>race</code> — two names
+        for one state, the first naming a heat that does not exist. It is left alone on purpose: it is
+        consistent within a connection (a timer does not change version mid-event), it is an inbound
+        decode rather than an emit, and <code>SessionId</code> is keyed on outside the adapter crate,
+        so normalising it is a wider change than this audit's remit. Recorded where the code is, with
+        the fix named, so the next person meets it as a decision rather than a surprise.
+      </p>
+    </div>
+
     <h2>5. Onboarding — required, with a guided install</h2>
     <p>
       On connecting its socket.io link to a configured RH timer, Grid emits <code>gridfpv_hello</code>
@@ -479,7 +774,24 @@ flowchart LR
       (<code>zero_prestage_pad</code>). <strong>Clean start/stop has not</strong> — the Stage-time
       socket prepare/seat flow (staging-zero, seating dance) is still the production control path,
       recently hardened rather than deleted (effective-format re-prepare, 5&nbsp;s stage retry,
-      per-arming pass gating). Deleting those workarounds is this slice's remaining work.</dd>
+      per-arming pass gating). Deleting those workarounds is this slice's remaining work.
+      <p>
+        <strong>#423 narrows what is left, and it is not what the slice's name says.</strong> The
+        <em>start/stop</em> half has no case: <code>on_stage_race</code> and <code>on_stop_race</code>
+        <em>are</em> <code>race.stage()</code> and <code>race.stop()</code>, byte-for-byte the calls
+        RHAPI would make, identical on 4.3.0 and 4.4.0 — so routing them Director&rarr;plugin&rarr;RHAPI
+        adds a hop and a capability gate to arrive at the same line of Python. Building it would be
+        &ldquo;newer&rdquo; standing in for &ldquo;better&rdquo;.
+      </p>
+      <p>
+        The <em>seating</em> half does have a case, and a specific one: <code>db.heat_add()</code> and
+        <code>db.pilot_add()</code> <strong>return the row they created</strong>. The socket dance
+        cannot — it emits, waits up to 3&nbsp;s for a broadcast, and infers the new id as &ldquo;the
+        highest&rdquo; / &ldquo;the one above the floor&rdquo;, a heuristic that is wrong the moment
+        anything else touches RH's heats or pilots concurrently. That is the piece worth building, it
+        needs a socket fallback for the v0.3.0 field plugin, and until then the readback added in #423
+        is what keeps the dance honest.
+      </p></dd>
       <dt>Slice 4 — Draggable-threshold recalculate ◐ DELIVERED GRID-SIDE</dt>
       <dd>A <code>recalculate</code> that replays detection over the stored dense trace at marshal-chosen
       enter/exit levels and <em>proposes</em> lap changes (Grid/marshal commits; RH truth is not mutated
