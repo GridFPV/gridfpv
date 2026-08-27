@@ -17,7 +17,7 @@ import { expect, test } from './observability.js';
 
 /** Get the shared worker Director into the Practice event's workspace. */
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -106,7 +106,7 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
 
   // ── It persisted on the Director: a reload resumes into the event with the round listed ─────
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Rounds & Heats');
   const rowAfter = page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL });
   await expect(rowAfter).toBeVisible({ timeout: 15_000 });

@@ -18,7 +18,7 @@
 import { expect, test } from './observability.js';
 
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -112,7 +112,7 @@ test('RD collapses a class placement section and a round; both persist across a 
 
   // ── It persisted: a reload keeps the placement section collapsed. ─────────────────────────────
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Classes & Roster');
   // Collapsed: the group is hidden, so match the placement toggle by its accessible name (title + count).
   const placeToggleAfter = page.getByRole('button', { name: /Open Class.*placed/ });
@@ -143,7 +143,7 @@ test('RD collapses a class placement section and a round; both persist across a 
       .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/rounds-heats-collapsed.png` });
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Rounds & Heats');
   const roundToggleAfter = page
     .getByRole('region', { name: `Heats for ${ROUND_LABEL}` })

@@ -21,7 +21,7 @@ import { expect, test } from './observability.js';
 
 /** Get the shared worker Director into the Practice event's workspace. */
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
