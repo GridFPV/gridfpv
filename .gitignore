@@ -36,3 +36,6 @@ frontend/playwright-report/
 frontend/blob-report/
 frontend/.playwright/
 frontend/e2e-artifacts/
+
+# Bench-Director runtime state (issue #455)
+/.gridfpv-*/
