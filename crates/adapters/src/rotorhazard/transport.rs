@@ -516,49 +516,93 @@ pub struct NodeTick {
 /// Nothing in this type produces an [`Event`]. See [`RawHeartbeat`] for why that is structural.
 #[derive(Clone, Default)]
 pub struct SignalTap {
-    /// The pre-parse subscription gate. Relaxed throughout: it guards no other memory, and a frame
-    /// landing on either side of the flip is equally correct.
+    /// The pre-parse subscription gate — a **hint**, not the authority. Relaxed throughout: it
+    /// guards no other memory, and a frame landing on either side of the flip is equally correct
+    /// *as far as the parse is concerned*. Whether the resulting fold may be **stored** is decided
+    /// separately, by [`TapStore::open`] under the store lock (#452).
     capture: Arc<AtomicBool>,
+    /// The subscription flag and the readings, behind one lock — see [`TapStore`].
+    store: Arc<Mutex<TapStore>>,
+}
+
+/// The tap's mutable state: the authoritative subscription flag **and** the readings it guards,
+/// behind a single lock (#452).
+///
+/// They are one datum, not two. Before this, `capturing()` was an atomic checked outside the lock
+/// and the readings were a `Mutex<Vec<NodeTick>>` cleared inside it, so a socket-callback thread
+/// could pass the gate, get descheduled, and have the driver tick close the subscription and empty
+/// the store underneath it — then wake up and write its frame into the supposedly-empty store. The
+/// next `set_signal_capture(true)` session's first `take()` then reported the *previous* session's
+/// RSSI, crossing and `crossed` flags as current. Deciding "is the subscription open?" and writing
+/// the frame under one lock is what makes "a lapsed Tune page leaves nothing behind" an invariant
+/// rather than a likelihood.
+#[derive(Debug, Default)]
+struct TapStore {
+    /// Whether the subscription is open, as decided **under this lock**. Kept in lockstep with
+    /// [`SignalTap::capture`], which exists only to answer the pre-parse gate without locking.
+    open: bool,
     /// Latest reading per node index. Grows to the widest array a frame has reported, capped at
     /// [`MAX_TUNE_NODES`].
-    nodes: Arc<Mutex<Vec<NodeTick>>>,
+    nodes: Vec<NodeTick>,
 }
 
 impl SignalTap {
     /// Whether a subscription is currently open — the check every gated handler makes **first**.
+    ///
+    /// A lock-free *hint*, deliberately: its job is to skip the deserialization of a frame nobody
+    /// wants (the #392 hazard), and being one instant stale there costs nothing. It is **not** the
+    /// permission to write — [`widen`](Self::widen) re-checks under the store lock (#452).
     pub fn capturing(&self) -> bool {
         self.capture.load(Ordering::Relaxed)
     }
 
     /// Open or close the subscription, returning the **previous** state so a caller can act on the
     /// edge. Closing empties the store: a lapsed Tune page must leave nothing behind.
+    ///
+    /// The flag flip and the clear happen under **one** acquisition of the store lock, so a
+    /// concurrent fold either completes entirely before the close (and is then cleared) or observes
+    /// `open == false` in [`widen`](Self::widen) and writes nothing. There is no window between
+    /// them for an in-flight frame to land in (#452).
     fn set_capturing(&self, on: bool) -> bool {
-        let was = self.capture.swap(on, Ordering::Relaxed);
+        let mut store = self.store.lock().expect("signal-tap lock");
+        let was = store.open;
+        store.open = on;
         if was && !on {
-            self.nodes.lock().expect("signal-tap lock").clear();
+            store.nodes.clear();
         }
+        // Publish the hint while still holding the lock, so it can never advertise "open" for a
+        // store this call is about to empty.
+        self.capture.store(on, Ordering::Relaxed);
         was
     }
 
     /// The current per-node readings, clearing the sticky [`NodeTick::crossed`] flags so the next
     /// read reports only crossings seen since this one.
     fn take(&self) -> Vec<NodeTick> {
-        let mut nodes = self.nodes.lock().expect("signal-tap lock");
-        let snapshot = nodes.clone();
-        for node in nodes.iter_mut() {
+        let mut store = self.store.lock().expect("signal-tap lock");
+        let snapshot = store.nodes.clone();
+        for node in store.nodes.iter_mut() {
             node.crossed = false;
         }
         snapshot
     }
 
-    /// Widen the store to `len` nodes (capped), returning the guard to write through.
-    fn widen(&self, len: usize) -> std::sync::MutexGuard<'_, Vec<NodeTick>> {
-        let mut nodes = self.nodes.lock().expect("signal-tap lock");
-        let want = len.min(MAX_TUNE_NODES);
-        if nodes.len() < want {
-            nodes.resize(want, NodeTick::default());
+    /// Widen the store to `len` nodes (capped) and return the guard to write through — or `None`
+    /// when the subscription has closed since the caller passed the pre-parse gate.
+    ///
+    /// This `None` is the whole of the #452 fix: the fold is abandoned rather than resurrecting a
+    /// closed session's readings. Every `note_*` fold goes through here, so none of them can write
+    /// to a closed tap.
+    fn widen(&self, len: usize) -> Option<std::sync::MutexGuard<'_, TapStore>> {
+        let mut store = self.store.lock().expect("signal-tap lock");
+        if !store.open {
+            return None;
         }
-        nodes
+        let want = len.min(MAX_TUNE_NODES);
+        if store.nodes.len() < want {
+            store.nodes.resize(want, NodeTick::default());
+        }
+        Some(store)
     }
 
     /// Fold a `heartbeat` frame in. Called **only** when [`capturing`](Self::capturing) is true.
@@ -569,8 +613,10 @@ impl SignalTap {
             .max(hb.frequency.len())
             .max(hb.loop_time.len())
             .max(hb.crossing_flag.len());
-        let mut nodes = self.widen(len);
-        for (index, node) in nodes.iter_mut().enumerate() {
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
             let mut touched = false;
             if let Some(&rssi) = hb.current_rssi.get(index) {
                 node.rssi = Some(rssi);
@@ -601,8 +647,10 @@ impl SignalTap {
         if change.node_index >= MAX_TUNE_NODES {
             return;
         }
-        let mut nodes = self.widen(change.node_index + 1);
-        if let Some(node) = nodes.get_mut(change.node_index) {
+        let Some(mut store) = self.widen(change.node_index + 1) else {
+            return;
+        };
+        if let Some(node) = store.nodes.get_mut(change.node_index) {
             let crossing = truthy(&change.crossing_flag);
             node.crossing = crossing;
             node.crossed |= crossing;
@@ -624,8 +672,10 @@ impl SignalTap {
             .max(data.pass_peak_rssi.len())
             .max(data.pass_nadir_rssi.len())
             .max(data.debug_pass_count.len());
-        let mut nodes = self.widen(len);
-        for (index, node) in nodes.iter_mut().enumerate() {
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
             let mut touched = false;
             for (slot, source) in [
                 (&mut node.node_peak_rssi, &data.node_peak_rssi),
@@ -656,8 +706,10 @@ impl SignalTap {
             .enter_at_levels
             .len()
             .max(levels.exit_at_levels.len());
-        let mut nodes = self.widen(len);
-        for (index, node) in nodes.iter_mut().enumerate() {
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
             if let Some(&enter) = levels.enter_at_levels.get(index) {
                 node.enter_at = Some(enter);
             }
@@ -673,8 +725,10 @@ impl SignalTap {
     /// Widens the store the same way the array-shaped frames do, so a capture on a node the tap has
     /// not otherwise heard from still lands rather than being dropped for being out of range.
     fn note_level(&self, index: usize, level: f32, enter: bool) {
-        let mut nodes = self.widen(index + 1);
-        let Some(node) = nodes.get_mut(index) else {
+        let Some(mut store) = self.widen(index + 1) else {
+            return;
+        };
+        let Some(node) = store.nodes.get_mut(index) else {
             return;
         };
         if enter {
@@ -2999,6 +3053,82 @@ mod tests {
             "and reports the rising edge as such"
         );
         assert!(tap.take().is_empty(), "a reopened tap starts from nothing");
+    }
+
+    /// **A frame already past the gate when the subscription closes must not survive the close**
+    /// (#452).
+    ///
+    /// This is the socket-callback thread's exact interleaving, replayed deterministically. A
+    /// handler checks [`SignalTap::capturing`] (true), is descheduled while it deserializes, and
+    /// the driver tick meanwhile calls `set_capturing(false)` — which empties the store. The
+    /// handler then wakes and performs its fold. Before the fix the fold took the `nodes` lock and
+    /// wrote unconditionally, so the closed session's RSSI, crossing state and sticky `crossed`
+    /// flags were sitting in the store for the *next* Tune session's first `take()` to report as
+    /// current readings. Now the fold re-checks under the same lock and abandons the frame.
+    ///
+    /// The gated `note_*` folds are called directly here on purpose: `tap_heartbeat` re-reads the
+    /// gate itself, so going through it would test the gate rather than the race behind it.
+    #[test]
+    fn a_fold_in_flight_when_the_subscription_closes_leaves_nothing_behind() {
+        for (name, fold) in [
+            (
+                "heartbeat",
+                Box::new(|tap: &SignalTap| {
+                    let hb: RawHeartbeat = serde_json::from_value(json!({
+                        "current_rssi": [40.0, 41.0, 42.0, 43.0],
+                        "frequency": [5658, 5695, 5760, 5800],
+                        "loop_time": [1200, 1180, 1210, 1195],
+                        "crossing_flag": [true, true, true, true],
+                    }))
+                    .unwrap();
+                    tap.note_heartbeat(&hb);
+                }) as Box<dyn Fn(&SignalTap)>,
+            ),
+            (
+                "node_data",
+                Box::new(|tap: &SignalTap| {
+                    let data: RawNodeData = serde_json::from_value(json!({
+                        "node_peak_rssi": [90.0, 91.0, 92.0, 93.0],
+                        "pass_peak_rssi": [88.0, 89.0, 90.0, 91.0],
+                        "debug_pass_count": [3, 3, 3, 3],
+                    }))
+                    .unwrap();
+                    tap.note_node_data(&data);
+                }),
+            ),
+            (
+                "node_crossing_change",
+                Box::new(|tap: &SignalTap| {
+                    let change: RawNodeCrossing =
+                        serde_json::from_value(json!({ "node_index": 2, "crossing_flag": true }))
+                            .unwrap();
+                    tap.note_crossing(&change);
+                }),
+            ),
+        ] {
+            let tap = SignalTap::default();
+            tap.set_capturing(true);
+
+            // The handler passes the pre-parse gate...
+            assert!(tap.capturing(), "{name}: the gate is open when it is read");
+            // ...the driver tick closes the subscription and empties the store...
+            assert!(tap.set_capturing(false), "{name}: the tap was open");
+            // ...and only now does the descheduled handler's fold reach the store.
+            fold(&tap);
+
+            assert!(
+                tap.take().is_empty(),
+                "{name}: a fold that lost the race to the close must write nothing — the store \
+                 belongs to a subscription that is gone"
+            );
+
+            // The proof this matters: the next Tune session must start from nothing.
+            tap.set_capturing(true);
+            assert!(
+                tap.take().is_empty(),
+                "{name}: the next session's first take() reported the previous session's readings"
+            );
+        }
     }
 
     /// **Both feeds surface.** `get_heartbeat_json` carries only rssi / frequency / loop-time /
