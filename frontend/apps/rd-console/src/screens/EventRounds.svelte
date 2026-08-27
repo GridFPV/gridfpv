@@ -244,7 +244,10 @@
     return buildCompetitorNames({
       pilots,
       heat: h,
-      layout: roundLayouts[0],
+      // The heat's OWN layout, never the round's first: heats alternate across the round's named
+      // layouts (#117), so `[0]` would label an even-numbered heat's seats with channels it is not
+      // flying — a confident, wrong readout, which is worse than none.
+      layout: h?.layout ?? roundLayouts[0],
       catalog,
       timer: primaryTimer,
       membership: session.currentEvent?.classes_membership,
@@ -2133,7 +2136,7 @@
             ? 'None chosen: channels are picked automatically from the timer’s allowed set.'
             : roundLayouts.length === 1
               ? `Every heat in this round flies ${layoutName(roundLayouts[0])}.`
-              : `Heats default to ${layoutName(roundLayouts[0])}; you can pick another per heat.`}
+              : `Heats alternate through these ${roundLayouts.length} layouts in order, so back-to-back heats do not share channels. You can still pick one per heat.`}
       >
         {#if eventLayouts.length === 0}
           <p class="layout-empty">No channel layouts defined for this event.</p>
@@ -2147,8 +2150,19 @@
                   onchange={() => toggleRoundLayout(l.id)}
                 />
                 <span class="layout-pick-name">{l.name}</span>
-                {#if roundLayouts[0] === l.id && roundLayouts.length > 1}
-                  <span class="layout-pick-default">default</span>
+                {#if roundLayouts.length > 1 && roundLayouts.includes(l.id)}
+                  <!-- Position in the CYCLE, not a default: heat 1 flies the 1st, heat 2 the 2nd,
+                       wrapping round. Calling the first "default" implied the others were
+                       exceptions the RD had to pick by hand, which is what it used to be. -->
+                  <span class="layout-pick-default"
+                    >{roundLayouts.indexOf(l.id) + 1}{roundLayouts.indexOf(l.id) === 0
+                      ? 'st'
+                      : roundLayouts.indexOf(l.id) === 1
+                        ? 'nd'
+                        : roundLayouts.indexOf(l.id) === 2
+                          ? 'rd'
+                          : 'th'}</span
+                  >
                 {/if}
               </label>
             {/each}

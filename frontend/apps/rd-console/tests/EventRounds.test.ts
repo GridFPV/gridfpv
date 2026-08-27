@@ -2163,10 +2163,12 @@ describe('EventRounds — a round names the channel layouts its heats may fly (#
     // The bracket strategy: one layout, and there is nothing per-heat left to do.
     await fireEvent.click(await screen.findByLabelText('Bracket A'));
     expect(await screen.findByText(/Every heat in this round flies Bracket A/)).toBeInTheDocument();
-    // The GQ strategy: several, and the first is the default the RD can override per heat.
+    // Several layouts: heats ALTERNATE through them (#117) rather than all defaulting to the
+    // first. That is what stops a landing heat and a staging heat sharing frequencies, and it is
+    // why naming a second layout is no longer an odd way to say "use the first".
     await fireEvent.click(screen.getByLabelText('Whoop pack'));
     expect(
-      await screen.findByText(/Heats default to Bracket A; you can pick another per heat/)
+      await screen.findByText(/Heats alternate through these 2 layouts in order/)
     ).toBeInTheDocument();
   });
 
