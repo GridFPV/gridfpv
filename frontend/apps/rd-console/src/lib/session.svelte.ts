@@ -51,6 +51,7 @@ import {
   disconnectTimer,
   restartTimer,
   setCalibration,
+  captureLevel,
   setNodeChannel,
   timerNodes,
   setTimerNodes,
@@ -94,6 +95,8 @@ import type {
   ProtocolState,
   ConnectionStatus,
   CalibrationRequest,
+  CaptureDispatch,
+  CaptureRequest,
   ChannelDispatch,
   ChannelRequest
 } from '@gridfpv/protocol-client';
@@ -388,6 +391,7 @@ export class Session {
   #disconnectTimerImpl: typeof disconnectTimer;
   #restartTimerImpl: typeof restartTimer;
   #setCalibrationImpl: typeof setCalibration;
+  #captureLevelImpl: typeof captureLevel;
   #setNodeChannelImpl: typeof setNodeChannel;
   #timerSignalImpl: typeof timerSignal;
   #stopTimerSignalImpl: typeof stopTimerSignal;
@@ -442,6 +446,7 @@ export class Session {
     disconnectTimerImpl?: typeof disconnectTimer;
     restartTimerImpl?: typeof restartTimer;
     setCalibrationImpl?: typeof setCalibration;
+    captureLevelImpl?: typeof captureLevel;
     setNodeChannelImpl?: typeof setNodeChannel;
     timerSignalImpl?: typeof timerSignal;
     stopTimerSignalImpl?: typeof stopTimerSignal;
@@ -497,6 +502,7 @@ export class Session {
     this.#disconnectTimerImpl = opts?.disconnectTimerImpl ?? disconnectTimer;
     this.#restartTimerImpl = opts?.restartTimerImpl ?? restartTimer;
     this.#setCalibrationImpl = opts?.setCalibrationImpl ?? setCalibration;
+    this.#captureLevelImpl = opts?.captureLevelImpl ?? captureLevel;
     this.#setNodeChannelImpl = opts?.setNodeChannelImpl ?? setNodeChannel;
     this.#timerSignalImpl = opts?.timerSignalImpl ?? timerSignal;
     this.#stopTimerSignalImpl = opts?.stopTimerSignalImpl ?? stopTimerSignal;
@@ -815,6 +821,28 @@ export class Session {
   setCalibration(id: TimerId, request: CalibrationRequest): Promise<void | undefined> {
     return this.#privilegedWrite((token) =>
       this.#setCalibrationImpl(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * **Capture** a timer node's threshold from a pass (`POST /timers/{id}/capture`, #355) — the Tune
+   * page's third write, and the only one that does not carry a number.
+   *
+   * Resolves with the Director's `CaptureDispatch` when the capture was **started**, `undefined` on
+   * a cancelled token prompt, or throws on any other failure (a Mock, a disconnected timer, a
+   * scored heat running on it, a disabled or non-existent node, or a capture of that threshold
+   * already running on that node — each message already phrased for the RD, so the caller surfaces
+   * it verbatim).
+   *
+   * Started is not captured, and it is not even *measured* yet: RotorHazard samples for the
+   * dispatch's `window_ms` from the moment this lands, so the RD's pass has to happen inside that
+   * window. The page counts it down from the dispatch and then confirms the same way it confirms a
+   * typed level — by watching `NodeSignal.enter_at` / `exit_at` come back on the signal feed it is
+   * already polling. A level that never comes back is a capture that did not land.
+   */
+  captureLevel(id: TimerId, request: CaptureRequest): Promise<CaptureDispatch | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#captureLevelImpl(this.baseUrl, id, request, token)
     );
   }
 

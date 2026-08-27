@@ -445,6 +445,11 @@ pub fn router(registry: EventRegistry) -> Router {
         // the `stop` is for promptness on view close, not for correctness.
         .route("/timers/{timer_id}/signal", get(timer_signal))
         .route("/timers/{timer_id}/calibration", post(calibrate_timer))
+        // **Capture** one node's threshold from a pass (#355). The same write path as the
+        // calibration route above and gated identically — the difference is that RotorHazard
+        // supplies the number instead of the RD, which is the only way to bootstrap a timer nobody
+        // has ever tuned (#411).
+        .route("/timers/{timer_id}/capture", post(capture_timer_level))
         // **Set one node's channel** while tuning it (#413). The other half of the Tune page's
         // write: a gate cannot be tuned meaningfully until its node is listening on the channel it
         // will race. Gated exactly like the calibration write above — RD-gated, RotorHazard-only,
@@ -1060,6 +1065,96 @@ async fn calibrate_timer(
     let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
     timers
         .request_calibration(&timer_id, &request, during_open_practice)
+        .map(Json)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
+}
+
+/// `POST /timers/{timer_id}/capture` — have the timer **measure** one node's threshold, RD-gated
+/// (#355).
+///
+/// The Tune page's third write, and the answer to a gap #411 names in as many words: a fresh RD
+/// with no saved profile and a badly-tuned timer has **no starting point**. GridFPV deliberately
+/// refuses to ship a fabricated default — the right level depends on craft, VTX power, antenna and
+/// gate geometry, none of which GridFPV knows, and a default would also change the hardware on
+/// first connect, which is the surprise D27's drift rule exists to prevent. A capture measures the
+/// RD's actual craft on their actual gate. It is the only non-guessing bootstrap there is.
+///
+/// # What the RD is agreeing to when this is called
+///
+/// RotorHazard opens a **three-second sampling window the instant the emit lands**
+/// (`CAP_ENTER_EXIT_AT_MILLIS`, identical on v4.3.0 and v4.4.0) and averages the node's RSSI across
+/// it — it does not look back at a lap already flown, and it does not take the peak. The pass has
+/// to happen inside the window. That is why [`CaptureDispatch`] carries `window_ms`: the console
+/// counts it down rather than hardcoding a number that could drift from RotorHazard's, and it is
+/// why the control is labelled with what it will do rather than with a bare verb.
+///
+/// # This acknowledges a dispatch. It cannot be a readback.
+///
+/// Same rule as [`calibrate_timer`], one step stronger: a `200` here means the capture was
+/// *started*, and the level it will produce does not exist yet. RotorHazard's handler returns
+/// nothing on any path — including the paths where it silently refuses, which are a node that is
+/// not answering (`api_valid_flag`) and a capture already running on that node/threshold.
+///
+/// **Confirmation is by poll.** The captured level reaches the console as
+/// [`NodeSignal::enter_at`] / [`NodeSignal::exit_at`] on a later `GET /timers/{id}/signal`, fed by
+/// RotorHazard's own end-of-capture `node_enter_at_level` broadcast *and* by the readback the
+/// driver fires once the window closes. A capture whose level never comes back is reported as not
+/// landed — never as a success.
+///
+/// # The refusals
+///
+/// Everything [`calibrate_timer`] refuses, for the same reasons and in the same order:
+///
+/// * a **Mock** → `400` (no detector to capture from);
+/// * a **scored race in progress on this timer** → `400`. A capture *ends by setting a threshold*,
+///   so it moves a detector mid-race exactly as a typed level does. **Open practice is exempt**
+///   (#398 excludes it from scoring), and a practice heat is the natural moment to capture: the
+///   pass the capture needs is one a pilot is already flying.
+/// * a timer that is **not connected**, a `node` beyond the timer's width **or one the RD has
+///   disabled** (#412) → `400` from the registry;
+/// * a capture of that threshold **already running on that node** → `400`. RotorHazard refuses that
+///   one in silence, so accepting it here would show a capture as started that never was.
+/// * an unknown id → `404`.
+///
+/// Every refusal names the timer and the node by their **friendly names** (repo display rule).
+async fn capture_timer_level(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+    Json(request): Json<crate::timers::CaptureRequest>,
+) -> Result<Json<crate::timers::CaptureDispatch>, ProtocolError> {
+    let timers = registry.timers();
+    let timer = timers.get(&timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    // Kind before phase, exactly as `calibrate_timer` does it: the Mock is in every event's default
+    // selection, so gating on the heat first would answer a Mock with "… is running Heat 1".
+    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is not a RotorHazard timer — there is no detector to capture from",
+                timer.name
+            ),
+        ));
+    }
+    if let Some(heat) = registry.scored_heat_in_progress_on_timer(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is running {}, a scored heat — a capture sets the threshold when it finishes, \
+                 so it would change which laps that heat counts (open practice can be captured \
+                 while it runs)",
+                timer.name, heat
+            ),
+        ));
+    }
+    let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
+    timers
+        .request_capture(&timer_id, &request, during_open_practice)
         .map(Json)
         .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
@@ -5231,6 +5326,488 @@ mod tests {
             "the disabled-node refusal must name the node 1-based and say why: {message}"
         );
         assert!(registry.timers().take_calibration_requests().is_empty());
+    }
+
+    /// `POST /timers/{id}/capture` with a raw JSON body → status + raw bytes (#355).
+    async fn post_capture(
+        registry: EventRegistry,
+        timer_id: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Vec<u8>) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/timers/{timer_id}/capture"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    /// Put a level on the timer's live signal feed, the way the connection driver does.
+    ///
+    /// A capture is settled against **what the timer is reporting**, so a test about a capture has
+    /// to feed one — this is the same `push_signal` the driver calls, through the same lease.
+    fn report_levels(
+        registry: &EventRegistry,
+        timer: &crate::timers::TimerId,
+        levels: &[(f32, f32)],
+    ) {
+        let timers = registry.timers();
+        let _ = timers.signal(timer); // open/renew the lease — no lease, no ring, no readings
+        let readings: Vec<crate::timers::NodeReading> = levels
+            .iter()
+            .map(|(enter, exit)| crate::timers::NodeReading {
+                seen: true,
+                enter_at: Some(*enter),
+                exit_at: Some(*exit),
+                ..Default::default()
+            })
+            .collect();
+        timers.push_signal(timer, &readings);
+    }
+
+    #[tokio::test]
+    async fn a_capture_is_queued_with_rotorhazards_own_sampling_window() {
+        // #355: the third write. The route parks the capture on the registry — the connection layer
+        // lives above this crate — and the reconciler drains it onto the live socket as
+        // `cap_enter_at_btn`.
+        //
+        // The dispatch is NOT a readback and could not be: RotorHazard opens a three-second sampling
+        // window at the emit and only then has a level. What it carries instead is that window, so
+        // the console counts down RotorHazard's own number rather than one the console invented.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
+        report_levels(&registry, &rh.id, &[(90.0, 80.0), (95.0, 85.0)]);
+
+        let (status, bytes) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 1, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let dispatch: crate::timers::CaptureDispatch = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dispatch.timer, rh.id);
+        assert_eq!(dispatch.node, 1);
+        assert_eq!(dispatch.threshold, crate::timers::CaptureThreshold::Enter);
+        // `BaseHardwareInterface::CAP_ENTER_EXIT_AT_MILLIS`, verified identical on v4.3.0 and v4.4.0.
+        assert_eq!(dispatch.window_ms, crate::timers::CAPTURE_WINDOW_MS);
+        assert_eq!(dispatch.settle_ms, crate::timers::CAPTURE_SETTLE_MS);
+        // What the capture is replacing — evidence about the timer, and what "a new level arrived"
+        // will be measured against.
+        assert_eq!(dispatch.previous, Some(95));
+
+        // Nothing is recorded as GridFPV's config YET: the level does not exist. Recording one here
+        // would be a fabricated success, which is exactly what this control exists to avoid.
+        assert!(registry.timers().calibration(&rh.id).is_empty());
+
+        let drained = registry.timers().take_capture_requests();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].node, 1);
+        assert_eq!(drained[0].threshold, crate::timers::CaptureThreshold::Enter);
+        assert!(
+            registry.timers().take_capture_requests().is_empty(),
+            "a second drain is empty — nothing is re-queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_capture_of_a_threshold_already_capturing_is_refused_not_silently_dropped() {
+        // RotorHazard's `start_capture_enter_at_level` returns False when a capture of that
+        // threshold is already running on that node — and emits NOTHING. Accepting the second press
+        // here would show a capture as started that never was: the fourth silently-ignored write
+        // (#423). The OTHER threshold on the same node is a different capture and must be allowed.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
+        report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
+
+        let (status, _) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, bytes) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Node 1") && message.contains("already capturing"),
+            "the refusal must name the node 1-based and say why: {message}"
+        );
+
+        // The exit threshold is its own capture — RotorHazard arms them independently.
+        let (status, _) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "threshold": "exit" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(registry.timers().take_capture_requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_captured_level_is_confirmed_by_poll_and_recorded_as_grid_config() {
+        // The whole point, and the D27 half of it. A capture is confirmed the same way a typed level
+        // is — by the timer reporting it on the signal feed — and once it is, the level becomes
+        // GridFPV's own value on `Timer::calibration`, exactly as a typed one is. It is NOT left as
+        // something read back off the timer.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
+        report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
+
+        let (status, _) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Nothing is credited before RotorHazard's window closes: it has not computed a level yet,
+        // so a threshold that moved in those three seconds moved for some other reason.
+        report_levels(&registry, &rh.id, &[(118.0, 80.0)]);
+        assert!(
+            registry.timers().resolve_captures().is_empty(),
+            "a capture must not settle before its sampling window has closed"
+        );
+        assert!(registry.timers().calibration(&rh.id).is_empty());
+
+        // …and once it has.
+        std::thread::sleep(std::time::Duration::from_millis(
+            u64::from(crate::timers::CAPTURE_WINDOW_MS) + 20,
+        ));
+        report_levels(&registry, &rh.id, &[(118.0, 80.0)]);
+        let settled = registry.timers().resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].node, 0);
+        assert_eq!(settled[0].level, Some(118));
+
+        // D27: GridFPV holds the value, not merely the timer.
+        assert_eq!(
+            registry.timers().calibration(&rh.id),
+            vec![crate::timers::NodeCalibration {
+                node: 0,
+                enter_at: Some(118),
+                exit_at: None,
+            }]
+        );
+        // Settled exactly once — a resolved capture is retired, not re-reported every tick.
+        assert!(registry.timers().resolve_captures().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_does_not_land_is_reported_and_records_nothing() {
+        // RotorHazard refuses a capture — a node that is not answering, or one already capturing —
+        // by returning False and emitting nothing at all. So an unchanged level is the ONLY evidence
+        // of that refusal there is, and inventing a recorded level to fill the gap would be the
+        // fabricated success this whole control exists to avoid.
+        let (registry, _state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
+        report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
+
+        let (status, _) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        std::thread::sleep(std::time::Duration::from_millis(
+            u64::from(crate::timers::CAPTURE_WINDOW_MS)
+                + u64::from(crate::timers::CAPTURE_SETTLE_MS)
+                + 20,
+        ));
+        report_levels(&registry, &rh.id, &[(90.0, 80.0)]); // unchanged, as RotorHazard left it
+        let settled = registry.timers().resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(
+            settled[0].level, None,
+            "a capture that produced no new level must be reported as such, never as a success"
+        );
+        assert!(
+            registry.timers().calibration(&rh.id).is_empty(),
+            "nothing may be recorded for a capture that did not land"
+        );
+        // And it is retired, so a later capture on the same threshold is not refused by a ghost.
+        assert!(registry.timers().resolve_captures().is_empty());
+        let (status, _) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn capturing_is_refused_while_a_scored_race_is_in_progress_on_the_timer() {
+        // A capture ends by SETTING the threshold, so it moves a detector mid-race exactly as a
+        // typed level does. Same gate as the calibration write, and the refusal names the heat, the
+        // timer, and the fact that the heat is *scored* — the thing that distinguishes it from open
+        // practice, which is capturable while it runs.
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_the_event(&registry);
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("q-1".into()),
+                        lineup: vec![CompetitorRef("A".into())],
+                        class: None,
+                        round: None,
+                        frequencies: vec![],
+                        label: Some("Qualifier Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("q-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, bytes) = post_capture(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "threshold": "enter" }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "a {transition:?} heat must refuse the capture"
+            );
+            let message = refusal(&bytes);
+            assert!(
+                message.contains("Qualifier Heat 1") && message.contains("Field RH"),
+                "the refusal must name the heat and the timer: {message}"
+            );
+            assert!(
+                message.contains("scored heat"),
+                "the refusal must say the heat is SCORED — open practice is capturable: {message}"
+            );
+            assert!(
+                !message.contains(&rh.id.0),
+                "the refusal must not leak the raw timer id: {message}"
+            );
+            // A real refusal: nothing queued, and no capture left outstanding to block the next one.
+            assert!(registry.timers().take_capture_requests().is_empty());
+            assert!(!registry.timers().capture_in_flight(&rh.id));
+        }
+    }
+
+    #[tokio::test]
+    async fn capturing_is_accepted_while_an_open_practice_heat_is_running() {
+        // #398, and sharper here than for a typed level: the pass a capture NEEDS is one a pilot is
+        // already flying. Refusing during practice would leave the RD waving a quad through an idle
+        // gate by hand — the RotorHazard-UI loop this page exists to replace.
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished, // → Unofficial
+        ] {
+            let (registry, state, _) = state_with(vec![]);
+            let rh = connected_rh_timer_selected_by_the_event(&registry);
+            let round = registry
+                .add_round(
+                    &sole_event(&registry),
+                    NewRoundReq {
+                        layouts: Vec::new(),
+                        label: "Practice".into(),
+                        classes: vec![],
+                        format: gridfpv_engine::format::OpenPractice::NAME.to_string(),
+                        params: std::collections::BTreeMap::new(),
+                        win_condition: None,
+                        seeding: SeedingRule::ActiveNodes { nodes: vec![0] },
+                        time_limit_secs: None,
+                        channel_mode: None,
+                        staging_timer_secs: None,
+                        start_procedure: None,
+                        grace_window: None,
+                        protest_window: None,
+                        min_lap_secs: None,
+                    },
+                )
+                .expect("an open-practice round");
+            state
+                .append(
+                    Event::HeatScheduled {
+                        heat: HeatId("p-1".into()),
+                        lineup: vec![CompetitorRef("node-0".into())],
+                        class: None,
+                        round: Some(round.id.clone()),
+                        frequencies: vec![],
+                        label: Some("Practice Heat 1".into()),
+                    },
+                    None,
+                )
+                .unwrap();
+            for t in [
+                HeatTransition::Staged,
+                HeatTransition::Armed,
+                HeatTransition::Running,
+                HeatTransition::Finished,
+            ] {
+                state
+                    .append(
+                        Event::HeatStateChanged {
+                            heat: HeatId("p-1".into()),
+                            transition: t,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                if t == transition {
+                    break;
+                }
+            }
+
+            let (status, _) = post_capture(
+                registry.clone(),
+                &rh.id.0,
+                json!({ "node": 0, "threshold": "enter" }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an open-practice heat in {transition:?} must NOT block a capture"
+            );
+            // …and it must actually reach the wire: without the stamp the driver's armed-heat
+            // backstop would drop a capture the route deliberately allowed.
+            let drained = registry.timers().take_capture_requests();
+            assert_eq!(drained.len(), 1);
+            assert!(
+                drained[0].during_open_practice,
+                "the capture must be stamped as cleared against an open-practice heat"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn capturing_a_mock_an_unknown_a_disconnected_timer_or_a_disabled_node_is_refused() {
+        // Every refusal the calibration write has, for the same reasons — and #412 in particular:
+        // RotorHazard drops an out-of-range seat index with nothing but a log line, so offering a
+        // capture on a node that is not there (or one the RD switched off) would produce a control
+        // that looks like it worked and measured nothing.
+        let (registry, _state, _) = state_with(vec![]);
+
+        let (status, bytes) = post_capture(
+            registry.clone(),
+            "mock",
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Mock") && message.contains("not a RotorHazard timer"),
+            "the Mock refusal must name the timer and say why: {message}"
+        );
+
+        let (status, _) = post_capture(
+            registry.clone(),
+            "no-such-timer",
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let disconnected = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Bench RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+            })
+            .unwrap();
+        let (status, bytes) = post_capture(
+            registry.clone(),
+            &disconnected.id.0,
+            json!({ "node": 0, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(refusal(&bytes).contains("Bench RH"));
+
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
+        let width = registry.timers().get(&rh.id).unwrap().node_width();
+        let (status, bytes) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": width, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            refusal(&bytes).contains(&format!("Node {}", width + 1)),
+            "the refusal must name the node the way the page labels it (1-based)"
+        );
+
+        registry
+            .timers()
+            .set_nodes(
+                &rh.id,
+                &crate::timers::SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some((0..width).filter(|n| *n != 2).collect()),
+                },
+            )
+            .unwrap();
+        let (status, bytes) = post_capture(
+            registry.clone(),
+            &rh.id.0,
+            json!({ "node": 2, "threshold": "enter" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(
+            message.contains("Node 3") && message.contains("disabled"),
+            "the disabled-node refusal must name the node 1-based and say why: {message}"
+        );
+        assert!(registry.timers().take_capture_requests().is_empty());
     }
 
     /// `POST /timers/{id}/channel` with a raw JSON body → status + raw bytes (#413).

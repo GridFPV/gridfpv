@@ -46,7 +46,7 @@ import type {
   TimerSignal
 } from '@gridfpv/types';
 import TunePage from '../src/screens/TunePage.svelte';
-import type { CalibrationRequest } from '@gridfpv/protocol-client';
+import type { CalibrationRequest, CaptureDispatch, CaptureRequest } from '@gridfpv/protocol-client';
 import type { SessionRole } from '../src/lib/session.svelte.js';
 import { makeTestSession } from './support.js';
 
@@ -174,6 +174,7 @@ const RUNNING: LiveRaceState = { current_heat: 'heat-1', phase: 'Running' };
 
 interface Harness {
   applyLevels: ReturnType<typeof vi.fn>;
+  startCapture: ReturnType<typeof vi.fn>;
   applyChannel: ReturnType<typeof vi.fn>;
   fetchSignal: ReturnType<typeof vi.fn>;
   stopSignal: ReturnType<typeof vi.fn>;
@@ -236,6 +237,15 @@ async function renderTune(
     channelRejects?: Error;
     /** Override the timer under test (its capability / channel pool). */
     timer?: Timer;
+    /**
+     * What a **capture** (#355) ends up measuring, per threshold — the level the timer starts
+     * reporting once its sampling window closes. `undefined` (the default) models a capture that
+     * produced nothing: RotorHazard refuses one in complete silence, so "the level never changed"
+     * is the only evidence of that there is.
+     */
+    captures?: (body: CaptureRequest) => number | undefined;
+    /** The capture request itself is refused by the Director. */
+    captureRejects?: Error;
   } = {}
 ): Promise<Harness> {
   const feed: TimerSignal = opts.signal ?? snapshot();
@@ -263,6 +273,37 @@ async function renderTune(
     }
   });
   const stopSignal = vi.fn(async () => {});
+  // The capture behaves like the real one: the Director answers with a DISPATCH carrying the window
+  // it just opened, and the measured level (if there is one) only appears on a LATER poll — fed in
+  // reality by RotorHazard's end-of-capture `node_enter_at_level` broadcast and the readback behind
+  // it. The window/grace are milliseconds here for the same reason `confirmMs` is: the behaviour
+  // under test is the sequence, not RotorHazard's three seconds.
+  const startCapture = vi.fn(async (_timer: string, body: CaptureRequest) => {
+    if (opts.captureRejects) throw opts.captureRejects;
+    const target = feed.nodes.find((n) => n.node === body.node);
+    const previous = target
+      ? body.threshold === 'enter'
+        ? target.enter_at
+        : target.exit_at
+      : undefined;
+    const measured = opts.captures?.(body);
+    if (target && measured !== undefined) {
+      // Applied on a delay so the window is genuinely open for a moment — a capture that resolved
+      // the instant it was pressed would never exercise the "fly the pass now" state at all.
+      setTimeout(() => {
+        if (body.threshold === 'enter') target.enter_at = measured;
+        else target.exit_at = measured;
+      }, 20);
+    }
+    return {
+      timer: 'rh-1',
+      node: body.node,
+      threshold: body.threshold,
+      window_ms: 40,
+      settle_ms: 60,
+      previous
+    } satisfies CaptureDispatch;
+  });
   // The channel write behaves like the real one: the Director answers with a DISPATCH, and the
   // channel itself only reappears on a later poll (RotorHazard's heartbeat carries it).
   const applyChannel = vi.fn(async (_timer: string, body: { node: number; mhz: number }) => {
@@ -295,6 +336,7 @@ async function renderTune(
     ontimers: () => {},
     fetchSignal,
     applyLevels,
+    startCapture,
     applyChannel,
     fetchNodes: async () => {
       if (view === null) throw new Error('the node view is unavailable');
@@ -310,7 +352,7 @@ async function renderTune(
   // `available_channels[node]` fabrication that used to make one up — so a node whose heartbeat has
   // not reported a frequency is now honestly labelled "Node 1" alone.
   await screen.findByLabelText(/^Enter at level for Node 1/);
-  return { applyLevels, applyChannel, fetchSignal, stopSignal, unmount };
+  return { applyLevels, startCapture, applyChannel, fetchSignal, stopSignal, unmount };
 }
 
 const box = (node = 1, th = 'Enter at') =>
@@ -1221,6 +1263,167 @@ describe('TunePage — a fresh subscription fills in without a manual refresh', 
     expect(screen.queryByText(/Reading this node/)).toBeNull();
     expect(screen.queryByText(/Waiting for this node to report its levels/)).toBeNull();
     expect(h.fetchSignal.mock.calls.length).toBeGreaterThan(1);
+    h.unmount();
+  });
+});
+
+describe('TunePage — Capture: let the timer MEASURE the level (#355)', () => {
+  const captureBtn = (node = 0, th: 'enter' | 'exit' = 'enter') =>
+    within(screen.getByTestId(`capture-${node}-${th}`)).getByRole('button');
+
+  it('says what it will do BEFORE it is pressed — not a bare verb, and not an icon', async () => {
+    // The RD's own requirement, verbatim: *"the RD had never seen this in RH and did not know it
+    // existed, so it cannot be a bare icon or an unexplained verb."* Three facts have to be on
+    // screen before the press, and each of them was read off RotorHazard's source rather than
+    // assumed: the timer does the measuring, the window starts at the press, and the RD flies the
+    // pass INTO it. "Fly a lap, then capture" would send them to the gate three seconds too late.
+    const h = await renderTune();
+    const btn = captureBtn();
+    expect(btn).toHaveTextContent(/Capture Enter at from a pass/i);
+    // The accessible name carries the same explanation, and names the node by its FRIENDLY name.
+    expect(btn.getAttribute('aria-label')).toMatch(/Node 1 · Raceband R7/);
+    expect(btn.getAttribute('aria-label')).toMatch(/three seconds from the moment you press/i);
+    // And the explainer beside it says the mechanism plainly, including the honest ending.
+    expect(
+      screen.getAllByText(/watches this gate for three seconds starting the moment you press/i)
+        .length
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText(/Nothing is recorded unless a new level comes back/i).length
+    ).toBeGreaterThan(0);
+    h.unmount();
+  });
+
+  it('tells the RD to fly the pass NOW, and counts the window down', async () => {
+    // The countdown is the instruction. RotorHazard's window opens at the emit, so an RD who does
+    // not know how long they have is an RD whose pass lands outside it.
+    const h = await renderTune({ pollMs: 15 });
+    await fireEvent.click(captureBtn());
+    await waitFor(() =>
+      expect(h.startCapture).toHaveBeenCalledWith('rh-1', { node: 0, threshold: 'enter' })
+    );
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('capture-0-enter')).getByText(/Fly the pass now/)
+      ).toBeInTheDocument()
+    );
+    // While the timer is watching, pressing again must not start a second capture — RotorHazard
+    // refuses that in silence, so a second press would look started and do nothing.
+    await fireEvent.click(captureBtn());
+    expect(h.startCapture).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
+  it('confirms the captured level BY POLL, and it lands in all three editors', async () => {
+    // Same evidence a typed level is confirmed by, and it has to be: the RD cannot know the number
+    // in advance, so the only proof the capture landed is the timer reporting a level it was not
+    // reporting before.
+    const h = await renderTune({ pollMs: 15, captures: () => 118 });
+    await fireEvent.click(captureBtn());
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('capture-0-enter')).getByText('Captured 118')
+      ).toBeInTheDocument()
+    );
+    // The captured level is now THE value — every editor shows it, exactly as if the RD had typed
+    // it, because from here on it is GridFPV's value (D27) and the Director has recorded it.
+    expect(box().value).toBe('118');
+    expect(slider().value).toBe('118');
+    expect(graphValue('Enter')).toBe(118);
+    // And it did NOT write the level back at the timer: the timer already has it, and a second
+    // write would be GridFPV changing something nobody asked it to change.
+    expect(h.applyLevels).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it('reports a capture that did not land, rather than showing it as a success', async () => {
+    // RotorHazard refuses a capture — a node that is not answering, or one already capturing — with
+    // no reply of any kind: `start_capture_enter_at_level` returns False and the handler emits
+    // nothing. So "the level never changed" is the ONLY evidence of that refusal, and it must read
+    // as a failure. This is the #423 failure class (a write that returns success and does nothing).
+    const h = await renderTune({ pollMs: 15 });
+    await fireEvent.click(captureBtn());
+    const panel = () => screen.getByTestId('capture-0-enter');
+    await waitFor(() => expect(within(panel()).getByText('Nothing captured')).toBeInTheDocument());
+    expect(screen.getByTestId('capture-detail-0-enter')).toHaveTextContent(
+      /still reporting 90.*Nothing was captured and nothing was recorded/s
+    );
+    // The threshold itself is untouched — nothing was invented to fill the gap.
+    expect(box().value).toBe('90');
+    h.unmount();
+  });
+
+  it('gives a verdict even when the poll itself has stopped answering', async () => {
+    // The backstop, exactly as for a write: with no further polls no confirmation is coming, and a
+    // capture left reading "Reading the level…" for ever is the silent failure in another costume.
+    const h = await renderTune({ pollMs: 10 * 60 * 1000 });
+    await fireEvent.click(captureBtn());
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('capture-0-enter')).getByText('Nothing captured')
+      ).toBeInTheDocument()
+    );
+    expect(h.fetchSignal).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
+  it('surfaces the Director’s refusal verbatim when the capture never starts', async () => {
+    const h = await renderTune({
+      captureRejects: new Error(
+        'Node 1 is already capturing its Enter at level — wait for that capture to finish'
+      )
+    });
+    await fireEvent.click(captureBtn());
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('capture-0-enter')).getByText('Capture failed')
+      ).toBeInTheDocument()
+    );
+    expect(screen.getByTestId('capture-detail-0-enter')).toHaveTextContent(/already capturing/);
+    h.unmount();
+  });
+
+  it('is never offered for a node the RD has DISABLED (#412)', async () => {
+    // A capture on a disabled node would sample hardware no heat is ever seated on, and RotorHazard
+    // drops an out-of-range seat index with nothing but a log line. Same rule, same reason, as the
+    // channel dropdown's.
+    const h = await renderTune({ nodes: nodeView([0]) });
+    expect(screen.queryByTestId('capture-0-enter')).toBeInTheDocument();
+    expect(screen.queryByTestId('capture-1-enter')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('capture-1-exit')).not.toBeInTheDocument();
+    h.unmount();
+  });
+
+  it('is refused while a SCORED heat is running, and says why', async () => {
+    // A capture ends by SETTING the threshold, so it changes what counts as a lap under a scored
+    // heat just as surely as a typed level does. Same gate, checked per press.
+    const h = await renderTune({
+      live: RUNNING,
+      event: eventWith([QUAL_ROUND]),
+      heats: heatOn(QUAL_ROUND)
+    });
+    expect(captureBtn()).toBeDisabled();
+    h.unmount();
+  });
+
+  it('is ALLOWED while an open-practice heat is running (#398)', async () => {
+    // Practice is excluded from scoring, so there is no result to corrupt — and a practice heat is
+    // the natural moment to capture, because the pass a capture needs is one a pilot is flying.
+    const h = await renderTune({
+      live: RUNNING,
+      event: eventWith([PRACTICE_ROUND]),
+      heats: heatOn(PRACTICE_ROUND),
+      captures: () => 118
+    });
+    expect(captureBtn()).not.toBeDisabled();
+    await fireEvent.click(captureBtn());
+    await waitFor(() => expect(h.startCapture).toHaveBeenCalledTimes(1));
+    h.unmount();
+  });
+
+  it('is not offered to a read-only session with no control authority', async () => {
+    const h = await renderTune({ role: 'readonly' });
+    expect(captureBtn()).toBeDisabled();
     h.unmount();
   });
 });

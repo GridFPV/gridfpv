@@ -37,11 +37,11 @@ use std::time::Duration;
 use gridfpv_events::CompetitorRef;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry};
+use gridfpv_server::timers::{CaptureThreshold, TimerId, TimerKind, TimerRegistry};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
-use super::rotorhazard::{CalibrationWrite, ChannelWrite, RhConnection};
+use super::rotorhazard::{CalibrationWrite, CaptureWrite, ChannelWrite, RhConnection};
 
 /// How often the reconciler polls the active event + its selected timers to sync the live set.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
@@ -211,6 +211,30 @@ impl RhConnections {
         for (key, live) in map.iter() {
             if &key.1 == timer {
                 live.conn.calibrate(write);
+                found = true;
+            }
+        }
+        found
+    }
+
+    /// **Capture** one of a node's thresholds on `timer`'s live connection (#355) — the Tune page's
+    /// third write, carried onto the socket the Director is already holding.
+    ///
+    /// Keyed on the **timer** for the same reason [`calibrate`](Self::calibrate) is: the RD is at a
+    /// gate with a piece of hardware, and it holds exactly one connection whichever claim opened it.
+    ///
+    /// Returns whether a live connection was found. `false` means the timer is not connected right
+    /// now — nothing was emitted, and nothing is queued for a future connection. That matters more
+    /// here than for a typed level: a capture that fired minutes later would sample a gate with
+    /// nothing flying through it and set the threshold off the **noise floor**, which is worse than
+    /// not capturing at all because the RD would have no reason to suspect it. The RD sees it as a
+    /// capture that never comes back with a level.
+    pub fn capture(&self, timer: &TimerId, write: CaptureWrite) -> bool {
+        let map = self.inner.lock().expect("rh-connections lock poisoned");
+        let mut found = false;
+        for (key, live) in map.iter() {
+            if &key.1 == timer {
+                live.conn.capture(write);
                 found = true;
             }
         }
@@ -493,6 +517,62 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                         );
                     }
                 }
+                // …and any **captures** (#355) the Tune page parked on the registry: the RD pressed
+                // Capture on a node's threshold and RotorHazard is asked to *measure* it. Same seam
+                // and the same drain-exactly-once discipline as the calibration write above.
+                for write in timers.take_capture_requests() {
+                    let landed = connections.capture(
+                        &write.timer,
+                        CaptureWrite {
+                            node: u64::from(write.node),
+                            enter: matches!(write.threshold, CaptureThreshold::Enter),
+                            during_open_practice: write.during_open_practice,
+                        },
+                    );
+                    if !landed {
+                        // The connection went away between the route accepting the capture and this
+                        // tick. Nothing is queued for a future connection — a capture that fired
+                        // minutes later would sample an empty gate and set the threshold off the
+                        // noise floor — so say so rather than fail silently. The RD sees it as a
+                        // capture that never comes back with a level.
+                        let name = timers.get(&write.timer).map(|t| t.name);
+                        eprintln!(
+                            "gridfpv: no live RotorHazard connection to capture node {}'s {} level \
+                             on {:?}",
+                            write.node + 1,
+                            write.threshold.label(),
+                            name.as_deref().unwrap_or("that timer")
+                        );
+                    }
+                }
+                // …then settle every capture whose sampling window has run out (#355). This is where
+                // a captured level becomes **GridFPV's** value (D27): the registry compares what the
+                // timer is reporting now against what it reported when the capture started, records
+                // the new level on `Timer::calibration` if one arrived, and records **nothing** if
+                // none did. RotorHazard refuses a capture in complete silence — a node that is not
+                // answering, or one already capturing — so "no new level" is the only evidence of
+                // that refusal there is, and it is reported rather than dressed up as a success.
+                for outcome in timers.resolve_captures() {
+                    let name = timers.get(&outcome.timer).map(|t| t.name);
+                    let name = name.as_deref().unwrap_or("that timer");
+                    match outcome.level {
+                        Some(level) => eprintln!(
+                            "gridfpv: captured node {}'s {} level on {:?} — {}",
+                            outcome.node + 1,
+                            outcome.threshold.label(),
+                            name,
+                            level
+                        ),
+                        None => eprintln!(
+                            "gridfpv: node {}'s {} capture on {:?} produced no new level — \
+                             RotorHazard refuses a capture silently (a node that is not answering, \
+                             or one already capturing), so nothing was recorded",
+                            outcome.node + 1,
+                            outcome.threshold.label(),
+                            name
+                        ),
+                    }
+                }
                 // …and any **channel writes** (#413) the Tune page parked on the registry: the RD
                 // picked a channel for a node and it goes onto the live socket now. Same seam and
                 // same drain-exactly-once discipline as the two above. The band/channel label was
@@ -533,7 +613,7 @@ mod tests {
     use super::*;
     use gridfpv_server::events::CreateEventRequest;
     use gridfpv_server::timers::{
-        CalibrationRequest, ChannelRequest, CreateTimerRequest, UpdateTimerRequest,
+        CalibrationRequest, CaptureRequest, ChannelRequest, CreateTimerRequest, UpdateTimerRequest,
     };
 
     const OLD_URL: &str = "http://rh-old.local:5000";
@@ -640,6 +720,85 @@ mod tests {
         assert_eq!(drained[0].exit_at, Some(70));
         assert!(
             timers.take_calibration_requests().is_empty(),
+            "drained exactly once — nothing is re-queued"
+        );
+    }
+
+    #[test]
+    fn a_capture_with_no_live_connection_is_reported_not_swallowed() {
+        // #355, and sharper than the calibration case: a capture that fired minutes later on a
+        // reconnect would sample a gate with nothing flying through it and set the threshold off the
+        // **noise floor** — worse than not capturing, because the RD would have no reason to suspect
+        // it. So nothing is queued for a future connection, and `capture` says so.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        let connections = RhConnections::new();
+        assert!(!connections.capture(
+            &rh,
+            CaptureWrite {
+                node: 0,
+                enter: true,
+                during_open_practice: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn captures_drain_exactly_once_and_are_never_coalesced() {
+        // Deliberately unlike the calibration queue. Two writes of a value to one node are one
+        // intent (the latest value wins); two captures are two *measurements* the RD asked for, and
+        // collapsing them would silently drop a pass they flew.
+        //
+        // The one case where two would collide — a second capture of a threshold already capturing,
+        // which RotorHazard refuses in silence — is refused by `request_capture` instead, so the
+        // queue never needs to.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
+
+        timers
+            .request_capture(
+                &rh,
+                &CaptureRequest {
+                    node: 1,
+                    threshold: CaptureThreshold::Enter,
+                },
+                false,
+            )
+            .expect("connected RH timer");
+        // The same node's OTHER threshold is a separate capture — RotorHazard arms them separately.
+        timers
+            .request_capture(
+                &rh,
+                &CaptureRequest {
+                    node: 1,
+                    threshold: CaptureThreshold::Exit,
+                },
+                false,
+            )
+            .expect("the exit capture is independent of the enter one");
+        // …and a repeat of the enter one is refused while it is still running, rather than queued.
+        assert!(
+            timers
+                .request_capture(
+                    &rh,
+                    &CaptureRequest {
+                        node: 1,
+                        threshold: CaptureThreshold::Enter,
+                    },
+                    false,
+                )
+                .is_err(),
+            "RotorHazard refuses a capture already in flight in SILENCE, so the Director must \
+             refuse it out loud instead"
+        );
+
+        let drained = timers.take_capture_requests();
+        assert_eq!(drained.len(), 2, "one entry per capture, never coalesced");
+        assert_eq!(drained[0].threshold, CaptureThreshold::Enter);
+        assert_eq!(drained[1].threshold, CaptureThreshold::Exit);
+        assert!(
+            timers.take_capture_requests().is_empty(),
             "drained exactly once — nothing is re-queued"
         );
     }

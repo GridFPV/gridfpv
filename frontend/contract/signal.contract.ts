@@ -40,7 +40,11 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { stopTimerSignal, timerSignal } from '../packages/protocol-client/dist/index.js';
+import {
+  captureLevel,
+  stopTimerSignal,
+  timerSignal
+} from '../packages/protocol-client/dist/index.js';
 import { type Director } from '../test-harness/director.ts';
 import { startContractDirector } from './harness.ts';
 import { wireShapeProblems } from './wire-shape.ts';
@@ -244,5 +248,70 @@ describe('the real protocol-client drives the signal seam (#355 S2a)', () => {
     // Tokenless: the Director's 401 reaches the caller as a thrown error, never as an empty
     // `TimerSignal` the page would then render as a dead timer.
     await expect(timerSignal(director.baseUrl, rhTimerId)).rejects.toThrow();
+  });
+});
+
+describe('POST /timers/{id}/capture is wired, gated and honest about refusing (#355)', () => {
+  // The capture route, driven by the real `@gridfpv/protocol-client` against a real Director.
+  //
+  // This suite is deliberately Docker-free, so no timer here is ever connected — which means the
+  // *success* path (a `CaptureDispatch` body) cannot be exercised here and is covered by the Rust
+  // route tests instead. What can be proved without a timer is the half that has actually bitten:
+  // that the route exists at the path the client posts to, that it is RD-gated, and that every
+  // refusal is a typed 400/404 naming the timer by its **friendly name** rather than a status code
+  // or a raw id.
+  //
+  // That matters more than it looks. Three writes have shipped that RotorHazard silently ignored
+  // (#423), and the shape of each was "the call returned success and nothing happened". A capture
+  // has the same hazard one layer out: a route that 404s because the client posts to the wrong path
+  // would surface, in the console, as a capture that simply never comes back.
+
+  it('refuses a capture on a timer that is not connected, and names it', async () => {
+    // There is no socket to emit on, and a capture is never held over for a future connection: one
+    // that fired minutes later would sample a gate with nothing flying through it.
+    await expect(
+      captureLevel(director.baseUrl, rhTimerId, { node: 0, threshold: 'enter' }, token)
+    ).rejects.toThrow(/Signal RH/);
+    // …and the message is the Director's own prose, not an HTTP status.
+    await expect(
+      captureLevel(director.baseUrl, rhTimerId, { node: 0, threshold: 'enter' }, token)
+    ).rejects.not.toThrow(/HTTP \d+/);
+  });
+
+  it('refuses a capture on the built-in Mock by its friendly name', async () => {
+    await expect(
+      captureLevel(director.baseUrl, MOCK_TIMER_ID, { node: 0, threshold: 'enter' }, token)
+    ).rejects.toThrow(/not a RotorHazard timer/);
+  });
+
+  it('answers an unknown timer with a 404 rather than a message about a timer that does not exist', async () => {
+    const res = await fetch(`${director.baseUrl}/timers/no-such-timer/capture`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ node: 0, threshold: 'enter' })
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('is RD-gated: no token is a 401, which is a different failure from a refusal', async () => {
+    const res = await fetch(`${director.baseUrl}/timers/${encodeURIComponent(rhTimerId)}/capture`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node: 0, threshold: 'enter' })
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('accepts the threshold vocabulary the generated binding declares, and nothing else', async () => {
+    // `CaptureThreshold` is `"enter" | "exit"` on the wire (ts-rs, lowercased). A body carrying
+    // anything else must fail to deserialize rather than being coerced into one of them — a capture
+    // silently retargeted at the wrong threshold would move the wrong detector.
+    const res = await fetch(`${director.baseUrl}/timers/${encodeURIComponent(rhTimerId)}/capture`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ node: 0, threshold: 'Enter' })
+    });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).not.toBe(200);
   });
 });

@@ -242,6 +242,53 @@ struct RawNodeCrossing {
     crossing_flag: serde_json::Value,
 }
 
+/// A RotorHazard `node_enter_at_level` / `node_exit_at_level` frame: **one** node's threshold,
+/// broadcast on its own (`RHUI.emit_enter_at_level` / `emit_exit_at_level`).
+///
+/// This is the **capture echo** (#355). RotorHazard does not answer `set_enter_at_level` at all,
+/// but when a *capture* (`cap_enter_at_btn`) finishes its sampling window, `server.py`'s
+/// `new_enter_or_exit_at_callback` calls `calibration.set_*_at_level` **and then**
+/// `rhui.emit_*_at_level(node)` — so the captured level arrives unsolicited, roughly three seconds
+/// after the button, without anyone asking for it. Verified byte-identical on v4.3.0 and v4.4.0.
+///
+/// Folded into the tune tap so it reaches the Tune page as `NodeSignal::enter_at`/`exit_at` on the
+/// very feed the page already polls. Not a [`Raw`] variant, for the same structural reason as
+/// [`RawHeartbeat`]: a threshold is an observation about the timer, never an [`Event`].
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawNodeLevel {
+    /// Which node the level belongs to, 0-based (RotorHazard's `seat_index`).
+    node_index: usize,
+    /// The level itself. RotorHazard sends an integer; read as `f32` because that is what the tap
+    /// and `NodeSignal` carry, and `enter_and_exit_at_levels` is float-shaped on the same wire.
+    level: f32,
+}
+
+/// RotorHazard's socket event that **starts** an enter-threshold capture (#355) —
+/// `server.py::on_cap_enter_at_btn`, identical on v4.3.0 and v4.4.0.
+pub const CAP_ENTER_EVENT: &str = "cap_enter_at_btn";
+
+/// RotorHazard's socket event that **starts** an exit-threshold capture (#355) —
+/// `server.py::on_cap_exit_at_btn`, identical on v4.3.0 and v4.4.0.
+pub const CAP_EXIT_EVENT: &str = "cap_exit_at_btn";
+
+/// How long RotorHazard samples for once a capture starts —
+/// `BaseHardwareInterface::CAP_ENTER_EXIT_AT_MILLIS`, `3000` on v4.3.0 and v4.4.0 alike.
+///
+/// The window opens when the emit lands, not when the pass happens, so this is the interval the RD
+/// has to fly through the gate. Published because the Director hands it to the console, which
+/// counts it down rather than hardcoding a number that could drift from RotorHazard's.
+pub const CAPTURE_WINDOW_MILLIS: u32 = 3_000;
+
+/// The body of a capture emit: `{"node_index": <0-based seat>}`.
+///
+/// A named builder rather than an inline `json!` at each call site so the **key** is asserted in
+/// one place. It is `node_index` here and `node` on `set_enter_at_level` — the same socket, the
+/// same node, two different key names — and RotorHazard answers a wrong key with a swallowed
+/// `KeyError` and a success. See [`RotorHazardConnection::capture_enter_at_level`].
+fn capture_payload(node: u64) -> serde_json::Value {
+    json!({ "node_index": node })
+}
+
 /// Read a RotorHazard crossing flag that may be wired as a bool **or** as a 0/1 number.
 fn truthy(value: &serde_json::Value) -> bool {
     match value {
@@ -298,6 +345,24 @@ fn tap_crossing(tap: &SignalTap, payload: &Payload) -> TapOutcome {
     match first_text(payload).and_then(|v| serde_json::from_value::<RawNodeCrossing>(v).ok()) {
         Some(change) => {
             tap.note_crossing(&change);
+            TapOutcome::Folded
+        }
+        None => TapOutcome::Unreadable,
+    }
+}
+
+/// Fold a single-node `node_enter_at_level` / `node_exit_at_level` broadcast into `tap`, gated
+/// before parsing exactly as [`tap_heartbeat`] is.
+///
+/// `enter` selects which threshold the frame carries — the two RotorHazard events have identical
+/// payloads and differ only in name, so one folder serves both rather than two that can drift.
+fn tap_captured_level(tap: &SignalTap, payload: &Payload, enter: bool) -> TapOutcome {
+    if !tap.capturing() {
+        return TapOutcome::Gated;
+    }
+    match first_text(payload).and_then(|v| serde_json::from_value::<RawNodeLevel>(v).ok()) {
+        Some(frame) => {
+            tap.note_level(frame.node_index, frame.level, enter);
             TapOutcome::Folded
         }
         None => TapOutcome::Unreadable,
@@ -518,6 +583,23 @@ impl SignalTap {
             if let Some(&exit) = levels.exit_at_levels.get(index) {
                 node.exit_at = Some(exit);
             }
+        }
+    }
+
+    /// Fold **one** node's threshold in — the single-node `node_enter_at_level` /
+    /// `node_exit_at_level` broadcast a finished *capture* fires (#355).
+    ///
+    /// Widens the store the same way the array-shaped frames do, so a capture on a node the tap has
+    /// not otherwise heard from still lands rather than being dropped for being out of range.
+    fn note_level(&self, index: usize, level: f32, enter: bool) {
+        let mut nodes = self.widen(index + 1);
+        let Some(node) = nodes.get_mut(index) else {
+            return;
+        };
+        if enter {
+            node.enter_at = Some(level);
+        } else {
+            node.exit_at = Some(level);
         }
     }
 }
@@ -1290,6 +1372,28 @@ impl RotorHazardConnection {
                 let tap = tap.clone();
                 move |payload: Payload, _client: RawClient| {
                     tap_crossing(&tap, &payload);
+                }
+            })
+            // The **capture echo** (#355). A finished `cap_enter_at_btn` / `cap_exit_at_btn`
+            // broadcasts the level it settled on — `server.py`'s `new_enter_or_exit_at_callback`
+            // calls `calibration.set_*_at_level` and then `rhui.emit_*_at_level(node)` — so the
+            // captured value arrives unasked, ~3 s after the button. That is the one place
+            // RotorHazard *does* echo a level, and it is why a capture is confirmable without
+            // waiting on the next readback. Same pre-parse gate as the two frames above: these are
+            // broadcast to every client, so a Director with no Tune page open must not pay for
+            // them. (The driver still fires the ordinary `enter_and_exit_at_levels` readback after
+            // the window as a backstop — this echo is a broadcast we are glad to have, not the only
+            // evidence we accept.)
+            .on("node_enter_at_level", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    tap_captured_level(&tap, &payload, true);
+                }
+            })
+            .on("node_exit_at_level", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    tap_captured_level(&tap, &payload, false);
                 }
             })
             .on("gridfpv_hello_ack", {
@@ -2073,6 +2177,75 @@ impl RotorHazardConnection {
             "set_exit_at_level",
             json!({ "node": node, "exit_at_level": level }),
         )
+    }
+
+    /// **Start a peak-sampling CAPTURE of node `node`'s enter threshold** (#355) — RotorHazard's
+    /// `cap_enter_at_btn`, the only non-guessing way to bootstrap a timer nobody has ever tuned.
+    ///
+    /// # What it actually does, which is not what its name suggests
+    ///
+    /// Verified in the container (v4.3.0) and against the v4.4.0 tree — the capture path is
+    /// **byte-identical on both**, in `server.py`, `calibration.py` and `BaseHardwareInterface.py`
+    /// alike.
+    ///
+    /// `server.py::on_cap_enter_at_btn` reads `data['node_index']` and calls
+    /// `interface.start_capture_enter_at_level(node_index)`, which arms a **3-second sampling
+    /// window** (`CAP_ENTER_EXIT_AT_MILLIS = 3000`) starting *now*. Over that window the RSSI loop
+    /// accumulates `current_rssi` and a sample count; at the deadline the level becomes
+    /// `round(total / count)` — the **mean** of what the node saw, not its peak. For the *enter*
+    /// threshold only there is then one correction: if `node_peak_rssi - level` is under
+    /// `ENTER_AT_PEAK_MARGIN` (5), the level is pulled down to `node_peak_rssi - 5`.
+    ///
+    /// So the RD does not fly a lap and *then* capture. The window opens the instant this emit
+    /// lands, and the pass has to happen inside it. Any UI wording that says otherwise sends the
+    /// RD to the gate three seconds too late — which is why the console labels this as a
+    /// three-second window rather than as a verb.
+    ///
+    /// # Preconditions, and the silence when they fail
+    ///
+    /// It needs **no race, no crossing and no seated pilot** — it works on a wholly idle timer,
+    /// which is the entire point. It is refused, and `start_capture_enter_at_level` returns
+    /// `False`, when a capture of this threshold is *already* running on this node, or when the
+    /// node's `api_valid_flag` is clear (nothing answering at that seat). An out-of-range
+    /// `node_index` raises an `IndexError` that `@catchLogExcWithDBWrapper` swallows into the log.
+    ///
+    /// **Every one of those failures is silent on the socket.** The handler emits nothing on the
+    /// refusal path and returns nothing on any path, so an `Ok` here means the bytes left, and
+    /// nothing more. This is the fourth write in this file with that property (`set_min_lap_time`,
+    /// `frequencyset_alter` and `set_frequency`'s label were the first three, #423) and it gets the
+    /// same treatment: the caller proves it landed by watching the level change on the signal feed.
+    ///
+    /// # This one DOES echo — eventually
+    ///
+    /// Unlike `set_enter_at_level`, a *finished* capture broadcasts its result: at the end of the
+    /// window `new_enter_or_exit_at_callback` calls `calibration.set_enter_at_level` (profile row,
+    /// hardware push, `Evt.ENTER_AT_LEVEL_SET`) **and** `rhui.emit_enter_at_level(node)`, which
+    /// puts `node_enter_at_level` `{node_index, level}` on the wire ~3.0-3.1 s after this emit.
+    /// This transport folds that into the tune tap, so the captured level reaches the Tune page on
+    /// the feed it is already polling. The driver *also* fires
+    /// [`request_thresholds`](Self::request_thresholds) once the window has elapsed, because one
+    /// broadcast is not a thing to stake a gate's calibration on.
+    ///
+    /// ⚠️ **The payload key is `node_index`, not `node`.** The calibration writes on this same
+    /// socket use `node`; these two handlers use `node_index`. Sending `node` gives a `KeyError`
+    /// the exception wrapper swallows — accepted, logged, and nothing captured.
+    ///
+    /// Callers **must** gate this on heat phase exactly as they gate the calibration write: a
+    /// capture ends by *setting* the threshold, so it moves a detector mid-race just as surely.
+    pub fn capture_enter_at_level(&self, node: u64) -> Result<(), rust_socketio::Error> {
+        self.client.emit(CAP_ENTER_EVENT, capture_payload(node))
+    }
+
+    /// **Start a capture of node `node`'s exit threshold** (#355) — RotorHazard's
+    /// `cap_exit_at_btn`, the twin of [`capture_enter_at_level`](Self::capture_enter_at_level).
+    ///
+    /// Everything said there applies, with one difference: the exit branch has **no peak margin**.
+    /// `BaseHardwareInterface` sets `exit_at_level` to the plain mean of the window and stops
+    /// there, where the enter branch additionally pulls the level to `node_peak_rssi - 5` when it
+    /// came out too close to the node's peak. Same 3-second window, same `node_index` payload key,
+    /// same silence on refusal, and the same `node_exit_at_level` echo at the end.
+    pub fn capture_exit_at_level(&self, node: u64) -> Result<(), rust_socketio::Error> {
+        self.client.emit(CAP_EXIT_EVENT, capture_payload(node))
     }
 
     /// **Ask RotorHazard for its min-lap filter** — `load_data` with
@@ -3022,6 +3195,63 @@ mod tests {
         adapter.note_malformed_frame("current_laps", &detail);
         assert_eq!(adapter.counts.malformed_frames, 1);
     }
+    /// The capture emit's **event names and payload key**, pinned against the RotorHazard source.
+    ///
+    /// Not a tautology: the key is `node_index` here and `node` on `set_enter_at_level`, on the same
+    /// socket, for the same node. RotorHazard answers a wrong key with a `KeyError` its exception
+    /// wrapper swallows into the log — the emit succeeds and nothing is captured. This is the
+    /// assertion that would have caught the three writes RotorHazard silently ignored (#423).
+    #[test]
+    fn a_capture_emit_carries_node_index_and_rotorhazards_own_event_names() {
+        // `server.py::on_cap_enter_at_btn` / `on_cap_exit_at_btn`, v4.3.0 and v4.4.0 alike.
+        assert_eq!(CAP_ENTER_EVENT, "cap_enter_at_btn");
+        assert_eq!(CAP_EXIT_EVENT, "cap_exit_at_btn");
+        // `BaseHardwareInterface::CAP_ENTER_EXIT_AT_MILLIS`, both versions.
+        assert_eq!(CAPTURE_WINDOW_MILLIS, 3_000);
+
+        let payload = capture_payload(2);
+        assert_eq!(payload, json!({ "node_index": 2 }));
+        // The trap, stated as an assertion: NOT the key the calibration write uses.
+        assert!(
+            payload.get("node").is_none(),
+            "the capture handlers read `node_index`; sending `node` is a swallowed KeyError"
+        );
+    }
+
+    /// A finished capture's **echo** reaches the tune tap as that node's threshold — the thing that
+    /// makes a capture confirmable at all, since the RD cannot know the value in advance.
+    #[test]
+    fn a_finished_captures_echo_lands_on_the_node_it_names() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        // `RHUI.emit_enter_at_level` / `emit_exit_at_level`, verbatim shape.
+        assert_eq!(
+            tap_captured_level(&tap, &text(json!({ "node_index": 1, "level": 118 })), true),
+            TapOutcome::Folded
+        );
+        assert_eq!(
+            tap_captured_level(&tap, &text(json!({ "node_index": 1, "level": 96 })), false),
+            TapOutcome::Folded
+        );
+        let ticks = tap.take();
+        assert_eq!(ticks[1].enter_at, Some(118.0));
+        assert_eq!(ticks[1].exit_at, Some(96.0));
+        // The other nodes are untouched — a single-node broadcast must not smear across the row.
+        assert_eq!(ticks[0].enter_at, None);
+        assert_eq!(ticks[0].exit_at, None);
+    }
+
+    /// The echo pays the same pre-parse gate the heartbeat does: these frames are **broadcast** to
+    /// every connected client, so a Director with no Tune page open must not deserialize them.
+    #[test]
+    fn the_capture_echo_is_gated_before_it_is_parsed() {
+        let tap = SignalTap::default();
+        let good = text(json!({ "node_index": 0, "level": 118 }));
+        assert_eq!(tap_captured_level(&tap, &good, true), TapOutcome::Gated);
+        assert_eq!(tap_captured_level(&tap, &good, false), TapOutcome::Gated);
+        assert!(tap.take().is_empty());
+    }
+
     #[test]
     fn a_catalog_channel_code_becomes_rotorhazards_letter_and_number() {
         // RotorHazard stores `{"b": "R", "c": 8}` and calls `int()` on the channel with no guard.

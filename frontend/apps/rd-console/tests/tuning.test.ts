@@ -29,11 +29,14 @@ import {
   SIGNAL_LEASE_MS,
   SIGNAL_POLL_MS,
   adoptReported,
+  captureLabel,
+  captureSecondsLeft,
   channelGate,
   channelOptions,
   clampLevel,
   duplicateChannelNodes,
   duplicateChannelNote,
+  foldCapture,
   foldPolled,
   foldPolledChannel,
   holdsLease,
@@ -51,6 +54,7 @@ import {
   seedThreshold,
   staleThresholdNote,
   writeGate,
+  type CaptureState,
   type ThresholdState
 } from '../src/lib/tuning.js';
 
@@ -681,5 +685,96 @@ describe('channelGate — ONE rule for a Tune-page write, two ways of saying it'
       expect(gate.reason).toContain('channel');
       expect(gate.reason).not.toContain('threshold');
     }
+  });
+});
+
+describe('Capture — the timer measures the level (#355)', () => {
+  /** A capture that started at t=0 with the timer holding 90, sampling for 3 s then 4 s of grace. */
+  const started = (): CaptureState => ({
+    phase: 'sampling',
+    startedAt: 0,
+    windowMs: 3_000,
+    settleMs: 4_000,
+    previous: 90
+  });
+
+  it('credits NOTHING to the capture while RotorHazard is still sampling', () => {
+    // The window is three seconds long and RotorHazard has not computed a level until it closes —
+    // it accumulates `current_rssi` and only divides at the deadline. A threshold that moved during
+    // those seconds moved for some other reason, and crediting it would report a number that was
+    // never measured.
+    expect(foldCapture(started(), 118, 1_500).phase).toBe('sampling');
+    expect(foldCapture(started(), 118, 2_999).phase).toBe('sampling');
+  });
+
+  it('takes a level that CHANGED after the window as the captured one', () => {
+    const next = foldCapture(started(), 118, 3_100);
+    expect(next.phase).toBe('captured');
+    expect(next.level).toBe(118);
+  });
+
+  it('keeps waiting through the grace before giving a verdict', () => {
+    // The level has to survive RotorHazard's own write, the Director's decimation and a poll. A
+    // verdict declared one poll too early is a false alarm on a capture that did land.
+    expect(foldCapture(started(), 90, 3_100).phase).toBe('waiting');
+    expect(foldCapture(started(), 90, 6_900).phase).toBe('waiting');
+  });
+
+  it('reports a capture that produced NO new level, rather than showing a success', () => {
+    // This is the #423 failure class in its capture costume. RotorHazard refuses a capture — a node
+    // whose `api_valid_flag` is clear, or one already capturing — by returning False and emitting
+    // absolutely nothing, so an unchanged level is the only evidence of that refusal there is.
+    const next = foldCapture(started(), 90, 7_100);
+    expect(next.phase).toBe('unchanged');
+    expect(next.level).toBeUndefined();
+    expect(next.detail).toContain('still reporting 90');
+    expect(next.detail).toContain('nothing was recorded');
+  });
+
+  it('says so plainly when the timer never reported the threshold at all', () => {
+    const next = foldCapture(started(), undefined, 7_100);
+    expect(next.phase).toBe('unchanged');
+    expect(next.detail).toContain('never reported a level');
+  });
+
+  it('claims no diagnosis it cannot support', () => {
+    // A capture CAN legitimately measure the same level it started from. "Nothing changed" is the
+    // whole of what is known, and the copy has to stop there rather than assert a cause.
+    const next = foldCapture(started(), 90, 7_100);
+    expect(next.detail).toContain('either the pass fell outside the window');
+    expect(next.detail).not.toMatch(/RotorHazard is not responding|the node is dead/i);
+  });
+
+  it('counts the window down in whole seconds, and stops at zero', () => {
+    // The countdown IS the instruction: RotorHazard's window opens at the press, so an RD who does
+    // not know how long they have is an RD whose pass lands outside it.
+    expect(captureSecondsLeft(started(), 0)).toBe(3);
+    expect(captureSecondsLeft(started(), 1_200)).toBe(2);
+    expect(captureSecondsLeft(started(), 2_900)).toBe(1);
+    expect(captureSecondsLeft(started(), 3_500)).toBe(0);
+  });
+
+  it('labels the sampling state as an instruction, not a status', () => {
+    expect(captureLabel(started(), 500)).toMatch(/Fly the pass now/);
+    expect(captureLabel({ ...started(), phase: 'captured', level: 118 }, 0)).toBe('Captured 118');
+    expect(captureLabel({ ...started(), phase: 'unchanged' }, 0)).toBe('Nothing captured');
+  });
+
+  it('does NOT clamp the reported level when deciding whether it changed', () => {
+    // The comparison is against `previous`, which the Director rounded off the same feed without
+    // clamping. Clamping only this side would read a timer sitting on 255 as 254 and call an
+    // unchanged level a capture — a fabricated success, which is the one outcome this must never
+    // produce. (`clampLevel` is the rule for a value an EDITOR produces; this is the timer's own.)
+    const at255: CaptureState = { ...started(), previous: 255 };
+    expect(foldCapture(at255, 255, 7_100).phase).toBe('unchanged');
+    // …and a genuine change is still a capture, reported at the level the timer actually holds.
+    expect(foldCapture(at255, 255.4, 7_100).phase).toBe('unchanged');
+    expect(foldCapture(at255, 200, 3_100).level).toBe(200);
+  });
+
+  it('leaves a settled capture alone on every later poll', () => {
+    const done = foldCapture(started(), 118, 3_100);
+    expect(foldCapture(done, 118, 9_000)).toBe(done);
+    expect(foldCapture(done, 90, 9_000)).toBe(done);
   });
 });
