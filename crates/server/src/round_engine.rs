@@ -344,14 +344,18 @@ impl std::error::Error for AssignError {}
 ///    [`AssignError::NoChannelsAllowed`] (none configured) or
 ///    [`AssignError::CapabilityAllowsNoConfigured`] (configured, none tunable). An **empty lineup**
 ///    needs no channels and is exempt: there is nothing to seat, so there is nothing to refuse.
-/// 3. **IMD-aware channel SELECTION (#209 auto-pick).** Rather than first-fitting the pool's first
-///    `lineup.len()` channels, pick the **cleanest** size-`lineup.len()` *subset* of the timer's
-///    available channels by third-order intermodulation
+/// 3. **IMD-aware channel SELECTION (#209 auto-pick, #430).** Rather than first-fitting the
+///    pool's first `lineup.len()` channels, pick the **cleanest** size-`lineup.len()` *subset* of
+///    the timer's available channels
 ///    ([`pick_best_imd_set`](gridfpv_engine::imd::pick_best_imd_set)). IMD only matters for the
 ///    channels flying **simultaneously in this heat**, so the channel *set* is chosen for the
-///    heat's lineup size — products landing on/near a used channel cause video breakup, so the
-///    subset that keeps the worst product farthest from every used channel is chosen. Too few
-///    available channels for the lineup is [`AssignError::TooFewChannels`].
+///    heat's lineup size: third-order products landing on/near a used channel cause video
+///    breakup, so the subset with the best
+///    [`imd_rating`](gridfpv_engine::imd::imd_rating) — our port of **IMDTabler**, the same
+///    number an RD reads off RotorHazard for the same channels — is chosen, subject to a
+///    [minimum channel separation](gridfpv_engine::imd::MIN_CHANNEL_SEPARATION_MHZ) so a set is
+///    never picked with two channels close enough to bleed into each other. Too few available
+///    channels for the lineup is [`AssignError::TooFewChannels`].
 /// 4. **First-fit assignment of the chosen set.** The IMD-best channels (sorted ascending) are
 ///    laid onto the lineup in seed order via [`allocate`] — top seed gets the lowest chosen
 ///    channel, etc. — so the per-pilot mapping is deterministic.
@@ -427,8 +431,10 @@ pub fn assign_frequencies(
     // #209 auto-pick: choose the IMD-cleanest size-`lineup.len()` subset of the candidate pool for
     // this heat's *simultaneous* lineup, then first-fit those channels onto the seed-ordered lineup.
     // NOTE(#209): this is the **auto-pick** half only. The remaining halves stay on the roadmap —
-    // surfacing the heat's IMD score in the UI and flagging a low-IMD heat for the RD. Channels are
-    // now IMD-optimised at fill; the score display + low-IMD flag are not yet wired.
+    // surfacing the heat's IMD rating in the UI and flagging a low-IMD heat for the RD (#117 S4).
+    // Channels are IMD-optimised at fill; the rating display + low-IMD flag are not yet wired, and
+    // deliberately so: what counts as "clean" depends on the pilot count, so the threshold is a
+    // presentation decision and not this path's to make.
     // `pick_best_imd_set` is deterministic (tie-broken by widest spread then lowest channels), so
     // the assignment is replay-deterministic. A manual per-heat channel override (if any) is applied
     // by the caller, which wins over this auto-pick.
@@ -2649,26 +2655,32 @@ mod tests {
 
     #[test]
     fn assign_picks_the_imd_best_subset_in_seed_order() {
-        // #209 auto-pick: an 8-node Raceband timer no longer first-fits R1,R2,R3 (which has a
-        // third-order product landing exactly on R3 — IMD score 0). It selects the IMD-cleanest
-        // 3-channel subset — [5658, 5732, 5917] (score 74) — and lays it onto the seeds in order
-        // (lowest channel → top seed).
+        // #209 auto-pick / #430: an 8-node Raceband timer no longer first-fits R1,R2,R3 (which
+        // has a two-tone product landing exactly on R3 — IMDTabler rates it -308). It selects the
+        // IMD-cleanest 3-channel subset — [5658, 5695, 5917], which rates the ceiling 100 — and
+        // lays it onto the seeds in order (lowest channel → top seed).
         let timer = timer_with(8, RACEBAND_MHZ.to_vec());
         let assignment = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap();
         assert_eq!(
             assignment,
             vec![
                 (CompetitorRef("A".into()), 5658),
-                (CompetitorRef("B".into()), 5732),
+                (CompetitorRef("B".into()), 5695),
                 (CompetitorRef("C".into()), 5917),
             ]
         );
-        // The chosen set is strictly cleaner than the naive first-fit R1,R2,R3.
+        // The chosen set is strictly cleaner than the naive first-fit R1,R2,R3, and no two of its
+        // channels are close enough to bleed into each other (#430).
         let chosen: Vec<u16> = assignment.iter().map(|(_, f)| *f).collect();
         assert!(
-            gridfpv_engine::imd::imd_score(&chosen)
-                > gridfpv_engine::imd::imd_score(&[5658, 5695, 5732]),
+            gridfpv_engine::imd::imd_rating(&chosen)
+                > gridfpv_engine::imd::imd_rating(&[5658, 5695, 5732]),
             "IMD-best subset must beat first-fit"
+        );
+        assert!(
+            gridfpv_engine::imd::min_channel_separation(&chosen).unwrap()
+                >= gridfpv_engine::imd::MIN_CHANNEL_SEPARATION_MHZ,
+            "the assigned set clears the adjacent-bleed floor"
         );
     }
 
@@ -2931,8 +2943,8 @@ mod tests {
             "the IMD-best 3 of the WHOLE allowed set"
         );
         assert!(
-            gridfpv_engine::imd::imd_score(&chosen)
-                >= gridfpv_engine::imd::imd_score(&gridfpv_engine::imd::pick_best_imd_set(
+            gridfpv_engine::imd::imd_rating(&chosen)
+                >= gridfpv_engine::imd::imd_rating(&gridfpv_engine::imd::pick_best_imd_set(
                     &RACEBAND_MHZ[..4],
                     3
                 )),
