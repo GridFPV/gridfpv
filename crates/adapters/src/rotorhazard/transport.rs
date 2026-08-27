@@ -1323,7 +1323,31 @@ fn rh_band_channel(code: &str) -> Option<(String, u16)> {
 impl RotorHazardConnection {
     /// Connect to `url` (e.g. `http://localhost:5000`) and start translating the
     /// RotorHazard socket stream through `adapter`.
-    pub fn connect(url: &str, adapter: RotorHazardAdapter) -> Result<Self, rust_socketio::Error> {
+    ///
+    /// # The adapter comes back if the connect fails (#435)
+    ///
+    /// The `Err` carries the adapter alongside the error, and it has to: this consumes the adapter
+    /// by value, and on a **mid-race reconnect** that adapter is the only thing suppressing the
+    /// in-progress `current_laps` snapshot RotorHazard re-sends on every new socket. An attempt
+    /// that fails — RH momentarily unreachable, the common case right after the blip that dropped
+    /// the socket — used to drop it, so the next attempt started from an empty deduplicator and
+    /// re-minted every lap of the running heat as a fresh `Pass`. The lap projection does not dedup
+    /// by sequence, so one Wi-Fi blip plus one failed retry doubled a heat's lap log.
+    ///
+    /// `rust_socketio::Error` carries nothing back on its own, which is why the recovery is in the
+    /// signature rather than left to the caller to arrange.
+    ///
+    /// ⚠️ **One thing is still lost on a failed attempt**, and it is not the dedup state: the
+    /// `set_plugin_live_pass(false)` reset below runs *before* the socket is dialled, and any laps
+    /// it mints go into this attempt's event sink, which the `Err` path drops. That is a
+    /// pre-existing narrowing of #400 (it can only bite on the first attempt after a `live_pass`
+    /// link dropped, since the reset is idempotent), and it is left alone here deliberately —
+    /// re-ordering the reset around `.connect()` changes where those laps land relative to the
+    /// socket's own first frames, which is a separate question from this one.
+    pub fn connect(
+        url: &str,
+        adapter: RotorHazardAdapter,
+    ) -> Result<Self, (rust_socketio::Error, RotorHazardAdapter)> {
         let adapter = Arc::new(Mutex::new(adapter));
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         // Fresh link, fresh pass-source decision (#389). The adapter is REUSED across reconnects
@@ -1807,7 +1831,25 @@ impl RotorHazardConnection {
                     }
                 }
             })
-            .connect()?;
+            .connect();
+        // Hand the adapter back rather than dropping it with the failed attempt (#435). It is only
+        // ever shared with this attempt's own handlers, none of which can outlive a connect that
+        // never succeeded, so the `Arc` is uncontended here — but recover defensively rather than
+        // unwrapping it, because losing the dedup state to a panic on a mid-race reconnect is the
+        // very outcome this exists to prevent.
+        let client = match client {
+            Ok(client) => client,
+            Err(error) => {
+                let recovered = match Arc::try_unwrap(adapter) {
+                    Ok(cell) => cell.into_inner().unwrap_or_else(|e| e.into_inner()),
+                    Err(shared) => shared
+                        .lock()
+                        .map(|a| a.clone())
+                        .unwrap_or_else(|e| e.into_inner().clone()),
+                };
+                return Err((error, recovered));
+            }
+        };
 
         // Warm initial state on (re)connect: ask RH to send current per-node RSSI, the enter/exit
         // detection thresholds, the current race status (so the **current format id** is learned

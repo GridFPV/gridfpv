@@ -49,6 +49,7 @@ Floor: RHAPI 1.3 / RotorHazard v4.3.0+ (declared in ``manifest.json``).
 """
 
 import bisect
+import json
 import logging
 import sys
 
@@ -203,6 +204,17 @@ MIN_LAP_NEUTRAL_SECS = 0
 MIN_LAP_BEHAVIOR_HIGHLIGHT = 0
 
 
+def _min_lap_is_neutral(secs, behavior):
+    """Whether ``(MinLapSec, MinLapBehavior)`` lets **every** crossing through to Grid.
+
+    From ``RHRace.py::pass_record_callback``, identical on v4.3.0 and v4.4.0: a zero floor makes
+    the sub-minimum test unreachable, and a zero behaviour keeps the crossing even when it fires.
+    Grid requires *both*, because either can be moved from RotorHazard's UI alone. An unread value
+    (``None``) is not neutral — an unknown filter is not a cleared one.
+    """
+    return secs == MIN_LAP_NEUTRAL_SECS and behavior == MIN_LAP_BEHAVIOR_HIGHLIGHT
+
+
 def _read_min_lap(rhapi):
     """RotorHazard's current ``(MinLapSec, TIMING/MinLapBehavior)`` as ints, ``None`` where unread.
 
@@ -231,23 +243,36 @@ def _read_min_lap(rhapi):
     return secs, behavior
 
 
-def ensure_min_lap_neutral(rhapi, state):
-    """Read RH's min-lap filter, zero it, and **confirm by re-reading**; return the wire report.
+def _record_min_lap_first_sighting(state, secs_was, behavior_was):
+    """Fold this reading into the **hand-back record** — what the RD had before Grid touched it.
 
-    The report is what the Director announces and records — Grid's own note of what it found on
-    this timer and what it applied, never a value Grid then treats as its own config (D27).
+    Returns the record, ``{"secs": ..., "behavior": ...}``, with either half ``None`` when it has
+    never been read.
 
-    ``secs_was`` / ``behavior_was`` are the values seen the **first** time this plugin touched this
-    server, stashed in ``state`` and never overwritten. That matters: this runs again at every
-    ``gridfpv_select_format``, and a naive re-read would report Grid's own zero back as "what the
-    race director had", erasing the only record of the setting Grid displaced.
+    Two cases, and the second is #454:
 
-    Never raises — a failure is reported, not thrown, because a timer whose filter could not be
-    neutralised must still connect (so the Director can *say* so) rather than fall over.
+    * **The first time this plugin touches this server**, nothing has been written yet, so whatever
+      RotorHazard reports IS what the RD had — including a value that already equals Grid's neutral.
+      Recorded verbatim.
+    * **Any later call**, a half that is still unknown is backfilled — but only from a value that
+      *cannot* be Grid's own write, i.e. one that differs from what Grid applies. If the very first
+      ``_read_min_lap`` failed (RH's database briefly unreadable at load, which is exactly when a
+      plugin loads), the record used to freeze as ``{None, None}`` for the life of the plugin,
+      because the guard asked whether the record existed rather than whether it held anything. The
+      RD's displaced values were then unrecoverable even though the very next call could read them.
+
+    The neutral-value exclusion is what keeps the backfill honest: by the time a later call runs,
+    Grid may itself have written the zero it is reading, and recording *that* as "what the race
+    director had" is the erasure this record exists to prevent.
     """
-    secs_was, behavior_was = _read_min_lap(rhapi)
-    if state.get("min_lap_was") is None:
-        state["min_lap_was"] = {"secs": secs_was, "behavior": behavior_was}
+    first_touch = state.get("min_lap_was") is None
+    if first_touch:
+        state["min_lap_was"] = {"secs": None, "behavior": None}
+    record = state["min_lap_was"]
+
+    if first_touch:
+        record["secs"] = secs_was
+        record["behavior"] = behavior_was
         if secs_was or behavior_was:
             logger.info(
                 "GridFPV: RotorHazard's own min-lap filter is MinLapSec=%s, %s/%s=%s — Grid is "
@@ -259,7 +284,64 @@ def ensure_min_lap_neutral(rhapi, state):
                 MIN_LAP_BEHAVIOR_ITEM,
                 behavior_was,
             )
-    first_seen = state["min_lap_was"]
+        return record
+
+    for key, found, applied in (
+        ("secs", secs_was, MIN_LAP_NEUTRAL_SECS),
+        ("behavior", behavior_was, MIN_LAP_BEHAVIOR_HIGHLIGHT),
+    ):
+        if record[key] is not None or found is None or found == applied:
+            continue
+        record[key] = found
+        logger.info(
+            "GridFPV: recovered the race director's displaced min-lap %s (%s) — the first read of "
+            "it failed, so it was missing from the hand-back record until now (#454)",
+            key,
+            found,
+        )
+    return record
+
+
+def ensure_min_lap_neutral(rhapi, state):
+    """Read RH's min-lap filter, zero it, and **confirm by re-reading**; return the wire report.
+
+    The report is what the Director announces and records — Grid's own note of what it found on
+    this timer and what it applied, never a value Grid then treats as its own config (D27).
+
+    ``secs_was`` / ``behavior_was`` are the values seen the **first** time this plugin touched this
+    server, stashed in ``state`` and never overwritten by Grid's own zero — see
+    `_record_min_lap_first_sighting`, which also backfills a half the first read could not produce
+    (#454). That matters: this runs again at every ``gridfpv_select_format`` and every
+    ``gridfpv_hello``, and a naive re-read would report Grid's own zero back as "what the race
+    director had", erasing the only record of the setting Grid displaced.
+
+    Called per ack rather than once at load (#438): the RD can restore RotorHazard's own filter
+    from its settings screen between two Director connects, and a replayed load-time report would
+    tell the Director the timer was neutral while it was discarding every short crossing.
+
+    Never raises — a failure is reported, not thrown, because a timer whose filter could not be
+    neutralised must still connect (so the Director can *say* so) rather than fall over.
+    """
+    secs_was, behavior_was = _read_min_lap(rhapi)
+    drifted = not _min_lap_is_neutral(secs_was, behavior_was)
+    already_touched = state.get("min_lap_was") is not None
+    first_seen = _record_min_lap_first_sighting(state, secs_was, behavior_was)
+
+    # Grid has cleared this filter before and it is back. Something re-applied it since — RH's own
+    # settings screen, a profile load, an RH restart restoring a saved value — and until this call
+    # the timer was discarding or flagging crossings Grid never got to referee. Say so once per
+    # occurrence, out loud: it is the only notice the RD gets that their timer was refereeing
+    # again, and it is what makes the re-assertion observable at all (#407, #438).
+    if drifted and already_touched:
+        logger.warning(
+            "GridFPV: RotorHazard's min-lap filter had drifted back to MinLapSec=%s, %s/%s=%s — "
+            "re-neutralising it now (#407). Grid had already cleared it, so something re-applied "
+            "it: RotorHazard's own settings screen, a profile load, or a restart.",
+            secs_was,
+            MIN_LAP_BEHAVIOR_SECTION,
+            MIN_LAP_BEHAVIOR_ITEM,
+            behavior_was,
+        )
 
     errors = []
     if secs_was != MIN_LAP_NEUTRAL_SECS:
@@ -291,7 +373,7 @@ def ensure_min_lap_neutral(rhapi, state):
     # for the same reason: RH coerces on the way in, and a coercion that quietly kept the old value
     # would leave Grid racing on a filter it believes it removed.
     secs_now, behavior_now = _read_min_lap(rhapi)
-    ok = secs_now == MIN_LAP_NEUTRAL_SECS and behavior_now == MIN_LAP_BEHAVIOR_HIGHLIGHT
+    ok = _min_lap_is_neutral(secs_now, behavior_now)
     if not ok and not errors:
         errors.append(
             "still MinLapSec={0!r}, {1}/{2}={3!r} after the write".format(
@@ -367,6 +449,77 @@ def _format_drift(rhapi, format_id):
         if found != wanted:
             drift[field] = (found, wanted)
     return drift
+
+
+# Where the **displaced race format** record lives (#454). An RH database option rather than
+# plugin state, because plugin state dies with the RH process and the thing it records cannot be
+# re-derived afterwards: once Grid's format is RotorHazard's persisted current one, a restarted
+# plugin sees Grid's own row as "what was there before" and the RD's format is unrecoverable.
+#
+# An option row is the same store `MinLapSec` lives in, reachable through the supported RHAPI
+# surface (`db.option` / `db.option_set`) on RHAPI 1.3 and 1.4 alike, and namespaced so it cannot
+# collide with RotorHazard's own keys.
+DISPLACED_FORMAT_OPTION = "gridfpv_displaced_format"
+
+
+def _load_displaced_format(rhapi):
+    """The persisted record of the RD's own race format, or ``None``.
+
+    Validated against RotorHazard's current format list before it is trusted: a row the RD deleted
+    since must not be offered as a hand-back target, and naming a format that no longer exists is
+    worse than saying nothing. Never raises — a hand-back *diagnostic* must not be able to stop a
+    timer connecting.
+    """
+    try:
+        raw = rhapi.db.option(DISPLACED_FORMAT_OPTION)
+        if not raw:
+            return None
+        record = json.loads(raw)
+        format_id = record.get("id")
+        if format_id is None:
+            return None
+        rows = rhapi.db.raceformats or []
+        row = next((f for f in rows if getattr(f, "id", None) == format_id), None)
+        if row is None:
+            logger.info(
+                "GridFPV: the recorded hand-back race format (%s) no longer exists in "
+                "RotorHazard — forgetting it rather than naming a row that is gone",
+                format_id,
+            )
+            return None
+        # Re-read the name off the row: the RD may have renamed it since, and the record exists to
+        # say something they recognise.
+        return {"id": format_id, "name": getattr(row, "name", record.get("name"))}
+    except Exception:  # noqa: BLE001 - a diagnostic must never break the connection
+        logger.exception(
+            "GridFPV: could not read the recorded hand-back race format (%s)",
+            DISPLACED_FORMAT_OPTION,
+        )
+        return None
+
+
+def _save_displaced_format(rhapi, record):
+    """Persist the RD's own race format so the hand-back target survives an RH restart (#454).
+
+    Read back rather than trusted, the discipline every other write here follows: RH coerces on the
+    way in, and a hand-back record that silently did not store is one nobody discovers until they
+    want it. Never raises.
+    """
+    try:
+        rhapi.db.option_set(DISPLACED_FORMAT_OPTION, json.dumps(record))
+        stored = rhapi.db.option(DISPLACED_FORMAT_OPTION)
+        if not stored or json.loads(stored).get("id") != record.get("id"):
+            logger.error(
+                "GridFPV: could not persist the hand-back race format — RotorHazard reads back "
+                "%r after storing %r. The record survives this session but not an RH restart.",
+                stored,
+                record,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "GridFPV: could not persist the hand-back race format (%s)",
+            DISPLACED_FORMAT_OPTION,
+        )
 
 
 def _find_grid_format(rhapi):
@@ -454,9 +607,13 @@ def select_grid_format(rhapi, state):
 
     if previous_id != format_id:
         # Remember the RD's own format the FIRST time we take the timer over, so the hand-back
-        # target survives however many times Grid re-selects its own row afterwards.
+        # target survives however many times Grid re-selects its own row afterwards — and, since
+        # #454, however many times RotorHazard restarts. Persisted, because this is the one moment
+        # the information exists: after a restart that left Grid's format current, `previous_id`
+        # IS Grid's own row and there is nothing here to learn from.
         if state.get("displaced") is None and previous_id is not None:
             state["displaced"] = {"id": previous_id, "name": previous_name}
+            _save_displaced_format(rhapi, state["displaced"])
             logger.info(
                 "GridFPV: taking the timer over from race format '%s' (%s) — that row is left "
                 "untouched; select it again in RotorHazard to hand the timer back",
@@ -570,6 +727,12 @@ def initialize(rhapi):
         "min_lap_was": None,
     }
 
+    # Restore the hand-back record from RotorHazard's own database (#454). Grid's format may well
+    # be RH's persisted current one after a restart, in which case `select_grid_format` will see
+    # its own row as `previous` and have nothing to learn — this is the only place the RD's format
+    # can still be recovered from.
+    state["displaced"] = _load_displaced_format(rhapi)
+
     # ---- S3 gate: earn `live_pass` before advertising it (#389) -------------------------
     live_pass_ok, live_pass_detail = _self_check_live_pass(rhapi)
     capabilities = list(BASE_CAPABILITIES)
@@ -660,7 +823,15 @@ def initialize(rhapi):
     # `TIMING/MinLapBehavior` is a config-file item, both readable and writable before STARTUP.
     # Doing it here means the filter is already gone before the Director ever connects, so a
     # crossing detected during setup is not silently eaten. Re-asserted at every stage (see
-    # `select_grid_format`) because the RD can move it back from RH's own settings screen.
+    # `select_grid_format`) and at every hello, because the RD can move it back from RH's own
+    # settings screen at any moment.
+    #
+    # ⚠️ This value is the **load-time** outcome and is used for the load-summary log line at the
+    # bottom of `initialize` and nowhere else. Do not put it on a wire message: closing over it is
+    # exactly #438 — a hello two hours and one settings change later would replay `ok: true` about
+    # a timer that is discarding crossings again, and the Director trusts a confirmed-neutral
+    # plugin report enough to skip its own readback. Every ack calls
+    # `ensure_min_lap_neutral(rhapi, state)` for itself.
     min_lap_report = ensure_min_lap_neutral(rhapi, state)
 
     # ---- S1: handshake -----------------------------------------------------------------
@@ -686,7 +857,21 @@ def initialize(rhapi):
             # RotorHazard's own min-lap filter (#407): what Grid found and what it applied. A
             # missing key (an older plugin) or `ok: false` both mean the Director must neutralise
             # it itself over the socket — and say out loud that it is doing so.
-            "min_lap": min_lap_report,
+            #
+            # **Re-run per hello, never the load-time report replayed** (#438). A hello arrives on
+            # every Director (re)connect, and between two of them the RD can restore MinLapSec=10
+            # and the discard behaviour from RotorHazard's own settings screen. Replaying the
+            # closure value said `ok: true` about a timer that was discarding every sub-10s
+            # crossing — and the Director's `ensure_min_lap_neutral` takes a confirmed-neutral
+            # plugin report as proof and skips its own socket readback, so nothing else would have
+            # caught it until the next heat's Stage re-asserted the format (the #407 window).
+            #
+            # No payload-level defence was possible: `MinLapReport` carries no freshness marker, so
+            # a replayed report is byte-identical to a fresh one. Re-verification is the only fix.
+            # It is cheap (two RHAPI reads, a write only when it has drifted), idempotent, never
+            # raises, and `state["min_lap_was"]` already protects the hand-back record from being
+            # overwritten with Grid's own zero.
+            "min_lap": ensure_min_lap_neutral(rhapi, state),
         }
         logger.info("GridFPV hello -> ack %s", ack)
         rhapi.ui.socket_send(EVT_HELLO_ACK, ack)
