@@ -691,6 +691,13 @@ impl Timer {
     /// disabled or non-existent node, and any pilot beyond the enabled set (which the heat-size cap
     /// should already have refused). Dropping seats nobody there, which records nothing; squeezing
     /// would seat somebody on the wrong gate, which records *the wrong pilot*.
+    ///
+    /// **One unplaceable entry drops only itself** (#450). Running out of free gates used to `break`
+    /// the walk, which also skipped every *later* explicit `node-{i}` ref — refs that need no free
+    /// gate at all, because they name their own. A lineup mixing auto-seated pilots with explicit
+    /// seats could therefore fail to seat an explicitly-placed pilot onto a gate that was sitting
+    /// there available, and RotorHazard dismisses every crossing on an unseated node ("Pilot not
+    /// defined"), so that pilot's laps simply never existed.
     pub fn seat_nodes(&self, lineup: &[CompetitorRef]) -> Vec<(u32, CompetitorRef)> {
         let enabled = self.enabled_nodes();
         // Indices the lineup names outright — they are spoken for, so the positional walk below
@@ -711,11 +718,15 @@ impl Timer {
                         seats.push((node, competitor.clone()));
                     }
                 }
-                // A pilot: the next enabled gate that nothing else has claimed.
-                None => match free.next() {
-                    Some(node) => seats.push((node, competitor.clone())),
-                    None => break,
-                },
+                // A pilot: the next enabled gate that nothing else has claimed. With none left this
+                // pilot is dropped — and the walk CONTINUES (#450), because a later `node-{i}` ref
+                // asks for a gate of its own and the free list has nothing to do with whether that
+                // gate is available.
+                None => {
+                    if let Some(node) = free.next() {
+                        seats.push((node, competitor.clone()));
+                    }
+                }
             }
         }
         seats
@@ -3876,6 +3887,89 @@ mod tests {
         // silently slid onto a working one.
         let stale = vec![CompetitorRef("node-2".into())];
         assert!(rh.seat_nodes(&stale).is_empty());
+    }
+
+    #[test]
+    fn running_out_of_free_gates_does_not_skip_a_later_explicit_node_ref() {
+        // #450. A mixed lineup: auto-seated pilots take free gates in order, and an explicit
+        // `node-{i}` ref names its own. The walk used to `break` the moment the free list ran dry
+        // — which also skipped every explicit ref AFTER that point, even though such a ref needs
+        // no free gate at all, because it names one that was deliberately held back for it.
+        //
+        // RotorHazard dismisses every crossing on a node with no seated pilot ("Pilot not
+        // defined"), so a pilot dropped here does not fly badly: their laps never exist.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 3);
+        reg.set_nodes(
+            &rh.id,
+            &SetTimerNodesRequest {
+                node_count: None,
+                enabled: Some(vec![0, 1, 2]),
+            },
+        )
+        .unwrap();
+        let rh = reg.get(&rh.id).unwrap();
+
+        // Node 2 is claimed outright, so the free list is [0, 1] — and the THIRD pilot exhausts it.
+        let lineup = vec![
+            CompetitorRef("ace".into()),
+            CompetitorRef("bolt".into()),
+            CompetitorRef("cyan".into()),
+            CompetitorRef("node-2".into()),
+        ];
+        let seats = rh.seat_nodes(&lineup);
+
+        assert_eq!(
+            seats,
+            vec![
+                (0, CompetitorRef("ace".into())),
+                (1, CompetitorRef("bolt".into())),
+                // `cyan` has nowhere to go and is dropped — never squeezed onto node 2, which is
+                // spoken for.
+                (2, CompetitorRef("node-2".into())),
+            ],
+            "the explicit node-2 ref must still be seated: its own gate was free the whole time"
+        );
+    }
+
+    #[test]
+    fn an_unseatable_pilot_drops_only_itself() {
+        // The same rule from the other side, and the reason `break` was wrong rather than merely
+        // unlucky: one entry that cannot be placed must cost exactly one entry. Two pilots past the
+        // end of the free list must not take the explicit refs between and after them with them.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        reg.set_nodes(
+            &rh.id,
+            &SetTimerNodesRequest {
+                node_count: None,
+                enabled: Some(vec![0, 1, 2, 3]),
+            },
+        )
+        .unwrap();
+        let rh = reg.get(&rh.id).unwrap();
+
+        // Nodes 1, 2 and 3 are claimed by name, leaving exactly one free gate (0) for two pilots.
+        let lineup = vec![
+            CompetitorRef("node-3".into()),
+            CompetitorRef("ace".into()),
+            CompetitorRef("bolt".into()),
+            CompetitorRef("node-1".into()),
+            CompetitorRef("cyan".into()),
+            CompetitorRef("node-2".into()),
+        ];
+        assert_eq!(
+            rh.seat_nodes(&lineup),
+            vec![
+                (3, CompetitorRef("node-3".into())),
+                (0, CompetitorRef("ace".into())),
+                // `bolt` and `cyan` are dropped — the free list held one gate.
+                (1, CompetitorRef("node-1".into())),
+                (2, CompetitorRef("node-2".into())),
+            ]
+        );
     }
 
     #[test]
