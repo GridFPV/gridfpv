@@ -1003,8 +1003,17 @@ fn apply_advance(
     let from = logged_heat_name(meta.as_ref(), &events, &heat);
 
     // 2. Pick the next heat to run. The advanced heat is now `Final` (not `Scheduled`), so
-    //    `on_deck` against it is exactly "the next still-`Scheduled` heat" — the heat to load.
-    if let Some(next) = crate::live_state::on_deck(&events, &heat) {
+    //    `on_deck` against it is exactly "the next still-`Scheduled` heat" — the heat to load,
+    //    filtered to the rounds this event still defines (#439). Removing a round leaves its
+    //    `HeatScheduled` entries in the append-only log; loading one would put the RD on a heat
+    //    that appears in no console list and whose round config (layouts, staging timer, min-lap)
+    //    is gone from meta — and naming it in the ack would print its raw id, since there is no
+    //    round left to derive a friendly name from. No meta (the event vanished under us) means
+    //    no round list to filter by, and the fill below is skipped for the same reason.
+    let defined = meta
+        .as_ref()
+        .map(|m| crate::live_state::defined_round_ids(&m.rounds));
+    if let Some(next) = crate::live_state::on_deck(&events, &heat, defined.as_deref()) {
         // A next heat is already scheduled — follow Live control to it.
         let loaded = describe_logged_heat(meta.as_ref(), &events, &next);
         let detail = format!(
@@ -5918,7 +5927,6 @@ mod tests {
     /// The scratch round's heat is drawn **after** the keeper round's heat 1 and before anything
     /// the keeper draws next, so it is exactly the heat `on_deck` reaches for first.
     #[test]
-    #[ignore = "known bug #439: apply_advance selects on_deck with no round-existence check — un-ignore with the fix"]
     fn advance_never_loads_a_removed_rounds_heat() {
         use crate::events::{ChannelMode, NewRoundReq, SeedingRule};
         use gridfpv_engine::scoring::WinCondition;

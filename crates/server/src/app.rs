@@ -107,8 +107,8 @@ use crate::events::{
     SetClassMembershipRequest, SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
-    HeatSummary, heat_summaries, heats_of_defined_rounds, live_state_over_with_floor,
-    live_state_with_floor, with_heat_timing,
+    HeatSummary, defined_round_ids, heat_summaries, heats_of_defined_rounds,
+    live_state_over_with_floor, live_state_with_floor, with_heat_timing,
 };
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::round_engine;
@@ -2063,14 +2063,9 @@ async fn list_heats(
     // it: they have no name, no win condition and no scoring left to resolve through. Only
     // unstarted heats can be in this position — `remove_round` refuses a round with a heat in
     // progress or past `Scheduled` — so nothing with results is ever hidden here.
-    let defined: Vec<gridfpv_events::RoundId> = registry
-        .rounds_of(&event_id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|round| round.id)
-        .collect();
+    let defined = defined_round_ids(&registry.rounds_of(&event_id).unwrap_or_default());
     Ok(Json(heats_of_defined_rounds(
-        heat_summaries(&events),
+        heat_summaries(&events, Some(&defined)),
         &defined,
     )))
 }
@@ -2471,9 +2466,16 @@ async fn snapshot_event(
     // The D26 min-lap floor is resolved from registry meta for the heat this fold reports as
     // current (#409). It is NOT in the log, so a pure-log fold cannot see it — and without it the
     // event scope counted an echo pass the heat scope's lap list suppressed.
+    //
+    // The rounds the event still defines go in with it (#439): a heat of a round the RD removed is
+    // no more selectable here than it is listable at `GET /events/{id}/heats`.
     let rounds = registry.rounds_of(&event_id).unwrap_or_default();
     let floor = live_fold_floor(&events, &rounds);
-    let body = with_heat_timing(live_state_with_floor(&events, floor), &stored);
+    let defined = defined_round_ids(&rounds);
+    let body = with_heat_timing(
+        live_state_with_floor(&events, floor, Some(&defined)),
+        &stored,
+    );
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(body),
@@ -2503,10 +2505,11 @@ async fn snapshot_class(
     let window_events: Vec<Event> = class_offsets.iter().map(|(_, e)| e.clone()).collect();
     let rounds = registry.rounds_of(&event_id).unwrap_or_default();
     let floor = live_fold_floor(&window_events, &rounds);
+    let defined = defined_round_ids(&rounds);
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(with_heat_timing(
-            live_state_over_with_floor(&class_offsets, floor),
+            live_state_over_with_floor(&class_offsets, floor, Some(&defined)),
             &stored,
         )),
     }))
@@ -2618,8 +2621,10 @@ async fn snapshot_heat(
         HeatProjection::Live => {
             // A pure fold of the heat's log window — every format, open practice included (D5,
             // reversed 2026-08-24): practice passes are logged like anyone else's, no overlay.
+            // No defined-round filter (#439): this scope NAMES its heat, so there is no "which
+            // heat is up" for a removed round's ghost to win. A heat asked for by id is served.
             ProjectionBody::LiveRaceState(with_heat_timing(
-                live_state_over_with_floor(&heat_offsets, min_lap_micros),
+                live_state_over_with_floor(&heat_offsets, min_lap_micros, None),
                 &stored,
             ))
         }
@@ -2920,7 +2925,11 @@ pub(crate) fn round_def_of_heat(
 /// A heat with no round, or a round with no `min_lap_secs`, yields `None` — D26's "0/absent =
 /// off, so pre-existing rounds keep bit-identical results".
 pub(crate) fn live_fold_floor(events: &[Event], rounds: &[crate::events::RoundDef]) -> Option<i64> {
-    let heat = crate::live_state::current_heat(events)?;
+    // Under the SAME defined-round filter the fold applies (#439) — a removed round's heat is not
+    // the current heat there, so resolving the floor from it here would floor the fold against a
+    // heat it is not reporting, which is the drift this helper exists to prevent.
+    let defined = crate::live_state::defined_round_ids(rounds);
+    let heat = crate::live_state::current_heat(events, Some(&defined))?;
     min_lap_micros_of(round_def_of_heat(events, &heat, rounds).as_ref())
 }
 
@@ -3802,12 +3811,17 @@ mod tests {
     async fn class_scope_filters_to_the_class_heats() {
         // Two heats in different classes; the class scope folds only its own class's heat.
         // `open`'s heat ran A; `sport`'s heat ran B. The open class scope sees only A's racing.
+        //
+        // The heats carry no round tag: this registry's event defines no rounds, and a heat tagged
+        // to a round the event does not define is a **removed round's** heat, which the live fold
+        // discards (#439). That is a state this fixture cannot reach in production — the tag comes
+        // from a round that existed at fill time — and it is not what this test is about.
         let events = vec![
             Event::HeatScheduled {
                 heat: HeatId("o-1".into()),
                 lineup: vec![CompetitorRef("A".into())],
                 class: Some(ClassId("open".into())),
-                round: Some(RoundId("q1".into())),
+                round: None,
                 frequencies: vec![],
                 label: None,
             },
@@ -3821,7 +3835,7 @@ mod tests {
                 heat: HeatId("s-1".into()),
                 lineup: vec![CompetitorRef("B".into())],
                 class: Some(ClassId("sport".into())),
-                round: Some(RoundId("q2".into())),
+                round: None,
                 frequencies: vec![],
                 label: None,
             },
@@ -4005,7 +4019,6 @@ mod tests {
     /// The right answer here is `q-2`: the next still-`Scheduled` heat of a round the event
     /// **does** define.
     #[tokio::test]
-    #[ignore = "known bug #439: on_deck scans raw HeatScheduled with no defined-round filter — un-ignore with the fix"]
     async fn on_deck_skips_a_removed_rounds_heat() {
         let registry = registry_with_a_removed_rounds_heat();
         let (status, snap) = get_snapshot(registry, "/snapshot/event/spring-cup").await;

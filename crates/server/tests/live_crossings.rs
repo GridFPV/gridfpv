@@ -70,8 +70,11 @@ fn with_offsets(events: &[Event]) -> Vec<(u64, Event)> {
 }
 
 /// Fold under a min-lap floor (the D26 path the heat-scoped snapshot uses).
+///
+/// No defined-round filter (#439): these fixtures are bare logs with no registry meta behind them,
+/// which is exactly the `None` case — every heat in the log counts.
 fn folded_with_floor(events: &[Event], floor: Option<i64>) -> LiveRaceState {
-    live_state_over_with_floor(&with_offsets(events), floor)
+    live_state_over_with_floor(&with_offsets(events), floor, None)
 }
 
 /// The feed's `(pass_ref, disposition, lap_number)` triples, for compact assertions.

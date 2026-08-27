@@ -2763,10 +2763,19 @@ impl EventRegistry {
     ///   **deletes, and its heats go with it**.
     ///
     /// "Go with it" is a read-side discard, because the log is append-only: the `HeatScheduled`
-    /// entries stay in the log as the historical fact that they were once planned, and
-    /// [`heats_of_defined_rounds`](crate::live_state::heats_of_defined_rounds) drops a heat whose
-    /// round the event no longer defines from every list the console reads. There is nothing left
-    /// to advise the RD to do, so the message no longer advises anything.
+    /// entries stay in the log as the historical fact that they were once planned, and every read
+    /// that could put one in front of the RD drops it. There is nothing left to advise the RD to
+    /// do, so the message no longer advises anything.
+    ///
+    /// **Every read means every read** (#439). The discard used to live only at `GET /heats`
+    /// ([`heats_of_defined_rounds`](crate::live_state::heats_of_defined_rounds)), and the RD does
+    /// not reach the next heat through a list: `on_deck` and `Advance` walked the raw
+    /// `HeatScheduled` entries and happily loaded a heat of a round that no longer existed —
+    /// unnameable (its ack printed the raw heat id), unconfigurable (its layouts, staging timer
+    /// and min-lap went with the round) and unfindable (it is on no screen). So the live fold
+    /// ([`current_heat`](crate::live_state), [`on_deck`](crate::live_state)) and the Advance
+    /// control take the same defined-round list, built once by
+    /// [`defined_round_ids`](crate::live_state::defined_round_ids).
     pub fn remove_round(&self, id: &EventId, round_id: &RoundId) -> Result<EventMeta, RoundError> {
         // Probe the log BEFORE taking the registry write lock (the log has its own mutex) — the
         // same order `update_round` uses.
@@ -5230,10 +5239,14 @@ mod tests {
         // does not define. The log still carries the `HeatScheduled` (it is append-only); what
         // changed is that nothing renders it.
         let (events, _cursor) = state.read().unwrap();
-        assert_eq!(heat_summaries(&events).len(), 1, "the log is untouched");
+        assert_eq!(
+            heat_summaries(&events, None).len(),
+            1,
+            "the log is untouched"
+        );
         let defined: Vec<RoundId> = meta.rounds.iter().map(|r| r.id.clone()).collect();
         assert!(
-            heats_of_defined_rounds(heat_summaries(&events), &defined).is_empty(),
+            heats_of_defined_rounds(heat_summaries(&events, Some(&defined)), &defined).is_empty(),
             "the removed round's heats are discarded on read"
         );
     }
@@ -5263,7 +5276,7 @@ mod tests {
             .unwrap();
         let (events, _cursor) = state.read().unwrap();
         assert_eq!(
-            heats_of_defined_rounds(heat_summaries(&events), &[]).len(),
+            heats_of_defined_rounds(heat_summaries(&events, Some(&[])), &[]).len(),
             1,
             "an untagged heat survives a round list with nothing in it"
         );
