@@ -24,7 +24,7 @@ import { expect, test } from './observability.js';
 async function gotoHub(page: import('@playwright/test').Page) {
   await page.goto('/');
   const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     await page
@@ -46,7 +46,7 @@ async function gotoPicker(page: import('@playwright/test').Page) {
   await gotoHub(page);
   await page.getByRole('button', { name: /Events/ }).click();
   const picker = page.getByRole('heading', { name: 'Choose an event' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     // Auto-entered the active event's workspace — "Switch event" leaves it and lands on the picker.
@@ -82,7 +82,7 @@ test('inside an event, a refresh stays on the open tab; browser back returns to 
     .getByRole('button', { name: /Practice/ })
     .first()
     .click();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => new URL(page.url()).hash).toBe('#/event/live');
 
   // Open the Classes & Roster tab from the sidebar → the hash becomes #/event/classes-roster.
@@ -105,7 +105,7 @@ test('inside an event, a refresh stays on the open tab; browser back returns to 
 
   // Browser BACK moves to the previous view (the Live tab) — driven by hashchange.
   await page.goBack();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect.poll(() => new URL(page.url()).hash).toBe('#/event/live');
   // The Classes & Roster heading is gone — we really moved off that tab.
   await expect(page.getByRole('heading', { name: 'Present pilots' })).toBeHidden();
@@ -132,7 +132,7 @@ test('on the hub with an active event, a refresh stays on the hub (no auto-resum
   await gotoHub(page);
   await page.getByRole('button', { name: /Events/ }).click();
   const picker = page.getByRole('heading', { name: 'Choose an event' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await picker.isVisible().catch(() => false)) {
     await page
@@ -159,6 +159,6 @@ test('on the hub with an active event, a refresh stays on the hub (no auto-resum
   await expect(page.getByRole('heading', { name: 'Pilots' })).toBeVisible({ timeout: 15_000 });
   // The hub stayed: the hash is the canonical #/ (or empty), not #/event/<tab>.
   expect(new URL(page.url()).hash).toMatch(/^(#\/?)?$/);
-  // And we are NOT in the workspace — the Live control sidebar button is absent on the hub.
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeHidden();
+  // And we are NOT in the workspace — the Race control sidebar button is absent on the hub.
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeHidden();
 });

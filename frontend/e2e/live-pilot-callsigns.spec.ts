@@ -1,15 +1,15 @@
 /**
- * Pilot callsigns in Live control resolve from the **roster binding**, BEFORE the heat runs — the
+ * Pilot callsigns in Race control resolve from the **roster binding**, BEFORE the heat runs — the
  * regression #212's e2e missed.
  *
  * #212 resolved a competitor ref → callsign only from the live `progress[].pilot` field. But a
  * real `FromRoster` heat seeds each competitor ref to the **pilot id itself** and emits NO
  * `CompetitorRegistered` event, so `progress.pilot` is `null` in every phase (Scheduled → Running)
- * — confirmed on a throwaway Director. So Live control fell back to the raw pilot id everywhere a
+ * — confirmed on a throwaway Director. So Race control fell back to the raw pilot id everywhere a
  * pilot appears (heat sheet, leaderboard, channels panel) for a heat that is merely scheduled.
  *
  * This spec sets up a real roster-seeded heat over the write paths, FILLS it (it lands **Scheduled
- * — not run**), focuses it as the current heat, opens Live control, and asserts the lineup shows
+ * — not run**), focuses it as the current heat, opens Race control, and asserts the lineup shows
  * the pilot **callsigns** (never the raw pilot ids) — a NOT-running heat. Then it stages it (still
  * not racing) and re-asserts. Nothing is mocked; every callsign comes from the real `/pilots`
  * directory joined to the real scheduled lineup.
@@ -21,7 +21,7 @@ import { expect, test } from './observability.js';
 
 /** Get the shared worker Director into the Practice event's workspace. */
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -38,7 +38,7 @@ async function enterPractice(page: import('@playwright/test').Page) {
   }
 }
 
-test('Live control shows pilot callsigns for a NOT-running roster-seeded heat (not raw ids)', async ({
+test('Race control shows pilot callsigns for a NOT-running roster-seeded heat (not raw ids)', async ({
   page,
   director
 }) => {
@@ -119,7 +119,7 @@ test('Live control shows pilot callsigns for a NOT-running roster-seeded heat (n
   });
   expect(focusAck.ok()).toBeTruthy();
 
-  // ── Into Live control: the lineup must show CALLSIGNS, not the raw pilot ids ───────────────────
+  // ── Into Race control: the lineup must show CALLSIGNS, not the raw pilot ids ───────────────────
   await page.goto('/');
   await enterPractice(page);
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });

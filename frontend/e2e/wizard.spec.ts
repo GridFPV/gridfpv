@@ -21,7 +21,7 @@ import { expect, test } from './observability.js';
 async function gotoHub(page: import('@playwright/test').Page) {
   await page.goto('/');
   const eventsCard = page.getByRole('heading', { name: 'Events' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(eventsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     await page

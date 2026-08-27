@@ -22,7 +22,7 @@ import { expect, test } from './observability.js';
 async function gotoHub(page: import('@playwright/test').Page) {
   await page.goto('/');
   const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     await page
@@ -38,7 +38,7 @@ async function gotoPicker(page: import('@playwright/test').Page) {
   await gotoHub(page);
   await page.getByRole('button', { name: /Events/ }).click();
   const picker = page.getByRole('heading', { name: 'Choose an event' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     await page.getByRole('button', { name: /Switch event/ }).click();
@@ -66,7 +66,7 @@ test('create an event, then permanently delete it through the hard-confirm dialo
   await page.getByRole('button', { name: /Create & enter/ }).click();
 
   // The new event entered its workspace; return to the picker to see/delete it in the list.
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: /Switch event/ }).click();
   await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
     timeout: 15_000

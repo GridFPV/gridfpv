@@ -30,7 +30,7 @@ test('a marshaling DQ correction re-folds the heat result', async ({ page, direc
   await page.goto('/');
 
   // Enter Practice (handle the active-event-resume / picker branches like race.spec.ts).
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   await expect(
     page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
@@ -76,7 +76,7 @@ test('a marshaling DQ correction re-folds the heat result', async ({ page, direc
   expect((await control({ SetCurrentHeat: { heat: HEAT_ID } })).ok()).toBeTruthy();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID, { timeout: 15_000 });
 
   // Stage → Start; the runtime auto-advances Armed → Running, then ForceEnd to Unofficial.
@@ -140,7 +140,7 @@ const UI_HEAT = `marshal-ui-${Date.now()}`;
 /** Enter Practice and confirm the live read stream is up (mirrors the helper above). */
 async function enterPractice(page: import('@playwright/test').Page): Promise<void> {
   await page.goto('/');
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   await expect(
     page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
@@ -177,7 +177,7 @@ test('the Marshaling screen corrects laps and the audit + standings update live'
   expect((await control({ SetCurrentHeat: { heat: UI_HEAT } })).ok()).toBeTruthy();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.heat-id .value')).toHaveText(UI_HEAT, { timeout: 15_000 });
 
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
@@ -300,7 +300,7 @@ test('the full adjudication framework: protest, throw-out, DQ+reverse re-fold au
   expect((await control({ SetCurrentHeat: { heat: S6_HEAT } })).ok()).toBeTruthy();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.heat-id .value')).toHaveText(S6_HEAT, { timeout: 15_000 });
   await runToUnofficial(page);
 
@@ -399,7 +399,7 @@ test('a read-only session sees the laps + audit but cannot mutate', async ({ pag
 
   // Enter as a read-only pilot via the role seam.
   await page.goto('/?role=readonly');
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   if (
     await page
@@ -572,7 +572,7 @@ test('a sim heat (no captured trace) shows no RSSI graph and keeps the lap-only 
   expect((await control({ SetCurrentHeat: { heat: SIM_HEAT } })).ok()).toBeTruthy();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.heat-id .value')).toHaveText(SIM_HEAT, { timeout: 15_000 });
 
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
@@ -632,7 +632,7 @@ test('the Add-lap control inserts a new lap and it appears in the lap list', asy
   expect((await control({ SetCurrentHeat: { heat: ADD_HEAT } })).ok()).toBeTruthy();
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.heat-id .value')).toHaveText(ADD_HEAT, { timeout: 15_000 });
   await runToUnofficial(page);
 
@@ -821,7 +821,7 @@ test('a read-only session sees the lifecycle but cannot finalize', async ({ page
 
   // Re-enter as a read-only pilot via the role seam.
   await page.goto('/?role=readonly');
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   if (
     await page

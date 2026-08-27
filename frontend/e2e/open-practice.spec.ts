@@ -17,7 +17,7 @@ import type { Page } from '@playwright/test';
 const SHOTS = new URL('./screenshots/', import.meta.url).pathname;
 
 async function enterPractice(page: Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -131,8 +131,8 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   });
   expect(focused.ok()).toBeTruthy();
 
-  // ── Live control → the per-channel practice board ───────────────────────────────────────────
-  await openTab(page, 'Live control');
+  // ── Race control → the per-channel practice board ───────────────────────────────────────────
+  await openTab(page, 'Race control');
   const board = page.getByRole('list', { name: 'Per-channel practice board' });
   await expect(board).toBeVisible({ timeout: 15_000 });
   // One row per active channel, labelled by its timer channel.

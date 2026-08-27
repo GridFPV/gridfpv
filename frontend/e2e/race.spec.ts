@@ -38,7 +38,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // worker's Director may already have an active event from a prior spec (#90): on a fresh load
   // the hash is authoritative (#118) so we land on the hub even then, and clicking Events either
   // shows the picker (nothing active) or auto-enters the active event's workspace — handle both.
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   await expect(
     page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
@@ -55,8 +55,8 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
       .click();
   }
 
-  // The shell is up: the Live control screen is the default landing screen.
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible();
+  // The shell is up: the Race control screen is the default landing screen.
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible();
   // The live read stream connects against the Director and settles on `live` (it passes
   // through connecting → snapshotting on the way).
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
@@ -86,7 +86,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // full page reload reads `GET /active-event` and re-enters the workspace directly — the
   // picker's "Choose an event" heading must NOT reappear.
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeHidden();
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
@@ -149,7 +149,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // mounts fresh well after race-go.
   await page.getByRole('button', { name: /Results/ }).click();
   await page.waitForTimeout(1200);
-  await page.getByRole('button', { name: /Live control/ }).click();
+  await page.getByRole('button', { name: /Race control/ }).click();
   await expect(hudClockLive).toBeVisible();
   // Sample both in the same tick: the freshly-mounted HUD must agree with the long-lived header
   // (within one 50ms tick of sampling jitter), NOT lag by the time we were away. This is the bug.
@@ -226,22 +226,22 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
 });
 
 /**
- * Friendly names everywhere in Live control — the human-readable-identifiers fix.
+ * Friendly names everywhere in Race control — the human-readable-identifiers fix.
  *
- * The bug: Live control rendered raw ids/refs. This proves the fix end-to-end against a real
+ * The bug: Race control rendered raw ids/refs. This proves the fix end-to-end against a real
  * Director: a heat whose seats are bound (via `Register`) to **directory pilots** renders those
  * pilots' **callsigns** in the lineup/heat-sheet — not the bare competitor refs — and an **on-deck**
  * heat shows its name. The pilots directory + the registration both go over the real REST/control
  * paths; the browser's own live stream drives the render (nothing mocked).
  */
-test('Live control shows pilot callsigns (not refs) and an on-deck heat', async ({
+test('Race control shows pilot callsigns (not refs) and an on-deck heat', async ({
   page,
   director
 }) => {
   await page.goto('/');
 
   // Enter Practice (handle the active-event-resume / picker branches like the main race test).
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   await expect(
     page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
@@ -335,7 +335,7 @@ test('home hub navigates to each page and back, with working breadcrumbs', async
   // hub's Pilots card or the workspace's Live-control nav appears), and if we resumed into the
   // workspace use the brand/logo (a Home root, #118) to return to the hub.
   const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     // Resumed into the workspace — the breadcrumb's Home crumb returns to the hub.

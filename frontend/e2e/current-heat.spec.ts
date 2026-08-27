@@ -3,7 +3,7 @@
  * Director (open / no token):
  *
  *  1. A first heat is scheduled and Staged so it is the current heat on the timer.
- *  2. A SECOND heat is filled (a bare ScheduleHeat) — and Live control's focus must NOT jump to it
+ *  2. A SECOND heat is filled (a bare ScheduleHeat) — and Race control's focus must NOT jump to it
  *     (the regression this feature fixes). The current heat stays the first, staged heat.
  *  3. The RD picks the second heat in the Live heat picker → it becomes the current heat (the live
  *     state follows the explicit SetCurrentHeat selection).
@@ -13,7 +13,7 @@
 import { expect, test } from './observability.js';
 
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -129,7 +129,7 @@ test('a value change attempted while the picker is locked does not apply after a
 }) => {
   // The drift bug: while a heat is Staged the picker is disabled, but a forced value change used to
   // stick on the select (the one-way `value={heat}` binding never re-asserted), so after an Abort
-  // unlocked the picker Live control switched straight to that drifted heat. The value is now pinned
+  // unlocked the picker Race control switched straight to that drifted heat. The value is now pinned
   // to the current heat, so a locked attempt snaps back and nothing stale survives the abort.
   await page.goto('/');
   await enterPractice(page);
@@ -164,7 +164,7 @@ test('a value change attempted while the picker is locked does not apply after a
   }, 'dr-2');
   await expect(select).toHaveValue('dr-1');
 
-  // 4) Abort dr-1 back to Scheduled ⇒ the picker unlocks. Live control must NOT have switched to the
+  // 4) Abort dr-1 back to Scheduled ⇒ the picker unlocks. Race control must NOT have switched to the
   //    attempted dr-2 — the current heat is still dr-1 (the drifted selection did not defer-apply).
   await page.getByRole('button', { name: 'Abort', exact: true }).click();
   await page.getByRole('button', { name: 'Confirm' }).click();
