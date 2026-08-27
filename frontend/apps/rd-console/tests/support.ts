@@ -36,6 +36,7 @@ import type {
   listFormats,
   listFormatSchemas,
   listChannels,
+  rateChannels,
   setNodeChannel,
   timerNodes,
   setTimerNodes,
@@ -127,6 +128,9 @@ export interface TimerImpls {
   listFormatSchemasImpl?: typeof listFormatSchemas;
   /** The standard channel-catalog read (race redesign Slice 4b) — backs the Channels UI tests. */
   listChannelsImpl?: typeof listChannels;
+  /** The IMD reading for a candidate channel set (#117 S4) — backs the layout editor's live
+   * rating tests. Inert unless a test overrides it, so a screen that never asks stays silent. */
+  rateChannelsImpl?: typeof rateChannels;
   /** The per-node channel write (#413) — backs the Tune page's channel-dropdown tests. */
   setNodeChannelImpl?: typeof setNodeChannel;
   /** The node-set read (#412) — backs the Tune page's "never offer a disabled node" tests. */
@@ -276,6 +280,8 @@ export function makeTestSession(
     listFormatSchemasImpl: opts?.listFormatSchemasImpl,
     // Channel-catalog read seam (race redesign Slice 4b): inert unless a test overrides it.
     listChannelsImpl: opts?.listChannelsImpl,
+    // IMD reading seam (#117 S4): inert unless a test overrides it.
+    rateChannelsImpl: opts?.rateChannelsImpl,
     setNodeChannelImpl: opts?.setNodeChannelImpl,
     createRoundImpl: opts?.createRoundImpl,
     updateRoundImpl: opts?.updateRoundImpl,

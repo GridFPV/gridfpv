@@ -38,6 +38,7 @@ use ts_rs::TS;
 
 use gridfpv_engine::format::{FormatRegistry, OpenPractice};
 use gridfpv_engine::heat::{GraceWindow, ProtestWindow};
+use gridfpv_engine::imd::{ImdReading, imd_reading};
 use gridfpv_engine::scoring::WinCondition;
 use gridfpv_events::{HeatId, RoundId};
 use gridfpv_storage::{InMemoryLog, SqliteLog};
@@ -483,8 +484,27 @@ pub struct LayoutOverlap {
     pub channels: Vec<u16>,
 }
 
-/// An event's layouts **and what is worth telling the RD about them** (#117 S2) — the body of
-/// `GET /events/{id}/layouts`, and of every layout write.
+/// One layout's **IMD reading** (#117 S4) — how cleanly its channels fly together, and what the
+/// worst offending mixing product is.
+///
+/// Keyed by [`LayoutId`] rather than positional, for the same reason [`LayoutOverlap`] carries ids:
+/// a parallel array silently mis-labels every layout the day someone filters the list.
+///
+/// **Advisory, exactly like [`LayoutOverlap`].** Nothing in the write path consults it — a layout
+/// with a poor rating saves like any other, because the RD may have no better option and a
+/// Raceband-only timer genuinely cannot do better than 0 at five pilots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct LayoutRating {
+    /// The layout this reading is for.
+    pub layout: LayoutId,
+    /// The reading itself — IMDTabler's rating plus the worst two-tone product, or no offender at
+    /// all when the set is clean.
+    pub imd: ImdReading,
+}
+
+/// An event's layouts **and what is worth telling the RD about them** (#117 S2, #117 S4) — the body
+/// of `GET /events/{id}/layouts`, and of every layout write.
 ///
 /// One view type for the read and all three writes so the console never has to re-derive the
 /// warnings from a write's response: a write returns the resulting whole picture, exactly like the
@@ -499,6 +519,37 @@ pub struct ChannelLayouts {
     /// a channel, and empty is *not* a goal: a bracket run off one layout trivially has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlaps: Vec<LayoutOverlap>,
+    /// Each layout's IMD reading (#117 S4), one entry per layout, in the same order — **advisory**,
+    /// and never a reason to refuse anything.
+    ///
+    /// Computed here, from [`gridfpv_engine::imd`], so the console never carries a second
+    /// implementation of IMDTabler. That is the whole point of #430: an RD must read the *same*
+    /// number off GridFPV that they read off RotorHazard for the same channels, and two ports of
+    /// the same algorithm is exactly how that stops being true.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ratings: Vec<LayoutRating>,
+}
+
+impl ChannelLayouts {
+    /// The whole view for a layout set: the layouts, their cross-layout overlaps, and each one's
+    /// IMD reading.
+    ///
+    /// The single constructor for all four routes (the read and the three writes) — the advisories
+    /// are properties of the accepted set, so building them in one place is what keeps a write's
+    /// answer identical to the read's.
+    fn of(layouts: Vec<ChannelLayout>) -> Self {
+        Self {
+            overlaps: layout_overlaps(&layouts),
+            ratings: layouts
+                .iter()
+                .map(|l| LayoutRating {
+                    layout: l.id.clone(),
+                    imd: imd_reading(&l.channels()),
+                })
+                .collect(),
+            layouts,
+        }
+    }
 }
 
 /// The body of `POST /events/{id}/layouts` — define a new channel layout (#117 S2).
@@ -2000,10 +2051,7 @@ impl EventRegistry {
     /// The body of `GET /events/{id}/layouts`, and `None` for an unknown event (→ a typed 404).
     pub fn channel_layouts(&self, id: &EventId) -> Option<ChannelLayouts> {
         let layouts = self.read().events.get(id)?.meta.channel_layouts.clone();
-        Some(ChannelLayouts {
-            overlaps: layout_overlaps(&layouts),
-            layouts,
-        })
+        Some(ChannelLayouts::of(layouts))
     }
 
     /// Define a **channel layout** on an event (#117 S2), returning the event's whole updated
@@ -2065,10 +2113,7 @@ impl EventRegistry {
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
-        Ok(ChannelLayouts {
-            overlaps: layout_overlaps(&meta.channel_layouts),
-            layouts: meta.channel_layouts,
-        })
+        Ok(ChannelLayouts::of(meta.channel_layouts))
     }
 
     /// Replace an existing **channel layout**'s name and mapping (#117 S2), returning the event's
@@ -2134,10 +2179,7 @@ impl EventRegistry {
         for round in meta.rounds.iter().filter(|r| r.layouts.contains(layout_id)) {
             self.rematerialize_round_heats(id, &round.id, &meta, &timers);
         }
-        Ok(ChannelLayouts {
-            overlaps: layout_overlaps(&meta.channel_layouts),
-            layouts: meta.channel_layouts,
-        })
+        Ok(ChannelLayouts::of(meta.channel_layouts))
     }
 
     /// Remove a **channel layout** from an event (#117 S2), returning the event's whole updated
@@ -2184,10 +2226,7 @@ impl EventRegistry {
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
-        Ok(ChannelLayouts {
-            overlaps: layout_overlaps(&meta.channel_layouts),
-            layouts: meta.channel_layouts,
-        })
+        Ok(ChannelLayouts::of(meta.channel_layouts))
     }
 
     /// Add a **round** to an event (race redesign Slice 2a), returning the created [`RoundDef`]

@@ -10,13 +10,24 @@
  *    RD's own decision and is what makes the bracket and the GQ strategies share one mechanism.
  */
 import { describe, expect, it } from 'vitest';
-import type { ChannelCatalogEntry, ChannelLayout, TimerNode, TimerNodes } from '@gridfpv/types';
+import type {
+  ChannelCatalogEntry,
+  ChannelLayout,
+  ImdReading,
+  TimerNode,
+  TimerNodes
+} from '@gridfpv/types';
 import {
   allowedChannels,
   draftBlocker,
+  draftChannelSet,
   draftNodes,
   duplicateNodes,
+  imdMessage,
+  imdOffenderMessage,
+  imdRatingLabel,
   layoutName,
+  layoutRating,
   layerNodes,
   layerNodeLabel,
   layerSummary,
@@ -224,5 +235,109 @@ describe('cross-layout overlap', () => {
       CATALOG
     );
     expect(message).toContain('Raceband R1, Raceband R2 and Raceband R3');
+  });
+});
+
+describe('the IMD reading (#117 S4)', () => {
+  /** The catalog the offender sentence resolves against — Raceband R1–R8 plus one Fatshark. */
+  const BAND: ChannelCatalogEntry[] = [
+    { band: 'Raceband', channel: 'R1', mhz: 5658 },
+    { band: 'Raceband', channel: 'R2', mhz: 5695 },
+    { band: 'Raceband', channel: 'R3', mhz: 5732 },
+    { band: 'Raceband', channel: 'R8', mhz: 5917 },
+    { band: 'Fatshark', channel: 'F4', mhz: 5800 }
+  ];
+
+  /** All of Raceband, as the Director reads it: −635, and R2 + R1 landing exactly on R3. */
+  const RACEBAND8: ImdReading = {
+    rating: -635,
+    worst: { doubled: 5695, subtracted: 5658, product: 5732, lands_on: 5732, gap_mhz: 0 }
+  };
+  /** RotorHazard's IMD6C: 29, worst offender 12 MHz off R8. */
+  const IMD6C: ImdReading = {
+    rating: 29,
+    worst: { doubled: 5800, subtracted: 5695, product: 5905, lands_on: 5917, gap_mhz: 12 }
+  };
+  /** Racebnd4 — nothing within 35 MHz, so there is no offender to name. */
+  const CLEAN: ImdReading = { rating: 100 };
+
+  it('shows the rating the way IMDTabler states it, minus sign and all', () => {
+    expect(imdRatingLabel(CLEAN)).toBe('IMD 100');
+    expect(imdRatingLabel(IMD6C)).toBe('IMD 29');
+    // A real minus sign, not a hyphen — a bad set genuinely goes negative.
+    expect(imdRatingLabel(RACEBAND8)).toBe('IMD −635');
+  });
+
+  it('names the worst offender by its arithmetic AND the channel it lands on', () => {
+    expect(imdOffenderMessage(RACEBAND8, BAND)).toBe(
+      '2 × Raceband R2 − Raceband R1 = 5732 MHz — lands on Raceband R3'
+    );
+    expect(imdOffenderMessage(IMD6C, BAND)).toBe(
+      '2 × Fatshark F4 − Raceband R2 = 5905 MHz — 12 MHz off Raceband R8'
+    );
+  });
+
+  it('names every channel and never leaves one as a bare frequency', () => {
+    const message = imdMessage(IMD6C, BAND);
+    // The two that mix and the one they land near are all named.
+    expect(message).toContain('Fatshark F4');
+    expect(message).toContain('Raceband R2');
+    expect(message).toContain('Raceband R8');
+    // ...and none of their frequencies appears raw. The only number that does is the product,
+    // which is arithmetic — nobody is flying 5905.
+    expect(message).not.toContain('5800');
+    expect(message).not.toContain('5695');
+    expect(message).not.toContain('5917');
+    expect(message).toContain('5905 MHz');
+  });
+
+  it('says a clean set is clean rather than inventing a nearest miss', () => {
+    const message = imdMessage(CLEAN, BAND);
+    expect(message).toBe('IMD 100 · nothing mixes within 35 MHz of a channel this layout uses');
+    expect(message).not.toContain('worst offender');
+  });
+
+  it('carries no verdict word and no clean/marginal/poor band', () => {
+    // The RD rejected a verdict chip outright: the ceiling collapses with pilot count, so any flat
+    // band would call every six-pilot layout dirty. The sentence must state, never judge.
+    for (const reading of [CLEAN, IMD6C, RACEBAND8]) {
+      const message = imdMessage(reading, BAND).toLowerCase();
+      for (const verdict of ['marginal', 'poor', 'bad', 'good', 'warning', 'dirty', 'unusable']) {
+        expect(message).not.toContain(verdict);
+      }
+    }
+  });
+
+  it('resolves a rating by layout id, not by position', () => {
+    const ratings = [
+      { layout: 'pack-b-z1x8', imd: IMD6C },
+      { layout: 'bracket-a-k3f9', imd: CLEAN }
+    ];
+    expect(layoutRating(ratings, 'bracket-a-k3f9')).toBe(CLEAN);
+    expect(layoutRating(ratings, 'pack-b-z1x8')).toBe(IMD6C);
+    expect(layoutRating(ratings, 'gone')).toBeUndefined();
+    expect(layoutRating(undefined, 'bracket-a-k3f9')).toBeUndefined();
+  });
+
+  it('asks about a channel SET — ascending, de-duplicated, so one choice is asked once', () => {
+    const d: LayerDraft = {
+      name: 'Bracket A',
+      channels: new Map([
+        [3, 5769],
+        [0, 5658],
+        [1, 5695]
+      ])
+    };
+    expect(draftChannelSet(d)).toEqual([5658, 5695, 5769]);
+    // Two nodes briefly on one channel collapse — the blocker speaks to that, not the rating.
+    const clash: LayerDraft = {
+      name: 'x',
+      channels: new Map([
+        [0, 5658],
+        [1, 5658]
+      ])
+    };
+    expect(draftChannelSet(clash)).toEqual([5658]);
+    expect(draftChannelSet({ name: 'x', channels: new Map() })).toEqual([]);
   });
 });

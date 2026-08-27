@@ -81,6 +81,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use gridfpv_engine::format::{FormatRegistry, FormatSchema};
+use gridfpv_engine::imd::{ImdReading, imd_reading};
 use gridfpv_engine::scoring::{HeatResult, WinCondition, score_corrected_with_global_offsets};
 use gridfpv_events::{CompetitorRef, Event, HeatId, SourceTime};
 use gridfpv_projection::{
@@ -479,6 +480,11 @@ pub fn router(registry: EventRegistry) -> Router {
         // back to label a heat's assigned frequencies. An open read (no token) — static, compiled-in
         // configuration like `/formats`, not per-event state.
         .route("/channels", get(list_channels))
+        // The **IMD reading** for a candidate channel set (#117 S4): IMDTabler's rating plus the
+        // worst offending mixing product. An open read (no token) and a pure function of the query
+        // — it is what makes the layout editor's rating live as the RD picks channels, without the
+        // console carrying a second implementation of the metric (#430).
+        .route("/channels/imd", get(rate_channels))
         // Per-event class **selection** (issue #84): RD-gated; each id must name a known directory
         // class. Set the whole selection wholesale (mirrors the timer selection).
         .route("/events/{event_id}/classes", put(set_event_classes))
@@ -1500,6 +1506,64 @@ async fn list_formats() -> Json<Vec<FormatSchema>> {
 /// static, compiled-in configuration straight from [`crate::channels::catalog`], not event state.
 async fn list_channels() -> Json<Vec<ChannelCatalogEntry>> {
     Json(crate::channels::catalog())
+}
+
+/// Query parameters for `GET /channels/imd` — the candidate channel set, comma-separated raw MHz.
+#[derive(Debug, Default, Deserialize)]
+struct ImdQuery {
+    /// `5658,5695,5760,5800` — the channels being considered together. Order is irrelevant
+    /// ([`imd_reading`] is order-independent) and repeats are collapsed.
+    #[serde(default)]
+    channels: String,
+}
+
+/// The largest candidate set `GET /channels/imd` will rate. The reading is O(n²) and a heat is
+/// four to eight channels; the whole catalog is 39. A cap two orders of magnitude above anything
+/// real keeps a hand-typed query from asking the Director to do arithmetic nobody wanted.
+const IMD_MAX_CHANNELS: usize = 64;
+
+/// `GET /channels/imd?channels=5658,5695,…` — the **IMD reading** for a candidate channel set
+/// (#117 S4): IMDTabler's rating plus the worst offending mixing product.
+///
+/// An open read (no token) and a **pure function of the query** — it touches no event, no timer and
+/// no state, so it is cache-friendly and safe to call on every keystroke. This is what makes the
+/// layout editor's rating *live*: the RD ticks a channel and asks the Director what the set now
+/// rates, rather than the console carrying a second implementation of IMDTabler. The number an RD
+/// reads off GridFPV has to be the number they read off RotorHazard for the same channels (#430),
+/// and two ports of one algorithm is precisely how that stops being true.
+///
+/// The set is de-duplicated before rating: a set is a set, and a half-built layout with two nodes
+/// briefly on the same channel is a draft state the editor already blocks, not a different heat.
+///
+/// A malformed channel or more than [`IMD_MAX_CHANNELS`] of them is a typed **400**; an empty set
+/// is not an error — it rates the ceiling, because nothing cannot interfere with nothing.
+async fn rate_channels(Query(q): Query<ImdQuery>) -> Result<Json<ImdReading>, ProtocolError> {
+    let mut channels: Vec<u16> = Vec::new();
+    for token in q.channels.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let mhz: u16 = token.parse().map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::BadRequest,
+                format!("{token:?} is not a channel frequency in MHz"),
+            )
+        })?;
+        if !channels.contains(&mhz) {
+            channels.push(mhz);
+        }
+    }
+    if channels.len() > IMD_MAX_CHANNELS {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} channels is more than an IMD reading is meant for (at most {IMD_MAX_CHANNELS})",
+                channels.len()
+            ),
+        ));
+    }
+    Ok(Json(imd_reading(&channels)))
 }
 
 /// `POST /classes` — create a class from a [`CreateClassRequest`], RD-gated (issue #84).
@@ -6363,6 +6427,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // --- #117 S4: the IMD reading over the wire -------------------------------
+
+    /// `GET /channels/imd?channels=…`, returning the status and the parsed JSON body.
+    async fn get_imd(registry: EventRegistry, channels: &str) -> (StatusCode, serde_json::Value) {
+        let response = router(registry)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/channels/imd?channels={channels}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn the_imd_route_answers_with_imdtablers_own_rating() {
+        // RotorHazard's default IMD6C profile. The number on the wire has to be the number an RD
+        // reads off RotorHazard for the same channels — that is the whole point of #430.
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, body) = get_imd(registry, "5658,5695,5760,5800,5880,5917").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["rating"], 29);
+        // …and it names the worst offender: 2·5800 − 5695 = 5905, 12 MHz off 5917.
+        assert_eq!(body["worst"]["doubled"], 5800);
+        assert_eq!(body["worst"]["subtracted"], 5695);
+        assert_eq!(body["worst"]["product"], 5905);
+        assert_eq!(body["worst"]["lands_on"], 5917);
+        assert_eq!(body["worst"]["gap_mhz"], 12);
+    }
+
+    #[tokio::test]
+    async fn a_clean_set_rates_the_ceiling_with_no_offender_to_name() {
+        // Racebnd4. Nothing comes within 35 MHz, so there is nothing to name and `worst` is absent
+        // rather than a nearest-miss that is not a problem.
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, body) = get_imd(registry.clone(), "5658,5732,5843,5917").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["rating"], 100);
+        assert!(body.get("worst").is_none(), "{body}");
+
+        // Order and repeats do not change the answer — a set is a set.
+        let (_, shuffled) = get_imd(registry.clone(), "5917,5843,5658,5732,5658").await;
+        assert_eq!(shuffled, body);
+
+        // An empty set is not an error: nothing cannot interfere with nothing.
+        let (status, empty) = get_imd(registry, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["rating"], 100);
+    }
+
+    #[tokio::test]
+    async fn the_imd_route_refuses_a_channel_that_is_not_a_frequency() {
+        let (registry, _state, _) = state_with(vec![]);
+        let (status, body) = get_imd(registry, "5658,R7").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["message"].as_str().unwrap_or_default().contains("R7"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_layouts_rating_rides_the_view_and_never_blocks_the_save() {
+        // The Mock's allowed set is all eight of Raceband — the worst set in FPV, and exactly the
+        // one an RD with a Raceband-only timer is stuck with. It must SAVE, and it must come back
+        // carrying its rating: information, never a refusal.
+        let (registry, _state, _) = state_with(vec![]);
+        let event = sole_event(&registry);
+        let (status, body) = post_layout(registry, &event, json!({ "name": "Bracket A" })).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a poor rating must not block a save"
+        );
+
+        let layout_id = body["layouts"][0]["id"].as_str().unwrap();
+        let ratings = body["ratings"].as_array().unwrap();
+        assert_eq!(ratings.len(), 1);
+        assert_eq!(
+            ratings[0]["layout"], layout_id,
+            "keyed by layout, not by position"
+        );
+        assert_eq!(
+            ratings[0]["imd"]["rating"], -635,
+            "all of Raceband, as IMDTabler rates it"
+        );
+        // 2·5695 − 5658 = 5732 — R2 and R1 land exactly on R3.
+        assert_eq!(ratings[0]["imd"]["worst"]["product"], 5732);
+        assert_eq!(ratings[0]["imd"]["worst"]["lands_on"], 5732);
+        assert_eq!(ratings[0]["imd"]["worst"]["gap_mhz"], 0);
     }
 
     // --- P1-7: a registry I/O failure maps to a 500, not a 404/400 ----------

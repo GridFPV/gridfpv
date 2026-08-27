@@ -16,11 +16,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import { toasts } from '@gridfpv/components';
-import type { createChannelLayout, updateChannelLayout } from '@gridfpv/protocol-client';
+import type {
+  createChannelLayout,
+  rateChannels,
+  updateChannelLayout
+} from '@gridfpv/protocol-client';
 import type {
   ChannelCatalogEntry,
   ChannelLayouts,
   EventMeta,
+  ImdReading,
   Timer,
   TimerNodes
 } from '@gridfpv/types';
@@ -367,5 +372,158 @@ describe('EventChannelLayouts — editing an existing layout', () => {
         { node: 3, channel: 5732 }
       ]
     });
+  });
+});
+
+describe('EventChannelLayouts — the IMD reading (#117 S4)', () => {
+  /** RotorHazard's IMD6C reading, as the Director computes it. */
+  const IMD6C: ImdReading = {
+    rating: 29,
+    worst: { doubled: 5732, subtracted: 5695, product: 5769, lands_on: 5769, gap_mhz: 0 }
+  };
+  /** Racebnd4 — nothing within 35 MHz, so nothing to name. */
+  const CLEAN: ImdReading = { rating: 100 };
+
+  /** Bracket A with a reading attached, the way the Director sends it back. */
+  const RATED: ChannelLayouts = {
+    ...BRACKET_A,
+    ratings: [{ layout: 'bracket-a-k3f9', imd: IMD6C }]
+  };
+
+  it('shows a saved layout its rating and the worst offender, every channel named', async () => {
+    const { session } = makeTestSession({ ...impls(store(RATED)), event: EVENT });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    const list = await screen.findByRole('list', { name: 'Channel layouts' });
+    const row = within(list).getByText('Bracket A').closest('li') as HTMLElement;
+    await waitFor(() => expect(row.textContent).toContain('IMD 29'));
+    // The two channels that mix and the one they land on, all by name.
+    expect(row.textContent).toContain('Raceband R3');
+    expect(row.textContent).toContain('Raceband R2');
+    expect(row.textContent).toContain('lands on Raceband R4');
+    // No raw frequency for any of them — only the product, which is arithmetic.
+    expect(row.textContent).not.toContain('5732');
+    expect(row.textContent).not.toContain('5695');
+    expect(row.textContent).toContain('5769 MHz');
+  });
+
+  it('reads live as the RD picks, asking the Director about the channel SET', async () => {
+    const rateChannelsImpl = vi.fn<typeof rateChannels>(async () => IMD6C);
+    const { session } = makeTestSession({
+      ...impls(store(), { rateChannelsImpl }),
+      event: EVENT
+    });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
+    // One channel cannot interfere with anything, so nothing is asked yet.
+    await fireEvent.change(await screen.findByLabelText('Channel for Node 1'), {
+      target: { value: '5695' }
+    });
+    expect(rateChannelsImpl).not.toHaveBeenCalled();
+    expect(screen.getByText(/Pick a second/)).toBeTruthy();
+
+    // A second channel makes it a set worth asking about.
+    await fireEvent.change(screen.getByLabelText('Channel for Node 2'), {
+      target: { value: '5732' }
+    });
+    await waitFor(() => expect(rateChannelsImpl).toHaveBeenCalled());
+    expect(rateChannelsImpl.mock.calls[0][1]).toEqual([5695, 5732]);
+
+    const strip = screen.getByLabelText('IMD reading');
+    await waitFor(() => expect(strip.textContent).toContain('IMD 29'));
+    expect(strip.textContent).toContain('lands on Raceband R4');
+    // The caption that stops the number being misread as a pass mark.
+    expect(strip.textContent).toContain('What is achievable falls as you use more nodes');
+  });
+
+  it('never blocks a save on a poor rating, and never shows a verdict word', async () => {
+    const seed = store();
+    const rateChannelsImpl = vi.fn<typeof rateChannels>(async () => ({
+      rating: -635,
+      worst: { doubled: 5695, subtracted: 5658, product: 5732, lands_on: 5732, gap_mhz: 0 }
+    }));
+    const createChannelLayoutImpl = vi.fn<typeof createChannelLayout>(
+      async () => (seed.view = RATED)
+    );
+    const { session } = makeTestSession({
+      ...impls(seed, { rateChannelsImpl, createChannelLayoutImpl }),
+      event: EVENT
+    });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
+    for (const [node, mhz] of [
+      ['Node 1', '5658'],
+      ['Node 2', '5695'],
+      ['Node 4', '5732']
+    ] as const) {
+      await fireEvent.change(screen.getByLabelText(`Channel for ${node}`), {
+        target: { value: mhz }
+      });
+    }
+    const strip = screen.getByLabelText('IMD reading');
+    await waitFor(() => expect(strip.textContent).toContain('IMD \u2212635'));
+    // The worst rating in FPV, and Save is still live: the RD may have no better option.
+    const save = screen.getByRole('button', { name: 'Add layout' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await fireEvent.click(save);
+    await waitFor(() => expect(createChannelLayoutImpl).toHaveBeenCalled());
+    // And it states rather than judges.
+    for (const verdict of ['Poor', 'Marginal', 'Clean', 'Bad', 'Unusable']) {
+      expect(strip.textContent).not.toContain(verdict);
+    }
+  });
+
+  it('stops reading while two nodes share a channel — that is a different layout', async () => {
+    const rateChannelsImpl = vi.fn<typeof rateChannels>(async () => CLEAN);
+    const { session } = makeTestSession({
+      ...impls(store(), { rateChannelsImpl }),
+      event: EVENT
+    });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
+    await fireEvent.change(await screen.findByLabelText('Channel for Node 1'), {
+      target: { value: '5658' }
+    });
+    await fireEvent.change(screen.getByLabelText('Channel for Node 2'), {
+      target: { value: '5658' }
+    });
+    const strip = screen.getByLabelText('IMD reading');
+    await waitFor(() => expect(strip.textContent).toContain('Two nodes are on one channel'));
+    // Rating the collapsed set would answer about a layout that is not on screen.
+    expect(rateChannelsImpl).not.toHaveBeenCalled();
+  });
+
+  it('shows nothing when the reading cannot be had, and still lets the layout save', async () => {
+    const seed = store();
+    const rateChannelsImpl = vi.fn<typeof rateChannels>(async () => {
+      throw new Error('GET /channels/imd failed: HTTP 503');
+    });
+    const createChannelLayoutImpl = vi.fn<typeof createChannelLayout>(
+      async () => (seed.view = BRACKET_A)
+    );
+    const { session } = makeTestSession({
+      ...impls(seed, { rateChannelsImpl, createChannelLayoutImpl }),
+      event: EVENT
+    });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
+    await fireEvent.change(await screen.findByLabelText('Channel for Node 1'), {
+      target: { value: '5658' }
+    });
+    await fireEvent.change(screen.getByLabelText('Channel for Node 2'), {
+      target: { value: '5695' }
+    });
+    const strip = screen.getByLabelText('IMD reading');
+    await waitFor(() => expect(strip.textContent).toContain('does not affect saving'));
+
+    await fireEvent.change(screen.getByLabelText('Channel for Node 4'), {
+      target: { value: '5732' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add layout' }));
+    await waitFor(() => expect(createChannelLayoutImpl).toHaveBeenCalled());
   });
 });

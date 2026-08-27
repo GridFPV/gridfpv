@@ -38,6 +38,7 @@ import type {
   EventMeta,
   FormatSchema,
   HeatSummary,
+  ImdReading,
   LayoutId,
   MemberSlot,
   NewChannelLayoutRequest,
@@ -1303,6 +1304,35 @@ export async function listChannels(
   const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels`, { headers });
   if (!resp.ok) throw new Error(`GET /channels failed: HTTP ${resp.status}`);
   return (await resp.json()) as ChannelCatalogEntry[];
+}
+
+/**
+ * Rate a candidate **channel set** (`GET /channels/imd?channels=…`) — #117 S4. An open read (no
+ * token): IMDTabler's 0–100 rating for those channels flown together, plus the worst offending
+ * two-tone mixing product — or no offender at all, when nothing lands within 35 MHz of a channel
+ * somebody is flying.
+ *
+ * The Director owns the metric, and this is the **only** implementation of it in the system. That
+ * is #430's whole point: an RD must read the same number off GridFPV that they read off
+ * RotorHazard for the same channels, and a second port of the algorithm in the console is exactly
+ * how that stops being true. Pure over its query — no event, no timer, no state — so it is safe to
+ * call as fast as an RD can tick a dropdown.
+ *
+ * Order and repeats do not matter (a set is a set). Resolves to the `ImdReading`, or rejects on a
+ * non-2xx / transport failure.
+ */
+export async function rateChannels(
+  baseUrl: string,
+  channels: readonly number[],
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<ImdReading> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const query = encodeURIComponent(channels.join(','));
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels/imd?channels=${query}`, { headers });
+  if (!resp.ok) throw new Error(`GET /channels/imd failed: HTTP ${resp.status}`);
+  return (await resp.json()) as ImdReading;
 }
 
 /**

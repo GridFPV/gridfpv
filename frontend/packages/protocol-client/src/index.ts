@@ -51,6 +51,7 @@ export {
   listFormats,
   listFormatSchemas,
   listChannels,
+  rateChannels,
   createRound,
   updateRound,
   deleteRound,

@@ -75,6 +75,7 @@ import {
   listFormats,
   listFormatSchemas,
   listChannels,
+  rateChannels,
   createRound,
   updateRound,
   deleteRound,
@@ -122,6 +123,7 @@ import type {
   HeatId,
   HeatResult,
   HeatSummary,
+  ImdReading,
   LayoutId,
   LiveRaceState,
   MemberSlot,
@@ -412,6 +414,7 @@ export class Session {
   #listFormatsImpl: typeof listFormats;
   #listFormatSchemasImpl: typeof listFormatSchemas;
   #listChannelsImpl: typeof listChannels;
+  #rateChannelsImpl: typeof rateChannels;
   #createRoundImpl: typeof createRound;
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
@@ -466,6 +469,7 @@ export class Session {
     listFormatsImpl?: typeof listFormats;
     listFormatSchemasImpl?: typeof listFormatSchemas;
     listChannelsImpl?: typeof listChannels;
+    rateChannelsImpl?: typeof rateChannels;
     createRoundImpl?: typeof createRound;
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
@@ -521,6 +525,7 @@ export class Session {
     this.#listFormatsImpl = opts?.listFormatsImpl ?? listFormats;
     this.#listFormatSchemasImpl = opts?.listFormatSchemasImpl ?? listFormatSchemas;
     this.#listChannelsImpl = opts?.listChannelsImpl ?? listChannels;
+    this.#rateChannelsImpl = opts?.rateChannelsImpl ?? rateChannels;
     this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
@@ -1015,6 +1020,19 @@ export class Session {
    */
   listChannels(): Promise<ChannelCatalogEntry[]> {
     return this.#listChannelsImpl(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Rate a candidate **channel set** (`GET /channels/imd`, open, no token) — #117 S4. IMDTabler's
+   * rating for those channels flown together, plus the worst offending mixing product.
+   *
+   * The Director owns the metric and is the only implementation of it, so the number here is the
+   * number an RD reads off RotorHazard for the same channels (#430). Pure over its argument — no
+   * event, no timer, no state — which is what lets the layout editor ask on every tick. Rejects on
+   * a transport/HTTP failure; the caller shows nothing rather than blocking on it.
+   */
+  rateChannels(channels: readonly number[]): Promise<ImdReading> {
+    return this.#rateChannelsImpl(this.baseUrl, channels, { token: this.#token });
   }
 
   /**

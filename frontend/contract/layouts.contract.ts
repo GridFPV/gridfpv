@@ -23,6 +23,7 @@ import {
   listHeats,
   listRoundIssues,
   listTimers,
+  rateChannels,
   setEventTimers,
   updateChannelLayout,
   updateRound,
@@ -207,6 +208,34 @@ describe('#117 S2 — cross-layout overlap is a warning, not a rule', () => {
     expect(view.overlaps[0].other).toBe(view.layouts[1].id);
     expect(view.overlaps[0].channels).toEqual(ALLOWED);
     // And the read agrees with the write — one computation of the rule, not two.
+    const read = await listChannelLayouts(director.baseUrl, director.event, { token: TOKEN });
+    expect(read).toEqual(view);
+  });
+
+  it('carries each layout\u2019s IMD reading, keyed by layout, and never blocks on it (#117 S4)', async () => {
+    await clearLayouts();
+    // The allowed set is four consecutive Raceband channels — a genuinely poor set, and exactly
+    // what an RD with a Raceband-only timer is stuck with. It must save anyway.
+    const view = await createChannelLayout(
+      director.baseUrl,
+      director.event,
+      { name: 'Bracket A' },
+      TOKEN
+    );
+    expect(view.layouts).toHaveLength(1);
+
+    const rating = (view.ratings ?? []).find((r) => r.layout === view.layouts[0].id);
+    expect(rating).toBeDefined();
+    if (!rating) return;
+    // The SAME number the standalone route answers for the same channels — one implementation,
+    // two delivery paths. If these ever disagreed the console would show two numbers for one
+    // layout, which is the failure #430 says is worse than showing none.
+    const direct = await rateChannels(director.baseUrl, ALLOWED);
+    expect(rating.imd).toEqual(direct);
+    expect(rating.imd.rating).toBeLessThan(0);
+    expect(rating.imd.worst).toBeDefined();
+
+    // The read agrees with the write, exactly as it does for the overlaps.
     const read = await listChannelLayouts(director.baseUrl, director.event, { token: TOKEN });
     expect(read).toEqual(view);
   });
