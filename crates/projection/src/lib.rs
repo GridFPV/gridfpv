@@ -245,11 +245,24 @@ where
 /// A window with no adapter in evidence at all (a bare `HeatScheduled` with nothing else)
 /// yields nothing for that ref: there is no source to address a correction to, so inventing
 /// an adapter id would only produce an unusable row. Pure and order-independent.
+///
+/// # A heat's lineup is its LATEST `HeatScheduled`, never the union (#443)
+///
+/// A seating override (and a round re-materialization, and a re-fill) re-emits `HeatScheduled`
+/// for the same heat, and the heat's window keeps **both** entries — `heat_window_offsets` does
+/// not filter heat-loop events. Unioning them seeded a pilot the override had seated *out* into
+/// the marshaled lap list as a zero-lap row, on the one screen whose purpose is entering laps
+/// against a row, while `live_state`'s `lineup_of` / `latest_schedule` (last-wins) showed the
+/// correct lineup. So the fold is **last-wins per heat id**, the same rule every other reader
+/// folds by; refs are unioned only *across* heats, which is what a multi-heat window means.
 pub fn lineup_keys<'a, I>(events: I) -> BTreeSet<CompetitorKey>
 where
     I: IntoIterator<Item = &'a Event>,
 {
-    let mut lineup: BTreeSet<CompetitorRef> = BTreeSet::new();
+    // Per heat, its most recent lineup — the seats unioned at the end. Keyed by heat so a window
+    // holding several heats still contributes every heat's lineup, without one heat's superseded
+    // lineup surviving as another's.
+    let mut lineup_by_heat: BTreeMap<HeatId, Vec<CompetitorRef>> = BTreeMap::new();
     // Every adapter each ref was named by, and every adapter in evidence at all.
     let mut adapters_by_ref: BTreeMap<CompetitorRef, BTreeSet<AdapterId>> = BTreeMap::new();
     let mut adapters: BTreeSet<AdapterId> = BTreeSet::new();
@@ -258,8 +271,10 @@ where
         // The `(adapter, competitor)` pair this fact names, where it names one. A lifecycle
         // fact names only its source; a lineup names only refs.
         let named: Option<(&AdapterId, &CompetitorRef)> = match event {
-            Event::HeatScheduled { lineup: refs, .. } => {
-                lineup.extend(refs.iter().cloned());
+            Event::HeatScheduled {
+                heat, lineup: refs, ..
+            } => {
+                lineup_by_heat.insert(heat.clone(), refs.clone());
                 None
             }
             Event::Pass(p) => Some((&p.adapter, &p.competitor)),
@@ -298,6 +313,7 @@ where
         }
     }
 
+    let lineup: BTreeSet<CompetitorRef> = lineup_by_heat.into_values().flatten().collect();
     lineup
         .into_iter()
         .flat_map(|competitor| {
@@ -3190,7 +3206,6 @@ mod marshaling_tests {
     /// this heat, on a screen whose whole purpose is entering laps against a row — and it puts
     /// the two live surfaces into disagreement about who is in the heat.
     #[test]
-    #[ignore = "known bug #443: lineup_keys unions every HeatScheduled lineup — un-ignore with the fix"]
     fn a_seating_override_drops_the_reseated_pilot_from_the_marshaled_lap_list() {
         let log = vec![
             // Filled from the round's plan …

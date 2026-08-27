@@ -677,7 +677,9 @@ fn fill_round_once(
             heat,
             lineup,
             frequencies: static_freqs,
-            layout,
+            // The layout the plan's channels were assigned from — reported, never recorded as a
+            // bind (#441; see the append below).
+            layout: _,
             field_draw,
         }) => {
             let class = round_engine::round_class(meta, round);
@@ -748,22 +750,17 @@ fn fill_round_once(
                 lineup: lineup.clone(),
                 frequencies: frequencies.clone(),
             };
-            // #117 S3: record WHICH LAYOUT this heat flies, before the schedule that carries the
-            // channels it produced. Appending it makes the answer a fact about the heat rather than
-            // something re-derived later from a round whose default may since have changed — so a
-            // heat that has raced keeps not just its channels but the name of the tuning it raced
-            // on. Only when there is one: a round naming no layouts logs nothing new.
-            if layout.is_some() {
-                if let Err(err) = state.append(
-                    Event::HeatLayoutSet {
-                        heat: heat.clone(),
-                        layout,
-                    },
-                    None,
-                ) {
-                    return FillStep::Failed(CommandAck::failed(err));
-                }
-            }
+            // #441: the fill records NO `HeatLayoutSet`. It used to append one for every heat it
+            // drew, naming the layout the round's default had just resolved to — an *explicit*
+            // bind for a decision the RD never made about this heat. An explicit bind wins in
+            // `layout_for_heat`, so swapping the round from Bracket A to Bracket B re-materialized
+            // every heat straight back onto A and `round_issues` flagged each one as bound to a
+            // layout its round no longer names: a whole round's worth of manual repair for a
+            // decision the RD made once, at the round. A generated heat follows its round's
+            // default, and a bind is what the RD's own `SetHeatLayout` writes.
+            //
+            // The channels the layout produced are still baked into the `HeatScheduled` below, so
+            // a heat that has raced keeps what it flew regardless of any later round edit.
             let event = Event::HeatScheduled {
                 heat,
                 lineup,
@@ -1003,8 +1000,17 @@ fn apply_advance(
     let from = logged_heat_name(meta.as_ref(), &events, &heat);
 
     // 2. Pick the next heat to run. The advanced heat is now `Final` (not `Scheduled`), so
-    //    `on_deck` against it is exactly "the next still-`Scheduled` heat" — the heat to load.
-    if let Some(next) = crate::live_state::on_deck(&events, &heat) {
+    //    `on_deck` against it is exactly "the next still-`Scheduled` heat" — the heat to load,
+    //    filtered to the rounds this event still defines (#439). Removing a round leaves its
+    //    `HeatScheduled` entries in the append-only log; loading one would put the RD on a heat
+    //    that appears in no console list and whose round config (layouts, staging timer, min-lap)
+    //    is gone from meta — and naming it in the ack would print its raw id, since there is no
+    //    round left to derive a friendly name from. No meta (the event vanished under us) means
+    //    no round list to filter by, and the fill below is skipped for the same reason.
+    let defined = meta
+        .as_ref()
+        .map(|m| crate::live_state::defined_round_ids(&m.rounds));
+    if let Some(next) = crate::live_state::on_deck(&events, &heat, defined.as_deref()) {
         // A next heat is already scheduled — follow Live control to it.
         let loaded = describe_logged_heat(meta.as_ref(), &events, &next);
         let detail = format!(
@@ -1221,6 +1227,19 @@ fn require_retunable(
 /// The lineup, class, round tag and RD-typed label are carried through unchanged: this re-tunes the
 /// heat, it does not re-draw it.
 ///
+/// # `layout: None` records the CLEARED bind, not the default it resolves to (#441)
+///
+/// [`heat_layout_bind`](crate::round_engine::heat_layout_bind) is three-valued on purpose:
+/// `Some(Some(l))` is *"the RD bound this heat"*, `Some(None)` is *"the RD cleared it"*, `None` is
+/// *"never touched"*. The clear used to write `Some(Some(current_default))`, which made the middle
+/// state unreachable — a cleared heat became indistinguishable from one deliberately pinned to
+/// that layout, froze against the round's next layout edit, and could not be undone by clearing
+/// again. What the heat *flies* is unchanged either way: a cleared bind resolves to the round's
+/// default, which is what the re-tune below assigns from.
+///
+/// A round that names **no** layouts and races `Static` channels is left alone entirely: its
+/// channels are its members' own, and there is no layout here to clear.
+///
 /// Refusals, all typed `400`s naming the heat, the layout and the timer by their friendly names:
 /// a heat past `Scheduled`; a layout the event does not have; a layout the heat's **round** does not
 /// name; and any [`AssignError`](crate::round_engine::AssignError) the layout produces (a node it
@@ -1286,28 +1305,46 @@ fn apply_set_heat_layout(
     // Re-tune. With the bind cleared, the heat falls back to the round's default layout for *its
     // position* — the alternating default (#117 S3), resolved through exactly the same helper the
     // fill uses, so clearing a bind restores what the round would have given this heat anyway
-    // rather than dropping it onto the first layout. With no layouts named, the auto-pick.
-    let (lineup, class, round_tag, _freqs, label) = logged_schedule_full(&events, &heat);
+    // rather than dropping it onto the first layout. With no layouts named, the auto-pick — unless
+    // the round races Static channels, which are nobody's to re-pick (see below).
+    let (lineup, class, round_tag, logged_freqs, label) = logged_schedule_full(&events, &heat);
     let effective = match &resolved {
         Some(found) => Some(found.clone()),
         None => round_engine::default_layout_for_heat(&meta, Some(round), &events, &heat).cloned(),
     };
-    let frequencies = match round_engine::assign_for_event(
-        &meta,
-        &registry.timers(),
-        effective.as_ref(),
-        &lineup,
-    ) {
-        Ok(freqs) => freqs,
-        Err(err) => {
-            return CommandAck::failed(ProtocolError::new(ErrorCode::BadRequest, err.to_string()));
-        }
+    let frequencies = match (&effective, round.channel_mode) {
+        // #441: a `Static` round's channels come from **membership** — each pilot's own assigned
+        // frequency — not from a layout. With no layout to tune to, there is nothing here to
+        // re-tune, and auto-picking would silently move every pilot in the heat off the channel
+        // their VTX is actually on. Keep what the heat has.
+        (None, crate::events::ChannelMode::Static) => logged_freqs,
+        _ => match round_engine::assign_for_event(
+            &meta,
+            &registry.timers(),
+            effective.as_ref(),
+            &lineup,
+        ) {
+            Ok(freqs) => freqs,
+            Err(err) => {
+                return CommandAck::failed(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    err.to_string(),
+                ));
+            }
+        },
     };
 
+    // Record the RD's own answer, not the layout it happened to resolve to (#441). The bind is
+    // three-valued on purpose — `Some(id)` is "the RD bound this heat", `None` is "the RD cleared
+    // it, so follow the round" — and writing the resolved default for a clear made the cleared
+    // state unreachable: the heat came out pinned to whatever the round's default was at that
+    // moment, indistinguishable from a deliberate pick, and frozen against the round's next
+    // layout edit. `layout_for_heat` resolves a cleared bind to the round's default, which is what
+    // the channels above were assigned from, so the heat does not move.
     if let Err(err) = state.append(
         Event::HeatLayoutSet {
             heat: heat.clone(),
-            layout: effective.as_ref().map(|l| l.id.clone()),
+            layout,
         },
         None,
     ) {
@@ -1338,6 +1375,24 @@ fn apply_set_heat_layout(
 ///
 /// An **empty lineup clears** the override: the heat is re-formed from its round's plan, exactly as
 /// if the RD had never touched it. That is the only way out, and it is deliberately explicit.
+///
+/// # The clear re-forms from the ROUND'S PLAN, not from the log (#440)
+///
+/// Two bugs sat on top of each other here. `require_distinct_lineup` ran before the clear was
+/// recognised, so an empty lineup was rejected outright ("a heat needs at least one competitor in
+/// its lineup") and the documented escape hatch was unreachable at all. Behind it, the clear read
+/// its replacement lineup from [`logged_schedule_full`] — the heat's most recent `HeatScheduled`,
+/// which one command after an override *is the override* — and re-appended it with channels
+/// re-assigned for it. A clear that re-applies the very lineup it was asked to discard is a clear
+/// that does nothing, and nothing else re-forms the heat: the round's own fill returns
+/// `AlreadyScheduled` for it, so the "cleared" heat would race the override until some unrelated
+/// round edit rematerialized it.
+///
+/// So the clear goes through [`round_engine::rematerialize_round_heats`] — the same machinery a
+/// round edit uses to re-form its scheduled heats, which recomputes the round's plan and applies
+/// the heat's *remaining* recorded decisions (its layout; the override, which the clear we just
+/// appended has removed). The empty-lineup validation is skipped, because there is no lineup to
+/// validate: the plan supplies it.
 ///
 /// Refusals, typed `400`s naming the heat and the timer by their friendly names: a heat past
 /// `Scheduled`; a repeated pilot; a lineup wider than the timer's **enabled** node set; and any
@@ -1373,13 +1428,16 @@ fn apply_override_heat_seating(
     if let Err(err) = require_retunable(&events, &heat, &name, "seating") {
         return CommandAck::failed(err);
     }
-    if let Err(err) = require_distinct_lineup(&lineup) {
-        return CommandAck::failed(err);
-    }
-    // The same membership/roster validation a hand-built heat gets: an override may re-seat the
-    // heat, but not with somebody who is not in this event.
+    // The lineup validations apply to a lineup the RD SET. An empty one is the documented clear
+    // (#440) — "there is nobody in this heat" is precisely what it does not mean — so it is
+    // neither rejected as empty nor checked for membership; the round's plan supplies both.
     let class = round_engine::round_class(&meta, &round.id);
     if !lineup.is_empty() {
+        if let Err(err) = require_distinct_lineup(&lineup) {
+            return CommandAck::failed(err);
+        }
+        // The same membership/roster validation a hand-built heat gets: an override may re-seat
+        // the heat, but not with somebody who is not in this event.
         if let Err(err) =
             validate_tagged_lineup(registry, &meta, &lineup, &class, &Some(round.id.clone()))
         {
@@ -1404,12 +1462,39 @@ fn apply_override_heat_seating(
         Ok(read) => read,
         Err(err) => return CommandAck::failed(err),
     };
-    let (plan_lineup, _class, round_tag, plan_freqs, label) = logged_schedule_full(&events, &heat);
-    let seated = if lineup.is_empty() {
-        plan_lineup
-    } else {
-        lineup
-    };
+    let (_logged_lineup, _class, round_tag, plan_freqs, label) =
+        logged_schedule_full(&events, &heat);
+
+    // THE CLEAR (#440): re-form the heat from its ROUND'S PLAN. The override is gone from the fold
+    // now, so re-materializing the round recomputes exactly the lineup and channels the fill would
+    // have produced, with the heat's layout still applied — "exactly as if the RD had never touched
+    // it". `rematerialize_round_heats` reports only heats it actually changes, so an override that
+    // happened to match the plan clears to a no-op rather than a redundant re-schedule.
+    if lineup.is_empty() {
+        let re_formed =
+            round_engine::rematerialize_round_heats(&meta, &registry.timers(), &round.id, &events)
+                .into_iter()
+                .find(|re_formed| re_formed.heat == heat);
+        let Some(re_formed) = re_formed else {
+            return CommandAck::ok();
+        };
+        return match state.append(
+            Event::HeatScheduled {
+                heat,
+                lineup: re_formed.lineup,
+                class,
+                round: round_tag,
+                frequencies: re_formed.frequencies,
+                label: re_formed.label,
+            },
+            None,
+        ) {
+            Ok(_offset) => CommandAck::ok(),
+            Err(err) => CommandAck::failed(err),
+        };
+    }
+
+    let seated = lineup;
     let layout = round_engine::layout_for_heat(&meta, Some(round), &events, &heat).cloned();
     let assigned = if frequencies.is_empty() {
         match round_engine::assign_for_event(&meta, &registry.timers(), layout.as_ref(), &seated) {
@@ -4428,7 +4513,6 @@ mod tests {
     /// first today and on the second once the guard is fixed, which is the order they must be
     /// fixed in.
     #[test]
-    #[ignore = "known bug #440: the clear re-applies the override's own lineup — un-ignore with the fix"]
     fn clearing_a_seating_override_re_forms_the_heat_from_its_rounds_plan() {
         let (registry, event, round) = event_with_round(
             "Qualifying",
@@ -4514,6 +4598,88 @@ mod tests {
         assert_eq!(
             seated, plan,
             "every planned pilot has a channel: {seated:?}"
+        );
+    }
+
+    /// #440: the empty lineup is the *clear*, and nothing else about the lineup validations moved.
+    /// An override the RD actually SETS is still refused when it seats one pilot twice — a
+    /// duplicate ref would merge two seats into one pilot's lap stream (#335).
+    #[test]
+    fn an_override_that_seats_one_pilot_twice_is_still_refused() {
+        let (registry, event, round) =
+            event_with_round("Qualifying", "timed_qual", &["alpha", "bravo", "charlie"]);
+        let filled = fill_next(&registry, &event, &round);
+        let heat = filled.scheduled[0].heat.clone();
+        let plan = filled.scheduled[0].lineup.clone();
+        let state = registry.resolve(&event).unwrap();
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: vec![plan[0].clone(), plan[0].clone()],
+                frequencies: vec![],
+            },
+        );
+        assert!(!ack.ok, "a repeated pilot is not a lineup: {ack:?}");
+        assert_eq!(
+            lineup_of(&state, &heat),
+            plan,
+            "a refused override appends nothing"
+        );
+    }
+
+    /// #440: clearing an override that happened to match the round's plan is a **no-op**, not a
+    /// redundant re-schedule — `rematerialize_round_heats` reports only heats it changes, and the
+    /// clear passes that through rather than re-appending an identical `HeatScheduled`.
+    #[test]
+    fn clearing_an_override_that_matched_the_plan_re_schedules_nothing() {
+        let (registry, event, round) =
+            event_with_round("Qualifying", "timed_qual", &["alpha", "bravo", "charlie"]);
+        let filled = fill_next(&registry, &event, &round);
+        let heat = filled.scheduled[0].heat.clone();
+        let plan = filled.scheduled[0].lineup.clone();
+        let state = registry.resolve(&event).unwrap();
+
+        // An override that re-states the plan exactly …
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: plan.clone(),
+                frequencies: vec![],
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        let before = state.read().unwrap().0.len();
+
+        // … clears with nothing left to re-form.
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: vec![],
+                frequencies: vec![],
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(
+            crate::round_engine::heat_seating_override(&events, &heat).is_none(),
+            "the override is cleared"
+        );
+        assert_eq!(lineup_of(&state, &heat), plan, "and the heat is the plan's");
+        assert_eq!(
+            events.len(),
+            before + 1,
+            "only the clearing HeatSeatingOverridden was appended — the heat already matched its \
+             round's plan, so there was nothing to re-schedule"
         );
     }
 
@@ -4613,7 +4779,6 @@ mod tests {
     /// *means*, and both halves are asserted here so a fix cannot satisfy one by breaking the
     /// other.
     #[test]
-    #[ignore = "known bug #441: SetHeatLayout{layout:None} writes an explicit bind to the current default — un-ignore with the fix"]
     fn clearing_a_heats_layout_bind_records_the_cleared_state() {
         use crate::events::{ChannelMode, NewChannelLayoutRequest, NewRoundReq, SeedingRule};
         use gridfpv_engine::scoring::WinCondition;
@@ -4711,7 +4876,6 @@ mod tests {
     /// it hands the heat a fresh IMD auto-pick from the timer's pool and every pilot in it is
     /// silently moved off the channel their VTX is actually on.
     #[test]
-    #[ignore = "known bug #441: the layout-less clear auto-picks over a Static heat's membership channels — un-ignore with the fix"]
     fn clearing_a_bind_on_a_layout_less_round_keeps_a_static_heats_fixed_channels() {
         // Two adjacent Raceband channels — a pair the IMD auto-pick would never choose, so a
         // clobber is unmistakable.
@@ -5918,7 +6082,6 @@ mod tests {
     /// The scratch round's heat is drawn **after** the keeper round's heat 1 and before anything
     /// the keeper draws next, so it is exactly the heat `on_deck` reaches for first.
     #[test]
-    #[ignore = "known bug #439: apply_advance selects on_deck with no round-existence check — un-ignore with the fix"]
     fn advance_never_loads_a_removed_rounds_heat() {
         use crate::events::{ChannelMode, NewRoundReq, SeedingRule};
         use gridfpv_engine::scoring::WinCondition;
