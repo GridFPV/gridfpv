@@ -37,11 +37,11 @@ use std::time::Duration;
 use gridfpv_events::CompetitorRef;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{CaptureThreshold, TimerId, TimerKind, TimerRegistry};
+use gridfpv_server::timers::{PendingTimerWrite, Timer, TimerId, TimerKind, TimerRegistry};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
-use super::rotorhazard::{CalibrationWrite, CaptureWrite, ChannelWrite, RhConnection, TuneNode};
+use super::rotorhazard::{RhConnection, TuneNode};
 
 /// How often the reconciler polls the active event + its selected timers to sync the live set.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
@@ -168,104 +168,46 @@ impl RhConnections {
         }
     }
 
-    /// **Restart the RotorHazard server** behind `timer`'s live connection (#386) — the guided
-    /// plugin install's last step, so the RD never leaves GridFPV to press Restart in RotorHazard's
-    /// own web UI.
+    /// **Deliver one queued write** (#457) onto `write`'s timer's live connection — a restart
+    /// (#386), a calibration write (#355), a capture (#355) or a channel write (#413).
     ///
-    /// Keyed on the **timer**, not a `(claimant, timer)` pair: the RD is restarting a piece of
-    /// hardware, and it holds exactly one connection whichever claim opened it (the event's, or a
-    /// manual hold — see the module docs). Whichever one is live is the one that carries the emit,
-    /// so this scans the map by timer id rather than guessing the claimant.
+    /// One method rather than four, because the four were the same method four times: scan the map
+    /// by timer id, hand the write to the driver, report whether anything took it. Keeping them
+    /// apart meant every policy question — is this connection actually up? is the write cleared on
+    /// reconnect? — had four answers that could silently disagree, which is how #436 and #437
+    /// happened.
     ///
-    /// Returns whether a live connection was found to restart. `false` means the timer is not
-    /// connected right now — nothing was emitted, and nothing will be: a restart is not queued for
-    /// a future connection (the RD asked to restart *this* live timer, and a request that lands
-    /// minutes later on a reconnect would be a surprise).
-    pub fn restart(&self, timer: &TimerId) -> bool {
+    /// Keyed on the **timer**, not a `(claimant, timer)` pair: every one of these is the RD acting
+    /// on a piece of hardware, and a timer holds exactly one connection whichever claim opened it
+    /// (the active event's, or a manual hold — see the module docs). Tuning and the guided install
+    /// both happen from the Timers menu with no event necessarily active, so the manual-hold key is
+    /// the *common* case here, not the exotic one. So this scans by timer id rather than guessing
+    /// the claimant.
+    ///
+    /// # Returns whether the write **landed on a live link**
+    ///
+    /// `false` means nothing was emitted and nothing will be: a write is **never queued for a
+    /// future connection**. That is one policy for all four variants, and each has its own reason
+    /// to want it:
+    ///
+    /// * a **restart** arriving minutes later would take a timer down that nobody asked to restart;
+    /// * a **threshold** would move a detector nobody asked to move, long after the RD gave up on
+    ///   it and re-set it by hand;
+    /// * a **capture** is sharper still — fired at an empty gate it would set the threshold off the
+    ///   **noise floor**, which is worse than not capturing at all, because the RD would have no
+    ///   reason to suspect it;
+    /// * a **channel** would retune a receiver nobody asked to move, possibly on a different
+    ///   physical RotorHazard now answering at that URL.
+    ///
+    /// GridFPV's own records of the values are unaffected (`Timer::calibration`,
+    /// `Timer::node_channels`, D27); it is the *application* of them that was lost, and the RD sees
+    /// that as a value that never comes back confirmed.
+    pub fn deliver(&self, write: PendingTimerWrite) -> bool {
         let map = self.inner.lock().expect("rh-connections lock poisoned");
         let mut found = false;
         for (key, live) in map.iter() {
-            if &key.1 == timer {
-                live.conn.restart();
-                found = true;
-            }
-        }
-        found
-    }
-
-    /// **Set a node's enter/exit detection thresholds** on `timer`'s live connection (#355) — the
-    /// Tune page's write, carried onto the socket the Director is already holding.
-    ///
-    /// Keyed on the **timer** for the same reason [`restart`](Self::restart) is: the RD is
-    /// calibrating a piece of hardware, and it holds exactly one connection whichever claim opened
-    /// it (the active event's, or a manual hold). Tuning happens from the Timers menu with no event
-    /// necessarily active at all, so the manual-hold key is the *common* case here, not the exotic
-    /// one.
-    ///
-    /// Returns whether a live connection was found. `false` means the timer is not connected right
-    /// now — nothing was emitted, and nothing is queued for a future connection: a threshold that
-    /// landed minutes later on a reconnect would move a detector nobody asked to move. GridFPV's own
-    /// record of the value is unaffected (`Timer::calibration`, D27); it is the *application* of it
-    /// that was lost, and the RD sees that as a level that never comes back confirmed.
-    pub fn calibrate(&self, timer: &TimerId, write: CalibrationWrite) -> bool {
-        let map = self.inner.lock().expect("rh-connections lock poisoned");
-        let mut found = false;
-        for (key, live) in map.iter() {
-            if &key.1 == timer {
-                live.conn.calibrate(write);
-                found = true;
-            }
-        }
-        found
-    }
-
-    /// **Capture** one of a node's thresholds on `timer`'s live connection (#355) — the Tune page's
-    /// third write, carried onto the socket the Director is already holding.
-    ///
-    /// Keyed on the **timer** for the same reason [`calibrate`](Self::calibrate) is: the RD is at a
-    /// gate with a piece of hardware, and it holds exactly one connection whichever claim opened it.
-    ///
-    /// Returns whether a live connection was found. `false` means the timer is not connected right
-    /// now — nothing was emitted, and nothing is queued for a future connection. That matters more
-    /// here than for a typed level: a capture that fired minutes later would sample a gate with
-    /// nothing flying through it and set the threshold off the **noise floor**, which is worse than
-    /// not capturing at all because the RD would have no reason to suspect it. The RD sees it as a
-    /// capture that never comes back with a level.
-    pub fn capture(&self, timer: &TimerId, write: CaptureWrite) -> bool {
-        let map = self.inner.lock().expect("rh-connections lock poisoned");
-        let mut found = false;
-        for (key, live) in map.iter() {
-            if &key.1 == timer {
-                live.conn.capture(write);
-                found = true;
-            }
-        }
-        found
-    }
-
-    /// **Set a node's channel** on `timer`'s live connection (#413) — the Tune page's other write,
-    /// carried onto the socket the Director is already holding.
-    ///
-    /// Keyed on the **timer** for the same reason [`calibrate`](Self::calibrate) is: the RD is
-    /// retuning a piece of hardware, and it holds exactly one connection whichever claim opened it.
-    /// Tuning happens from the Timers menu with no event necessarily active, so the manual-hold key
-    /// is the common case here.
-    ///
-    /// Note this is **not** [`tune`](Self::tune): that is the heat's whole-timer channel plan,
-    /// keyed on `(event, timer)` and pushed at Stage. This is one node, from the bench, with no
-    /// event needed. A heat legitimately overwrites what this set.
-    ///
-    /// Returns whether a live connection was found. `false` means the timer is not connected right
-    /// now — nothing was emitted and nothing is queued for a future connection: a node retuned
-    /// minutes later on a reconnect would move a receiver nobody asked to move. GridFPV's own record
-    /// of the channel is unaffected (`Timer::node_channels`, D27); it is the *application* of it
-    /// that was lost, and the RD sees a channel that never comes back confirmed.
-    pub fn set_channel(&self, timer: &TimerId, write: ChannelWrite) -> bool {
-        let map = self.inner.lock().expect("rh-connections lock poisoned");
-        let mut found = false;
-        for (key, live) in map.iter() {
-            if &key.1 == timer {
-                live.conn.set_channel(write.clone());
+            if &key.1 == write.timer() {
+                live.conn.queue(write.clone());
                 found = true;
             }
         }
@@ -475,76 +417,25 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                 ticker.tick().await;
                 let wanted = wanted_connections(&registry, &timers);
                 connections.reconcile(&wanted, &timers);
-                // Carry any **restart requests** (#386) from the timer registry — where the
-                // RD-gated route parks them, the server crate having no handle on this set — onto
-                // the live connections. Drained here rather than handed over directly for the same
-                // reason a manual hold is a registry flag: the server crate is *below* this one,
-                // so the registry is the one seam both sides already share.
-                for timer in timers.take_restart_requests() {
-                    if !connections.restart(&timer) {
-                        // The connection went away between the route accepting the request and this
-                        // tick (a deselect, a URL edit, a drop). Nothing to restart, and nothing is
-                        // queued for a future connection — say so rather than fail silently.
-                        let name = timers.get(&timer).map(|t| t.name);
-                        eprintln!(
-                            "gridfpv: no live RotorHazard connection to restart for {:?}",
-                            name.as_deref().unwrap_or("that timer")
-                        );
-                    }
-                }
-                // …and any **calibration writes** (#355) the Tune page parked on the registry: the
-                // RD moved an enter/exit threshold and it goes onto the live socket now. Same seam
-                // and same drain-exactly-once discipline as the restart above.
-                for write in timers.take_calibration_requests() {
-                    let landed = connections.calibrate(
-                        &write.timer,
-                        CalibrationWrite {
-                            node: u64::from(write.node),
-                            enter_at: write.enter_at,
-                            exit_at: write.exit_at,
-                            during_open_practice: write.during_open_practice,
-                        },
-                    );
-                    if !landed {
+                // Carry every **queued write** (#457) from the timer registry — where the RD-gated
+                // routes park them, the server crate having no handle on this set — onto the live
+                // connections. Drained here rather than handed over directly for the same reason a
+                // manual hold is a registry flag: the server crate is *below* this one, so the
+                // registry is the one seam both sides already share.
+                //
+                // One drain and one dispatch for restarts (#386), calibration writes (#355),
+                // captures (#355) and channel writes (#413) alike. Before #457 this paragraph
+                // existed four times over, and the differences between the copies were not policy
+                // — they were drift.
+                for write in timers.take_pending_writes() {
+                    if !connections.deliver(write.clone()) {
                         // The connection went away between the route accepting the write and this
-                        // tick. Nothing is queued for a future connection — a threshold arriving
-                        // minutes later would move a detector nobody asked to move — so say so
-                        // rather than fail silently. The RD sees it as a level that never comes
-                        // back confirmed on the page.
-                        let name = timers.get(&write.timer).map(|t| t.name);
-                        eprintln!(
-                            "gridfpv: no live RotorHazard connection to calibrate node {} on {:?}",
-                            write.node + 1,
-                            name.as_deref().unwrap_or("that timer")
-                        );
-                    }
-                }
-                // …and any **captures** (#355) the Tune page parked on the registry: the RD pressed
-                // Capture on a node's threshold and RotorHazard is asked to *measure* it. Same seam
-                // and the same drain-exactly-once discipline as the calibration write above.
-                for write in timers.take_capture_requests() {
-                    let landed = connections.capture(
-                        &write.timer,
-                        CaptureWrite {
-                            node: u64::from(write.node),
-                            enter: matches!(write.threshold, CaptureThreshold::Enter),
-                            during_open_practice: write.during_open_practice,
-                        },
-                    );
-                    if !landed {
-                        // The connection went away between the route accepting the capture and this
-                        // tick. Nothing is queued for a future connection — a capture that fired
-                        // minutes later would sample an empty gate and set the threshold off the
-                        // noise floor — so say so rather than fail silently. The RD sees it as a
-                        // capture that never comes back with a level.
-                        let name = timers.get(&write.timer).map(|t| t.name);
-                        eprintln!(
-                            "gridfpv: no live RotorHazard connection to capture node {}'s {} level \
-                             on {:?}",
-                            write.node + 1,
-                            write.threshold.label(),
-                            name.as_deref().unwrap_or("that timer")
-                        );
+                        // tick (a deselect, a URL edit, a drop). Nothing was emitted, and nothing is
+                        // queued for a future connection — so say so rather than fail silently. On
+                        // the page the RD sees it as a value that never comes back confirmed, which
+                        // is the honest outcome; GridFPV's own record of what it decided is
+                        // untouched (D27).
+                        eprintln!("gridfpv: {}", orphaned_write(&write, &timers));
                     }
                 }
                 // …then settle every capture whose sampling window has run out (#355). This is where
@@ -575,47 +466,48 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                         ),
                     }
                 }
-                // …and any **channel writes** (#413) the Tune page parked on the registry: the RD
-                // picked a channel for a node and it goes onto the live socket now. Same seam and
-                // same drain-exactly-once discipline as the two above. The band/channel label was
-                // resolved server-side from GridFPV's catalog and rides along, so RotorHazard's own
-                // UI shows `Raceband R7` and not a bare frequency.
-                for write in timers.take_channel_requests() {
-                    let landed = connections.set_channel(
-                        &write.timer,
-                        ChannelWrite {
-                            node: u64::from(write.node),
-                            mhz: write.mhz,
-                            band: write.band,
-                            channel: write.channel,
-                            during_open_practice: write.during_open_practice,
-                        },
-                    );
-                    if !landed {
-                        // The connection went away between the route accepting the write and this
-                        // tick. Nothing is queued for a future connection — say so rather than fail
-                        // silently; the RD sees a channel that never comes back confirmed.
-                        let name = timers.get(&write.timer).map(|t| t.name);
-                        eprintln!(
-                            "gridfpv: no live RotorHazard connection to set node {}'s channel on \
-                             {:?}",
-                            write.node + 1,
-                            name.as_deref().unwrap_or("that timer")
-                        );
-                    }
-                }
             }
         })
     };
     (connections, handle)
 }
 
+/// The operator line for a write that found **no live connection** (#457) — one place, so the four
+/// kinds cannot drift into four different vocabularies for one situation.
+///
+/// Names the timer by its **friendly name** (CLAUDE.md), falling back only if the registry no
+/// longer holds it, and the node the way the page labels it (1-based). This is what an RD reads
+/// when a threshold or a channel never comes back confirmed, and `"bench-rotorhazard-xvb27q"` does
+/// not tell them which box on the bench to go and look at.
+fn orphaned_write(write: &PendingTimerWrite, timers: &TimerRegistry) -> String {
+    let name = timers.get(write.timer()).map(|t| t.name);
+    let name = name.as_deref().unwrap_or("that timer").to_string();
+    match write {
+        PendingTimerWrite::Restart { .. } => {
+            format!("no live RotorHazard connection to restart for {name:?}")
+        }
+        PendingTimerWrite::Calibrate(w) => format!(
+            "no live RotorHazard connection to calibrate {} on {name:?}",
+            Timer::node_label(w.node)
+        ),
+        PendingTimerWrite::Capture(w) => format!(
+            "no live RotorHazard connection to capture {}'s {} level on {name:?}",
+            Timer::node_label(w.node),
+            w.threshold.label()
+        ),
+        PendingTimerWrite::SetChannel(w) => format!(
+            "no live RotorHazard connection to set {}'s channel on {name:?}",
+            Timer::node_label(w.node)
+        ),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use gridfpv_server::events::CreateEventRequest;
     use gridfpv_server::timers::{
-        CalibrationRequest, CaptureRequest, ChannelRequest, CreateTimerRequest, UpdateTimerRequest,
+        CalibrationRequest, CaptureRequest, CaptureThreshold, ChannelRequest, CreateTimerRequest,
+        PendingCalibration, PendingChannel, UpdateTimerRequest,
     };
 
     const OLD_URL: &str = "http://rh-old.local:5000";
@@ -649,44 +541,98 @@ mod tests {
     /// The **manual** half of a [`ConnKey`]: the RD holds the timer with no event at all (#383).
     const MANUAL: Option<EventId> = None;
 
-    #[test]
-    fn a_restart_request_with_no_live_connection_is_reported_not_swallowed() {
-        // #386: the RD asked to restart a timer that has since gone away (deselected, URL edited,
-        // link dropped). There is nothing to emit on and nothing is queued for a future connection —
-        // `restart` says so, which is what lets the reconciler log it rather than fail silently.
-        let timers = registry();
-        let rh = rh_timer(&timers, "Field RH", OLD_URL);
-        let connections = RhConnections::new();
-        assert!(!connections.restart(&rh));
+    /// A calibration write for `timer`, node 0, enter-only — the shape the Tune page sends most.
+    fn a_calibration(timer: &TimerId) -> PendingTimerWrite {
+        PendingTimerWrite::Calibrate(PendingCalibration {
+            timer: timer.clone(),
+            node: 0,
+            enter_at: Some(96),
+            exit_at: None,
+            during_open_practice: false,
+        })
+    }
+
+    /// A channel write for `timer`, node 0, carrying its catalog label.
+    fn a_channel(timer: &TimerId) -> PendingTimerWrite {
+        PendingTimerWrite::SetChannel(PendingChannel {
+            timer: timer.clone(),
+            node: 0,
+            mhz: 5880,
+            band: Some("Raceband".into()),
+            channel: Some("R7".into()),
+            during_open_practice: false,
+        })
     }
 
     #[test]
-    fn a_calibration_write_with_no_live_connection_is_reported_not_swallowed() {
-        // #355: the RD moved a threshold on a timer that has since gone away (deselected, URL
+    fn a_write_with_no_live_connection_is_reported_not_swallowed() {
+        // #457, and the whole of what the four per-feature dispatches each used to assert
+        // separately: the RD asked something of a timer that has since gone away (deselected, URL
         // edited, link dropped). There is nothing to emit on and nothing is queued for a future
-        // connection — a threshold landing minutes later would move a detector nobody asked to
-        // move — so `calibrate` says so, which is what lets the reconciler log it rather than fail
-        // silently. On the page it shows as a level that never comes back confirmed.
+        // connection, so `deliver` says `false` — which is what lets the reconciler log it rather
+        // than fail silently.
+        //
+        // Each variant has its own reason to want that policy, and they are worth restating
+        // because a future reader will be tempted to "helpfully" hold one over:
+        //
+        //  * a restart minutes later takes a timer down nobody asked to restart;
+        //  * a threshold moves a detector nobody asked to move, long after the RD gave up on the
+        //    value and re-set it by hand;
+        //  * a capture is sharper still — fired at an empty gate it sets the threshold off the
+        //    NOISE FLOOR, which is worse than not capturing at all;
+        //  * a channel retunes a receiver nobody asked to move, possibly on a different physical
+        //    RotorHazard now answering at that URL.
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let connections = RhConnections::new();
-        assert!(!connections.calibrate(
-            &rh,
-            CalibrationWrite {
+
+        for write in [
+            PendingTimerWrite::Restart { timer: rh.clone() },
+            a_calibration(&rh),
+            PendingTimerWrite::Capture(gridfpv_server::timers::PendingCapture {
+                timer: rh.clone(),
                 node: 0,
-                enter_at: Some(96),
-                exit_at: None,
+                threshold: CaptureThreshold::Enter,
                 during_open_practice: false,
-            }
-        ));
+            }),
+            a_channel(&rh),
+        ] {
+            assert!(
+                !connections.deliver(write.clone()),
+                "{write:?} must report NOT landed with no live connection"
+            );
+        }
+    }
+
+    #[test]
+    fn an_orphaned_write_names_the_timer_and_the_node_the_way_the_page_does() {
+        // CLAUDE.md's display rule, on the one surface an RD reads when a write never comes back
+        // confirmed: the timer's friendly name, and the node 1-based. `"bench-rotorhazard-xvb27q"`
+        // and `"node 0"` do not tell an RD which box on the bench to go and look at.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+
+        let line = orphaned_write(&a_calibration(&rh), &timers);
+        assert!(line.contains("\"Field RH\""), "got {line:?}");
+        assert!(line.contains("Node 1"), "0-based index leaked: {line:?}");
+        assert!(!line.contains(&rh.0), "raw timer id leaked: {line:?}");
+
+        let line = orphaned_write(&PendingTimerWrite::Restart { timer: rh.clone() }, &timers);
+        assert!(line.contains("restart"), "got {line:?}");
+        assert!(line.contains("\"Field RH\""), "got {line:?}");
+
+        // A timer the registry no longer holds falls back — a last resort, never the first choice.
+        let gone = TimerId("no-such-timer".into());
+        let line = orphaned_write(&PendingTimerWrite::Restart { timer: gone }, &timers);
+        assert!(line.contains("that timer"), "got {line:?}");
     }
 
     #[test]
     fn calibration_writes_drain_exactly_once_and_coalesce_per_node() {
         // The registry is the seam the RD-gated route and the (higher-layer) connection reconciler
-        // share, exactly as it is for a restart; the reconciler drains it each tick. Several writes
-        // to one node before a drain apply the LATEST value once — a stale threshold replayed after
-        // a fresh one would leave the timer detecting against a value the page is no longer showing.
+        // share; the reconciler drains it each tick. Several writes to one node before a drain
+        // apply the LATEST value once — a stale threshold replayed after a fresh one would leave
+        // the timer detecting against a value the page is no longer showing.
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
@@ -716,44 +662,32 @@ mod tests {
             )
             .expect("the exit half is independent of the enter half");
 
-        let drained = timers.take_calibration_requests();
+        let drained = timers.take_pending_writes();
         assert_eq!(drained.len(), 1, "one entry per node, not one per write");
-        assert_eq!(drained[0].enter_at, Some(96));
-        assert_eq!(drained[0].exit_at, Some(70));
+        match &drained[0] {
+            PendingTimerWrite::Calibrate(w) => {
+                assert_eq!(w.enter_at, Some(96));
+                assert_eq!(w.exit_at, Some(70));
+            }
+            other => panic!("expected a calibration write, got {other:?}"),
+        }
         assert!(
-            timers.take_calibration_requests().is_empty(),
+            timers.take_pending_writes().is_empty(),
             "drained exactly once — nothing is re-queued"
         );
     }
 
     #[test]
-    fn a_capture_with_no_live_connection_is_reported_not_swallowed() {
-        // #355, and sharper than the calibration case: a capture that fired minutes later on a
-        // reconnect would sample a gate with nothing flying through it and set the threshold off the
-        // **noise floor** — worse than not capturing, because the RD would have no reason to suspect
-        // it. So nothing is queued for a future connection, and `capture` says so.
-        let timers = registry();
-        let rh = rh_timer(&timers, "Field RH", OLD_URL);
-        let connections = RhConnections::new();
-        assert!(!connections.capture(
-            &rh,
-            CaptureWrite {
-                node: 0,
-                enter: true,
-                during_open_practice: false,
-            }
-        ));
-    }
-
-    #[test]
     fn captures_drain_exactly_once_and_are_never_coalesced() {
-        // Deliberately unlike the calibration queue. Two writes of a value to one node are one
-        // intent (the latest value wins); two captures are two *measurements* the RD asked for, and
-        // collapsing them would silently drop a pass they flew.
+        // Deliberately unlike the calibration queue, and the reason `PendingTimerWrite`'s
+        // coalescing policy is a documented per-variant method rather than one rule. Two writes of
+        // a value to one node are one intent (the latest value wins); two captures are two
+        // *measurements* the RD asked for, and collapsing them would silently drop a pass they
+        // flew.
         //
-        // The one case where two would collide — a second capture of a threshold already capturing,
-        // which RotorHazard refuses in silence — is refused by `request_capture` instead, so the
-        // queue never needs to.
+        // The one case where two would collide — a second capture of a threshold already
+        // capturing, which RotorHazard refuses in silence — is refused by `request_capture`
+        // instead, so the queue never needs to.
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
@@ -795,35 +729,23 @@ mod tests {
              refuse it out loud instead"
         );
 
-        let drained = timers.take_capture_requests();
+        let drained = timers.take_pending_writes();
         assert_eq!(drained.len(), 2, "one entry per capture, never coalesced");
-        assert_eq!(drained[0].threshold, CaptureThreshold::Enter);
-        assert_eq!(drained[1].threshold, CaptureThreshold::Exit);
+        let thresholds: Vec<CaptureThreshold> = drained
+            .iter()
+            .map(|w| match w {
+                PendingTimerWrite::Capture(c) => c.threshold,
+                other => panic!("expected a capture, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            thresholds,
+            vec![CaptureThreshold::Enter, CaptureThreshold::Exit]
+        );
         assert!(
-            timers.take_capture_requests().is_empty(),
+            timers.take_pending_writes().is_empty(),
             "drained exactly once — nothing is re-queued"
         );
-    }
-
-    #[test]
-    fn a_channel_write_with_no_live_connection_is_reported_not_swallowed() {
-        // #413, and the exact twin of the calibration case above: the RD picked a channel for a
-        // timer that has since gone away. Nothing is emitted and nothing is queued for a future
-        // connection — a node retuned minutes later would move a receiver nobody asked to move — so
-        // `set_channel` says so and the reconciler logs it rather than failing silently.
-        let timers = registry();
-        let rh = rh_timer(&timers, "Field RH", OLD_URL);
-        let connections = RhConnections::new();
-        assert!(!connections.set_channel(
-            &rh,
-            ChannelWrite {
-                node: 0,
-                mhz: 5880,
-                band: Some("Raceband".into()),
-                channel: Some("R7".into()),
-                during_open_practice: false,
-            }
-        ));
     }
 
     #[test]
@@ -854,13 +776,18 @@ mod tests {
                 .expect("connected RH timer");
         }
 
-        let drained = timers.take_channel_requests();
+        let drained = timers.take_pending_writes();
         assert_eq!(drained.len(), 1, "one entry per node, not one per pick");
-        assert_eq!(drained[0].mhz, 5880);
-        assert_eq!(drained[0].band.as_deref(), Some("Raceband"));
-        assert_eq!(drained[0].channel.as_deref(), Some("R7"));
+        match &drained[0] {
+            PendingTimerWrite::SetChannel(w) => {
+                assert_eq!(w.mhz, 5880);
+                assert_eq!(w.band.as_deref(), Some("Raceband"));
+                assert_eq!(w.channel.as_deref(), Some("R7"));
+            }
+            other => panic!("expected a channel write, got {other:?}"),
+        }
         assert!(
-            timers.take_channel_requests().is_empty(),
+            timers.take_pending_writes().is_empty(),
             "drained exactly once — nothing is re-queued"
         );
     }
@@ -875,8 +802,73 @@ mod tests {
         timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
         timers.request_restart(&rh).expect("connected RH timer");
         timers.request_restart(&rh).expect("coalesces");
-        assert_eq!(timers.take_restart_requests(), vec![rh.clone()]);
-        assert!(timers.take_restart_requests().is_empty());
+        assert_eq!(
+            timers.take_pending_writes(),
+            vec![PendingTimerWrite::Restart { timer: rh.clone() }]
+        );
+        assert!(timers.take_pending_writes().is_empty());
+    }
+
+    #[test]
+    fn the_one_queue_keeps_request_order_across_kinds() {
+        // #457: four queues became one, and the order the reconciler dispatches in is now the order
+        // the RD asked in — not a fixed restart→level→capture→channel sweep that could apply a
+        // threshold to a node *before* the channel pick that preceded it. A coalesced write folds
+        // into the entry already queued rather than jumping to the back, so the RD's order survives
+        // a second press too.
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", OLD_URL);
+        timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
+
+        timers
+            .request_channel(
+                &rh,
+                &ChannelRequest {
+                    node: 1,
+                    mhz: 5658,
+                    band: Some("Raceband".into()),
+                    channel: Some("R1".into()),
+                },
+                false,
+            )
+            .expect("connected RH timer");
+        timers
+            .request_calibration(
+                &rh,
+                &CalibrationRequest {
+                    node: 1,
+                    enter_at: Some(96),
+                    exit_at: None,
+                },
+                false,
+            )
+            .expect("connected RH timer");
+        // A second pick on the already-queued channel folds in place — it does not overtake the
+        // threshold that was asked for after it.
+        timers
+            .request_channel(
+                &rh,
+                &ChannelRequest {
+                    node: 1,
+                    mhz: 5880,
+                    band: Some("Raceband".into()),
+                    channel: Some("R7".into()),
+                },
+                false,
+            )
+            .expect("connected RH timer");
+
+        let drained = timers.take_pending_writes();
+        assert_eq!(drained.len(), 2, "the channel write coalesced, in place");
+        match &drained[0] {
+            PendingTimerWrite::SetChannel(w) => assert_eq!(w.mhz, 5880, "latest pick wins"),
+            other => panic!("the channel write was asked for first, got {other:?}"),
+        }
+        assert!(
+            matches!(drained[1], PendingTimerWrite::Calibrate(_)),
+            "got {:?}",
+            drained[1]
+        );
     }
 
     #[test]
@@ -1210,7 +1202,7 @@ mod tests {
     /// `Connected`. Before the next 500 ms reconciler tick the timer's URL is edited, or the active
     /// event switches — so the same tick supersedes the entry and `Open`s a fresh [`RhConnection`]
     /// whose driver thread is still dialling. Then the tick's own drain queues the write onto that
-    /// brand-new connection, and [`RhConnections::calibrate`] answers `true`: landed, no operator
+    /// brand-new connection, and [`RhConnections::deliver`] answers `true`: landed, no operator
     /// warning, nothing logged.
     ///
     /// It has not landed. When the new driver's `connect` succeeds it clears the queue — deliberately,
@@ -1237,25 +1229,8 @@ mod tests {
         );
 
         // The same tick drains the parked writes onto it.
-        let calibration_landed = connections.calibrate(
-            &rh,
-            CalibrationWrite {
-                node: 0,
-                enter_at: Some(96),
-                exit_at: None,
-                during_open_practice: false,
-            },
-        );
-        let channel_landed = connections.set_channel(
-            &rh,
-            ChannelWrite {
-                node: 0,
-                mhz: 5880,
-                band: Some("Raceband".into()),
-                channel: Some("R7".into()),
-                during_open_practice: false,
-            },
-        );
+        let calibration_landed = connections.deliver(a_calibration(&rh));
+        let channel_landed = connections.deliver(a_channel(&rh));
 
         // Tear the driver thread down before asserting, so a failure does not leave it dialling.
         connections.reconcile(&[], &timers);
@@ -1268,7 +1243,7 @@ mod tests {
         );
         assert!(
             !channel_landed,
-            "and the same for a channel write — `set_channel`'s own contract is that nothing is \
+            "and the same for a channel write — `deliver`'s own contract is that nothing is \
              queued for a future connection"
         );
     }

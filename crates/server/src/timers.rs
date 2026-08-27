@@ -1070,7 +1070,7 @@ pub struct CalibrationDispatch {
 ///
 /// The internal twin of [`CalibrationDispatch`] with the timer it belongs to: the queue is a
 /// hand-off across the crate boundary (the live sockets live in `gridfpv-app`, *above* this
-/// crate), exactly like `restart_requests`.
+/// crate), exactly like every other variant of [`PendingTimerWrite`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCalibration {
     /// Which timer to write to.
@@ -1356,6 +1356,141 @@ pub struct PendingChannel {
     pub during_open_practice: bool,
 }
 
+/// **One pending timer write** the connection reconciler drains (#457) — the single queue every
+/// RD-initiated write to a live timer travels on.
+///
+/// # Why one queue
+///
+/// Restart (#386), calibration (#355), capture (#355) and channel (#413) each grew their own `Vec`
+/// field, their own `take_*_requests()` drain and their own copy-pasted "no live connection →
+/// warn, drop" paragraph in the reconciler. They are the *same* hand-off: a route in this crate
+/// accepts a write, and the live socket that has to carry it lives in `gridfpv-app`, **above** this
+/// crate, so the registry is the one seam both sides already share. Four copies of one pipe meant
+/// any policy fix — #436's clear-on-reconnect, #437's not-landed-while-dialling — had to be made
+/// four times, in four places that could silently diverge.
+///
+/// So: one enum, one queue, one drain ([`TimerRegistry::take_pending_writes`]), and one `match` in
+/// the reconciler. The per-variant *differences* that are real are stated once, as
+/// [`coalesces_with`](PendingTimerWrite::coalesces_with) / [`fold_into`](PendingTimerWrite::fold_into),
+/// instead of being implied by which of four functions a caller happened to reach.
+///
+/// The payloads keep their own types ([`PendingCalibration`], [`PendingCapture`],
+/// [`PendingChannel`]) — those are the shapes the emit needs, and each carries the timer it is for.
+///
+/// **In-memory only, never persisted.** A Director restart must not replay a previous session's
+/// restart, tuning, capture or retune onto whatever timer happens to be plugged in now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingTimerWrite {
+    /// **Restart the RotorHazard server** behind this timer (#386) — the guided plugin install's
+    /// last step, so RH re-imports its `plugins/` directory.
+    Restart {
+        /// Which timer to restart.
+        timer: TimerId,
+    },
+    /// **Set a node's enter/exit detection thresholds** (#355) — the Tune page's typed level.
+    Calibrate(PendingCalibration),
+    /// **Measure** one of a node's thresholds (#355) — the Tune page's Capture button.
+    Capture(PendingCapture),
+    /// **Set a node's channel** (#413) — the Tune page's other write.
+    SetChannel(PendingChannel),
+}
+
+impl PendingTimerWrite {
+    /// Which timer this write is addressed to — the only thing every variant has in common, and
+    /// what the reconciler matches a live connection on.
+    pub fn timer(&self) -> &TimerId {
+        match self {
+            PendingTimerWrite::Restart { timer } => timer,
+            PendingTimerWrite::Calibrate(w) => &w.timer,
+            PendingTimerWrite::Capture(w) => &w.timer,
+            PendingTimerWrite::SetChannel(w) => &w.timer,
+        }
+    }
+
+    /// **Queue this write**, applying its variant's coalescing policy — the one enqueue used by
+    /// *both* queues a write crosses: the registry's hand-off queue
+    /// ([`TimerRegistry::take_pending_writes`]) and the per-connection queue the live driver in
+    /// `gridfpv-app` holds. One function, so the two can never disagree about whether a second
+    /// press replaces the first (#457).
+    ///
+    /// A write that [supersedes](Self::coalesces_with) one already queued is
+    /// [folded into](Self::fold_into) it **in place**, so the queue keeps request order — a
+    /// coalesced write must not jump ahead of writes queued after the one it replaces. A write
+    /// that supersedes nothing (every capture, and the first of anything) is appended.
+    pub fn queue_into(self, queue: &mut Vec<PendingTimerWrite>) {
+        match queue.iter_mut().find(|queued| self.coalesces_with(queued)) {
+            Some(queued) => self.fold_into(queued),
+            None => queue.push(self),
+        }
+    }
+
+    /// Whether this write **supersedes** `queued` — the per-variant coalescing policy, in one
+    /// place (#457). Each rule below is a deliberate decision, and they are deliberately not the
+    /// same rule:
+    ///
+    /// * **Restart** coalesces per **timer**. Pressing Restart twice before a drain is one
+    ///   restart; firing two would take the timing hardware down, bring it up, and take it down
+    ///   again.
+    /// * **Calibrate** coalesces per **(timer, node)**, last value wins per threshold (see
+    ///   [`fold_into`](Self::fold_into)). A slider dragged twice before a drain must apply the
+    ///   *latest* level once — replaying a stale one after a fresh one would leave the detector on
+    ///   a value the page is no longer showing.
+    /// * **SetChannel** coalesces per **(timer, node)**, latest pick wins, for exactly the same
+    ///   reason: a dropdown changed twice before a drain retunes the node once.
+    /// * **Capture NEVER coalesces.** This is the one that is easy to get wrong by symmetry. Two
+    ///   writes of a *value* to one node are one intent; two captures are two **measurements** the
+    ///   RD asked for, each of which needs a pass flown through the gate — collapsing them would
+    ///   silently drop a pass they flew. The single case where two would genuinely collide (a
+    ///   second capture of a threshold already capturing, which RotorHazard refuses in complete
+    ///   silence) is refused by [`TimerRegistry::request_capture`] up front, so the queue never
+    ///   has to.
+    fn coalesces_with(&self, queued: &PendingTimerWrite) -> bool {
+        match (self, queued) {
+            (PendingTimerWrite::Restart { timer: a }, PendingTimerWrite::Restart { timer: b }) => {
+                a == b
+            }
+            (PendingTimerWrite::Calibrate(a), PendingTimerWrite::Calibrate(b)) => {
+                a.timer == b.timer && a.node == b.node
+            }
+            (PendingTimerWrite::SetChannel(a), PendingTimerWrite::SetChannel(b)) => {
+                a.timer == b.timer && a.node == b.node
+            }
+            // A capture is a measurement, not a value. It never folds into anything.
+            _ => false,
+        }
+    }
+
+    /// Fold this write into the `queued` one it [supersedes](Self::coalesces_with). Only ever
+    /// called for a pair `coalesces_with` accepted, so the non-matching arms are unreachable.
+    fn fold_into(self, queued: &mut PendingTimerWrite) {
+        match (self, queued) {
+            // Nothing to carry: one restart is indistinguishable from another.
+            (PendingTimerWrite::Restart { .. }, PendingTimerWrite::Restart { .. }) => {}
+            (PendingTimerWrite::Calibrate(fresh), PendingTimerWrite::Calibrate(queued)) => {
+                // Per threshold: a write that carries only an enter level must not blank the exit
+                // level a previous write in the same tick set.
+                if fresh.enter_at.is_some() {
+                    queued.enter_at = fresh.enter_at;
+                }
+                if fresh.exit_at.is_some() {
+                    queued.exit_at = fresh.exit_at;
+                }
+                // The freshest phase reading wins: a heat that has just gone racing (or just
+                // stopped) must not be judged by a check made several writes ago.
+                queued.during_open_practice = fresh.during_open_practice;
+            }
+            // Wholesale: a channel pick has no independent halves.
+            (PendingTimerWrite::SetChannel(fresh), PendingTimerWrite::SetChannel(queued)) => {
+                *queued = fresh;
+            }
+            (fresh, queued) => {
+                debug_assert!(false, "fold_into called on writes that do not coalesce");
+                *queued = fresh;
+            }
+        }
+    }
+}
+
 /// The application-level registry of all configured timers (issue #73).
 ///
 /// Maps each [`TimerId`] to its [`Timer`]. A built-in **Mock** ([`MOCK_TIMER_ID`]) is always
@@ -1367,7 +1502,7 @@ pub struct PendingChannel {
 pub struct TimerRegistry {
     inner: Arc<RwLock<Registry>>,
     /// Live **tune telemetry** (#355 S2a), keyed by timer — a sibling map beside the timer set,
-    /// exactly like `restart_requests`, and for the same layering reason: the live socket lives in
+    /// exactly like `pending_writes`, and for the same layering reason: the live socket lives in
     /// `gridfpv-app`, above this crate, so the registry is the one seam the route and the
     /// connection driver already share.
     ///
@@ -1398,54 +1533,26 @@ struct Registry {
     timers: BTreeMap<TimerId, Timer>,
     /// Directory `timers.json` is persisted under; `None` ⇒ in-memory only (no data dir).
     data_dir: Option<PathBuf>,
-    /// **Pending RotorHazard restart requests** (issue #386), in request order — the RD asked, from
-    /// the guided plugin install, that these timers re-execute their RotorHazard server so it
-    /// re-imports its `plugins/` directory.
+    /// **Every pending write to a live timer** (#457), in request order — restarts (#386),
+    /// calibration writes (#355), captures (#355) and channel writes (#413), on one queue.
     ///
     /// A hand-off queue, not state: the connection layer that owns the live sockets lives in
-    /// `gridfpv-app`, *above* this crate, so a route here cannot call it. The manual connection hold
-    /// solves the same layering problem with a flag ([`Timer::manual_connect`]); a restart is an
+    /// `gridfpv-app`, *above* this crate, so a route here cannot call it. The manual connection
+    /// hold solves the same layering problem with a flag ([`Timer::manual_connect`]); a write is an
     /// **edge** rather than a level, so it is a drained queue instead — the reconciler takes each
-    /// request exactly once ([`TimerRegistry::take_restart_requests`]) and emits it onto the live
-    /// connection. In-memory only, and never persisted: a Director restart must not re-fire an
-    /// RD's restart from a previous session.
-    restart_requests: Vec<TimerId>,
-    /// **Pending calibration writes** (#355), in request order — enter/exit thresholds the RD set
-    /// on the Tune page that have not yet been emitted onto a live socket.
+    /// write exactly once ([`TimerRegistry::take_pending_writes`]) and dispatches it onto the live
+    /// connection.
     ///
-    /// The same hand-off queue `restart_requests` is, for the same layering reason: the live
-    /// sockets live in `gridfpv-app`, *above* this crate, so the RD-gated route here cannot emit.
-    /// The reconciler drains it exactly once
-    /// ([`TimerRegistry::take_calibration_requests`]) and fires the emits.
+    /// **Enqueued through [`Registry::queue_write`]**, which applies the per-variant coalescing
+    /// policy stated once on [`PendingTimerWrite::coalesces_with`] — so "calibration coalesces per
+    /// node, a capture never does" is a documented rule rather than a difference between two
+    /// copy-pasted `push` sites.
     ///
-    /// **Coalesced per `(timer, node)`, last write wins per threshold.** A slider dragged twice
-    /// before a drain should put the *latest* value on the timer, not replay a stale one after it —
-    /// and a node whose enter and exit both moved in the same tick travels as one entry carrying
-    /// both. This queue is only the in-flight buffer; the durable record of what GridFPV decided is
-    /// [`Timer::calibration`], written at accept time (D27).
-    ///
-    /// In-memory only, and never persisted: a Director restart must not replay an RD's tuning from
-    /// a previous session onto whatever timer happens to be plugged in now.
-    calibration_requests: Vec<PendingCalibration>,
-    /// **Pending channel writes** (#413), in request order — the channel the RD picked for a node
-    /// on the Tune page, not yet emitted onto a live socket.
-    ///
-    /// The same hand-off queue, the same layering reason, and the same discipline as
-    /// [`calibration_requests`](Registry::calibration_requests): coalesced per `(timer, node)` so a
-    /// dropdown changed twice before a drain tunes the node once, drained exactly once
-    /// ([`TimerRegistry::take_channel_requests`]), and never persisted — a Director restart must
-    /// not retune whatever timer happens to be plugged in now.
-    channel_requests: Vec<PendingChannel>,
-    /// **Pending captures** (#355), in request order — the RD pressed Capture on a node and the
-    /// `cap_enter_at_btn` / `cap_exit_at_btn` emit has not reached a live socket yet.
-    ///
-    /// The same hand-off queue as [`calibration_requests`](Registry::calibration_requests), with
-    /// one deliberate difference: it is **not coalesced**. A repeated capture is not a repeated
-    /// value, it is a second measurement the RD asked for; and RotorHazard refuses a capture that
-    /// is already running on that node/threshold, which is what
-    /// [`TimerRegistry::request_capture`] checks before ever queueing a second one. Never
-    /// persisted — a Director restart must not fire a capture at whatever timer is plugged in now.
-    capture_requests: Vec<PendingCapture>,
+    /// In-memory only, and never persisted: a Director restart must not re-fire an RD's restart,
+    /// replay their tuning, or retune whatever timer happens to be plugged in now. The durable
+    /// records of what GridFPV *decided* are [`Timer::calibration`] and [`Timer::node_channels`],
+    /// written at accept time (D27); this is only the in-flight buffer.
+    pending_writes: Vec<PendingTimerWrite>,
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1807,10 +1914,7 @@ impl TimerRegistry {
             inner: Arc::new(RwLock::new(Registry {
                 timers,
                 data_dir,
-                restart_requests: Vec::new(),
-                calibration_requests: Vec::new(),
-                channel_requests: Vec::new(),
-                capture_requests: Vec::new(),
+                pending_writes: Vec::new(),
             })),
             signal: Arc::new(Mutex::new(HashMap::new())),
             captures: Arc::new(Mutex::new(HashMap::new())),
@@ -2081,7 +2185,7 @@ impl TimerRegistry {
     ///
     /// This only **parks the request**: the sockets live in `gridfpv-app`, above this crate, so the
     /// connection reconciler drains the queue on its next tick
-    /// ([`take_restart_requests`](Self::take_restart_requests)) and fires the emit. The queue is
+    /// ([`take_pending_writes`](Self::take_pending_writes)) and fires the emit. The queue is
     /// in-memory and never persisted.
     ///
     /// Refused (a [`TimerError`], which the route reports as a `400`) for an unknown id, for a
@@ -2112,17 +2216,23 @@ impl TimerRegistry {
                 timer.name
             )));
         }
-        if !reg.restart_requests.contains(id) {
-            reg.restart_requests.push(id.clone());
-        }
+        reg.queue_write(PendingTimerWrite::Restart { timer: id.clone() });
         Ok(timer)
     }
 
-    /// Take every pending restart request (issue #386), leaving the queue empty — the connection
-    /// reconciler's drain. Each request is handed out **exactly once**: if no live connection is
-    /// found for it the request is dropped (and logged), never re-queued for a later connection.
-    pub fn take_restart_requests(&self) -> Vec<TimerId> {
-        std::mem::take(&mut self.write().restart_requests)
+    /// Take every pending timer write (#457), leaving the queue empty — the connection
+    /// reconciler's one drain, for restarts (#386), calibration writes (#355), captures (#355) and
+    /// channel writes (#413) alike.
+    ///
+    /// Each write is handed out **exactly once**: if no live connection is found for it the write
+    /// is dropped (and logged), never re-queued for a later connection. That is a policy, not an
+    /// omission, and it is the same one for every variant — a restart, a threshold, a capture or a
+    /// retune arriving minutes later on a reconnect would each act on hardware nobody asked to
+    /// touch, on a timer that may not even be the same physical box. The RD sees it as a value
+    /// that never comes back confirmed; the durable record of what GridFPV decided
+    /// ([`Timer::calibration`], [`Timer::node_channels`]) is unaffected.
+    pub fn take_pending_writes(&self) -> Vec<PendingTimerWrite> {
+        std::mem::take(&mut self.write().pending_writes)
     }
 
     /// **Set a node's enter/exit detection thresholds** on `id` (#355), returning what was
@@ -2245,32 +2355,16 @@ impl TimerRegistry {
             }
         }
 
-        // Then queue the *application* of it. Coalesced per (timer, node): a drag that lands twice
-        // before a drain applies the latest value once, rather than replaying a stale one after it.
-        match reg
-            .calibration_requests
-            .iter_mut()
-            .find(|p| &p.timer == id && p.node == request.node)
-        {
-            Some(pending) => {
-                if enter_at.is_some() {
-                    pending.enter_at = enter_at;
-                }
-                if exit_at.is_some() {
-                    pending.exit_at = exit_at;
-                }
-                // The freshest phase reading wins: a heat that has just gone racing (or just
-                // stopped) must not be judged by a check made several writes ago.
-                pending.during_open_practice = during_open_practice;
-            }
-            None => reg.calibration_requests.push(PendingCalibration {
-                timer: id.clone(),
-                node: request.node,
-                enter_at,
-                exit_at,
-                during_open_practice,
-            }),
-        }
+        // Then queue the *application* of it (#457, one queue). Coalesced per (timer, node) by
+        // `PendingTimerWrite`'s own policy: a drag that lands twice before a drain applies the
+        // latest value once, rather than replaying a stale one after it.
+        reg.queue_write(PendingTimerWrite::Calibrate(PendingCalibration {
+            timer: id.clone(),
+            node: request.node,
+            enter_at,
+            exit_at,
+            during_open_practice,
+        }));
         reg.persist()?;
 
         Ok(CalibrationDispatch {
@@ -2279,17 +2373,6 @@ impl TimerRegistry {
             enter_at,
             exit_at,
         })
-    }
-
-    /// Take every pending calibration write (#355), leaving the queue empty — the connection
-    /// reconciler's drain, and the twin of [`take_restart_requests`](Self::take_restart_requests).
-    ///
-    /// Each write is handed out **exactly once**: if no live connection is found for it the write
-    /// is dropped (and logged), never re-queued. The RD sees that on the page as a threshold that
-    /// never comes back confirmed, which is the honest outcome — the durable record of the value
-    /// stays on [`Timer::calibration`] regardless.
-    pub fn take_calibration_requests(&self) -> Vec<PendingCalibration> {
-        std::mem::take(&mut self.write().calibration_requests)
     }
 
     /// **Start a capture** on one node's threshold (#355), returning what was dispatched.
@@ -2405,17 +2488,18 @@ impl TimerRegistry {
             });
         }
 
-        // 4. Queue the emit. NOT coalesced (see `Registry::capture_requests`): a second capture is a
-        //    second measurement, not a restatement of a value — and step 3 has already refused the
-        //    one case where two would collide.
+        // 4. Queue the emit (#457, one queue). **Never coalesced** — see
+        //    `PendingTimerWrite::coalesces_with`, where that is stated as the policy it is: a
+        //    second capture is a second *measurement*, not a restatement of a value, and step 3
+        //    has already refused the one case where two would collide.
         {
             let mut reg = self.write();
-            reg.capture_requests.push(PendingCapture {
+            reg.queue_write(PendingTimerWrite::Capture(PendingCapture {
                 timer: id.clone(),
                 node: request.node,
                 threshold: request.threshold,
                 during_open_practice,
-            });
+            }));
         }
 
         Ok(CaptureDispatch {
@@ -2426,17 +2510,6 @@ impl TimerRegistry {
             settle_ms: CAPTURE_SETTLE_MS,
             previous,
         })
-    }
-
-    /// Take every pending capture (#355), leaving the queue empty — the connection reconciler's
-    /// drain, and the twin of [`take_calibration_requests`](Self::take_calibration_requests).
-    ///
-    /// Handed out **exactly once**. If no live connection is found the capture is dropped and
-    /// logged, never re-queued: a capture that fires minutes later would sample an empty gate and
-    /// set a threshold off the noise floor, which is worse than not capturing at all. The RD sees it
-    /// as a capture that never comes back with a level, which is the honest outcome.
-    pub fn take_capture_requests(&self) -> Vec<PendingCapture> {
-        std::mem::take(&mut self.write().capture_requests)
     }
 
     /// Whether a capture is running on `id` right now (#355) — read by the driver so it knows to
@@ -2735,28 +2808,17 @@ impl TimerRegistry {
             }
         }
 
-        // Then queue the *application* of it, coalesced per (timer, node): a dropdown changed twice
-        // before a drain tunes the node once, to the latest value.
-        match reg
-            .channel_requests
-            .iter_mut()
-            .find(|p| &p.timer == id && p.node == request.node)
-        {
-            Some(pending) => {
-                pending.mhz = request.mhz;
-                pending.band = band.clone();
-                pending.channel = channel.clone();
-                pending.during_open_practice = during_open_practice;
-            }
-            None => reg.channel_requests.push(PendingChannel {
-                timer: id.clone(),
-                node: request.node,
-                mhz: request.mhz,
-                band: band.clone(),
-                channel: channel.clone(),
-                during_open_practice,
-            }),
-        }
+        // Then queue the *application* of it (#457, one queue), coalesced per (timer, node) by
+        // `PendingTimerWrite`'s own policy: a dropdown changed twice before a drain tunes the node
+        // once, to the latest value.
+        reg.queue_write(PendingTimerWrite::SetChannel(PendingChannel {
+            timer: id.clone(),
+            node: request.node,
+            mhz: request.mhz,
+            band: band.clone(),
+            channel: channel.clone(),
+            during_open_practice,
+        }));
         reg.persist()?;
 
         Ok(ChannelDispatch {
@@ -2768,16 +2830,6 @@ impl TimerRegistry {
             previous_mhz,
             thresholds_tuned_on_another_channel,
         })
-    }
-
-    /// Take every pending channel write (#413), leaving the queue empty — the reconciler's drain,
-    /// and the twin of [`take_calibration_requests`](Self::take_calibration_requests).
-    ///
-    /// Handed out **exactly once**: with no live connection the write is dropped (and logged),
-    /// never re-queued — a node retuned minutes later on a reconnect would move a receiver nobody
-    /// asked to move. The RD sees that on the page as a channel that never comes back confirmed.
-    pub fn take_channel_requests(&self) -> Vec<PendingChannel> {
-        std::mem::take(&mut self.write().channel_requests)
     }
 
     /// The per-node channels GridFPV holds for `id` (#413, D27) — its own record, never a readback.
@@ -2911,6 +2963,13 @@ impl TimerRegistry {
 }
 
 impl Registry {
+    /// Queue one write for the connection reconciler (#457) through
+    /// [`PendingTimerWrite::queue_into`], so the registry's queue and the live driver's own queue
+    /// apply the *same* coalescing policy.
+    fn queue_write(&mut self, write: PendingTimerWrite) {
+        write.queue_into(&mut self.pending_writes);
+    }
+
     /// Persist the timer set to `<data_dir>/timers.json` (issue #73), a no-op with no data dir.
     /// The Mock is persisted too so a retune survives a restart.
     fn persist(&self) -> Result<(), TimerError> {
