@@ -1283,16 +1283,14 @@ fn apply_set_heat_layout(
         None => None,
     };
 
-    // Re-tune. With the bind cleared, the heat falls back to the round's default layout (or, with
-    // none, to the auto-pick) — resolved through exactly the same helper the fill uses.
+    // Re-tune. With the bind cleared, the heat falls back to the round's default layout for *its
+    // position* — the alternating default (#117 S3), resolved through exactly the same helper the
+    // fill uses, so clearing a bind restores what the round would have given this heat anyway
+    // rather than dropping it onto the first layout. With no layouts named, the auto-pick.
     let (lineup, class, round_tag, _freqs, label) = logged_schedule_full(&events, &heat);
     let effective = match &resolved {
         Some(found) => Some(found.clone()),
-        None => round
-            .layouts
-            .first()
-            .and_then(|id| meta.layout(id))
-            .cloned(),
+        None => round_engine::default_layout_for_heat(&meta, Some(round), &events, &heat).cloned(),
     };
     let frequencies = match round_engine::assign_for_event(
         &meta,
@@ -4238,6 +4236,159 @@ mod tests {
             Some(CommandOutcome::FillRound(outcome)) => outcome,
             other => panic!("FillRound must report its outcome, got {other:?}"),
         }
+    }
+
+    /// The channels a heat is currently scheduled on, in seat order — its most recent
+    /// `HeatScheduled`, the same "latest wins" rule every reader folds by.
+    #[cfg(test)]
+    fn channels_of(state: &AppState, heat: &HeatId) -> Vec<u16> {
+        let (events, _) = state.read().unwrap();
+        let mut out = Vec::new();
+        for event in &events {
+            if let Event::HeatScheduled {
+                heat: h,
+                frequencies,
+                ..
+            } = event
+            {
+                if h == heat {
+                    out = frequencies.iter().map(|(_, f)| *f).collect();
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_rounds_heats_alternate_layouts_and_clearing_a_bind_restores_that_default() {
+        // #117 S3's alternation end to end through the command path, including the *second*
+        // `layouts.first()`: `SetHeatLayout { layout: None }` re-tunes the heat to its round's
+        // default, and that default is now the heat's own place in the cycle. Dropping a cleared
+        // heat 2 back onto the first layout would be the very bug this change removes, one
+        // command later.
+        use crate::events::{
+            ChannelMode, LayoutNode, NewChannelLayoutRequest, NewRoundReq, SeedingRule,
+        };
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let (registry, event, _warmup) =
+            event_with_round("Warmup", "timed_qual", &["a", "b", "c", "d"]);
+
+        // Two complete tunings of the Mock's eight nodes: the seeded Raceband order, and its
+        // reverse — so which layout a heat flies is legible from its channels alone.
+        let seeded = registry
+            .add_channel_layout(
+                &event,
+                NewChannelLayoutRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        let a = seeded
+            .layouts
+            .iter()
+            .find(|l| l.name == "Bracket A")
+            .unwrap()
+            .id
+            .clone();
+        let reversed: Vec<LayoutNode> = crate::channels::RACEBAND_MHZ
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(node, channel)| LayoutNode {
+                node: node as u32,
+                channel: *channel,
+            })
+            .collect();
+        let both = registry
+            .add_channel_layout(
+                &event,
+                NewChannelLayoutRequest {
+                    name: "Bracket B".into(),
+                    nodes: Some(reversed),
+                },
+            )
+            .unwrap();
+        let b = both
+            .layouts
+            .iter()
+            .find(|l| l.name == "Bracket B")
+            .unwrap()
+            .id
+            .clone();
+
+        // A round flying both, in 2-up heats, so four pilots draw two heats.
+        let classes = registry.meta_of(&event).unwrap().classes;
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    layouts: vec![a.clone(), b],
+                    label: "Qualifying".into(),
+                    classes,
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([
+                        ("rounds".into(), "1".into()),
+                        ("heat_size".into(), "2".into()),
+                    ]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap()
+            .id;
+
+        let first = fill_next(&registry, &event, &round);
+        let second = fill_next(&registry, &event, &round);
+        let h1 = first.scheduled[0].heat.clone();
+        let h2 = second.scheduled[0].heat.clone();
+        let state = registry.resolve(&event).unwrap();
+        assert_eq!(channels_of(&state, &h1), vec![5658, 5695], "heat 1 flies A");
+        assert_eq!(
+            channels_of(&state, &h2),
+            vec![5917, 5880],
+            "heat 2 flies B — the alternation, not a second copy of A"
+        );
+
+        // The RD re-picks heat 2 onto A …
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::SetHeatLayout {
+                heat: h2.clone(),
+                layout: Some(a),
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        assert_eq!(channels_of(&state, &h2), vec![5658, 5695]);
+
+        // … and then clears the bind. It goes back to B, the default for ITS position.
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::SetHeatLayout {
+                heat: h2.clone(),
+                layout: None,
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        assert_eq!(channels_of(&state, &h2), vec![5917, 5880]);
+        assert_eq!(
+            channels_of(&state, &h1),
+            vec![5658, 5695],
+            "heat 1 was never touched by any of it"
+        );
     }
 
     /// The bug, stated as the assertion that was impossible before (#395): a fill that scheduled

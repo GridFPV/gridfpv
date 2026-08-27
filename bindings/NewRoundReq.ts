@@ -60,8 +60,9 @@ time_limit_secs?: number,
 channel_mode?: ChannelMode, 
 /**
  * The **channel layouts** this round's heats may fly (#117 S3). Optional — omit for none (the
- * auto-pick, the pre-S3 behaviour). Each must name a layout this event has. Stored on
- * [`RoundDef::layouts`]; the first is each heat's default.
+ * auto-pick, the pre-S3 behaviour). Each must name a layout this event has, and none twice.
+ * Stored on [`RoundDef::layouts`]; naming several makes the round's heats **alternate** across
+ * them in this order (#117 S3), which the RD may still override per heat.
  */
 layouts?: Array<LayoutId>, 
 /**

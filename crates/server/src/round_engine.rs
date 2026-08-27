@@ -89,10 +89,10 @@ pub enum FillOutcome {
         /// enforces the node-count cap either way.
         frequencies: Option<Vec<(CompetitorRef, u16)>>,
         /// The **channel layout** this heat flies (#117 S3), when one applies: the RD's explicit
-        /// per-heat bind, else the first layout its round names. The handler records it as an
-        /// [`Event::HeatLayoutSet`] alongside the `HeatScheduled`, so *which layout a heat flew* is
-        /// a recorded fact rather than something re-derived later from a round whose default may
-        /// since have changed.
+        /// per-heat bind, else the round's alternating default for this heat's position
+        /// ([`default_layout_for_heat`]). The handler records it as an [`Event::HeatLayoutSet`]
+        /// alongside the `HeatScheduled`, so *which layout a heat flew* is a recorded fact rather
+        /// than something re-derived later from a round whose default may since have changed.
         ///
         /// `None` when the round names no layouts and the RD bound none — the pre-S3 behaviour,
         /// where channels come from the auto-pick.
@@ -566,12 +566,12 @@ pub fn heat_layout_bind(events: &[Event], heat: &HeatId) -> Option<Option<Layout
     bind
 }
 
-/// The **layout a heat flies**: its explicit bind, else the first layout its round names (#117 S3).
+/// The **layout a heat flies**: its explicit bind, else its round's alternating default (#117 S3).
 ///
 /// A round naming exactly one layout — the bracket case, *"n channels for n pilots, and they stay
-/// for the whole tournament"* — therefore needs no per-heat action at all: every heat it draws
-/// flies that layout. A round naming several — the GQ-style qualifier — gives the RD a menu, with
-/// the first as the default.
+/// for the whole tournament"* — needs no per-heat action at all: every heat it draws flies that
+/// layout. A round naming **several** alternates between them, heat by heat
+/// ([`default_layout_for_heat`]); the RD still re-picks any individual heat, and that pick wins.
 ///
 /// A bind naming a layout the event no longer has resolves to `None` rather than failing: the heat
 /// keeps the channels it was last scheduled with, and the mismatch is reported where the RD looks,
@@ -582,11 +582,71 @@ pub fn layout_for_heat<'a>(
     events: &[Event],
     heat: &HeatId,
 ) -> Option<&'a ChannelLayout> {
-    let id = match heat_layout_bind(events, heat) {
-        Some(explicit) => explicit?,
-        None => round?.layouts.first()?.clone(),
-    };
-    meta.layout(&id)
+    match heat_layout_bind(events, heat) {
+        Some(explicit) => meta.layout(&explicit?),
+        None => default_layout_for_heat(meta, round, events, heat),
+    }
+}
+
+/// A heat's **default** layout — the one it flies when the RD has bound none (#117 S3).
+///
+/// The round's named layouts taken **round-robin by the heat's position within the round**: heat 1
+/// flies the first, heat 2 the second, and back round again once the list runs out. One named
+/// layout therefore behaves exactly as it always has (`0 % 1 == 0` for every heat); naming none
+/// still yields `None`, the pre-S3 auto-pick.
+///
+/// Alternating is the right *default* because of what it buys with **no pilot awareness at all**:
+/// adjacent heats stop sharing channels, so a group landing on the same frequencies as the group
+/// staging behind them no longer interferes. It is deliberately **not** an attempt to keep a pilot
+/// on one channel — that needs pilot-aware grouping and is #419's job, explicitly deferred; note
+/// that in one of the two self-registration models the RD described, a pilot changing channel
+/// between heats is *normal*, so "changing channel is bad" must not be baked in here. Alternating
+/// is still strictly better than always-the-first for that strategy too: fewer heats to hand-fix
+/// than *all of them*.
+///
+/// **Where the position comes from matters more than the modulo.** See
+/// [`heat_position_in_round`]: it is folded from the append-only log, never from wall-clock or the
+/// order of a list at call time, so a heat resolves to the same layout on every re-fold. A position
+/// that could move would silently retune a scheduled heat the next time anything re-materialized
+/// the round.
+///
+/// A layout the event no longer has resolves to `None` here exactly as a stale bind does — the
+/// round-level version of that is reported by
+/// [`round_issues`](crate::events::EventRegistry::round_issues).
+pub fn default_layout_for_heat<'a>(
+    meta: &'a EventMeta,
+    round: Option<&RoundDef>,
+    events: &[Event],
+    heat: &HeatId,
+) -> Option<&'a ChannelLayout> {
+    let round = round?;
+    if round.layouts.is_empty() {
+        return None;
+    }
+    let position = heat_position_in_round(events, &round.id, heat);
+    meta.layout(&round.layouts[position % round.layouts.len()])
+}
+
+/// A heat's **position within its round**, folded from the log (#117 S3).
+///
+/// The index of `heat` among the round's distinct scheduled heats in **first-scheduled order** —
+/// the very list [`scheduled_round_heats`] yields, which is the order [`finalized_heat_ids`] and
+/// the event-wide audit trail already fold by. A heat the log has **not** scheduled yet — the fill
+/// is forming it right now, so it is not in the log until the handler appends it — takes the
+/// **next** position, which is precisely the position it then holds for good.
+///
+/// That last part is what makes this stable rather than merely deterministic. The log is
+/// append-only and a `HeatScheduled` id is fixed at fill time (`{round}-{generator-id}`), so once a
+/// heat appears its index can never move: a later heat appends *after* it, a re-fill re-emits the
+/// same id at the same first appearance, and a repeated schedule is deduped to that first
+/// appearance. Deriving the position from anything mutable — the round's current plan, the layout
+/// list's length, wall-clock — would let a scheduled heat be silently retuned by a re-fold.
+fn heat_position_in_round(events: &[Event], round_id: &RoundId, heat: &HeatId) -> usize {
+    let scheduled = scheduled_round_heats(events, round_id);
+    scheduled
+        .iter()
+        .position(|h| h == heat)
+        .unwrap_or(scheduled.len())
 }
 
 /// The RD's **manual seating override** for a heat (#117 S3) — the escape hatch for when the
@@ -663,6 +723,18 @@ fn apply_heat_decisions(
     lineup: Vec<CompetitorRef>,
     frequencies: Option<Vec<(CompetitorRef, u16)>>,
 ) -> Result<EffectiveSeating, AssignError> {
+    // A RACED HEAT NEVER CHANGES (#117 S3). Its channels are the durable record of what it flew, so
+    // nothing here may re-decide them. Both callers already guarantee it — the fill emits only a
+    // plan its round has not scheduled yet, and #387's re-materialization filters its targets to
+    // `Scheduled` — and the alternating default is a pure function of the heat's FIRST scheduled
+    // position in an append-only log, so it cannot drift under a heat either. This asserts the
+    // guarantee rather than trusting it: a third caller that forgot would silently retune a heat's
+    // record of what it raced on, which is the one thing this area may never do.
+    debug_assert!(
+        matches!(heat_state(events, heat), None | Some(HeatState::Scheduled)),
+        "apply_heat_decisions re-decided {heat:?}, which is past Scheduled — a raced heat keeps \
+         the channels it flew"
+    );
     let manual = heat_seating_override(events, heat);
     let lineup = match &manual {
         Some(seating) => seating.lineup.clone(),
@@ -2240,18 +2312,15 @@ pub fn heat_display_name(round: &RoundDef, events: &[Event], heat: &HeatId) -> S
     if round.format == gridfpv_engine::format::OpenPractice::NAME {
         return OPEN_PRACTICE_HEAT_NAME.to_string();
     }
-    let in_round = scheduled_round_heats(events, &round.id);
-    let index = in_round.iter().position(|h| h == heat);
+    // The heat's position in its round, through the ONE derivation of it (#117 S3): the alternating
+    // layout default numbers heats the same way, so "Qualifying Heat 2" and "the second layout"
+    // always name the same heat. A not-yet-listed heat is the next position, matching the console.
+    let index = heat_position_in_round(events, &round.id, heat);
     if round.format == "multi_main" {
-        // The main's tier is its position in the round (A=first, B=second, …); a not-yet-listed
-        // heat is the next main, matching the console.
-        return main_tier_name(index.unwrap_or(in_round.len()));
+        // The main's tier is its position in the round (A=first, B=second, …).
+        return main_tier_name(index);
     }
-    format!(
-        "{} Heat {}",
-        round.label,
-        index.map_or(in_round.len() + 1, |i| i + 1)
-    )
+    format!("{} Heat {}", round.label, index + 1)
 }
 
 /// The tier name for the main at 0-based `index`: 0 → "A-Main", 1 → "B-Main", … matching the
@@ -5387,6 +5456,299 @@ mod tests {
         assert_eq!(
             heat_display_name(&practice, &log, &HeatId("op1-heat".into())),
             "Practice Heat"
+        );
+    }
+
+    // ── #117 S3: a round's heats ALTERNATE across the layouts it names ──────────────────────
+
+    /// A per-heat qual round flying `layouts`, chunked into 2-up heats so one round draws several.
+    fn round_flying(id: &str, layouts: &[&ChannelLayout]) -> RoundDef {
+        let mut round = qual_round(id, "open");
+        round.params.insert("heat_size".into(), "2".into());
+        round.layouts = layouts.iter().map(|l| l.id.clone()).collect();
+        round
+    }
+
+    /// `(meta, timers)` for `round`: `pilots` in class `open`, a 2-node primary timer, and the
+    /// event holding `layouts`.
+    fn meta_flying(
+        round: &RoundDef,
+        layouts: &[&ChannelLayout],
+        pilots: &[&str],
+    ) -> (EventMeta, TimerRegistry) {
+        let (mut meta, timers) =
+            meta_with_timer(vec![round.clone()], vec![member("open", pilots)], 2);
+        meta.channel_layouts = layouts.iter().map(|l| (*l).clone()).collect();
+        (meta, timers)
+    }
+
+    /// Fill `round` `count` times, appending each heat **exactly as the `FillRound` handler does** —
+    /// the `HeatLayoutSet` recording which layout it flies, then the `HeatScheduled` carrying the
+    /// channels that layout gave it.
+    ///
+    /// Returns the log plus, per heat, `(id, layout name, seat channels)`.
+    #[allow(clippy::type_complexity)]
+    fn fill_and_log(
+        meta: &EventMeta,
+        timers: &TimerRegistry,
+        round_id: &RoundId,
+        count: usize,
+    ) -> (Vec<Event>, Vec<(HeatId, String, Vec<u16>)>) {
+        let mut log: Vec<Event> = Vec::new();
+        let mut flown = Vec::new();
+        for i in 0..count {
+            let outcome = fill_round(meta, timers, round_id, &log).unwrap();
+            let FillOutcome::Scheduled {
+                heat,
+                lineup,
+                frequencies,
+                layout,
+                ..
+            } = outcome
+            else {
+                panic!("fill {i} did not schedule a heat: {outcome:?}");
+            };
+            let frequencies = frequencies.expect("a heat flying a layout carries its channels");
+            let name = layout
+                .as_ref()
+                .and_then(|id| meta.layout(id))
+                .map(|l| l.name.clone())
+                .unwrap_or_default();
+            flown.push((
+                heat.clone(),
+                name,
+                frequencies.iter().map(|(_, f)| *f).collect(),
+            ));
+            log.push(Event::HeatLayoutSet {
+                heat: heat.clone(),
+                layout,
+            });
+            log.push(Event::HeatScheduled {
+                heat,
+                lineup,
+                class: round_class(meta, round_id),
+                round: Some(round_id.clone()),
+                frequencies,
+                label: None,
+            });
+        }
+        (log, flown)
+    }
+
+    #[test]
+    fn a_rounds_generated_heats_alternate_across_the_layouts_it_names() {
+        // The change (#117 S3). A round naming TWO layouts used to put every heat it drew on the
+        // first, so the RD hand-switched every other heat — and naming a second layout was an odd
+        // way of saying "use the first". Now the heats alternate, and the reason is what that buys
+        // with no pilot awareness at all: adjacent heats stop sharing channels, so a group landing
+        // does not sit on the frequencies of the group staging behind it.
+        let a = layout("Bracket A", &[(0, 5658), (1, 5695)]);
+        let b = layout("Bracket B", &[(0, 5732), (1, 5769)]);
+        let round = round_flying("q1", &[&a, &b]);
+        let (meta, timers) = meta_flying(&round, &[&a, &b], &["A", "B", "C", "D", "E", "F"]);
+
+        let (_log, flown) = fill_and_log(&meta, &timers, &RoundId("q1".into()), 3);
+        let names: Vec<&str> = flown.iter().map(|(_, name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Bracket A", "Bracket B", "Bracket A"],
+            "heat 1 → A, heat 2 → B, heat 3 → A again"
+        );
+        // And it is the CHANNELS that matter, not the name: no two adjacent heats share one.
+        assert_eq!(flown[0].2, vec![5658, 5695]);
+        assert_eq!(flown[1].2, vec![5732, 5769]);
+        assert_eq!(flown[2].2, vec![5658, 5695]);
+        for pair in flown.windows(2) {
+            assert!(
+                pair[0].2.iter().all(|ch| !pair[1].2.contains(ch)),
+                "adjacent heats must not share a channel: {:?} then {:?}",
+                pair[0].2,
+                pair[1].2
+            );
+        }
+    }
+
+    #[test]
+    fn three_layouts_cycle_and_one_behaves_exactly_as_before() {
+        // The general rule is a cycle, not a flip-flop …
+        let a = layout("A", &[(0, 5658), (1, 5695)]);
+        let b = layout("B", &[(0, 5732), (1, 5769)]);
+        let c = layout("C", &[(0, 5806), (1, 5843)]);
+        let round = round_flying("q1", &[&a, &b, &c]);
+        let (meta, timers) = meta_flying(&round, &[&a, &b, &c], &["A", "B", "C", "D", "E", "F"]);
+        let (_log, flown) = fill_and_log(&meta, &timers, &RoundId("q1".into()), 3);
+        assert_eq!(
+            flown.iter().map(|(_, n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B", "C"]
+        );
+
+        // … and ONE named layout is untouched by all of this: every heat flies it, as the bracket
+        // case always did ("n channels for n pilots, and they stay for the whole tournament").
+        let round = round_flying("q1", &[&a]);
+        let (meta, timers) = meta_flying(&round, &[&a], &["A", "B", "C", "D", "E", "F"]);
+        let (_log, flown) = fill_and_log(&meta, &timers, &RoundId("q1".into()), 3);
+        assert_eq!(
+            flown.iter().map(|(_, n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["A", "A", "A"]
+        );
+        assert!(flown.iter().all(|(_, _, ch)| ch == &vec![5658, 5695]));
+    }
+
+    #[test]
+    fn a_round_naming_no_layouts_still_resolves_to_none() {
+        // The pre-S3 auto-pick path, and the `None` behaviours around it, are untouched.
+        let a = layout("A", &[(0, 5658), (1, 5695)]);
+        let round = qual_round("q1", "open");
+        let mut meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        meta.channel_layouts = vec![a];
+        let heat = HeatId("q1-h1".into());
+        assert!(layout_for_heat(&meta, Some(&round), &[], &heat).is_none());
+        assert!(default_layout_for_heat(&meta, Some(&round), &[], &heat).is_none());
+        // No round at all (a hand-scheduled heat) is `None` too.
+        assert!(layout_for_heat(&meta, None, &[], &heat).is_none());
+    }
+
+    #[test]
+    fn an_explicit_bind_wins_and_does_not_shift_its_neighbours() {
+        // The alternation is only the DEFAULT. `Command::SetHeatLayout` still decides any single
+        // heat — and because the position is the heat's own place in the round, re-picking one heat
+        // leaves every other heat exactly where it was.
+        let a = layout("Bracket A", &[(0, 5658), (1, 5695)]);
+        let b = layout("Bracket B", &[(0, 5732), (1, 5769)]);
+        let round = round_flying("q1", &[&a, &b]);
+        let mut meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        meta.channel_layouts = vec![a.clone(), b.clone()];
+
+        let mut log: Vec<Event> = (1..=3)
+            .map(|i| scheduled(&format!("q1-h{i}"), "q1", "open", &["A", "B"]))
+            .collect();
+        let name_of = |log: &[Event], heat: &str| {
+            layout_for_heat(&meta, Some(&round), log, &HeatId(heat.into())).map(|l| l.name.clone())
+        };
+        assert_eq!(name_of(&log, "q1-h2").as_deref(), Some("Bracket B"));
+
+        // The RD puts heat 2 back on A.
+        log.push(Event::HeatLayoutSet {
+            heat: HeatId("q1-h2".into()),
+            layout: Some(a.id.clone()),
+        });
+        assert_eq!(name_of(&log, "q1-h2").as_deref(), Some("Bracket A"));
+        assert_eq!(name_of(&log, "q1-h1").as_deref(), Some("Bracket A"));
+        assert_eq!(
+            name_of(&log, "q1-h3").as_deref(),
+            Some("Bracket A"),
+            "heat 3's own position still decides it — a neighbour's bind changes nothing"
+        );
+
+        // A bind naming a layout the event no longer has still resolves to `None` rather than
+        // falling through to the round's default — unchanged, and reported by `round_issues`.
+        log.push(Event::HeatLayoutSet {
+            heat: HeatId("q1-h3".into()),
+            layout: Some(LayoutId("deleted".into())),
+        });
+        assert_eq!(name_of(&log, "q1-h3"), None);
+    }
+
+    #[test]
+    fn a_heats_layout_is_the_same_on_every_re_fold() {
+        // The property the whole derivation exists for. A heat's position is its FIRST appearance
+        // in an append-only log, so nothing that happens afterwards can move it — otherwise a
+        // re-materialization would silently retune a scheduled heat.
+        let a = layout("Bracket A", &[(0, 5658), (1, 5695)]);
+        let b = layout("Bracket B", &[(0, 5732), (1, 5769)]);
+        let round = round_flying("q1", &[&a, &b]);
+        let mut meta = meta_with(vec![round.clone()], vec![member("open", &["A", "B"])]);
+        meta.channel_layouts = vec![a, b];
+        let heats: Vec<HeatId> = (1..=4).map(|i| HeatId(format!("q1-h{i}"))).collect();
+
+        // Resolve each heat BEFORE it is logged (what the fill sees while forming it), then log it.
+        let mut log: Vec<Event> = Vec::new();
+        let mut at_fill = Vec::new();
+        for heat in &heats {
+            at_fill.push(
+                default_layout_for_heat(&meta, Some(&round), &log, heat)
+                    .unwrap()
+                    .name
+                    .clone(),
+            );
+            log.push(scheduled(&heat.0, "q1", "open", &["A", "B"]));
+        }
+        assert_eq!(
+            at_fill,
+            ["Bracket A", "Bracket B", "Bracket A", "Bracket B"]
+        );
+
+        // Now churn the log the way a running event does: re-emit a heat's schedule (a re-fill /
+        // #387 re-materialization), schedule another round's heats, add a fifth heat here.
+        log.push(scheduled("q1-h1", "q1", "open", &["A", "B"]));
+        log.push(scheduled("q2-h1", "q2", "open", &["A", "B"]));
+        log.push(scheduled("q1-h5", "q1", "open", &["A", "B"]));
+        for (heat, expected) in heats.iter().zip(&at_fill) {
+            assert_eq!(
+                default_layout_for_heat(&meta, Some(&round), &log, heat)
+                    .unwrap()
+                    .name,
+                *expected,
+                "{heat:?} moved layouts on a re-fold"
+            );
+        }
+        // The position is the same one the RD reads in the heat's name.
+        assert_eq!(
+            heat_display_name(&round, &log, &heats[1]),
+            "q1 Heat 2",
+            "\"Heat 2\" and \"the second layout\" name the same heat"
+        );
+    }
+
+    #[test]
+    fn a_raced_heat_keeps_the_channels_and_the_layout_it_flew() {
+        // The binding constraint. A raced heat's channels ARE the durable record of what it flew,
+        // so no later fold may re-decide them: the round is re-filled around it, never through it.
+        let a = layout("Bracket A", &[(0, 5658), (1, 5695)]);
+        let b = layout("Bracket B", &[(0, 5732), (1, 5769)]);
+        let round = round_flying("q1", &[&a, &b]);
+        let (meta, timers) = meta_flying(&round, &[&a, &b], &["A", "B", "C", "D", "E", "F"]);
+        let round_id = RoundId("q1".into());
+
+        let (mut log, flown) = fill_and_log(&meta, &timers, &round_id, 2);
+        let (raced, raced_layout, raced_channels) = flown[0].clone();
+        assert_eq!(raced_channels, vec![5658, 5695]);
+
+        // Race it all the way to Final.
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            log.push(changed(&raced.0, transition));
+        }
+        assert_eq!(heat_state(&log, &raced), Some(HeatState::Final));
+
+        // A re-materialization of the round never offers a rewrite for it …
+        let rewrites = rematerialize_round_heats(&meta, &timers, &round_id, &log);
+        assert!(
+            rewrites.iter().all(|r| r.heat != raced),
+            "a raced heat was re-materialized: {rewrites:?}"
+        );
+        // … and the round keeps filling around it, without disturbing what it flew.
+        let outcome = fill_round(&meta, &timers, &round_id, &log).unwrap();
+        assert!(
+            matches!(&outcome, FillOutcome::Scheduled { heat, .. } if heat != &raced),
+            "expected a fresh heat, got {outcome:?}"
+        );
+        let (_, frequencies, _) = logged_schedule(&log, &raced);
+        assert_eq!(
+            frequencies.iter().map(|(_, f)| *f).collect::<Vec<_>>(),
+            raced_channels,
+            "the raced heat's channels are its record of what it flew"
+        );
+        assert_eq!(
+            layout_for_heat(&meta, Some(&round), &log, &raced)
+                .unwrap()
+                .name,
+            raced_layout
         );
     }
 
