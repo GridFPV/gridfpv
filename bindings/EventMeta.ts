@@ -130,6 +130,11 @@ classes_membership?: Array<ClassMembership>,
  * Slice 2a reads back with no rounds; a new event defaults to an **empty** list. The
  * whole field round-trips through the event's persisted meta (issue #115), so it is restart-safe
  * for free.
+ *
+ * Read through [`lenient_rounds`]: a stored round the current code can no longer parse — a
+ * [`SeedingRule`] variant that has been renamed, say — is **dropped**, and the event still
+ * opens. Losing one round is a thing the RD can recreate; an event that will not open is not
+ * (`CLAUDE.md`, "a stored record in an old shape must still LOAD").
  */
 rounds?: Array<RoundDef>, 
 /**

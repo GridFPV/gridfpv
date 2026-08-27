@@ -39,7 +39,7 @@ use ts_rs::TS;
 use gridfpv_engine::format::{FormatRegistry, OpenPractice};
 use gridfpv_engine::heat::{GraceWindow, ProtestWindow};
 use gridfpv_engine::scoring::WinCondition;
-use gridfpv_events::RoundId;
+use gridfpv_events::{HeatId, RoundId};
 use gridfpv_storage::{InMemoryLog, SqliteLog};
 
 use crate::app::AppState;
@@ -174,7 +174,16 @@ pub struct EventMeta {
     /// Slice 2a reads back with no rounds; a new event defaults to an **empty** list. The
     /// whole field round-trips through the event's persisted meta (issue #115), so it is restart-safe
     /// for free.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Read through [`lenient_rounds`]: a stored round the current code can no longer parse — a
+    /// [`SeedingRule`] variant that has been renamed, say — is **dropped**, and the event still
+    /// opens. Losing one round is a thing the RD can recreate; an event that will not open is not
+    /// (`CLAUDE.md`, "a stored record in an old shape must still LOAD").
+    #[serde(
+        default,
+        deserialize_with = "lenient_rounds",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub rounds: Vec<RoundDef>,
     /// The event's **channel layouts** (#117 S2) — the event-scoped answer to *what goes on which
     /// node?*
@@ -1026,7 +1035,8 @@ impl ChannelMode {
 /// ([`FromRoster`](Self::FromRoster) — practice / first qualifying), or from a **prior round's
 /// ranking** ([`FromRanking`](Self::FromRanking) — the bracket / cut case, the issue-#84 carry that
 /// a later slice consumes), or — for the casual **open-practice** format — from a set of active
-/// **channels** ([`AllChannels`](Self::AllChannels)) rather than pilots. Derives serde + `ts_rs::TS`.
+/// **timer nodes** ([`ActiveNodes`](Self::ActiveNodes)) rather than pilots. Derives serde +
+/// `ts_rs::TS`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum SeedingRule {
@@ -1105,20 +1115,34 @@ pub enum SeedingRule {
         /// Each is resolved exactly as a standalone seeding rule. Always at least one entry.
         sources: Vec<SeedingRule>,
     },
-    /// Seed from a set of active **channels** rather than pilots — the **open-practice** seeding
+    /// Seed from a set of active **timer nodes** rather than pilots — the **open-practice** seeding
     /// (open-practice format). The field builder lays each node index out as a `node-{i}`
     /// [`CompetitorRef`](gridfpv_events::CompetitorRef) (the timer-seat handle the timer emits
-    /// passes for), and the one open heat runs over those channels. Those seats are **unbound** (no
+    /// passes for), and the one open heat runs over those seats. Those seats are **unbound** (no
     /// pilot registration) — which is fine: their laps are appended to the durable log like every
     /// other format's (D5, reversed — see [`crate::open_practice`]); practice's only difference is
     /// that it is never scored. An open-practice round is `format: "open_practice"` +
-    /// `seeding: AllChannels { channels }`; its [`classes`](RoundDef::classes) may be empty (it is
-    /// not a class round). Additive variant — pre-existing rounds (`FromRoster`/`FromRanking`) read
-    /// back unchanged.
-    AllChannels {
-        /// The active channels as **node indices** (the timer-seat indices the RD made live), laid
-        /// out as `node-{i}` competitor refs by the field builder, in this order.
-        channels: Vec<usize>,
+    /// `seeding: ActiveNodes { nodes }`; its [`classes`](RoundDef::classes) may be empty (it is
+    /// not a class round).
+    ///
+    /// # Nodes, not channels
+    ///
+    /// This variant was called `AllChannels { channels }` until #117 S3's follow-up, and the name
+    /// lied twice: the entries were never channels (they are **node indices**), and the set is a
+    /// *subset* the RD picks, not "all" of anything. That name is a large part of why #416's
+    /// `[6]` — node 6 of a **four-node** timer, a heat that could never record a lap — read as
+    /// fine. What each node is *tuned to* is a [`ChannelLayout`] (#117 S2/S3), a different
+    /// vocabulary entirely; keeping the two apart is the point of the rename.
+    ///
+    /// The old tag is **not** accepted on read (no `serde(alias)`, no migration — see the
+    /// pre-release rule in `CLAUDE.md`). A stored round written under it is dropped when the event
+    /// loads and the RD recreates it; the **event still opens** (see `lenient_rounds`).
+    ActiveNodes {
+        /// The active **node indices** (the timer-seat indices the RD made live), laid out as
+        /// `node-{i}` competitor refs by the field builder, in this order. These are seats on the
+        /// timer, never frequencies — what a seat is *tuned to* comes from the round's
+        /// [`ChannelLayout`].
+        nodes: Vec<usize>,
     },
 }
 
@@ -1183,7 +1207,7 @@ impl<'de> Deserialize<'de> for SeedingRule {
             FromRankingRange(FromRankingRangeBody),
             FromHeatWinners(FromHeatWinnersBody),
             Combine { sources: Vec<SeedingRule> },
-            AllChannels { channels: Vec<usize> },
+            ActiveNodes { nodes: Vec<usize> },
         }
 
         match Shadow::deserialize(deserializer)? {
@@ -1209,7 +1233,7 @@ impl<'de> Deserialize<'de> for SeedingRule {
                 };
                 Ok(SeedingRule::FromHeatWinners { source_round })
             }
-            Shadow::AllChannels { channels } => Ok(SeedingRule::AllChannels { channels }),
+            Shadow::ActiveNodes { nodes } => Ok(SeedingRule::ActiveNodes { nodes }),
             Shadow::Combine { sources } => Ok(SeedingRule::Combine { sources }),
             Shadow::FromRankingRange(body) => {
                 let source_rounds = match (body.source_rounds, body.source_round) {
@@ -1248,6 +1272,47 @@ impl<'de> Deserialize<'de> for SeedingRule {
             }
         }
     }
+}
+
+/// Read [`EventMeta::rounds`] **leniently**: a stored round that the current code can no longer
+/// parse is **dropped**, and the rest of the event loads normally.
+///
+/// # Why the whole event must not fall over
+///
+/// `EventMeta` is read back from the event's sidecar `meta` table on boot, and
+/// [`restore_persisted_events`] skips an event whose meta will not parse — so *one* unreadable
+/// round would vanish the entire event, its heats, its results and all. `CLAUDE.md` is explicit
+/// that this is the line: a pre-release rename may lose a stored record, but "failing to open the
+/// event, or 500ing, is not" excused.
+///
+/// This is what makes a breaking [`SeedingRule`] change affordable without a `serde(alias)` or a
+/// migration. The rename of `AllChannels { channels }` → [`SeedingRule::ActiveNodes`] is exactly
+/// that case: a round stored under the old tag no longer matches any variant, is dropped **here**
+/// with a loud line on stderr, and the RD recreates it — while the event opens.
+///
+/// Not a compatibility shim: nothing here understands any old shape. It is the drop-one-record
+/// boundary, and it is deliberately as narrow as it can be (one round, not the list, not the meta).
+fn lenient_rounds<'de, D>(deserializer: D) -> Result<Vec<RoundDef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // `EventMeta` is only ever read from JSON (the sidecar `meta` table and the HTTP wire), so
+    // buffering each round as a `Value` and re-parsing it is exact — the round that fails is the
+    // only one lost.
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for value in raw {
+        match serde_json::from_value::<RoundDef>(value) {
+            Ok(round) => out.push(round),
+            // LOUD, never silent: a dropped round is a thing the RD has to recreate, and finding
+            // that out in the field is exactly the outcome the rule forbids.
+            Err(e) => eprintln!(
+                "WARNING: dropping a stored round that no longer parses — recreate it on the \
+                 event's Rounds page: {e}"
+            ),
+        }
+    }
+    Ok(out)
 }
 
 /// The body of `POST /events/{id}/rounds` — everything a caller supplies to add a round (race
@@ -2690,13 +2755,21 @@ impl EventRegistry {
         Ok(meta)
     }
 
-    /// Every **impossible seat** in this event's stored rounds (#416), or `None` if no such event.
+    /// Everything wrong with this event's **stored** round configuration (#416 / #117 S3), or
+    /// `None` if no such event.
     ///
-    /// The read-side twin of the write-side refusal in [`validate_round_fields`]: it walks the
-    /// event's stored rounds and reports each `node-{i}` seat that cannot record a lap, checked
-    /// against the event's **effective primary** timer through the shared [`seat_problems`] rule.
-    /// An event with no resolvable timer has nothing to check against and yields an empty list (a
-    /// pure-sim event has no node set) — an empty list is "nothing wrong", never "not checked".
+    /// The read-side twin of the write-side refusal in [`validate_round_fields`]. Three walks, one
+    /// list, because #412, #416 and #117 S3 all landed on *validate stored config on read* and a
+    /// second mechanism is how two answers to one question start disagreeing:
+    ///
+    /// 1. every `node-{i}` **seat that cannot record a lap**, checked against the event's
+    ///    **effective primary** timer through the shared [`seat_problems`] rule;
+    /// 2. every **stale channel layout** a round names, through [`layout_problems`];
+    /// 3. every **scheduled heat still bound to a layout its round no longer names** — which needs
+    ///    no timer at all, only the round and the log.
+    ///
+    /// An event with no resolvable timer has no node set to check (1) and (2) against and reports
+    /// neither; (3) is still reported. An empty list is "nothing wrong", never "not checked".
     ///
     /// This is what makes a round the RD *already has* repairable: #412 stopped new rounds from
     /// being authored onto a dead gate, but the one on the bench predates it, and a round that
@@ -2707,24 +2780,36 @@ impl EventRegistry {
             let event = reg.events.get(id)?;
             (event.meta.clone(), reg.timers.clone())
         };
-        let Some(timer) = meta.effective_primary().and_then(|id| timers.get(&id)) else {
-            return Some(Vec::new());
-        };
+        // The event's own log, for the heat→layout binds (walk 3). Read AFTER the registry lock is
+        // released — the log has its own mutex, and this is the order `round_heat_facts` uses. An
+        // unreadable log costs walk 3 only; walks 1 and 2 are pure config.
+        let events = self
+            .resolve(id)
+            .and_then(|state| state.read().ok())
+            .map(|(events, _cursor)| events)
+            .unwrap_or_default();
+        let timer = meta.effective_primary().and_then(|id| timers.get(&id));
         let mut out = Vec::new();
         for round in &meta.rounds {
-            if let SeedingRule::AllChannels { channels } = &round.seeding {
-                for (node, problem) in seat_problems(channels, &timer) {
+            out.extend(orphaned_bind_issues(&meta, round, &events));
+            let Some(timer) = &timer else {
+                continue;
+            };
+            if let SeedingRule::ActiveNodes { nodes } = &round.seeding {
+                for (node, problem) in seat_problems(nodes, timer) {
                     out.push(RoundIssue {
                         round: round.id.clone(),
                         round_label: round.label.clone(),
-                        timer: timer.id.clone(),
-                        timer_name: timer.name.clone(),
-                        node,
-                        node_label: Timer::node_label(node),
+                        timer: Some(timer.id.clone()),
+                        timer_name: Some(timer.name.clone()),
+                        node: Some(node),
+                        node_label: Some(Timer::node_label(node)),
                         problem,
                         layout: None,
                         layout_name: None,
-                        detail: seat_problem_detail(round, &timer, node, problem),
+                        heat: None,
+                        heat_name: None,
+                        detail: seat_problem_detail(round, timer, node, problem),
                     });
                 }
             }
@@ -2738,18 +2823,20 @@ impl EventRegistry {
                 let Some(layout) = meta.layout(id) else {
                     continue;
                 };
-                for (node, problem) in layout_problems(layout, &timer) {
+                for (node, problem) in layout_problems(layout, timer) {
                     out.push(RoundIssue {
                         round: round.id.clone(),
                         round_label: round.label.clone(),
-                        timer: timer.id.clone(),
-                        timer_name: timer.name.clone(),
-                        node,
-                        node_label: Timer::node_label(node),
+                        timer: Some(timer.id.clone()),
+                        timer_name: Some(timer.name.clone()),
+                        node: Some(node),
+                        node_label: Some(Timer::node_label(node)),
                         problem,
                         layout: Some(layout.id.clone()),
                         layout_name: Some(layout.name.clone()),
-                        detail: layout_problem_detail(round, layout, &timer, node, problem),
+                        heat: None,
+                        heat_name: None,
+                        detail: layout_problem_detail(round, layout, timer, node, problem),
                     });
                 }
             }
@@ -3241,19 +3328,27 @@ impl From<RegistryError> for RoundError {
     }
 }
 
-/// Why a stored round's `node-{i}` seat **cannot record a lap** (#412 / #416).
+/// What is wrong with a **stored** round's channel configuration, found on read (#412 / #416 /
+/// #117 S3).
 ///
-/// An open-practice round's field *is* its active channels, laid out as `node-{i}` seats
-/// ([`SeedingRule::AllChannels`], whose entries are **node indices**). A seat naming a node the
+/// The original three cases are about a `node-{i}` **seat that cannot record a lap**: an
+/// open-practice round's field *is* its active nodes, laid out as `node-{i}` seats
+/// ([`SeedingRule::ActiveNodes`], whose entries are **node indices**). A seat naming a node the
 /// timer does not have, or one the RD switched off, is a pilot on a dead gate: the heat runs, the
 /// clock counts, and nothing is ever detected. Silently rendering that seat is the worst available
 /// behaviour, so it is surfaced on **read** as well as refused on write.
+///
+/// The `Layout*` cases extend the same idea to a stored [`ChannelLayout`] that has gone stale, and
+/// the `HeatLayout*` cases to a **heat still bound to a layout its round no longer names**. One
+/// enum and one read (`GET /events/{id}/round-issues`) on purpose: #412, #416 and #117 S3 all
+/// landed on *validate stored config on read*, and a second mechanism is how two answers to one
+/// question start disagreeing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum SeatProblem {
     /// The seat names a node index at or beyond the timer's **effective width**
     /// ([`Timer::node_width`]) — there is no such node at all. The RD's bench case: a round seeded
-    /// `AllChannels { channels: [6] }` on a four-node timer.
+    /// `ActiveNodes { nodes: [6] }` on a four-node timer.
     NoSuchNode,
     /// The node exists, but the RD has **disabled** it (#412) — a dead receiver, a gate that will
     /// not tune. A disabled node seats no pilot and is offered no channel.
@@ -3282,6 +3377,33 @@ pub enum SeatProblem {
     /// timer), so this is not a silent failure — but it flies a channel the RD has said this timer
     /// may not use, and one of the two statements needs to change.
     LayoutChannelNotAllowed,
+    /// A **scheduled heat** is still bound to a channel layout its round **no longer names**
+    /// (#117 S3 follow-up) — the RD dropped the layout from the round *after* the heat was drawn.
+    ///
+    /// The bind is an [`Event::HeatLayoutSet`](gridfpv_events::Event::HeatLayoutSet) in the log,
+    /// and it outlives a round edit by design (that is what stops a re-fill from silently losing
+    /// it). So the heat keeps the layout's channels and flies frequencies its round no longer
+    /// sanctions, with nothing saying so.
+    ///
+    /// **Reported, never refused.** The round edit stands: there are two valid repairs — bind the
+    /// heat to a layout the round *does* name (`Command::SetHeatLayout`), or set its channels by
+    /// hand (`Command::OverrideHeatSeating`) — and blocking the edit would prevent both.
+    ///
+    /// A **raced** heat is never reported: it flew what it flew, and its channels are the durable
+    /// record of that. Only a still-`Scheduled` heat has anything left to decide.
+    HeatLayoutNotInRound,
+    /// A **scheduled heat** is still bound to a channel layout the event **no longer has** (#117
+    /// S3 follow-up) — the same orphaned bind as [`HeatLayoutNotInRound`](Self::HeatLayoutNotInRound),
+    /// one step further along.
+    ///
+    /// Reachable precisely because the delete refusal is scoped to *rounds*: `remove_channel_layout`
+    /// refuses while a round names the layout, so the RD drops it from the round first (creating
+    /// the orphan) and only then deletes it. The heat keeps the channels it was last scheduled
+    /// with, and [`layout_for_heat`](crate::round_engine::layout_for_heat) resolves to `None`.
+    ///
+    /// There is no layout name to show, which is the whole difference from the case above; the
+    /// repairs are the same two.
+    HeatLayoutGone,
 }
 
 /// One problem found in a **stored** round's configuration, on read (#416).
@@ -3297,8 +3419,17 @@ pub enum SeatProblem {
 /// [`Timer::node_view`](crate::timers::Timer::node_view) answer `GET /timers/{id}/nodes` serves.
 ///
 /// Every field a person reads is a **friendly name** — the round's label, the timer's name, the
-/// 1-based node label — never a raw id or a bare index (repo display rule). `round` and `node` are
-/// the wire handles the console repairs *through* (they address the round-edit form), not labels.
+/// heat's name, the layout's name, the 1-based node label — never a raw id or a bare index (repo
+/// display rule). `round` / `node` / `layout` / `heat` are the wire handles the console repairs
+/// *through* (they address the round-edit form, the layouts page, the heat), not labels.
+///
+/// # Only `round` and `problem` are always there
+///
+/// The set has grown past "an impossible seat". A stale-layout problem is about a node *and* a
+/// layout; an orphaned heat bind ([`SeatProblem::HeatLayoutNotInRound`]) is about a **heat** and
+/// has no node at all, and is not checked against a timer. Rather than fabricate a node index or a
+/// timer to fill the struct — the display rule's exact failure mode — the fields that do not apply
+/// are simply absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct RoundIssue {
@@ -3306,20 +3437,30 @@ pub struct RoundIssue {
     pub round: RoundId,
     /// The round's **label**, for display.
     pub round_label: String,
-    /// The timer the seat was checked against (the event's effective primary).
-    pub timer: TimerId,
+    /// The timer the seat was checked against (the event's effective primary). Absent for a
+    /// problem that is not about the timer at all (an orphaned heat bind).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timer: Option<TimerId>,
     /// That timer's **name**, for display.
-    pub timer_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timer_name: Option<String>,
     /// The offending node index, **0-based** — a wire handle (it is what the round's seeding
-    /// stores), never shown as-is.
-    pub node: u32,
+    /// stores), never shown as-is. Absent for a problem that names no single node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node: Option<u32>,
     /// The node's **display name**, 1-based: index `6` is `"Node 7"`.
-    pub node_label: String,
-    /// Which case this is — an impossible **seat** (#412/#416) or a stale **channel layout**
-    /// (#117 S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_label: Option<String>,
+    /// Which case this is — an impossible **seat** (#412/#416), a stale **channel layout**
+    /// (#117 S3), or a heat still bound to a layout its round dropped.
     pub problem: SeatProblem,
     /// The **channel layout** the problem is in, for the `Layout*` cases — the handle the console's
-    /// repair action edits. Absent for a seat problem, which is about the round's own seeding.
+    /// repair action edits. Absent for a seat problem, which is about the round's own seeding, and
+    /// for [`SeatProblem::HeatLayoutGone`], where the layout no longer exists to name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub layout: Option<LayoutId>,
@@ -3327,12 +3468,24 @@ pub struct RoundIssue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub layout_name: Option<String>,
+    /// The **heat** the problem is in, for the `HeatLayout*` cases — the handle the console's
+    /// repair actions (`SetHeatLayout` / `OverrideHeatSeating`) address. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub heat: Option<HeatId>,
+    /// That heat's **name**, for display — resolved through
+    /// [`round_engine::heat_display_name`](crate::round_engine::heat_display_name), the server-side
+    /// twin of the console's `heatNameById`, so both surfaces call the heat the same thing. Never
+    /// its [`HeatId`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub heat_name: Option<String>,
     /// The RD-facing sentence: what is wrong, and what to do about it. Written server-side so the
     /// console does not re-derive (and drift from) the explanation.
     pub detail: String,
 }
 
-/// The **seat problems** in an `AllChannels` seeding, checked against `timer` — the one place that
+/// The **seat problems** in an `ActiveNodes` seeding, checked against `timer` — the one place that
 /// decides whether a `node-{i}` seat can record a lap (#412 / #416).
 ///
 /// Shared by the write-side refusal ([`validate_round_fields`]) and the read-side notice
@@ -3341,11 +3494,11 @@ pub struct RoundIssue {
 /// the console — rather than re-deriving width/enabled locally.
 ///
 /// Returns `(node, problem)` in seeding order, one entry per offending seat.
-fn seat_problems(channels: &[usize], timer: &Timer) -> Vec<(u32, SeatProblem)> {
+fn seat_problems(seeded_nodes: &[usize], timer: &Timer) -> Vec<(u32, SeatProblem)> {
     let view = timer.node_view();
     let mut out = Vec::new();
-    for channel in channels {
-        let node = u32::try_from(*channel).unwrap_or(u32::MAX);
+    for seeded in seeded_nodes {
+        let node = u32::try_from(*seeded).unwrap_or(u32::MAX);
         let problem = if node >= view.width {
             SeatProblem::NoSuchNode
         } else if !view.enabled.contains(&node) {
@@ -3398,6 +3551,82 @@ fn layout_problems(layout: &ChannelLayout, timer: &Timer) -> Vec<(u32, SeatProbl
     out
 }
 
+/// The **orphaned layout binds** in one round: every still-`Scheduled` heat bound to a channel
+/// layout `round` no longer names (#117 S3 follow-up).
+///
+/// # The hole this closes
+///
+/// A heat's layout is an [`Event::HeatLayoutSet`](gridfpv_events::Event::HeatLayoutSet) in the log,
+/// deliberately **not** a field on `HeatScheduled` — that is what stops a round re-fill from
+/// silently dropping the RD's choice. The same durability means the bind outlives a *round* edit:
+/// drop the layout from the round and the heat keeps flying the layout's channels, sanctioned by
+/// nothing. Until now, nothing said so.
+///
+/// # Reported, not refused
+///
+/// The round edit is legitimate and stands. There are two valid repairs — rebind the heat
+/// ([`Command::SetHeatLayout`](crate::control::Command::SetHeatLayout)) or set its channels by hand
+/// ([`Command::OverrideHeatSeating`](crate::control::Command::OverrideHeatSeating)) — and refusing
+/// the edit would prevent both. This is the RD's own call.
+///
+/// # Scope
+///
+/// - Only an **explicit** bind can be orphaned. A heat with no `HeatLayoutSet` (or one the RD
+///   cleared) already falls back to its round's first layout, so it is by definition current.
+/// - Only a **`Scheduled`** heat. A raced heat flew what it flew, and its channels are the durable
+///   record of that: reporting it would invite the RD to "repair" history. A heat that is staged or
+///   running is equally past repair.
+/// - Deletion is a **different** case and is not touched here: `remove_channel_layout` refuses
+///   while a round still names the layout. That refusal is what forces this orphan to be created
+///   in two steps (drop from the round, then delete), which is why
+///   [`SeatProblem::HeatLayoutGone`] exists.
+fn orphaned_bind_issues(
+    meta: &EventMeta,
+    round: &RoundDef,
+    events: &[gridfpv_events::Event],
+) -> Vec<RoundIssue> {
+    use gridfpv_engine::heat::{HeatState, heat_state};
+
+    let mut out = Vec::new();
+    for heat in round_engine::scheduled_round_heats(events, &round.id) {
+        if heat_state(events, &heat) != Some(HeatState::Scheduled) {
+            continue;
+        }
+        // `Some(Some(_))` is an explicit bind; `Some(None)` is the RD clearing it and `None` is
+        // never having touched it — both of which mean "the round's default", which cannot be
+        // stale by construction.
+        let Some(Some(bound)) = round_engine::heat_layout_bind(events, &heat) else {
+            continue;
+        };
+        if round.layouts.contains(&bound) {
+            continue;
+        }
+        let layout = meta.layout(&bound);
+        let heat_name = round_engine::heat_display_name(round, events, &heat);
+        let detail = orphaned_bind_detail(round, &heat_name, layout.map(|l| l.name.trim()));
+        out.push(RoundIssue {
+            round: round.id.clone(),
+            round_label: round.label.clone(),
+            // Not a timer question: the heat's channels are wrong relative to its ROUND, whatever
+            // hardware it lands on. Naming a timer here would be decoration.
+            timer: None,
+            timer_name: None,
+            node: None,
+            node_label: None,
+            problem: match layout {
+                Some(_) => SeatProblem::HeatLayoutNotInRound,
+                None => SeatProblem::HeatLayoutGone,
+            },
+            layout: layout.map(|l| l.id.clone()),
+            layout_name: layout.map(|l| l.name.clone()),
+            heat: Some(heat),
+            heat_name: Some(heat_name),
+            detail,
+        });
+    }
+    out
+}
+
 /// The RD-facing sentence for one **stale-layout** problem (#117 S3): what is wrong, and the way
 /// out of it.
 ///
@@ -3438,10 +3667,39 @@ fn layout_problem_detail(
                  Timers page, or pick another channel for {node_label} in {layout_name}."
             )
         }
-        // The seat problems are explained by `seat_problem_detail`; they never reach here.
-        SeatProblem::NoSuchNode | SeatProblem::Disabled | SeatProblem::NotOnTimer => {
-            seat_problem_detail(round, timer, node, problem)
-        }
+        // The seat problems are explained by `seat_problem_detail`, and the orphaned heat binds by
+        // `orphaned_bind_detail`; neither reaches here.
+        SeatProblem::NoSuchNode
+        | SeatProblem::Disabled
+        | SeatProblem::NotOnTimer
+        | SeatProblem::HeatLayoutNotInRound
+        | SeatProblem::HeatLayoutGone => seat_problem_detail(round, timer, node, problem),
+    }
+}
+
+/// The RD-facing sentence for a heat still bound to a channel layout its round **no longer names**
+/// (#117 S3 follow-up): what is wrong, and the two ways out of it.
+///
+/// `layout_name` is the layout's friendly name when the event still has it, and `None` once it has
+/// been deleted ([`SeatProblem::HeatLayoutGone`]) — there is then nothing to name, and the sentence
+/// says so rather than printing a [`LayoutId`].
+///
+/// Both remedies are named because the RD chose to be **told, not blocked**: the round edit that
+/// created this is legitimate, and either repair may be the right one.
+///
+/// - [`Command::SetHeatLayout`](crate::control::Command::SetHeatLayout) rebinds the heat to a
+///   layout the round does name;
+/// - [`Command::OverrideHeatSeating`](crate::control::Command::OverrideHeatSeating) sets the heat's
+///   channels by hand.
+fn orphaned_bind_detail(round: &RoundDef, heat_name: &str, layout_name: Option<&str>) -> String {
+    let round_label = round.label.trim();
+    match layout_name {
+        Some(layout_name) => format!(
+            "{heat_name} still flies the {layout_name} channel layout, but {round_label} no longer              names it — the heat keeps {layout_name}'s channels even though its round no longer              says it may. Pick a layout {round_label} names for {heat_name}, or set its channels              by hand."
+        ),
+        None => format!(
+            "{heat_name} is still bound to a channel layout {round_label} no longer names, and              that layout has since been deleted — the heat keeps the channels it was last drawn              with. Pick a layout {round_label} names for {heat_name}, or set its channels by hand."
+        ),
     }
 }
 
@@ -3460,6 +3718,13 @@ fn seat_problem_detail(round: &RoundDef, timer: &Timer, node: u32, problem: Seat
         | SeatProblem::LayoutChannelNotAllowed => format!(
             "{round_label} has a stale channel layout on {node_label} of {timer_name} — open the \
              event's Channel layouts page to repair it."
+        ),
+        // Written by `orphaned_bind_detail`: those are about a heat, not about a node on a timer,
+        // so there is nothing useful this function could say about them. Delegating back the way
+        // `layout_problem_detail` does would recurse, so this is the one honest fallback.
+        SeatProblem::HeatLayoutNotInRound | SeatProblem::HeatLayoutGone => format!(
+            "{round_label} has a heat bound to a channel layout it no longer names — open the \
+             event's Rounds page to repair it."
         ),
         SeatProblem::NoSuchNode => format!(
             "{round_label} seats a pilot on {node_label}, but {timer_name} has only {} nodes — \
@@ -3493,7 +3758,7 @@ pub(crate) const MAX_SEEDING_DEPTH: usize = 8;
 /// Pushes the sources of [`FromRanking`](SeedingRule::FromRanking),
 /// [`FromRankingRange`](SeedingRule::FromRankingRange) and
 /// [`FromHeatWinners`](SeedingRule::FromHeatWinners); ignores [`FromRoster`](SeedingRule::FromRoster)
-/// / [`AllChannels`](SeedingRule::AllChannels) (no source rounds). Rejects: a `FromRanking` /
+/// / [`ActiveNodes`](SeedingRule::ActiveNodes) (no source rounds). Rejects: a `FromRanking` /
 /// `FromRankingRange` with an empty source list, a `FromRankingRange` whose `take` is `0`, an empty
 /// `Combine.sources`, and nesting deeper than [`MAX_SEEDING_DEPTH`]. The caller validates the
 /// collected source rounds (existence + no self-seed) afterwards.
@@ -3550,7 +3815,7 @@ fn collect_source_rounds<'a>(
                 collect_source_rounds(sub, acc, depth + 1)?;
             }
         }
-        SeedingRule::FromRoster | SeedingRule::AllChannels { .. } => {}
+        SeedingRule::FromRoster | SeedingRule::ActiveNodes { .. } => {}
     }
     Ok(())
 }
@@ -3605,14 +3870,14 @@ fn validate_round_fields(
     // seeding (creatable only via the raw API — the rounds form pairs Static with FromRoster) would
     // race a different field than it ranks. Reject it (release-hardening P1-2).
     // **A disabled node is not offered a channel** (#412). An open-practice round's field IS its
-    // active channels, laid out as `node-{i}` seats — so a round naming a node the RD has switched
+    // active nodes, laid out as `node-{i}` seats — so a round naming a node the RD has switched
     // off (or one the timer does not have) would show a lineup slot that can never record a lap:
     // the silent zero-lap heat this issue exists to stop, in its practice costume. Checked against
     // the event's **primary** timer; an event with no resolvable timer is not checked (a pure-sim
     // event has no node set to check against).
-    if let SeedingRule::AllChannels { channels } = seeding {
+    if let SeedingRule::ActiveNodes { nodes } = seeding {
         if let Some(timer) = meta.effective_primary().and_then(|id| timers.get(&id)) {
-            for (node, problem) in seat_problems(channels, &timer) {
+            for (node, problem) in seat_problems(nodes, &timer) {
                 // A reported-vs-configured DRIFT is a notice, never a refusal (#412, D27): an
                 // observation about a timer is evidence, not an input to a decision. It is
                 // surfaced by `round_issues` where the RD can see and repair it, not here.
@@ -4721,7 +4986,7 @@ mod tests {
         // Open-practice refinement: an open-practice round needs **no win condition** (the request
         // omits it — `win_condition: None`) and carries an optional `time_limit_secs`. The round
         // saves: the inert default win condition is stored (never consulted), the seeding is
-        // AllChannels, and the time limit round-trips.
+        // ActiveNodes, and the time limit round-trips.
         let reg = EventRegistry::new(None).unwrap();
         let event = reg.create(&req("Practice Event")).unwrap();
 
@@ -4736,8 +5001,8 @@ mod tests {
                     params: BTreeMap::new(),
                     // No win condition — the form is not forced to supply one for open practice.
                     win_condition: None,
-                    seeding: SeedingRule::AllChannels {
-                        channels: vec![0, 1, 2],
+                    seeding: SeedingRule::ActiveNodes {
+                        nodes: vec![0, 1, 2],
                     },
                     time_limit_secs: Some(3600),
                     channel_mode: None,
@@ -4753,7 +5018,7 @@ mod tests {
         // The inert default win condition is stored (BestLap), never consulted for open practice.
         assert_eq!(round.win_condition, default_win_condition());
         assert_eq!(round.time_limit_secs, Some(3600));
-        assert!(matches!(round.seeding, SeedingRule::AllChannels { .. }));
+        assert!(matches!(round.seeding, SeedingRule::ActiveNodes { .. }));
 
         // It round-trips through the event meta with the time limit intact.
         let rounds = reg.rounds_of(&event.id).unwrap();
@@ -5622,9 +5887,7 @@ mod tests {
         practice.format = "open_practice".to_string();
         practice.win_condition = None;
         practice.time_limit_secs = None;
-        practice.seeding = SeedingRule::AllChannels {
-            channels: vec![0, 1],
-        };
+        practice.seeding = SeedingRule::ActiveNodes { nodes: vec![0, 1] };
         assert!(reg.add_round(&event.id, practice).is_ok());
     }
 
@@ -5649,7 +5912,7 @@ mod tests {
     /// #416 — a STORED round seating onto a node the timer does not have is flagged on **read**,
     /// by friendly name, with the round to repair.
     ///
-    /// This is the RD's live bench case: `AllChannels { channels: [6] }` — node index 6, the 7th
+    /// This is the RD's live bench case: `ActiveNodes { nodes: [6] }` — node index 6, the 7th
     /// node — on a four-node timer. #412 refuses that at add and update, but the round on the
     /// bench predates the fix and nothing surfaced it, so the practice heat ran and recorded
     /// nothing at all.
@@ -5664,7 +5927,7 @@ mod tests {
         practice.format = "open_practice".to_string();
         practice.win_condition = None;
         practice.time_limit_secs = None;
-        practice.seeding = SeedingRule::AllChannels { channels: vec![6] };
+        practice.seeding = SeedingRule::ActiveNodes { nodes: vec![6] };
         let round = reg.add_round(&event.id, practice).unwrap();
         assert!(
             reg.round_issues(&event.id).unwrap().is_empty(),
@@ -5678,11 +5941,11 @@ mod tests {
         let issue = &issues[0];
         assert_eq!(issue.round, round.id);
         assert_eq!(issue.problem, SeatProblem::NoSuchNode);
-        assert_eq!(issue.node, 6);
+        assert_eq!(issue.node, Some(6));
         // 1-based on screen, 0-based on the wire (repo display rule).
-        assert_eq!(issue.node_label, "Node 7");
+        assert_eq!(issue.node_label.as_deref(), Some("Node 7"));
         assert_eq!(issue.round_label, "Open Practice");
-        assert_eq!(issue.timer_name, "Field RH");
+        assert_eq!(issue.timer_name.as_deref(), Some("Field RH"));
         assert!(
             issue.detail.contains("Node 7") && issue.detail.contains("Field RH"),
             "the sentence names the node and the timer: {}",
@@ -5707,9 +5970,7 @@ mod tests {
         practice.format = "open_practice".to_string();
         practice.win_condition = None;
         practice.time_limit_secs = None;
-        practice.seeding = SeedingRule::AllChannels {
-            channels: vec![0, 2],
-        };
+        practice.seeding = SeedingRule::ActiveNodes { nodes: vec![0, 2] };
         reg.add_round(&event.id, practice).unwrap();
         assert!(
             reg.round_issues(&event.id).unwrap().is_empty(),
@@ -5731,7 +5992,7 @@ mod tests {
         let issues = reg.round_issues(&event.id).unwrap();
         assert_eq!(issues.len(), 1, "got {issues:?}");
         assert_eq!(issues[0].problem, SeatProblem::Disabled);
-        assert_eq!(issues[0].node_label, "Node 3");
+        assert_eq!(issues[0].node_label.as_deref(), Some("Node 3"));
         assert!(
             issues[0].detail.contains("switched off"),
             "the sentence says WHY: {}",
@@ -5753,9 +6014,7 @@ mod tests {
         practice.format = "open_practice".to_string();
         practice.win_condition = None;
         practice.time_limit_secs = None;
-        practice.seeding = SeedingRule::AllChannels {
-            channels: vec![0, 3],
-        };
+        practice.seeding = SeedingRule::ActiveNodes { nodes: vec![0, 3] };
         // The write is NOT refused — an observation about a timer is evidence, not a decision.
         reg.add_round(&event.id, practice)
             .expect("drift must not refuse the write (#412, D27)");
@@ -5763,7 +6022,7 @@ mod tests {
         let issues = reg.round_issues(&event.id).unwrap();
         assert_eq!(issues.len(), 1, "got {issues:?}");
         assert_eq!(issues[0].problem, SeatProblem::NotOnTimer);
-        assert_eq!(issues[0].node_label, "Node 4");
+        assert_eq!(issues[0].node_label.as_deref(), Some("Node 4"));
     }
 
     /// #416 — an event with no impossible seat reports nothing, and a non-practice round (whose
@@ -5882,13 +6141,32 @@ mod tests {
         // The other variants are unaffected.
         let roster: SeedingRule = serde_json::from_str(r#""FromRoster""#).unwrap();
         assert_eq!(roster, SeedingRule::FromRoster);
-        let channels: SeedingRule =
-            serde_json::from_str(r#"{ "AllChannels": { "channels": [0, 1, 2] } }"#).unwrap();
+        let active: SeedingRule =
+            serde_json::from_str(r#"{ "ActiveNodes": { "nodes": [0, 1, 2] } }"#).unwrap();
         assert_eq!(
-            channels,
-            SeedingRule::AllChannels {
-                channels: vec![0, 1, 2]
+            active,
+            SeedingRule::ActiveNodes {
+                nodes: vec![0, 1, 2]
             }
+        );
+        // …and back out under the same tag and key — the wire form the console writes.
+        assert_eq!(
+            serde_json::to_string(&active).unwrap(),
+            r#"{"ActiveNodes":{"nodes":[0,1,2]}}"#
+        );
+        // The PRE-rename tag is gone, deliberately: no `serde(alias)`, no migration (CLAUDE.md's
+        // pre-release rule). A round stored under it is lost — and `lenient_rounds` is what keeps
+        // that from taking the whole event with it.
+        assert!(
+            serde_json::from_str::<SeedingRule>(r#"{ "AllChannels": { "channels": [0, 1, 2] } }"#)
+                .is_err(),
+            "the old AllChannels tag must not be accepted"
+        );
+        // Nor is the old FIELD name under the new tag — half a rename is not a shape.
+        assert!(
+            serde_json::from_str::<SeedingRule>(r#"{ "ActiveNodes": { "channels": [0] } }"#)
+                .is_err(),
+            "the old `channels` key must not be accepted"
         );
 
         // FromHeatWinners (bracket advancement, #217) deserializes from its single source round
@@ -6000,6 +6278,53 @@ mod tests {
     }
 
     #[test]
+    fn an_event_whose_round_uses_the_pre_rename_seeding_tag_still_opens() {
+        // `AllChannels { channels }` → `ActiveNodes { nodes }` with no alias and no migration
+        // (CLAUDE.md's pre-release rule). The stored round IS lost — that is the deal — but the
+        // event, its heats and its results are not: `EventMeta` is what `restore_persisted_events`
+        // parses, so one unreadable round would otherwise vanish the whole event on boot.
+        let dir = std::env::temp_dir().join(format!("gridfpv-old-seeding-{}", short_suffix()));
+        let event_id;
+        {
+            let reg = EventRegistry::new(Some(dir.clone())).unwrap();
+            let created = reg.create(&req("Bench Night")).unwrap();
+            event_id = created.id.clone();
+            let open = seed_class(&reg, "Open");
+            reg.set_classes(&created.id, vec![open.clone()]).unwrap();
+            // The round that will carry the old tag, and one that will not.
+            reg.add_round(&created.id, practice_round(&[0, 1])).unwrap();
+            reg.add_round(&created.id, round_req("Qualifying R1", vec![open]))
+                .unwrap();
+        }
+        // Rewrite the practice round's seeding to the pre-rename shape, exactly as it sits in the
+        // RD's sidecar `meta` table today.
+        {
+            let log = SqliteLog::open(event_db_path(&dir, &event_id)).unwrap();
+            let json = log.get_meta(EVENT_META_KEY).unwrap().unwrap();
+            let legacy = json.replace(
+                r#""ActiveNodes":{"nodes":[0,1]}"#,
+                r#""AllChannels":{"channels":[0,1]}"#,
+            );
+            assert_ne!(legacy, json, "the fixture must actually carry the old tag");
+            log.set_meta(EVENT_META_KEY, &legacy).unwrap();
+        }
+
+        // Restart over the same data dir: the event OPENS.
+        let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
+        let restored = reopened.meta_of(&event_id).expect("the event still opens");
+        assert_eq!(restored.name, "Bench Night");
+        // …and the unreadable round — and only it — is gone. The RD recreates it.
+        assert_eq!(
+            restored.rounds.len(),
+            1,
+            "the old-tag round is dropped; every other round survives: {:?}",
+            restored.rounds
+        );
+        assert_eq!(restored.rounds[0].label, "Qualifying R1");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn restores_an_older_additive_event_meta_json() {
         // P1-6 back-compat: a known-good *older* EventMeta JSON (only the pre-#73 core fields,
         // before timers/roster/classes/rounds existed) must still load on a newer Director — the
@@ -6036,9 +6361,9 @@ mod tests {
 
     // --- Editing a round re-materializes its scheduled heats (#387) --------------------------
 
-    /// An open-practice round over `channels` — the round the #387 report is written against (its
-    /// heat's lineup *is* its channel set, so a channel edit must reach the already-filled heat).
-    fn practice_round(channels: &[usize]) -> NewRoundReq {
+    /// An open-practice round over `nodes` — the round the #387 report is written against (its
+    /// heat's lineup *is* its active-node set, so editing it must reach the already-filled heat).
+    fn practice_round(nodes: &[usize]) -> NewRoundReq {
         NewRoundReq {
             layouts: Vec::new(),
             label: "Practice".to_string(),
@@ -6046,8 +6371,8 @@ mod tests {
             format: OpenPractice::NAME.to_string(),
             params: BTreeMap::new(),
             win_condition: None,
-            seeding: SeedingRule::AllChannels {
-                channels: channels.to_vec(),
+            seeding: SeedingRule::ActiveNodes {
+                nodes: nodes.to_vec(),
             },
             time_limit_secs: None,
             channel_mode: None,
@@ -6059,8 +6384,8 @@ mod tests {
         }
     }
 
-    /// The same round as an **edit**, over a (possibly different) channel set.
-    fn practice_edit(label: &str, channels: &[usize]) -> UpdateRoundReq {
+    /// The same round as an **edit**, over a (possibly different) active-node set.
+    fn practice_edit(label: &str, nodes: &[usize]) -> UpdateRoundReq {
         UpdateRoundReq {
             layouts: Vec::new(),
             label: label.to_string(),
@@ -6068,8 +6393,8 @@ mod tests {
             format: OpenPractice::NAME.to_string(),
             params: BTreeMap::new(),
             win_condition: None,
-            seeding: SeedingRule::AllChannels {
-                channels: channels.to_vec(),
+            seeding: SeedingRule::ActiveNodes {
+                nodes: nodes.to_vec(),
             },
             time_limit_secs: None,
             channel_mode: None,
@@ -7093,7 +7418,7 @@ mod tests {
             .collect();
         assert_eq!(stale.len(), 1, "one node lost its channel: {issues:?}");
         assert_eq!(stale[0].layout_name.as_deref(), Some("Bracket A"));
-        assert_eq!(stale[0].node_label, "Node 3");
+        assert_eq!(stale[0].node_label.as_deref(), Some("Node 3"));
         // Friendly names only — the round, the layout, the node and the CHANNEL, never a bare MHz.
         let detail = &stale[0].detail;
         assert!(detail.contains("Bracket"), "names the round: {detail}");
@@ -7137,8 +7462,160 @@ mod tests {
         let issues = reg.round_issues(&created.id).unwrap();
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].problem, SeatProblem::LayoutNodeUntuned);
-        assert_eq!(issues[0].node_label, "Node 8");
+        assert_eq!(issues[0].node_label.as_deref(), Some("Node 8"));
         assert!(issues[0].detail.contains("Node 8"));
+    }
+
+    /// A round with one layout, one still-`Scheduled` heat bound to it, and distinct friendly
+    /// names for all three — the fixture the orphaned-bind tests share.
+    ///
+    /// Returns `(event, round, layout, heat)`. The round is labelled **Warmup**, the layout is
+    /// **Bracket A** and the heat is **Practice Heat**: three different strings on purpose, so an
+    /// assertion that the sentence names the heat cannot pass by naming the round.
+    fn heat_bound_to_a_layout(reg: &EventRegistry) -> (EventId, RoundId, LayoutId, HeatId) {
+        let (event, layout) = event_with_layout(reg, "Race Night");
+        let mut req_round = practice_round(&[0, 1, 2]);
+        req_round.label = "Warmup".to_string();
+        req_round.layouts = vec![layout.clone()];
+        let round = reg.add_round(&event, req_round).unwrap();
+        let heat = fill_next_heat(reg, &event, &round.id);
+        (event, round.id, layout, heat)
+    }
+
+    /// Drop every layout from `round` — the RD's edit that orphans a heat already bound to one.
+    fn drop_layouts(reg: &EventRegistry, event: &EventId, round: &RoundId) {
+        let stored = reg
+            .rounds_of(event)
+            .unwrap()
+            .into_iter()
+            .find(|r| &r.id == round)
+            .expect("the round is stored");
+        let mut edit = round_edit_of(&stored);
+        edit.layouts = Vec::new();
+        reg.update_round(event, round, edit)
+            .expect("removing a layout from a round is allowed — the RD is told, not blocked");
+    }
+
+    #[test]
+    fn a_heat_bound_to_a_layout_its_round_no_longer_names_is_reported() {
+        // The RD's scenario, verbatim: "we create a round, it has a layout, create a heat from that
+        // round, remove the layout from the round, but the heat stays on the layout channels?" Yes
+        // — the bind is a logged event so a re-fill cannot lose it, and that same durability makes
+        // it outlive a round edit. Nothing said so before this.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, round, layout, heat) = heat_bound_to_a_layout(&reg);
+        assert!(
+            reg.round_issues(&event).unwrap().is_empty(),
+            "the bind is current while the round still names the layout"
+        );
+
+        drop_layouts(&reg, &event, &round);
+
+        let issues = reg.round_issues(&event).unwrap();
+        assert_eq!(issues.len(), 1, "one orphaned bind: {issues:?}");
+        let issue = &issues[0];
+        assert_eq!(issue.problem, SeatProblem::HeatLayoutNotInRound);
+        assert_eq!(issue.heat.as_ref(), Some(&heat));
+        // Every noun a person reads is a friendly name (CLAUDE.md).
+        assert_eq!(issue.heat_name.as_deref(), Some("Practice Heat"));
+        assert_eq!(issue.layout_name.as_deref(), Some("Bracket A"));
+        assert_eq!(issue.round_label, "Warmup");
+        // Not a timer question, and not about any one node — so neither is fabricated to fill the
+        // struct, which is the display rule's exact failure mode.
+        assert_eq!(issue.node, None);
+        assert_eq!(issue.timer, None);
+
+        let detail = &issue.detail;
+        assert!(detail.contains("Practice Heat"), "names the heat: {detail}");
+        assert!(detail.contains("Bracket A"), "names the layout: {detail}");
+        assert!(detail.contains("Warmup"), "names the round: {detail}");
+        for raw in [&heat.0, &layout.0, &round.0] {
+            assert!(!detail.contains(raw.as_str()), "leaks a raw id: {detail}");
+        }
+        // Both repairs the RD has, because they chose to be told rather than blocked: rebind the
+        // heat (`SetHeatLayout`), or set its channels by hand (`OverrideHeatSeating`).
+        assert!(
+            detail.contains("Pick a layout") && detail.contains("by hand"),
+            "offers both remedies: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_raced_heat_on_a_layout_its_round_dropped_is_left_alone() {
+        // A raced heat flew what it flew, and its channels are the durable record of that. There is
+        // nothing to repair and nothing to warn about — inviting the RD to "fix" it would be worse
+        // than saying nothing.
+        use gridfpv_events::HeatTransition;
+
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, round, _layout, heat) = heat_bound_to_a_layout(&reg);
+        // Orphan it FIRST: a raced round's layouts are frozen, so this is the only order in which
+        // a raced heat can end up on a layout its round no longer names.
+        drop_layouts(&reg, &event, &round);
+        assert_eq!(
+            reg.round_issues(&event).unwrap().len(),
+            1,
+            "reported while the heat is still Scheduled"
+        );
+
+        let state = reg.resolve(&event).unwrap();
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: heat.clone(),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        assert!(
+            reg.round_issues(&event).unwrap().is_empty(),
+            "a raced heat is never reported — it flew what it flew"
+        );
+    }
+
+    #[test]
+    fn an_orphaned_bind_to_a_deleted_layout_still_reports_without_naming_it() {
+        // One step further along, and reachable precisely because the delete refusal is scoped to
+        // ROUNDS: drop the layout from the round (creating the orphan), and the delete then goes
+        // through. There is no layout left to name, which is the whole difference.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, round, layout, heat) = heat_bound_to_a_layout(&reg);
+        drop_layouts(&reg, &event, &round);
+        reg.remove_channel_layout(&event, &layout).unwrap();
+
+        let issues = reg.round_issues(&event).unwrap();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].problem, SeatProblem::HeatLayoutGone);
+        assert_eq!(issues[0].heat_name.as_deref(), Some("Practice Heat"));
+        assert_eq!(issues[0].layout, None, "there is no layout to point at");
+        assert_eq!(issues[0].layout_name, None);
+        let detail = &issues[0].detail;
+        assert!(
+            detail.contains("Practice Heat") && detail.contains("Warmup"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("deleted"),
+            "says the layout is gone: {detail}"
+        );
+        assert!(
+            !detail.contains(layout.0.as_str()),
+            "leaks a raw id: {detail}"
+        );
+        assert!(
+            !detail.contains(heat.0.as_str()),
+            "leaks a raw id: {detail}"
+        );
     }
 
     #[test]

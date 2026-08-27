@@ -750,7 +750,7 @@ fn round_field_at(
 fn seeding_freezes(seeding: &SeedingRule) -> bool {
     !matches!(
         seeding,
-        SeedingRule::FromRoster | SeedingRule::AllChannels { .. }
+        SeedingRule::FromRoster | SeedingRule::ActiveNodes { .. }
     )
 }
 
@@ -849,12 +849,12 @@ fn resolve_seeding(
             }
             Ok(field)
         }
-        // Open practice (open-practice format): the field is the active **channels**, each node
-        // index laid out as a `node-{i}` competitor ref (the timer-seat handle) in the given order.
-        // No pilots, no membership — the field is the channels themselves, so laps land on
+        // Open practice (open-practice format): the field is the **active nodes**, each node index
+        // laid out as a `node-{i}` competitor ref (the timer-seat handle) in the given order.
+        // No pilots, no membership — the field is the timer seats themselves, so laps land on
         // `node-{i}` seats rather than pilots. They ARE logged like any other format (D5 reversed
         // 2026-08-24, #398); practice is excluded from scoring, not from the log.
-        SeedingRule::AllChannels { channels } => Ok(channels
+        SeedingRule::ActiveNodes { nodes } => Ok(nodes
             .iter()
             .map(|i| CompetitorRef(format!("node-{i}")))
             .collect()),
@@ -970,9 +970,9 @@ fn aggregate_rankings(rankings: &[Vec<RankEntry>]) -> Vec<RankEntry> {
 }
 
 /// Whether `round` is an **open-practice** round (open-practice format): `format ==
-/// "open_practice"` with [`SeedingRule::AllChannels`] seeding (race redesign open-practice Slice 1).
+/// "open_practice"` with [`SeedingRule::ActiveNodes`] seeding (race redesign open-practice Slice 1).
 ///
-/// Used by `add_round`'s auto-fill and by `fill_round`; the field builder lays the channels out as
+/// Used by `add_round`'s auto-fill and by `fill_round`; the field builder lays the nodes out as
 /// `node-{i}` refs. The format name *and* the seeding are both checked so a mis-tagged round (one or
 /// the other but not both) is treated as a normal round, never half-open-practice.
 ///
@@ -984,7 +984,7 @@ fn aggregate_rankings(rankings: &[Vec<RankEntry>]) -> Vec<RankEntry> {
 /// scored even though it is not treated as practice here.
 pub fn is_open_practice(round: &RoundDef) -> bool {
     round.format == gridfpv_engine::format::OpenPractice::NAME
-        && matches!(round.seeding, SeedingRule::AllChannels { .. })
+        && matches!(round.seeding, SeedingRule::ActiveNodes { .. })
 }
 
 /// Whether `round` is an **open-ended `Static` round** (release-hardening P1-8): a
@@ -1904,7 +1904,7 @@ fn per_heat_plans(
     // and `assign_frequencies` never runs for a practice heat.
     //
     // The original justification was *"its lineup is the active channels themselves"*, and that
-    // premise was false (#402): `SeedingRule::AllChannels { channels }` takes node/seat *indices*,
+    // premise was false (#402): `SeedingRule::ActiveNodes { nodes }` takes node/seat *indices*,
     // and a seat index carries no frequency at all. So a practice seat's channel had **no source in
     // the log**, and the console could only fall back to what the hardware happened to report.
     //
@@ -4253,7 +4253,7 @@ mod tests {
     }
 
     /// An **open-practice** round fixture (open-practice format, Slice 1): `format: "open_practice"`
-    /// + `seeding: AllChannels { channels }`, with no eligible classes (it is not a class round).
+    /// + `seeding: ActiveNodes { nodes }`, with no eligible classes (it is not a class round).
     fn open_practice_round(id: &str, channels: &[usize]) -> RoundDef {
         RoundDef {
             layouts: Vec::new(),
@@ -4263,8 +4263,8 @@ mod tests {
             format: "open_practice".into(),
             params: BTreeMap::new(),
             win_condition: WinCondition::BestLap,
-            seeding: SeedingRule::AllChannels {
-                channels: channels.to_vec(),
+            seeding: SeedingRule::ActiveNodes {
+                nodes: channels.to_vec(),
             },
             channel_mode: ChannelMode::PerHeat,
             staging_timer_secs: default_staging_timer_secs(),
@@ -4352,7 +4352,7 @@ mod tests {
 
     #[test]
     fn is_open_practice_recognizes_only_the_open_practice_format_plus_allchannels() {
-        // Both the format name AND AllChannels seeding are required.
+        // Both the format name AND ActiveNodes seeding are required.
         assert!(is_open_practice(&open_practice_round("op", &[0])));
         // A normal qual round is not open-practice.
         assert!(!is_open_practice(&qual_round("q", "open")));

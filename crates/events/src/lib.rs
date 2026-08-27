@@ -658,7 +658,7 @@ pub enum Event {
     /// draw. Without this, the seeding re-resolved live on every read — so adjudicating the
     /// *source* round after this round had already raced silently rewrote who this round's
     /// field "was", vanishing raced results from its ranking. Roster-derived seedings
-    /// (`FromRoster` / `AllChannels`) never record a draw: they stay live so late entrants
+    /// (`FromRoster` / `ActiveNodes`) never record a draw: they stay live so late entrants
     /// keep working.
     RoundFieldDrawn {
         /// The round whose field this freezes.

@@ -608,7 +608,7 @@ impl FormatRegistry {
     ///   so re-grouping between heats stays a tournament-structure job), `scoring` ("Scoring",
     ///   placement/points).
     /// - `open_practice`: no params (the active channels are the field, carried by the round's
-    ///   `AllChannels` seeding).
+    ///   `ActiveNodes` seeding).
     /// - `zippyq`: **not offered** — shelved (#218); still registered in
     ///   [`standard`](Self::standard) so persisted rounds load, but omitted from this offered set.
     pub fn standard_schemas() -> Vec<FormatSchema> {
@@ -731,7 +731,7 @@ impl OpenPractice {
     }
 
     /// The registry constructor: the active channels are the seeded field (the round's
-    /// `AllChannels` seeding laid them out as `node-{i}` refs); no params, no draw.
+    /// `ActiveNodes` seeding laid them out as `node-{i}` refs); no params, no draw.
     pub fn from_config(config: &FormatConfig) -> Box<dyn Generator> {
         Box::new(Self::new(config.seeding.apply(&config.field)))
     }

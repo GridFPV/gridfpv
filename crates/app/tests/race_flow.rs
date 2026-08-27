@@ -1246,7 +1246,7 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
     let event_meta: serde_json::Value = serde_json::from_str(&body).unwrap();
     let event = EventId(event_meta["id"].as_str().unwrap().to_string());
 
-    // Define an open-practice round: NO win condition, a 1s time limit, AllChannels seeding over two
+    // Define an open-practice round: NO win condition, a 1s time limit, ActiveNodes seeding over two
     // node-seats. Creating it must auto-build the single open heat (the channels are the lineup).
     let open_req = || NewRoundReq {
         layouts: Vec::new(),
@@ -1256,9 +1256,7 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
         params: BTreeMap::new(),
         win_condition: None,
         time_limit_secs: Some(1),
-        seeding: SeedingRule::AllChannels {
-            channels: vec![0, 1],
-        },
+        seeding: SeedingRule::ActiveNodes { nodes: vec![0, 1] },
         channel_mode: None,
         staging_timer_secs: None,
         start_procedure: Some(StartProcedure::RandomizedDelay {
@@ -1463,9 +1461,7 @@ async fn two_open_practice_rounds_in_one_event_get_distinct_heats_e2e() {
         params: BTreeMap::new(),
         win_condition: None,
         time_limit_secs: None,
-        seeding: SeedingRule::AllChannels {
-            channels: vec![0, 1],
-        },
+        seeding: SeedingRule::ActiveNodes { nodes: vec![0, 1] },
         channel_mode: None,
         staging_timer_secs: None,
         start_procedure: None,
@@ -1582,9 +1578,7 @@ async fn open_practice_laps_are_logged_and_durable_but_never_scored_e2e() {
             params: BTreeMap::new(),
             win_condition: None,
             time_limit_secs: Some(1),
-            seeding: SeedingRule::AllChannels {
-                channels: vec![0, 1],
-            },
+            seeding: SeedingRule::ActiveNodes { nodes: vec![0, 1] },
             channel_mode: None,
             staging_timer_secs: None,
             start_procedure: Some(StartProcedure::RandomizedDelay {

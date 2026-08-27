@@ -123,7 +123,7 @@
       practice pass become a durable fact like every other format's, or live only in memory?</dd>
       <dt>Decision</dt>
       <dd>An open-practice round is <strong>one open heat over the active channels</strong>
-      (<code>node-{i}</code> seats, seeded by <code>AllChannels { channels }</code>), and is
+      (<code>node-{i}</code> seats, seeded by <code>ActiveNodes { nodes }</code>), and is
       <strong>auto-created</strong>. It then behaves <strong>exactly like every other round</strong>:
       its passes are appended to the durable log as ordinary <code>Pass</code> events stamped with
       the heat, and the live state, lap list, marshaling, audit trail and crossing tones all fold
@@ -278,7 +278,7 @@
       re-resolution let an adjudication on the <em>source</em> round, landing after the dependent
       round had raced, silently rewrite who its field "was" (raced results vanished from its
       ranking). Before the first fill, resolution stays live (a build-ahead round tracks its source
-      until it draws), and roster seedings (<code>FromRoster</code> / <code>AllChannels</code>) never
+      until it draws), and roster seedings (<code>FromRoster</code> / <code>ActiveNodes</code>) never
       freeze — a late entrant still joins mid-round. The user's call: freeze, not warn.</dd>
     </dl>
 

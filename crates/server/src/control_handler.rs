@@ -5095,7 +5095,7 @@ mod tests {
             })
             .unwrap()
             .id;
-        // An open-practice round: channel-seated (`AllChannels` seeding), no class membership.
+        // An open-practice round: node-seated (`ActiveNodes` seeding), no class membership.
         // Its single channel heat is one draw — the (dynamic) format the RD single-steps, never
         // fill-all.
         let round = registry
@@ -5108,8 +5108,8 @@ mod tests {
                     format: "open_practice".into(),
                     params: BTreeMap::new(),
                     win_condition: None,
-                    seeding: SeedingRule::AllChannels {
-                        channels: vec![0, 1, 2],
+                    seeding: SeedingRule::ActiveNodes {
+                        nodes: vec![0, 1, 2],
                     },
                     time_limit_secs: None,
                     channel_mode: None,
