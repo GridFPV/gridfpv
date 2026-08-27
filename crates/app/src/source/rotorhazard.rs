@@ -293,6 +293,18 @@ pub struct RhConnection {
     /// its async teardown used to stomp `Disconnected` over the successor's `Connecting`/
     /// `Connected`, and the failover logic read the healthy new primary as down.
     yield_status: Arc<AtomicBool>,
+    /// Whether this connection's driver has **reached `Connected` and not since dropped** (#437) —
+    /// the one question a queued write has to ask before it can call itself landed.
+    ///
+    /// Set by [`drive`] after the socket is up *and* the previous connection's stale writes have
+    /// been cleared, so there is no window in which a write can be accepted onto a link that is
+    /// about to wipe it; cleared the moment the link drops, and on cancel.
+    ///
+    /// It is deliberately **not** the registry's [`TimerStatus`]: that is one cell per *timer*,
+    /// shared across a supersede hand-off, and the whole of #437 was a write being accepted by a
+    /// brand-new connection while the status cell still read `Connected` from the connection it
+    /// replaced. This is per *connection*, which is the thing the write is actually queued on.
+    connected: Arc<AtomicBool>,
     /// The armed-heat slot: `Some` while a heat is racing on this connection, else `None`.
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
@@ -331,6 +343,7 @@ impl RhConnection {
     pub fn open(timer_id: TimerId, url: String, timers: TimerRegistry) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let yield_status = Arc::new(AtomicBool::new(false));
+        let connected = Arc::new(AtomicBool::new(false));
         let armed: Arc<Mutex<Option<ArmedHeat>>> = Arc::new(Mutex::new(None));
         let tune: TuneSlot = Arc::new(Mutex::new(None));
         let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
@@ -339,6 +352,7 @@ impl RhConnection {
         let driver = {
             let cancel = cancel.clone();
             let yield_status = yield_status.clone();
+            let connected = connected.clone();
             let armed = armed.clone();
             let tune = tune.clone();
             let prepare = prepare.clone();
@@ -351,6 +365,7 @@ impl RhConnection {
                     timers,
                     cancel,
                     yield_status,
+                    connected,
                     armed,
                     tune,
                     prepare,
@@ -362,6 +377,7 @@ impl RhConnection {
         Self {
             cancel,
             yield_status,
+            connected,
             armed,
             tune,
             prepare,
@@ -476,9 +492,45 @@ impl RhConnection {
         write.queue_into(&mut pending);
     }
 
+    /// Whether this connection's socket is **up right now** (#437) — it reached `Connected` and
+    /// has not since dropped, and its stale-write clear has already run.
+    ///
+    /// The precondition for a queued write to mean anything. A connection that is still dialling
+    /// will wipe its queue the instant it connects (deliberately — see
+    /// [`clear_writes_that_outlived_the_previous_connection`]), so a write handed to it now is
+    /// *accepted and then silently discarded*, with no readback and no warning. Asking this first
+    /// is what keeps "sent" from becoming indistinguishable from "landed".
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    /// **Test seam:** stand in for [`drive`] having reached `Connected`, so the *positive* half of
+    /// the #437 gate can be asserted without a RotorHazard to dial.
+    ///
+    /// A gate that is only ever tested closed is indistinguishable from a wall — and a wall here
+    /// would silently kill every Tune-page write in the field while every unit test stayed green
+    /// (CLAUDE.md: a check that cannot see the thing it is checking).
+    #[cfg(test)]
+    pub(crate) fn mark_connected_for_test(&self) {
+        self.connected.store(true, Ordering::Relaxed);
+    }
+
+    /// **Test seam:** what is sitting in this connection's write queue, so a test can prove a write
+    /// actually reached the driver rather than merely being reported as landed.
+    #[cfg(test)]
+    pub(crate) fn queued_writes_for_test(&self) -> Vec<PendingTimerWrite> {
+        self.writes
+            .lock()
+            .expect("pending-writes lock poisoned")
+            .clone()
+    }
+
     /// Tear the connection down: stop any race, disconnect, leave the timer `Disconnected`. Called
     /// when the timer is deselected, the active event changes, or the Director shuts down.
     pub fn cancel(&self) {
+        // Stop accepting writes at once, rather than whenever the driver thread next notices: a
+        // write handed to a connection that is on its way out has nowhere to land (#437).
+        self.connected.store(false, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
 
@@ -486,6 +538,7 @@ impl RhConnection {
     /// active-event switch): the exiting driver yields the shared timer status to its successor
     /// (see [`yield_status`](Self::yield_status)).
     pub fn cancel_superseded(&self) {
+        self.connected.store(false, Ordering::Relaxed);
         self.yield_status.store(true, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -494,6 +547,7 @@ impl RhConnection {
 impl Drop for RhConnection {
     fn drop(&mut self) {
         // A dropped connection (the reconcile map removed it) must still tear down on its thread.
+        self.connected.store(false, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -613,6 +667,7 @@ fn drive(
     timers: TimerRegistry,
     cancel: Arc<AtomicBool>,
     yield_status: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     tune: TuneSlot,
     prepare: PrepareSlot,
@@ -679,6 +734,11 @@ fn drive(
         timers.set_status(&timer_id, TimerStatus::Connected);
         backoff = RECONNECT_BACKOFF_MIN;
         clear_writes_that_outlived_the_previous_connection(&writes);
+        // Only NOW may this connection accept writes (#437) — after the clear, never before it.
+        // Flipping this the other way round would leave a window in which a write is accepted onto
+        // a link that is about to wipe it, which is the whole of the bug: accepted, reported
+        // landed, discarded, no readback, no warning.
+        connected.store(true, Ordering::Relaxed);
 
         // Probe for the GridFPV plugin (D16, S1): `connect` already emitted `gridfpv_hello`, so
         // wait briefly for the `gridfpv_hello_ack`. Present-&-compatible / incompatible / missing
@@ -760,6 +820,10 @@ fn drive(
                 timer_id: &timer_id,
             },
         );
+
+        // This connection is over: stop accepting writes before anything else, so a write racing
+        // the teardown is reported not-landed rather than queued onto a socket coming down (#437).
+        connected.store(false, Ordering::Relaxed);
 
         // Stop any in-flight race and disconnect on the way out of this connection. `disconnect`
         // returns the adapter so the next reconnect reuses its dedup state (the #105 fix).

@@ -202,16 +202,62 @@ impl RhConnections {
     /// GridFPV's own records of the values are unaffected (`Timer::calibration`,
     /// `Timer::node_channels`, D27); it is the *application* of them that was lost, and the RD sees
     /// that as a value that never comes back confirmed.
+    ///
+    /// # A connection that has not connected does not count (#437)
+    ///
+    /// "A live connection exists for this timer" is not the same question as "this timer's socket
+    /// is up", and the difference is a real race. A write parks in the registry while the timer
+    /// reads `Connected`; before the next 500 ms tick the RD edits the URL (or the active event
+    /// switches), so **the same tick** supersedes the entry and `Open`s a fresh [`RhConnection`]
+    /// whose driver thread is still dialling — and then drains the parked write onto it. The
+    /// entry exists, so the old code answered `true`: landed, no warning, nothing logged. It had
+    /// not landed: the new driver wipes its queue the instant it connects (deliberately — a
+    /// threshold that fired minutes later would move a detector nobody asked to move), so the
+    /// accepted write vanished with no readback. *Sent* became indistinguishable from *landed*,
+    /// which is the #403 failure class the readback design exists to prevent.
+    ///
+    /// So a connection is only asked to carry a write once it has actually reached `Connected`
+    /// ([`RhConnection::is_connected`]). A write is **never held over** for a link that is on its
+    /// way up — that is refused by design, for every one of the reasons above — so a still-dialling
+    /// connection reports not-landed and the RD sees a value that never comes back confirmed.
     pub fn deliver(&self, write: PendingTimerWrite) -> bool {
         let map = self.inner.lock().expect("rh-connections lock poisoned");
         let mut found = false;
         for (key, live) in map.iter() {
-            if &key.1 == write.timer() {
+            if &key.1 == write.timer() && live.conn.is_connected() {
                 live.conn.queue(write.clone());
                 found = true;
             }
         }
         found
+    }
+
+    /// **Test seam:** stand in for every open connection's driver having reached `Connected`, so
+    /// the *open* half of the #437 gate is asserted too — see
+    /// [`RhConnection::mark_connected_for_test`].
+    #[cfg(test)]
+    fn mark_all_connected_for_test(&self) {
+        for live in self
+            .inner
+            .lock()
+            .expect("rh-connections lock poisoned")
+            .values()
+        {
+            live.conn.mark_connected_for_test();
+        }
+    }
+
+    /// **Test seam:** what actually reached `timer`'s connection queue, so a test can tell a write
+    /// that *landed* from one merely reported as landed.
+    #[cfg(test)]
+    fn queued_writes_for_test(&self, timer: &TimerId) -> Vec<PendingTimerWrite> {
+        self.inner
+            .lock()
+            .expect("rh-connections lock poisoned")
+            .iter()
+            .filter(|(key, _)| &key.1 == timer)
+            .flat_map(|(_, live)| live.conn.queued_writes_for_test())
+            .collect()
     }
 
     /// Reconcile the live set against `wanted` ([`wanted_connections`]: the active event's selected
@@ -1214,7 +1260,6 @@ mod tests {
     /// that is already up: a connection still dialling must report **not landed**, so the reconciler
     /// logs it and the RD sees a level (or a channel) that never comes back confirmed.
     #[tokio::test]
-    #[ignore = "known bug #437: a write drained onto a dialling connection reports landed — un-ignore with the fix"]
     async fn a_write_drained_onto_a_still_dialling_connection_is_not_landed() {
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", DEAD_URL);
@@ -1245,6 +1290,38 @@ mod tests {
             !channel_landed,
             "and the same for a channel write — `deliver`'s own contract is that nothing is \
              queued for a future connection"
+        );
+    }
+
+    /// **…and the same connection, once it is up, takes the write (#437).**
+    ///
+    /// The other half of the gate, and the half that matters most if it ever breaks: a liveness
+    /// check that never opens is a wall, and a wall here would silently kill every Tune-page write
+    /// in the field while every test above stayed green — a check that cannot see the thing it is
+    /// checking (CLAUDE.md). So this asserts the write both reports landed *and* actually reaches
+    /// the driver's queue.
+    #[tokio::test]
+    async fn a_write_drained_onto_a_connected_connection_lands_on_its_driver() {
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", DEAD_URL);
+        let connections = RhConnections::new();
+
+        connections.reconcile(&[(event("e1"), rh.clone(), DEAD_URL.to_string())], &timers);
+        // Stand in for the driver having connected (nothing here dials a real RotorHazard).
+        connections.mark_all_connected_for_test();
+
+        let landed = connections.deliver(a_calibration(&rh));
+        let queued = connections.queued_writes_for_test(&rh);
+
+        // Tear the driver thread down before asserting, so a failure does not leave it dialling.
+        connections.reconcile(&[], &timers);
+
+        assert!(landed, "a live connection must take the write");
+        assert_eq!(
+            queued,
+            vec![a_calibration(&rh)],
+            "and it must actually reach the driver's queue — reporting landed without queueing \
+             would be the same lie from the other direction"
         );
     }
 }
