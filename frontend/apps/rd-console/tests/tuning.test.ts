@@ -576,8 +576,62 @@ describe('channelOptions — the dropdown source is the CAPABILITY, never `avail
     // A dropdown that cannot show the node's actual value would silently render some OTHER option
     // as selected — the RD would read a channel the gate is not on.
     expect(channelOptions(FLEXIBLE, FULL, [], 5905).some((o) => o.mhz === 5905)).toBe(true);
-    // …but not one a Fixed timer cannot tune to: that would offer a refusal.
-    expect(channelOptions(FIXED, FULL, [], 5905).some((o) => o.mhz === 5905)).toBe(false);
+  });
+
+  // #449. This assertion used to read the other way — "…but not one a Fixed timer cannot tune to:
+  // that would offer a refusal" — which asserted the bug as the behaviour. It is wrong on its own
+  // terms: nothing is being offered *as a write* here, the node is ALREADY on that channel, and
+  // `<select value={chan.mhz}>` matching no option does not hide the situation, it makes the
+  // browser show the first option instead — a channel the node is not on, presented as the RD's
+  // own selection.
+  it('shows a Fixed timer the channel its node is on, even outside the declared set', () => {
+    // How a real timer gets here: a heat retuned the node before the RD narrowed the declared set,
+    // or RotorHazard came back holding a stale profile.
+    const options = channelOptions(FIXED, FULL, [], 5905);
+    expect(options.some((o) => o.mhz === 5905)).toBe(true);
+    // Named through the shared helper, so the off-catalog frequency reads as the RD's own rather
+    // than as a bare number standing in for a name it does not have.
+    expect(options.find((o) => o.mhz === 5905)?.label).toBe('Custom — 5905');
+    // And the declared set is still all it OFFERS beyond that — the escape hatch is one channel
+    // wide, not a hole in the capability.
+    expect(options.map((o) => o.mhz)).toEqual([5658, 5800, 5905]);
+  });
+
+  it('shows a Fixed timer a CATALOG channel its node is on but that it does not declare', () => {
+    // The same situation with a channel the catalog can name: it keeps its band and channel, so
+    // the emit that moves the node off it can still label itself on RotorHazard.
+    const options = channelOptions(FIXED, FULL, [], 5880);
+    expect(options.find((o) => o.mhz === 5880)).toMatchObject({
+      mhz: 5880,
+      label: 'Raceband R7 (F8) — 5880',
+      custom: false
+    });
+  });
+
+  it('does not duplicate the current channel when the capability already offers it', () => {
+    expect(channelOptions(FIXED, FULL, [], 5800).filter((o) => o.mhz === 5800)).toHaveLength(1);
+    expect(channelOptions(FLEXIBLE, FULL, [5891], 5891).filter((o) => o.mhz === 5891)).toHaveLength(
+      1
+    );
+  });
+
+  // #449, the second half: `offeredCatalog` filtered the catalog, so a Fixed timer's declared
+  // frequency that the catalog had no entry for was dropped before it ever reached an option.
+  it('offers a Fixed timer a declared channel the catalog does not know', () => {
+    const oddball: ChannelCapability = { Fixed: { channels: [5658, 5891] } };
+    const options = channelOptions(oddball, FULL, []);
+    expect(options.map((o) => o.mhz)).toEqual([5658, 5891]);
+    // Labelled from the raw MHz through `channels.ts`, and marked as the non-catalog entry it is.
+    expect(options[1]).toMatchObject({ label: 'Custom — 5891', custom: true });
+    // No band/channel invented for it — the emit omits them rather than handing RotorHazard a
+    // made-up label (see `commitChannel`).
+    expect(options[1].band).toBeUndefined();
+    expect(options[1].channel).toBeUndefined();
+  });
+
+  it('offers a Fixed timer whose declared set is entirely off-catalog, rather than nothing', () => {
+    const oddball: ChannelCapability = { Fixed: { channels: [5921, 5891] } };
+    expect(channelOptions(oddball, FULL, []).map((o) => o.mhz)).toEqual([5891, 5921]);
   });
 
   it('labels every option by band, channel AND frequency, and marks a custom one', () => {

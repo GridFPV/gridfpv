@@ -1069,6 +1069,45 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
     h.unmount();
   });
 
+  it('shows a Fixed timer’s node on a channel outside the declared set (#449)', async () => {
+    // Node 0 reports 5880, and the RD has since narrowed this timer to R2/F4. With 5880 missing
+    // from the options the `<select value={chan.mhz}>` matched nothing, and the browser fell back
+    // to rendering the FIRST option — so the page showed Raceband R2 on a gate sitting on R7, as
+    // though the RD had picked it. The one thing that must never happen on this control.
+    const h = await renderTune({
+      timer: { ...TIMER, channel_capability: { Fixed: { channels: [5695, 5800] } } }
+    });
+    const select = screen.getByTestId('channel-0').querySelector('select') as HTMLSelectElement;
+    expect(select.value).toBe('5880');
+    // Present, named, and last — the declared set still leads.
+    expect([...select.options].map((o) => o.textContent?.trim())).toEqual([
+      'Raceband R2 — 5695',
+      'Fatshark F4 — 5800',
+      'Raceband R7 — 5880'
+    ]);
+    h.unmount();
+  });
+
+  it('offers a Fixed timer a declared channel the catalog cannot name (#449)', async () => {
+    // `offeredCatalog` filtered the catalog, so a declared frequency with no catalog entry was
+    // dropped before it could become an option — a timer on a non-standard grid could never be
+    // offered the channels it supports. Node 0's own 5880 rides along beside them, as ever.
+    const h = await renderTune({
+      timer: { ...TIMER, channel_capability: { Fixed: { channels: [5695, 5891] } } }
+    });
+    const select = screen.getByTestId('channel-0').querySelector('select') as HTMLSelectElement;
+    const labels = [...select.options].map((o) => o.textContent?.trim());
+    // Named from the raw MHz through `channels.ts` — never a bare number on its own.
+    expect(labels).toContain('Custom — 5891');
+    expect(labels).toEqual(['Raceband R2 — 5695', 'Custom — 5891', 'Raceband R7 — 5880']);
+
+    // And it is genuinely selectable: the write goes out with no band/channel invented for it.
+    await fireEvent.change(select, { target: { value: '5891' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    expect(h.applyChannel).toHaveBeenCalledWith('rh-1', { node: 0, mhz: 5891 });
+    h.unmount();
+  });
+
   it('sends the BAND AND CHANNEL, not just the frequency', async () => {
     // RotorHazard's `on_set_frequency` stores band/channel on its active profile, and the RD
     // validates this work by refreshing RotorHazard's own page — where a bare number with no `R7`

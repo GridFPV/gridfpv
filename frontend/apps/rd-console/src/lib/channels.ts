@@ -185,17 +185,45 @@ export function fixedAllowed(cap: ChannelCapability | undefined): number[] {
 }
 
 /**
- * The catalog a picker offers for a given capability: a **Fixed** timer is limited to its built-in
- * allowed set (no custom), so only those catalog entries show; a **Flexible** timer offers the whole
- * catalog (and may add custom raw MHz). Preserves catalog order.
+ * One channel a picker offers, and the catalog entry behind it if there is one.
+ *
+ * `entry` is absent for a frequency a **Fixed** timer declares that the catalog does not know
+ * (#449) — a module built for a non-standard grid, or a catalog that has moved on since the RD
+ * typed the timer's allowed set. Such a channel has no band and no channel code, so a caller labels
+ * it from its raw MHz through {@link channelOptionLabel}, which is where "there is no friendly name
+ * for this one" is spelled honestly (`"Custom — 5891"`) rather than invented.
+ */
+export interface OfferedChannel {
+  /** The centre frequency in MHz — the wire handle, and the only thing every offer has. */
+  mhz: number;
+  /** The catalog entry this frequency resolves to, or `undefined` when the catalog has no name. */
+  entry?: ChannelCatalogEntry;
+}
+
+/**
+ * The channels a picker offers for a given capability: a **Fixed** timer is limited to its declared
+ * allowed set (no custom), a **Flexible** one offers the whole catalog (and may add custom raw MHz
+ * on top). Catalog order is preserved.
+ *
+ * ## A declared channel is offered whether or not the catalog knows it (#449)
+ *
+ * This used to be `catalog.filter(...)`, which silently dropped every Fixed channel the catalog had
+ * no entry for — so a timer whose module runs a non-standard grid could *never* be offered the
+ * channels it actually supports, and a node sitting on one of them had no option to select. The
+ * declared set is the timer's own statement about itself; the catalog is a naming table, and a
+ * missing name is not a missing channel. So the known ones come back in catalog order, and the rest
+ * follow ascending with no entry to name them.
  */
 export function offeredCatalog(
   cap: ChannelCapability | undefined,
   catalog: ChannelCatalogEntry[]
-): ChannelCatalogEntry[] {
-  if (capabilityTag(cap) === 'Flexible') return catalog;
+): OfferedChannel[] {
+  if (capabilityTag(cap) === 'Flexible') return catalog.map((entry) => ({ mhz: entry.mhz, entry }));
   const allowed = new Set(fixedAllowed(cap));
-  return catalog.filter((e) => allowed.has(e.mhz));
+  const named = catalog.filter((e) => allowed.has(e.mhz));
+  const namedMhz = new Set(named.map((e) => e.mhz));
+  const unnamed = [...allowed].filter((mhz) => !namedMhz.has(mhz)).sort((a, b) => a - b);
+  return [...named.map((entry) => ({ mhz: entry.mhz, entry })), ...unnamed.map((mhz) => ({ mhz }))];
 }
 
 /** A plausible 5.8 GHz centre frequency (the band the catalog lives in). Guards custom-MHz entry. */
