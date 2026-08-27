@@ -173,9 +173,20 @@ export function seatNodes(
  * Deliberately looser than the Director's `NodeDrift` (which also fires on an enabled phantom
  * seat): the row's job is only to say *"these two numbers disagree — open this"*, and the dialog
  * carries the exact reading.
+ *
+ * `!= null` and not `!== undefined` (#445). `reported_nodes` is `Option<u32>` with `#[serde(default)]`
+ * and **no** `skip_serializing_if` (`crates/server/src/timers.rs`), so a timer the Director has
+ * never asked — a Mock, or any RotorHazard that has not connected yet — arrives on the wire as
+ * `"reported_nodes": null`, not as an absent key. `null !== undefined` is true, so every one of
+ * those rows flagged drift and TimerManager rendered a danger badge reading "Timer reports " with
+ * nothing after it (`null` renders empty). {@link hasWidthOverride} guards both; so does this now.
+ *
+ * The binding types the field `reported_nodes?: number` (`#[ts(optional)]`), which cannot express
+ * the `null` the wire actually sends — which is exactly why the type-checker was no help here and
+ * the fixture proving it has to cast.
  */
 export function timerDrifts(timer: Timer): boolean {
-  return timer.reported_nodes !== undefined && timer.reported_nodes !== timerWidth(timer);
+  return timer.reported_nodes != null && timer.reported_nodes !== timerWidth(timer);
 }
 
 /**
