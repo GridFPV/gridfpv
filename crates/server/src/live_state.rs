@@ -298,6 +298,19 @@ pub struct PilotProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub last_lap_micros: Option<i64>,
+    /// Duration (µs, source clock) of the pilot's **fastest** completed lap of the run, or
+    /// `None` before they have completed one (#425).
+    ///
+    /// Served, never accumulated. The console used to fold a running `min` over the
+    /// `last_lap_micros` of the frames it happened to observe, which made the displayed best a
+    /// function of *which frames a client saw* — lossy on any re-snapshot, and more so since
+    /// #422 collapses a resumed span into one settled envelope rather than re-walking each
+    /// intermediate lap time. Here the whole (marshaling-aware, floored) lap list is in hand, so
+    /// this is a `min` over every lap that counted: correct by construction, identical on a
+    /// re-fold, and unchanged by a reconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub best_lap_micros: Option<i64>,
 }
 
 /// Fold the event log into the [`LiveRaceState`] (protocol.html §1) — issue #41.
@@ -363,6 +376,22 @@ pub fn live_state_over_with_floor(
     live_state_core(&events, &pairs, min_lap_micros)
 }
 
+/// One competitor ref's accumulation while folding the run's lap list into [`PilotProgress`].
+///
+/// A ref can appear once per adapter, so every field folds across entries: the lap count adds,
+/// the last lap keeps the temporally latest, and `best` takes the `min` over every counted lap.
+#[derive(Debug, Clone, Copy, Default)]
+struct RefProgress {
+    /// Laps counted for this ref so far.
+    laps: u32,
+    /// Duration (µs) of the temporally latest counted lap — the wire's `last_lap_micros`.
+    last_duration: Option<i64>,
+    /// Completion instant (source µs) of that latest lap — the running-order tie-break.
+    last_at: Option<i64>,
+    /// Shortest counted lap duration (µs) of the run — the wire's `best_lap_micros` (#425).
+    best: Option<i64>,
+}
+
 /// The shared fold behind [`live_state_with_floor`] (full log, positional offsets) and
 /// [`live_state_over_with_floor`] (a window with preserved global offsets). `window` is the SAME
 /// sequence as `events`, paired with each event's global append offset.
@@ -422,22 +451,32 @@ fn live_state_core(
         .collect();
     let laps = lap_list_marshaled_with_floor(run_window.iter().copied(), min_lap_micros);
     // Per ref: lap count, the last lap's DURATION (the wire's `last_lap_micros` display value),
-    // and the last lap's COMPLETION time (`at`) — the running-order tie-break. The scorer ranks
-    // equal-lap pilots by earlier last-lap completion; ordering on duration here made the live
-    // overlay contradict the scored Timed result (a slower-but-ahead pilot showed behind).
-    let mut by_ref: BTreeMap<&CompetitorRef, (u32, Option<i64>, Option<i64>)> = BTreeMap::new();
+    // the last lap's COMPLETION time (`at`) — the running-order tie-break — and the run's BEST
+    // lap duration (#425). The scorer ranks equal-lap pilots by earlier last-lap completion;
+    // ordering on duration here made the live overlay contradict the scored Timed result (a
+    // slower-but-ahead pilot showed behind).
+    let mut by_ref: BTreeMap<&CompetitorRef, RefProgress> = BTreeMap::new();
     for cl in &laps.competitors {
         let CompetitorKey { competitor, .. } = &cl.competitor;
-        let entry = by_ref.entry(competitor).or_insert((0, None, None));
-        entry.0 += cl.lap_count() as u32;
+        let entry = by_ref.entry(competitor).or_default();
+        entry.laps += cl.lap_count() as u32;
         if let Some(last) = cl.laps.last() {
             // Across adapters, keep the TEMPORALLY latest lap (not whichever adapter
             // iterates later).
-            if entry.2.is_none_or(|prev| last.at.micros >= prev) {
-                entry.1 = Some(last.duration_micros);
-                entry.2 = Some(last.at.micros);
+            if entry.last_at.is_none_or(|prev| last.at.micros >= prev) {
+                entry.last_duration = Some(last.duration_micros);
+                entry.last_at = Some(last.at.micros);
             }
         }
+        // Best is a `min` over EVERY counted lap, folded together with whatever another adapter
+        // already contributed for this ref. No ordering assumption at all — unlike the last lap,
+        // which has to pick the temporally latest.
+        entry.best = cl
+            .laps
+            .iter()
+            .map(|lap| lap.duration_micros)
+            .chain(entry.best)
+            .min();
     }
 
     // Fold the registration bindings and index them by competitor ref. The lineup carries
@@ -454,13 +493,13 @@ fn live_state_core(
     let progress: Vec<PilotProgress> = active_pilots
         .iter()
         .map(|competitor| {
-            let (laps_completed, last_lap_micros, _) =
-                by_ref.get(competitor).copied().unwrap_or((0, None, None));
+            let entry = by_ref.get(competitor).copied().unwrap_or_default();
             PilotProgress {
                 competitor: competitor.clone(),
                 pilot: pilot_by_ref.get(competitor).map(|p| (*p).clone()),
-                laps_completed,
-                last_lap_micros,
+                laps_completed: entry.laps,
+                last_lap_micros: entry.last_duration,
+                best_lap_micros: entry.best,
             }
         })
         .collect();
@@ -469,7 +508,7 @@ fn live_state_core(
     // `score_timed`), never by lap duration: physically ahead means crossed sooner.
     let last_completion: BTreeMap<&CompetitorRef, i64> = by_ref
         .iter()
-        .filter_map(|(competitor, (_, _, at))| at.map(|at| (*competitor, at)))
+        .filter_map(|(competitor, entry)| entry.last_at.map(|at| (*competitor, at)))
         .collect();
     let running_order = running_order_by_completion(&progress, &last_completion);
 
@@ -1213,6 +1252,132 @@ mod tests {
             s.running_order,
             vec![CompetitorRef("A".into()), CompetitorRef("B".into())]
         );
+    }
+
+    #[test]
+    fn best_lap_is_the_runs_fastest_lap_not_the_most_recent_one() {
+        // #425. A flies 3.0s, then 2.0s, then 4.0s. `last_lap_micros` is the 4.0s lap — the live
+        // "last lap" an overlay shows — and `best_lap_micros` is the 2.0s one. They are DIFFERENT
+        // values, which is the whole point: before this field the console derived "best" by folding
+        // a running `min` over the `last_lap_micros` of the frames it happened to observe.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 0, 1),
+            pass("A", 3_000_000, 2),
+            pass("A", 5_000_000, 3),
+            pass("A", 9_000_000, 4),
+            // B completed exactly one lap: its best IS its last, and both are that lap.
+            pass("B", 500_000, 1),
+            pass("B", 3_100_000, 2),
+        ];
+        let s = live_state(&events);
+
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        assert_eq!(a.laps_completed, 3);
+        assert_eq!(a.last_lap_micros, Some(4_000_000), "the most recent lap");
+        assert_eq!(a.best_lap_micros, Some(2_000_000), "the fastest lap");
+
+        let b = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("B".into()))
+            .unwrap();
+        assert_eq!(b.laps_completed, 1);
+        assert_eq!(b.last_lap_micros, Some(2_600_000));
+        assert_eq!(b.best_lap_micros, Some(2_600_000));
+    }
+
+    #[test]
+    fn best_lap_survives_a_re_snapshot_because_it_is_folded_not_accumulated() {
+        // #425's actual failure: a client that watched every frame kept the fast lap, and one that
+        // re-snapshotted after it had gone by did not. Folding the SAME log at any point must give
+        // the same best — so a fresh subscriber joining after the fast lap reads it too.
+        let head = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 0, 1),
+            pass("A", 3_000_000, 2),
+            // The fast lap. A client watching live sees this frame; one that reconnects afterwards
+            // is delivered a single settled envelope and never re-walks it (#422).
+            pass("A", 5_000_000, 3),
+        ];
+        let mid = live_state(&head);
+        assert_eq!(
+            mid.progress[0].best_lap_micros,
+            Some(2_000_000),
+            "the fast lap is the best while it is also the last"
+        );
+
+        // Two slower laps go by. A LATE joiner folds the whole log from scratch — the re-snapshot
+        // path — and must still see the 2.0s lap.
+        let mut whole = head.clone();
+        whole.push(pass("A", 9_000_000, 4));
+        whole.push(pass("A", 14_500_000, 5));
+        let late = live_state(&whole);
+        assert_eq!(late.progress[0].last_lap_micros, Some(5_500_000));
+        assert_eq!(
+            late.progress[0].best_lap_micros,
+            Some(2_000_000),
+            "a re-snapshot after the fast lap must still report it — this is exactly what the \
+             client-side accumulator could not do"
+        );
+        // And re-folding is idempotent: the same log yields the same state, every time.
+        assert_eq!(live_state(&whole), late);
+    }
+
+    #[test]
+    fn best_lap_is_absent_before_the_first_completed_lap() {
+        // A holeshot closes no lap, so there is nothing to be fastest yet. `None`, not zero — a
+        // zero best lap would sort ahead of every real one on any board that ranked on it.
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.progress[0].laps_completed, 0);
+        assert_eq!(s.progress[0].last_lap_micros, None);
+        assert_eq!(s.progress[0].best_lap_micros, None);
+    }
+
+    #[test]
+    fn best_lap_obeys_the_min_lap_floor_like_the_lap_list_does() {
+        // D26/#409: a sub-floor echo is suppressed in the lap list, so it must not become the best
+        // lap either — a floored-out 0.4s "lap" is the one value that would poison this readout
+        // hardest, and it is precisely the one the fold must never see.
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 0, 1),
+            pass("A", 3_000_000, 2),
+            // An echo 0.4s later — below a 1.0s floor.
+            pass("A", 3_400_000, 3),
+            pass("A", 5_500_000, 4),
+        ];
+        let floored = live_state_with_floor(&events, Some(1_000_000));
+        assert_eq!(floored.progress[0].laps_completed, 2);
+        assert_eq!(
+            floored.progress[0].best_lap_micros,
+            Some(2_500_000),
+            "the echo is not a lap, so it cannot be the best one"
+        );
+        // Unfloored, the same log DOES count the echo — which is what makes the floored answer
+        // above a real assertion rather than a coincidence of the data.
+        let unfloored = live_state(&events);
+        assert_eq!(unfloored.progress[0].best_lap_micros, Some(400_000));
     }
 
     #[test]

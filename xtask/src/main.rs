@@ -300,10 +300,12 @@ const FULL_TARGETS: &[LiveTarget] = &[
     ("gridfpv-app", "rh_restart_live", true),
 ];
 
-/// The **targeted** subset the secondary matrix legs run: the lap-ingestion-critical
+/// The **targeted** subset the secondary *plugin* legs run: the lap-ingestion-critical
 /// targets. Each drives a real dockerized RotorHazard through a real race and asserts on
 /// the passes that came back out — so "RH recorded laps but Grid ingested none" (#389)
-/// fails them, in whichever version × plugin combination it happens in:
+/// fails them, in whichever RH version it happens in. (The plugin-less legs run
+/// [`NO_PLUGIN_TARGETS`] instead: with the plugin required, there is no second ingest path
+/// left to contrast, only a refusal to prove.)
 ///
 /// - `heat_live` — adapter → engine: a heat is only `Final` with crossings collected
 ///   while it was live; the harness asserts at least one `Pass` came through.
@@ -323,6 +325,35 @@ const INGEST_TARGETS: &[LiveTarget] = &[
     ("gridfpv-engine", "scoring_live", true),
     ("gridfpv-server", "full_event_live", true),
 ];
+
+/// What the **no-plugin** legs run (#424) — the proof that GridFPV *refuses to race* a
+/// plugin-less RotorHazard, and says why.
+///
+/// These legs used to run [`INGEST_TARGETS`], asserting the stock `current_laps` path
+/// **works**. #405 made the GridFPV plugin **required**, so that assertion was testing a
+/// promise the product had withdrawn — a green leg guaranteeing nothing.
+///
+/// Deleting the legs was the wrong answer. #405 is explicit:
+///
+/// > Do not simply delete them: *"we degrade correctly"* is exactly what regressed silently
+/// > in #389.
+///
+/// #389 was a plugin-only lap-ingestion regression that reached real hardware with **all 12
+/// live targets green**, because only one configuration was ever exercised. Dropping the
+/// no-plugin legs would recreate that blind spot one level up: nothing would prove a
+/// plugin-less timer produces a clear refusal rather than a silent half-working race.
+///
+/// So the legs keep their slot and change their assertion. `rh_no_plugin_live` drives a real
+/// plugin-less RotorHazard and asserts that connecting **succeeds** (the refusal belongs at
+/// racing — a live socket is what probes presence, drives #386's restart, and tells the RD
+/// what is wrong), that selecting it for an event and arming a heat on it are both
+/// **refused**, and that each refusal is **specific** — the plugin, by name, in RD-facing
+/// language with no raw ids — rather than a generic connection error or silence.
+///
+/// One target, not three: there is no ingest to contrast here. The RH **version** axis is
+/// what still earns two legs — the handshake probe has to resolve `Missing` on 4.3.0 (the
+/// floor, and what the field timer runs) as well as on the current stable.
+const NO_PLUGIN_TARGETS: &[LiveTarget] = &[("gridfpv-app", "rh_no_plugin_live", true)];
 
 /// How much of the live suite a matrix leg runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -364,30 +395,61 @@ impl LiveConfig {
             "RH {} {} plugin ({})",
             self.rh,
             if self.plugin { "+" } else { "—" },
-            self.coverage.label()
+            if self.plugin {
+                self.coverage.label()
+            } else {
+                "refusal"
+            }
         )
     }
 
     /// The command that reproduces exactly this leg on its own.
     fn command(&self) -> String {
         format!(
-            "cargo xtask live --rh {}{} --{}",
+            "cargo xtask live --rh {}{}{}",
             self.rh,
             if self.plugin { "" } else { " --no-plugin" },
-            self.coverage.label()
+            // A no-plugin leg's targets are fixed (see `targets`), so a coverage flag on the
+            // reproduction line would be a lie about what it selects.
+            if self.plugin {
+                format!(" --{}", self.coverage.label())
+            } else {
+                String::new()
+            }
         )
+    }
+
+    /// The targets this leg runs.
+    ///
+    /// **A plugin-less leg asserts the refusal, whatever coverage says** (#424): with the plugin
+    /// required (#405), `--full` / `--targeted` on a stock RotorHazard would select suites that
+    /// exist to prove *racing works* — and they would fail for the reason the product now
+    /// guarantees they should. The coverage axis only means something on the plugin legs.
+    fn targets(&self) -> &'static [LiveTarget] {
+        if self.plugin {
+            self.coverage.targets()
+        } else {
+            NO_PLUGIN_TARGETS
+        }
     }
 }
 
-/// The default matrix `cargo xtask live` runs with no arguments: **targeted × 4, full on
-/// one**. The current stable with the plugin keeps the full suite (today's behaviour,
-/// unchanged); the other three legs run the ingestion-critical subset.
+/// The default matrix `cargo xtask live` runs with no arguments, four legs over two axes —
+/// RotorHazard version × plugin:
+///
+/// - **stable + plugin** — the full suite (today's behaviour, unchanged);
+/// - **floor + plugin** — the ingestion-critical subset;
+/// - **stable / floor, no plugin** — the **refusal** suite ([`NO_PLUGIN_TARGETS`], #424).
 ///
 /// Why these four: before #389 the suite only ever ran one configuration — current-stable
-/// RH *with* the plugin — so the stock `current_laps` path had **no** live coverage at all
-/// and the two ingest paths were never contrasted. A plugin-only lap-ingestion regression
-/// therefore reached the field green. The floor (RHAPI 1.3 / RH v4.3.0+, D16) is what the
-/// field timer runs, so it is covered on both paths too.
+/// RH *with* the plugin — so a plugin-only lap-ingestion regression reached the field with
+/// every live target green. The floor (RHAPI 1.3 / RH v4.3.0+, D16) is what the field timer
+/// runs, so it is covered too.
+///
+/// The no-plugin legs kept their slot when #405 made the plugin required, and changed what
+/// they assert: not "the stock path works" (a withdrawn promise) but "GridFPV refuses to race
+/// and says why". Deleting them would have rebuilt #389's blind spot around *degrading*
+/// instead of around *ingesting*.
 fn default_matrix() -> Vec<LiveConfig> {
     let stable = gridfpv_testkit::DEFAULT_RH_VERSION.to_string();
     let floor = gridfpv_testkit::FLOOR_RH_VERSION.to_string();
@@ -431,8 +493,11 @@ fn default_matrix() -> Vec<LiveConfig> {
 ///
 /// - `--rh <version>` — RotorHazard version (repeatable); default the current stable.
 /// - `--plugin` / `--no-plugin` — mount the GridFPV plugin, or run stock RH; default on.
+///   A `--no-plugin` leg runs the **refusal** suite ([`NO_PLUGIN_TARGETS`]) — GridFPV
+///   connects, then refuses to race and says why (#424).
 /// - `--full` / `--targeted` — override how much of the suite that leg runs; the default
-///   matches what the matrix gives that configuration.
+///   matches what the matrix gives that configuration. **Ignored on a `--no-plugin` leg**,
+///   whose targets are fixed.
 fn live(args: &[String]) -> bool {
     let mut versions: Vec<String> = Vec::new();
     let mut plugin: Option<bool> = None;
@@ -475,6 +540,8 @@ fn live(args: &[String]) -> bool {
             .map(|rh| {
                 // Default coverage mirrors the matrix: the primary config gets the full
                 // suite, every other configuration the ingestion-critical subset.
+                // Default coverage mirrors the matrix. It is inert on a no-plugin leg — those
+                // run `NO_PLUGIN_TARGETS` regardless (see `LiveConfig::targets`).
                 let default = if plugin && rh == gridfpv_testkit::DEFAULT_RH_VERSION {
                     Coverage::Full
                 } else {
@@ -555,7 +622,7 @@ fn run_config(config: &LiveConfig) -> bool {
     ];
 
     let mut ok = true;
-    for (package, name, ignored) in config.coverage.targets() {
+    for (package, name, ignored) in config.targets() {
         let mut args = vec![
             "test",
             "-p",

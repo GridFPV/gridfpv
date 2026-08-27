@@ -53,6 +53,8 @@ use gridfpv_events::{
 };
 use gridfpv_projection::{CompetitorKey, registrations};
 use gridfpv_server::app::AppState;
+#[cfg(feature = "live")]
+use gridfpv_server::channels;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::pilots::PilotDirectory;
 use gridfpv_server::scope::EventId;
@@ -69,6 +71,8 @@ mod rh_connections;
 mod rotorhazard;
 #[cfg(feature = "live")]
 pub use rh_connections::{RhConnections, spawn_rh_reconciler};
+#[cfg(feature = "live")]
+use rotorhazard::TuneNode;
 
 /// How often the bridge polls the log tail for new heat-loop events. Short enough that a
 /// `Start` click feels instant (the first pass lands within a poll), long enough to be a
@@ -1246,7 +1250,8 @@ fn lineup_of(state: &AppState, heat: &HeatId) -> Option<Vec<CompetitorRef>> {
 }
 
 /// The per-pilot frequency assignment of `heat` from its most recent `HeatScheduled` (race redesign
-/// Slice 4a), mapped onto **real node indices** for the RH `set_frequency` tune.
+/// Slice 4a), mapped onto **real node indices** for the RH `set_frequency` tune, each carrying the
+/// catalog band/channel that labels it on RotorHazard's own screen (#421).
 ///
 /// The node a competitor's MHz is applied to is its seat on `timer` — [`Timer::seat_nodes`], which
 /// walks the timer's **enabled** indices rather than `0..lineup.len()` (#412). Tuning by lineup
@@ -1254,9 +1259,16 @@ fn lineup_of(state: &AppState, heat: &HeatId) -> Option<Vec<CompetitorRef>> {
 /// node 3: the pilot flies a gate tuned to somebody else's video channel, which is a dead node with
 /// extra steps. A **disabled node is never tuned** — it is not offered a channel at all.
 ///
+/// The **label** is resolved here, once, through the catalog's single resolver
+/// (`gridfpv_server::channels::label_of`) — the same one the Tune page's write goes through — so
+/// both write paths put the *same* name on RotorHazard for the same frequency. `HeatScheduled`
+/// stores raw allocated MHz, and the catalog's first matching entry wins deterministically, so this
+/// needs nothing on the wire. A **custom** frequency the catalog does not know resolves to `None`
+/// and is emitted as a bare frequency — never an invented label.
+///
 /// A heat with no assigned frequencies (a sim/un-channelled heat) yields an empty plan (no tuning).
 #[cfg(feature = "live")]
-fn tune_plan_of(state: &AppState, timer: &Timer, heat: &HeatId) -> Vec<(u64, u16)> {
+fn tune_plan_of(state: &AppState, timer: &Timer, heat: &HeatId) -> Vec<TuneNode> {
     let Some(stored) = state.log().lock().ok().and_then(|g| g.read_all().ok()) else {
         return Vec::new();
     };
@@ -1279,7 +1291,18 @@ fn tune_plan_of(state: &AppState, timer: &Timer, heat: &HeatId) -> Vec<(u64, u16
                         seats
                             .iter()
                             .find(|(_, seated)| *seated == competitor)
-                            .map(|(node, _)| (*node as u64, mhz))
+                            .map(|(node, _)| {
+                                // `unzip` is the honest shape: the catalog answers with both
+                                // halves of a label or with neither, and a half-label is not a
+                                // thing RotorHazard can be told.
+                                let (band, channel) = channels::label_of(mhz).unzip();
+                                TuneNode {
+                                    node: *node as u64,
+                                    mhz,
+                                    band,
+                                    channel,
+                                }
+                            })
                     })
                     .collect();
             }
@@ -2318,11 +2341,35 @@ mod tests {
         );
 
         // The tune emit follows the same seats: node 3 gets Cyan's channel, and the disabled node 2
-        // is offered no channel at all.
+        // is offered no channel at all. Each node carries its catalog label as well as the raw MHz
+        // (#421) — that is what puts `R1`/`R2`/`R3` on RotorHazard's own screen instead of a bare
+        // frequency, matching the Tune page's write.
         let plan = tune_plan_of(&state, &timer, &heat);
-        assert_eq!(plan, vec![(0, 5658), (1, 5695), (3, 5732)]);
+        assert_eq!(
+            plan,
+            vec![
+                TuneNode {
+                    node: 0,
+                    mhz: 5658,
+                    band: Some("Raceband".into()),
+                    channel: Some("R1".into()),
+                },
+                TuneNode {
+                    node: 1,
+                    mhz: 5695,
+                    band: Some("Raceband".into()),
+                    channel: Some("R2".into()),
+                },
+                TuneNode {
+                    node: 3,
+                    mhz: 5732,
+                    band: Some("Raceband".into()),
+                    channel: Some("R3".into()),
+                },
+            ]
+        );
         assert!(
-            !plan.iter().any(|(node, _)| *node == 2),
+            !plan.iter().any(|n| n.node == 2),
             "a disabled node must never be tuned: {plan:?}"
         );
     }

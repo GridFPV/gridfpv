@@ -35,7 +35,7 @@ pub const DIRECTOR_PROTOCOL_VERSION: u32 = 1;
 
 use rust_socketio::client::Client;
 use rust_socketio::{ClientBuilder, Payload, RawClient};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{
     Raw, RawCurrentLaps, RawEnterExitLevels, RawGridPass, RawGridSignal, RawHeatData,
@@ -1047,6 +1047,37 @@ pub struct RotorHazardConnection {
     /// [`Event`], nothing in here reaches a log, and nothing in here survives
     /// [`set_signal_capture(false)`](Self::set_signal_capture).
     tap: SignalTap,
+}
+
+/// The `set_frequency` payload for one node — the **single place** either channel-write path turns
+/// a GridFPV channel into RotorHazard's wire vocabulary.
+///
+/// Both writers land here: the Tune page's bench write (#413) and a heat's channel assignment on
+/// stage (#421). They agreed on the frequency and disagreed on the label until the heat path
+/// started carrying one, which is exactly the ambiguity an RD cross-checking RH's screen mid-event
+/// cannot resolve — `5880` where they expect `R7`, or a stale `R5` against a changed frequency.
+///
+/// `label` is GridFPV's `(band, code)` — `("Raceband", "R7")`. **RotorHazard's own vocabulary is
+/// different**: `band` is a single LETTER and `channel` is an INT, so its profile holds
+/// `{"b": "R", "c": 7}`, never `("Raceband", "R7")`.
+///
+/// `on_set_frequency` runs `int(data['channel'])` unguarded, so sending the catalog's code raised
+/// `ValueError: invalid literal for int() with base 10: 'R8'` and aborted the whole handler — the
+/// frequency was never set. And because the emit is fire-and-forget, the Director answered 200
+/// every time: a dead write that reported success (#423's class).
+///
+/// A label that cannot be confidently translated is OMITTED, never guessed. RotorHazard then keeps
+/// whatever label it had and still applies the frequency — losing a label is cosmetic on RH's
+/// screen; losing the write puts a gate on the wrong channel.
+fn set_frequency_payload(node: u64, frequency: u16, label: Option<(&str, &str)>) -> Value {
+    let mut payload = json!({ "node": node, "frequency": frequency });
+    if let (Some((_, code)), Some(map)) = (label, payload.as_object_mut()) {
+        if let Some((letter, number)) = rh_band_channel(code) {
+            map.insert("band".into(), json!(letter));
+            map.insert("channel".into(), json!(number));
+        }
+    }
+    payload
 }
 
 /// Split a catalog channel code (`"R8"`, `"F4"`, `"A1"`) into RotorHazard's `(band letter, channel
@@ -2113,25 +2144,10 @@ impl RotorHazardConnection {
         frequency: u16,
         label: Option<(&str, &str)>,
     ) -> Result<(), rust_socketio::Error> {
-        let mut payload = json!({ "node": node, "frequency": frequency });
-        // RotorHazard's own vocabulary, not GridFPV's: `band` is a single LETTER and `channel` is
-        // an INT — its profile holds `{"b": "R", "c": 8}`, not `("Raceband", "R8")`.
-        //
-        // `on_set_frequency` runs `int(data['channel'])` unguarded, so sending the catalog's code
-        // raised `ValueError: invalid literal for int() with base 10: 'R8'` and aborted the whole
-        // handler — the frequency was never set. And because this emit is fire-and-forget, the
-        // Director answered 200 every time: a dead write that reported success (#423's class).
-        //
-        // A label we cannot confidently translate is OMITTED, never guessed. RotorHazard then keeps
-        // whatever label it had and still applies the frequency — losing a label is cosmetic on
-        // RH's screen; losing the write puts a gate on the wrong channel.
-        if let (Some((_, code)), Some(map)) = (label, payload.as_object_mut()) {
-            if let Some((letter, number)) = rh_band_channel(code) {
-                map.insert("band".into(), json!(letter));
-                map.insert("channel".into(), json!(number));
-            }
-        }
-        self.client.emit("set_frequency", payload)
+        self.client.emit(
+            "set_frequency",
+            set_frequency_payload(node, frequency, label),
+        )
     }
 
     /// **Set node `node`'s enter threshold** to `level` (#355) — the calibration write.
@@ -3260,6 +3276,39 @@ mod tests {
         assert_eq!(rh_band_channel("R8"), Some(("R".to_string(), 8)));
         assert_eq!(rh_band_channel("F4"), Some(("F".to_string(), 4)));
         assert_eq!(rh_band_channel("A1"), Some(("A".to_string(), 1)));
+    }
+
+    #[test]
+    fn both_channel_write_paths_emit_rotorhazards_letter_and_number() {
+        // The Tune page's bench write (#413) and a heat's channel assignment (#421) build the SAME
+        // payload from the same helper, so what an RD sees on RotorHazard's screen after staging a
+        // heat is what they see after tuning a node by hand — `R7`, not `5880`.
+        let tuned = set_frequency_payload(2, 5880, Some(("Raceband", "R7")));
+        assert_eq!(
+            tuned,
+            json!({ "node": 2, "frequency": 5880, "band": "R", "channel": 7 })
+        );
+        // Same frequency named from its other band still lands as RH's own letter+number.
+        assert_eq!(
+            set_frequency_payload(2, 5880, Some(("Fatshark", "F8"))),
+            json!({ "node": 2, "frequency": 5880, "band": "F", "channel": 8 })
+        );
+    }
+
+    #[test]
+    fn a_custom_frequency_emits_the_frequency_alone_and_never_an_invented_label() {
+        // A raw MHz the catalog cannot name reaches here with no label, and leaves with none: the
+        // node still retunes, and RotorHazard is not told a channel GridFPV made up.
+        assert_eq!(
+            set_frequency_payload(0, 5885, None),
+            json!({ "node": 0, "frequency": 5885 })
+        );
+        // A label that survives to here but cannot be translated is dropped, not guessed — the
+        // frequency write is worth more than the name.
+        assert_eq!(
+            set_frequency_payload(0, 5885, Some(("Raceband", "Raceband"))),
+            json!({ "node": 0, "frequency": 5885 })
+        );
     }
 
     #[test]

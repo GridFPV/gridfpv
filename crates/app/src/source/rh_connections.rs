@@ -41,7 +41,7 @@ use gridfpv_server::timers::{CaptureThreshold, TimerId, TimerKind, TimerRegistry
 use tokio::task::JoinHandle;
 
 use super::PassSink;
-use super::rotorhazard::{CalibrationWrite, CaptureWrite, ChannelWrite, RhConnection};
+use super::rotorhazard::{CalibrationWrite, CaptureWrite, ChannelWrite, RhConnection, TuneNode};
 
 /// How often the reconciler polls the active event + its selected timers to sync the live set.
 pub const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
@@ -113,9 +113,11 @@ impl RhConnections {
     /// **Tune** `(event, timer)`'s connection to a per-node channel assignment (race redesign Slice
     /// 4a), if a live connection exists: the driver emits a `set_frequency` per node so the device
     /// tunes to the staging heat's assigned channels ("the engine allocates, the adapter applies").
+    /// Each [`TuneNode`] carries the catalog band/channel too, so RotorHazard's own UI labels the
+    /// heat's channels rather than showing a bare frequency (#421).
     /// Returns whether a live connection was found to tune. A no-op (returns `false`) for a
     /// non-active event or a not-yet-connected timer.
-    pub fn tune(&self, event: &EventId, timer: &TimerId, assignment: Vec<(u64, u16)>) -> bool {
+    pub fn tune(&self, event: &EventId, timer: &TimerId, assignment: Vec<TuneNode>) -> bool {
         let map = self.inner.lock().expect("rh-connections lock poisoned");
         if let Some(live) = map.get(&(Some(event.clone()), timer.clone())) {
             live.conn.tune(assignment);

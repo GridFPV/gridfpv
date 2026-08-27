@@ -118,10 +118,47 @@ const PLUGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// [`wait_for_reported_nodes`]: gridfpv_adapters::rotorhazard::transport::RotorHazardConnection::wait_for_reported_nodes
 const NODE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// A timer's **friendly name** for an operator log line, falling back to its raw id only if the
+/// registry no longer holds it (CLAUDE.md: friendly names everywhere, raw ids as a last resort).
+///
+/// These lines are what an RD reads when a link drops or a filter could not be cleared, and
+/// `"bench-rotorhazard-xvb27q"` does not tell them which box on the bench to go and look at.
+fn timer_name(timers: &TimerRegistry, id: &TimerId) -> String {
+    timers
+        .get(id)
+        .map(|t| t.name)
+        .unwrap_or_else(|| id.0.clone())
+}
+
+/// One node of a **heat's channel plan** (race redesign Slice 4a, #421): the node the engine
+/// allocated a frequency to, that frequency, and the catalog label to put on RotorHazard's own
+/// screen beside it.
+///
+/// The twin of [`ChannelWrite`] for the *heat* write path rather than the Tune page's bench one,
+/// and it carries a label for exactly the same reason: without one RotorHazard's UI shows a bare
+/// `5880` — or worse, keeps the *previous* channel's label against a changed frequency — and the
+/// RD who cross-checks GridFPV against RH's screen cannot tell a display quirk from a node that
+/// never retuned.
+///
+/// `band`/`channel` are `None` for a **custom** raw MHz the catalog has no name for. The emit then
+/// carries the frequency alone (see [`ChannelWrite`]): an honest absence, never an invented label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuneNode {
+    /// The node to tune, 0-based (RotorHazard's `seat_index`) — the pilot's real seat, not their
+    /// lineup position (#412).
+    pub node: u64,
+    /// The centre frequency to tune it to, in raw MHz — what the engine allocated.
+    pub mhz: u16,
+    /// The catalog band to label it with on RotorHazard (`"Raceband"`), if the catalog knows one.
+    pub band: Option<String>,
+    /// The catalog channel label (`"R7"`), if the catalog knows one.
+    pub channel: Option<String>,
+}
+
 /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
-/// `(node_index, frequency_mhz)` assignment the engine allocated for the staging heat, shared from
-/// the async [`RhConnection::tune`] caller to the blocking driver thread. `None` ⇒ nothing pending.
-type TuneSlot = Arc<Mutex<Option<Vec<(u64, u16)>>>>;
+/// channel plan the engine allocated for the staging heat, shared from the async
+/// [`RhConnection::tune`] caller to the blocking driver thread. `None` ⇒ nothing pending.
+type TuneSlot = Arc<Mutex<Option<Vec<TuneNode>>>>;
 
 /// A **pending prepare** the driver applies on its next loop: when a heat is **Staged** the bridge
 /// asks the connection to ready RH for an instant start — zero the current format's staging delays
@@ -441,10 +478,11 @@ impl RhConnection {
 
     /// **Tune** this connection's nodes to an assigned channel plan (race redesign Slice 4a): the
     /// engine allocates the channels, the adapter applies them (RE §7.3). `assignment` is the
-    /// per-node `(node_index, frequency_mhz)` set for the staging heat; the driver thread emits a
-    /// `set_frequency` per node on its next loop (best-effort — a failed emit on a dropped link is
-    /// logged, not fatal). The bridge calls this when a heat is **Staged**, before it arms/runs.
-    pub fn tune(&self, assignment: Vec<(u64, u16)>) {
+    /// per-node [`TuneNode`] set for the staging heat — frequency **and** its catalog label (#421)
+    /// — and the driver thread emits a `set_frequency` per node on its next loop (best-effort — a
+    /// failed emit on a dropped link is logged, not fatal). The bridge calls this when a heat is
+    /// **Staged**, before it arms/runs.
+    pub fn tune(&self, assignment: Vec<TuneNode>) {
         let mut slot = self.tune.lock().expect("tune lock poisoned");
         *slot = Some(assignment);
     }
@@ -793,7 +831,7 @@ fn drive(
                 // log tells a dead `:5000` apart from a genuine handshake failure at a glance.
                 eprintln!(
                     "gridfpv: RotorHazard connect failed for {:?}: {}",
-                    timer_id.0,
+                    timer_name(&timers, &timer_id),
                     error_chain(&e)
                 );
                 timers.set_status(&timer_id, TimerStatus::Error);
@@ -859,7 +897,7 @@ fn drive(
             None => eprintln!(
                 "gridfpv: RotorHazard {:?} did not report a node count; GridFPV keeps its \
                  configured width",
-                timer_id.0
+                timer_name(&timers, &timer_id)
             ),
         }
 
@@ -884,7 +922,10 @@ fn drive(
                 "gridfpv: RotorHazard {:?}: min-lap filter neutralised via {:?} (timer had \
                  MinLapSec={:?}, MinLapBehavior={:?}); GridFPV's per-round floor is the only \
                  min-lap rule in force",
-                timer_id.0, min_lap.route, min_lap.found_secs, min_lap.found_behavior,
+                timer_name(&timers, &timer_id),
+                min_lap.route,
+                min_lap.found_secs,
+                min_lap.found_behavior,
             );
         }
 
@@ -922,7 +963,7 @@ fn drive(
         if dropped {
             eprintln!(
                 "gridfpv: RotorHazard connection lost for {:?}; reconnecting",
-                timer_id.0
+                timer_name(&timers, &timer_id)
             );
             timers.set_status(&timer_id, TimerStatus::Disconnected);
             if sleep_unless_cancelled(backoff, &cancel) {
@@ -976,7 +1017,7 @@ struct ControlSlots<'a> {
     /// The heat currently armed on this connection, if any.
     armed: &'a Mutex<Option<ArmedHeat>>,
     /// A pending channel assignment to push to the timer.
-    tune: &'a Mutex<Option<Vec<(u64, u16)>>>,
+    tune: &'a Mutex<Option<Vec<TuneNode>>>,
     /// Set when the timer should be prepared for a heat.
     prepare: &'a AtomicBool,
     /// A pending seat → pilot binding to push before racing.
@@ -1244,12 +1285,20 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
         //
         // **This legitimately overwrites anything the Tune page set** (#413): a heat's channel
         // assignment is the race's, and the bench value does not get to win. The Tune page says so
-        // rather than fighting it. No label is passed — the heat plan is raw allocated MHz, and
-        // inventing one here would re-derive the catalog away from its one resolver.
+        // rather than fighting it.
+        //
+        // The emit carries the catalog **band and channel** alongside the frequency, exactly as the
+        // Tune page's write does (#421). It is resolved once, upstream, through the catalog's single
+        // resolver (`gridfpv_server::channels::label_of`) and threaded here on the plan — nothing is
+        // re-derived at the emit. `set_frequency` translates the catalog code into RotorHazard's own
+        // vocabulary (`"R7"` → `{"b": "R", "c": 7}`); sending the code itself raised `ValueError` in
+        // `on_set_frequency` and aborted the handler, so the frequency was never set at all. A
+        // custom MHz the catalog cannot name travels as a bare frequency, never an invented label.
         let pending_tune = tune.lock().expect("tune lock poisoned").take();
         if let Some(assignment) = pending_tune {
-            for (node, mhz) in assignment {
-                if conn.set_frequency(node, mhz, None).is_err() {
+            for node in assignment {
+                let label = node.band.as_deref().zip(node.channel.as_deref());
+                if conn.set_frequency(node.node, node.mhz, label).is_err() {
                     return true;
                 }
             }
