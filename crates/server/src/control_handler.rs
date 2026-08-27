@@ -4259,6 +4259,25 @@ mod tests {
         out
     }
 
+    /// The lineup a heat is currently seated with — its most recent `HeatScheduled`, the same
+    /// "latest wins" rule [`channels_of`] and every reader fold by.
+    #[cfg(test)]
+    fn lineup_of(state: &AppState, heat: &HeatId) -> Vec<CompetitorRef> {
+        let (events, _) = state.read().unwrap();
+        let mut out = Vec::new();
+        for event in &events {
+            if let Event::HeatScheduled {
+                heat: h, lineup, ..
+            } = event
+            {
+                if h == heat {
+                    out = lineup.clone();
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn a_rounds_heats_alternate_layouts_and_clearing_a_bind_restores_that_default() {
         // #117 S3's alternation end to end through the command path, including the *second*
@@ -4388,6 +4407,343 @@ mod tests {
             channels_of(&state, &h1),
             vec![5658, 5695],
             "heat 1 was never touched by any of it"
+        );
+    }
+
+    /// #440: `OverrideHeatSeating { lineup: [] }` is the documented — and only — way OUT of a
+    /// manual override: *"the heat is re-formed from its round's plan, exactly as if the RD had
+    /// never touched it."*
+    ///
+    /// The clear has to re-form from the **round's plan**, not from the heat's most recent
+    /// `HeatScheduled` — which, one command after an override, *is* the override. A clear that
+    /// re-applies the very lineup it was asked to discard is a clear that does nothing, and
+    /// nothing else re-forms the heat: the round's own fill returns `AlreadyScheduled` for it, so
+    /// the "cleared" heat races the override unless an unrelated round edit later rematerializes
+    /// it.
+    ///
+    /// **Two defects, in order.** Today the command does not even get that far:
+    /// `require_distinct_lineup` runs before the empty-lineup branch and rejects the clear as "a
+    /// heat needs at least one competitor in its lineup", so the documented escape hatch is
+    /// unreachable. Behind that guard sits the re-application itself. This test fails on the
+    /// first today and on the second once the guard is fixed, which is the order they must be
+    /// fixed in.
+    #[test]
+    #[ignore = "known bug #440: the clear re-applies the override's own lineup — un-ignore with the fix"]
+    fn clearing_a_seating_override_re_forms_the_heat_from_its_rounds_plan() {
+        let (registry, event, round) = event_with_round(
+            "Qualifying",
+            "timed_qual",
+            &["alpha", "bravo", "charlie", "delta"],
+        );
+        let filled = fill_next(&registry, &event, &round);
+        let heat = filled.scheduled[0].heat.clone();
+        let plan = filled.scheduled[0].lineup.clone();
+        assert!(
+            plan.len() > 2,
+            "the round's plan must seat more than the override does, or the clear proves \
+             nothing: {plan:?}"
+        );
+        let state = registry.resolve(&event).unwrap();
+        assert_eq!(lineup_of(&state, &heat), plan);
+
+        // The RD re-seats the heat by hand — two of the field, in the other order.
+        let by_hand = vec![plan[1].clone(), plan[0].clone()];
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: by_hand.clone(),
+                frequencies: vec![],
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        assert_eq!(
+            lineup_of(&state, &heat),
+            by_hand,
+            "the override is in force before it is cleared"
+        );
+
+        // … and then clears it.
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: vec![],
+                frequencies: vec![],
+            },
+        );
+        assert!(
+            ack.ok,
+            "an empty lineup is the documented clear, not an empty heat — it must be accepted: \
+             {ack:?}"
+        );
+
+        let (events, _) = state.read().unwrap();
+        assert!(
+            crate::round_engine::heat_seating_override(&events, &heat).is_none(),
+            "an empty lineup clears the override in the fold …"
+        );
+        assert_eq!(
+            lineup_of(&state, &heat),
+            plan,
+            "… so the heat must be seated back to its round's plan, exactly as if the RD had \
+             never touched it"
+        );
+        // The channels follow the lineup they were re-formed for — one per seat, no pilot left
+        // holding a channel assigned for a lineup the heat no longer has.
+        let seated: Vec<CompetitorRef> = {
+            let mut out = Vec::new();
+            for event in &events {
+                if let Event::HeatScheduled {
+                    heat: h,
+                    frequencies,
+                    ..
+                } = event
+                {
+                    if h == &heat {
+                        out = frequencies.iter().map(|(c, _)| c.clone()).collect();
+                    }
+                }
+            }
+            out
+        };
+        assert_eq!(
+            seated, plan,
+            "every planned pilot has a channel: {seated:?}"
+        );
+    }
+
+    /// An event over `pilots` with one round: `timed_qual`, naming `layouts`, in `channel_mode`.
+    /// Each pilot is seated on the matching entry of `channels` at **membership** — the fixed
+    /// per-member channel a [`ChannelMode::Static`] round races on.
+    ///
+    /// Returns the registry, the event id and the round id.
+    #[cfg(test)]
+    fn event_with_static_channels(
+        pilots: &[(&str, u16)],
+    ) -> (EventRegistry, EventId, gridfpv_events::RoundId) {
+        use crate::classes::CreateClassRequest;
+        use crate::events::{
+            ChannelMode, CreateEventRequest, MemberSlot, NewRoundReq, SeedingRule,
+        };
+        use crate::pilots::CreatePilotRequest;
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let registry = EventRegistry::new(None).unwrap();
+        let class = registry
+            .classes()
+            .create(&CreateClassRequest {
+                name: "Open".into(),
+                source: Default::default(),
+                reference: None,
+                description: None,
+            })
+            .unwrap()
+            .id;
+        let members: Vec<MemberSlot> = pilots
+            .iter()
+            .map(|(cs, channel)| MemberSlot {
+                pilot: registry
+                    .pilots()
+                    .create(&CreatePilotRequest {
+                        callsign: (*cs).into(),
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .id,
+                channel: Some(*channel),
+            })
+            .collect();
+        let event = registry
+            .create(&CreateEventRequest {
+                name: "E".into(),
+                date: None,
+                location: None,
+                description: None,
+                organizer: None,
+            })
+            .unwrap()
+            .id;
+        registry.set_classes(&event, vec![class.clone()]).unwrap();
+        registry
+            .set_class_membership(&event, class.clone(), members)
+            .unwrap();
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    // NO layouts: the round says nothing about channels, because its members
+                    // already carry their own.
+                    layouts: Vec::new(),
+                    label: "Qualifying".into(),
+                    classes: vec![class],
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([("rounds".into(), "1".into())]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: Some(ChannelMode::Static),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap();
+        (registry, EventId(event.0.clone()), round.id)
+    }
+
+    /// #441: `SetHeatLayout { layout: None }` must record the **cleared** bind.
+    ///
+    /// `heat_layout_bind` is three-valued on purpose — `Some(Some(l))` is *"the RD bound this
+    /// heat"*, `Some(None)` is *"the RD cleared it"*, `None` is *"never touched"*. The clear
+    /// writes `Some(Some(current_default))` instead, so the middle state is unreachable and a
+    /// cleared heat is indistinguishable from one the RD deliberately pinned to that layout. That
+    /// is what freezes the heat against a later round edit (the same defect as
+    /// `editing_a_rounds_layouts_re_tunes_the_heats_it_generated` in `events.rs`), and it means
+    /// "clear" is a write the RD cannot undo by clearing again.
+    ///
+    /// Clearing still leaves the heat flying its round's default — that is what a cleared bind
+    /// *means*, and both halves are asserted here so a fix cannot satisfy one by breaking the
+    /// other.
+    #[test]
+    #[ignore = "known bug #441: SetHeatLayout{layout:None} writes an explicit bind to the current default — un-ignore with the fix"]
+    fn clearing_a_heats_layout_bind_records_the_cleared_state() {
+        use crate::events::{ChannelMode, NewChannelLayoutRequest, NewRoundReq, SeedingRule};
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let (registry, event, _warmup) = event_with_round("Warmup", "timed_qual", &["a", "b"]);
+        let seeded = registry
+            .add_channel_layout(
+                &event,
+                NewChannelLayoutRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        let a = seeded
+            .layouts
+            .iter()
+            .find(|l| l.name == "Bracket A")
+            .unwrap()
+            .id
+            .clone();
+        let classes = registry.meta_of(&event).unwrap().classes;
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    layouts: vec![a.clone()],
+                    label: "Qualifying".into(),
+                    classes,
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([("rounds".into(), "1".into())]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap()
+            .id;
+
+        let filled = fill_next(&registry, &event, &round);
+        let heat = filled.scheduled[0].heat.clone();
+        let state = registry.resolve(&event).unwrap();
+        assert_eq!(
+            channels_of(&state, &heat),
+            vec![5658, 5695],
+            "the generated heat flies the round's only layout"
+        );
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::SetHeatLayout {
+                heat: heat.clone(),
+                layout: None,
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+
+        let (events, _) = state.read().unwrap();
+        assert_eq!(
+            crate::round_engine::heat_layout_bind(&events, &heat),
+            Some(None),
+            "the documented cleared bind — not a fresh explicit bind to whatever the default \
+             happens to be right now"
+        );
+        // …and a cleared bind still resolves to the round's default, which is what it means.
+        let meta = registry.meta_of(&event).unwrap();
+        let round_def = meta.rounds.iter().find(|r| r.id == round).unwrap();
+        assert_eq!(
+            crate::round_engine::layout_for_heat(&meta, Some(round_def), &events, &heat)
+                .map(|l| l.id.clone()),
+            Some(a),
+            "a cleared bind falls back to the round's default layout"
+        );
+        assert_eq!(
+            channels_of(&state, &heat),
+            vec![5658, 5695],
+            "so the heat's channels do not move"
+        );
+    }
+
+    /// #441 (the bonus defect): clearing a layout bind on a round that names **no** layouts must
+    /// not blow away a `Static`-mode heat's fixed channels.
+    ///
+    /// A Static round's channels come from **membership** — each pilot's own assigned frequency —
+    /// not from a layout. The clear runs `assign_for_event(None)` with no channel-mode check, so
+    /// it hands the heat a fresh IMD auto-pick from the timer's pool and every pilot in it is
+    /// silently moved off the channel their VTX is actually on.
+    #[test]
+    #[ignore = "known bug #441: the layout-less clear auto-picks over a Static heat's membership channels — un-ignore with the fix"]
+    fn clearing_a_bind_on_a_layout_less_round_keeps_a_static_heats_fixed_channels() {
+        // Two adjacent Raceband channels — a pair the IMD auto-pick would never choose, so a
+        // clobber is unmistakable.
+        let (registry, event, round) =
+            event_with_static_channels(&[("alpha", 5732), ("bravo", 5769)]);
+        let filled = fill_next(&registry, &event, &round);
+        let heat = filled.scheduled[0].heat.clone();
+        let state = registry.resolve(&event).unwrap();
+        let fixed = channels_of(&state, &heat);
+        assert_eq!(
+            fixed,
+            vec![5732, 5769],
+            "the Static heat races its members' own assigned channels"
+        );
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::SetHeatLayout {
+                heat: heat.clone(),
+                layout: None,
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+
+        assert_eq!(
+            channels_of(&state, &heat),
+            fixed,
+            "there was no layout to clear — a Static heat's channels are its members', and \
+             moving a pilot off the frequency their VTX is on is exactly what must not happen \
+             as a side effect"
         );
     }
 
@@ -5548,6 +5904,119 @@ mod tests {
             current_heat_of(&state),
             Some(heat2),
             "with nothing to advance to, Live control stays on the advanced heat"
+        );
+    }
+
+    /// #439: `Advance` must never load a heat whose round the event no longer defines.
+    ///
+    /// Removing a round is allowed while all its heats are still `Scheduled` (#418), and it is
+    /// documented to drop those heats "from every list the console reads". But the RD does not
+    /// reach the next heat through a list — they press Advance. Selecting a ghost heat loads a
+    /// race whose round config (layouts, staging timer, min-lap) is gone from event meta and
+    /// which appears on no console screen to be fixed or skipped.
+    ///
+    /// The scratch round's heat is drawn **after** the keeper round's heat 1 and before anything
+    /// the keeper draws next, so it is exactly the heat `on_deck` reaches for first.
+    #[test]
+    #[ignore = "known bug #439: apply_advance selects on_deck with no round-existence check — un-ignore with the fix"]
+    fn advance_never_loads_a_removed_rounds_heat() {
+        use crate::events::{ChannelMode, NewRoundReq, SeedingRule};
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let (registry, event_id, round) =
+            round_robin_event(&["alpha", "bravo", "charlie", "delta"], 2);
+        let state = registry.resolve(&event_id).unwrap();
+
+        // Heat 1 of the round that stays.
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: round.clone(),
+                    mode: FillMode::Next,
+                },
+            )
+            .ok
+        );
+        let heat1 = heat_ids_in_round(&state, &round)[0].clone();
+
+        // A scratch round over the same field, filled once — its heat lands between heat 1 and
+        // whatever the keeper round draws next.
+        let classes = registry.meta_of(&event_id).unwrap().classes;
+        let scratch = registry
+            .add_round(
+                &event_id,
+                NewRoundReq {
+                    layouts: Vec::new(),
+                    label: "Scratch".into(),
+                    classes,
+                    format: "head_to_head".into(),
+                    params: BTreeMap::from([("group_size".into(), "2".into())]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap();
+        assert!(
+            apply_command_in_event(
+                &registry,
+                &event_id,
+                &state,
+                Command::FillRound {
+                    round: scratch.id.clone(),
+                    mode: FillMode::Next,
+                },
+            )
+            .ok
+        );
+        let ghost = heat_ids_in_round(&state, &scratch.id)[0].clone();
+
+        // The RD throws the scratch round away. Nothing of it has raced, so it goes (#418).
+        registry
+            .remove_round(&event_id, &scratch.id)
+            .expect("a round whose heats are all still Scheduled removes");
+
+        drive_heat_to_final(&registry, &event_id, &state, &heat1);
+        let ack = apply_command_in_event(
+            &registry,
+            &event_id,
+            &state,
+            Command::Advance {
+                heat: heat1.clone(),
+            },
+        );
+        assert!(ack.ok, "Advance rejected: {ack:?}");
+
+        // Neither the ack nor Live control may name the ghost …
+        if let Some(CommandOutcome::Advance(outcome)) = &ack.outcome {
+            assert_ne!(
+                outcome.loaded.as_ref().map(|h| h.heat.clone()),
+                Some(ghost.clone()),
+                "the ack names a heat of a round this event no longer defines: {outcome:?}"
+            );
+        }
+        assert_ne!(
+            current_heat_of(&state),
+            Some(ghost.clone()),
+            "Advance loaded a heat whose round was removed — it is on no console screen and its \
+             round config is gone from event meta"
+        );
+
+        // … and positively: Advance moved on within the round that still exists.
+        let loaded = current_heat_of(&state).expect("Advance loaded a heat");
+        assert!(
+            heat_ids_in_round(&state, &round).contains(&loaded),
+            "Advance must move on within a round the event still defines, got {loaded:?}"
         );
     }
 

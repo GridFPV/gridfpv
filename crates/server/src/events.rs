@@ -7627,6 +7627,92 @@ mod tests {
         );
     }
 
+    /// #441: a round's layout decision must still reach the heats it generated.
+    ///
+    /// The fill records an **explicit** `HeatLayoutSet` bind for every heat it draws, even though
+    /// the RD chose nothing about that heat — it only resolved the round's default. An explicit
+    /// bind then wins in `layout_for_heat`, so swapping the round from Bracket A to Bracket B
+    /// re-materializes each heat straight back onto A and `round_issues` flags every one of them
+    /// as bound to a layout its round no longer names. A whole round's worth of manual repair for
+    /// a decision the RD made once, at the round.
+    ///
+    /// A heat the RD has *personally* re-picked (`SetHeatLayout`) is a different matter and must
+    /// keep its pick — that is what a bind is for. This heat was never touched.
+    #[test]
+    #[ignore = "known bug #441: the fill freezes a layout bind on every generated heat — un-ignore with the fix"]
+    fn editing_a_rounds_layouts_re_tunes_the_heats_it_generated() {
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, a) = event_with_layout(&reg, "Race Night");
+        // A second complete tuning — the seeded Raceband order reversed — so which layout a heat
+        // flies is legible from its channels alone.
+        let reversed: Vec<LayoutNode> = crate::channels::RACEBAND_MHZ
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(node, channel)| LayoutNode {
+                node: node as u32,
+                channel: *channel,
+            })
+            .collect();
+        let view = reg
+            .add_channel_layout(
+                &event,
+                NewChannelLayoutRequest {
+                    name: "Bracket B".into(),
+                    nodes: Some(reversed),
+                },
+            )
+            .unwrap();
+        let b = view
+            .layouts
+            .iter()
+            .find(|l| l.name == "Bracket B")
+            .unwrap()
+            .id
+            .clone();
+
+        let mut req_round = practice_round(&[0, 1, 2]);
+        req_round.label = "Warmup".to_string();
+        req_round.layouts = vec![a.clone()];
+        let round = reg.add_round(&event, req_round).unwrap();
+        let heat = fill_next_heat(&reg, &event, &round.id);
+        let channels = |reg: &EventRegistry| -> Vec<u16> {
+            heat_now(reg, &event, &heat)
+                .1
+                .iter()
+                .map(|(_, f)| *f)
+                .collect()
+        };
+        assert_eq!(
+            channels(&reg),
+            vec![5658, 5695, 5732],
+            "the generated heat flies the round's only layout, Bracket A"
+        );
+
+        // The RD swaps the round onto Bracket B. Nobody has touched this heat.
+        let stored = reg
+            .rounds_of(&event)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == round.id)
+            .expect("the round is stored");
+        let mut edit = round_edit_of(&stored);
+        edit.layouts = vec![b];
+        reg.update_round(&event, &round.id, edit)
+            .expect("swapping a round's layouts is allowed");
+
+        assert_eq!(
+            channels(&reg),
+            vec![5917, 5880, 5843],
+            "re-materializing the round re-tunes its untouched heat onto Bracket B"
+        );
+        assert!(
+            reg.round_issues(&event).unwrap().is_empty(),
+            "nothing to repair: the RD edited the round, and the round's heats followed — {:?}",
+            reg.round_issues(&event).unwrap()
+        );
+    }
+
     #[test]
     fn an_orphaned_bind_to_a_deleted_layout_still_reports_without_naming_it() {
         // One step further along, and reachable precisely because the delete refusal is scoped to

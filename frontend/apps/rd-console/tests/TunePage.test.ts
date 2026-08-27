@@ -1091,6 +1091,56 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
     h.unmount();
   });
 
+  // #442, defect 2 — the honest seam is HERE, not in `tuning.ts`: the guard that drops the pick is
+  // `commitChannel`'s own `if (!held || held.phase === 'sent') return;` (TunePage.svelte:745).
+  // `ChannelState` has no queue and no refusal for this case, so there is nothing in the state
+  // machine to exercise — the component is where the input is accepted and where it is lost.
+  //
+  // The dropdown is NOT disabled while a channel write is unconfirmed (up to CONFIRM_TIMEOUT_MS,
+  // 3 s), so the RD's second pick is taken by the control, dropped by the handler, and then erased
+  // from the screen by the one-way `value={chan.mhz}` snapping the select back to the first pick.
+  // No write, no error, no `refused` state, no toast: the page ends up on a channel nobody asked
+  // for while reading as though it were the RD's own choice.
+  //
+  // Deliberately accepts EITHER honest fix — queue/apply the pick, or refuse it out loud — because
+  // both are defensible and only the silence is not. `it.fails` (not a skip) so it runs in CI,
+  // passes while the bug stands, and goes red the moment either fix lands.
+  it.fails(
+    'never silently drops a channel pick made while the previous write is unconfirmed',
+    async () => {
+      // No second poll (the default 10-minute cadence) and a confirm backstop far out of the way, so
+      // the first write simply stays `sent` — exactly the window this is about.
+      const h = await renderTune({ confirmMs: 5_000 });
+      const panel = () => screen.getByTestId('channel-0');
+      // Addressed through the panel's own testid rather than the node's accessible name, because that
+      // name follows the channel and is mid-change for the whole of this test.
+      const select = () => panel().querySelector('select') as HTMLSelectElement;
+
+      await fireEvent.change(select(), { target: { value: '5800' } });
+      await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+      // The write is out and unconfirmed — and the control is still live, so the RD may pick again.
+      expect(within(panel()).getByText('Sending…')).toBeInTheDocument();
+      expect(select()).not.toBeDisabled();
+
+      // The RD changes their mind inside the round trip.
+      await fireEvent.change(select(), { target: { value: '5695' } });
+
+      await waitFor(
+        () => {
+          const outcome = {
+            // Either the pick reached the timer (immediately, or queued behind the first write)…
+            wroteThePick: h.applyChannel.mock.calls.some((call) => call[1].mhz === 5695),
+            // …or the node says out loud that it was not sent. `phaseLabel('refused')` is 'Not sent'.
+            toldTheRD: within(panel()).queryByText('Not sent') !== null
+          };
+          expect(outcome).not.toEqual({ wroteThePick: false, toldTheRD: false });
+        },
+        { timeout: 300 }
+      );
+      h.unmount();
+    }
+  );
+
   it('says NOT TAKEN when the timer never comes back on the new channel', async () => {
     // The #403 failure class: a write that reports dispatched and never lands. Silence here would
     // leave the RD tuning a gate that is on a different channel from the one on screen.

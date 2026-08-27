@@ -844,28 +844,12 @@ fn drive(
         };
         timers.set_status(&timer_id, TimerStatus::Connected);
         backoff = RECONNECT_BACKOFF_MIN;
-        // Drop any restart request that outlived the previous connection. The route only accepts
-        // one while the timer reads `Connected`, but the link can drop in the window between that
-        // check and the reconciler's drain — and `maintain` only consumes the flag while a socket
-        // is up. Without this the request would survive backoff and fire on a reconnect minutes
-        // later, restarting the timer with no one asking: exactly the surprise `restart`'s own
-        // contract says cannot happen.
-        restart.store(false, Ordering::Relaxed);
-        // …and any calibration write that outlived the previous connection, for the same reason.
-        // The route only accepts one while the timer reads `Connected`, but the link can drop in the
-        // window before the reconciler drains. A threshold is not held over for a future connection:
-        // firing it minutes later, onto whatever RotorHazard came back, would move a detector nobody
-        // asked to move — and the RD would have long since seen the value fail to come back and
-        // re-set it by hand.
-        calibration
-            .lock()
-            .expect("calibration lock poisoned")
-            .clear();
-        // …and any capture that outlived it, for a sharper version of the same reason. A capture
-        // fired minutes later would sample a gate with nothing flying through it and set the
-        // threshold off the noise floor — a *worse* outcome than not capturing, because the RD
-        // would have no reason to suspect it.
-        capture.lock().expect("capture lock poisoned").clear();
+        clear_writes_that_outlived_the_previous_connection(
+            &restart,
+            &calibration,
+            &capture,
+            &channel,
+        );
 
         // Probe for the GridFPV plugin (D16, S1): `connect` already emitted `gridfpv_hello`, so
         // wait briefly for the `gridfpv_hello_ack`. Present-&-compatible / incompatible / missing
@@ -979,6 +963,40 @@ fn drive(
     if !yield_status.load(Ordering::Relaxed) {
         timers.set_status(&timer_id, TimerStatus::Disconnected);
     }
+}
+
+/// Drop every queued write that outlived the **previous** connection — called once by [`drive`]
+/// each time it (re)connects, before anything can be armed on the new link.
+///
+/// The route behind each of these only accepts a request while the timer reads `Connected`, but the
+/// link can drop in the window between that check and the reconciler's drain — and [`maintain`] only
+/// consumes a queued write while a socket is up. Without this the request survives the backoff and
+/// fires on a reconnect minutes later:
+///
+/// - **restart** (#386) would restart the timer with no one asking: exactly the surprise
+///   [`RhConnection::restart`]'s own contract says cannot happen.
+/// - **calibration** (#355) would move a detector nobody asked to move, onto whatever RotorHazard
+///   came back — and the RD would long since have seen the value fail to come back and re-set it
+///   by hand.
+/// - **capture** (#355), for a sharper version of the same reason: fired minutes later it would
+///   sample a gate with nothing flying through it and set the threshold off the noise floor, a
+///   *worse* outcome than not capturing, because the RD would have no reason to suspect it.
+///
+/// `_channel` (#413) is handed in because it is a write slot of exactly the same kind — and is
+/// **not** cleared: that is bug #436 (see the ignored repro test at the bottom of this file), which
+/// is why the parameter is named for what it is rather than left off the signature.
+fn clear_writes_that_outlived_the_previous_connection(
+    restart: &RestartSlot,
+    calibration: &CalibrationSlot,
+    capture: &CaptureSlot,
+    _channel: &ChannelSlot,
+) {
+    restart.store(false, Ordering::Relaxed);
+    calibration
+        .lock()
+        .expect("calibration lock poisoned")
+        .clear();
+    capture.lock().expect("capture lock poisoned").clear();
 }
 
 /// Classify the GridFPV-plugin handshake result (D16, S1) into the [`PluginPresence`] the timer
@@ -1784,6 +1802,177 @@ mod tests {
         assert!(
             lower.contains("refused") || lower.contains("connect"),
             "error_chain should name the refused connect, got {chained:?}"
+        );
+    }
+
+    // ── #435: a failed intermediate reconnect attempt must not cost the dedup ────────────────
+
+    /// RotorHazard's `RACING` status edge (`RaceStatus.RACING == 1`), as the driver folds it.
+    fn racing() -> gridfpv_adapters::rotorhazard::Raw {
+        gridfpv_adapters::rotorhazard::Raw::RaceStatus(
+            gridfpv_adapters::rotorhazard::RawRaceStatus {
+                race_status: 1,
+                race_heat_id: Some(1),
+            },
+        )
+    }
+
+    /// The in-progress `current_laps` snapshot RotorHazard re-sends on **every** new socket while a
+    /// race is running — three laps flown on node 0 before the link dropped. Shaped as
+    /// `build_laps_list` builds it on 4.3.0/4.4.0: `{current: {node_index: [{laps: [...]}]}}`, each
+    /// lap carrying `lap_time_stamp` in cumulative ms since race start.
+    fn in_progress_snapshot() -> gridfpv_adapters::rotorhazard::Raw {
+        use gridfpv_adapters::rotorhazard::{
+            Raw, RawCurrent, RawCurrentLaps, RawLap, RawLapNumber, RawNode,
+        };
+        let lap = |number: u64, stamp: f64| RawLap {
+            lap_index: Some(number as i64),
+            lap_number: RawLapNumber::Counted(number),
+            lap_raw: None,
+            lap_time: None,
+            lap_time_stamp: stamp,
+            late_lap: false,
+            deleted: None,
+        };
+        Raw::CurrentLaps(RawCurrentLaps {
+            current: RawCurrent {
+                node_index: vec![RawNode {
+                    laps: vec![lap(0, 2_000.0), lap(1, 7_000.0), lap(2, 12_000.0)],
+                    pilot: None,
+                }],
+            },
+        })
+    }
+
+    fn passes(events: &[Event]) -> Vec<i64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Pass(p) => Some(p.at.micros),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A failed reconnect attempt must not lose the carried adapter (#435).**
+    ///
+    /// On a mid-race drop [`drive`] carries the adapter out of the dead connection
+    /// (`carry_adapter = Some(conn.disconnect())`) precisely so its dedup and `last_race_status`
+    /// stay continuous: RotorHazard re-sends the whole in-progress `current_laps` snapshot on the
+    /// new socket, and a fresh adapter re-mints every lap of the heat as a new `Pass` — which the
+    /// lap projection, which does not dedup by sequence, turns into duplicate laps.
+    ///
+    /// But `RotorHazardConnection::connect` takes the adapter **by value**, so an attempt that
+    /// *fails* — RotorHazard momentarily unreachable, the common case right after the blip that
+    /// dropped the socket — drops it in the `Err` branch, and the next iteration's
+    /// `carry_adapter.take().unwrap_or_default()` starts from an empty dedup while the heat is
+    /// still armed. One Wi-Fi blip plus one failed retry doubles the heat's lap log.
+    ///
+    /// The failing connect below is the real one (port 1 is refused immediately); the rest is
+    /// [`drive`]'s own carry, transcribed. **Un-ignoring this with the fix means recovering the
+    /// adapter in the `Err` arm** — whatever shape `connect` grows to hand it back.
+    #[test]
+    #[ignore = "known bug #435: a failed connect consumes the carried adapter — un-ignore with the fix"]
+    fn a_failed_connect_attempt_must_not_lose_the_carried_dedup_state() {
+        use gridfpv_adapters::Adapter;
+
+        // Mid-race: three laps already flown, already minted, already in the heat's log.
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(racing());
+        assert_eq!(
+            passes(&adapter.translate(in_progress_snapshot())),
+            vec![2_000_000, 7_000_000, 12_000_000],
+            "the laps flown before the drop"
+        );
+
+        // The socket drops. `drive` carries the adapter into the next attempt…
+        let mut carry_adapter = Some(adapter);
+        let attempt = carry_adapter.take().unwrap_or_default();
+        // …and that attempt fails, because RotorHazard has not come back yet. (Port 1 is reserved
+        // and unused on the loopback, so the connect is refused immediately.) `drive`'s Err arm
+        // then logs the chain, marks the timer Error, backs off and retries — nothing puts the
+        // adapter back, because `connect` consumed it and `rust_socketio::Error` carries nothing.
+        assert!(
+            RotorHazardConnection::connect("http://127.0.0.1:1", attempt).is_err(),
+            "connecting to a dead port must fail"
+        );
+        assert!(
+            carry_adapter.is_some(),
+            "the adapter carried into a FAILED connect must survive it — the heat is still armed \
+             and the next attempt needs its dedup to suppress RotorHazard's replayed snapshot"
+        );
+
+        // The retry succeeds and RotorHazard re-sends the in-progress snapshot on the new socket.
+        let mut retried = carry_adapter.take().unwrap_or_default();
+        retried.translate(racing());
+        assert!(
+            passes(&retried.translate(in_progress_snapshot())).is_empty(),
+            "every lap flown before the drop would be minted a SECOND time: the lap projection \
+             does not dedup by sequence, so these become duplicate laps in the heat's log"
+        );
+    }
+
+    // ── #436: the connect-success path must clear the channel slot too ───────────────────────
+
+    /// **A reconnect drops every write that outlived the previous connection — the channel one
+    /// included (#436).**
+    ///
+    /// The RD picks a channel on the Tune page while the timer reads Connected; the socket drops
+    /// before the next maintain tick drains it. Minutes later the reconnected driver's first tick
+    /// emits `set_frequency`, retuning a receiver nobody asked to move — possibly on a different
+    /// physical RotorHazard now answering at that URL. That is exactly what the restart,
+    /// calibration and capture slots are cleared to prevent, and exactly what
+    /// `RhConnections::set_channel`'s own contract promises cannot happen: "nothing is queued for a
+    /// future connection: a node retuned minutes later on a reconnect would move a receiver nobody
+    /// asked to move".
+    #[test]
+    #[ignore = "known bug #436: reconnect leaves the channel slot armed — un-ignore with the fix"]
+    fn a_reconnect_clears_the_channel_slot_like_every_other_stale_write() {
+        // One of each write queued while the previous connection was up.
+        let restart: RestartSlot = Arc::new(AtomicBool::new(true));
+        let calibration: CalibrationSlot = Arc::new(Mutex::new(vec![CalibrationWrite {
+            node: 0,
+            enter_at: Some(96),
+            exit_at: None,
+            during_open_practice: false,
+        }]));
+        let capture: CaptureSlot = Arc::new(Mutex::new(vec![CaptureWrite {
+            node: 0,
+            enter: true,
+            during_open_practice: false,
+        }]));
+        let channel: ChannelSlot = Arc::new(Mutex::new(vec![ChannelWrite {
+            node: 0,
+            mhz: 5880,
+            band: Some("Raceband".into()),
+            channel: Some("R7".into()),
+            during_open_practice: false,
+        }]));
+
+        // The link dropped and the driver has just reconnected.
+        clear_writes_that_outlived_the_previous_connection(
+            &restart,
+            &calibration,
+            &capture,
+            &channel,
+        );
+
+        assert!(
+            channel.lock().expect("channel lock").is_empty(),
+            "a channel write from the previous connection must NOT survive the reconnect — it \
+             would retune a receiver nobody asked to move, minutes later, with no readback"
+        );
+        assert!(
+            !restart.load(Ordering::Relaxed),
+            "the restart request must not outlive its connection"
+        );
+        assert!(
+            calibration.lock().expect("calibration lock").is_empty(),
+            "the calibration write must not outlive its connection"
+        );
+        assert!(
+            capture.lock().expect("capture lock").is_empty(),
+            "the capture must not outlive its connection"
         );
     }
 }

@@ -208,6 +208,32 @@ describe('the timer-row reading', () => {
     // Never asked: nothing to disagree with.
     expect(timerDrifts({ ...base, node_count: 8 })).toBe(false);
   });
+
+  // #445 — the same "never asked" case, spelled the way the WIRE actually spells it.
+  //
+  // The assertion above builds it by OMITTING the key, which is the one shape the Director never
+  // sends: `reported_nodes` is `Option<u32>` with `#[serde(default)]` and **no**
+  // `skip_serializing_if` (`crates/server/src/timers.rs:469-471`), so a Mock — or any timer the
+  // Director has never dialed — serialises `"reported_nodes": null`. `timerDrifts` tests
+  // `!== undefined`, and `null !== undefined`, so every one of those rows flags drift and
+  // TimerManager renders a danger badge reading "Timer reports " with nothing after it (`null`
+  // renders empty). `hasWidthOverride()` immediately above already guards both `undefined` and
+  // `null`; this is that same guard, missing.
+  //
+  // `as unknown as Timer` for the same reason the #412 fixtures below use it: `#[ts(optional)]`
+  // types the field as `reported_nodes?: number`, which cannot express the `null` the wire sends —
+  // and a fixture that can only express shapes the wire does not send is how this shipped.
+  //
+  // `it.fails` rather than a skip: it runs in CI, passes while the bug stands, and goes red the
+  // moment the guard becomes `!= null`, which forces the marker off with the fix.
+  it.fails('does not flag drift on a timer the Director has never asked (wire: null)', () => {
+    // A Mock: width pinned by the RD, nothing to ask.
+    const mock = { ...base, node_count: 8, reported_nodes: null } as unknown as Timer;
+    expect(timerDrifts(mock)).toBe(false);
+    // A never-connected RotorHazard: nothing pinned and nothing observed either.
+    const neverDialed = { ...base, node_count: null, reported_nodes: null } as unknown as Timer;
+    expect(timerDrifts(neverDialed)).toBe(false);
+  });
 });
 
 describe('the effective width is what consumers must read (#412 regression)', () => {
