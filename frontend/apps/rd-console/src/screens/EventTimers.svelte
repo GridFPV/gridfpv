@@ -39,21 +39,21 @@
    * editable, and the row carries a warning instead. What stops such an event from racing it is
    * the Director's arm-time backstop.
    *
-   * ## Channel layers (#117 S2)
+   * ## Channel layouts (#117 S2)
    *
    * Per the RD, in **event** scope the timer page becomes per-node channel selection — the
-   * {@link EventChannelLayers} card at the bottom. Note carefully what the two halves of this page
+   * {@link EventChannelLayouts} card at the bottom. Note carefully what the two halves of this page
    * edit: the checkbox picker inside {@link TimerManager} writes `Timer.available_channels`, the
-   * **global** record of what a timer may *ever* use; a **layer** is this event's own `node →
+   * **global** record of what a timer may *ever* use; a **layout** is this event's own `node →
    * channel` tuning, stored on the event's meta. Global is the seed, the event owns what it runs —
-   * and editing a layer never touches a timer, which is the bug that slice exists to close.
+   * and editing a layout never touches a timer, which is the bug that slice exists to close.
    */
   import { Button, Card, toast } from '@gridfpv/components';
   import type { Timer, TimerId } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import { AutoSaver } from '../lib/autosave.js';
   import { selectionRefusal } from '../lib/pluginPresence.js';
-  import EventChannelLayers from './EventChannelLayers.svelte';
+  import EventChannelLayouts from './EventChannelLayouts.svelte';
   import TimerManager from './TimerManager.svelte';
 
   let {
@@ -79,11 +79,11 @@
      */
     onselectionchange?: (count: number) => void;
     /**
-     * Whether to show the per-node **channel layer** editor (#117 S2). On by default — this is the
+     * Whether to show the per-node **channel layout** editor (#117 S2). On by default — this is the
      * event Timers page, and in event scope the timer page *is* per-node channel selection.
      *
      * The setup wizard passes `false`: its Timer step is where the RD is still choosing *which*
-     * timer feeds the event, and a layer tunes a timer that has not been settled on yet. Layers
+     * timer feeds the event, and a layout tunes a timer that has not been settled on yet. Layouts
      * stay fully editable on this page afterwards, which is the wizard's whole posture.
      */
     showLayers?: boolean;
@@ -212,17 +212,17 @@
   // Guards a primary change in flight so the radios don't double-fire mid-request.
   let settingPrimary = $state(false);
 
-  // ── Channel layers (#117 S2) ──────────────────────────────────────────────
+  // ── Channel layouts (#117 S2) ──────────────────────────────────────────────
   //
   // Per the RD, in **event** scope the timer page becomes per-node channel selection. That is the
-  // layer editor below: a layer is one complete tuning of this event's timer (node → channel),
+  // layout editor below: a layout is one complete tuning of this event's timer (node → channel),
   // drawn from the channels ticked above.
   //
   // The distinction the two halves of this page draw is the whole slice: the checkbox picker inside
   // `TimerManager` edits `Timer.available_channels` — **the global timer record**, what a timer may
-  // *ever* use — while a layer is **event** state. Editing a layer never touches a timer.
+  // *ever* use — while a layout is **event** state. Editing a layout never touches a timer.
   //
-  // A layer tunes the event's **effective primary** timer (#112's redundant timers are two boxes at
+  // A layout tunes the event's **effective primary** timer (#112's redundant timers are two boxes at
   // one gate, so an alternate must be listening on the same channels). Resolved from the registry
   // rows this screen already holds, so the editor and the roles picker cannot disagree about which
   // timer is primary.
@@ -328,7 +328,7 @@
   {/if}
 
   {#if showLayers}
-    <EventChannelLayers {session} timer={layerTimer} />
+    <EventChannelLayouts {session} timer={layerTimer} />
   {/if}
 </section>
 

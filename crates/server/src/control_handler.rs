@@ -339,6 +339,17 @@ pub fn apply_command_in_event(
             frequencies,
             label,
         ),
+        // #117 S3: both need the event meta (the layouts, the round that names them) and the
+        // timer registry (the enabled node set a layout lays channels onto), so neither can be
+        // answered from the log alone.
+        Command::SetHeatLayout { heat, layout } => {
+            apply_set_heat_layout(registry, event_id, state, heat, layout)
+        }
+        Command::OverrideHeatSeating {
+            heat,
+            lineup,
+            frequencies,
+        } => apply_override_heat_seating(registry, event_id, state, heat, lineup, frequencies),
         other => apply_command(state, other),
     }
 }
@@ -438,7 +449,10 @@ fn apply_schedule_heat(
     // Caller-supplied frequencies win (manual override / test); otherwise assign from the event's
     // timer. Either way the heat-size cap is enforced against the event's timer.
     let frequencies = if frequencies.is_empty() {
-        match round_engine::assign_for_event(&meta, &registry.timers(), &lineup) {
+        // #117 S3: `ScheduleHeat` is the free-text / manual path — it names no round, so there is
+        // no round default layout to apply, and any layout binding for the heat is set afterwards
+        // through `SetHeatLayout`. Assign from the timer's allowed set, as before.
+        match round_engine::assign_for_event(&meta, &registry.timers(), None, &lineup) {
             Ok(freqs) => freqs,
             Err(err) => {
                 return CommandAck::failed(ProtocolError::new(
@@ -663,6 +677,7 @@ fn fill_round_once(
             heat,
             lineup,
             frequencies: static_freqs,
+            layout,
             field_draw,
         }) => {
             let class = round_engine::round_class(meta, round);
@@ -690,15 +705,20 @@ fn fill_round_once(
                     }
                     freqs
                 }
-                None => match round_engine::assign_for_event(meta, &registry.timers(), &lineup) {
-                    Ok(freqs) => freqs,
-                    Err(err) => {
-                        return FillStep::Failed(CommandAck::failed(ProtocolError::new(
-                            ErrorCode::BadRequest,
-                            err.to_string(),
-                        )));
+                // No layout and no static channels: first-fit from the timer's allowed set.
+                // A heat that *does* fly a layout arrives here with `static_freqs: Some(..)`
+                // already resolved from it by `fill_round` — the layout IS the assignment.
+                None => {
+                    match round_engine::assign_for_event(meta, &registry.timers(), None, &lineup) {
+                        Ok(freqs) => freqs,
+                        Err(err) => {
+                            return FillStep::Failed(CommandAck::failed(ProtocolError::new(
+                                ErrorCode::BadRequest,
+                                err.to_string(),
+                            )));
+                        }
                     }
-                },
+                }
             };
             // FREEZE-AT-FILL (#334): a carry-seeded round's first fill records its resolved
             // field BEFORE the heat, so every later read (fills, ranking, standings, dependent
@@ -728,6 +748,22 @@ fn fill_round_once(
                 lineup: lineup.clone(),
                 frequencies: frequencies.clone(),
             };
+            // #117 S3: record WHICH LAYOUT this heat flies, before the schedule that carries the
+            // channels it produced. Appending it makes the answer a fact about the heat rather than
+            // something re-derived later from a round whose default may since have changed — so a
+            // heat that has raced keeps not just its channels but the name of the tuning it raced
+            // on. Only when there is one: a round naming no layouts logs nothing new.
+            if layout.is_some() {
+                if let Err(err) = state.append(
+                    Event::HeatLayoutSet {
+                        heat: heat.clone(),
+                        layout,
+                    },
+                    None,
+                ) {
+                    return FillStep::Failed(CommandAck::failed(err));
+                }
+            }
             let event = Event::HeatScheduled {
                 heat,
                 lineup,
@@ -1132,6 +1168,325 @@ fn select_next_heat(state: &AppState, next: HeatId) -> Result<(), ProtocolError>
     Ok(())
 }
 
+/// A heat's **friendly name** and the round it belongs to, for a refusal that has to name it
+/// (CLAUDE.md: never a raw heat id).
+///
+/// `None` when the heat is not tagged to a round this event still defines — the caller then has
+/// nothing to resolve against and refuses on existence instead.
+fn named_heat<'a>(
+    meta: &'a crate::events::EventMeta,
+    events: &[Event],
+    heat: &HeatId,
+) -> Option<(&'a crate::events::RoundDef, String)> {
+    let (_, _, round, _, _) = logged_schedule_full(events, heat);
+    let round = meta.rounds.iter().find(|r| Some(&r.id) == round.as_ref())?;
+    let name = crate::round_engine::heat_display_name(round, events, heat);
+    Some((round, name))
+}
+
+/// Refuse anything that would re-tune a heat **past `Scheduled`** (#117 S3).
+///
+/// The binding rule, and the same one #387's re-materialization follows: a staged, armed, running
+/// or finalized heat is either on the timer or in the record, and *a heat that has raced keeps the
+/// channels it raced on*. Re-tuning one would relabel a result after the fact.
+///
+/// Names the heat by its friendly name, never its id.
+fn require_retunable(
+    events: &[Event],
+    heat: &HeatId,
+    name: &str,
+    what: &str,
+) -> Result<(), ProtocolError> {
+    let state = gridfpv_engine::heat::heat_state(events, heat);
+    if matches!(state, Some(gridfpv_engine::heat::HeatState::Scheduled)) {
+        return Ok(());
+    }
+    Err(ProtocolError::new(
+        ErrorCode::BadRequest,
+        format!(
+            "{name} has already been staged, so its {what} can no longer change — a heat keeps the \
+             channels it raced on. Abort or restart it first to put it back to Scheduled."
+        ),
+    ))
+}
+
+/// Handle [`Command::SetHeatLayout`] (#117 S3): bind a `Scheduled` heat to one of the channel
+/// layouts its round names, and **re-tune it** to that layout.
+///
+/// Two events, in order: the [`Event::HeatLayoutSet`] recording the choice, then a fresh
+/// [`Event::HeatScheduled`] carrying the channels the layout gives each seat. Appending the bind
+/// first means a reader folding the log in order never sees a heat carrying one layout's channels
+/// while still recorded against another.
+///
+/// The lineup, class, round tag and RD-typed label are carried through unchanged: this re-tunes the
+/// heat, it does not re-draw it.
+///
+/// Refusals, all typed `400`s naming the heat, the layout and the timer by their friendly names:
+/// a heat past `Scheduled`; a layout the event does not have; a layout the heat's **round** does not
+/// name; and any [`AssignError`](crate::round_engine::AssignError) the layout produces (a node it
+/// says nothing about, a lineup wider than the enabled node set).
+fn apply_set_heat_layout(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    heat: HeatId,
+    layout: Option<gridfpv_events::LayoutId>,
+) -> CommandAck {
+    use crate::round_engine;
+
+    let _guard = state.command_guard();
+    let Some(meta) = registry.meta_of(event_id) else {
+        return CommandAck::failed(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        ));
+    };
+    let (events, _cursor) = match state.read() {
+        Ok(read) => read,
+        Err(err) => return CommandAck::failed(err),
+    };
+    let Some((round, name)) = named_heat(&meta, &events, &heat) else {
+        return CommandAck::failed(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no heat scheduled with id {:?} in this event", heat.0),
+        ));
+    };
+    if let Err(err) = require_retunable(&events, &heat, &name, "channel layout") {
+        return CommandAck::failed(err);
+    }
+
+    // The layout must exist AND be one this round flies. The round is where the RD decided which
+    // layouts this phase of the event may use; a heat reaching past that list would quietly
+    // contradict the decision one level up.
+    let resolved = match &layout {
+        Some(id) => match meta.layout(id) {
+            Some(found) if round.layouts.contains(id) => Some(found.clone()),
+            Some(found) => {
+                return CommandAck::failed(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    format!(
+                        "{:?} does not fly the {:?} channel layout — add it to the round first, or \
+                         pick one of the layouts it does fly",
+                        round.label, found.name
+                    ),
+                ));
+            }
+            None => {
+                return CommandAck::failed(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    "this event has no such channel layout — pick one from its Channel layouts \
+                     page"
+                        .to_string(),
+                ));
+            }
+        },
+        None => None,
+    };
+
+    // Re-tune. With the bind cleared, the heat falls back to the round's default layout (or, with
+    // none, to the auto-pick) — resolved through exactly the same helper the fill uses.
+    let (lineup, class, round_tag, _freqs, label) = logged_schedule_full(&events, &heat);
+    let effective = match &resolved {
+        Some(found) => Some(found.clone()),
+        None => round
+            .layouts
+            .first()
+            .and_then(|id| meta.layout(id))
+            .cloned(),
+    };
+    let frequencies = match round_engine::assign_for_event(
+        &meta,
+        &registry.timers(),
+        effective.as_ref(),
+        &lineup,
+    ) {
+        Ok(freqs) => freqs,
+        Err(err) => {
+            return CommandAck::failed(ProtocolError::new(ErrorCode::BadRequest, err.to_string()));
+        }
+    };
+
+    if let Err(err) = state.append(
+        Event::HeatLayoutSet {
+            heat: heat.clone(),
+            layout: effective.as_ref().map(|l| l.id.clone()),
+        },
+        None,
+    ) {
+        return CommandAck::failed(err);
+    }
+    match state.append(
+        Event::HeatScheduled {
+            heat,
+            lineup,
+            class,
+            round: round_tag,
+            frequencies,
+            label,
+        },
+        None,
+    ) {
+        Ok(_offset) => CommandAck::ok(),
+        Err(err) => CommandAck::failed(err),
+    }
+}
+
+/// Handle [`Command::OverrideHeatSeating`] (#117 S3): set a `Scheduled` heat's pilots and their
+/// channels by hand, and make the choice **stick**.
+///
+/// Records the [`Event::HeatSeatingOverridden`] first — that is the durable half, the one a round
+/// re-fill and a round edit's re-materialization both re-apply — then re-emits the heat's schedule
+/// so the heat is seated that way immediately.
+///
+/// An **empty lineup clears** the override: the heat is re-formed from its round's plan, exactly as
+/// if the RD had never touched it. That is the only way out, and it is deliberately explicit.
+///
+/// Refusals, typed `400`s naming the heat and the timer by their friendly names: a heat past
+/// `Scheduled`; a repeated pilot; a lineup wider than the timer's **enabled** node set; and any
+/// [`AssignError`](crate::round_engine::AssignError) raised while filling the channels the RD did
+/// not type in from the heat's layout.
+fn apply_override_heat_seating(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    heat: HeatId,
+    lineup: Vec<gridfpv_events::CompetitorRef>,
+    frequencies: Vec<(gridfpv_events::CompetitorRef, u16)>,
+) -> CommandAck {
+    use crate::round_engine;
+
+    let _guard = state.command_guard();
+    let Some(meta) = registry.meta_of(event_id) else {
+        return CommandAck::failed(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no event with id {:?}", event_id.0),
+        ));
+    };
+    let (events, _cursor) = match state.read() {
+        Ok(read) => read,
+        Err(err) => return CommandAck::failed(err),
+    };
+    let Some((round, name)) = named_heat(&meta, &events, &heat) else {
+        return CommandAck::failed(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no heat scheduled with id {:?} in this event", heat.0),
+        ));
+    };
+    if let Err(err) = require_retunable(&events, &heat, &name, "seating") {
+        return CommandAck::failed(err);
+    }
+    if let Err(err) = require_distinct_lineup(&lineup) {
+        return CommandAck::failed(err);
+    }
+    // The same membership/roster validation a hand-built heat gets: an override may re-seat the
+    // heat, but not with somebody who is not in this event.
+    let class = round_engine::round_class(&meta, &round.id);
+    if !lineup.is_empty() {
+        if let Err(err) =
+            validate_tagged_lineup(registry, &meta, &lineup, &class, &Some(round.id.clone()))
+        {
+            return CommandAck::failed(err);
+        }
+    }
+
+    if let Err(err) = state.append(
+        Event::HeatSeatingOverridden {
+            heat: heat.clone(),
+            lineup: lineup.clone(),
+            frequencies: frequencies.clone(),
+        },
+        None,
+    ) {
+        return CommandAck::failed(err);
+    }
+
+    // Re-form the heat under the override we just recorded, through the same round-fill machinery
+    // — so what the RD sees now is exactly what a later re-fill will reproduce.
+    let (events, _cursor) = match state.read() {
+        Ok(read) => read,
+        Err(err) => return CommandAck::failed(err),
+    };
+    let (plan_lineup, _class, round_tag, plan_freqs, label) = logged_schedule_full(&events, &heat);
+    let seated = if lineup.is_empty() {
+        plan_lineup
+    } else {
+        lineup
+    };
+    let layout = round_engine::layout_for_heat(&meta, Some(round), &events, &heat).cloned();
+    let assigned = if frequencies.is_empty() {
+        match round_engine::assign_for_event(&meta, &registry.timers(), layout.as_ref(), &seated) {
+            Ok(freqs) => freqs,
+            Err(err) => {
+                return CommandAck::failed(ProtocolError::new(
+                    ErrorCode::BadRequest,
+                    err.to_string(),
+                ));
+            }
+        }
+    } else {
+        frequencies
+    };
+    // With no layout and no typed channels there is nothing better than what the heat already had
+    // — never blank a heat's channels as a side effect of re-seating it.
+    let assigned = if assigned.is_empty() {
+        plan_freqs
+    } else {
+        assigned
+    };
+
+    match state.append(
+        Event::HeatScheduled {
+            heat,
+            lineup: seated,
+            class,
+            round: round_tag,
+            frequencies: assigned,
+            label,
+        },
+        None,
+    ) {
+        Ok(_offset) => CommandAck::ok(),
+        Err(err) => CommandAck::failed(err),
+    }
+}
+
+/// A heat's most recent `HeatScheduled` payload: `(lineup, class, round, frequencies, label)`.
+type LoggedSchedule = (
+    Vec<gridfpv_events::CompetitorRef>,
+    Option<gridfpv_events::ClassId>,
+    Option<gridfpv_events::RoundId>,
+    Vec<(gridfpv_events::CompetitorRef, u16)>,
+    Option<String>,
+);
+
+/// A heat's full **most recent** `HeatScheduled` payload — for a command that re-emits the
+/// schedule rather than drawing a new one.
+fn logged_schedule_full(events: &[Event], heat: &HeatId) -> LoggedSchedule {
+    let mut out = (Vec::new(), None, None, Vec::new(), None);
+    for event in events {
+        if let Event::HeatScheduled {
+            heat: h,
+            lineup,
+            class,
+            round,
+            frequencies,
+            label,
+        } = event
+        {
+            if h == heat {
+                out = (
+                    lineup.clone(),
+                    class.clone(),
+                    round.clone(),
+                    frequencies.clone(),
+                    label.clone(),
+                );
+            }
+        }
+    }
+    out
+}
+
 /// Validate a [`Command`] against the current log and, on success, append the event(s) it
 /// records (protocol.html §5) — the one control write path, shared by both endpoints.
 ///
@@ -1236,6 +1591,18 @@ fn command_to_event(state: &AppState, command: Command) -> Result<Event, Protoco
         Command::FillRound { .. } => Err(ProtocolError::new(
             ErrorCode::BadRequest,
             "FillRound must be applied through the event-aware control path",
+        )),
+
+        // --- The two #117 S3 channel decisions are the same case: both resolve a layout against
+        // the event's meta, so neither can be validated from the log alone. Same arm, same
+        // reasoning as `FillRound` above. ---
+        Command::SetHeatLayout { .. } => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            "SetHeatLayout must be applied through the event-aware control path",
+        )),
+        Command::OverrideHeatSeating { .. } => Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            "OverrideHeatSeating must be applied through the event-aware control path",
         )),
 
         // --- Registration: bind a source competitor to a pilot (no prior-state check). ---
@@ -3680,6 +4047,7 @@ mod tests {
             .add_round(
                 &event,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Qual".into(),
                     classes: vec![class.clone()],
                     format: "timed_qual".into(),
@@ -3828,6 +4196,7 @@ mod tests {
             .add_round(
                 &event,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: label.into(),
                     classes: vec![class],
                     format: format.into(),
@@ -4022,6 +4391,7 @@ mod tests {
             .add_round(
                 &event,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Qual".into(),
                     classes: vec![class],
                     format: "timed_qual".into(),
@@ -4483,6 +4853,7 @@ mod tests {
             .add_round(
                 &event,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Round Robin".into(),
                     classes: vec![class],
                     format: "head_to_head".into(),
@@ -4663,6 +5034,7 @@ mod tests {
             .add_round(
                 &event,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Time Trials".into(),
                     classes: vec![class],
                     format: "timed_qual".into(),
@@ -4730,6 +5102,7 @@ mod tests {
             .add_round(
                 &event,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Open Practice".into(),
                     classes: vec![],
                     format: "open_practice".into(),

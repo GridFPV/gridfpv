@@ -2,6 +2,7 @@
 import type { ChannelMode } from "./ChannelMode";
 import type { ClassId } from "./ClassId";
 import type { GraceWindow } from "./GraceWindow";
+import type { LayoutId } from "./LayoutId";
 import type { ProtestWindow } from "./ProtestWindow";
 import type { RoundId } from "./RoundId";
 import type { SeedingRule } from "./SeedingRule";
@@ -82,6 +83,28 @@ seeding: SeedingRule,
  * reads back as [`ChannelMode::PerHeat`], the prior behaviour); RD-overridable.
  */
 channel_mode: ChannelMode, 
+/**
+ * The **channel layouts this round's heats may fly** (#117 S3) — the round scope of the
+ * three-scope channel model.
+ *
+ * A layout is a complete `node → channel` tuning of the event's timer
+ * ([`EventMeta::channel_layouts`]); a round *names* the ones its heats may choose from, and
+ * the RD's strategy falls out of how many it names:
+ *
+ * - **one** — the bracket case. *"n channels where n is the number of pilots per heat, and
+ *   those channels stay for the whole tournament."* Every heat the round draws flies that
+ *   layout automatically; there is nothing per-heat to do.
+ * - **several** — the GQ-style qualifier, where many layouts exist so each pilot can stay on
+ *   their own channel. The first is each heat's default and the RD re-picks per heat.
+ * - **none** (the default, and every round persisted before S3) — the round names no layout,
+ *   so its heats fall back to the auto-pick from the timer's allowed set. Unchanged behaviour.
+ *
+ * Order is meaningful only in that the **first** entry is a heat's default. Each id must name
+ * a layout the event actually has (checked on add *and* update); a layout a round names cannot
+ * be deleted out from under it. Additive (`#[serde(default)]`) so pre-S3 meta reads back
+ * empty.
+ */
+layouts?: Array<LayoutId>, 
 /**
  * The **staging timer** for this round, in seconds (heat-lifecycle Slice 2). *Informational
  * only* — there is **no** auto-advance out of `Staged`; the console displays it as a staging

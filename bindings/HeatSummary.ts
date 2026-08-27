@@ -3,6 +3,7 @@ import type { ClassId } from "./ClassId";
 import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 import type { HeatPhase } from "./HeatPhase";
+import type { LayoutId } from "./LayoutId";
 import type { RoundId } from "./RoundId";
 
 /**
@@ -48,6 +49,21 @@ frequencies?: Array<[CompetitorRef, number]>,
  * heat, which keeps the auto-name. Additive — defaults absent so older logs round-trip.
  */
 label?: string, 
+/**
+ * The **channel layout** this heat flies (#117 S3) — the last
+ * [`HeatLayoutSet`](gridfpv_events::Event::HeatLayoutSet) for it.
+ *
+ * A wire handle: the console resolves it to the layout's **name** against the event's
+ * `channel_layouts` (CLAUDE.md), and uses its `node → channel` mapping as the per-node channel
+ * source a seat resolves through — the value that replaces `available_channels[node]`, which
+ * an allowed set never had any business answering.
+ *
+ * `None` when the heat flies no layout (its round names none, or the RD cleared the bind), in
+ * which case its channels came from the auto-pick and live on
+ * [`frequencies`](Self::frequencies) alone. Additive — defaults absent so older logs
+ * round-trip.
+ */
+layout?: LayoutId, 
 /**
  * The heat's folded loop phase (its derived status: scheduled / running / final / …).
  */

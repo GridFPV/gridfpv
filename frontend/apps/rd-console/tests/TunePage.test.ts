@@ -305,8 +305,11 @@ async function renderTune(
     confirmMs: opts.confirmMs ?? 150
   });
 
-  // Wait for the first snapshot to seed the per-(node, threshold) state.
-  await screen.findByLabelText('Enter at level for Node 1 · Raceband R7');
+  // Wait for the first snapshot to seed the per-(node, threshold) state. Matched on the NODE only:
+  // a seat's label carries its channel just when something knows it, and #117 S3 removed the
+  // `available_channels[node]` fabrication that used to make one up — so a node whose heartbeat has
+  // not reported a frequency is now honestly labelled "Node 1" alone.
+  await screen.findByLabelText(/^Enter at level for Node 1/);
   return { applyLevels, applyChannel, fetchSignal, stopSignal, unmount };
 }
 
@@ -711,7 +714,9 @@ describe('TunePage — an unseen node is DEAD, not quiet', () => {
     // Unseated nodes are in the snapshot deliberately: filtering them out would answer the RD's
     // question with silence for exactly the node they are checking.
     const h = await renderTune({ signal: withDeadNode() });
-    expect(screen.getByRole('heading', { name: 'Node 2 · Raceband R2' })).toBeInTheDocument();
+    // Labelled by the node alone: a node that is not reporting has not said what it is tuned to,
+    // and #117 S3 stopped inventing an answer from the timer's allowed set. Unknown, not "none".
+    expect(screen.getByRole('heading', { name: 'Node 2' })).toBeInTheDocument();
     expect(within(screen.getByTestId('readout-1-rssi')).getByText('—')).toBeInTheDocument();
     h.unmount();
   });

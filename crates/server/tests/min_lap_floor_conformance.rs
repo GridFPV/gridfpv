@@ -162,6 +162,7 @@ fn rig() -> Rig {
         .add_round(
             &event,
             NewRoundReq {
+                layouts: Vec::new(),
                 label: "Qualifying".into(),
                 classes: vec![class.id.clone()],
                 format: "timed_qual".into(),

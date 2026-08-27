@@ -22,7 +22,8 @@
 //! > control endpoints (#45) and the doc-reconciliation pass.
 
 use gridfpv_events::{
-    AdapterId, ClassId, CompetitorRef, HeatId, LogRef, Penalty, ProtestOutcome, RoundId, SourceTime,
+    AdapterId, ClassId, CompetitorRef, HeatId, LayoutId, LogRef, Penalty, ProtestOutcome, RoundId,
+    SourceTime,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -156,6 +157,50 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         label: Option<String>,
+    },
+
+    /// **Bind a heat to a channel layout** (#117 S3) — *"this heat flies the Whoop layout"*.
+    ///
+    /// A layout is a complete `node → channel` tuning of the event's timer; binding one re-tunes
+    /// the heat, so the command re-emits the heat's [`Event::HeatScheduled`] with the channels the
+    /// layout gives each seat, alongside the [`Event::HeatLayoutSet`] that records the choice.
+    ///
+    /// Refused unless the heat is still **`Scheduled`**: past that the heat is staged, on the timer
+    /// or raced, and *a heat that has raced keeps the channels it raced on*. Also refused when the
+    /// layout is not one the heat's round names — the round is where the RD decided which layouts
+    /// this phase of the event may use.
+    ///
+    /// `layout: None` clears the bind, returning the heat to its round's default.
+    SetHeatLayout {
+        /// The heat to bind — one already scheduled in this event, still `Scheduled`.
+        heat: HeatId,
+        /// The layout it flies, or `None` to clear the bind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        layout: Option<LayoutId>,
+    },
+
+    /// **Set a heat's pilots and their channels by hand** (#117 S3) — the RD's escape hatch for
+    /// when the automatic answer is wrong.
+    ///
+    /// Records an [`Event::HeatSeatingOverridden`] and re-emits the heat's schedule from it. The
+    /// override is **sticky**: a round re-fill and a round edit's re-materialization both re-apply
+    /// it, because an override silently lost when the round is refilled is worse than no override
+    /// at all (#419).
+    ///
+    /// Refused unless the heat is still **`Scheduled`**, and refused when the lineup will not fit
+    /// the timer's *enabled* node set or repeats a pilot. An **empty `lineup` clears** the
+    /// override and returns the heat to its round's plan.
+    OverrideHeatSeating {
+        /// The heat to re-seat — one already scheduled in this event, still `Scheduled`.
+        heat: HeatId,
+        /// The RD's lineup, in seat order. **Empty clears the override.**
+        lineup: Vec<CompetitorRef>,
+        /// The RD's per-pilot channels in raw MHz. Omit for *"my pilots, the layout's channels"* —
+        /// the lineup is overridden and the channels still come from the heat's layout, so
+        /// swapping two pilots does not mean retyping four frequencies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frequencies: Vec<(CompetitorRef, u16)>,
     },
 
     /// **Fill a round** (race redesign Slice 3a) — the round-driven engine's one command.

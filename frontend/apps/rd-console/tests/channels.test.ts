@@ -15,8 +15,7 @@ import {
   isPlausibleMhz,
   nodeIndexOf,
   nodeSeatLabel,
-  offeredCatalog,
-  poolChannel
+  offeredCatalog
 } from '../src/lib/channels.js';
 
 const CATALOG: ChannelCatalogEntry[] = [
@@ -174,22 +173,10 @@ describe('nodeSeatLabel (open-practice seat label) — #416: node AND channel', 
   });
 });
 
-describe('poolChannel — an EMPTY pool is "unrestricted", not "none" (#413, #416)', () => {
-  it('reads a configured pool positionally', () => {
-    expect(poolChannel(0, [5658, 5800])).toBe(5658);
-    expect(poolChannel(1, [5658, 5800])).toBe(5800);
-  });
-
-  it('answers undefined past the end of a configured pool', () => {
-    expect(poolChannel(2, [5658, 5800])).toBeUndefined();
-  });
-
-  it('refuses to read an EMPTY pool at all', () => {
-    // Every Flexible timer (both RotorHazard timers on the bench) reports `available_channels: []`,
-    // where empty means "no restriction" rather than "no channels". Indexing it answers undefined
-    // for every node — which reads as "this seat has no channel", a false statement about the
-    // hardware, and the reason the seat label degraded to a bare `Node N` on all real timers.
-    expect(poolChannel(0, [])).toBeUndefined();
-    expect(poolChannel(0, undefined)).toBeUndefined();
-  });
-});
+// `poolChannel` is gone (#117 S3). It read a node seat's channel as `available_channels[node]` —
+// indexing the timer's ALLOWED SET by node index. An allowed set says which channels the timer may
+// ever use and carries no per-node mapping, so the answer was invented; it only looked harmless
+// because the list is empty on every Flexible timer, where it returned undefined for every node.
+//
+// A `ChannelLayout` is the mapping it never was. See `competitorName.test.ts` for the source order
+// a seat's channel now resolves through.

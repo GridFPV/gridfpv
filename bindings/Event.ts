@@ -4,6 +4,7 @@ import type { ClassId } from "./ClassId";
 import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 import type { HeatTransition } from "./HeatTransition";
+import type { LayoutId } from "./LayoutId";
 import type { LogRef } from "./LogRef";
 import type { Pass } from "./Pass";
 import type { Penalty } from "./Penalty";
@@ -57,7 +58,31 @@ frequencies?: Array<[CompetitorRef, number]>,
  * keeps the auto-name. Additive and default-absent, so a pre-existing log (or a
  * generator heat) reads back as `None` and round-trips unchanged.
  */
-label?: string, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "CurrentHeatSelected": { heat: HeatId, } } | { "HeatStarting": { 
+label?: string, } } | { "HeatLayoutSet": { 
+/**
+ * The heat being bound.
+ */
+heat: HeatId, 
+/**
+ * The layout it flies, or `None` to clear the bind (back to the round's default).
+ */
+layout?: LayoutId, } } | { "HeatSeatingOverridden": { 
+/**
+ * The heat whose seating the RD set by hand.
+ */
+heat: HeatId, 
+/**
+ * The RD's lineup, in seat order — the pilots and where they sit. **Empty clears the
+ * override.**
+ */
+lineup: Array<CompetitorRef>, 
+/**
+ * The RD's per-pilot channels in raw MHz. Empty means *"my pilots, the layout's
+ * channels"* — the lineup is overridden but the channels still come from the heat's
+ * layout (or the auto-pick), so an RD swapping two pilots does not have to retype four
+ * frequencies.
+ */
+frequencies?: Array<[CompetitorRef, number]>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "CurrentHeatSelected": { heat: HeatId, } } | { "HeatStarting": { 
 /**
  * The heat whose start procedure fired (it is in `Armed`).
  */

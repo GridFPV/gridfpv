@@ -131,7 +131,11 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
       heat: heats.find((h) => h.heat === heat),
       catalog,
       timer: session.primaryTimer,
-      membership: session.currentEvent?.classes_membership
+      membership: session.currentEvent?.classes_membership,
+      // #117 S3: the event's channel layouts. Paired with each heat's own `layout`, they are the
+      // per-node channel mapping a `node-{i}` seat resolves through — the source that used to be
+      // `available_channels[node]`, which carried no per-node meaning at all.
+      layouts: session.currentEvent?.channel_layouts
     })
   );
   const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);

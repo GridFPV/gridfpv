@@ -3,6 +3,7 @@ import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type {
   ChannelCatalogEntry,
+  ChannelLayout,
   Class,
   EventMeta,
   HeatSummary,
@@ -955,9 +956,10 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     // No separate hours field anymore — minutes only.
     expect(screen.queryByLabelText('Time limit hours')).toBeNull();
 
-    // Pick both active channels (the picker is driven by the primary timer's node seats).
-    await fireEvent.click(await screen.findByLabelText(/Channel Node 1 · Raceband R1/));
-    await fireEvent.click(screen.getByLabelText(/Channel Node 2 · Fatshark F4/));
+    // Pick both active seats. This round flies no layout, so the seats carry no channel in their
+    // label — the picker names the node alone rather than inventing a channel for it (#117 S3).
+    await fireEvent.click(await screen.findByLabelText('Channel Node 1'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 2'));
 
     // Set a 90-minute practice duration (stored as 90*60 = 5400s).
     await fireEvent.input(screen.getByLabelText('Time limit minutes'), { target: { value: '90' } });
@@ -1002,8 +1004,9 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     });
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'open_practice' } });
     await waitFor(() => expect(screen.queryByLabelText('Win condition')).toBeNull());
-    await fireEvent.click(await screen.findByLabelText(/Channel Node 1 · Raceband R1/));
-    await fireEvent.click(screen.getByLabelText(/Channel Node 2 · Fatshark F4/));
+    // No layout on this round: the seats name the node alone (#117 S3).
+    await fireEvent.click(await screen.findByLabelText('Channel Node 1'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 2'));
 
     // Leave the minutes field blank → no limit.
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
@@ -1686,6 +1689,23 @@ const OP_CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
   { band: 'Fatshark', channel: 'F4', mhz: 5800 }
 ];
+// #117 S3 / #402: the event's channel layout — the `node → channel` mapping the practice picker
+// labels its seats through. Node 4 is deliberately absent, so that seat has NO known channel and
+// must read as the bare "Node 4": unknown is not "none", and it is certainly not a guess.
+//
+// Before S3 these labels came from `available_channels[node]` — indexing the timer's *allowed set*
+// by node index, which carries no per-node meaning. That fabrication is what #402 called out here
+// by name: the picker was channel-blind at exactly the moment the RD chooses which channels
+// practice runs on.
+const OP_LAYOUT: ChannelLayout = {
+  id: 'practice-a',
+  name: 'Practice A',
+  nodes: [
+    { node: 0, channel: 5658 },
+    { node: 1, channel: 5800 },
+    { node: 2, channel: 5732 }
+  ]
+};
 
 describe('EventRounds — open-practice active-channels picker', () => {
   it('swaps to an active-channels picker and saves AllChannels with the selected node indices', async () => {
@@ -1704,7 +1724,7 @@ describe('EventRounds — open-practice active-channels picker', () => {
       listTimersImpl: vi.fn(async () => [PRACTICE_TIMER]),
       listChannelsImpl: vi.fn(async () => OP_CATALOG),
       createRoundImpl,
-      event: { ...EVENT, rounds: [] }
+      event: { ...EVENT, rounds: [], channel_layouts: [OP_LAYOUT] }
     });
     render(EventRounds, { session });
 
@@ -1718,7 +1738,15 @@ describe('EventRounds — open-practice active-channels picker', () => {
     });
     await waitFor(() => expect(screen.queryByLabelText('Eligible Open')).not.toBeInTheDocument());
 
-    // Seats labelled by band+channel·MHz, with a bare node for the unconfigured 4th seat.
+    // With no layout chosen the seats are honestly channel-less — the picker does not invent one
+    // from the timer's allowed set (#117 S3).
+    expect(await screen.findByLabelText('Channel Node 1')).toBeInTheDocument();
+
+    // Fly the practice round on a layout → every seat it tunes now names its channel (#402).
+    await fireEvent.click(screen.getByLabelText('Practice A'));
+
+    // Seats labelled by band+channel·MHz, with a bare node for the 4th seat the layout does not
+    // tune — unknown, which is not the same statement as "no channel".
     expect(await screen.findByLabelText('Channel Node 1 · Raceband R1')).toBeInTheDocument();
     expect(screen.getByLabelText('Channel Node 2 · Fatshark F4')).toBeInTheDocument();
     expect(screen.getByLabelText('Channel Node 4')).toBeInTheDocument();
@@ -1736,7 +1764,10 @@ describe('EventRounds — open-practice active-channels picker', () => {
       label: 'Open Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [0, 2] } }
+      seeding: { AllChannels: { channels: [0, 2] } },
+      // #117 S3: the round records which layout its heats fly, so the practice heat's channels are
+      // a real `heat → channel` mapping rather than whatever the hardware happened to be on.
+      layouts: ['practice-a']
     });
   });
 
@@ -1747,7 +1778,10 @@ describe('EventRounds — open-practice active-channels picker', () => {
       label: 'Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [1] } }
+      seeding: { AllChannels: { channels: [1] } },
+      // The round already flies a layout, so re-opening it shows every seat's channel straight
+      // away — the RD does not have to re-tick anything to read what practice is on (#402).
+      layouts: ['practice-a']
     };
     const { session } = makeTestSession({
       listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
@@ -1755,7 +1789,7 @@ describe('EventRounds — open-practice active-channels picker', () => {
       listFormatSchemasImpl: vi.fn(async () => OP_SCHEMAS),
       listTimersImpl: vi.fn(async () => [PRACTICE_TIMER]),
       listChannelsImpl: vi.fn(async () => OP_CATALOG),
-      event: { ...EVENT, rounds: [OP_ROUND] }
+      event: { ...EVENT, rounds: [OP_ROUND], channel_layouts: [OP_LAYOUT] }
     });
     render(EventRounds, { session });
 
@@ -1985,5 +2019,180 @@ describe('EventRounds — the impossible seat (#416)', () => {
 
     const alert = await screen.findByText(/records nothing/);
     expect(alert.closest('.round-row')?.textContent).toContain('switched off');
+  });
+});
+
+// ── #117 S3: rounds name channel layouts, heats fly one ──────────────────────────────────────
+
+describe('EventRounds — a round names the channel layouts its heats may fly (#117 S3)', () => {
+  const BRACKET: ChannelLayout = {
+    id: 'bracket-a',
+    name: 'Bracket A',
+    nodes: [
+      { node: 0, channel: 5658 },
+      { node: 1, channel: 5800 }
+    ]
+  };
+  const WHOOPS: ChannelLayout = {
+    id: 'whoops',
+    name: 'Whoop pack',
+    nodes: [
+      { node: 0, channel: 5732 },
+      { node: 1, channel: 5769 }
+    ]
+  };
+  const EVENT_WITH_MEMBERS: EventMeta = {
+    ...EVENT,
+    roster: ['p1', 'p2'],
+    classes_membership: [{ class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }] }],
+    rounds: [{ ...QUAL, layouts: ['bracket-a'] }],
+    channel_layouts: [BRACKET, WHOOPS]
+  };
+  /** A scheduled heat in the qual round, flying Bracket A. */
+  const HEAT: HeatSummary = {
+    heat: 'r1-h0',
+    lineup: ['p1', 'p2'],
+    class: 'c1',
+    round: 'r1',
+    frequencies: [
+      ['p1', 5658],
+      ['p2', 5800]
+    ],
+    layout: 'bracket-a',
+    phase: 'Scheduled',
+    is_current: false
+  };
+
+  function withLayouts(heat: HeatSummary = HEAT) {
+    return makeTestSession({
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [heat]),
+      event: EVENT_WITH_MEMBERS
+    });
+  }
+
+  it('submits the layouts the RD ticked, first one being each heat’s default', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => QUAL);
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [], channel_layouts: [BRACKET, WHOOPS] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Bracket' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.click(await screen.findByLabelText('Whoop pack'));
+    await fireEvent.click(screen.getByLabelText('Bracket A'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    // Tick order is the order sent — the FIRST is each heat's default, which is the only way order
+    // is meaningful here.
+    expect(req.layouts).toEqual(['whoops', 'bracket-a']);
+  });
+
+  it('says which layout a single-layout round puts every heat on', async () => {
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      event: { ...EVENT, rounds: [], channel_layouts: [BRACKET, WHOOPS] }
+    });
+    render(EventRounds, { session });
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    // The bracket strategy: one layout, and there is nothing per-heat left to do.
+    await fireEvent.click(await screen.findByLabelText('Bracket A'));
+    expect(await screen.findByText(/Every heat in this round flies Bracket A/)).toBeInTheDocument();
+    // The GQ strategy: several, and the first is the default the RD can override per heat.
+    await fireEvent.click(screen.getByLabelText('Whoop pack'));
+    expect(
+      await screen.findByText(/Heats default to Bracket A; you can pick another per heat/)
+    ).toBeInTheDocument();
+  });
+
+  it('names the layout, never its id, and points at the layouts page when there are none', async () => {
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    expect(
+      await screen.findByText(/No channel layouts defined for this event/)
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('bracket-a');
+  });
+
+  it('binds a scheduled heat to one of its round’s layouts', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+
+    const picker = (await screen.findByLabelText(
+      'Channel layout for Qualifying R1 Heat 1'
+    )) as HTMLSelectElement;
+    // The menu offers the round's layouts by NAME, plus the "no layout" escape.
+    expect([...picker.options].map((o) => o.textContent?.trim())).toEqual([
+      'Automatic',
+      'Bracket A'
+    ]);
+    expect(picker.value).toBe('bracket-a');
+
+    await fireEvent.change(picker, { target: { value: '' } });
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({ SetHeatLayout: { heat: 'r1-h0' } });
+  });
+
+  it('offers no re-tuning once the heat has been staged', async () => {
+    // A heat keeps the channels it raced on, so the controls are not offered — and it still SHOWS
+    // the layout it flew, which is the record.
+    const { session } = withLayouts({ ...HEAT, phase: 'Final' });
+    render(EventRounds, { session });
+    await screen.findByText(/Flew the/);
+    expect(screen.queryByLabelText('Channel layout for Qualifying R1 Heat 1')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Set seating/ })).toBeNull();
+    expect(document.body.textContent).toContain('Bracket A');
+  });
+
+  it('sends a manual seating override, and says that it sticks', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Set seating for Qualifying R1 Heat 1' })
+    );
+    // The dialog says the override sticks — the one property that makes it worth having (#419).
+    expect(
+      await screen.findByText(/re-filling or editing the round will not undo it/i)
+    ).toBeInTheDocument();
+
+    // The two pilots swap seats; both channels stay as the heat already has them.
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 1'), { target: { value: 'p2' } });
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 2'), { target: { value: 'p1' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      OverrideHeatSeating: {
+        heat: 'r1-h0',
+        lineup: ['p2', 'p1'],
+        frequencies: [
+          ['p2', 5658],
+          ['p1', 5800]
+        ]
+      }
+    });
+  });
+
+  it('refuses to save a seating that sits one pilot twice', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Set seating for Qualifying R1 Heat 1' })
+    );
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 2'), { target: { value: 'p1' } });
+    expect(
+      await screen.findByText(/Every seat needs a pilot, and no pilot can sit twice/)
+    ).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+    expect(sendSpy).not.toHaveBeenCalled();
   });
 });

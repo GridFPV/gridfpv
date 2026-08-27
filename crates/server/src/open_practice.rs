@@ -99,6 +99,7 @@ mod tests {
 
     fn round(id: &str, format: &str) -> RoundDef {
         RoundDef {
+            layouts: Vec::new(),
             id: RoundId(id.into()),
             label: id.into(),
             classes: vec![],
@@ -132,7 +133,7 @@ mod tests {
             classes: vec![ClassId("open".into())],
             classes_membership: vec![],
             rounds,
-            channel_layers: vec![],
+            channel_layouts: vec![],
         }
     }
 

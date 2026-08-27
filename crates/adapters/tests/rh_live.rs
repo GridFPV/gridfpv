@@ -51,6 +51,8 @@ fn event_kind(e: &Event) -> &'static str {
         Event::SignalThresholds(_) => "SignalThresholds",
         Event::SignalHistory(_) => "SignalHistory",
         Event::HeatScheduled { .. } => "HeatScheduled",
+        Event::HeatLayoutSet { .. } => "HeatLayoutSet",
+        Event::HeatSeatingOverridden { .. } => "HeatSeatingOverridden",
         Event::HeatStateChanged { .. } => "HeatStateChanged",
         Event::CurrentHeatSelected { .. } => "CurrentHeatSelected",
         Event::HeatStarting { .. } => "HeatStarting",

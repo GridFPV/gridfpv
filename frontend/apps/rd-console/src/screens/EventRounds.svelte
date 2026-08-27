@@ -31,6 +31,7 @@
   } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
+    ChannelLayout,
     ChannelMode,
     Class,
     ClassId,
@@ -40,6 +41,7 @@
     GraceWindow,
     HeatPhase,
     HeatSummary,
+    LayoutId,
     NewRoundReq,
     Pilot,
     PilotId,
@@ -53,6 +55,7 @@
     Timer,
     WinCondition
   } from '@gridfpv/types';
+  import { channelLabel } from '../lib/channels.js';
   import { buildCompetitorNames } from '../lib/competitorName.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import {
@@ -231,13 +234,23 @@
   //
   // `namesFor(h)` scopes it to one heat, so that heat's own frequency assignment wins; the
   // event-level `names` (no heat) is what the round card and the node picker read.
+  //
+  // `formLayout` is the stand-in for a heat that does not exist yet: the open-practice round form's
+  // node picker labels each seat with the channel the round's own layout puts it on, which is #402's
+  // sharpest gap — the picker was channel-blind at exactly the moment the RD chooses which channels
+  // practice runs on.
   function namesFor(h: HeatSummary | undefined) {
     return buildCompetitorNames({
       pilots,
       heat: h,
+      layout: roundLayouts[0],
       catalog,
       timer: primaryTimer,
-      membership: session.currentEvent?.classes_membership
+      membership: session.currentEvent?.classes_membership,
+      // #117 S3: the event's channel layouts. Paired with the heat's own `layout`, they are
+      // the per-node channel mapping a `node-{i}` seat resolves through — the source that
+      // used to be `available_channels[node]`, which carried no per-node meaning at all.
+      layouts: session.currentEvent?.channel_layouts
     });
   }
   const names = $derived(namesFor(undefined));
@@ -533,6 +546,112 @@
     }
   }
 
+  // --- Per-heat channel decisions (#117 S3) ------------------------------------------------------
+  //
+  // Two RD actions on a heat that is still **Scheduled**, and only then: a heat past that is staged,
+  // on the timer or raced, and a heat keeps the channels it raced on. The Director refuses either
+  // way; the UI hides them so the RD is not offered a control that cannot work.
+  //
+  //  * **Layout** — which of its round's named layouts this heat flies. Re-tunes the heat.
+  //  * **Seating** — the pilots and their channels, by hand. Sticky: it survives a re-fill and a
+  //    round edit, which is the whole point (#419).
+
+  /** Whether a heat can still be re-tuned — `Scheduled` and nothing else. */
+  const retunable = (h: HeatSummary): boolean => h.phase === 'Scheduled';
+
+  /** The layouts a heat may fly: the ones its round names, resolved to their definitions. */
+  function layoutsForRound(round: RoundDef): ChannelLayout[] {
+    return (round.layouts ?? [])
+      .map((id) => eventLayouts.find((l) => l.id === id))
+      .filter((l): l is ChannelLayout => l !== undefined);
+  }
+
+  async function pickHeatLayout(h: HeatSummary, layout: LayoutId | '') {
+    const ack = await session.setHeatLayout(h.heat, layout === '' ? undefined : layout);
+    if (!ack.ok) return; // The banner surfaces the Director's own refusal sentence.
+    await refreshHeats();
+    toast.success('Heat re-tuned.');
+  }
+
+  // ── The seating override editor ──────────────────────────────────────────────
+  // One row per seat: which pilot sits there, and what channel they are on. A blank channel means
+  // "take it from the heat's layout", which is the common case — an RD swapping two pilots should
+  // not have to retype four frequencies.
+  let seatOpen = $state(false);
+  let seatHeat = $state<HeatSummary | undefined>(undefined);
+  let seatRound = $state<RoundDef | undefined>(undefined);
+  let seatRows = $state<{ pilot: CompetitorRef; channel: string }[]>([]);
+  let seatSaving = $state(false);
+
+  function openSeating(round: RoundDef, h: HeatSummary) {
+    seatRound = round;
+    seatHeat = h;
+    const byRef = new Map(h.frequencies ?? []);
+    seatRows = h.lineup.map((ref) => ({ pilot: ref, channel: String(byRef.get(ref) ?? '') }));
+    seatOpen = true;
+  }
+  function cancelSeating() {
+    seatOpen = false;
+    seatHeat = undefined;
+    seatRound = undefined;
+    seatRows = [];
+  }
+  function addSeatRow() {
+    if (seatRows.length >= heatNodeCap) return;
+    seatRows = [...seatRows, { pilot: '', channel: '' }];
+  }
+  function removeSeatRow(i: number) {
+    seatRows = seatRows.filter((_, n) => n !== i);
+  }
+
+  /** The pilots this heat's round may seat, for the per-seat dropdown. */
+  const seatCandidates = $derived<PilotId[]>(buildEligibleMembers(seatRound?.id ?? ''));
+
+  /**
+   * The channels the RD may type in — the event timer's **allowed** set (what it may ever use), plus
+   * whatever the heat is already on so an existing assignment is never silently un-pickable. Never
+   * the whole catalog: assigning a channel the RD has not allowed is the "no channels becomes
+   * arbitrary channels" trap S1 closed.
+   */
+  const seatChannels = $derived<number[]>(
+    [
+      ...new Set([
+        ...(primaryTimer?.available_channels ?? []),
+        ...(seatHeat?.frequencies ?? []).map(([, mhz]) => mhz)
+      ])
+    ].sort((a, b) => a - b)
+  );
+
+  const seatValid = $derived(
+    seatRows.length === 0 ||
+      (seatRows.every((r) => r.pilot !== '') &&
+        new Set(seatRows.map((r) => r.pilot)).size === seatRows.length)
+  );
+
+  async function submitSeating() {
+    if (seatSaving || !seatHeat || !seatValid) return;
+    seatSaving = true;
+    try {
+      const lineup: CompetitorRef[] = seatRows.map((r) => r.pilot);
+      // Only send channels when the RD actually typed every one of them: a partial set would leave
+      // some seats un-channelled, and "the layout's channels" is the better answer for all of them.
+      const typed = seatRows.filter((r) => r.channel !== '');
+      const frequencies: [CompetitorRef, number][] =
+        typed.length === seatRows.length && seatRows.length > 0
+          ? seatRows.map((r) => [r.pilot, Number(r.channel)])
+          : [];
+      const ack = await session.overrideHeatSeating(seatHeat.heat, lineup, frequencies);
+      if (!ack.ok) return; // The banner surfaces the Director's refusal.
+      await refreshHeats();
+      toast.success(lineup.length === 0 ? 'Override cleared.' : 'Heat re-seated.');
+      cancelSeating();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      seatSaving = false;
+    }
+  }
+
   // --- The add/edit form -------------------------------------------------------------------------
   // One form drives both add (no `editing`) and edit (an existing round id). Field order is **Label
   // first, then Format**, then the remaining fields shown **dynamically** per the chosen format
@@ -611,6 +730,26 @@
   // The round's channel mode (Static = fixed channels / channel-balanced heats; Per-heat = assigned
   // per heat, for brackets). Defaulted by format on the backend; the toggle overrides it.
   let channelMode = $state<ChannelMode>('PerHeat');
+  // ── Channel layouts this round may fly (#117 S3) ─────────────────────────────
+  // A layout is one complete `node → channel` tuning of the event's timer, defined on the Channel
+  // layouts page. A round NAMES the ones its heats may choose from, and the RD's strategy falls out
+  // of how many it names — one for a bracket ("n channels for n pilots, and they stay for the whole
+  // tournament"), several for a GQ-style qualifier where pilots keep their own channel. Naming none
+  // is the pre-S3 behaviour: channels come from the auto-pick.
+  //
+  // ORDER MATTERS in exactly one way: the first entry is each heat's default. Kept as an array
+  // rather than a Set for that reason.
+  let roundLayouts = $state<LayoutId[]>([]);
+  // The event's defined layouts, for the picker. Resolved to `name` for display — a `LayoutId` is a
+  // wire handle and must never reach the screen (CLAUDE.md).
+  const eventLayouts = $derived<ChannelLayout[]>(session.currentEvent?.channel_layouts ?? []);
+  const layoutName = (id: LayoutId): string =>
+    eventLayouts.find((l) => l.id === id)?.name ?? String(id);
+  function toggleRoundLayout(id: LayoutId) {
+    roundLayouts = roundLayouts.includes(id)
+      ? roundLayouts.filter((l) => l !== id)
+      : [...roundLayouts, id];
+  }
   // ── Heat-lifecycle config (Slice 3) ─────────────────────────────────────────
   // The staging timer (entered as mm:ss, the field-friendly form), the randomized start-procedure
   // window (min/max as whole/decimal **seconds** — Rounds form redesign item 3), and the completion
@@ -783,6 +922,7 @@
     pointsTable = [...DEFAULT_POINTS_TABLE];
     lastParamFormat = ''; // force the format effect to re-seed the new format's params
     channelMode = 'PerHeat';
+    roundLayouts = [];
     // Heat-lifecycle config defaults — match the engine (5:00 staging, 2.0–5.0s start, 30s grace).
     stagingMinutes = 5;
     stagingSeconds = 0;
@@ -813,6 +953,7 @@
     pointsTable = parsePointsTable(round.params?.points);
     lastParamFormat = ''; // force the format effect to re-seed against this round's format
     channelMode = round.channel_mode ?? 'PerHeat';
+    roundLayouts = [...(round.layouts ?? [])];
 
     const wc = round.win_condition;
     if (typeof wc === 'string') {
@@ -1108,6 +1249,7 @@
         ? { AllChannels: { channels: [...selectedNodes].sort((a, b) => a - b) } }
         : buildSeeding(),
       channel_mode: channelMode,
+      layouts: roundLayouts,
       staging_timer_secs: buildStagingSecs(),
       start_procedure: buildStartProcedure(),
       min_lap_secs: Math.max(0, Math.round(Number(minLapSeconds) || 0)),
@@ -1445,6 +1587,7 @@
                   <ol class="heat-list">
                     {#each heatsByRound(round.id) as h (h.heat)}
                       {@const heatNames = namesFor(h)}
+                      {@const heatLayouts = layoutsForRound(round)}
                       <li class="heat-row" class:current={h.is_current}>
                         <div class="heat-main">
                           <div class="heat-head">
@@ -1471,6 +1614,46 @@
                                 >— no pilots —</span
                               >{/if}
                           </div>
+                          <!-- #117 S3: the heat's two channel decisions. Shown only while the heat
+                               is Scheduled — past that it is staged, on the timer or raced, and it
+                               keeps the channels it raced on. A raced heat still SHOWS the layout
+                               it flew, which is the record. -->
+                          {#if retunable(h) && (heatLayouts.length > 0 || h.lineup.length > 0)}
+                            <div class="heat-channels">
+                              {#if heatLayouts.length > 0}
+                                <label class="heat-layout">
+                                  <span class="heat-layout-label">Layout</span>
+                                  <select
+                                    class="heat-layout-select"
+                                    aria-label={`Channel layout for ${heatDisplayName(round, h)}`}
+                                    value={h.layout ?? ''}
+                                    onchange={(e) =>
+                                      pickHeatLayout(
+                                        h,
+                                        (e.currentTarget as HTMLSelectElement).value as
+                                          | LayoutId
+                                          | ''
+                                      )}
+                                  >
+                                    <option value="">Automatic</option>
+                                    {#each heatLayouts as l (l.id)}
+                                      <option value={l.id}>{l.name}</option>
+                                    {/each}
+                                  </select>
+                                </label>
+                              {/if}
+                              <Button
+                                variant="ghost"
+                                onclick={() => openSeating(round, h)}
+                                aria-label={`Set seating for ${heatDisplayName(round, h)}`}
+                                >Set seating…</Button
+                              >
+                            </div>
+                          {:else if h.layout}
+                            <p class="heat-flew">
+                              Flew the <strong>{layoutName(h.layout)}</strong> channel layout.
+                            </p>
+                          {/if}
                         </div>
                       </li>
                     {/each}
@@ -1732,6 +1915,41 @@
         </Field>
       {/if}
 
+      <!-- #117 S3: which channel layouts this round's heats may fly. Tick one for a bracket (every
+           heat flies it, nothing more to do); tick several for a GQ-style qualifier and pick per
+           heat. Tick none and channels come from the auto-pick, as before. The FIRST ticked layout
+           is each heat's default, which is why the hint says so out loud. -->
+      <Field
+        label="Channel layouts"
+        hint={eventLayouts.length === 0
+          ? 'None defined yet — add one on the event’s Channel layouts page to choose the channels this round flies.'
+          : roundLayouts.length === 0
+            ? 'None chosen: channels are picked automatically from the timer’s allowed set.'
+            : roundLayouts.length === 1
+              ? `Every heat in this round flies ${layoutName(roundLayouts[0])}.`
+              : `Heats default to ${layoutName(roundLayouts[0])}; you can pick another per heat.`}
+      >
+        {#if eventLayouts.length === 0}
+          <p class="layout-empty">No channel layouts defined for this event.</p>
+        {:else}
+          <div class="layout-picks">
+            {#each eventLayouts as l (l.id)}
+              <label class="layout-pick">
+                <input
+                  type="checkbox"
+                  checked={roundLayouts.includes(l.id)}
+                  onchange={() => toggleRoundLayout(l.id)}
+                />
+                <span class="layout-pick-name">{l.name}</span>
+                {#if roundLayouts[0] === l.id && roundLayouts.length > 1}
+                  <span class="layout-pick-default">default</span>
+                {/if}
+              </label>
+            {/each}
+          </div>
+        {/if}
+      </Field>
+
       <!-- Format params (Rounds form redesign item 4): the chosen format's declared params, each a
              proper labeled field seeded from its default. The generic "Format Params" add/remove
              editor is gone — these knobs (rounds, heat_size, metric, bracket_reset, main_size) are
@@ -1924,6 +2142,85 @@
 
   <!-- The build-a-heat form is a modal Dialog — opened by the "+ Build heat" button, closed on
          submit/cancel. -->
+  <!-- #117 S3: the manual seating override — the RD's escape hatch when the automatic answer is
+       wrong. It is STICKY: re-filling the round, or editing the round so its heats are rebuilt,
+       both re-apply it. Clearing it (removing every seat) is the only way back to the round's own
+       plan, and the dialog says so. -->
+  <Dialog
+    bind:open={seatOpen}
+    title={seatHeat && seatRound ? `Seating — ${heatDisplayName(seatRound, seatHeat)}` : 'Seating'}
+    onclose={cancelSeating}
+  >
+    <form
+      class="seat-form"
+      aria-label="Set heat seating"
+      onsubmit={(e) => {
+        e.preventDefault();
+        submitSeating();
+      }}
+    >
+      <p class="form-note" role="note">
+        This override <strong>sticks</strong>: re-filling or editing the round will not undo it.
+        Remove every seat to clear it and go back to the round’s own plan.
+      </p>
+      <ol class="seat-rows">
+        {#each seatRows as _row, i (i)}
+          <li class="seat-row">
+            <span class="seat-num" aria-hidden="true">{i + 1}</span>
+            <select
+              class="seat-pilot"
+              aria-label={`Pilot in seat ${i + 1}`}
+              bind:value={seatRows[i].pilot}
+            >
+              <option value="">— pick a pilot —</option>
+              {#each seatCandidates as pid (pid)}
+                <option value={pid}>{callsign(pid)}</option>
+              {/each}
+            </select>
+            <select
+              class="seat-channel"
+              aria-label={`Channel in seat ${i + 1}`}
+              bind:value={seatRows[i].channel}
+            >
+              <!-- Blank = "take it from the heat's layout". Not "no channel": those are different
+                   statements, and the option says which one it means. -->
+              <option value="">From the layout</option>
+              {#each seatChannels as mhz (mhz)}
+                <option value={String(mhz)}>{channelLabel(mhz, catalog)}</option>
+              {/each}
+            </select>
+            <Button
+              variant="ghost"
+              type="button"
+              onclick={() => removeSeatRow(i)}
+              aria-label={`Remove seat ${i + 1}`}>Remove</Button
+            >
+          </li>
+        {/each}
+      </ol>
+      {#if seatRows.length === 0}
+        <p class="seat-empty">
+          No seats — saving now <strong>clears</strong> the override and rebuilds this heat from its round.
+        </p>
+      {/if}
+      <div class="seat-actions">
+        <Button
+          variant="ghost"
+          type="button"
+          onclick={addSeatRow}
+          disabled={seatRows.length >= heatNodeCap}>+ Add seat</Button
+        >
+        <Button variant="ghost" type="button" onclick={cancelSeating}>Cancel</Button>
+        <Button type="submit" disabled={seatSaving || !seatValid}>Save seating</Button>
+      </div>
+      {#if !seatValid}
+        <p class="seat-invalid" role="alert">
+          Every seat needs a pilot, and no pilot can sit twice.
+        </p>
+      {/if}
+    </form>
+  </Dialog>
+
   <Dialog bind:open={buildOpen} title="Build a heat by hand" onclose={cancelBuild}>
     <form
       class="build-form"
@@ -2372,6 +2669,80 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-2);
+  }
+  /* #117 S3: the per-heat channel controls, under the lineup. */
+  .heat-channels {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-top: 0.4rem;
+  }
+  .heat-layout {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .heat-layout-label {
+    font-size: 0.78rem;
+    opacity: 0.75;
+  }
+  .heat-flew {
+    margin: 0.4rem 0 0;
+    font-size: 0.78rem;
+    opacity: 0.75;
+  }
+  .layout-picks {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .layout-pick {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .layout-pick-default {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+  .layout-empty,
+  .seat-empty,
+  .seat-invalid {
+    margin: 0;
+    font-size: 0.82rem;
+    opacity: 0.8;
+  }
+  .seat-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .seat-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .seat-num {
+    min-width: 1.25rem;
+    text-align: right;
+    opacity: 0.6;
+  }
+  .seat-pilot,
+  .seat-channel {
+    flex: 1 1 8rem;
+    min-width: 0;
+  }
+  .seat-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
   }
   .heat-row {
     display: flex;

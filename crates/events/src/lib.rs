@@ -326,6 +326,23 @@ pub struct ClassId(pub String);
 #[ts(export, export_to = "bindings/")]
 pub struct RoundId(pub String);
 
+/// Identifies one **channel layout** within an event (#117 S2/S3) — a named `node → channel`
+/// tuning of the event's timer.
+///
+/// Defined here rather than in `gridfpv_server` because a **heat carries the layout it flies**
+/// ([`Event::HeatScheduled::layout`]), exactly as it carries its class and round: which channels a
+/// heat raced on is a fact about the heat, and facts about a heat live in the log. The richer
+/// `ChannelLayout` (the mapping itself) stays event *config* in `gridfpv_server::events`, which
+/// re-exports this type so the log and the protocol never disagree on what a layout id is.
+///
+/// A transparent string newtype like [`ClassId`] / [`RoundId`], **auto-generated** (a slug of the
+/// layout's name plus a short random suffix), and a **wire handle only**: what an RD reads is the
+/// layout's name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct LayoutId(pub String);
+
 /// A reference to an already-logged event by its append **offset** — the stable id
 /// marshaling adjudications target (e.g. "void *this* pass"). The offset is assigned
 /// by the storage layer when the target event was appended.
@@ -683,6 +700,57 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         label: Option<String>,
+    },
+    /// The RD **bound a heat to a channel layout** — *"which layout does this heat fly?"*, the
+    /// heat scope of the three-scope channel model (#117 S3).
+    ///
+    /// A layout is a complete `node -> channel` tuning of the event's timer, defined once per event
+    /// (`ChannelLayout`); this is the record of a heat choosing one. `layout: None` clears the bind
+    /// and returns the heat to its round's default.
+    ///
+    /// # Why this is its own event and not a field on `HeatScheduled`
+    ///
+    /// Which layout a heat flies is an **RD decision about the heat**, made and re-made while the
+    /// heat sits in `Scheduled` — not a property of the moment it was drawn. Keeping it separate
+    /// means re-binding a layout does not have to re-assert the lineup, and a round re-fill that
+    /// re-emits `HeatScheduled` does not silently drop the bind: the fold takes the **last**
+    /// `HeatLayoutSet` per heat, independently of how many times the heat was re-scheduled.
+    ///
+    /// The heat's actual per-pilot channels still live on its most recent
+    /// [`HeatScheduled`](Event::HeatScheduled) `frequencies` — this event says *where they came
+    /// from*, and re-binding re-emits them. That split is what keeps a heat that has raced on the
+    /// channels it raced on: the frequencies are baked at schedule time and never recomputed from
+    /// a layout that has since been edited.
+    HeatLayoutSet {
+        /// The heat being bound.
+        heat: HeatId,
+        /// The layout it flies, or `None` to clear the bind (back to the round's default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        layout: Option<LayoutId>,
+    },
+    /// The RD **manually set a heat's pilots and their channels** (#117 S3) — the override the RD
+    /// reaches for when the automatic answer is wrong.
+    ///
+    /// This is *sticky*, and that is the entire point: an override quietly lost when the round is
+    /// re-filled is worse than no override at all (#419). The round fill and the #387
+    /// re-materialization both apply the last override for a heat **on top of** the plan they
+    /// compute, so re-forming the round cannot silently undo the RD's answer.
+    ///
+    /// An **empty `lineup` clears the override**, returning the heat to whatever its round's plan
+    /// and its layout produce. That is the only way out, and it is deliberately explicit.
+    HeatSeatingOverridden {
+        /// The heat whose seating the RD set by hand.
+        heat: HeatId,
+        /// The RD's lineup, in seat order — the pilots and where they sit. **Empty clears the
+        /// override.**
+        lineup: Vec<CompetitorRef>,
+        /// The RD's per-pilot channels in raw MHz. Empty means *"my pilots, the layout's
+        /// channels"* — the lineup is overridden but the channels still come from the heat's
+        /// layout (or the auto-pick), so an RD swapping two pilots does not have to retype four
+        /// frequencies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frequencies: Vec<(CompetitorRef, u16)>,
     },
     /// A heat-loop state transition appended by the engine (race-engine.html §2).
     HeatStateChanged {

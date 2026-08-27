@@ -1,22 +1,22 @@
 /**
- * Channel-layer readings (#117 S2) — the pure half.
+ * Channel-layout readings (#117 S2) — the pure half.
  *
  * These are the sentences an RD reads while laying channels onto nodes, so they are asserted as
  * **text**. Two things are load-bearing here and are asserted in both directions:
  *
  *  - no raw id, raw node index or bare MHz reaches the screen — a node is `"Node 3"`, a channel is
- *    `"Raceband R7"`, a layer is `"Bracket A"` (CLAUDE.md's display rule);
- *  - cross-layer channel reuse produces a **warning sentence**, never a blocker — that split is the
+ *    `"Raceband R7"`, a layout is `"Bracket A"` (CLAUDE.md's display rule);
+ *  - cross-layout channel reuse produces a **warning sentence**, never a blocker — that split is the
  *    RD's own decision and is what makes the bracket and the GQ strategies share one mechanism.
  */
 import { describe, expect, it } from 'vitest';
-import type { ChannelCatalogEntry, ChannelLayer, TimerNode, TimerNodes } from '@gridfpv/types';
+import type { ChannelCatalogEntry, ChannelLayout, TimerNode, TimerNodes } from '@gridfpv/types';
 import {
   allowedChannels,
   draftBlocker,
   draftNodes,
   duplicateNodes,
-  layerName,
+  layoutName,
   layerNodes,
   layerNodeLabel,
   layerSummary,
@@ -24,7 +24,7 @@ import {
   unconfiguredTimerMessage,
   untunedNodes,
   type LayerDraft
-} from '../src/lib/channelLayers.js';
+} from '../src/lib/channelLayouts.js';
 
 const CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
@@ -59,7 +59,7 @@ function draft(name: string, pairs: [number, number][]): LayerDraft {
   return { name, channels: new Map(pairs) };
 }
 
-const LAYERS: ChannelLayer[] = [
+const LAYERS: ChannelLayout[] = [
   {
     id: 'bracket-a-k3f9',
     name: 'Bracket A',
@@ -78,9 +78,9 @@ const LAYERS: ChannelLayer[] = [
   }
 ];
 
-describe('the timer a layer draws from', () => {
+describe('the timer a layout draws from', () => {
   it('offers the ALLOWED set, in the RD’s own order — not the catalog', () => {
-    // The Tune page offers everything the hardware can tune; a layer offers what the RD said this
+    // The Tune page offers everything the hardware can tune; a layout offers what the RD said this
     // timer may use. Offering more would offer a choice the Director then refuses.
     const timer = { available_channels: [5769, 5658] } as never;
     expect(allowedChannels(timer)).toEqual([5769, 5658]);
@@ -103,9 +103,9 @@ describe('the timer a layer draws from', () => {
   });
 });
 
-describe('the nodes a layer tunes', () => {
+describe('the nodes a layout tunes', () => {
   it('is the ENABLED set, holes and all (#412)', () => {
-    // Node index 2 is disabled, so a layer must not offer to tune it — a disabled node seats
+    // Node index 2 is disabled, so a layout must not offer to tune it — a disabled node seats
     // nobody, and pretending to tune it hides a dead gate.
     expect(layerNodes(holedView())).toEqual([0, 1, 3]);
   });
@@ -130,7 +130,7 @@ describe('the draft', () => {
     ]);
   });
 
-  it('flags every node sharing a channel — the one hard rule inside a layer', () => {
+  it('flags every node sharing a channel — the one hard rule inside a layout', () => {
     const clashing = draft('A', [
       [0, 5658],
       [1, 5695],
@@ -139,14 +139,14 @@ describe('the draft', () => {
     expect([...duplicateNodes(clashing)].sort()).toEqual([0, 3]);
   });
 
-  it('lists the nodes still untuned — a layer is a complete tuning', () => {
+  it('lists the nodes still untuned — a layout is a complete tuning', () => {
     expect(untunedNodes(draft('A', [[0, 5658]]), [0, 1, 3])).toEqual([1, 3]);
   });
 });
 
 describe('why Save is blocked', () => {
-  it('asks for a name first — it is what a heat picks the layer by', () => {
-    expect(draftBlocker(draft('  ', []), [0], holedView(), CATALOG)).toContain('Name this layer');
+  it('asks for a name first — it is what a heat picks the layout by', () => {
+    expect(draftBlocker(draft('  ', []), [0], holedView(), CATALOG)).toContain('Name this layout');
   });
 
   it('names both clashing nodes and the channel, never an index or a bare MHz', () => {
@@ -169,7 +169,7 @@ describe('why Save is blocked', () => {
 
   it('names the untuned nodes by their 1-based labels', () => {
     const message = draftBlocker(draft('Bracket A', [[0, 5658]]), [0, 1, 3], holedView(), CATALOG);
-    expect(message).toBe('Set a channel for Node 2, Node 4 — a layer tunes every enabled node.');
+    expect(message).toBe('Set a channel for Node 2, Node 4 — a layout tunes every enabled node.');
   });
 
   it('is quiet for a complete, conflict-free tuning', () => {
@@ -182,7 +182,7 @@ describe('why Save is blocked', () => {
   });
 });
 
-describe('what a layer looks like on screen', () => {
+describe('what a layout looks like on screen', () => {
   it('renders a node and its channel together — the pair an RD needs', () => {
     expect(layerNodeLabel({ node: 2, channel: 5732 }, CATALOG)).toBe('Node 3 · Raceband R3');
   });
@@ -193,16 +193,16 @@ describe('what a layer looks like on screen', () => {
     expect(summary).not.toMatch(/\d{4}/);
   });
 
-  it('resolves a layer id to its name, and a deleted one to a phrase', () => {
-    expect(layerName(LAYERS, 'pack-b-z1x8')).toBe('Pack B');
-    expect(layerName(LAYERS, 'gone')).toBe('a deleted layer');
+  it('resolves a layout id to its name, and a deleted one to a phrase', () => {
+    expect(layoutName(LAYERS, 'pack-b-z1x8')).toBe('Pack B');
+    expect(layoutName(LAYERS, 'gone')).toBe('a deleted layout');
   });
 });
 
-describe('cross-layer overlap', () => {
-  it('warns by naming both layers and the shared channel — and reads as ignorable', () => {
+describe('cross-layout overlap', () => {
+  it('warns by naming both layouts and the shared channel — and reads as ignorable', () => {
     const message = overlapMessage(
-      { layer: 'bracket-a-k3f9', other: 'pack-b-z1x8', channels: [5658] },
+      { layout: 'bracket-a-k3f9', other: 'pack-b-z1x8', channels: [5658] },
       LAYERS,
       CATALOG
     );
@@ -219,7 +219,7 @@ describe('cross-layer overlap', () => {
 
   it('lists several shared channels readably', () => {
     const message = overlapMessage(
-      { layer: 'bracket-a-k3f9', other: 'pack-b-z1x8', channels: [5658, 5695, 5732] },
+      { layout: 'bracket-a-k3f9', other: 'pack-b-z1x8', channels: [5658, 5695, 5732] },
       LAYERS,
       CATALOG
     );
