@@ -652,6 +652,100 @@ fn workspace_root_dir() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+/// The image tag must match the installed `@playwright/test`: the browsers come from the image
+/// while the test runner comes from the mounted `node_modules`, and Playwright refuses a mismatch.
+const PLAYWRIGHT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.61.0-noble";
+
+/// `cargo xtask e2e [filter]` — run the browser e2e suite inside Microsoft's Playwright image.
+///
+/// The suite is already headless; what a build box lacks is the ~300 system libraries Chromium
+/// needs. Rather than provision the host, borrow the image that has them.
+///
+/// **No custom image and no Rust in the container.** The host-built Director binary runs inside it
+/// unmodified (verified: image glibc 2.39, host 2.43 — a Rust binary needs the symbols it uses to
+/// exist, not an identical libc), so the container needs only node and browsers. That is what keeps
+/// this a `docker run` instead of a Dockerfile somebody has to maintain.
+///
+/// The binary is built on the **host** first because the harness's build-on-demand path shells out
+/// to `cargo`, which is not in the image — a missing binary would fail deep inside a spec instead
+/// of here, where the message can say what to do.
+fn e2e(args: &[String]) -> bool {
+    if !run("cargo", &["build", "-p", "gridfpv-app"]) {
+        eprintln!("e2e: the Director binary must build before the suite can boot it");
+        return false;
+    }
+    let installed = playwright_version();
+    if let Some(v) = &installed {
+        if !PLAYWRIGHT_IMAGE.contains(v.as_str()) {
+            eprintln!(
+                "e2e: @playwright/test is {v} but the image is pinned to {PLAYWRIGHT_IMAGE}.\n\
+                 Playwright refuses a runner/browser mismatch — update PLAYWRIGHT_IMAGE in \
+                 xtask/src/main.rs to the matching tag."
+            );
+            return false;
+        }
+    }
+    let root = workspace_root();
+    let mount = format!("{}:{}", root.display(), root.display());
+    let workdir = root.join("frontend");
+    let mut docker: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "--init".into(),
+        // The specs boot a real Director per worker on an EPHEMERAL port, so nothing here can
+        // collide with a Director already running on 8080 for bench testing.
+        "-v".into(),
+        mount,
+        "-w".into(),
+        workdir.display().to_string(),
+        "-e".into(),
+        "CI=1".into(),
+        "-e".into(),
+        "HOME=/tmp".into(),
+        PLAYWRIGHT_IMAGE.into(),
+        "npx".into(),
+        "playwright".into(),
+        "test".into(),
+    ];
+    // Write artefacts (traces, reports) as the invoking user, not root.
+    if let Some(ids) = users_ids() {
+        let at = docker.len() - 4; // before the image + npx playwright test
+        docker.splice(at..at, ["-u".to_string(), ids]);
+    }
+    docker.extend(args.iter().cloned());
+    let refs: Vec<&str> = docker.iter().map(String::as_str).collect();
+    run("docker", &refs)
+}
+
+/// The installed `@playwright/test` version, or `None` if it cannot be read (then the tag check is
+/// skipped rather than blocking the run on a missing file).
+fn playwright_version() -> Option<String> {
+    let pkg = workspace_root().join("frontend/node_modules/@playwright/test/package.json");
+    let text = std::fs::read_to_string(pkg).ok()?;
+    let key = "\"version\"";
+    let at = text.find(key)?;
+    let rest = &text[at + key.len()..];
+    let start = rest.find('"')? + 1;
+    let end = rest[start..].find('"')? + start;
+    Some(rest[start..end].to_string())
+}
+
+/// The invoking user's `uid:gid`, so artefacts the container writes (traces, reports) land owned
+/// by the RD rather than by root.
+///
+/// Read from `id -u` / `id -g` rather than libc: this crate forbids `unsafe`, and shelling out once
+/// per run is free next to a container start.
+fn users_ids() -> Option<String> {
+    let uid = Command::new("id").arg("-u").output().ok()?;
+    let gid = Command::new("id").arg("-g").output().ok()?;
+    let uid = String::from_utf8(uid.stdout).ok()?.trim().to_string();
+    let gid = String::from_utf8(gid.stdout).ok()?.trim().to_string();
+    if uid.is_empty() || gid.is_empty() {
+        return None;
+    }
+    Some(format!("{uid}:{gid}"))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let task = args.first().cloned().unwrap_or_else(|| "ci".to_string());
@@ -666,6 +760,8 @@ fn main() {
         "ci" => fmt() && lint() && test() && gen_check() && barrel_check(),
         // The RotorHazard version × plugin live matrix; bare `live` runs all four legs.
         "live" => live(&args[1..]),
+        // The browser e2e suite, in Microsoft's Playwright image (#426). See `docker/playwright/`.
+        "e2e" => e2e(&args[1..]),
         // The interactive RotorHazard mock-signal harness (marshaling testing). Needs Docker to
         // `feed`; `dump`/`list` are plain HTTP/std. See `rh_mock.rs`.
         "rh-mock" => rh_mock::run(&args[1..]),
