@@ -94,10 +94,11 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
 
   // ── The heat is auto-created (no manual Fill) ───────────────────────────────────────────────
   const heatSection = page.getByRole('region', { name: `Heats for ${LABEL}` });
-  // An open-practice round drops the manual fill control — its heat is created for it. Neither the
-  // single-step "Add next heat" nor the deterministic "Generate heats" (#216) is offered.
-  await expect(heatSection.getByRole('button', { name: 'Add next heat' })).toHaveCount(0);
+  // An open-practice round drops the GENERATION control — it has no field to lay into heats, and
+  // its fill emits one heat, ever. It keeps "Add heat", the only way to seat a second by hand.
+  await expect(heatSection.getByRole('button', { name: 'Generate next heat' })).toHaveCount(0);
   await expect(heatSection.getByRole('button', { name: 'Generate heats' })).toHaveCount(0);
+  await expect(heatSection.getByRole('button', { name: 'Add heat' })).toBeVisible();
   // The auto-created heat lands (its node lineup shows in the heats list).
   await expect(heatSection.getByText(/node-0/).first()).toBeVisible({ timeout: 15_000 });
   // It displays under the friendly name "Practice Heat", not its generated heat id

@@ -88,8 +88,16 @@ export function heatDisplayName(
   // convention below (the whole point of the build-heat name field). A generator heat has none.
   const custom = heat.label?.trim();
   if (custom) return custom;
-  if (isOpenPracticeRound(round)) return OPEN_PRACTICE_HEAT_NAME;
   const index = heatsInRound.findIndex((x) => x.heat === heat.heat);
+  if (isOpenPracticeRound(round)) {
+    // The round's own fill generates ONE practice heat, ever — so the unnumbered name is right for
+    // the common case. But the RD can add more by hand ("Add heat" on the round), and two heats both
+    // reading "Practice Heat" is a name that no longer identifies anything. Number them only once
+    // there is something to tell apart.
+    if (heatsInRound.length <= 1) return OPEN_PRACTICE_HEAT_NAME;
+    const n = index >= 0 ? index + 1 : heatsInRound.length + 1;
+    return `${OPEN_PRACTICE_HEAT_NAME} ${n}`;
+  }
   if (isMultiMainRound(round)) {
     // The main's tier is its position in the round (A=first, B=second, …); a not-yet-listed heat
     // is the next main. The engine ids these `main-A`, `main-B`, … in this same order, so position

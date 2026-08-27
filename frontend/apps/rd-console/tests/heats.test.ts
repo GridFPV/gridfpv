@@ -51,10 +51,21 @@ describe('heats — shared heat-name helper', () => {
     expect(heatDisplayName(r, heat('h-new'), list)).toBe('Qualifying R1 Heat 2');
   });
 
-  it('names every open-practice heat the fixed practice name', () => {
+  it('names the one open-practice heat the fixed practice name', () => {
     const r = round({ format: 'open_practice', label: 'Open Practice' });
     expect(isOpenPracticeRound(r)).toBe(true);
     expect(heatDisplayName(r, heat('p-1'), [heat('p-1')])).toBe(OPEN_PRACTICE_HEAT_NAME);
+  });
+
+  it('numbers practice heats only once the RD has added a second by hand', () => {
+    // The round's own fill emits one practice heat, ever — so the plain name is right for it. But
+    // "Add heat" can seat more, and two rows both reading "Practice Heat" name nothing at all.
+    const r = round({ format: 'open_practice', label: 'Open Practice' });
+    const list = [heat('p-1'), heat('p-2')];
+    expect(heatDisplayName(r, list[0], list)).toBe(`${OPEN_PRACTICE_HEAT_NAME} 1`);
+    expect(heatDisplayName(r, list[1], list)).toBe(`${OPEN_PRACTICE_HEAT_NAME} 2`);
+    // An RD-typed label still wins over the derived name, as it does everywhere.
+    expect(heatDisplayName(r, { ...list[1], label: 'Whoop session' }, list)).toBe('Whoop session');
   });
 
   it('reports a non-practice round as not open-practice', () => {

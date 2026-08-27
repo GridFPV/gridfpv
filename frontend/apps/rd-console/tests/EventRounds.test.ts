@@ -1043,11 +1043,13 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     await within(roundsCard).findByText('Free Practice');
     expect(within(roundsCard).getByText('1h')).toBeInTheDocument();
 
-    // The Heats area drops the manual fill control for the open-practice round — neither the
-    // single-step "Add next heat" nor the deterministic "Generate heats" (#216).
+    // An open-practice round has no field to lay into heats — its fill emits one heat, ever — so it
+    // offers no generation control at all. It DOES offer "Add heat": the RD can still seat another
+    // practice heat by hand, which is the only way to get one.
     const heatsCard = screen.getByRole('heading', { name: 'Heats' }).closest('section')!;
-    expect(within(heatsCard).queryByRole('button', { name: 'Add next heat' })).toBeNull();
+    expect(within(heatsCard).queryByRole('button', { name: 'Generate next heat' })).toBeNull();
     expect(within(heatsCard).queryByRole('button', { name: 'Generate heats' })).toBeNull();
+    expect(within(heatsCard).getByRole('button', { name: 'Add heat' })).toBeInTheDocument();
   });
 
   it('round-trips an open-practice time limit through edit', async () => {
@@ -1400,10 +1402,10 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
 
-    // There is no heat-id field to fill — the RD only picks a round (defaults to the first) and a
-    // lineup. Submit is enabled by round + lineup alone.
+    // There is no heat-id field to fill, and no round to pick either — the builder is opened FROM a
+    // round, so it is already scoped to it and says so in its title. Submit is enabled by lineup.
     expect(screen.queryByLabelText('Build heat id')).toBeNull();
     expect(screen.getByRole('button', { name: 'Schedule heat' })).toBeDisabled();
 
@@ -1456,7 +1458,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session } = makeTestSession({ ...impls, event: event3 });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     // The 2-node timer caps the lineup at 2: after two picks the third is disabled + a note shows.
     await fireEvent.click(await screen.findByLabelText('Select AceOne'));
     await fireEvent.click(screen.getByLabelText('Select Bolt'));
@@ -1473,7 +1475,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     render(EventRounds, { session });
 
     const buildOne = async () => {
-      await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+      await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
       await fireEvent.click(screen.getByLabelText('Select AceOne'));
       await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
     };
@@ -1495,7 +1497,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     await fireEvent.input(await screen.findByLabelText('Build heat name'), {
       target: { value: 'Featured Heat' }
     });
@@ -1514,25 +1516,29 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   });
 
   // ── The build-heat form is a modal Dialog (ux(rounds)) ────────────────────────────────────────
-  it('does not show the build-heat dialog until "+ Build heat" is clicked', async () => {
+  it('does not show the build-heat dialog until the round’s "Add heat" is clicked', async () => {
     const { session } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
     // No dialog shown (and so the build form is not presented) until the trigger is clicked.
-    await screen.findByRole('button', { name: '+ Build heat' });
+    await screen.findByRole('button', { name: 'Add heat' });
     expect(screen.queryByRole('dialog')).toBeNull();
 
-    await fireEvent.click(screen.getByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add heat' }));
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
     expect(screen.getByRole('form', { name: 'Build heat' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Build round')).toBeInTheDocument();
+    // Pre-scoped to the round whose button opened it — there is no round picker to re-answer.
+    expect(screen.queryByLabelText('Build round')).toBeNull();
+    expect(
+      screen.getByRole('heading', { name: 'Add a heat to Qualifying R1' })
+    ).toBeInTheDocument();
   });
 
   it('cancel closes the build-heat dialog without scheduling a heat', async () => {
     const { session, sendSpy } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     await fireEvent.click(await screen.findByLabelText('Select AceOne'));
     await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
@@ -1544,7 +1550,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session, sendSpy } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     await fireEvent.click(await screen.findByLabelText('Select AceOne'));
     await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
 
@@ -2068,6 +2074,7 @@ describe('EventRounds — a round names the channel layouts its heats may fly (#
       ...baseImpls(),
       listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
       listHeatsImpl: vi.fn(async () => [heat]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
       event: EVENT_WITH_MEMBERS
     });
   }
@@ -2148,7 +2155,7 @@ describe('EventRounds — a round names the channel layouts its heats may fly (#
     render(EventRounds, { session });
     await screen.findByText(/Flew the/);
     expect(screen.queryByLabelText('Channel layout for Qualifying R1 Heat 1')).toBeNull();
-    expect(screen.queryByRole('button', { name: /Set seating/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Edit seating/ })).toBeNull();
     expect(document.body.textContent).toContain('Bracket A');
   });
 
@@ -2157,7 +2164,7 @@ describe('EventRounds — a round names the channel layouts its heats may fly (#
     render(EventRounds, { session });
 
     await fireEvent.click(
-      await screen.findByRole('button', { name: 'Set seating for Qualifying R1 Heat 1' })
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
     );
     // The dialog says the override sticks — the one property that makes it worth having (#419).
     expect(
@@ -2186,13 +2193,190 @@ describe('EventRounds — a round names the channel layouts its heats may fly (#
     const { session, sendSpy } = withLayouts();
     render(EventRounds, { session });
     await fireEvent.click(
-      await screen.findByRole('button', { name: 'Set seating for Qualifying R1 Heat 1' })
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
     );
     await fireEvent.change(screen.getByLabelText('Pilot in seat 2'), { target: { value: 'p1' } });
+    expect(await screen.findByText(/No pilot can sit twice in one heat/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  // ── Seat-first, pilot-OPTIONAL (the RD's practice-seating bug) ───────────────────────────────
+  //
+  // "for practice where we dont have assigned pilots, we cant manually set seating because it
+  // requires a pilot." The Director never required one — `node-{i}` refs are the open-practice
+  // lineup and skip the membership check — so this was the console requiring something the wire
+  // does not. These four cover the rule and its edges.
+
+  /** A 4-node timer with node 2 switched off, so the enabled gates are 0, 1 and 3 (#412). */
+  const GATED_TIMER: Timer = {
+    id: 'mock',
+    name: 'Mock',
+    kind: { Mock: { laps: 3, lap_ms: 1000 } },
+    status: 'Ready',
+    channel_capability: 'Flexible',
+    node_count: 4,
+    available_channels: [5658, 5800],
+    manual_connect: false,
+    calibration: [],
+    disabled_nodes: [2]
+  };
+
+  /** An open-practice round: no classes, so no membership — its competitors ARE its gates. */
+  const PRACTICE: RoundDef = {
+    ...QUAL,
+    id: 'op1',
+    label: 'Free Practice',
+    format: 'open_practice',
+    classes: [],
+    seeding: { AllChannels: { channels: [0, 1] } }
+  };
+  /** Its heat, seated on two node refs and flying no layout — the case that could not be edited. */
+  const PRACTICE_HEAT: HeatSummary = {
+    heat: 'op1-heat',
+    lineup: ['node-0', 'node-1'],
+    round: 'op1',
+    phase: 'Scheduled',
+    is_current: false
+  };
+
+  function practiceSession(heat: HeatSummary = PRACTICE_HEAT) {
+    return makeTestSession({
+      ...baseImpls(),
+      listFormatsImpl: vi.fn(async () => [...FORMATS, 'open_practice']),
+      listFormatSchemasImpl: vi.fn(async () => [...SCHEMAS, { name: 'open_practice', params: [] }]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [heat]),
+      listTimersImpl: vi.fn(async () => [GATED_TIMER]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
+      event: { ...EVENT, classes: [], rounds: [PRACTICE], channel_layouts: [] }
+    });
+  }
+
+  it('opens the seating editor on a heat that flies no layout at all', async () => {
+    // The button used to appear only once a layout was set — hiding the escape hatch exactly when
+    // there was no automatic answer to escape from.
+    const { session } = practiceSession();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Practice Heat' })
+    );
+    expect(await screen.findByRole('form', { name: 'Set heat seating' })).toBeInTheDocument();
+    // No layout picker to be found — and the seating editor opened regardless.
+    expect(screen.queryByLabelText(/^Channel layout for/)).toBeNull();
+  });
+
+  it('saves a practice heat’s seating with NO pilot, landing node refs in the lineup', async () => {
+    const { session, sendSpy } = practiceSession();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Practice Heat' })
+    );
+
+    // Every seat's pilot cell is empty and that is a complete answer — the seat IS the competitor.
+    const pilot = screen.getByLabelText('Pilot in seat 1') as HTMLSelectElement;
+    expect(pilot.value).toBe('');
+    expect([...pilot.options].map((o) => o.textContent?.trim())).toEqual(['Open seat — no pilot']);
+    // The gates are named, never the raw ref, and node 2 is off so it is not offered (#412).
+    const node = screen.getByLabelText('Node in seat 1') as HTMLSelectElement;
+    expect([...node.options].map((o) => o.textContent?.trim())).toEqual([
+      'Node 1',
+      'Node 2',
+      'Node 4'
+    ]);
+
+    // Move the second seat onto the last enabled gate and save — with no pilot anywhere.
+    await fireEvent.change(screen.getByLabelText('Node in seat 2'), { target: { value: '3' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      // No channel was typed on any seat, so none is sent — the seats take the round's own answer.
+      OverrideHeatSeating: { heat: 'op1-heat', lineup: ['node-0', 'node-3'] }
+    });
+  });
+
+  it('adds a pilot-less seat on the next free gate, skipping the disabled one', async () => {
+    const { session, sendSpy } = practiceSession();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Practice Heat' })
+    );
+    // Gates 0 and 1 are taken; 2 is switched off, so the next seat is gate 3 — never a renumbered 2.
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add seat' }));
+    expect((screen.getByLabelText('Node in seat 3') as HTMLSelectElement).value).toBe('3');
+    // Three enabled gates, three seats — the cap is the ENABLED set, not the width.
+    expect(screen.getByRole('button', { name: '+ Add seat' })).toBeDisabled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      OverrideHeatSeating: { heat: 'op1-heat', lineup: ['node-0', 'node-1', 'node-3'] }
+    });
+  });
+
+  it('still requires a pilot on every seat of a round that HAS a field', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    // The qual round's classes have members, so an empty seat is a mistake, not a practice seat.
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 2'), { target: { value: '' } });
     expect(
-      await screen.findByText(/Every seat needs a pilot, and no pilot can sit twice/)
+      await screen.findByText(/Every seat needs a pilot from this round’s field/)
     ).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
     expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('says so when a pilot would fly a gate other than the one their row names', async () => {
+    // A `node-{i}` seat names its own gate; a PILOT takes the next free one. So skipping a gate
+    // below a pilot slides them down onto it, and the row would otherwise show a gate they are not
+    // on — the quiet wrongness the display rule exists to prevent. Said out loud, with the fix.
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [{ ...HEAT, layout: undefined, frequencies: undefined }]),
+      listTimersImpl: vi.fn(async () => [GATED_TIMER]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    // Seats on gates 1 and 2, no drift: the pilots already fly the gates their rows name.
+    expect(screen.queryByText(/would fly/)).toBeNull();
+
+    // Drop the first seat and move the survivor up to the last gate — nothing now claims gate 1,
+    // so the Director would hand it to them.
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove seat 1' }));
+    await fireEvent.change(screen.getByLabelText('Node in seat 1'), { target: { value: '3' } });
+
+    const note = (await screen.findByText(/would fly/)).textContent?.replace(/\s+/g, ' ') ?? '';
+    // Both gates NAMED, never `node-3` and never a bare index.
+    expect(note).toContain('Bolt would fly Node 1, not Node 4');
+    // And the fix is offered, not just the diagnosis.
+    expect(note).toContain('open seat');
+    // It is a note, not a refusal — the RD may well mean it.
+    expect(screen.getByRole('button', { name: 'Save seating' })).toBeEnabled();
+  });
+
+  it('names every gate and channel it offers — no raw ref, no bare MHz', async () => {
+    const { session } = withLayouts();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    const channel = (await screen.findByLabelText('Channel in seat 1')) as HTMLSelectElement;
+    // A picker carries the frequency BESIDE the friendly name (channels.ts), never instead of it.
+    expect([...channel.options].map((o) => o.textContent?.trim())).toEqual([
+      'From the layout',
+      'Raceband R1 — 5658',
+      'Fatshark F4 — 5800'
+    ]);
+    const form = screen.getByRole('form', { name: 'Set heat seating' });
+    expect(form.textContent).not.toMatch(/node-\d/);
   });
 });

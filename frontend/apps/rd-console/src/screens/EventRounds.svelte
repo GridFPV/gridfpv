@@ -55,7 +55,7 @@
     Timer,
     WinCondition
   } from '@gridfpv/types';
-  import { channelLabel } from '../lib/channels.js';
+  import { channelOptionLabel, nodeIndexOf } from '../lib/channels.js';
   import { buildCompetitorNames } from '../lib/competitorName.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import {
@@ -72,7 +72,7 @@
     isDeterministicRound,
     isOpenPracticeRound
   } from '../lib/heats.js';
-  import { timerSeats, timerWidth } from '../lib/timerNodes.js';
+  import { enabledNodes, seatNodes, timerSeats, timerWidth } from '../lib/timerNodes.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let { session }: { session: Session } = $props();
@@ -451,6 +451,11 @@
 
   let buildOpen = $state(false);
   let buildRound = $state<RoundId | ''>('');
+  // The node seats a **pilot-less** round builds its heat from — an open-practice round has no
+  // classes, so no membership to draw a field from, and its competitors ARE the gates (`node-{i}`).
+  // Same seat-first, pilot-optional rule as the seating editor; the picker differs only because
+  // there are no pilots to offer.
+  let buildNodes = $state<Set<number>>(new Set());
   // An optional human name for the heat. When set it becomes the heat's display name everywhere
   // (overriding the derived "‹Round› Heat N" / tier convention); empty = auto-name (label None).
   let buildHeatLabel = $state('');
@@ -479,12 +484,18 @@
     return round && round.classes.length === 1 ? round.classes[0] : undefined;
   }
 
+  /** The round the builder is scoped to — it is opened FROM a round, so there is always one. */
+  const buildRoundDef = $derived<RoundDef | undefined>(rounds.find((r) => r.id === buildRound));
+  /** Whether this round seats pilots (it has an eligible field) or gates (practice). */
+  const buildSeatsPilots = $derived(eligibleMembers.length > 0);
+  /** How many seats the RD has picked, whichever kind this round seats. */
+  const buildPicked = $derived(buildSeatsPilots ? buildSelected.size : buildNodes.size);
   // A heat only needs a round + a non-empty lineup; the id is generated, the name is optional.
-  const canBuild = $derived(buildRound !== '' && buildSelected.size > 0);
+  const canBuild = $derived(buildRound !== '' && buildPicked > 0);
   // A hand-built heat can hold at most the primary timer's node count — the most pilots it can run at
   // once. No primary timer ⇒ no cap (the RD will set a timer before running it).
   const heatNodeCap = $derived(primaryTimer ? timerSeats(primaryTimer) : Infinity);
-  const buildAtNodeCap = $derived(buildSelected.size >= heatNodeCap);
+  const buildAtNodeCap = $derived(buildPicked >= heatNodeCap);
 
   // Mint a unique, round-scoped heat id in the readable generator style (`<round>-h-<suffix>`). The
   // suffix is a short random base36 token, and we re-roll on the (vanishingly rare) chance it
@@ -499,15 +510,24 @@
     }
   }
 
-  function openBuild() {
+  /**
+   * Open the manual builder **scoped to one round** — the round card's own "Add heat".
+   *
+   * It used to be a single console-level "+ Build heat" that made the RD re-pick the round they were
+   * already looking at, which is why it went unfound: two doors to the same room, and the RD went
+   * looking for a third. The round the button sits on IS the round, so there is nothing to choose.
+   */
+  function openBuild(round: RoundDef) {
     buildOpen = true;
-    buildRound = rounds[0]?.id ?? '';
+    buildRound = round.id;
     buildHeatLabel = '';
     buildSelected = new Set();
+    buildNodes = new Set();
   }
   function cancelBuild() {
     buildOpen = false;
     buildSelected = new Set();
+    buildNodes = new Set();
   }
   function toggleMember(pid: PilotId) {
     const next = new Set(buildSelected);
@@ -517,12 +537,23 @@
     else if (!buildAtNodeCap) next.add(pid);
     buildSelected = next;
   }
+  /** The same toggle for a round that seats gates rather than pilots, under the same cap. */
+  function toggleBuildNode(node: number) {
+    const next = new Set(buildNodes);
+    if (next.has(node)) next.delete(node);
+    else if (!buildAtNodeCap) next.add(node);
+    buildNodes = next;
+  }
 
   async function submitBuild() {
     if (building || !canBuild || buildRound === '') return;
     building = true;
-    // Lineup in eligible-member order; a pilot id is its own CompetitorRef.
-    const lineup: CompetitorRef[] = eligibleMembers.filter((pid) => buildSelected.has(pid));
+    // Lineup in eligible-member order; a pilot id is its own CompetitorRef. A round with no field
+    // to draw from seats the gates themselves, in gate order — the `node-{i}` refs the Director
+    // already accepts on a tagged heat, so practice needs no separate path here either.
+    const lineup: CompetitorRef[] = buildSeatsPilots
+      ? eligibleMembers.filter((pid) => buildSelected.has(pid))
+      : [...buildNodes].sort((a, b) => a - b).map((node) => `node-${node}` as CompetitorRef);
     // A blank name = no custom label (the heat keeps its derived auto-name).
     const label = buildHeatLabel.trim() || undefined;
     // The internal handle is auto-generated (round-scoped + collision-safe), not RD-entered.
@@ -538,6 +569,7 @@
       toast.success('Heat scheduled.');
       buildOpen = false;
       buildSelected = new Set();
+      buildNodes = new Set();
       buildHeatLabel = '';
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -573,21 +605,96 @@
     toast.success('Heat re-tuned.');
   }
 
-  // ── The seating override editor ──────────────────────────────────────────────
-  // One row per seat: which pilot sits there, and what channel they are on. A blank channel means
-  // "take it from the heat's layout", which is the common case — an RD swapping two pilots should
-  // not have to retype four frequencies.
+  // ── The seating editor ───────────────────────────────────────────────────────
+  //
+  // **Seat-first, pilot-optional.** A row is a *seat*: which gate it flies, what channel it is on,
+  // and — optionally — which pilot sits there. That order is the fix for the bug the RD hit: the old
+  // editor was built around the pilot and *required* one, so a practice heat (whose seats have no
+  // assigned pilots at all) could not be seated by hand.
+  //
+  // The wire model always allowed this, and there is no Practice carve-out here. A lineup entry is a
+  // `CompetitorRef`, and a seat with no pilot **is** its own competitor: the ref is `node-{i}` — the
+  // open-practice handle the Director already accepts (`validate_tagged_lineup`: *"`node-{i}` timer
+  // seats … have no membership to check — so practice-style heats keep scheduling"*). So the write
+  // path below never asks what kind of round this is; it just asks each row whether it has a pilot.
+  //
+  // The only thing the round type changes is what the UI marks **required**, and even that is read
+  // off the field rather than the format: a round with eligible members seats pilots, a round with
+  // none (practice) seats gates.
+  //
+  // A blank channel still means "take it from the heat's layout", which is the common case — an RD
+  // swapping two pilots should not have to retype four frequencies.
+  interface SeatRow {
+    /** The **real** node index this seat flies (never a compacted row position). */
+    node: number;
+    /** Raw MHz as a string, or `''` for "from the layout". */
+    channel: string;
+    /** The pilot sitting here, or `''` for an open seat — which is a competitor in its own right. */
+    pilot: PilotId | '';
+  }
   let seatOpen = $state(false);
   let seatHeat = $state<HeatSummary | undefined>(undefined);
   let seatRound = $state<RoundDef | undefined>(undefined);
-  let seatRows = $state<{ pilot: CompetitorRef; channel: string }[]>([]);
+  let seatRows = $state<SeatRow[]>([]);
   let seatSaving = $state(false);
+
+  /** The competitor ref a row seats: the pilot when there is one, else the gate itself. */
+  const seatRef = (row: SeatRow): CompetitorRef =>
+    row.pilot !== '' ? row.pilot : `node-${row.node}`;
+
+  /**
+   * The gates a heat may be seated on, ascending — the primary timer's **enabled** nodes, plus any
+   * gate the heat is already on so an existing seat is never silently un-pickable (the same rule
+   * {@link seatChannels} applies to channels).
+   *
+   * With no primary timer resolved there is nothing to enumerate, so the choices are exactly the
+   * rows' own gates: the control still renders and still says which gate each seat flies, and
+   * {@link addSeatRow} extends the list rather than inventing hardware (#412's trap).
+   */
+  const seatNodeChoices = $derived<number[]>(
+    [
+      ...new Set([
+        ...(primaryTimer ? enabledNodes(primaryTimer) : []),
+        ...seatRows.map((r) => r.node)
+      ])
+    ].sort((a, b) => a - b)
+  );
+
+  /** Which gate each entry of a lineup flies — the Director's own rule, mirrored (`seatNodes`). */
+  function seatNodesFor(lineup: readonly CompetitorRef[]): Map<CompetitorRef, number> {
+    // With no timer resolved, fall back to the gates the lineup itself names plus one per entry, so
+    // a `node-5` seat keeps its gate instead of being dropped and re-placed somewhere else.
+    const enabled = primaryTimer
+      ? enabledNodes(primaryTimer)
+      : [
+          ...new Set([
+            ...lineup.map((_, i) => i),
+            ...lineup.map(nodeIndexOf).filter((n): n is number => n !== undefined)
+          ])
+        ].sort((a, b) => a - b);
+    return new Map(seatNodes(enabled, lineup).map((seat) => [seat.ref, seat.node]));
+  }
 
   function openSeating(round: RoundDef, h: HeatSummary) {
     seatRound = round;
     seatHeat = h;
     const byRef = new Map(h.frequencies ?? []);
-    seatRows = h.lineup.map((ref) => ({ pilot: ref, channel: String(byRef.get(ref) ?? '') }));
+    const gates = seatNodesFor(h.lineup);
+    const used = new Set(gates.values());
+    // A ref the seating rule DROPS (a `node-{i}` naming a gate that is off or gone) still needs a row
+    // — hiding it would silently delete the seat on the next save. Park it on the next free gate.
+    const spare = (): number => {
+      let n = 0;
+      while (used.has(n)) n++;
+      used.add(n);
+      return n;
+    };
+    seatRows = h.lineup.map((ref) => ({
+      node: gates.get(ref) ?? spare(),
+      channel: String(byRef.get(ref) ?? ''),
+      // A `node-{i}` ref is the seat itself, not a pilot — it must not land in the pilot cell.
+      pilot: nodeIndexOf(ref) === undefined ? (ref as PilotId) : ''
+    }));
     seatOpen = true;
   }
   function cancelSeating() {
@@ -598,7 +705,15 @@
   }
   function addSeatRow() {
     if (seatRows.length >= heatNodeCap) return;
-    seatRows = [...seatRows, { pilot: '', channel: '' }];
+    const used = new Set(seatRows.map((r) => r.node));
+    let node = seatNodeChoices.find((n) => !used.has(n));
+    if (node === undefined) {
+      // Only reachable with no primary timer (with one, `heatNodeCap` is the enabled-seat count and
+      // has already stopped us). Extend past the rows' own gates rather than refuse to add a seat.
+      node = 0;
+      while (used.has(node)) node++;
+    }
+    seatRows = [...seatRows, { node, channel: '', pilot: '' }];
   }
   function removeSeatRow(i: number) {
     seatRows = seatRows.filter((_, n) => n !== i);
@@ -608,7 +723,20 @@
   const seatCandidates = $derived<PilotId[]>(buildEligibleMembers(seatRound?.id ?? ''));
 
   /**
-   * The channels the RD may type in — the event timer's **allowed** set (what it may ever use), plus
+   * Whether a seat **needs** a pilot — the one place the two cases differ, and it is a question
+   * about the *field*, not about the format.
+   *
+   * A round with eligible members is seating those members, and a seat left empty there is a
+   * mistake worth refusing. A round with none — an open-practice round has no classes, so no
+   * membership to draw from — is seating gates, and its seats are complete without a pilot.
+   */
+  const seatPilotRequired = $derived(seatCandidates.length > 0);
+
+  /** The resolver scoped to this heat, so a seat's gate is labelled with the channel it flies. */
+  const seatNames = $derived(namesFor(seatHeat));
+
+  /**
+   * The channels the RD may pick — the event timer's **allowed** set (what it may ever use), plus
    * whatever the heat is already on so an existing assignment is never silently un-pickable. Never
    * the whole catalog: assigning a channel the RD has not allowed is the "no channels becomes
    * arbitrary channels" trap S1 closed.
@@ -622,23 +750,68 @@
     ].sort((a, b) => a - b)
   );
 
-  const seatValid = $derived(
-    seatRows.length === 0 ||
-      (seatRows.every((r) => r.pilot !== '') &&
-        new Set(seatRows.map((r) => r.pilot)).size === seatRows.length)
-  );
+  /**
+   * Why this seating cannot be saved, phrased for the RD — or `undefined` when it can.
+   *
+   * Three separate mistakes with three separate fixes, so they get three separate sentences rather
+   * than one that covers all of them and helps with none.
+   */
+  const seatProblem = $derived.by<string | undefined>(() => {
+    if (seatRows.length === 0) return undefined; // An empty seating CLEARS the override — deliberate.
+    const nodes = seatRows.map((r) => r.node);
+    if (new Set(nodes).size !== nodes.length) {
+      return 'Two seats are on the same node — each seat flies its own gate.';
+    }
+    const pilots = seatRows.map((r) => r.pilot).filter((p) => p !== '');
+    if (new Set(pilots).size !== pilots.length) return 'No pilot can sit twice in one heat.';
+    if (seatPilotRequired && pilots.length !== seatRows.length) {
+      return 'Every seat needs a pilot from this round’s field.';
+    }
+    return undefined;
+  });
+  const seatValid = $derived(seatProblem === undefined);
+
+  /**
+   * Seats whose row names one gate but whose **pilot will fly another** — and how to fix it.
+   *
+   * A `node-{i}` seat names its own gate outright, so it always gets it. A *pilot* does not: the
+   * Director hands each one the next enabled gate no explicit seat has claimed, so leaving a gate
+   * empty below a pilot slides them down onto it. The fix is the same mechanism, which is why this
+   * is a note and not a refusal — put an **open seat** (a row with no pilot) on the gate to be
+   * skipped and it claims that gate, holding the pilot where the RD put them.
+   *
+   * Showing the picked gate while the pilot flies a different one is exactly the class of quiet
+   * wrongness this screen exists to remove, so it is said out loud rather than silently corrected.
+   */
+  const seatDrift = $derived.by(() => {
+    const rows = [...seatRows].sort((a, b) => a.node - b.node);
+    const gates = seatNodesFor(rows.map(seatRef));
+    return rows
+      .filter((r) => r.pilot !== '' && gates.get(seatRef(r)) !== r.node)
+      .map((r) => ({
+        who: callsign(seatRef(r)),
+        picked: seatNames.seatLabel(r.node),
+        actual: gates.has(seatRef(r)) ? seatNames.seatLabel(gates.get(seatRef(r))!) : undefined
+      }));
+  });
 
   async function submitSeating() {
     if (seatSaving || !seatHeat || !seatValid) return;
     seatSaving = true;
     try {
-      const lineup: CompetitorRef[] = seatRows.map((r) => r.pilot);
+      // Gate order IS the lineup order: the Director walks the lineup and hands each pilot the next
+      // free enabled gate, so sorting by node is what makes the row the RD sees and the gate the
+      // pilot flies the same thing.
+      const rows = [...seatRows].sort((a, b) => a.node - b.node);
+      // No branch on round type here, and there must never be one: a row simply seats its pilot, or
+      // — when it has none — seats the gate itself as `node-{i}`.
+      const lineup: CompetitorRef[] = rows.map(seatRef);
       // Only send channels when the RD actually typed every one of them: a partial set would leave
       // some seats un-channelled, and "the layout's channels" is the better answer for all of them.
-      const typed = seatRows.filter((r) => r.channel !== '');
+      const typed = rows.filter((r) => r.channel !== '');
       const frequencies: [CompetitorRef, number][] =
-        typed.length === seatRows.length && seatRows.length > 0
-          ? seatRows.map((r) => [r.pilot, Number(r.channel)])
+        typed.length === rows.length && rows.length > 0
+          ? rows.map((r) => [seatRef(r), Number(r.channel)])
           : [];
       const ack = await session.overrideHeatSeating(seatHeat.heat, lineup, frequencies);
       if (!ack.ok) return; // The banner surfaces the Director's refusal.
@@ -1444,16 +1617,12 @@
     {/if}
   </Card>
 
+  <!-- Every heat action now lives on the round it acts on — there is no console-level "build a
+       heat" button any more. One door per room: the RD works down the round they are looking at. -->
   <Card
     title="Heats"
-    subtitle="Fill each round’s heats from its field, or build one by hand. Run them from Race control."
+    subtitle="Fill each round’s heats from its field, or add one by hand. Run them from Race control."
   >
-    {#snippet actions()}
-      <Button variant="secondary" size="sm" onclick={openBuild} disabled={rounds.length === 0}>
-        + Build heat
-      </Button>
-    {/snippet}
-
     {#if rounds.length === 0}
       <p class="empty" role="status">
         Add a round above first — heats are drawn from a round’s field.
@@ -1478,9 +1647,8 @@
                 </span>
               {/snippet}
               {#snippet actions()}
-                <!-- Open practice (open-practice refinement): its single channel heat is auto-created
-                     on round creation — there is nothing to Fill and no scoring to rank. So the Heats
-                     controls collapse to just the ready-to-Start heat. -->
+                <!-- Open practice (open-practice refinement): there is no field to rank, so it gets
+                     no Standings. -->
                 {#if !isOpenPracticeRound(round)}
                   <Button
                     variant="ghost"
@@ -1490,8 +1658,16 @@
                   >
                     {standingsRound === round.id ? 'Hide standings' : 'Standings'}
                   </Button>
-                  <!-- Format-aware fill (#216): a deterministic round generates all its heats in one
-                       action; a dynamic round (Open Practice) single-steps. -->
+                {/if}
+                <!-- **Generate** and **Add** are different actions and are deliberately not
+                     collapsed into one. Generating lays the round's FIELD into heats (a `timed_qual`
+                     at heat_size 2 turns 4 pilots into 2 heats); adding builds one heat by hand, and
+                     is the escape hatch when the draw is wrong.
+
+                     An open-practice round has no field to lay out — its fill emits one heat, ever
+                     (`round_engine`: the next FillRound is `Complete`) — so generation has nothing
+                     to offer there and only Add heat shows. Everywhere else both do. -->
+                {#if !isOpenPracticeRound(round)}
                   <Button
                     variant="primary"
                     size="sm"
@@ -1499,13 +1675,12 @@
                     loading={fillingRound === round.id}
                     disabled={fillingRound !== undefined}
                   >
-                    {isOpenEndedRound(round)
-                      ? 'Generate next heat'
-                      : isDeterministicRound(round)
-                        ? 'Generate heats'
-                        : 'Add next heat'}
+                    {isOpenEndedRound(round) ? 'Generate next heat' : 'Generate heats'}
                   </Button>
                 {/if}
+                <Button variant="secondary" size="sm" onclick={() => openBuild(round)}>
+                  Add heat
+                </Button>
               {/snippet}
 
               <div class="heat-round-body">
@@ -1564,17 +1739,14 @@
                   {:else if isOpenPracticeRound(round)}
                     <p class="empty small" role="status">
                       The practice heat is being prepared — it is created automatically for an
-                      open-practice round.
+                      open-practice round. Use <strong>Add heat</strong> to seat another by hand.
                     </p>
                   {:else}
                     <p class="empty small" role="status">
                       No heats yet — <strong
-                        >{isOpenEndedRound(round)
-                          ? 'Generate next heat'
-                          : isDeterministicRound(round)
-                            ? 'Generate heats'
-                            : 'Add next heat'}</strong
-                      > to draw from this round’s field.
+                        >{isOpenEndedRound(round) ? 'Generate next heat' : 'Generate heats'}</strong
+                      >
+                      to draw from this round’s field, or <strong>Add heat</strong> to seat one by hand.
                     </p>
                   {/if}
                 {:else}
@@ -1596,6 +1768,27 @@
                             <span class={`status-pill ${statusKind(h.phase)}`}
                               >{statusLabel(h)}</span
                             >
+                            <!-- The manual seating escape hatch (#117 S3). It lives in the heat's
+                                 header, top-right, because that is where a per-heat action belongs
+                                 — and it is a real button, not a ghost one: as a ghost it read as a
+                                 message and the RD found it only by accident.
+
+                                 Offered whether or not the heat flies a layout. Manual seating is
+                                 the escape hatch *especially* when there is no layout, so gating it
+                                 on one hid it exactly when it was needed most. Still Scheduled-only:
+                                 past that the heat is staged, on the timer or raced, and it keeps
+                                 the channels it raced on. -->
+                            {#if retunable(h)}
+                              <span class="heat-head-action">
+                                <Button
+                                  variant="secondary"
+                                  size="sm"
+                                  onclick={() => openSeating(round, h)}
+                                  aria-label={`Edit seating for ${heatDisplayName(round, h)}`}
+                                  >Edit seating</Button
+                                >
+                              </span>
+                            {/if}
                           </div>
                           <div class="lineup">
                             {#each h.lineup as ref, i (ref)}
@@ -1618,38 +1811,31 @@
                                is Scheduled — past that it is staged, on the timer or raced, and it
                                keeps the channels it raced on. A raced heat still SHOWS the layout
                                it flew, which is the record. -->
-                          {#if retunable(h) && (heatLayouts.length > 0 || h.lineup.length > 0)}
+                          {#if retunable(h) && heatLayouts.length > 0}
                             <div class="heat-channels">
-                              {#if heatLayouts.length > 0}
-                                <label class="heat-layout">
-                                  <span class="heat-layout-label">Layout</span>
-                                  <select
-                                    class="heat-layout-select"
-                                    aria-label={`Channel layout for ${heatDisplayName(round, h)}`}
-                                    value={h.layout ?? ''}
-                                    onchange={(e) =>
-                                      pickHeatLayout(
-                                        h,
-                                        (e.currentTarget as HTMLSelectElement).value as
-                                          | LayoutId
-                                          | ''
-                                      )}
-                                  >
-                                    <option value="">Automatic</option>
-                                    {#each heatLayouts as l (l.id)}
-                                      <option value={l.id}>{l.name}</option>
-                                    {/each}
-                                  </select>
-                                </label>
-                              {/if}
-                              <Button
-                                variant="ghost"
-                                onclick={() => openSeating(round, h)}
-                                aria-label={`Set seating for ${heatDisplayName(round, h)}`}
-                                >Set seating…</Button
-                              >
+                              <label class="heat-layout">
+                                <span class="heat-layout-label">Layout</span>
+                                <!-- The shared Select, not a bare `<select>`: the console's radius,
+                                     borders and focus ring come with it, and the native option popup
+                                     is already themed globally in tokens.css. -->
+                                <Select
+                                  size="sm"
+                                  aria-label={`Channel layout for ${heatDisplayName(round, h)}`}
+                                  value={h.layout ?? ''}
+                                  onchange={(e: Event) =>
+                                    pickHeatLayout(
+                                      h,
+                                      (e.currentTarget as HTMLSelectElement).value as LayoutId | ''
+                                    )}
+                                >
+                                  <option value="">Automatic</option>
+                                  {#each heatLayouts as l (l.id)}
+                                    <option value={l.id}>{l.name}</option>
+                                  {/each}
+                                </Select>
+                              </label>
                             </div>
-                          {:else if h.layout}
+                          {:else if !retunable(h) && h.layout}
                             <p class="heat-flew">
                               Flew the <strong>{layoutName(h.layout)}</strong> channel layout.
                             </p>
@@ -2160,37 +2346,69 @@
       }}
     >
       <p class="form-note" role="note">
+        A seat is a <strong>gate</strong>: which node it flies and what channel it is on. A pilot is
+        optional — leave it empty and the seat itself is the competitor, which is how a practice
+        heat is seated.
+      </p>
+      <p class="form-note" role="note">
         This override <strong>sticks</strong>: re-filling or editing the round will not undo it.
         Remove every seat to clear it and go back to the round’s own plan.
       </p>
+      {#if seatRows.length > 0}
+        <div class="seat-head" aria-hidden="true">
+          <span class="seat-num"></span>
+          <span class="seat-col">Node</span>
+          <span class="seat-col">Channel</span>
+          <span class="seat-col">Pilot{seatPilotRequired ? '' : ' (optional)'}</span>
+          <span class="seat-col-spacer"></span>
+        </div>
+      {/if}
       <ol class="seat-rows">
         {#each seatRows as _row, i (i)}
           <li class="seat-row">
             <span class="seat-num" aria-hidden="true">{i + 1}</span>
-            <select
-              class="seat-pilot"
-              aria-label={`Pilot in seat ${i + 1}`}
-              bind:value={seatRows[i].pilot}
-            >
-              <option value="">— pick a pilot —</option>
-              {#each seatCandidates as pid (pid)}
-                <option value={pid}>{callsign(pid)}</option>
-              {/each}
-            </select>
-            <select
-              class="seat-channel"
-              aria-label={`Channel in seat ${i + 1}`}
-              bind:value={seatRows[i].channel}
-            >
-              <!-- Blank = "take it from the heat's layout". Not "no channel": those are different
-                   statements, and the option says which one it means. -->
-              <option value="">From the layout</option>
-              {#each seatChannels as mhz (mhz)}
-                <option value={String(mhz)}>{channelLabel(mhz, catalog)}</option>
-              {/each}
-            </select>
+            <span class="seat-cell">
+              <!-- The gate the seat flies. Labelled through the shared resolver — "Node 3 · Raceband
+                   R7", never a raw `node-2` ref nor a bare 5880 (CLAUDE.md). -->
+              <Select size="sm" aria-label={`Node in seat ${i + 1}`} bind:value={seatRows[i].node}>
+                {#each seatNodeChoices as node (node)}
+                  <option value={node}>{seatNames.seatLabel(node)}</option>
+                {/each}
+              </Select>
+            </span>
+            <span class="seat-cell">
+              <Select
+                size="sm"
+                aria-label={`Channel in seat ${i + 1}`}
+                bind:value={seatRows[i].channel}
+              >
+                <!-- Blank = "take it from the heat's layout". Not "no channel": those are different
+                     statements, and the option says which one it means. -->
+                <option value="">From the layout</option>
+                {#each seatChannels as mhz (mhz)}
+                  <option value={String(mhz)}>{channelOptionLabel(mhz, catalog)}</option>
+                {/each}
+              </Select>
+            </span>
+            <span class="seat-cell">
+              <Select
+                size="sm"
+                aria-label={`Pilot in seat ${i + 1}`}
+                bind:value={seatRows[i].pilot}
+              >
+                <!-- An empty pilot is a real, saveable answer — the seat flies as `node-{i}`, the
+                     handle the Director already accepts. It is not a "pick one" placeholder. -->
+                <option value="">
+                  {seatPilotRequired ? '— pick a pilot —' : 'Open seat — no pilot'}
+                </option>
+                {#each seatCandidates as pid (pid)}
+                  <option value={pid}>{callsign(pid)}</option>
+                {/each}
+              </Select>
+            </span>
             <Button
               variant="ghost"
+              size="sm"
               type="button"
               onclick={() => removeSeatRow(i)}
               aria-label={`Remove seat ${i + 1}`}>Remove</Button
@@ -2213,15 +2431,24 @@
         <Button variant="ghost" type="button" onclick={cancelSeating}>Cancel</Button>
         <Button type="submit" disabled={seatSaving || !seatValid}>Save seating</Button>
       </div>
-      {#if !seatValid}
-        <p class="seat-invalid" role="alert">
-          Every seat needs a pilot, and no pilot can sit twice.
+      {#if seatProblem}
+        <p class="seat-invalid" role="alert">{seatProblem}</p>
+      {:else if seatDrift.length > 0}
+        <p class="seat-note" role="status">
+          A pilot flies the next free gate, so an empty gate below one moves them down:
+          {#each seatDrift as d, i (i)}{i > 0 ? '; ' : ''}<strong>{d.who}</strong> would fly
+            {d.actual ?? 'no gate'}, not {d.picked}{/each}. Add an <strong>open seat</strong> (a row with
+          no pilot) on the gate to skip — it holds that gate, and the pilots stay where you put them.
         </p>
       {/if}
     </form>
   </Dialog>
 
-  <Dialog bind:open={buildOpen} title="Build a heat by hand" onclose={cancelBuild}>
+  <Dialog
+    bind:open={buildOpen}
+    title={buildRoundDef ? `Add a heat to ${buildRoundDef.label}` : 'Add a heat'}
+    onclose={cancelBuild}
+  >
     <form
       class="build-form"
       aria-label="Build heat"
@@ -2231,14 +2458,7 @@
       }}
     >
       <div class="form-grid">
-        <Field label="Round" required>
-          <Select bind:value={buildRound} aria-label="Build round">
-            <option value="" disabled>Choose a round…</option>
-            {#each rounds as r (r.id)}
-              <option value={r.id}>{r.label}</option>
-            {/each}
-          </Select>
-        </Field>
+        <!-- The round is not a choice any more: the button that opened this sits on it. -->
         <Field label="Heat name (optional)" hint="Overrides the auto-name. Leave blank to keep it.">
           <Input
             bind:value={buildHeatLabel}
@@ -2248,30 +2468,54 @@
         </Field>
       </div>
 
-      <Field
-        label="Pilots"
-        required
-        hint={buildRound === ''
-          ? 'Pick a round to see its eligible members.'
-          : eligibleMembers.length === 0
-            ? 'This round’s classes have no members yet — set them in the Roster stage.'
-            : 'Select the round’s eligible class members to fly this heat.'}
-      >
-        <div class="member-picker" role="group" aria-label="Eligible members">
-          {#each eligibleMembers as pid (pid)}
-            <label class="member-chip">
-              <input
-                type="checkbox"
-                checked={buildSelected.has(pid)}
-                disabled={!buildSelected.has(pid) && buildAtNodeCap}
-                onchange={() => toggleMember(pid)}
-                aria-label={`Select ${callsign(pid)}`}
-              />
-              <span>{callsign(pid)}</span>
-            </label>
-          {/each}
-        </div>
-      </Field>
+      {#if buildSeatsPilots}
+        <Field
+          label="Pilots"
+          required
+          hint="Select the round’s eligible class members to fly this heat."
+        >
+          <div class="member-picker" role="group" aria-label="Eligible members">
+            {#each eligibleMembers as pid (pid)}
+              <label class="member-chip">
+                <input
+                  type="checkbox"
+                  checked={buildSelected.has(pid)}
+                  disabled={!buildSelected.has(pid) && buildAtNodeCap}
+                  onchange={() => toggleMember(pid)}
+                  aria-label={`Select ${callsign(pid)}`}
+                />
+                <span>{callsign(pid)}</span>
+              </label>
+            {/each}
+          </div>
+        </Field>
+      {:else}
+        <!-- No field to draw from (a practice round has no classes) — so the heat is seated by GATE,
+             and each gate is its own competitor. Same rule as the seating editor: a seat needs no
+             pilot. Labelled through the shared resolver ("Node 3 · Raceband R7"), never `node-2`. -->
+        <Field
+          label="Seats"
+          required
+          hint={timerNodes.length === 0
+            ? 'This event has no primary timer yet — set one on the Timers page before seating a heat by hand.'
+            : 'This round seats no pilots, so pick the gates that fly. Each one is its own competitor.'}
+        >
+          <div class="member-picker" role="group" aria-label="Node seats">
+            {#each timerNodes as seat (seat.node)}
+              <label class="member-chip">
+                <input
+                  type="checkbox"
+                  checked={buildNodes.has(seat.node)}
+                  disabled={!buildNodes.has(seat.node) && buildAtNodeCap}
+                  onchange={() => toggleBuildNode(seat.node)}
+                  aria-label={`Select ${seat.label}`}
+                />
+                <span>{seat.label}</span>
+              </label>
+            {/each}
+          </div>
+        </Field>
+      {/if}
       {#if buildAtNodeCap && Number.isFinite(heatNodeCap)}
         <p class="node-cap-note" role="status">
           All {heatNodeCap} nodes on the primary timer are taken — a heat can't run more pilots than the
@@ -2687,6 +2931,15 @@
     font-size: 0.78rem;
     opacity: 0.75;
   }
+  /* The shared Select fills its container by default; in this inline row it sizes to its content. */
+  .heat-layout :global(.gf-select) {
+    width: auto;
+    min-width: 9rem;
+  }
+  /* The per-heat action sits at the far right of the heat's header, where an action belongs. */
+  .heat-head-action {
+    margin-left: auto;
+  }
   .heat-flew {
     margin: 0.4rem 0 0;
     font-size: 0.78rem;
@@ -2710,6 +2963,7 @@
   }
   .layout-empty,
   .seat-empty,
+  .seat-note,
   .seat-invalid {
     margin: 0;
     font-size: 0.82rem;
@@ -2723,20 +2977,33 @@
     flex-direction: column;
     gap: 0.4rem;
   }
-  .seat-row {
+  .seat-row,
+  .seat-head {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+  }
+  .seat-head {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps, 0.04em);
+    opacity: 0.65;
+    margin-bottom: 0.15rem;
   }
   .seat-num {
     min-width: 1.25rem;
     text-align: right;
     opacity: 0.6;
   }
-  .seat-pilot,
-  .seat-channel {
+  /* Node / Channel / Pilot share the row evenly; the header cells track them. */
+  .seat-cell,
+  .seat-col {
     flex: 1 1 8rem;
     min-width: 0;
+  }
+  /* Reserves the width of the row's Remove button so the headings stay over their columns. */
+  .seat-col-spacer {
+    flex: 0 0 4.5rem;
   }
   .seat-actions {
     display: flex;

@@ -14,9 +14,11 @@ import {
   followTimerRequest,
   heatOverflow,
   heatOverflowMessage,
+  enabledNodes,
   joinLabels,
   nodeLabel,
   nodeLabels,
+  seatNodes,
   seatSummary,
   timerDrifts,
   timerNodeSummary,
@@ -243,5 +245,57 @@ describe('the effective width is what consumers must read (#412 regression)', ()
   it('still honours an explicit override, and disabled nodes still cut seats', () => {
     expect(timerWidth(unpinned({ node_count: 8 }))).toBe(8);
     expect(timerSeats(unpinned({ disabled_nodes: [2] }))).toBe(3);
+  });
+});
+
+/**
+ * Which gate each lineup entry flies — the console-side mirror of the Director's `Timer::seat_nodes`.
+ *
+ * The seating editor shows the RD a gate per seat, so this and the Director must not be able to
+ * disagree: a mismatch here puts a pilot's name against a gate they are not on.
+ */
+describe('seatNodes / enabledNodes — laying a lineup onto real gates', () => {
+  const timer = (over: Partial<Timer>): Timer =>
+    ({
+      id: 'mock',
+      name: 'Mock',
+      kind: { Mock: { laps: 3, lap_ms: 1000 } },
+      status: 'Ready',
+      channel_capability: 'Flexible',
+      available_channels: [],
+      manual_connect: false,
+      calibration: [],
+      disabled_nodes: [],
+      ...over
+    }) as unknown as Timer;
+
+  it('never renumbers around a disabled gate', () => {
+    // The whole point of #412: with node 2 off, a 3-pilot heat is on 0, 1 and 3 — not 0, 1, 2.
+    expect(enabledNodes(timer({ node_count: 4, disabled_nodes: [2] }))).toEqual([0, 1, 3]);
+    expect(seatNodes([0, 1, 3], ['a', 'b', 'c']).map((s) => s.node)).toEqual([0, 1, 3]);
+  });
+
+  it('lets a node-{i} seat keep the gate it names, and routes pilots around it', () => {
+    // The explicit handle names its own gate; the pilots take what is left, in order.
+    expect(seatNodes([0, 1, 2, 3], ['a', 'node-0', 'b'])).toEqual([
+      { node: 1, ref: 'a' },
+      { node: 0, ref: 'node-0' },
+      { node: 2, ref: 'b' }
+    ]);
+  });
+
+  it('drops what it cannot place rather than squeezing it onto the wrong gate', () => {
+    // A `node-{i}` naming a gate that is off or gone is not flown — seating nobody records nothing,
+    // whereas squeezing would record the WRONG pilot.
+    expect(seatNodes([0, 1, 3], ['node-2'])).toEqual([]);
+    // And a pilot beyond the enabled set is dropped, not wrapped around.
+    expect(seatNodes([0, 1], ['a', 'b', 'c']).map((s) => s.ref)).toEqual(['a', 'b']);
+  });
+
+  it('seats a lineup made only of gates, which is the practice case', () => {
+    expect(seatNodes([0, 1, 3], ['node-0', 'node-3'])).toEqual([
+      { node: 0, ref: 'node-0' },
+      { node: 3, ref: 'node-3' }
+    ]);
   });
 });

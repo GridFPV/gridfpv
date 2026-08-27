@@ -430,16 +430,18 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   await expect(filledRow.getByText(ACE)).toBeVisible();
   await expect(filledRow.getByText(BEE)).toBeVisible();
 
-  // ── Build a heat by hand from the round's eligible members ────────────────────────────────────
-  // No id is typed — the heat id is auto-generated (round-scoped + collision-safe); the RD only
-  // picks a round and a lineup.
+  // ── Add a heat by hand from the round's eligible members ──────────────────────────────────────
+  // No id is typed — the heat id is auto-generated (round-scoped + collision-safe) — and no round
+  // is picked either: "Add heat" lives ON the round, so the builder opens already scoped to it.
   // The build-heat form is a modal Dialog (ux(rounds)): open it, then fill from inside.
-  await page.getByRole('button', { name: '+ Build heat' }).click();
+  await heatRound.getByRole('button', { name: 'Add heat' }).click();
   const buildDialog = page.getByRole('dialog');
   await expect(buildDialog).toBeVisible();
   const buildForm = buildDialog.getByRole('form', { name: 'Build heat' });
   await expect(buildForm).toBeVisible();
-  await buildForm.getByLabel('Build round').selectOption({ label: ROUND_LABEL });
+  await expect(
+    buildDialog.getByRole('heading', { name: `Add a heat to ${ROUND_LABEL}` })
+  ).toBeVisible();
   await buildForm.getByLabel(`Select ${ACE}`).check();
   await buildForm.getByLabel(`Select ${BEE}`).check();
   await page.getByRole('button', { name: 'Schedule heat' }).click();
