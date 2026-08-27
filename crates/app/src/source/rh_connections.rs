@@ -1196,4 +1196,80 @@ mod tests {
                 .is_err()
         );
     }
+
+    // ---------------------------------------------------------------------------------------
+    // #437 — a write drained onto a connection that has not connected yet.
+    // ---------------------------------------------------------------------------------------
+
+    /// Loopback port 1 is reserved and unused, so a driver pointed at it never gets past dialling.
+    const DEAD_URL: &str = "http://127.0.0.1:1";
+
+    /// **A write must not report "landed" on a connection that has not connected (#437).**
+    ///
+    /// The race: a calibration (or channel) write parks in the registry while the timer reads
+    /// `Connected`. Before the next 500 ms reconciler tick the timer's URL is edited, or the active
+    /// event switches — so the same tick supersedes the entry and `Open`s a fresh [`RhConnection`]
+    /// whose driver thread is still dialling. Then the tick's own drain queues the write onto that
+    /// brand-new connection, and [`RhConnections::calibrate`] answers `true`: landed, no operator
+    /// warning, nothing logged.
+    ///
+    /// It has not landed. When the new driver's `connect` succeeds it clears the queue — deliberately,
+    /// because a threshold that fired minutes later would move a detector nobody asked to move — so
+    /// the accepted write vanishes with no warning and no readback. *Sent* becomes indistinguishable
+    /// from *landed*, which is the #403 failure class the readback design exists to prevent.
+    ///
+    /// Given that clear-on-connect is the intended behaviour, the write is only ever real on a link
+    /// that is already up: a connection still dialling must report **not landed**, so the reconciler
+    /// logs it and the RD sees a level (or a channel) that never comes back confirmed.
+    #[tokio::test]
+    #[ignore = "known bug #437: a write drained onto a dialling connection reports landed — un-ignore with the fix"]
+    async fn a_write_drained_onto_a_still_dialling_connection_is_not_landed() {
+        let timers = registry();
+        let rh = rh_timer(&timers, "Field RH", DEAD_URL);
+        let connections = RhConnections::new();
+
+        // The reconciler opens a fresh connection for the timer; its driver is still dialling.
+        connections.reconcile(&[(event("e1"), rh.clone(), DEAD_URL.to_string())], &timers);
+        assert_ne!(
+            timers.get(&rh).map(|t| t.status),
+            Some(gridfpv_server::timers::TimerStatus::Connected),
+            "the precondition: this connection has not reached Connected"
+        );
+
+        // The same tick drains the parked writes onto it.
+        let calibration_landed = connections.calibrate(
+            &rh,
+            CalibrationWrite {
+                node: 0,
+                enter_at: Some(96),
+                exit_at: None,
+                during_open_practice: false,
+            },
+        );
+        let channel_landed = connections.set_channel(
+            &rh,
+            ChannelWrite {
+                node: 0,
+                mhz: 5880,
+                band: Some("Raceband".into()),
+                channel: Some("R7".into()),
+                during_open_practice: false,
+            },
+        );
+
+        // Tear the driver thread down before asserting, so a failure does not leave it dialling.
+        connections.reconcile(&[], &timers);
+
+        assert!(
+            !calibration_landed,
+            "a threshold queued on a connection that is still dialling has NOT landed: the \
+             driver's clear-on-connect drops it, and reporting `true` here is what turns a lost \
+             write into a silent one"
+        );
+        assert!(
+            !channel_landed,
+            "and the same for a channel write — `set_channel`'s own contract is that nothing is \
+             queued for a future connection"
+        );
+    }
 }

@@ -4173,4 +4173,127 @@ mod tests {
         let back: Vec<Raw> = serde_json::from_str(&json).unwrap();
         assert_eq!(raws, back);
     }
+
+    // ── #434: a mid-race lap deletion renumbers RotorHazard's surviving laps ────────────────
+
+    /// The crossing times (µs) of every [`Event::Pass`] in `events`, in order — the identity of a
+    /// lap that survives a renumbering, unlike its `sequence`.
+    fn crossing_micros(events: &[Event]) -> Vec<i64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Pass(p) => Some(p.at.micros),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A lap the RD deletes mid-race must not cost the seat its next real lap.**
+    ///
+    /// RotorHazard's `build_laps_list` filters deleted laps out *before* they reach the wire and
+    /// renumbers what survives sequentially from 0 (4.3.0 and 4.4.0 alike). So after the RD marshals
+    /// away a false trigger, the pilot's **next genuine crossing** arrives carrying a `lap_number`
+    /// this adapter has already accepted — and the dedup key `(adapter, competitor, Seq(lap_number))`
+    /// swallows it. Every later lap of the heat collides the same way, so the seat is permanently
+    /// under-counted, and there is no trace: the #400 `deleted` diagnostic never fires either,
+    /// because the deleted lap is gone from the payload rather than flagged in it.
+    #[test]
+    #[ignore = "known bug #434: renumbered laps reuse a seen sequence — un-ignore with the fix"]
+    fn a_lap_deleted_mid_race_must_not_swallow_the_seats_next_crossing() {
+        let mut adapter = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        let racing = Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        });
+        // Three crossings on node 0: the holeshot at 2.0 s, a false trigger at 7.0 s, a lap at 12.0 s.
+        let minted = run(
+            &mut adapter,
+            vec![
+                racing,
+                snapshot(
+                    0,
+                    0,
+                    vec![lap(0, 2_000.0), lap(1, 7_000.0), lap(2, 12_000.0)],
+                ),
+            ],
+        );
+        assert_eq!(
+            crossing_micros(&minted),
+            vec![2_000_000, 7_000_000, 12_000_000],
+            "the clean part of the heat mints one pass per crossing"
+        );
+
+        // The RD deletes the 7.0 s false trigger in RotorHazard's own UI. RH drops it from the
+        // table and renumbers the survivors 0,1 — so 12.0 s comes back as lap 1 — and the pilot's
+        // next real crossing, at 17.0 s, is numbered 2: a number this adapter has already seen.
+        let after_deletion = run(
+            &mut adapter,
+            vec![snapshot(
+                0,
+                0,
+                vec![lap(0, 2_000.0), lap(1, 12_000.0), lap(2, 17_000.0)],
+            )],
+        );
+
+        assert!(
+            crossing_micros(&after_deletion).contains(&17_000_000),
+            "the crossing at 17.0 s is a NEW lap the pilot actually flew — deleting an earlier lap \
+             must not swallow it. Passes minted from the post-deletion snapshot: {:?}",
+            crossing_micros(&after_deletion)
+        );
+        assert_eq!(
+            crossing_micros(&after_deletion),
+            vec![17_000_000],
+            "…and only it: the two survivors were already minted, so a renumbering must not \
+             re-mint them either"
+        );
+    }
+
+    /// The same loss on the **plugin** pass path (`gridfpv_pass`), which shares the dedup.
+    ///
+    /// The plugin forwards RotorHazard's `lap.lap_number` verbatim from `RACE_LAP_RECORDED`, so
+    /// after a deletion has renumbered the table the very next broadcast carries a number already
+    /// accepted — no snapshot replay needed for the lap to vanish.
+    #[test]
+    #[ignore = "known bug #434: renumbered laps reuse a seen sequence — un-ignore with the fix"]
+    fn a_plugin_pass_after_a_deletion_must_not_be_swallowed_by_its_renumbering() {
+        let mut adapter = RotorHazardAdapter::with_id(AdapterId("rh".into()));
+        // The plugin advertised `live_pass`, so `gridfpv_pass` is the authoritative source (#389).
+        assert!(adapter.set_plugin_live_pass(true).is_empty());
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: race_status::RACING,
+            race_heat_id: Some(1),
+        }));
+
+        let plugin_pass = |lap_number: u64, lap_time_stamp: f64| {
+            Raw::GridPass(RawGridPass {
+                node_index: 0,
+                lap_number: RawLapNumber::Counted(lap_number),
+                lap_time_stamp,
+                peak_rssi: None,
+            })
+        };
+        let minted = run(
+            &mut adapter,
+            vec![
+                plugin_pass(0, 2_000.0),
+                plugin_pass(1, 7_000.0),
+                plugin_pass(2, 12_000.0),
+            ],
+        );
+        assert_eq!(
+            crossing_micros(&minted),
+            vec![2_000_000, 7_000_000, 12_000_000]
+        );
+
+        // The RD deletes the 7.0 s false trigger; RotorHazard renumbers, so the pilot's next real
+        // crossing at 17.0 s is broadcast as lap 2.
+        let next = run(&mut adapter, vec![plugin_pass(2, 17_000.0)]);
+        assert_eq!(
+            crossing_micros(&next),
+            vec![17_000_000],
+            "the plugin's next genuine crossing must mint a pass even though the deletion left it \
+             carrying an already-seen lap_number"
+        );
+    }
 }

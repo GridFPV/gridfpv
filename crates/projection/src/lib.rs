@@ -3178,6 +3178,58 @@ mod marshaling_tests {
         );
     }
 
+    // --- Lineup seeding is LAST-WINS, not a union (#443) ---------------------------------------
+
+    /// A seating override re-emits `HeatScheduled` with the new lineup, and the heat window
+    /// keeps **both** entries (`heat_window_offsets` does not filter heat-loop events). The
+    /// heat's lineup is its **most recent** `HeatScheduled` — the same last-wins rule
+    /// `live_state::lineup_of` / `latest_schedule` fold by — so a pilot the override seated
+    /// OUT is not in the heat and must not be seeded into marshaling.
+    ///
+    /// Unioning the two lineups offers the marshal a zero-lap row for a pilot who never flew
+    /// this heat, on a screen whose whole purpose is entering laps against a row — and it puts
+    /// the two live surfaces into disagreement about who is in the heat.
+    #[test]
+    #[ignore = "known bug #443: lineup_keys unions every HeatScheduled lineup — un-ignore with the fix"]
+    fn a_seating_override_drops_the_reseated_pilot_from_the_marshaled_lap_list() {
+        let log = vec![
+            // Filled from the round's plan …
+            scheduled("q-1", &["node-0", "node-1"]),
+            // … then the RD re-seats it: node-1 out, node-2 in.
+            scheduled("q-1", &["node-0", "node-2"]),
+            pass("rh", "node-0", 0, Some(0)),
+            pass("rh", "node-0", 2_000_000, Some(1)),
+        ];
+
+        let list = lap_list_marshaled(tagged(&log));
+        assert!(
+            list.competitor(&key("rh", "node-1")).is_none(),
+            "node-1 was seated out before the heat ran — a zero-lap marshaling row invites laps \
+             against a pilot who was never in this heat: {list:?}"
+        );
+        assert!(
+            list.competitor(&key("rh", "node-2"))
+                .is_some_and(|c| c.laps.is_empty()),
+            "node-2 IS in the heat and was never detected — it must still be marshalable: {list:?}"
+        );
+        assert_eq!(
+            laps_of(&list, "rh", "node-0"),
+            vec![ld(1, 2_000_000)],
+            "the pilot both lineups name is unaffected"
+        );
+
+        // And the seat fold the lap list is built on, stated directly — the bug's own site.
+        let seats: Vec<String> = lineup_keys(&log)
+            .into_iter()
+            .map(|k| k.competitor.0)
+            .collect();
+        assert_eq!(
+            seats,
+            vec!["node-0".to_string(), "node-2".to_string()],
+            "the heat's lineup is the LAST HeatScheduled, not every lineup it ever had"
+        );
+    }
+
     // --- Voiding the SOLE detection: the entry survives, emptied ------------------------------
 
     #[test]

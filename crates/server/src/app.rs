@@ -3938,6 +3938,101 @@ mod tests {
         }
     }
 
+    // --- #439: a removed round's heats are gone from every live surface, not just GET /heats ---
+
+    /// A registry whose event defines two rounds and has three still-`Scheduled` heats in
+    /// first-scheduled order: `q-1` and `q-2` in the round that stays, and `ghost-1` — scheduled
+    /// *between* them — in a round that is then **removed**.
+    ///
+    /// Returns the registry with the ghost round already gone, so every read is taken against an
+    /// event that no longer defines the round `ghost-1` was tagged to.
+    fn registry_with_a_removed_rounds_heat() -> EventRegistry {
+        let registry = new_registry();
+        let event_id = sole_event(&registry);
+        let round = |label: &str| NewRoundReq {
+            layouts: Vec::new(),
+            label: label.into(),
+            classes: vec![],
+            format: "timed_qual".into(),
+            params: std::collections::BTreeMap::new(),
+            win_condition: Some(WinCondition::BestLap),
+            seeding: SeedingRule::FromRoster,
+            time_limit_secs: Some(60),
+            channel_mode: None,
+            staging_timer_secs: None,
+            start_procedure: None,
+            grace_window: None,
+            protest_window: None,
+            min_lap_secs: None,
+        };
+        let keeper = registry.add_round(&event_id, round("Qualifying")).unwrap();
+        let scratch = registry.add_round(&event_id, round("Scratch")).unwrap();
+
+        let scheduled = |heat: &str, round: &crate::events::RoundDef| Event::HeatScheduled {
+            heat: HeatId(heat.into()),
+            lineup: vec![CompetitorRef("A".into()), CompetitorRef("B".into())],
+            class: None,
+            round: Some(round.id.clone()),
+            frequencies: vec![],
+            label: None,
+        };
+        let state = registry.resolve(&event_id).expect("the created event");
+        for e in [
+            scheduled("q-1", &keeper),
+            scheduled("ghost-1", &scratch),
+            scheduled("q-2", &keeper),
+        ] {
+            state.append(e, None).unwrap();
+        }
+
+        // Every heat is still merely `Scheduled`, so the round removes (#418: the gate is on
+        // state, not on existence) and its heats "go with it" as a read-side discard.
+        registry
+            .remove_round(&event_id, &scratch.id)
+            .expect("a round whose heats are all still Scheduled removes");
+        registry
+    }
+
+    /// #439: the live event scope's **on-deck** heat must never be a heat of a round the event no
+    /// longer defines.
+    ///
+    /// Removing a round is documented to drop its heats "from every list the console reads" — but
+    /// the RD does not reach the next heat through a list, they reach it through on-deck and
+    /// Advance. A ghost on deck is a heat that appears in no console list and whose round config
+    /// (layouts, staging timer, min-lap) is gone from event meta, so the heat it names cannot be
+    /// run correctly and cannot be found to fix.
+    ///
+    /// The right answer here is `q-2`: the next still-`Scheduled` heat of a round the event
+    /// **does** define.
+    #[tokio::test]
+    #[ignore = "known bug #439: on_deck scans raw HeatScheduled with no defined-round filter — un-ignore with the fix"]
+    async fn on_deck_skips_a_removed_rounds_heat() {
+        let registry = registry_with_a_removed_rounds_heat();
+        let (status, snap) = get_snapshot(registry, "/snapshot/event/spring-cup").await;
+        assert_eq!(status, StatusCode::OK);
+        match snap.unwrap().body {
+            ProjectionBody::LiveRaceState(ls) => {
+                assert_eq!(
+                    ls.current_heat,
+                    Some(HeatId("q-1".into())),
+                    "the first-scheduled surviving heat is current"
+                );
+                assert_ne!(
+                    ls.on_deck,
+                    Some(HeatId("ghost-1".into())),
+                    "the removed round's heat is in no list, and its round config is gone — it \
+                     must not be what the RD is told is up next"
+                );
+                assert_eq!(
+                    ls.on_deck,
+                    Some(HeatId("q-2".into())),
+                    "on deck is the next heat of a round the event still defines"
+                );
+            }
+            other => panic!("expected live state, got {other:?}"),
+        }
+    }
+
     // --- #64: unknown API-tree paths are a typed 404, not the SPA shell -----------------
 
     /// Drive a request against the bare protocol `router` (no SPA composed) and return the

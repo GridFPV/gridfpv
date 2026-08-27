@@ -293,6 +293,48 @@ describe('markSent / foldPolled — the confirmation is a POLL, not a response',
   });
 });
 
+describe('markSent — a LATE write resolve must not clobber a newer value (#442, defect 1)', () => {
+  const T0 = 1_000_000;
+
+  // The scenario, as the RD lives it: they commit `enter = 100` (the write leaves), and inside the
+  // round trip they type `120`. `adjust()` puts the state on 120/'pending' but does NOT bump
+  // `writeSeq` (only `commit()` does), so when the 100-write resolves, TunePage's seq guard passes
+  // and it calls `markSent(state, 100)` on a state that has moved on. `markSent` overwrites
+  // unconditionally — the value goes back to 100 and the phase to 'sent' — and the 300 ms idle
+  // commit for the 120 then dies on `if (state.phase === 'sent') return`. The 120 is gone, and the
+  // badge reads "On timer" over a number the RD did not choose: the #403 sent-vs-landed lie, in the
+  // UI layer.
+  //
+  // `it.fails` rather than a skip: this runs in CI, passes while the bug stands, and turns red the
+  // moment `markSent` learns to leave a moved-on state alone — which forces the marker off with the
+  // fix instead of leaving a skipped test nobody remembers to re-enable.
+  it.fails('leaves the value the RD moved on to standing, and leaves it pending', () => {
+    // The state at the instant `commit()` issued the 100-write, then the RD's 120 typed over it.
+    const rdTyped120: ThresholdState = { value: 120, confirmed: 90, phase: 'pending' };
+
+    const afterLateResolve = markSent(rdTyped120, 100, T0);
+
+    // The 120 is the newest thing the RD asked for. Nothing the older write does may replace it.
+    expect(afterLateResolve.value).toBe(120);
+    // And it has to still read as 'pending', because that is the only phase the idle commit will
+    // write from — a state parked on 'sent' silently swallows the follow-up write.
+    expect(afterLateResolve.phase).toBe('pending');
+  });
+
+  // The companion, and the reason the fix cannot just be "never overwrite": the ordinary write —
+  // where nothing moved between issuing and resolving — must still go to 'sent' with its receipt,
+  // or `foldPolled` has nothing to confirm against.
+  it('still marks the ordinary, unraced write as sent', () => {
+    const unraced: ThresholdState = { value: 100, confirmed: 90, phase: 'pending' };
+    expect(markSent(unraced, 100, T0)).toMatchObject({
+      value: 100,
+      phase: 'sent',
+      sent: 100,
+      sentAt: T0
+    });
+  });
+});
+
 describe('phase presentation', () => {
   it('labels every phase in plain language, readable at arm’s length', () => {
     expect(phaseLabel('confirmed')).toBe('On timer');
