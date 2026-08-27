@@ -116,12 +116,13 @@
   let catalog = $state<ChannelCatalogEntry[]>([]);
 
   // ── Open-practice format (open-practice Slice 2) ─────────────────────────────────────────────
-  // The casual **open-practice** format runs a single open heat over a set of active **channels**
-  // (timer node seats) rather than pilots — its field is seeded `AllChannels { channels }` (node
-  // indices), with no classes. So when this format is chosen the normal class/seeding inputs are
-  // swapped for an active-channels picker driven by the event's **primary timer** (its `node_count`
-  // seats, each labelled by its configured `available_channels[i]` channel). The picker reflects an
-  // edited round's existing `AllChannels` selection.
+  // The casual **open-practice** format runs a single open heat over a set of active **timer node
+  // seats** rather than pilots — its field is seeded `ActiveNodes { nodes }` (node indices), with no
+  // classes. So when this format is chosen the normal class/seeding inputs are swapped for a seat
+  // picker driven by the event's **primary timer** (its `node_count` seats, each labelled through
+  // the shared name builder). The picker reflects an edited round's existing `ActiveNodes`
+  // selection. What each seat is *tuned to* is a channel layout — a different vocabulary, kept
+  // apart on purpose (#117 S3).
   // The effective primary timer (its node_count + available_channels lay out the picker).
   const primaryTimer = $derived<Timer | undefined>(session.primaryTimer);
   // One pickable node seat: its index, the raw MHz it's configured to (if any), and its label.
@@ -145,7 +146,7 @@
     }
     return seats;
   }
-  // The chosen active node indices (the AllChannels payload), as a set for toggle ergonomics.
+  // The chosen active node indices (the ActiveNodes payload), as a set for toggle ergonomics.
   let selectedNodes = $state<Set<number>>(new Set());
   function toggleNode(node: number) {
     const next = new Set(selectedNodes);
@@ -288,8 +289,24 @@
       roundIssuesError = true;
     }
   }
-  /** The impossible seats in one round, in seeding order. Empty means the round's seats are live. */
+  /** The problems in one round, server order. Empty means the round's stored config is sound. */
   const issuesFor = (id: RoundId): RoundIssue[] => roundIssues.filter((i) => i.round === id);
+  /**
+   * A stable key for one issue. Not the node: a round can carry several issues on the SAME node (a
+   * stale layout entry and an impossible seat), and an orphaned heat bind carries no node at all.
+   */
+  const issueKey = (i: RoundIssue): string =>
+    [i.problem, i.node ?? '', i.layout ?? '', i.heat ?? ''].join('|');
+  /**
+   * The bold lead-in for one issue. The Director writes the explanation (`detail`); this is only
+   * the noun it is about, and it is always a friendly name — the heat's name for a heat still bound
+   * to a layout its round dropped, the 1-based node label for everything else.
+   */
+  function issueHeadline(i: RoundIssue): string {
+    if (i.heat_name) return `${i.heat_name} flies channels this round no longer names.`;
+    if (i.node_label) return `${i.node_label} records nothing.`;
+    return 'This round’s stored config needs attention.';
+  }
 
   function statusLabel(h: HeatSummary): string {
     if (h.phase === 'Final') return 'Final';
@@ -985,11 +1002,11 @@
       // back by the server as a one-element list, so the form always sees an array here.
       seedSources = new Set(seed.FromRanking.source_rounds);
       seedTopN = seed.FromRanking.top_n;
-    } else if ('AllChannels' in seed) {
-      // AllChannels (open-practice format): reflect the round's active node selection into the
-      // channels picker (the format swaps the class/seeding inputs for it below).
+    } else if ('ActiveNodes' in seed) {
+      // ActiveNodes (open-practice format): reflect the round's active node selection into the
+      // seat picker (the format swaps the class/seeding inputs for it below).
       seedKind = 'FromRoster';
-      selectedNodes = new Set(seed.AllChannels.channels);
+      selectedNodes = new Set(seed.ActiveNodes.nodes);
     } else {
       // FromHeatWinners (bracket-level advancement, #217) / FromRankingRange / Combine — seedings
       // this form doesn't model. Preserve the ORIGINAL verbatim and lock the seeding controls:
@@ -1226,7 +1243,7 @@
     if (saving || !canSubmit) return;
     saving = true;
     // A round targets one class, stored on the wire as a one-element `classes` list. Open practice is
-    // class-less and seeds from the active channels (node indices) instead.
+    // class-less and seeds from the active nodes (node indices) instead.
     const req: NewRoundReq = {
       label: label.trim(),
       classes: isOpenPractice || selectedClass === '' ? [] : [selectedClass],
@@ -1246,7 +1263,7 @@
           ? Math.max(1, Math.round(winSeconds || 0))
           : undefined,
       seeding: isOpenPractice
-        ? { AllChannels: { channels: [...selectedNodes].sort((a, b) => a - b) } }
+        ? { ActiveNodes: { nodes: [...selectedNodes].sort((a, b) => a - b) } }
         : buildSeeding(),
       channel_mode: channelMode,
       layouts: roundLayouts,
@@ -1313,9 +1330,10 @@
 
   function seedSummary(seed: SeedingRule): string {
     if (typeof seed === 'string') return 'From roster';
-    if ('AllChannels' in seed) {
-      // Open practice (open-practice format): seeded from the active channels (node indices).
-      return `Open practice · ${seed.AllChannels.channels.length} channel(s)`;
+    if ('ActiveNodes' in seed) {
+      // Open practice (open-practice format): seeded from the active timer nodes (node indices).
+      const n = seed.ActiveNodes.nodes.length;
+      return `Open practice · ${n} node${n === 1 ? '' : 's'}`;
     }
     if ('FromHeatWinners' in seed) {
       // Bracket-level advancement (#217): seeded from the prior level's heat winners.
@@ -1407,13 +1425,15 @@
                 {/if}
                 <span class="meta-chip">{seedSummary(round.seeding)}</span>
               </div>
-              <!-- A seat that can never record a lap, on the round that owns it and next to the
-                   Edit control that repairs it (#416). The Director writes the sentence — round
-                   label, timer name, 1-based node, and what to do — so the console cannot drift
-                   from the rule that produced it. -->
-              {#each badSeats as issue (issue.node)}
+              <!-- Everything wrong with this round's stored config, on the round that owns it and
+                   next to the Edit control that repairs it (#416, #117 S3): a seat that can never
+                   record a lap, a stale channel layout, or a scheduled heat still bound to a layout
+                   this round no longer names. The Director writes the sentence — every noun a
+                   friendly name, plus what to do — so the console cannot drift from the rule that
+                   produced it. -->
+              {#each badSeats as issue (issueKey(issue))}
                 <p class="round-bad-seat" role="alert">
-                  <strong>{issue.node_label} records nothing.</strong>
+                  <strong>{issueHeadline(issue)}</strong>
                   {issue.detail}
                 </p>
               {/each}
@@ -1787,7 +1807,7 @@
       {#if fields.activeChannels}
         <!-- Open-practice active-channels picker (open-practice Slice 2): the round runs one open
                heat over the primary timer's active node seats; pick which channels are live. Saved as
-               `seeding: AllChannels { channels: [<node indices>] }` with no classes. -->
+               `seeding: ActiveNodes { nodes: [<node indices>] }` with no classes. -->
         <Field
           label="Active channels"
           required

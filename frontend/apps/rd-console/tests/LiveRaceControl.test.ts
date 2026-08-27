@@ -1086,7 +1086,7 @@ const OP_ROUND: RoundDef = {
   format: 'open_practice',
   params: {},
   win_condition: 'BestLap',
-  seeding: { AllChannels: { channels: [0, 1] } },
+  seeding: { ActiveNodes: { nodes: [0, 1] } },
   layouts: ['practice-a'],
   channel_mode: 'Static',
   staging_timer_secs: 300,

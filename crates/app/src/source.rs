@@ -2578,11 +2578,11 @@ mod tests {
 
     // --- open practice (open-practice format, Slice 1): laps in memory, not logged ----------------
 
-    /// Add an **open-practice** round to Practice (open-practice format) over `channels` (node
+    /// Add an **open-practice** round to Practice (open-practice format) over `nodes` (node
     /// indices) and return its `RoundId`. Uses the registry's `add_round` so the bridge resolves the
     /// round through `rounds_of` exactly as it does in production.
-    fn add_open_practice_round(registry: &EventRegistry, channels: Vec<usize>) -> RoundId {
-        add_open_practice_round_with_limit(registry, channels, None)
+    fn add_open_practice_round(registry: &EventRegistry, nodes: Vec<usize>) -> RoundId {
+        add_open_practice_round_with_limit(registry, nodes, None)
     }
 
     /// As [`add_open_practice_round`], but with an optional **time limit** (open-practice refinement)
@@ -2590,7 +2590,7 @@ mod tests {
     /// stored) and whose only end condition is the `time_limit_secs` practice duration.
     fn add_open_practice_round_with_limit(
         registry: &EventRegistry,
-        channels: Vec<usize>,
+        nodes: Vec<usize>,
         time_limit_secs: Option<u32>,
     ) -> RoundId {
         use gridfpv_server::events::{NewRoundReq, SeedingRule};
@@ -2605,7 +2605,7 @@ mod tests {
             // is stored by `add_round`). The practice ends on the time limit (or the RD's ForceEnd).
             win_condition: None,
             time_limit_secs,
-            seeding: SeedingRule::AllChannels { channels },
+            seeding: SeedingRule::ActiveNodes { nodes },
             channel_mode: None,
             staging_timer_secs: None,
             start_procedure: None,

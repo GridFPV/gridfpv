@@ -25,6 +25,7 @@ import {
   listTimers,
   setEventTimers,
   updateChannelLayout,
+  updateRound,
   updateTimer
 } from '../packages/protocol-client/dist/index.js';
 import {
@@ -321,7 +322,7 @@ describe('#117 S3 — a round names layouts, a heat flies one', () => {
         label: 'Practice',
         classes: [],
         format: 'open_practice',
-        seeding: { AllChannels: { channels: [0, 1, 2] } },
+        seeding: { ActiveNodes: { nodes: [0, 1, 2] } },
         layouts: [layout]
       },
       TOKEN
@@ -460,5 +461,55 @@ describe('#117 S3 — a round names layouts, a heat flies one', () => {
     expect(stale[0].detail).not.toContain('5769');
 
     await updateTimer(director.baseUrl, timer.id, { available_channels: ALLOWED }, TOKEN);
+  });
+
+  it('reports a heat still bound to a layout its round no longer names', async () => {
+    // The RD's scenario over the wire: *"remove the layout from the round, but the heat stays on
+    // the layout channels?"* — yes, because the bind is a logged event that outlives a round edit.
+    // The edit is NOT refused (there are two valid repairs and blocking would prevent both); it is
+    // reported on the same round-issues read #412/#416 already landed on.
+    const heat = (await listHeats(director.baseUrl, director.event)).find(
+      (h) => h.layout !== undefined
+    )!;
+    expect(heat.round).toBeDefined();
+
+    await updateRound(
+      director.baseUrl,
+      director.event,
+      heat.round!,
+      {
+        label: 'Practice',
+        classes: [],
+        format: 'open_practice',
+        params: {},
+        seeding: { ActiveNodes: { nodes: [0, 1, 2] } },
+        layouts: []
+      },
+      TOKEN
+    );
+
+    const issues = await listRoundIssues(director.baseUrl, director.event);
+    const orphan = issues.find((i) => i.problem === 'HeatLayoutNotInRound');
+    expect(orphan).toBeDefined();
+    // The heat, the round and the layout, each by friendly name (CLAUDE.md).
+    expect(orphan!.heat_name).toBe('Practice Heat');
+    expect(orphan!.layout_name).toBe('Bracket A');
+    expect(orphan!.round_label).toBe('Practice');
+    expect(orphan!.detail).not.toContain(heat.heat);
+    expect(orphan!.detail).not.toContain(heat.layout!);
+    // Both repairs, named: rebind the heat (SetHeatLayout) or set its channels by hand
+    // (OverrideHeatSeating).
+    expect(orphan!.detail).toContain('Pick a layout');
+    expect(orphan!.detail).toContain('by hand');
+    // Not a timer question, and about no single node — neither is fabricated to fill the shape.
+    expect(orphan!.node).toBeUndefined();
+    expect(orphan!.timer).toBeUndefined();
+
+    // And the heat is left exactly as it was: still on the layout it was drawn with. Reported,
+    // never silently altered.
+    const after = (await listHeats(director.baseUrl, director.event)).find(
+      (h) => h.heat === heat.heat
+    );
+    expect(after?.layout).toBe(heat.layout);
   });
 });

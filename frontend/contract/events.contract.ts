@@ -1418,9 +1418,9 @@ describe('race Slice 2a: rounds', () => {
     expect((updated.body as RoundDef).start_procedure).toEqual(replaced);
   });
 
-  it('POST /rounds accepts an open_practice round seeded AllChannels (open-practice format)', async () => {
+  it('POST /rounds accepts an open_practice round seeded ActiveNodes (open-practice format)', async () => {
     // Open practice (open-practice format, Slice 1): a round is `format: "open_practice"` +
-    // `seeding: AllChannels { channels }` (node indices), with no eligible classes — it is keyed on
+    // `seeding: ActiveNodes { nodes }` (node indices), with no eligible classes — it is keyed on
     // active *channels*, not pilots. The round round-trips through the meta with its seeding intact.
     const event = (await createEvent('Open Practice Round', TOKEN)).body as EventMeta;
     // No class selection needed — an open-practice round has an empty classes list.
@@ -1432,7 +1432,7 @@ describe('race Slice 2a: rounds', () => {
         format: 'open_practice',
         params: {},
         win_condition: 'BestLap',
-        seeding: { AllChannels: { channels: [0, 1, 2] } }
+        seeding: { ActiveNodes: { nodes: [0, 1, 2] } }
       },
       TOKEN
     );
@@ -1440,13 +1440,13 @@ describe('race Slice 2a: rounds', () => {
     const round = created.body as RoundDef;
     expect(round.format).toBe('open_practice');
     expect(round.classes).toEqual([]);
-    expect(round.seeding).toEqual({ AllChannels: { channels: [0, 1, 2] } });
+    expect(round.seeding).toEqual({ ActiveNodes: { nodes: [0, 1, 2] } });
 
     // It round-trips through the event meta (the seeding + format survive the persist).
     const list = (await fetch(`${director.baseUrl}/events`).then((r) => r.json())) as EventMeta[];
     const meta = list.find((e) => e.id === event.id)!;
     const stored = (meta.rounds ?? []).find((r) => r.id === round.id)!;
-    expect(stored.seeding).toEqual({ AllChannels: { channels: [0, 1, 2] } });
+    expect(stored.seeding).toEqual({ ActiveNodes: { nodes: [0, 1, 2] } });
   });
 
   it('POST /rounds open_practice with NO win condition + a time limit auto-creates one heat', async () => {
@@ -1461,7 +1461,7 @@ describe('race Slice 2a: rounds', () => {
         classes: [],
         format: 'open_practice',
         // No `win_condition` field at all — additive on the wire.
-        seeding: { AllChannels: { channels: [0, 1] } },
+        seeding: { ActiveNodes: { nodes: [0, 1] } },
         time_limit_secs: 3600
       },
       TOKEN
@@ -1561,7 +1561,7 @@ describe('race Slice 2a: rounds', () => {
     expect(scoring.kind).toBe('enum');
     expect(scoring.options).toEqual(['placement', 'points']);
     expect(scoring.default).toBe('placement');
-    // open_practice declares no params (its active channels are the field, via AllChannels seeding).
+    // open_practice declares no params (its active nodes are the field, via ActiveNodes seeding).
     expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
     // timed_qual declares `rounds` (number, default 3) relabeled "Heats per pilot". It declares NO
     // `metric` param: the qualifying metric is derived from the round's win condition (the qualifying

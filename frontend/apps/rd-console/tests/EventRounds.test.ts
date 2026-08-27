@@ -926,7 +926,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -968,10 +968,10 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
 
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const [, , req] = createRoundImpl.mock.calls[0];
-    // No win condition is sent; the AllChannels seeding + the time limit (in seconds) are.
+    // No win condition is sent; the ActiveNodes seeding + the time limit (in seconds) are.
     expect(req.win_condition).toBeUndefined();
     expect(req.classes).toEqual([]);
-    expect(req.seeding).toEqual({ AllChannels: { channels: [0, 1] } });
+    expect(req.seeding).toEqual({ ActiveNodes: { nodes: [0, 1] } });
     expect(req.time_limit_secs).toBe(5400); // 90 min * 60
   });
 
@@ -983,7 +983,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1023,7 +1023,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1058,7 +1058,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0] } },
+      seeding: { ActiveNodes: { nodes: [0] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1300,7 +1300,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   });
 
   it("names an open-practice round's auto-created heat 'Practice Heat' (not its id)", async () => {
-    // An open-practice round (open_practice format + AllChannels seeding) auto-creates one heat;
+    // An open-practice round (open_practice format + ActiveNodes seeding) auto-creates one heat;
     // it should display as "Practice Heat" rather than the generated heat id.
     const OP_ROUND: RoundDef = {
       id: 'op1',
@@ -1309,7 +1309,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1708,14 +1708,14 @@ const OP_LAYOUT: ChannelLayout = {
 };
 
 describe('EventRounds — open-practice active-channels picker', () => {
-  it('swaps to an active-channels picker and saves AllChannels with the selected node indices', async () => {
+  it('swaps to an active-node picker and saves ActiveNodes with the selected node indices', async () => {
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
       ...QUAL,
       id: 'r2',
       label: 'Open Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [0, 2] } }
+      seeding: { ActiveNodes: { nodes: [0, 2] } }
     }));
     const { session } = makeTestSession({
       listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
@@ -1764,7 +1764,7 @@ describe('EventRounds — open-practice active-channels picker', () => {
       label: 'Open Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [0, 2] } },
+      seeding: { ActiveNodes: { nodes: [0, 2] } },
       // #117 S3: the round records which layout its heats fly, so the practice heat's channels are
       // a real `heat → channel` mapping rather than whatever the hardware happened to be on.
       layouts: ['practice-a']
@@ -1778,7 +1778,7 @@ describe('EventRounds — open-practice active-channels picker', () => {
       label: 'Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [1] } },
+      seeding: { ActiveNodes: { nodes: [1] } },
       // The round already flies a layout, so re-opening it shows every seat's channel straight
       // away — the RD does not have to re-tick anything to read what practice is on (#402).
       layouts: ['practice-a']
@@ -1935,7 +1935,7 @@ describe('EventRounds — a round with a heat in progress cannot be edited (#387
  * repair it.
  *
  * #412 refuses an impossible seat when a round is *written*, so new rounds are safe. The round on
- * the bench predates that fix: it seeds `AllChannels { channels: [6] }` — node index 6, the 7th
+ * the bench predates that fix: it seeds `ActiveNodes { nodes: [6] }` — node index 6, the 7th
  * node — on a four-node timer, so its practice heat can never record a lap, and nothing said so.
  * Silently rendering that seat is the worst available behaviour.
  */
@@ -2019,6 +2019,57 @@ describe('EventRounds — the impossible seat (#416)', () => {
 
     const alert = await screen.findByText(/records nothing/);
     expect(alert.closest('.round-row')?.textContent).toContain('switched off');
+  });
+});
+
+/**
+ * #117 S3 follow-up — a scheduled heat still bound to a channel layout its round no longer names.
+ *
+ * The RD's words: *"we create a round, it has a layout, create a heat from that round, remove the
+ * layout from the round, but the heat stays on the layout channels?"* Yes — the bind is a logged
+ * event so a re-fill cannot lose it, and that same durability makes it outlive a round edit. The
+ * RD chose to be **told, not blocked**, because there are two valid repairs and refusing the round
+ * edit would prevent both.
+ */
+describe('EventRounds — a heat bound to a layout its round dropped (#117 S3)', () => {
+  const orphan: RoundIssue = {
+    round: 'r1',
+    round_label: 'Qualifying R1',
+    problem: 'HeatLayoutNotInRound',
+    heat: 'heat-9f3c',
+    heat_name: 'Practice Heat',
+    layout: 'layout-7b2d',
+    layout_name: 'Bracket A',
+    detail:
+      'Practice Heat still flies the Bracket A channel layout, but Qualifying R1 no longer names ' +
+      'it — the heat keeps Bracket A’s channels even though its round no longer says it may. Pick ' +
+      'a layout Qualifying R1 names for Practice Heat, or set its channels by hand.'
+  };
+
+  it('names the heat, the round and the layout, and offers both repairs', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => [orphan]),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const alert = await screen.findByText(/still flies the Bracket A/);
+    const row = alert.closest('.round-row') as HTMLElement;
+    // On the round that owns it, beside the Edit control that repairs it.
+    expect(within(row).getByText('Qualifying R1')).toBeInTheDocument();
+    // Three friendly names, no raw handles (CLAUDE.md).
+    expect(row.textContent).toContain('Practice Heat');
+    expect(row.textContent).toContain('Bracket A');
+    expect(row.textContent).not.toContain('heat-9f3c');
+    expect(row.textContent).not.toContain('layout-7b2d');
+    // Both repairs: rebind the heat, or set its channels by hand. The RD is told, not blocked.
+    expect(row.textContent).toContain('Pick a layout');
+    expect(row.textContent).toContain('by hand');
+    // The headline names the HEAT — this problem has no node, and none is invented to fill the
+    // slot the seat headline uses.
+    expect(alert.textContent).toContain('Practice Heat flies channels this round no longer names.');
+    expect(row.textContent).not.toContain('records nothing');
   });
 });
 

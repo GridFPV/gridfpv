@@ -36,13 +36,13 @@ afterAll(async () => {
 });
 
 /** An open-practice round over the given node indices. */
-function practiceRound(label: string, channels: number[]) {
+function practiceRound(label: string, nodes: number[]) {
   return {
     label,
     classes: [],
     format: 'open_practice',
     params: {},
-    seeding: { AllChannels: { channels } }
+    seeding: { ActiveNodes: { nodes } }
   };
 }
 

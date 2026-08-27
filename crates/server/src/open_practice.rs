@@ -59,7 +59,7 @@ use crate::events::{EventMeta, RoundDef};
 ///
 /// Keyed on the **format alone**, deliberately more inclusive than
 /// [`round_engine::is_open_practice`](crate::round_engine::is_open_practice) (which also requires
-/// [`AllChannels`](crate::events::SeedingRule::AllChannels) seeding before it will auto-create the
+/// [`ActiveNodes`](crate::events::SeedingRule::ActiveNodes) seeding before it will auto-create the
 /// heat and lay the channels out). A "half-open-practice" round — the practice format with some
 /// other seeding, reachable only through the raw API — must still not be scored: erring toward
 /// exclusion can only withhold a scoreboard nobody asked for, while erring the other way would
