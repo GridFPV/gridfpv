@@ -42,10 +42,10 @@ import type {
   createRound,
   updateRound,
   deleteRound,
-  listChannelLayers,
-  createChannelLayer,
-  updateChannelLayer,
-  deleteChannelLayer,
+  listChannelLayouts,
+  createChannelLayout,
+  updateChannelLayout,
+  deleteChannelLayout,
   listHeats,
   listRoundIssues,
   eventAudit,
@@ -135,11 +135,11 @@ export interface TimerImpls {
   createRoundImpl?: typeof createRound;
   updateRoundImpl?: typeof updateRound;
   deleteRoundImpl?: typeof deleteRound;
-  /** The event channel-layer read/write seams (#117 S2) — back the ChannelLayers editor tests. */
-  listChannelLayersImpl?: typeof listChannelLayers;
-  createChannelLayerImpl?: typeof createChannelLayer;
-  updateChannelLayerImpl?: typeof updateChannelLayer;
-  deleteChannelLayerImpl?: typeof deleteChannelLayer;
+  /** The event channel-layout read/write seams (#117 S2) — back the ChannelLayouts editor tests. */
+  listChannelLayoutsImpl?: typeof listChannelLayouts;
+  createChannelLayoutImpl?: typeof createChannelLayout;
+  updateChannelLayoutImpl?: typeof updateChannelLayout;
+  deleteChannelLayoutImpl?: typeof deleteChannelLayout;
   /** The scheduled-heats read (race redesign Slice 3b) — backs the EventRounds Heats UI tests. */
   listHeatsImpl?: typeof listHeats;
   /** The stored-round seat check (#416) — backs the EventRounds impossible-seat tests. */
@@ -280,14 +280,14 @@ export function makeTestSession(
     createRoundImpl: opts?.createRoundImpl,
     updateRoundImpl: opts?.updateRoundImpl,
     deleteRoundImpl: opts?.deleteRoundImpl,
-    // Channel-layer seams (#117 S2): the READ defaults to an inert success (no layers) for the
+    // Channel-layout seams (#117 S2): the READ defaults to an inert success (no layouts) for the
     // same reason `listHeats` does — a failing default would trip the editor's error state in
     // every unrelated Timers test. The writes stay undefined unless a test overrides them.
-    listChannelLayersImpl:
-      opts?.listChannelLayersImpl ?? (async () => ({ layers: [], overlaps: [] })),
-    createChannelLayerImpl: opts?.createChannelLayerImpl,
-    updateChannelLayerImpl: opts?.updateChannelLayerImpl,
-    deleteChannelLayerImpl: opts?.deleteChannelLayerImpl,
+    listChannelLayoutsImpl:
+      opts?.listChannelLayoutsImpl ?? (async () => ({ layouts: [], overlaps: [] })),
+    createChannelLayoutImpl: opts?.createChannelLayoutImpl,
+    updateChannelLayoutImpl: opts?.updateChannelLayoutImpl,
+    deleteChannelLayoutImpl: opts?.deleteChannelLayoutImpl,
     // Scheduled-heats read seam (race redesign Slice 3b): inert success unless a test overrides it
     // (see the listPilotsImpl note — a failing default would trip the #340 error state everywhere).
     listHeatsImpl: opts?.listHeatsImpl ?? (async () => []),

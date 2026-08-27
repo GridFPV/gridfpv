@@ -14,6 +14,7 @@
 import { describe, expect, it } from 'vitest';
 import type {
   ChannelCatalogEntry,
+  ChannelLayout,
   ClassMembership,
   HeatSummary,
   Pilot,
@@ -148,13 +149,108 @@ describe('buildCompetitorNames — the ONE input assembly (#416)', () => {
     expect(names.channelFor('node-2')).toBeUndefined();
   });
 
-  it('prefers the HEAT’s own assignment over the timer pool', () => {
+  it('prefers the HEAT’s own assignment over every other source', () => {
+    // The heat's `frequencies` are what the round actually allocated for THIS heat — the only
+    // per-heat source there is, and the one a raced heat keeps forever.
     const names = buildCompetitorNames({
       catalog: CATALOG,
       timer: rhTimer({ available_channels: [5658, 5800, 5880, 5658] }),
-      heat: heat({ lineup: ['node-0'], frequencies: [['node-0', 5880]] })
+      layouts: [
+        {
+          id: 'bracket-a',
+          name: 'Bracket A',
+          nodes: [{ node: 0, channel: 5658 }]
+        } as unknown as ChannelLayout
+      ],
+      heat: heat({ lineup: ['node-0'], frequencies: [['node-0', 5880]], layout: 'bracket-a' })
     });
     expect(names.name('node-0')).toBe('Node 1 · Raceband R7');
+  });
+
+  // ── Source (3): the heat's channel layout (#117 S3) ──────────────────────────────────────
+  //
+  // Source (3) used to be `Timer.available_channels[node]` — indexing the timer's ALLOWED SET by
+  // node index. An allowed set says which channels the timer may ever use and carries no per-node
+  // mapping at all, so the answer was invented. A `ChannelLayout` is the mapping it never was.
+
+  /** A layout putting node 0 on R1 and node 2 on F4, and saying nothing about node 1. */
+  const LAYOUT: ChannelLayout = {
+    id: 'bracket-a',
+    name: 'Bracket A',
+    nodes: [
+      { node: 0, channel: 5658 },
+      { node: 2, channel: 5800 }
+    ]
+  } as unknown as ChannelLayout;
+
+  it('resolves a seat through the layout the HEAT flies', () => {
+    const names = buildCompetitorNames({
+      catalog: CATALOG,
+      timer: rhTimer(),
+      layouts: [LAYOUT],
+      heat: heat({ lineup: ['node-0', 'node-2'], layout: 'bracket-a' })
+    });
+    expect(names.name('node-0')).toBe('Node 1 · Raceband R1');
+    expect(names.name('node-2')).toBe('Node 3 · Fatshark F4');
+    // A node the layout says nothing about is UNKNOWN, not "no channel" — and never a guess.
+    expect(names.name('node-1')).toBe('Node 2');
+    expect(names.channelFor('node-1')).toBeUndefined();
+  });
+
+  it('will not resolve a layout the heat does not fly', () => {
+    // The event has the layout; this heat is not bound to it. Reaching for it anyway would be the
+    // same class of invention the allowed-set index was.
+    const names = buildCompetitorNames({
+      catalog: CATALOG,
+      timer: rhTimer(),
+      layouts: [LAYOUT],
+      heat: heat({ lineup: ['node-0'] })
+    });
+    expect(names.name('node-0')).toBe('Node 1');
+  });
+
+  it('takes an explicit layout when there is no heat to ask (#402)', () => {
+    // The open-practice round form: the RD is choosing which nodes practice runs on, before any
+    // heat exists. #402's sharpest complaint was that this picker is channel-blind at exactly that
+    // moment, so the round's own layout answers it.
+    const names = buildCompetitorNames({
+      catalog: CATALOG,
+      timer: rhTimer(),
+      layouts: [LAYOUT],
+      layout: 'bracket-a'
+    });
+    expect(names.seatLabel(0)).toBe('Node 1 · Raceband R1');
+    expect(names.seatLabel(2)).toBe('Node 3 · Fatshark F4');
+  });
+
+  it('lets what a node REPORTS win over the layout', () => {
+    // The layout is Grid's intent; the heartbeat is the hardware's own answer about right now. On a
+    // page watching a live gate, the observation is what the RD needs to see (D27: read a timer as
+    // evidence, never adopt it as config — and this is a display, not a decision).
+    const names = buildCompetitorNames({
+      catalog: CATALOG,
+      timer: rhTimer(),
+      layouts: [LAYOUT],
+      heat: heat({ lineup: ['node-0'], layout: 'bracket-a' }),
+      signal: {
+        nodes: [{ node: 0, seat: 'node-0', frequency_mhz: 5880 }]
+      } as unknown as TimerSignal
+    });
+    expect(names.name('node-0')).toBe('Node 1 · Raceband R7');
+  });
+
+  it('never resolves a channel from available_channels, however it is shaped', () => {
+    // The regression guard for the fabrication itself: a fully-populated allowed set, no layout and
+    // no signal, resolves NOTHING. Positional agreement with the node index is a coincidence, and
+    // the resolver no longer trades on it.
+    const names = buildCompetitorNames({
+      catalog: CATALOG,
+      timer: rhTimer({ available_channels: [5658, 5880, 5800, 5658] }),
+      heat: heat({ lineup: ['node-0', 'node-1', 'node-2'] })
+    });
+    expect(names.channelFor('node-0')).toBeUndefined();
+    expect(names.channelFor('node-1')).toBeUndefined();
+    expect(names.name('node-2')).toBe('Node 3');
   });
 
   it('a bound pilot still wins over the seat label', () => {

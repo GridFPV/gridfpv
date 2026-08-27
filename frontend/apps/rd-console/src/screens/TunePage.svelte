@@ -138,7 +138,6 @@
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import { buildCompetitorNames } from '../lib/competitorName.js';
-  import { poolChannel } from '../lib/channels.js';
   import { timerWidth } from '../lib/timerNodes.js';
   import { isOpenPracticeRound } from '../lib/heats.js';
   import {
@@ -796,17 +795,27 @@
       catalog,
       signal,
       timer,
-      membership: session.currentEvent?.classes_membership
+      membership: session.currentEvent?.classes_membership,
+      // #117 S3: the event's channel layouts. Paired with the heat's own `layout`, they are
+      // the per-node channel mapping a `node-{i}` seat resolves through — the source that
+      // used to be `available_channels[node]`, which carried no per-node meaning at all.
+      layouts: session.currentEvent?.channel_layouts
     })
   );
 
   /**
-   * The frequency a node is actually on: the live heartbeat's reading, else the timer's configured
-   * pool. Via `poolChannel`, which refuses to index an **empty** pool — empty means "unrestricted"
-   * on a Flexible RotorHazard timer, not "no channels", and indexing it would invent a frequency.
+   * The frequency a node is actually on: **what the heartbeat says it is tuned to**, and nothing
+   * else.
+   *
+   * It used to fall back to `available_channels[node]` — indexing the timer's *allowed set* by node
+   * index. That set has no per-node meaning, so the fallback invented a plausible answer (#117 S3).
+   * On this page in particular that was the worst place for it: a dropdown resting on a fabricated
+   * value is one the RD can change away from without ever having seen the real one, which is the
+   * exact hazard the channel-less-node notice below already exists to prevent. `undefined` here
+   * means **the timer has not told us**, and the page says so instead of guessing.
    */
   function frequencyOf(node: number): number | undefined {
-    return nodeById.get(node)?.frequency_mhz ?? poolChannel(node, timer.available_channels);
+    return nodeById.get(node)?.frequency_mhz;
   }
 
   /** `Node 1 · Raceband R7` — the seat's own name, band+channel resolved through `channels.ts`. */
@@ -852,7 +861,7 @@
   // ── Layout ──────────────────────────────────────────────────────────────────────────────────
   // Columns is the decision; stacked is a look the RD wants to compare against. Same markup, one
   // class — deliberately not a second component, which is how two layouts start to diverge.
-  let layout = $state<'columns' | 'stacked'>('columns');
+  let nodeLayout = $state<'columns' | 'stacked'>('columns');
 
   /**
    * The live trace for one node, in the `{ competitors: [...] }` shape `RssiGraph` consumes.
@@ -948,16 +957,16 @@
         {/if}
         <div class="layout-toggle" role="group" aria-label="Layout">
           <Button
-            variant={layout === 'columns' ? 'primary' : 'ghost'}
+            variant={nodeLayout === 'columns' ? 'primary' : 'ghost'}
             size="sm"
-            aria-pressed={layout === 'columns'}
-            onclick={() => (layout = 'columns')}>Columns</Button
+            aria-pressed={nodeLayout === 'columns'}
+            onclick={() => (nodeLayout = 'columns')}>Columns</Button
           >
           <Button
-            variant={layout === 'stacked' ? 'primary' : 'ghost'}
+            variant={nodeLayout === 'stacked' ? 'primary' : 'ghost'}
             size="sm"
-            aria-pressed={layout === 'stacked'}
-            onclick={() => (layout = 'stacked')}>Stacked</Button
+            aria-pressed={nodeLayout === 'stacked'}
+            onclick={() => (nodeLayout = 'stacked')}>Stacked</Button
           >
         </div>
       </div>
@@ -1000,7 +1009,7 @@
         </div>
       </Card>
     {:else}
-      <div class="nodes" class:stacked={layout === 'stacked'} data-layout={layout}>
+      <div class="nodes" class:stacked={nodeLayout === 'stacked'} data-layout={nodeLayout}>
         {#each nodeIndices as node (node)}
           {@const held = levels[node]}
           {@const snap = nodeById.get(node)}

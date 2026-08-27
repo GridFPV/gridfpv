@@ -325,6 +325,7 @@ async fn round_driven_mock_race_flow_e2e() {
         &event,
         &token,
         NewRoundReq {
+            layouts: Vec::new(),
             label: "Qualifying".into(),
             classes: vec![class_id.clone()],
             format: "timed_qual".into(),
@@ -429,6 +430,7 @@ async fn round_driven_mock_race_flow_e2e() {
         &event,
         &token,
         NewRoundReq {
+            layouts: Vec::new(),
             label: "Bracket".into(),
             classes: vec![class_id.clone()],
             format: "head_to_head".into(),
@@ -635,6 +637,7 @@ async fn fill_round_rejects_an_oversized_heat_e2e() {
         &event,
         &token,
         NewRoundReq {
+            layouts: Vec::new(),
             label: "Qualifying".into(),
             classes: vec![class_id.clone()],
             format: "timed_qual".into(),
@@ -777,6 +780,7 @@ async fn static_channel_balanced_qual_flow_e2e() {
         &event,
         &token,
         NewRoundReq {
+            layouts: Vec::new(),
             label: "Qualifying".into(),
             classes: vec![class_id.clone()],
             format: "timed_qual".into(),
@@ -1011,6 +1015,7 @@ async fn fast_auto_event(
         &event,
         &token,
         NewRoundReq {
+            layouts: Vec::new(),
             label: "Qualifying".into(),
             classes: vec![class_id.clone()],
             format: "timed_qual".into(),
@@ -1244,6 +1249,7 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
     // Define an open-practice round: NO win condition, a 1s time limit, AllChannels seeding over two
     // node-seats. Creating it must auto-build the single open heat (the channels are the lineup).
     let open_req = || NewRoundReq {
+        layouts: Vec::new(),
         label: "Open Practice".into(),
         classes: vec![],
         format: "open_practice".into(),
@@ -1450,6 +1456,7 @@ async fn two_open_practice_rounds_in_one_event_get_distinct_heats_e2e() {
     let event = EventId(event_meta["id"].as_str().unwrap().to_string());
 
     let open_req = |label: &str| NewRoundReq {
+        layouts: Vec::new(),
         label: label.into(),
         classes: vec![],
         format: "open_practice".into(),
@@ -1568,6 +1575,7 @@ async fn open_practice_laps_are_logged_and_durable_but_never_scored_e2e() {
         &event,
         &token,
         NewRoundReq {
+            layouts: Vec::new(),
             label: "Open Practice".into(),
             classes: vec![],
             format: "open_practice".into(),

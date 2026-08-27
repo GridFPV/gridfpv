@@ -1,30 +1,30 @@
 /**
- * The in-event **channel layer** editor (#117 S2).
+ * The in-event **channel layout** editor (#117 S2).
  *
  * What is actually being defended here:
  *
  *  - **no raw id reaches the screen** — a node renders as `"Node 3"`, a channel as `"Raceband R3"`,
- *    a layer as its name. The dropdown's option *values* stay raw MHz (a wire handle); its labels
+ *    a layout as its name. The dropdown's option *values* stay raw MHz (a wire handle); its labels
  *    may not;
- *  - the **global→event seam** — adding a layer with nothing picked sends no `nodes` at all, which
+ *  - the **global→event seam** — adding a layout with nothing picked sends no `nodes` at all, which
  *    is the Director's seed path (the allowed set laid onto the enabled nodes);
  *  - **only allowed channels, only enabled nodes** are offered, so the editor cannot even build the
  *    two refusals the Director exists to make;
- *  - a duplicate channel **blocks Save**, and a cross-layer overlap **does not** — it is a notice.
+ *  - a duplicate channel **blocks Save**, and a cross-layout overlap **does not** — it is a notice.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import { toasts } from '@gridfpv/components';
-import type { createChannelLayer, updateChannelLayer } from '@gridfpv/protocol-client';
+import type { createChannelLayout, updateChannelLayout } from '@gridfpv/protocol-client';
 import type {
   ChannelCatalogEntry,
-  ChannelLayers,
+  ChannelLayouts,
   EventMeta,
   Timer,
   TimerNodes
 } from '@gridfpv/types';
-import EventChannelLayers from '../src/screens/EventChannelLayers.svelte';
+import EventChannelLayouts from '../src/screens/EventChannelLayouts.svelte';
 import { makeTestSession } from './support.js';
 
 /** A four-node timer allowing Raceband R1–R4 — the bracket-strategy shape. */
@@ -77,8 +77,8 @@ const EVENT: EventMeta = {
   classes: []
 };
 
-const BRACKET_A: ChannelLayers = {
-  layers: [
+const BRACKET_A: ChannelLayouts = {
+  layouts: [
     {
       id: 'bracket-a-k3f9',
       name: 'Bracket A',
@@ -93,38 +93,38 @@ const BRACKET_A: ChannelLayers = {
 };
 
 /**
- * The reads every test needs: the catalog, the node view and the layer list.
+ * The reads every test needs: the catalog, the node view and the layout list.
  *
- * The layer read is **stateful** on purpose. Every layer write re-homes `currentEvent`, which is
+ * The layout read is **stateful** on purpose. Every layout write re-homes `currentEvent`, which is
  * what keeps the console's cached meta honest — and that re-home makes the editor re-read. A
- * fixed-`[]` read would answer the re-read with "no layers" and hide the write, which the real
+ * fixed-`[]` read would answer the re-read with "no layouts" and hide the write, which the real
  * Director never would. `seed` is the store the writes below mutate, exactly as the server's is.
  */
-function impls(seed: { view: ChannelLayers }, extra: Record<string, unknown> = {}) {
+function impls(seed: { view: ChannelLayouts }, extra: Record<string, unknown> = {}) {
   return {
     listChannelsImpl: vi.fn(async () => CATALOG),
     timerNodesImpl: vi.fn(async () => NODES),
-    listChannelLayersImpl: vi.fn(async () => seed.view),
+    listChannelLayoutsImpl: vi.fn(async () => seed.view),
     ...extra
   };
 }
 
 /** A store starting from `view`, shared by the stateful read and the writes in one test. */
-function store(view: ChannelLayers = { layers: [], overlaps: [] }): { view: ChannelLayers } {
+function store(view: ChannelLayouts = { layouts: [], overlaps: [] }): { view: ChannelLayouts } {
   return { view };
 }
 
 beforeEach(() => toasts.clear());
 
-describe('EventChannelLayers — what the RD reads', () => {
+describe('EventChannelLayouts — what the RD reads', () => {
   it('renders each node with its channel, never an index or a bare MHz', async () => {
     const { session } = makeTestSession({
       ...impls(store(BRACKET_A)),
       event: EVENT
     });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
-    const list = await screen.findByRole('list', { name: 'Channel layers' });
+    const list = await screen.findByRole('list', { name: 'Channel layouts' });
     const row = within(list).getByText('Bracket A').closest('li') as HTMLElement;
     expect(row.textContent).toContain('Node 1 · Raceband R1');
     expect(row.textContent).toContain('Node 4 · Raceband R4');
@@ -136,9 +136,9 @@ describe('EventChannelLayers — what the RD reads', () => {
 
   it('offers only the ALLOWED channels, labelled by band, and only the ENABLED nodes', async () => {
     const { session } = makeTestSession({ ...impls(store()), event: EVENT });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
 
     // Node index 2 is disabled — it must not be offered at all (#412).
     expect(await screen.findByLabelText('Channel for Node 1')).toBeTruthy();
@@ -157,56 +157,56 @@ describe('EventChannelLayers — what the RD reads', () => {
 
   it('says the timer is unconfigured rather than showing an empty dropdown', async () => {
     const { session } = makeTestSession({ ...impls(store()), event: EVENT });
-    render(EventChannelLayers, { session, timer: UNCONFIGURED });
+    render(EventChannelLayouts, { session, timer: UNCONFIGURED });
 
     const banner = await screen.findByRole('alert');
     expect(banner.textContent).toContain('Track RH');
     expect(banner.textContent).toContain('Timers page');
     // And there is nothing to add until that is fixed.
     expect(
-      (screen.getByRole('button', { name: '+ Add layer' }) as HTMLButtonElement).disabled
+      (screen.getByRole('button', { name: '+ Add layout' }) as HTMLButtonElement).disabled
     ).toBe(true);
   });
 });
 
-describe('EventChannelLayers — defining a layer', () => {
+describe('EventChannelLayouts — defining a layout', () => {
   it('seeds from the global allowed set: adding with nothing picked sends no nodes', async () => {
     const seed = store();
-    const createChannelLayerImpl = vi.fn<typeof createChannelLayer>(
+    const createChannelLayoutImpl = vi.fn<typeof createChannelLayout>(
       async () => (seed.view = BRACKET_A)
     );
     const { session } = makeTestSession({
-      ...impls(seed, { createChannelLayerImpl }),
+      ...impls(seed, { createChannelLayoutImpl }),
       event: EVENT
     });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
     // The seed note is what tells the RD this is not an empty form.
     expect(screen.getByText(/starts from the channels/)).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Add layer' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add layout' }));
 
-    await waitFor(() => expect(createChannelLayerImpl).toHaveBeenCalled());
-    const request = createChannelLayerImpl.mock.calls[0][2];
-    expect(request.name).toBe('Layer A');
+    await waitFor(() => expect(createChannelLayoutImpl).toHaveBeenCalled());
+    const request = createChannelLayoutImpl.mock.calls[0][2];
+    expect(request.name).toBe('Layout A');
     // The seam: no `nodes` at all, so the Director lays the allowed set onto the enabled nodes.
     expect(request.nodes).toBeUndefined();
-    // And the stored layer comes back rendered by name.
+    // And the stored layout comes back rendered by name.
     expect(await screen.findByText('Bracket A')).toBeTruthy();
   });
 
   it('sends the explicit mapping once the RD picks channels', async () => {
     const seed = store();
-    const createChannelLayerImpl = vi.fn<typeof createChannelLayer>(
+    const createChannelLayoutImpl = vi.fn<typeof createChannelLayout>(
       async () => (seed.view = BRACKET_A)
     );
     const { session } = makeTestSession({
-      ...impls(seed, { createChannelLayerImpl }),
+      ...impls(seed, { createChannelLayoutImpl }),
       event: EVENT
     });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
     await fireEvent.change(await screen.findByLabelText('Channel for Node 1'), {
       target: { value: '5658' }
     });
@@ -216,11 +216,11 @@ describe('EventChannelLayers — defining a layer', () => {
     await fireEvent.change(screen.getByLabelText('Channel for Node 4'), {
       target: { value: '5769' }
     });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add layer' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add layout' }));
 
-    await waitFor(() => expect(createChannelLayerImpl).toHaveBeenCalled());
-    expect(createChannelLayerImpl.mock.calls[0][2]).toEqual({
-      name: 'Layer A',
+    await waitFor(() => expect(createChannelLayoutImpl).toHaveBeenCalled());
+    expect(createChannelLayoutImpl.mock.calls[0][2]).toEqual({
+      name: 'Layout A',
       nodes: [
         { node: 0, channel: 5658 },
         { node: 1, channel: 5695 },
@@ -230,14 +230,14 @@ describe('EventChannelLayers — defining a layer', () => {
   });
 
   it('refuses to save two nodes on one channel, naming both and the channel', async () => {
-    const createChannelLayerImpl = vi.fn<typeof createChannelLayer>(async () => BRACKET_A);
+    const createChannelLayoutImpl = vi.fn<typeof createChannelLayout>(async () => BRACKET_A);
     const { session } = makeTestSession({
-      ...impls(store(), { createChannelLayerImpl }),
+      ...impls(store(), { createChannelLayoutImpl }),
       event: EVENT
     });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
     await fireEvent.change(await screen.findByLabelText('Channel for Node 1'), {
       target: { value: '5658' }
     });
@@ -251,17 +251,17 @@ describe('EventChannelLayers — defining a layer', () => {
     expect(blocker.textContent).toContain('Raceband R1');
     expect(blocker.textContent).not.toContain('5658');
 
-    expect((screen.getByRole('button', { name: 'Add layer' }) as HTMLButtonElement).disabled).toBe(
+    expect((screen.getByRole('button', { name: 'Add layout' }) as HTMLButtonElement).disabled).toBe(
       true
     );
-    expect(createChannelLayerImpl).not.toHaveBeenCalled();
+    expect(createChannelLayoutImpl).not.toHaveBeenCalled();
   });
 
-  it('will not save a half-tuned layer — a layer tunes every enabled node', async () => {
+  it('will not save a half-tuned layout — a layout tunes every enabled node', async () => {
     const { session } = makeTestSession({ ...impls(store()), event: EVENT });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
     await fireEvent.change(await screen.findByLabelText('Channel for Node 1'), {
       target: { value: '5658' }
     });
@@ -269,39 +269,39 @@ describe('EventChannelLayers — defining a layer', () => {
     const blocker = await screen.findByText(/tunes every enabled node/);
     expect(blocker.textContent).toContain('Node 2');
     expect(blocker.textContent).toContain('Node 4');
-    expect((screen.getByRole('button', { name: 'Add layer' }) as HTMLButtonElement).disabled).toBe(
+    expect((screen.getByRole('button', { name: 'Add layout' }) as HTMLButtonElement).disabled).toBe(
       true
     );
   });
 
   it('surfaces the Director’s own refusal sentence verbatim', async () => {
-    const createChannelLayerImpl = vi.fn<typeof createChannelLayer>(async () => {
-      throw new Error('Node 2 and Node 3 are both on Raceband R1 in this layer.');
+    const createChannelLayoutImpl = vi.fn<typeof createChannelLayout>(async () => {
+      throw new Error('Node 2 and Node 3 are both on Raceband R1 in this layout.');
     });
     const { session } = makeTestSession({
-      ...impls(store(), { createChannelLayerImpl }),
+      ...impls(store(), { createChannelLayoutImpl }),
       event: EVENT
     });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layer' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Add layer' }));
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add layout' }));
 
     // Surfaced VERBATIM — the Director's message already names the nodes and the channel by their
     // friendly names, so re-wording it could only make it worse.
     await waitFor(() => expect(toasts.items).toHaveLength(1));
     expect(toasts.items[0].tone).toBe('danger');
     expect(toasts.items[0].message).toBe(
-      'Node 2 and Node 3 are both on Raceband R1 in this layer.'
+      'Node 2 and Node 3 are both on Raceband R1 in this layout.'
     );
   });
 });
 
-describe('EventChannelLayers — cross-layer overlap', () => {
-  it('shows the overlap as a notice, with both layers named and nothing blocked', async () => {
-    const overlapping: ChannelLayers = {
-      layers: [
-        BRACKET_A.layers[0],
+describe('EventChannelLayouts — cross-layout overlap', () => {
+  it('shows the overlap as a notice, with both layouts named and nothing blocked', async () => {
+    const overlapping: ChannelLayouts = {
+      layouts: [
+        BRACKET_A.layouts[0],
         {
           id: 'pack-b-z1x8',
           name: 'Pack B',
@@ -312,13 +312,13 @@ describe('EventChannelLayers — cross-layer overlap', () => {
           ]
         }
       ],
-      overlaps: [{ layer: 'bracket-a-k3f9', other: 'pack-b-z1x8', channels: [5658, 5769] }]
+      overlaps: [{ layout: 'bracket-a-k3f9', other: 'pack-b-z1x8', channels: [5658, 5769] }]
     };
     const { session } = makeTestSession({
       ...impls(store(overlapping)),
       event: EVENT
     });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
     const notice = await screen.findByText(/both use/);
     expect(notice.textContent).toContain('Bracket A');
@@ -327,27 +327,27 @@ describe('EventChannelLayers — cross-layer overlap', () => {
     // Never a raw id and never a bare MHz.
     expect(notice.textContent).not.toContain('pack-b-z1x8');
     expect(notice.textContent).not.toContain('5658');
-    // Both layers are listed and editable — the warning blocks nothing.
-    const list = screen.getByRole('list', { name: 'Channel layers' });
+    // Both layouts are listed and editable — the warning blocks nothing.
+    const list = screen.getByRole('list', { name: 'Channel layouts' });
     expect(within(list).getAllByRole('listitem')).toHaveLength(2);
     expect(
-      (screen.getByRole('button', { name: '+ Add layer' }) as HTMLButtonElement).disabled
+      (screen.getByRole('button', { name: '+ Add layout' }) as HTMLButtonElement).disabled
     ).toBe(false);
   });
 });
 
-describe('EventChannelLayers — editing an existing layer', () => {
-  it('loads the layer’s tuning into the editor and replaces it wholesale', async () => {
+describe('EventChannelLayouts — editing an existing layout', () => {
+  it('loads the layout’s tuning into the editor and replaces it wholesale', async () => {
     const seed = store(BRACKET_A);
-    const updateChannelLayerImpl = vi.fn<typeof updateChannelLayer>(async () => seed.view);
+    const updateChannelLayoutImpl = vi.fn<typeof updateChannelLayout>(async () => seed.view);
     const { session } = makeTestSession({
-      ...impls(seed, { updateChannelLayerImpl }),
+      ...impls(seed, { updateChannelLayoutImpl }),
       event: EVENT
     });
-    render(EventChannelLayers, { session, timer: TIMER });
+    render(EventChannelLayouts, { session, timer: TIMER });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-    expect((await screen.findByLabelText('Layer name')).getAttribute('value') ?? '').toBeDefined();
+    expect((await screen.findByLabelText('Layout name')).getAttribute('value') ?? '').toBeDefined();
     // The stored mapping is what the dropdowns show.
     expect((screen.getByLabelText('Channel for Node 1') as HTMLSelectElement).value).toBe('5658');
     expect((screen.getByLabelText('Channel for Node 4') as HTMLSelectElement).value).toBe('5769');
@@ -355,11 +355,11 @@ describe('EventChannelLayers — editing an existing layer', () => {
     await fireEvent.change(screen.getByLabelText('Channel for Node 4'), {
       target: { value: '5732' }
     });
-    await fireEvent.click(screen.getByRole('button', { name: 'Save layer' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
 
-    await waitFor(() => expect(updateChannelLayerImpl).toHaveBeenCalled());
-    expect(updateChannelLayerImpl.mock.calls[0][2]).toBe('bracket-a-k3f9');
-    expect(updateChannelLayerImpl.mock.calls[0][3]).toEqual({
+    await waitFor(() => expect(updateChannelLayoutImpl).toHaveBeenCalled());
+    expect(updateChannelLayoutImpl.mock.calls[0][2]).toBe('bracket-a-k3f9');
+    expect(updateChannelLayoutImpl.mock.calls[0][3]).toEqual({
       name: 'Bracket A',
       nodes: [
         { node: 0, channel: 5658 },

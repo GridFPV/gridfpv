@@ -52,11 +52,11 @@ use gridfpv_engine::format::{
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_engine::schedule::{Frequency, FrequencyPool, allocate};
 use gridfpv_engine::scoring::{HeatResult, Metric, WinCondition};
-use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, RoundId};
+use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, LayoutId, RoundId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::events::{ChannelMode, EventMeta, RoundDef, SeedingRule};
+use crate::events::{ChannelLayout, ChannelMode, EventMeta, RoundDef, SeedingRule};
 use crate::timers::{Timer, TimerRegistry};
 
 /// The hard guard against a generator that never completes (mirrors
@@ -88,6 +88,15 @@ pub enum FillOutcome {
         /// from the timer's pool via [`assign_for_event`], the prior behaviour). The handler still
         /// enforces the node-count cap either way.
         frequencies: Option<Vec<(CompetitorRef, u16)>>,
+        /// The **channel layout** this heat flies (#117 S3), when one applies: the RD's explicit
+        /// per-heat bind, else the first layout its round names. The handler records it as an
+        /// [`Event::HeatLayoutSet`] alongside the `HeatScheduled`, so *which layout a heat flew* is
+        /// a recorded fact rather than something re-derived later from a round whose default may
+        /// since have changed.
+        ///
+        /// `None` when the round names no layouts and the RD bound none — the pre-S3 behaviour,
+        /// where channels come from the auto-pick.
+        layout: Option<LayoutId>,
         /// The round's **field draw to record** (freeze-at-fill, #334): `Some` exactly when
         /// this is a carry-seeded round's FIRST scheduled heat and no draw is recorded yet.
         /// The handler appends the [`Event::RoundFieldDrawn`] *before* the `HeatScheduled`,
@@ -148,6 +157,14 @@ pub enum FillError {
     /// seeding **cycle** (e.g. round A seeds `FromRanking` B while B seeds `FromRanking` A). A guard
     /// that turns an otherwise-unbounded recursion / stack overflow into a typed `400`.
     SeedingTooDeep,
+    /// The heat's channels could not be assigned (#117 S3) — carries the
+    /// [`AssignError`]'s already-friendly sentence, which names the timer, the layout and the node.
+    ///
+    /// Reached when a heat's **channel layout** cannot seat its lineup: a layout that says nothing
+    /// about a node the heat flies, or a lineup wider than the timer's enabled node set. Flattened
+    /// to a `String` because it is a message to the RD by the time it gets here, and both errors
+    /// map to the same `400`.
+    Assign(String),
 }
 
 impl std::fmt::Display for FillError {
@@ -167,6 +184,7 @@ impl std::fmt::Display for FillError {
                     "seeding source round {id:?} does not exist in this event"
                 )
             }
+            FillError::Assign(detail) => write!(f, "{detail}"),
             FillError::MissingChannel(pilot) => {
                 write!(
                     f,
@@ -223,6 +241,22 @@ pub enum AssignError {
         /// How many channels are configured on it (all of them excluded by the capability).
         configured: usize,
     },
+    /// The heat's **channel layout** says nothing about a node the heat seats a pilot on
+    /// (#117 S3) — the layout went stale after the RD enabled that node.
+    ///
+    /// A layout is meant to be a *complete* tuning of the timer, and it is validated as one when
+    /// it is written. But a stored layout is not static: enabling a node afterwards leaves it
+    /// short. Rather than seat a pilot on a gate with no channel, the fill refuses and names the
+    /// layout, the timer and the node the RD has to fix — the same gap
+    /// [`round_issues`](crate::events::EventRegistry::round_issues) reports on read.
+    LayoutNodeUntuned {
+        /// The timer's **friendly name** (CLAUDE.md: never the raw id).
+        timer: String,
+        /// The layout's **name** — never its [`LayoutId`].
+        layout: String,
+        /// The node's **display name**, 1-based (`"Node 3"`) — never the raw index.
+        node: String,
+    },
     /// The lineup fits the node count, but the timer's **allowed channels** are too few to give
     /// every pilot a distinct channel: `lineup` pilots, `available` channels.
     TooFewChannels {
@@ -250,6 +284,16 @@ impl std::fmt::Display for AssignError {
                 "{timer:?} cannot tune any of the {configured} channel(s) configured for it — it \
                  supports only the channels it was configured with; pick from those on the Timers \
                  page"
+            ),
+            AssignError::LayoutNodeUntuned {
+                timer,
+                layout,
+                node,
+            } => write!(
+                f,
+                "the {layout:?} channel layout does not say what {timer:?}'s {node} is tuned to, \
+                 so the pilot on that gate would have no channel — add {node} to {layout:?} on the \
+                 event's Channel layouts page"
             ),
             AssignError::TooFewChannels { lineup, available } => write!(
                 f,
@@ -357,15 +401,22 @@ pub fn assign_frequencies(
             }
         });
     }
-    // The candidate pool the picker chooses from, capped at the enabled seat count — a heat can
-    // never use more channels than it has seats, so beyond that the picker is choosing among
-    // candidates it cannot spend. NOTE(S2/S4): this cap is also what keeps a deliberately LARGE
-    // allowed set (the RD's "16 channels on a 4-node timer") from ever reaching the auto-picker —
-    // it always sees the first `nodes` of the set, in the RD's preference order. That is the right
-    // default for the bracket strategy (one channel set for the whole tournament) and the wrong one
-    // for the pool-larger-than-heat case the RD kept `pick_best_imd_set` for. Event **layers** (S2)
-    // decide which channels a heat flies; revisit the cap there, not here.
-    let pool: Vec<u16> = allowed.into_iter().take(nodes).collect();
+    // #117 S3: the candidate pool is the WHOLE allowed set. It used to be truncated with
+    // `.take(nodes)` — the enabled seat count — on the reasoning that a heat cannot spend more
+    // channels than it has seats. True, but it is the *picker's* job to decide which `n` of the
+    // set to spend, and the cap took that decision away from it: a deliberately large allowed set
+    // (the RD's "16 channels on a 4-node timer") never reached `pick_best_imd_set` at all, which
+    // always saw the first `nodes` entries in the RD's preference order and had nothing to choose
+    // between.
+    //
+    // S1 flagged the cap as belonging to the layout decision, and here is where it lands. A heat
+    // that names a **layout** never reaches this function: the layout IS its assignment, node by
+    // node ([`assign_from_layout`]), so there is no pool to truncate and no subset to pick. What
+    // is left here is the *no-layout* path — explicitly "let the system choose" — and the system
+    // choosing well means choosing from everything the RD allowed. `pick_best_imd_set` stays
+    // tractable on a large set: it enumerates exhaustively up to 12 candidates and falls back to a
+    // deterministic greedy walk beyond that.
+    let pool: Vec<u16> = allowed;
     if lineup.len() > pool.len() {
         return Err(AssignError::TooFewChannels {
             lineup: lineup.len(),
@@ -407,19 +458,234 @@ pub fn assignment_timer(meta: &EventMeta, timers: &TimerRegistry) -> Option<Time
     timers.get(&primary)
 }
 
+/// Assign a heat's channels **from its channel layout** (#117 S3) — the RD's own answer, applied
+/// verbatim.
+///
+/// A [`ChannelLayout`] is a complete `node -> channel` tuning of the timer, so once a heat names
+/// one there is nothing left to decide: each seat's channel is the layout's entry for **the node
+/// that seat actually flies**. That node comes from [`Timer::seat_nodes`] — the single rule laying
+/// a lineup onto real node indices (#412) — so a 3-pilot heat on a 4-node timer with node index 2
+/// switched off takes the layout's entries for nodes `0`, `1` and `3`, never `0`, `1`, `2`.
+///
+/// This is why the `take(nodes)` cap in [`assign_frequencies`] is not this path's problem: there is
+/// no candidate pool and no subset to pick. The layout **is** the assignment.
+///
+/// Refusals:
+///
+/// - a lineup larger than the timer's enabled node set is [`AssignError::TooManyForNodes`], checked
+///   first and identically to the auto-pick path;
+/// - a seat whose node the layout says nothing about is [`AssignError::LayoutNodeUntuned`], naming
+///   the layout, the timer and the node — the stale-layout case that arises when the RD enables a
+///   node after defining the layout.
+///
+/// A **disabled node is never assigned a channel**: `seat_nodes` drops a `node-{i}` seat naming a
+/// switched-off gate outright, so it appears in neither the returned assignment nor the refusal.
+///
+/// Pure and deterministic, exactly like [`assign_frequencies`] — no clock, no RNG.
+pub fn assign_from_layout(
+    timer: &Timer,
+    layout: &ChannelLayout,
+    lineup: &[CompetitorRef],
+) -> Result<Vec<(CompetitorRef, u16)>, AssignError> {
+    let nodes = timer.seat_capacity();
+    if lineup.len() > nodes {
+        return Err(AssignError::TooManyForNodes {
+            lineup: lineup.len(),
+            nodes,
+        });
+    }
+    let mut out = Vec::with_capacity(lineup.len());
+    for (node, competitor) in timer.seat_nodes(lineup) {
+        match layout.channel_for(node) {
+            Some(mhz) => out.push((competitor, mhz)),
+            None => {
+                return Err(AssignError::LayoutNodeUntuned {
+                    timer: timer.name.clone(),
+                    layout: layout.name.clone(),
+                    node: Timer::node_label(node),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Assign channels to `lineup` for `meta`'s event using its effective primary timer (race redesign
-/// Slice 4a). When the event has a resolvable timer, delegate to [`assign_frequencies`] (cap +
-/// first-fit); when it has none, the heat carries no channels (an empty assignment — a pure-sim
-/// event has no node cap beyond the format).
+/// Slice 4a; layouts #117 S3).
+///
+/// With a `layout`, the layout is the assignment ([`assign_from_layout`]). Without one, the
+/// auto-pick runs ([`assign_frequencies`]: cap + capability filter + IMD subset). When the event
+/// has no resolvable timer the heat carries no channels (an empty assignment — a pure-sim event has
+/// no node cap beyond the format), layout or not: a layout tunes a timer, and there is none.
 pub fn assign_for_event(
     meta: &EventMeta,
     timers: &TimerRegistry,
+    layout: Option<&ChannelLayout>,
     lineup: &[CompetitorRef],
 ) -> Result<Vec<(CompetitorRef, u16)>, AssignError> {
-    match assignment_timer(meta, timers) {
-        Some(timer) => assign_frequencies(&timer, lineup),
-        None => Ok(Vec::new()),
+    match (assignment_timer(meta, timers), layout) {
+        (Some(timer), Some(layout)) => assign_from_layout(&timer, layout, lineup),
+        (Some(timer), None) => assign_frequencies(&timer, lineup),
+        (None, _) => Ok(Vec::new()),
     }
+}
+
+// ── Heat -> layout, and the RD's manual override (#117 S3) ───────────────────────────────────
+//
+// Two RD decisions about a single heat, both **recorded in the log** rather than recomputed:
+//
+// | decision                          | event                     | cleared by            |
+// |-----------------------------------|---------------------------|-----------------------|
+// | which layout does this heat fly?  | `HeatLayoutSet`           | `layout: None`        |
+// | who sits where, on what channel?  | `HeatSeatingOverridden`   | an empty `lineup`     |
+//
+// Both are folded here, and both are applied by [`apply_heat_decisions`] at the ONE point every
+// formation path passes through — so neither can be silently lost by a re-fill, which is the
+// failure mode #419 called out as worse than having no override at all.
+
+/// The RD's **explicit** layout bind for a heat, folded from the log (#117 S3).
+///
+/// Three-valued on purpose:
+///
+/// - `Some(Some(layout))` — the RD bound this heat to that layout;
+/// - `Some(None)` — the RD *cleared* the bind, so the heat falls back to its round's default;
+/// - `None` — the RD never touched it, which is also the round's-default case but is worth telling
+///   apart when explaining a heat to somebody.
+///
+/// The **last** `HeatLayoutSet` for the heat wins, independently of how many times the heat has
+/// been re-scheduled since.
+pub fn heat_layout_bind(events: &[Event], heat: &HeatId) -> Option<Option<LayoutId>> {
+    let mut bind = None;
+    for event in events {
+        if let Event::HeatLayoutSet { heat: h, layout } = event {
+            if h == heat {
+                bind = Some(layout.clone());
+            }
+        }
+    }
+    bind
+}
+
+/// The **layout a heat flies**: its explicit bind, else the first layout its round names (#117 S3).
+///
+/// A round naming exactly one layout — the bracket case, *"n channels for n pilots, and they stay
+/// for the whole tournament"* — therefore needs no per-heat action at all: every heat it draws
+/// flies that layout. A round naming several — the GQ-style qualifier — gives the RD a menu, with
+/// the first as the default.
+///
+/// A bind naming a layout the event no longer has resolves to `None` rather than failing: the heat
+/// keeps the channels it was last scheduled with, and the mismatch is reported where the RD looks,
+/// by [`round_issues`](crate::events::EventRegistry::round_issues).
+pub fn layout_for_heat<'a>(
+    meta: &'a EventMeta,
+    round: Option<&RoundDef>,
+    events: &[Event],
+    heat: &HeatId,
+) -> Option<&'a ChannelLayout> {
+    let id = match heat_layout_bind(events, heat) {
+        Some(explicit) => explicit?,
+        None => round?.layouts.first()?.clone(),
+    };
+    meta.layout(&id)
+}
+
+/// The RD's **manual seating override** for a heat (#117 S3) — the escape hatch for when the
+/// automatic answer is wrong.
+///
+/// Folded from the last [`Event::HeatSeatingOverridden`] whose `lineup` is non-empty; an empty
+/// lineup is the explicit *clear*, and returns `None` from that point on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeatSeating {
+    /// The RD's lineup, in seat order.
+    pub lineup: Vec<CompetitorRef>,
+    /// The RD's per-pilot channels, or empty for *"my pilots, the layout's channels"*.
+    pub frequencies: Vec<(CompetitorRef, u16)>,
+}
+
+/// The RD's manual seating override for `heat`, or `None` when there is none (#117 S3).
+pub fn heat_seating_override(events: &[Event], heat: &HeatId) -> Option<HeatSeating> {
+    let mut out = None;
+    for event in events {
+        if let Event::HeatSeatingOverridden {
+            heat: h,
+            lineup,
+            frequencies,
+        } = event
+        {
+            if h == heat {
+                out = (!lineup.is_empty()).then(|| HeatSeating {
+                    lineup: lineup.clone(),
+                    frequencies: frequencies.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A heat's effective seating after its recorded RD decisions are applied: `(lineup, frequencies,
+/// layout)` (#117 S3).
+///
+/// `frequencies` stays an `Option` with the same meaning the formation paths give it — `None` is
+/// *"the caller first-fits from the timer's pool"*, not *"no channels"*.
+type EffectiveSeating = (
+    Vec<CompetitorRef>,
+    Option<Vec<(CompetitorRef, u16)>>,
+    Option<LayoutId>,
+);
+
+/// Apply a heat's two recorded RD decisions — its **layout** and its **manual override** — on top
+/// of the lineup and channels a formation path just computed (#117 S3).
+///
+/// The single point both are applied, deliberately. A round re-fill and the #387 re-materialization
+/// each recompute a heat from its round's config; if either forgot to re-apply the override, the
+/// RD's manual answer would vanish the next time the round was touched — *"an override silently
+/// lost is worse than none"* (#419). One function, called from both, makes forgetting impossible.
+///
+/// Precedence, highest first:
+///
+/// 1. the override's **lineup**, when the RD set one;
+/// 2. the override's **channels**, when the RD typed them (an override may set the lineup only,
+///    and then the layout still supplies the channels — an RD swapping two pilots should not have
+///    to retype four frequencies);
+/// 3. the heat's **layout**, node by node;
+/// 4. whatever the formation path already produced (a static round's fixed membership channels, an
+///    open-practice heat's empty set, or `None` for "the caller first-fits from the pool").
+///
+/// Returns the effective `(lineup, frequencies, layout)`. An assignment that cannot be made from
+/// the layout is a typed [`AssignError`] naming the layout, the timer and the node.
+fn apply_heat_decisions(
+    meta: &EventMeta,
+    timers: &TimerRegistry,
+    round: Option<&RoundDef>,
+    events: &[Event],
+    heat: &HeatId,
+    lineup: Vec<CompetitorRef>,
+    frequencies: Option<Vec<(CompetitorRef, u16)>>,
+) -> Result<EffectiveSeating, AssignError> {
+    let manual = heat_seating_override(events, heat);
+    let lineup = match &manual {
+        Some(seating) => seating.lineup.clone(),
+        None => lineup,
+    };
+    let layout = layout_for_heat(meta, round, events, heat);
+    let layout_id = layout.map(|l| l.id.clone());
+
+    if let Some(seating) = &manual {
+        if !seating.frequencies.is_empty() {
+            return Ok((lineup, Some(seating.frequencies.clone()), layout_id));
+        }
+    }
+    let frequencies = match layout {
+        Some(layout) => match assignment_timer(meta, timers) {
+            Some(timer) => Some(assign_from_layout(&timer, layout, &lineup)?),
+            // A layout tunes a timer, and this event has none to tune (pure sim): leave whatever
+            // the formation path produced rather than inventing an assignment.
+            None => frequencies,
+        },
+        None => frequencies,
+    };
+    Ok((lineup, frequencies, layout_id))
 }
 
 /// Resolve a round by id in the event meta, or [`FillError::UnknownRound`].
@@ -1436,7 +1702,51 @@ pub fn fill_round(
         ChannelMode::Static => fill_round_static(meta, timers, round, events)?,
         ChannelMode::PerHeat => fill_round_per_heat(meta, round, round_id, events)?,
     };
+    // #117 S3: the heat's layout and the RD's manual override are applied HERE, once, for both
+    // channel modes — the same discipline `diagnose_complete` follows below. Applying them on one
+    // path and not the other is exactly how an override gets silently lost.
+    let outcome = apply_decisions_to_outcome(meta, timers, round, events, outcome)?;
     Ok(diagnose_complete(meta, round, round_id, events, outcome))
+}
+
+/// Re-express a [`FillOutcome::Scheduled`] under the heat's recorded RD decisions — its channel
+/// layout and its manual seating override (#117 S3).
+///
+/// Every other outcome passes through untouched: there is no heat to decide anything about.
+fn apply_decisions_to_outcome(
+    meta: &EventMeta,
+    timers: &TimerRegistry,
+    round: &RoundDef,
+    events: &[Event],
+    outcome: FillOutcome,
+) -> Result<FillOutcome, FillError> {
+    let FillOutcome::Scheduled {
+        heat,
+        lineup,
+        frequencies,
+        layout: _,
+        field_draw,
+    } = outcome
+    else {
+        return Ok(outcome);
+    };
+    let (lineup, frequencies, layout) = apply_heat_decisions(
+        meta,
+        timers,
+        Some(round),
+        events,
+        &heat,
+        lineup,
+        frequencies,
+    )
+    .map_err(|err| FillError::Assign(err.to_string()))?;
+    Ok(FillOutcome::Scheduled {
+        heat,
+        lineup,
+        frequencies,
+        layout,
+        field_draw,
+    })
 }
 
 /// Tell a `Complete` that means "everything raced" apart from one that means "this format
@@ -1535,8 +1845,10 @@ fn fill_round_per_heat(
             heat: plan.heat,
             lineup: plan.lineup,
             // Per-heat: the handler assigns channels from the timer pool (first-fit), except for
-            // open practice which carries empty frequencies (the lineup is channels).
+            // open practice, whose seats name their own nodes. `apply_decisions_to_outcome` fills
+            // both in from the heat's layout where it has one.
             frequencies: plan.frequencies,
+            layout: None,
             field_draw,
         }),
         // Every plan the generator wants this step is already scheduled (the RD re-issued
@@ -1588,18 +1900,23 @@ fn per_heat_plans(
         return Ok((Vec::new(), field_draw));
     }
 
-    // Open practice (open-practice format): the heat carries **empty** frequencies. Force
-    // `Some(empty)` so the caller logs the `HeatScheduled` with no frequencies regardless of the
-    // timer's allowed channel set — `assign_frequencies` never runs for a practice heat.
+    // Open practice (open-practice format): the plan itself allocates nothing — `Some(empty)` —
+    // and `assign_frequencies` never runs for a practice heat.
     //
-    // ⚠️ The original justification for this was *"its lineup is the active channels themselves"*,
-    // and **that premise is false** (#402): `SeedingRule::AllChannels { channels }` takes node/seat
-    // *indices*, and a seat index carries no frequency at all. So a practice seat's channel has no
-    // source in the log, and the console can only fall back to what the hardware reports.
+    // The original justification was *"its lineup is the active channels themselves"*, and that
+    // premise was false (#402): `SeedingRule::AllChannels { channels }` takes node/seat *indices*,
+    // and a seat index carries no frequency at all. So a practice seat's channel had **no source in
+    // the log**, and the console could only fall back to what the hardware happened to report.
     //
-    // #117 S1 deliberately leaves this as-is: what a practice seat should be tuned to is a *heat →
-    // channel* mapping, which is exactly what event **layers** (S2/S3) introduce. Assigning here
-    // from the allowed set would be inventing that mapping ahead of the RD's model.
+    // **#402 closes here.** `apply_decisions_to_outcome` now assigns a practice heat's channels
+    // from its round's **layout**, exactly like any other heat: a `node-{i}` seat names its own
+    // gate, `Timer::seat_nodes` keeps that index verbatim, and the layout says what that gate is
+    // tuned to. So a practice seat's channel is a real `heat -> channel` mapping, logged with the
+    // heat, rendered by the resolver and pushed to the timer by `set_frequency` like every other
+    // heat's.
+    //
+    // Without a layout it stays empty, which is the pre-S3 behaviour: nothing is invented from the
+    // allowed set, because an allowed set carries no per-node mapping to invent it from (S1).
     let open_practice = is_open_practice(round);
     let plans = match generator.next(&completed) {
         GeneratorStep::Run(plans) => plans
@@ -1649,6 +1966,9 @@ fn fill_round_static(
             heat: plan.heat,
             lineup: plan.lineup,
             frequencies: plan.frequencies,
+            // Resolved by `apply_decisions_to_outcome`, the one place both channel modes pass
+            // through — a static round that names a layout flies it like any other.
+            layout: None,
             // Static rounds are validated FromRoster-only, and roster seedings never freeze (late
             // entrants stay welcome) — no draw to record.
             field_draw: None,
@@ -1733,9 +2053,13 @@ pub struct RematerializedHeat {
     pub heat: HeatId,
     /// The freshly-formed lineup, in the plan's seeding order.
     pub lineup: Vec<CompetitorRef>,
-    /// The freshly-assigned channels (raw MHz), empty when the round assigns none (open practice,
-    /// or an event with no resolvable timer).
+    /// The freshly-assigned channels (raw MHz), empty when the round assigns none (an
+    /// open-practice round with no layout, or an event with no resolvable timer).
     pub frequencies: Vec<(CompetitorRef, u16)>,
+    /// The **channel layout** the re-formed heat flies (#117 S3), when one applies — re-asserted
+    /// alongside the schedule so the recorded "which layout did this heat fly" keeps up with a
+    /// round whose named layouts have just been edited.
+    pub layout: Option<LayoutId>,
     /// The heat's existing custom label, carried through so a rewrite never drops an RD-typed name.
     pub label: Option<String>,
 }
@@ -1794,24 +2118,39 @@ pub fn rematerialize_round_heats(
         let Some(plan) = plans.iter().find(|plan| plan.is(&heat)) else {
             continue;
         };
-        let frequencies = match &plan.frequencies {
-            Some(freqs) => freqs.clone(),
-            // Per-heat: first-fit from the timer's pool, exactly as the fill handler does. An
-            // unassignable lineup (over the node cap, too few channels) leaves the heat as it is —
-            // a stale heat beats a channel-less one.
-            None => match assign_for_event(meta, timers, &plan.lineup) {
+        // #117 S3: the heat's layout and the RD's manual override survive a re-materialization,
+        // because they are applied here through the same `apply_heat_decisions` the fill uses. A
+        // round edit re-forms the heat; it does not overrule the RD's answer for it.
+        let Ok((lineup, frequencies, layout)) = apply_heat_decisions(
+            meta,
+            timers,
+            Some(round),
+            events,
+            &heat,
+            plan.lineup.clone(),
+            plan.frequencies.clone(),
+        ) else {
+            continue;
+        };
+        let frequencies = match frequencies {
+            Some(freqs) => freqs,
+            // Per-heat with no layout: first-fit from the timer's pool, exactly as the fill handler
+            // does. An unassignable lineup (over the node cap, too few channels) leaves the heat as
+            // it is — a stale heat beats a channel-less one.
+            None => match assign_for_event(meta, timers, None, &lineup) {
                 Ok(freqs) => freqs,
                 Err(_) => continue,
             },
         };
         let (lineup_now, frequencies_now, label) = logged_schedule(events, &heat);
-        if lineup_now == plan.lineup && frequencies_now == frequencies {
+        if lineup_now == lineup && frequencies_now == frequencies {
             continue;
         }
         out.push(RematerializedHeat {
             heat,
-            lineup: plan.lineup.clone(),
+            lineup,
             frequencies,
+            layout,
             label,
         });
     }
@@ -2138,6 +2477,107 @@ mod tests {
         names.iter().map(|n| CompetitorRef((*n).into())).collect()
     }
 
+    // ── #117 S3: a heat's layout IS its assignment ───────────────────────────────────────────
+
+    /// A channel layout tuning `pairs` of `(node, channel)`.
+    fn layout(name: &str, pairs: &[(u32, u16)]) -> ChannelLayout {
+        ChannelLayout {
+            id: LayoutId(format!("{name}-id")),
+            name: name.into(),
+            nodes: pairs
+                .iter()
+                .map(|(node, channel)| crate::events::LayoutNode {
+                    node: *node,
+                    channel: *channel,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_layout_assigns_by_the_node_each_seat_actually_flies() {
+        // The layout is a `node → channel` map, and which node a seat flies is `Timer::seat_nodes`
+        // — the single rule (#412). Nothing is picked, nothing is truncated: the layout IS the
+        // assignment, which is why the `take(nodes)` cap has no bearing on this path.
+        let timer = timer_with(4, RACEBAND_MHZ.to_vec());
+        let l = layout("Bracket A", &[(0, 5658), (1, 5695), (2, 5732), (3, 5769)]);
+        let assignment = assign_from_layout(&timer, &l, &lineup(&["A", "B", "C"])).unwrap();
+        assert_eq!(
+            assignment,
+            vec![
+                (CompetitorRef("A".into()), 5658),
+                (CompetitorRef("B".into()), 5695),
+                (CompetitorRef("C".into()), 5732),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_layout_skips_a_disabled_node_rather_than_shifting_onto_it() {
+        // #412's correctness heart, through the layout path: with node index 2 switched off, a
+        // 3-pilot heat flies nodes 0, 1 and 3 — so it takes the layout's entries for 0, 1 and 3.
+        // Shifting up would tune the third pilot's gate to somebody else's channel.
+        let timer = timer_with_disabled(4, RACEBAND_MHZ.to_vec(), vec![2]);
+        let l = layout("Bracket A", &[(0, 5658), (1, 5695), (2, 5732), (3, 5769)]);
+        let assignment = assign_from_layout(&timer, &l, &lineup(&["A", "B", "C"])).unwrap();
+        assert_eq!(
+            assignment,
+            vec![
+                (CompetitorRef("A".into()), 5658),
+                (CompetitorRef("B".into()), 5695),
+                (CompetitorRef("C".into()), 5769),
+            ],
+            "the disabled node's channel (5732) is never handed out"
+        );
+        // A practice lineup names its own gates: a `node-{i}` seat on the disabled node is dropped
+        // outright rather than seated somewhere else.
+        let practice = lineup(&["node-0", "node-2", "node-3"]);
+        let assignment = assign_from_layout(&timer, &l, &practice).unwrap();
+        assert_eq!(
+            assignment,
+            vec![
+                (CompetitorRef("node-0".into()), 5658),
+                (CompetitorRef("node-3".into()), 5769),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_layout_that_says_nothing_about_a_seats_node_is_a_named_refusal() {
+        // The stale-layout case: the RD enabled a node after writing the layout. Rather than seat a
+        // pilot on a gate with no channel, the fill refuses and names the layout, the timer and the
+        // node — every one of them by its friendly name (CLAUDE.md).
+        let timer = timer_with(4, RACEBAND_MHZ.to_vec());
+        let l = layout("Whoop pack", &[(0, 5658), (1, 5695)]);
+        let err = assign_from_layout(&timer, &l, &lineup(&["A", "B", "C"])).unwrap_err();
+        assert_eq!(
+            err,
+            AssignError::LayoutNodeUntuned {
+                timer: "T".into(),
+                layout: "Whoop pack".into(),
+                node: "Node 3".into(),
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("Whoop pack") && msg.contains("Node 3") && msg.contains("T"));
+        assert!(!msg.contains("node-2"), "leaks a raw seat ref: {msg}");
+    }
+
+    #[test]
+    fn a_layout_still_refuses_a_lineup_wider_than_the_enabled_nodes() {
+        // Checked first and identically to the auto-pick path, so an oversized heat is reported as
+        // oversized rather than as a gap in the layout.
+        let timer = timer_with_disabled(4, RACEBAND_MHZ.to_vec(), vec![2]);
+        let l = layout("Bracket A", &[(0, 5658), (1, 5695), (2, 5732), (3, 5769)]);
+        assert_eq!(
+            assign_from_layout(&timer, &l, &lineup(&["A", "B", "C", "D"])).unwrap_err(),
+            AssignError::TooManyForNodes {
+                lineup: 4,
+                nodes: 3
+            }
+        );
+    }
+
     #[test]
     fn assign_picks_the_imd_best_subset_in_seed_order() {
         // #209 auto-pick: an 8-node Raceband timer no longer first-fits R1,R2,R3 (which has a
@@ -2356,21 +2796,36 @@ mod tests {
     }
 
     #[test]
-    fn the_channel_pool_is_capped_by_the_enabled_nodes_too() {
-        // A disabled node is not offered a channel: the candidate pool a heat's IMD pick is drawn
-        // from is `enabled` wide, not `width` wide.
+    fn a_disabled_node_shrinks_the_heat_not_the_channel_pool() {
+        // #412 + #117 S3. A disabled node is never offered a channel — but what it caps is the
+        // HEAT SIZE, not the candidate pool. Before S3 the pool was `take(enabled)`, which quietly
+        // conflated the two: three seats meant the picker only ever saw the first three channels.
+        //
+        // Now a 3-seat heat on a 4-node timer with node 2 switched off picks the IMD-cleanest THREE
+        // of the whole Raceband set, and the cap is enforced where it belongs — on the lineup.
         let timer = timer_with_disabled(4, RACEBAND_MHZ.to_vec(), vec![2]);
         let ok = assign_frequencies(&timer, &lineup(&["A", "B", "C"])).unwrap();
         let chosen: Vec<u16> = ok.iter().map(|(_, mhz)| *mhz).collect();
-        // Three distinct channels, all from the first three of the Raceband pool (the pool is
-        // `take(3)` — the enabled count — before the IMD pick).
-        assert_eq!(chosen.len(), 3);
+        assert_eq!(chosen.len(), 3, "one channel per seat, three enabled seats");
         for mhz in &chosen {
             assert!(
-                RACEBAND_MHZ[..3].contains(mhz),
-                "{mhz} came from outside the enabled-node-capped pool"
+                RACEBAND_MHZ.contains(mhz),
+                "{mhz} is not an allowed channel"
             );
         }
+        assert_eq!(
+            chosen,
+            gridfpv_engine::imd::pick_best_imd_set(&RACEBAND_MHZ, 3),
+            "the picker chooses from the WHOLE allowed set, not its first `enabled` entries"
+        );
+        // The seat cap still bites: a 4-pilot heat does not fit three enabled nodes.
+        assert_eq!(
+            assign_frequencies(&timer, &lineup(&["A", "B", "C", "D"])).unwrap_err(),
+            AssignError::TooManyForNodes {
+                lineup: 4,
+                nodes: 3
+            }
+        );
     }
 
     #[test]
@@ -2389,11 +2844,13 @@ mod tests {
     }
 
     #[test]
-    fn assign_imd_pick_is_capped_by_node_count_and_replay_deterministic() {
-        // #209 auto-pick, capped by nodes + deterministic. A 4-node Raceband timer caps the candidate
-        // pool to its first 4 channels (R1..R4); the IMD-best 3-subset of *that* capped pool is
-        // [5658, 5695, 5769] (score 37) — chosen over the first-fit R1,R2,R3 (score 0). The node cap
-        // bounds the candidate set, exactly as the prior first-fit did.
+    fn the_auto_pick_sees_the_whole_allowed_set_and_replays_deterministically() {
+        // #117 S3 — the `take(nodes)` cap is gone.
+        //
+        // The RD's own scenario is "16 channels on a 4-node timer". Under the old cap the picker
+        // saw the first 4 of those and had nothing to choose between; the deliberately large
+        // allowed set never reached it. Now the whole set is the candidate pool, which is the only
+        // reading under which `pick_best_imd_set` has a job at all.
         let timer = timer_with(4, RACEBAND_MHZ.to_vec());
         let l = lineup(&["A", "B", "C"]);
 
@@ -2401,13 +2858,16 @@ mod tests {
         let chosen: Vec<u16> = first.iter().map(|(_, f)| *f).collect();
         assert_eq!(
             chosen,
-            vec![5658, 5695, 5769],
-            "IMD-best of the node-capped pool"
+            gridfpv_engine::imd::pick_best_imd_set(&RACEBAND_MHZ, 3),
+            "the IMD-best 3 of the WHOLE allowed set"
         );
         assert!(
             gridfpv_engine::imd::imd_score(&chosen)
-                > gridfpv_engine::imd::imd_score(&[5658, 5695, 5732]),
-            "still beats the first-fit even within the node cap"
+                >= gridfpv_engine::imd::imd_score(&gridfpv_engine::imd::pick_best_imd_set(
+                    &RACEBAND_MHZ[..4],
+                    3
+                )),
+            "a wider pool can only ever produce a cleaner set, never a worse one"
         );
 
         // Fold/fill twice → identical (no clock, no RNG): the assignment replays deterministically.
@@ -2461,7 +2921,7 @@ mod tests {
             classes: vec![ScopeClassId("open".into())],
             classes_membership: membership,
             rounds,
-            channel_layers: vec![],
+            channel_layouts: vec![],
         }
     }
 
@@ -2494,6 +2954,7 @@ mod tests {
     /// single-heat behaviour the Slice-3 tests assert is preserved.
     fn qual_round(id: &str, class: &str) -> RoundDef {
         RoundDef {
+            layouts: Vec::new(),
             id: RoundId(id.into()),
             label: id.into(),
             classes: vec![ScopeClassId(class.into())],
@@ -2920,6 +3381,7 @@ mod tests {
     /// heat's placements reshuffles the round ranking too.
     fn h2h_round(id: &str, class: &str, win: WinCondition) -> RoundDef {
         RoundDef {
+            layouts: Vec::new(),
             id: RoundId(id.into()),
             label: id.into(),
             classes: vec![ScopeClassId(class.into())],
@@ -3794,6 +4256,7 @@ mod tests {
     /// + `seeding: AllChannels { channels }`, with no eligible classes (it is not a class round).
     fn open_practice_round(id: &str, channels: &[usize]) -> RoundDef {
         RoundDef {
+            layouts: Vec::new(),
             id: RoundId(id.into()),
             label: id.into(),
             classes: vec![],
@@ -3957,6 +4420,7 @@ mod tests {
     /// A `timed_qual` round in **Static** channel mode (one format-round) over `class`.
     fn static_qual_round(id: &str, class: &str) -> RoundDef {
         RoundDef {
+            layouts: Vec::new(),
             id: RoundId(id.into()),
             label: id.into(),
             classes: vec![ScopeClassId(class.into())],
@@ -4367,6 +4831,7 @@ mod tests {
     /// must come from the lap-list projection, not the metric.
     fn race_round(id: &str, class: &str) -> RoundDef {
         RoundDef {
+            layouts: Vec::new(),
             id: RoundId(id.into()),
             label: id.into(),
             classes: vec![ScopeClassId(class.into())],
@@ -4541,6 +5006,7 @@ mod tests {
     /// field builder is exercised), so `head_to_head` + a sensible win condition keep it valid.
     fn seeded_round(id: &str, seeding: SeedingRule) -> RoundDef {
         RoundDef {
+            layouts: Vec::new(),
             id: RoundId(id.into()),
             label: id.into(),
             classes: vec![ScopeClassId("open".into())],
@@ -4792,7 +5258,7 @@ mod tests {
             FillOutcome::Scheduled { heat, lineup, .. } => (heat, lineup),
             other => panic!("expected a scheduled heat, got {other:?}"),
         };
-        let before_freqs = assign_for_event(&meta_before, &timers, &before_lineup).unwrap();
+        let before_freqs = assign_for_event(&meta_before, &timers, None, &before_lineup).unwrap();
         assert!(
             !before_freqs.is_empty(),
             "the fixture timer assigns channels"

@@ -100,10 +100,10 @@ use crate::classes::{
 use crate::control_handler::ControlAuth;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{
-    ActiveEvent, ChannelLayers, CreateEventRequest, EventMeta, EventRegistry, LayerError, LayerId,
-    NewChannelLayerRequest, NewRoundReq, RegistryError, RegistryErrorKind, RoundDef, RoundError,
-    RoundIssue, SetActiveEventRequest, SetChannelLayerRequest, SetClassMembershipRequest,
-    SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
+    ActiveEvent, ChannelLayouts, CreateEventRequest, EventMeta, EventRegistry, LayoutError,
+    LayoutId, NewChannelLayoutRequest, NewRoundReq, RegistryError, RegistryErrorKind, RoundDef,
+    RoundError, RoundIssue, SetActiveEventRequest, SetChannelLayoutRequest,
+    SetClassMembershipRequest, SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
     HeatSummary, heat_summaries, heats_of_defined_rounds, live_state_over_with_floor,
@@ -498,18 +498,18 @@ pub fn router(registry: EventRegistry) -> Router {
             "/events/{event_id}/rounds/{round_id}",
             put(update_round).delete(remove_round),
         )
-        // Per-event **channel layers** (#117 S2): the event-scoped answer to *what goes on which
-        // node?*. A layer is one complete tuning of the event's timer — one channel per enabled
+        // Per-event **channel layouts** (#117 S2): the event-scoped answer to *what goes on which
+        // node?*. A layout is one complete tuning of the event's timer — one channel per enabled
         // node, drawn from the timer's **allowed** set (S1). The `GET` is open (a read, like the
-        // heats list); add / replace / remove are RD-gated. Layers are event state: editing one
+        // heats list); add / replace / remove are RD-gated. Layouts are event state: editing one
         // never touches the global timer record, which is the bug this slice exists to close.
         .route(
-            "/events/{event_id}/layers",
-            get(list_channel_layers).post(add_channel_layer),
+            "/events/{event_id}/layouts",
+            get(list_channel_layouts).post(add_channel_layout),
         )
         .route(
-            "/events/{event_id}/layers/{layer_id}",
-            put(update_channel_layer).delete(remove_channel_layer),
+            "/events/{event_id}/layouts/{layout_id}",
+            put(update_channel_layout).delete(remove_channel_layout),
         )
         // Per-event scheduled **heats** (race redesign Slice 3b): the round-tagged heats list the
         // Heats UI reads — open, no token (a read), like the snapshot routes.
@@ -1706,97 +1706,100 @@ async fn set_class_membership(
     Ok(Json(meta))
 }
 
-// ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────────
+// ── Event channel layouts (#117 S2) ──────────────────────────────────────────────────────────────
 //
 // Four routes, shaped exactly like the rounds ones, and every write answers with the **whole**
-// [`ChannelLayers`] view rather than the one layer it touched. The overlap warnings are a property
-// of the layer *set*, so returning only the changed layer would leave the console to re-derive
+// [`ChannelLayouts`] view rather than the one layout it touched. The overlap warnings are a property
+// of the layout *set*, so returning only the changed layout would leave the console to re-derive
 // them — a second implementation of a rule the Director already owns.
 
-/// Map a [`LayerError`] to a [`ProtocolError`]: a missing event/layer is a typed **404**
+/// Map a [`LayoutError`] to a [`ProtocolError`]: a missing event/layout is a typed **404**
 /// ([`ErrorCode::UnknownScope`]); an invalid tuning (duplicate channel, a channel outside the
 /// timer's allowed set, a disabled/out-of-range node, an incomplete mapping, a blank/duplicate
 /// name) is a **400** ([`ErrorCode::BadRequest`]) whose message is already phrased for the RD.
-fn layer_error(e: LayerError) -> ProtocolError {
+fn layout_error(e: LayoutError) -> ProtocolError {
     let code = match e {
-        LayerError::EventNotFound(_) | LayerError::LayerNotFound(_) => ErrorCode::UnknownScope,
-        LayerError::Invalid(_) => ErrorCode::BadRequest,
+        LayoutError::EventNotFound(_) | LayoutError::LayoutNotFound(_) => ErrorCode::UnknownScope,
+        LayoutError::Invalid(_) => ErrorCode::BadRequest,
     };
     ProtocolError::new(code, e.to_string())
 }
 
-/// `GET /events/{event_id}/layers` — an event's **channel layers** plus their cross-layer overlap
+/// `GET /events/{event_id}/layouts` — an event's **channel layouts** plus their cross-layout overlap
 /// warnings (#117 S2). Open, no token (a read, like the heats list).
 ///
-/// The `overlaps` are advisory and always have been: reusing a channel between layers only matters
+/// The `overlaps` are advisory and always have been: reusing a channel between layouts only matters
 /// for the keep-pilots-on-one-channel strategy, so it is reported and never enforced. An unknown
 /// event is a typed **404**.
-async fn list_channel_layers(
+async fn list_channel_layouts(
     State(registry): State<EventRegistry>,
     Path(event_id): Path<EventId>,
-) -> Result<Json<ChannelLayers>, ProtocolError> {
-    registry.channel_layers(&event_id).map(Json).ok_or_else(|| {
-        ProtocolError::new(
-            ErrorCode::UnknownScope,
-            format!("no event with id {:?}", event_id.0),
-        )
-    })
+) -> Result<Json<ChannelLayouts>, ProtocolError> {
+    registry
+        .channel_layouts(&event_id)
+        .map(Json)
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::UnknownScope,
+                format!("no event with id {:?}", event_id.0),
+            )
+        })
 }
 
-/// `POST /events/{event_id}/layers` — define a **channel layer** on an event (#117 S2), RD-gated.
+/// `POST /events/{event_id}/layouts` — define a **channel layout** on an event (#117 S2), RD-gated.
 ///
-/// [`ControlAuth`] runs first. The layer id is **auto-generated** server-side (never in the body).
-/// Omitting `nodes` **seeds** the layer from the event timer's allowed set — the global→event seam:
+/// [`ControlAuth`] runs first. The layout id is **auto-generated** server-side (never in the body).
+/// Omitting `nodes` **seeds** the layout from the event timer's allowed set — the global→event seam:
 /// what the RD ticked globally is the default an event starts from, and every edit from here on is
 /// event-local. A tuning that duplicates a channel, names a channel the timer is not allowed to
 /// use, names a disabled/out-of-range node, or leaves an enabled node untuned is a typed **400**;
 /// an unknown event is a **404**. On success the event's meta is written through to disk (issue
-/// #115) and the whole resulting [`ChannelLayers`] view is returned.
-async fn add_channel_layer(
+/// #115) and the whole resulting [`ChannelLayouts`] view is returned.
+async fn add_channel_layout(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
     Path(event_id): Path<EventId>,
-    Json(body): Json<NewChannelLayerRequest>,
-) -> Result<Json<ChannelLayers>, ProtocolError> {
+    Json(body): Json<NewChannelLayoutRequest>,
+) -> Result<Json<ChannelLayouts>, ProtocolError> {
     registry
-        .add_channel_layer(&event_id, body)
+        .add_channel_layout(&event_id, body)
         .map(Json)
-        .map_err(layer_error)
+        .map_err(layout_error)
 }
 
-/// `PUT /events/{event_id}/layers/{layer_id}` — replace a **channel layer**'s name and mapping
+/// `PUT /events/{event_id}/layouts/{layout_id}` — replace a **channel layout**'s name and mapping
 /// (#117 S2), RD-gated.
 ///
 /// The id is fixed (the path segment); the name and the whole node → channel mapping are replaced
-/// wholesale and re-validated exactly as on create. Unknown event/layer → **404**; an invalid
+/// wholesale and re-validated exactly as on create. Unknown event/layout → **404**; an invalid
 /// tuning → **400**. Written through to disk (issue #115); returns the whole updated
-/// [`ChannelLayers`] view.
-async fn update_channel_layer(
+/// [`ChannelLayouts`] view.
+async fn update_channel_layout(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
-    Path((event_id, layer_id)): Path<(EventId, LayerId)>,
-    Json(body): Json<SetChannelLayerRequest>,
-) -> Result<Json<ChannelLayers>, ProtocolError> {
+    Path((event_id, layout_id)): Path<(EventId, LayoutId)>,
+    Json(body): Json<SetChannelLayoutRequest>,
+) -> Result<Json<ChannelLayouts>, ProtocolError> {
     registry
-        .update_channel_layer(&event_id, &layer_id, body)
+        .update_channel_layout(&event_id, &layout_id, body)
         .map(Json)
-        .map_err(layer_error)
+        .map_err(layout_error)
 }
 
-/// `DELETE /events/{event_id}/layers/{layer_id}` — remove a **channel layer** (#117 S2), RD-gated.
+/// `DELETE /events/{event_id}/layouts/{layout_id}` — remove a **channel layout** (#117 S2), RD-gated.
 ///
-/// Unknown event/layer → **404** (not a silent no-op: a console deleting a layer someone else
+/// Unknown event/layout → **404** (not a silent no-op: a console deleting a layout someone else
 /// already deleted is told, rather than left believing it removed something). Written through to
-/// disk (issue #115); returns the whole updated [`ChannelLayers`] view.
-async fn remove_channel_layer(
+/// disk (issue #115); returns the whole updated [`ChannelLayouts`] view.
+async fn remove_channel_layout(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
-    Path((event_id, layer_id)): Path<(EventId, LayerId)>,
-) -> Result<Json<ChannelLayers>, ProtocolError> {
+    Path((event_id, layout_id)): Path<(EventId, LayoutId)>,
+) -> Result<Json<ChannelLayouts>, ProtocolError> {
     registry
-        .remove_channel_layer(&event_id, &layer_id)
+        .remove_channel_layout(&event_id, &layout_id)
         .map(Json)
-        .map_err(layer_error)
+        .map_err(layout_error)
 }
 
 /// Map a [`RoundError`] to a [`ProtocolError`]: a missing event/round is a typed **404**
@@ -1949,6 +1952,7 @@ fn fill_error(err: round_engine::FillError) -> ProtocolError {
         FillError::EmptyField(_)
         | FillError::UnknownFormat(_)
         | FillError::MissingChannel(_)
+        | FillError::Assign(_)
         | FillError::SeedingTooDeep => ErrorCode::BadRequest,
     };
     ProtocolError::new(code, err.to_string())
@@ -2962,6 +2966,7 @@ mod tests {
             .add_round(
                 &event_id,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Race".into(),
                     classes: vec![],
                     format: "timed_qual".into(),
@@ -5027,6 +5032,7 @@ mod tests {
                 .add_round(
                     &sole_event(&registry),
                     NewRoundReq {
+                        layouts: Vec::new(),
                         label: "Practice".into(),
                         classes: vec![],
                         // The OPEN PRACTICE format is the whole of the exemption:
@@ -5585,6 +5591,7 @@ mod tests {
                 .add_round(
                     &sole_event(&registry),
                     NewRoundReq {
+                        layouts: Vec::new(),
                         label: "Practice".into(),
                         classes: vec![],
                         format: gridfpv_engine::format::OpenPractice::NAME.to_string(),
@@ -6227,10 +6234,10 @@ mod tests {
         );
     }
 
-    // --- #117 S2: event channel layers over the wire -------------------------
+    // --- #117 S2: event channel layouts over the wire -------------------------
 
-    /// `POST /events/{id}/layers` with `body`, returning the status and the parsed JSON body.
-    async fn post_layer(
+    /// `POST /events/{id}/layouts` with `body`, returning the status and the parsed JSON body.
+    async fn post_layout(
         registry: EventRegistry,
         event: &EventId,
         body: serde_json::Value,
@@ -6239,7 +6246,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/events/{}/layers", event.0))
+                    .uri(format!("/events/{}/layouts", event.0))
                     .header("Content-Type", "application/json")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -6252,19 +6259,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn defining_a_layer_seeds_it_from_the_timers_allowed_set() {
+    async fn defining_a_layout_seeds_it_from_the_timers_allowed_set() {
         // The global→event seam over the wire: no `nodes` in the body, and the Director seeds the
-        // layer from what the RD ticked for this timer on the Timers page.
+        // layout from what the RD ticked for this timer on the Timers page.
         let (registry, _state, _) = state_with(vec![]);
         let event = sole_event(&registry);
         let (status, body) =
-            post_layer(registry.clone(), &event, json!({ "name": "Bracket A" })).await;
+            post_layout(registry.clone(), &event, json!({ "name": "Bracket A" })).await;
         assert_eq!(status, StatusCode::OK);
-        let layers = body["layers"].as_array().unwrap();
-        assert_eq!(layers.len(), 1);
-        assert_eq!(layers[0]["name"], "Bracket A");
+        let layouts = body["layouts"].as_array().unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0]["name"], "Bracket A");
         // The Mock's eight Raceband channels, one per node, node index ascending.
-        let nodes = layers[0]["nodes"].as_array().unwrap();
+        let nodes = layouts[0]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 8);
         assert_eq!(nodes[0]["node"], 0);
         assert_eq!(nodes[0]["channel"], 5658);
@@ -6274,7 +6281,7 @@ mod tests {
         let response = router(registry)
             .oneshot(
                 Request::builder()
-                    .uri(format!("/events/{}/layers", event.0))
+                    .uri(format!("/events/{}/layouts", event.0))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -6283,14 +6290,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let read: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(read["layers"], body["layers"]);
+        assert_eq!(read["layouts"], body["layouts"]);
     }
 
     #[tokio::test]
-    async fn a_layer_with_two_nodes_on_one_channel_is_a_400_naming_both_nodes() {
+    async fn a_layout_with_two_nodes_on_one_channel_is_a_400_naming_both_nodes() {
         let (registry, _state, _) = state_with(vec![]);
         let event = sole_event(&registry);
-        let (status, body) = post_layer(
+        let (status, body) = post_layout(
             registry,
             &event,
             json!({
@@ -6318,29 +6325,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_layer_overlap_comes_back_as_a_warning_on_a_200() {
-        // The RD's call: reuse is flagged, never refused. Two identically-seeded layers both land.
+    async fn cross_layout_overlap_comes_back_as_a_warning_on_a_200() {
+        // The RD's call: reuse is flagged, never refused. Two identically-seeded layouts both land.
         let (registry, _state, _) = state_with(vec![]);
         let event = sole_event(&registry);
-        let (first, _) = post_layer(registry.clone(), &event, json!({ "name": "Bracket A" })).await;
+        let (first, _) =
+            post_layout(registry.clone(), &event, json!({ "name": "Bracket A" })).await;
         assert_eq!(first, StatusCode::OK);
-        let (status, body) = post_layer(registry, &event, json!({ "name": "Bracket B" })).await;
+        let (status, body) = post_layout(registry, &event, json!({ "name": "Bracket B" })).await;
         assert_eq!(
             status,
             StatusCode::OK,
             "an overlap must not block the write"
         );
-        assert_eq!(body["layers"].as_array().unwrap().len(), 2);
+        assert_eq!(body["layouts"].as_array().unwrap().len(), 2);
         let overlaps = body["overlaps"].as_array().unwrap();
         assert_eq!(overlaps.len(), 1);
         assert_eq!(overlaps[0]["channels"].as_array().unwrap().len(), 8);
     }
 
     #[tokio::test]
-    async fn layer_routes_404_an_unknown_event_and_an_unknown_layer() {
+    async fn layout_routes_404_an_unknown_event_and_an_unknown_layout() {
         let (registry, _state, _) = state_with(vec![]);
         let missing = EventId("nope".into());
-        let (status, _) = post_layer(registry.clone(), &missing, json!({ "name": "X" })).await;
+        let (status, _) = post_layout(registry.clone(), &missing, json!({ "name": "X" })).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
         let event = sole_event(&registry);
@@ -6348,7 +6356,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/events/{}/layers/never-existed", event.0))
+                    .uri(format!("/events/{}/layouts/never-existed", event.0))
                     .body(Body::empty())
                     .unwrap(),
             )

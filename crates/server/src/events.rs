@@ -176,12 +176,12 @@ pub struct EventMeta {
     /// for free.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rounds: Vec<RoundDef>,
-    /// The event's **channel layers** (#117 S2) — the event-scoped answer to *what goes on which
+    /// The event's **channel layouts** (#117 S2) — the event-scoped answer to *what goes on which
     /// node?*
     ///
-    /// Each [`ChannelLayer`] is one complete tuning of the event's timer (one channel per enabled
+    /// Each [`ChannelLayout`] is one complete tuning of the event's timer (one channel per enabled
     /// node), drawn from the timer's **allowed** set ([`Timer::available_channels`], S1). A bracket
-    /// runs off one layer all tournament; a GQ-style qualifier defines many so each pilot keeps
+    /// runs off one layout all tournament; a GQ-style qualifier defines many so each pilot keeps
     /// their own channel — the RD picks the strategy, the model does not.
     ///
     /// **This is the field that stops "editing channels in the event" from mutating the global timer
@@ -190,14 +190,22 @@ pub struct EventMeta {
     /// next to the log rather than in it. Global is the seed, the event owns what it runs — the same
     /// layering as #411's base profile → event tune.
     ///
-    /// Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted before
-    /// #117 S2 reads back with no layers; a new event defaults to an **empty** list (the RD defines
-    /// the first one). The whole field round-trips through the event's persisted meta (issue #115),
-    /// so it is restart-safe for free.
+    /// # Who reads it (#117 S3)
     ///
-    /// **Nothing reads it yet.** Which heat flies which layer — and the retune on arming — is S3.
+    /// A **round** names the layouts its heats may fly ([`RoundDef::layouts`]); a **heat** binds one
+    /// ([`Event::HeatLayoutSet`](gridfpv_events::Event::HeatLayoutSet)), and that binding is what
+    /// its channels are assigned from
+    /// ([`assign_from_layout`](crate::round_engine::assign_from_layout)). The console resolves a
+    /// seat's channel through the same mapping.
+    ///
+    /// Additive (`#[serde(default)]`, omitted from the wire when empty) so an event persisted
+    /// before #117 S2 reads back with no layouts; a new event defaults to an **empty** list (the RD
+    /// defines the first one). The whole field round-trips through the event's persisted meta
+    /// (issue #115), so it is restart-safe for free. An event stored under the pre-rename
+    /// `channel_layers` key simply **loads with no layouts** — pre-release, a stale record may lose
+    /// a field, but it must never fail to open.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub channel_layers: Vec<ChannelLayer>,
+    pub channel_layouts: Vec<ChannelLayout>,
 }
 
 /// One class's **membership** within an event (race redesign Slice 1a): the roster pilots that
@@ -329,7 +337,7 @@ mod member_slots {
     }
 }
 
-// ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────────
+// ── Event channel layouts (#117 S2) ──────────────────────────────────────────────────────────────
 //
 // Three scopes answer three different questions about channels, and conflating any two of them has
 // been this repo's most repeated bug (#402, #412, #413, #416):
@@ -337,30 +345,31 @@ mod member_slots {
 // | scope             | question                          | state                                |
 // |-------------------|-----------------------------------|--------------------------------------|
 // | Global (a timer)  | what may this timer *ever* use?   | [`Timer::available_channels`] (S1)   |
-// | **Event**         | **what goes on which node?**      | **[`ChannelLayer`] — this slice**    |
-// | Heat              | which layer does this heat fly?   | S3, not built                        |
+// | **Event**         | **what goes on which node?**      | **[`ChannelLayout`] — this slice**    |
+// | Heat              | which layout does this heat fly?   | S3, not built                        |
 //
-// A layer is **event-scoped**, and that is the point. Today the Timers-page checkboxes edit one
+// A layout is **event-scoped**, and that is the point. Today the Timers-page checkboxes edit one
 // per-timer field, and the event workspace embeds the *same* `TimerManager` — so editing channels
-// "in the event" mutates the **global** timer record. Layers live on [`EventMeta`] beside
+// "in the event" mutates the **global** timer record. Layouts live on [`EventMeta`] beside
 // `timers` / `roster` / `classes`, the same place every other event-scoped decision already lives,
 // and they are written through to the event's SQLite `meta` table (issue #115) so they are
 // restart-safe for free. The global allowed set is the **seed**; the event owns what it runs —
 // deliberately the same layering as #411's base-profile → event-tune, so there is one mental model
 // for both.
 
-/// Identifies one **channel layer** within an event (#117 S2).
+/// Identifies one **channel layout** within an event — re-exported from the event model.
 ///
-/// A transparent string newtype like every other id on the wire, and **auto-generated** (a slug of
-/// the layer's name plus a short random suffix — the same id-gen as events / pilots / rounds).
-/// Never user-entered, and a **wire handle only**: what an RD reads is [`ChannelLayer::name`]
-/// (CLAUDE.md's display rule).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
-#[serde(transparent)]
-#[ts(export, export_to = "bindings/")]
-pub struct LayerId(pub String);
+/// **Auto-generated** (a slug of the layout's name plus a short random suffix — the same id-gen as
+/// events / pilots / rounds), never user-entered, and a **wire handle only**: what an RD reads is
+/// [`ChannelLayout::name`] (CLAUDE.md's display rule).
+///
+/// It lives in `gridfpv_events` beside [`ClassId`] / [`RoundId`] because #117 S3 tags a scheduled
+/// heat with the layout it flies, and a fact about a heat belongs in the log. Re-exported here so
+/// the config side (this module) and the log side name the *same* type — the discipline that keeps
+/// `ClassId` from meaning two things.
+pub use gridfpv_events::LayoutId;
 
-/// One node's tuning within a [`ChannelLayer`] (#117 S2): the node index and the raw-MHz channel it
+/// One node's tuning within a [`ChannelLayout`] (#117 S2): the node index and the raw-MHz channel it
 /// is tuned to.
 ///
 /// **0-based on the wire, 1-based on screen** — index `2` is the node the RD calls "Node 3"
@@ -369,62 +378,62 @@ pub struct LayerId(pub String);
 /// are wire handles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct LayerNode {
+pub struct LayoutNode {
     /// The node's index on the timer, **0-based** — the same index [`TimerNode`] carries, and the
     /// one `NodeSignal::node` and the `node-{i}` seat ref mean.
     pub node: u32,
-    /// The raw centre frequency in **MHz** this node is tuned to in this layer. Must be one of the
+    /// The raw centre frequency in **MHz** this node is tuned to in this layout. Must be one of the
     /// timer's [`available_channels`](Timer::available_channels) — the *allowed* set S1 clarified.
     pub channel: u16,
 }
 
-/// One event **channel layer** (#117 S2): a complete tuning of the event's timer — one channel per
+/// One event **channel layout** (#117 S2): a complete tuning of the event's timer — one channel per
 /// enabled node.
 ///
 /// ```text
-/// Layer A:  Node 1→R1  Node 2→R2  Node 3→R3  Node 4→R4
-/// Layer B:  Node 1→F1  Node 2→F2  Node 3→F4  Node 4→F8
+/// Layout A:  Node 1→R1  Node 2→R2  Node 3→R3  Node 4→R4
+/// Layout B:  Node 1→F1  Node 2→F2  Node 3→F4  Node 4→F8
 /// ```
 ///
-/// # Why a layer, and why the system does not choose one for you
+/// # Why a layout, and why the system does not choose one for you
 ///
 /// The RD picks the strategy, per format, and both strategies fall out of this one mechanism with
 /// no special case:
 ///
-/// - a **bracket** is *one layer for the whole tournament* — n channels for n pilots per heat, and
+/// - a **bracket** is *one layout for the whole tournament* — n channels for n pilots per heat, and
 ///   they never move;
-/// - a **GQ-style qualifier** defines *many* layers so each pilot can stay on their own channel.
+/// - a **GQ-style qualifier** defines *many* layouts so each pilot can stay on their own channel.
 ///
-/// So nothing here encodes a policy that forces either. What the model does enforce is that a layer
+/// So nothing here encodes a policy that forces either. What the model does enforce is that a layout
 /// is a **complete, conflict-free tuning**: every enabled node has exactly one channel, and no two
 /// nodes share one (a node cannot share a frequency with its neighbour). Reusing a channel *between*
-/// layers is a [`LayerOverlap`] **warning**, never a refusal — it only matters for the
-/// keep-pilots-on-one-channel strategy, and an RD running a bracket off a single layer does not
+/// layouts is a [`LayoutOverlap`] **warning**, never a refusal — it only matters for the
+/// keep-pilots-on-one-channel strategy, and an RD running a bracket off a single layout does not
 /// care.
 ///
-/// Carried in [`EventMeta::channel_layers`]. **Not yet wired into heat filling or
-/// `assign_frequencies`** — which heat flies which layer is S3.
+/// Carried in [`EventMeta::channel_layouts`]. **Not yet wired into heat filling or
+/// `assign_frequencies`** — which heat flies which layout is S3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct ChannelLayer {
+pub struct ChannelLayout {
     /// The stable, **auto-generated** handle (a slug of [`name`](Self::name) + a short random
     /// suffix). Never user-entered; the name is display-only but is what a person reads.
-    pub id: LayerId,
+    pub id: LayoutId,
     /// The RD-typed display name (`"Bracket A"`, `"Qual pack 2"`). Non-empty after trimming, and
-    /// unique within the event — two layers called "Bracket A" is a mis-click, not a choice.
+    /// unique within the event — two layouts called "Bracket A" is a mis-click, not a choice.
     pub name: String,
     /// The node → channel mapping, **ascending by node**, one entry per enabled node of the event's
     /// timer. Complete and duplicate-free (see the type doc).
-    pub nodes: Vec<LayerNode>,
+    pub nodes: Vec<LayoutNode>,
 }
 
-impl ChannelLayer {
-    /// The channel this layer tunes `node` to, or `None` when the layer says nothing about it (a
-    /// layer stored before the RD enabled that node).
+impl ChannelLayout {
+    /// The channel this layout tunes `node` to, or `None` when the layout says nothing about it (a
+    /// layout stored before the RD enabled that node).
     ///
     /// **The per-node mapping the allowed set never had.** `competitorName.ts`'s resolver source (3)
     /// currently reads a seat's channel as `available_channels[node]`, which S1 documented as a
-    /// plausible-looking fabrication; this is the value that replaces it once a heat names a layer
+    /// plausible-looking fabrication; this is the value that replaces it once a heat names a layout
     /// (S3).
     pub fn channel_for(&self, node: u32) -> Option<u16> {
         self.nodes
@@ -433,8 +442,8 @@ impl ChannelLayer {
             .map(|n| n.channel)
     }
 
-    /// Every channel this layer uses, ascending and de-duplicated — the join key for
-    /// [`layer_overlaps`].
+    /// Every channel this layout uses, ascending and de-duplicated — the join key for
+    /// [`layout_overlaps`].
     pub fn channels(&self) -> Vec<u16> {
         let mut out: Vec<u16> = self.nodes.iter().map(|n| n.channel).collect();
         out.sort_unstable();
@@ -443,30 +452,30 @@ impl ChannelLayer {
     }
 }
 
-/// Two layers that share at least one channel (#117 S2) — a **warning**, never a refusal.
+/// Two layouts that share at least one channel (#117 S2) — a **warning**, never a refusal.
 ///
-/// The RD settled this explicitly: *"if I have R1-4 in one layer, I cannot use R1-4 in the next"*
-/// only matters for the **keep-pilots-on-one-channel** strategy. If layers are just timer tunings,
+/// The RD settled this explicitly: *"if I have R1-4 in one layout, I cannot use R1-4 in the next"*
+/// only matters for the **keep-pilots-on-one-channel** strategy. If layouts are just timer tunings,
 /// reusing a channel across them is harmless — so it is flagged so an RD pursuing that strategy
 /// sees it, and it never blocks an RD who does not care. Nothing in the write path consults this;
-/// it is computed on top of a layer set that has *already been accepted*.
+/// it is computed on top of a layout set that has *already been accepted*.
 ///
-/// Carries the two [`LayerId`]s as **wire handles** and the shared channels as raw MHz. Both resolve
-/// to names in the console (layer id → `ChannelLayer.name`, MHz → `channelLabel`), which is the
+/// Carries the two [`LayoutId`]s as **wire handles** and the shared channels as raw MHz. Both resolve
+/// to names in the console (layout id → `ChannelLayout.name`, MHz → `channelLabel`), which is the
 /// repo's rule: ids travel, names display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct LayerOverlap {
-    /// The **earlier** of the two layers, in the event's layer order.
-    pub layer: LayerId,
-    /// The **later** of the two layers, in the event's layer order.
-    pub other: LayerId,
-    /// The channels both layers use, ascending. Never empty (an empty intersection is not reported).
+pub struct LayoutOverlap {
+    /// The **earlier** of the two layouts, in the event's layout order.
+    pub layout: LayoutId,
+    /// The **later** of the two layouts, in the event's layout order.
+    pub other: LayoutId,
+    /// The channels both layouts use, ascending. Never empty (an empty intersection is not reported).
     pub channels: Vec<u16>,
 }
 
-/// An event's layers **and what is worth telling the RD about them** (#117 S2) — the body of
-/// `GET /events/{id}/layers`, and of every layer write.
+/// An event's layouts **and what is worth telling the RD about them** (#117 S2) — the body of
+/// `GET /events/{id}/layouts`, and of every layout write.
 ///
 /// One view type for the read and all three writes so the console never has to re-derive the
 /// warnings from a write's response: a write returns the resulting whole picture, exactly like the
@@ -474,100 +483,100 @@ pub struct LayerOverlap {
 /// RD can act on. This carries only the things that are *allowed* and still worth flagging.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct ChannelLayers {
-    /// The event's layers, in definition order.
-    pub layers: Vec<ChannelLayer>,
-    /// Cross-layer channel reuse ([`LayerOverlap`]) — **advisory**. Empty when no two layers share
-    /// a channel, and empty is *not* a goal: a bracket run off one layer trivially has none.
+pub struct ChannelLayouts {
+    /// The event's layouts, in definition order.
+    pub layouts: Vec<ChannelLayout>,
+    /// Cross-layout channel reuse ([`LayoutOverlap`]) — **advisory**. Empty when no two layouts share
+    /// a channel, and empty is *not* a goal: a bracket run off one layout trivially has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlaps: Vec<LayerOverlap>,
+    pub overlaps: Vec<LayoutOverlap>,
 }
 
-/// The body of `POST /events/{id}/layers` — define a new channel layer (#117 S2).
+/// The body of `POST /events/{id}/layouts` — define a new channel layout (#117 S2).
 ///
 /// The id is generated server-side (never user-entered). `nodes` is **optional and that is the
-/// global→event seam**: omit it and the layer is *seeded* from the event timer's allowed set —
+/// global→event seam**: omit it and the layout is *seeded* from the event timer's allowed set —
 /// enabled node *i* takes the *i*-th allowed channel, in the RD's own preference order. That is the
-/// whole of "global is the default subset an event starts from"; from the moment the layer exists
+/// whole of "global is the default subset an event starts from"; from the moment the layout exists
 /// it is event state, and editing it never touches [`Timer::available_channels`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct NewChannelLayerRequest {
-    /// The layer's display name. Trimmed; must be non-empty and unique within the event.
+pub struct NewChannelLayoutRequest {
+    /// The layout's display name. Trimmed; must be non-empty and unique within the event.
     pub name: String,
     /// The explicit node → channel mapping, or omitted to **seed** it from the timer's allowed set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub nodes: Option<Vec<LayerNode>>,
+    pub nodes: Option<Vec<LayoutNode>>,
 }
 
-/// The body of `PUT /events/{id}/layers/{layer_id}` — replace a layer's editable fields (#117 S2).
+/// The body of `PUT /events/{id}/layouts/{layout_id}` — replace a layout's editable fields (#117 S2).
 ///
-/// The [`LayerId`] is fixed (it is the path segment); the name and the whole mapping are replaced
+/// The [`LayoutId`] is fixed (it is the path segment); the name and the whole mapping are replaced
 /// wholesale, and re-validated exactly as on create.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct SetChannelLayerRequest {
-    /// The layer's display name. Trimmed; must be non-empty and unique within the event.
+pub struct SetChannelLayoutRequest {
+    /// The layout's display name. Trimmed; must be non-empty and unique within the event.
     pub name: String,
     /// The complete node → channel mapping (one entry per enabled node, no duplicate channels).
-    pub nodes: Vec<LayerNode>,
+    pub nodes: Vec<LayoutNode>,
 }
 
-/// Why a channel-layer write was refused (#117 S2) — the twin of [`RoundError`].
+/// Why a channel-layout write was refused (#117 S2) — the twin of [`RoundError`].
 ///
-/// Every [`Invalid`](LayerError::Invalid) message is written to be **read by an RD at a venue**: it
-/// names the layer, the node (`"Node 3"`) and the channel (`"Raceband R7"`) by their friendly names
+/// Every [`Invalid`](LayoutError::Invalid) message is written to be **read by an RD at a venue**: it
+/// names the layout, the node (`"Node 3"`) and the channel (`"Raceband R7"`) by their friendly names
 /// and says what to do next — never a raw index, a bare MHz, or a timer id.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LayerError {
+pub enum LayoutError {
     /// No event with the given id — a typed 404.
     EventNotFound(String),
-    /// No layer with the given id in this event — a typed 404.
-    LayerNotFound(String),
-    /// The layer is not a valid tuning (duplicate channel, a channel outside the allowed set, a
+    /// No layout with the given id in this event — a typed 404.
+    LayoutNotFound(String),
+    /// The layout is not a valid tuning (duplicate channel, a channel outside the allowed set, a
     /// disabled/out-of-range node, an incomplete mapping, a blank/duplicate name) — a 400.
     Invalid(String),
 }
 
-impl std::fmt::Display for LayerError {
+impl std::fmt::Display for LayoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LayerError::EventNotFound(id) => write!(f, "no event with id {id:?}"),
-            LayerError::LayerNotFound(id) => write!(f, "no channel layer with id {id:?}"),
-            LayerError::Invalid(msg) => write!(f, "{msg}"),
+            LayoutError::EventNotFound(id) => write!(f, "no event with id {id:?}"),
+            LayoutError::LayoutNotFound(id) => write!(f, "no channel layout with id {id:?}"),
+            LayoutError::Invalid(msg) => write!(f, "{msg}"),
         }
     }
 }
 
-impl std::error::Error for LayerError {}
+impl std::error::Error for LayoutError {}
 
-impl From<RegistryError> for LayerError {
+impl From<RegistryError> for LayoutError {
     fn from(e: RegistryError) -> Self {
-        LayerError::Invalid(e.message)
+        LayoutError::Invalid(e.message)
     }
 }
 
-/// Every pair of layers that shares a channel (#117 S2), in event order — the **warning** half of
-/// the layer model.
+/// Every pair of layouts that shares a channel (#117 S2), in event order — the **warning** half of
+/// the layout model.
 ///
-/// Pure and total: it takes the layer list and answers, with no notion of whether the set is
-/// "good". Cross-layer reuse is legal by decision (see [`LayerOverlap`]), so this never gates a
-/// write — [`EventRegistry::add_channel_layer`] and friends compute it *after* the layer has been
+/// Pure and total: it takes the layout list and answers, with no notion of whether the set is
+/// "good". Cross-layout reuse is legal by decision (see [`LayoutOverlap`]), so this never gates a
+/// write — [`EventRegistry::add_channel_layout`] and friends compute it *after* the layout has been
 /// accepted and persisted, purely so the console has something to show.
-pub fn layer_overlaps(layers: &[ChannelLayer]) -> Vec<LayerOverlap> {
+pub fn layout_overlaps(layouts: &[ChannelLayout]) -> Vec<LayoutOverlap> {
     let mut out = Vec::new();
-    for (i, layer) in layers.iter().enumerate() {
-        let mine = layer.channels();
-        for other in &layers[i + 1..] {
+    for (i, layout) in layouts.iter().enumerate() {
+        let mine = layout.channels();
+        for other in &layouts[i + 1..] {
             let shared: Vec<u16> = other
                 .channels()
                 .into_iter()
                 .filter(|c| mine.contains(c))
                 .collect();
             if !shared.is_empty() {
-                out.push(LayerOverlap {
-                    layer: layer.id.clone(),
+                out.push(LayoutOverlap {
+                    layout: layout.id.clone(),
                     other: other.id.clone(),
                     channels: shared,
                 });
@@ -577,48 +586,48 @@ pub fn layer_overlaps(layers: &[ChannelLayer]) -> Vec<LayerOverlap> {
     out
 }
 
-/// The event's timer for the purpose of layers (#117 S2) — its **effective primary**.
+/// The event's timer for the purpose of layouts (#117 S2) — its **effective primary**.
 ///
-/// A layer is one tuning of *the* timer, and #112's redundant timers are two boxes at **one gate**:
-/// an alternate that takes over mid-event has to be listening on the same channels, so one layer
-/// per event (validated against the primary) is the honest model, not one layer per timer. This is
+/// A layout is one tuning of *the* timer, and #112's redundant timers are two boxes at **one gate**:
+/// an alternate that takes over mid-event has to be listening on the same channels, so one layout
+/// per event (validated against the primary) is the honest model, not one layout per timer. This is
 /// also the timer `set_class_membership` already validates a pilot's fixed channel against, so the
 /// two channel surfaces cannot disagree about which timer they mean.
-fn layer_timer(meta: &EventMeta, timers: &TimerRegistry) -> Result<Timer, LayerError> {
+fn layout_timer(meta: &EventMeta, timers: &TimerRegistry) -> Result<Timer, LayoutError> {
     meta.effective_primary()
         .and_then(|id| timers.get(&id))
         .ok_or_else(|| {
-            LayerError::Invalid(
+            LayoutError::Invalid(
                 "this event has no timer selected, so there is no node set to tune — \
-                 pick a timer for this event before defining a channel layer."
+                 pick a timer for this event before defining a channel layout."
                     .to_string(),
             )
         })
 }
 
-/// **Seed** a layer from the timer's allowed set (#117 S2) — the global→event seam.
+/// **Seed** a layout from the timer's allowed set (#117 S2) — the global→event seam.
 ///
 /// Enabled node *i* takes the *i*-th allowed channel, in the RD's own preference order: the global
-/// set is a *default subset an event starts from*, and from here on the layer is event state that
+/// set is a *default subset an event starts from*, and from here on the layout is event state that
 /// no edit to the timer record can reach.
 ///
 /// Two refusals, both S1's semantics applied one level up. An **empty** allowed set is "the RD has
 /// not configured this timer" and never "this timer has no channels" — seeding from the catalog
-/// would scatter a layer across the band with no intent behind it. And **fewer allowed channels
+/// would scatter a layout across the band with no intent behind it. And **fewer allowed channels
 /// than enabled nodes** cannot produce a complete tuning at all; saying so, with both numbers and
-/// both repairs, is more use than a half-filled layer.
-fn seed_layer_nodes(timer: &Timer) -> Result<Vec<LayerNode>, LayerError> {
+/// both repairs, is more use than a half-filled layout.
+fn seed_layout_nodes(timer: &Timer) -> Result<Vec<LayoutNode>, LayoutError> {
     let enabled = timer.enabled_nodes();
     if timer.available_channels.is_empty() {
-        return Err(LayerError::Invalid(format!(
+        return Err(LayoutError::Invalid(format!(
             "{:?} has no channels configured — choose the channels it may use on the Timers page \
-             before defining a channel layer.",
+             before defining a channel layout.",
             timer.name
         )));
     }
     if timer.available_channels.len() < enabled.len() {
-        return Err(LayerError::Invalid(format!(
-            "{:?} allows {} channels but has {} enabled nodes, and a layer tunes every node. Allow \
+        return Err(LayoutError::Invalid(format!(
+            "{:?} allows {} channels but has {} enabled nodes, and a layout tunes every node. Allow \
              more channels on the Timers page, or disable the nodes this event will not fly.",
             timer.name,
             timer.available_channels.len(),
@@ -628,51 +637,51 @@ fn seed_layer_nodes(timer: &Timer) -> Result<Vec<LayerNode>, LayerError> {
     Ok(enabled
         .into_iter()
         .zip(timer.available_channels.iter().copied())
-        .map(|(node, channel)| LayerNode { node, channel })
+        .map(|(node, channel)| LayoutNode { node, channel })
         .collect())
 }
 
-/// Validate one layer against the event's timer and the event's other layers (#117 S2).
+/// Validate one layout against the event's timer and the event's other layouts (#117 S2).
 ///
 /// The rules, in the order an RD hits them:
 ///
-/// 1. the **name** is non-blank and not already used by another layer of this event;
+/// 1. the **name** is non-blank and not already used by another layout of this event;
 /// 2. every node is **enabled and on the timer** (#412 — a disabled node seats nobody, so tuning it
 ///    is at best pointless and at worst hides a dead gate);
 /// 3. every channel is in the timer's **allowed set** (S1's "allowed", not "capable");
-/// 4. **no two nodes share a channel** — the one hard rule inside a layer: a node cannot share a
+/// 4. **no two nodes share a channel** — the one hard rule inside a layout: a node cannot share a
 ///    frequency with its neighbour;
-/// 5. the mapping is **complete** — one channel for every enabled node, because a layer is a
+/// 5. the mapping is **complete** — one channel for every enabled node, because a layout is a
 ///    complete tuning of the timer.
 ///
-/// Cross-layer channel reuse is deliberately **absent** from this list: it is a [`LayerOverlap`]
+/// Cross-layout channel reuse is deliberately **absent** from this list: it is a [`LayoutOverlap`]
 /// warning, computed after the fact, and never a refusal.
-fn validate_layer(
+fn validate_layout(
     timer: &Timer,
-    layers: &[ChannelLayer],
-    editing: Option<&LayerId>,
+    layouts: &[ChannelLayout],
+    editing: Option<&LayoutId>,
     name: &str,
-    nodes: &[LayerNode],
-) -> Result<(), LayerError> {
+    nodes: &[LayoutNode],
+) -> Result<(), LayoutError> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(LayerError::Invalid(
-            "a channel layer needs a name — it is what you pick when a heat flies it.".to_string(),
+        return Err(LayoutError::Invalid(
+            "a channel layout needs a name — it is what you pick when a heat flies it.".to_string(),
         ));
     }
-    if let Some(clash) = layers
+    if let Some(clash) = layouts
         .iter()
         .find(|l| Some(&l.id) != editing && l.name.trim().eq_ignore_ascii_case(name))
     {
-        return Err(LayerError::Invalid(format!(
-            "this event already has a channel layer called {:?} — give this one a different name.",
+        return Err(LayoutError::Invalid(format!(
+            "this event already has a channel layout called {:?} — give this one a different name.",
             clash.name
         )));
     }
     if timer.available_channels.is_empty() {
-        return Err(LayerError::Invalid(format!(
+        return Err(LayoutError::Invalid(format!(
             "{:?} has no channels configured — choose the channels it may use on the Timers page \
-             before defining a channel layer.",
+             before defining a channel layout.",
             timer.name
         )));
     }
@@ -681,25 +690,25 @@ fn validate_layer(
         // #412: the node must exist on the timer AND be one the RD has left enabled. `node_view()` /
         // `GET /timers/{id}/nodes` is the console's half of this same rule.
         if !timer.node_enabled(entry.node) {
-            return Err(LayerError::Invalid(format!(
-                "{} is not available on {:?} — it is disabled or does not exist, so a layer cannot \
+            return Err(LayoutError::Invalid(format!(
+                "{} is not available on {:?} — it is disabled or does not exist, so a layout cannot \
                  tune it.",
                 Timer::node_label(entry.node),
                 timer.name
             )));
         }
         if seen_nodes.contains(&entry.node) {
-            return Err(LayerError::Invalid(format!(
-                "{} is listed twice in this layer — a node has exactly one channel.",
+            return Err(LayoutError::Invalid(format!(
+                "{} is listed twice in this layout — a node has exactly one channel.",
                 Timer::node_label(entry.node)
             )));
         }
         seen_nodes.push(entry.node);
-        // S1's clarified semantics: `available_channels` is what this timer MAY use. A layer draws
+        // S1's clarified semantics: `available_channels` is what this timer MAY use. A layout draws
         // from it and nothing else — never from the catalog, which would invent a channel the RD
         // never allowed.
         if !timer.available_channels.contains(&entry.channel) {
-            return Err(LayerError::Invalid(format!(
+            return Err(LayoutError::Invalid(format!(
                 "{} is not one of the channels {:?} is allowed to use — tick it on the Timers page \
                  first, or pick another channel for {}.",
                 crate::timers::channel_label(entry.channel),
@@ -707,7 +716,7 @@ fn validate_layer(
                 Timer::node_label(entry.node)
             )));
         }
-        // The one hard rule inside a layer.
+        // The one hard rule inside a layout.
         if let Some(clash) = nodes
             .iter()
             .find(|n| n.node != entry.node && n.channel == entry.channel)
@@ -717,15 +726,15 @@ fn validate_layer(
             } else {
                 (entry.node, clash.node)
             };
-            return Err(LayerError::Invalid(format!(
-                "{} and {} are both on {} in this layer — two nodes cannot share a frequency.",
+            return Err(LayoutError::Invalid(format!(
+                "{} and {} are both on {} in this layout — two nodes cannot share a frequency.",
                 Timer::node_label(first),
                 Timer::node_label(second),
                 crate::timers::channel_label(entry.channel)
             )));
         }
     }
-    // A layer is a COMPLETE tuning: every enabled node flies something. An incomplete layer would
+    // A layout is a COMPLETE tuning: every enabled node flies something. An incomplete layout would
     // leave a gate on whatever it happened to be tuned to last — the D27 hole this model closes.
     let missing: Vec<u32> = timer
         .enabled_nodes()
@@ -734,8 +743,8 @@ fn validate_layer(
         .collect();
     if let Some(&first) = missing.first() {
         let labels: Vec<String> = missing.iter().map(|n| Timer::node_label(*n)).collect();
-        return Err(LayerError::Invalid(format!(
-            "this layer does not tune {} — a layer sets a channel for every enabled node on {:?}. \
+        return Err(LayoutError::Invalid(format!(
+            "this layout does not tune {} — a layout sets a channel for every enabled node on {:?}. \
              Still to set: {}.",
             Timer::node_label(first),
             timer.name,
@@ -804,6 +813,27 @@ pub struct RoundDef {
     /// reads back as [`ChannelMode::PerHeat`], the prior behaviour); RD-overridable.
     #[serde(default)]
     pub channel_mode: ChannelMode,
+    /// The **channel layouts this round's heats may fly** (#117 S3) — the round scope of the
+    /// three-scope channel model.
+    ///
+    /// A layout is a complete `node → channel` tuning of the event's timer
+    /// ([`EventMeta::channel_layouts`]); a round *names* the ones its heats may choose from, and
+    /// the RD's strategy falls out of how many it names:
+    ///
+    /// - **one** — the bracket case. *"n channels where n is the number of pilots per heat, and
+    ///   those channels stay for the whole tournament."* Every heat the round draws flies that
+    ///   layout automatically; there is nothing per-heat to do.
+    /// - **several** — the GQ-style qualifier, where many layouts exist so each pilot can stay on
+    ///   their own channel. The first is each heat's default and the RD re-picks per heat.
+    /// - **none** (the default, and every round persisted before S3) — the round names no layout,
+    ///   so its heats fall back to the auto-pick from the timer's allowed set. Unchanged behaviour.
+    ///
+    /// Order is meaningful only in that the **first** entry is a heat's default. Each id must name
+    /// a layout the event actually has (checked on add *and* update); a layout a round names cannot
+    /// be deleted out from under it. Additive (`#[serde(default)]`) so pre-S3 meta reads back
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<LayoutId>,
     /// The **staging timer** for this round, in seconds (heat-lifecycle Slice 2). *Informational
     /// only* — there is **no** auto-advance out of `Staged`; the console displays it as a staging
     /// countdown (Slice 3). Defaults to [`default_staging_timer_secs`] (300s = 5 min). Additive
@@ -1262,6 +1292,11 @@ pub struct NewRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub channel_mode: Option<ChannelMode>,
+    /// The **channel layouts** this round's heats may fly (#117 S3). Optional — omit for none (the
+    /// auto-pick, the pre-S3 behaviour). Each must name a layout this event has. Stored on
+    /// [`RoundDef::layouts`]; the first is each heat's default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<LayoutId>,
     /// The round's staging timer in seconds (heat-lifecycle Slice 2). Optional — omit for the
     /// [`default_staging_timer_secs`] (300). Informational only (no auto-advance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1322,6 +1357,10 @@ pub struct UpdateRoundReq {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub channel_mode: Option<ChannelMode>,
+    /// The new **channel layouts** this round's heats may fly (#117 S3), replaced wholesale.
+    /// Optional — omit for none (the auto-pick). Each must name a layout this event has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<LayoutId>,
     /// The new staging timer in seconds (heat-lifecycle Slice 2). Optional — omit for the
     /// [`default_staging_timer_secs`] (300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1349,6 +1388,17 @@ pub struct UpdateRoundReq {
 }
 
 impl EventMeta {
+    /// One of the event's [`channel_layouts`](Self::channel_layouts) by id (#117 S3), or `None`
+    /// when the event has no such layout.
+    ///
+    /// The one lookup every layout consumer goes through — a round resolving the layouts it names,
+    /// a heat resolving the layout it flies — so a bind naming a layout that has since been deleted
+    /// resolves the same way everywhere: to nothing, reported by
+    /// [`round_issues`](EventRegistry::round_issues), never to a guess.
+    pub fn layout(&self, id: &LayoutId) -> Option<&ChannelLayout> {
+        self.channel_layouts.iter().find(|l| &l.id == id)
+    }
+
     /// The event's **effective primary** timer (issue #112): the explicitly-set
     /// [`primary_timer`](Self::primary_timer) when it is present *and still in the selection*,
     /// else the **first** selected timer. `None` only when the event selects no timers at all.
@@ -1481,7 +1531,7 @@ struct RegisteredEvent {
 }
 
 /// The registry of all events on this Director (issue #72) — the backend-agnostic
-/// `EventRegistry` the routing layer resolves an [`EventId`] through.
+/// `EventRegistry` the routing layout resolves an [`EventId`] through.
 ///
 /// Maps each [`EventId`] to its [`AppState`] (and so its own [`EventLog`]). A fresh registry
 /// holds **no events at all** (#414 removed the built-in in-memory Practice event) — the RD
@@ -1535,7 +1585,7 @@ struct Registry {
 /// (`Unofficial`). `Scheduled` is not begun and `Final` is done, so neither is in progress —
 /// callers that need to be stricter than "a race is under way" (the round-edit freeze also refuses
 /// a `Scheduled` heat the RD has *loaded* in Live control, whose channels may already have been
-/// read off) layer that on top rather than widening this.
+/// read off) layout that on top rather than widening this.
 fn is_racing_phase(state: gridfpv_engine::heat::HeatState) -> bool {
     use gridfpv_engine::heat::HeatState;
     matches!(
@@ -1863,54 +1913,54 @@ impl EventRegistry {
         Ok(meta)
     }
 
-    // ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────
+    // ── Event channel layouts (#117 S2) ──────────────────────────────────────────────────────────
     //
     // The event-scoped answer to *what goes on which node?*. Mirrors the rounds API exactly — a
     // generated id, individual add / update / remove, every write persisted through to the event's
-    // SQLite `meta` table (issue #115) — because a layer is the same kind of thing as a round: a
+    // SQLite `meta` table (issue #115) — because a layout is the same kind of thing as a round: a
     // named, RD-authored piece of event configuration.
     //
-    // Every one of these returns the whole resulting [`ChannelLayers`] view rather than just the
-    // layer that changed. The overlap warnings are a property of the *set*, so a write that returns
-    // only its own layer would leave the console to re-derive them — a second implementation of a
+    // Every one of these returns the whole resulting [`ChannelLayouts`] view rather than just the
+    // layout that changed. The overlap warnings are a property of the *set*, so a write that returns
+    // only its own layout would leave the console to re-derive them — a second implementation of a
     // rule, which is how rules drift.
 
-    /// An event's [`ChannelLayers`] — the layers plus their cross-layer overlap warnings (#117 S2).
+    /// An event's [`ChannelLayouts`] — the layouts plus their cross-layout overlap warnings (#117 S2).
     ///
-    /// The body of `GET /events/{id}/layers`, and `None` for an unknown event (→ a typed 404).
-    pub fn channel_layers(&self, id: &EventId) -> Option<ChannelLayers> {
-        let layers = self.read().events.get(id)?.meta.channel_layers.clone();
-        Some(ChannelLayers {
-            overlaps: layer_overlaps(&layers),
-            layers,
+    /// The body of `GET /events/{id}/layouts`, and `None` for an unknown event (→ a typed 404).
+    pub fn channel_layouts(&self, id: &EventId) -> Option<ChannelLayouts> {
+        let layouts = self.read().events.get(id)?.meta.channel_layouts.clone();
+        Some(ChannelLayouts {
+            overlaps: layout_overlaps(&layouts),
+            layouts,
         })
     }
 
-    /// Define a **channel layer** on an event (#117 S2), returning the event's whole updated
-    /// [`ChannelLayers`] view.
+    /// Define a **channel layout** on an event (#117 S2), returning the event's whole updated
+    /// [`ChannelLayouts`] view.
     ///
     /// The id is auto-generated — a slug of the request's `name` plus a short random suffix
     /// (mirroring the round/event/pilot id-gen) — retried on the (astronomically unlikely) collision
-    /// with an existing layer id.
+    /// with an existing layout id.
     ///
-    /// [`nodes`](NewChannelLayerRequest::nodes) omitted means **seed from the global allowed set**
-    /// ([`seed_layer_nodes`]): enabled node *i* takes the *i*-th channel the RD ticked for this
+    /// [`nodes`](NewChannelLayoutRequest::nodes) omitted means **seed from the global allowed set**
+    /// ([`seed_layout_nodes`]): enabled node *i* takes the *i*-th channel the RD ticked for this
     /// timer on the Timers page. That is the whole of "global is the default an event starts from" —
-    /// the moment the layer exists it is event state, and no later edit to it touches
+    /// the moment the layout exists it is event state, and no later edit to it touches
     /// [`Timer::available_channels`].
     ///
-    /// Validation is [`validate_layer`]'s (all [`LayerError::Invalid`] → a 400): a named,
+    /// Validation is [`validate_layout`]'s (all [`LayoutError::Invalid`] → a 400): a named,
     /// duplicate-free, complete tuning drawn from the allowed set, over nodes that exist and are
-    /// enabled. **Cross-layer channel reuse is not validated** — it comes back as a
-    /// [`LayerOverlap`] in the response and never blocks the write. An unknown event is a
-    /// [`LayerError::EventNotFound`] (→ 404). On success the layer is appended to
-    /// [`EventMeta::channel_layers`] and written through to the event's SQLite `meta` table (issue
+    /// enabled. **Cross-layout channel reuse is not validated** — it comes back as a
+    /// [`LayoutOverlap`] in the response and never blocks the write. An unknown event is a
+    /// [`LayoutError::EventNotFound`] (→ 404). On success the layout is appended to
+    /// [`EventMeta::channel_layouts`] and written through to the event's SQLite `meta` table (issue
     /// #115) so it survives a Director restart — exactly the rounds path.
-    pub fn add_channel_layer(
+    pub fn add_channel_layout(
         &self,
         id: &EventId,
-        req: NewChannelLayerRequest,
-    ) -> Result<ChannelLayers, LayerError> {
+        req: NewChannelLayoutRequest,
+    ) -> Result<ChannelLayouts, LayoutError> {
         let mut reg = self.write();
         // Cloned out before the mutable borrow below (the same reason `add_round` clones its
         // directories): resolving the event's timer would re-lock the registry we already hold.
@@ -1918,121 +1968,155 @@ impl EventRegistry {
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| LayerError::EventNotFound(id.0.clone()))?;
+            .ok_or_else(|| LayoutError::EventNotFound(id.0.clone()))?;
 
-        let timer = layer_timer(&event.meta, &timers)?;
+        let timer = layout_timer(&event.meta, &timers)?;
         // The global→event seam: an omitted mapping is seeded from what the RD allowed globally.
         let mut nodes = match req.nodes {
             Some(nodes) => nodes,
-            None => seed_layer_nodes(&timer)?,
+            None => seed_layout_nodes(&timer)?,
         };
         nodes.sort_by_key(|n| n.node);
-        validate_layer(&timer, &event.meta.channel_layers, None, &req.name, &nodes)?;
+        validate_layout(&timer, &event.meta.channel_layouts, None, &req.name, &nodes)?;
 
-        // Auto-generate a unique layer id within this event: slug(name) + short suffix, retried on
+        // Auto-generate a unique layout id within this event: slug(name) + short suffix, retried on
         // the (astronomically unlikely) collision so the id is always fresh.
-        let layer_id = loop {
-            let candidate = LayerId(format!("{}-{}", slugify(&req.name), short_suffix()));
-            if !event.meta.channel_layers.iter().any(|l| l.id == candidate) {
+        let layout_id = loop {
+            let candidate = LayoutId(format!("{}-{}", slugify(&req.name), short_suffix()));
+            if !event.meta.channel_layouts.iter().any(|l| l.id == candidate) {
                 break candidate;
             }
         };
-        event.meta.channel_layers.push(ChannelLayer {
-            id: layer_id,
+        event.meta.channel_layouts.push(ChannelLayout {
+            id: layout_id,
             name: req.name.trim().to_string(),
             nodes,
         });
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
-        Ok(ChannelLayers {
-            overlaps: layer_overlaps(&meta.channel_layers),
-            layers: meta.channel_layers,
+        Ok(ChannelLayouts {
+            overlaps: layout_overlaps(&meta.channel_layouts),
+            layouts: meta.channel_layouts,
         })
     }
 
-    /// Replace an existing **channel layer**'s name and mapping (#117 S2), returning the event's
-    /// whole updated [`ChannelLayers`] view.
+    /// Replace an existing **channel layout**'s name and mapping (#117 S2), returning the event's
+    /// whole updated [`ChannelLayouts`] view.
     ///
-    /// The layer's [`id`](ChannelLayer::id) is fixed (the path segment); the name and the entire
+    /// The layout's [`id`](ChannelLayout::id) is fixed (the path segment); the name and the entire
     /// node → channel mapping are replaced wholesale and re-validated exactly as on create. Unknown
-    /// event → [`LayerError::EventNotFound`] (404); unknown layer id → [`LayerError::LayerNotFound`]
-    /// (404); an invalid tuning → [`LayerError::Invalid`] (400). Written through to disk (issue
+    /// event → [`LayoutError::EventNotFound`] (404); unknown layout id → [`LayoutError::LayoutNotFound`]
+    /// (404); an invalid tuning → [`LayoutError::Invalid`] (400). Written through to disk (issue
     /// #115).
-    pub fn update_channel_layer(
+    pub fn update_channel_layout(
         &self,
         id: &EventId,
-        layer_id: &LayerId,
-        req: SetChannelLayerRequest,
-    ) -> Result<ChannelLayers, LayerError> {
+        layout_id: &LayoutId,
+        req: SetChannelLayoutRequest,
+    ) -> Result<ChannelLayouts, LayoutError> {
         let mut reg = self.write();
         let timers = reg.timers.clone();
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| LayerError::EventNotFound(id.0.clone()))?;
+            .ok_or_else(|| LayoutError::EventNotFound(id.0.clone()))?;
         let index = event
             .meta
-            .channel_layers
+            .channel_layouts
             .iter()
-            .position(|l| &l.id == layer_id)
-            .ok_or_else(|| LayerError::LayerNotFound(layer_id.0.clone()))?;
+            .position(|l| &l.id == layout_id)
+            .ok_or_else(|| LayoutError::LayoutNotFound(layout_id.0.clone()))?;
 
-        let timer = layer_timer(&event.meta, &timers)?;
+        let timer = layout_timer(&event.meta, &timers)?;
         let mut nodes = req.nodes;
         nodes.sort_by_key(|n| n.node);
-        validate_layer(
+        validate_layout(
             &timer,
-            &event.meta.channel_layers,
-            Some(layer_id),
+            &event.meta.channel_layouts,
+            Some(layout_id),
             &req.name,
             &nodes,
         )?;
 
-        event.meta.channel_layers[index] = ChannelLayer {
-            id: layer_id.clone(),
+        event.meta.channel_layouts[index] = ChannelLayout {
+            id: layout_id.clone(),
             name: req.name.trim().to_string(),
             nodes,
         };
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
-        Ok(ChannelLayers {
-            overlaps: layer_overlaps(&meta.channel_layers),
-            layers: meta.channel_layers,
+        let timers = reg.timers.clone();
+        // Release the registry write lock BEFORE touching the log — the same ordering
+        // `update_round` observes (command lock ahead of the log mutex).
+        drop(reg);
+
+        // #117 S3: **editing a layout re-tunes the heats already flying it.** The RD must be able
+        // to fix a layout without deleting and rebuilding every heat under it, and a `Scheduled`
+        // heat that kept the OLD channels after its layout changed would be the #387 bug in a new
+        // costume — a heat racing config that no longer exists anywhere the RD can see.
+        //
+        // Deliberately the same mechanism as a round edit, not a second one: re-materialize every
+        // round that names this layout. Only still-`Scheduled` heats are rewritten (anything staged
+        // or raced keeps the channels it raced on), and nothing is appended for a heat the new
+        // mapping does not actually change.
+        for round in meta.rounds.iter().filter(|r| r.layouts.contains(layout_id)) {
+            self.rematerialize_round_heats(id, &round.id, &meta, &timers);
+        }
+        Ok(ChannelLayouts {
+            overlaps: layout_overlaps(&meta.channel_layouts),
+            layouts: meta.channel_layouts,
         })
     }
 
-    /// Remove a **channel layer** from an event (#117 S2), returning the event's whole updated
-    /// [`ChannelLayers`] view.
+    /// Remove a **channel layout** from an event (#117 S2), returning the event's whole updated
+    /// [`ChannelLayouts`] view.
     ///
-    /// Unknown event → [`LayerError::EventNotFound`] (404); unknown layer id →
-    /// [`LayerError::LayerNotFound`] (404) rather than a silent no-op, so a console deleting a layer
+    /// Unknown event → [`LayoutError::EventNotFound`] (404); unknown layout id →
+    /// [`LayoutError::LayoutNotFound`] (404) rather than a silent no-op, so a console deleting a layout
     /// someone else already deleted is told rather than left believing it removed something.
     /// Written through to disk (issue #115).
-    pub fn remove_channel_layer(
+    pub fn remove_channel_layout(
         &self,
         id: &EventId,
-        layer_id: &LayerId,
-    ) -> Result<ChannelLayers, LayerError> {
+        layout_id: &LayoutId,
+    ) -> Result<ChannelLayouts, LayoutError> {
         let mut reg = self.write();
         let event = reg
             .events
             .get_mut(id)
-            .ok_or_else(|| LayerError::EventNotFound(id.0.clone()))?;
+            .ok_or_else(|| LayoutError::EventNotFound(id.0.clone()))?;
         let index = event
             .meta
-            .channel_layers
+            .channel_layouts
             .iter()
-            .position(|l| &l.id == layer_id)
-            .ok_or_else(|| LayerError::LayerNotFound(layer_id.0.clone()))?;
-        event.meta.channel_layers.remove(index);
+            .position(|l| &l.id == layout_id)
+            .ok_or_else(|| LayoutError::LayoutNotFound(layout_id.0.clone()))?;
+        // #117 S3: a layout a **round** names cannot be deleted out from under it. Allowing it
+        // would leave the round pointing at nothing — its next fill drawing a heat with no channels
+        // and no explanation — so the refusal names the round and the layout, both by their
+        // friendly names, and tells the RD which end to undo first.
+        if let Some(round) = event
+            .meta
+            .rounds
+            .iter()
+            .find(|r| r.layouts.contains(layout_id))
+        {
+            let layout = event.meta.channel_layouts[index].name.clone();
+            return Err(LayoutError::Invalid(format!(
+                "{:?} is the channel layout {:?} flies — remove it from that round before deleting \
+                 it",
+                layout, round.label
+            )));
+        }
+        event.meta.channel_layouts.remove(index);
         let meta = event.meta.clone();
         let data_dir = reg.data_dir.clone();
         persist_meta_change(data_dir.as_deref(), &meta)?;
-        Ok(ChannelLayers {
-            overlaps: layer_overlaps(&meta.channel_layers),
-            layers: meta.channel_layers,
+        Ok(ChannelLayouts {
+            overlaps: layout_overlaps(&meta.channel_layouts),
+            layouts: meta.channel_layouts,
         })
     }
 
@@ -2081,6 +2165,7 @@ impl EventRegistry {
             &req.format,
             &req.seeding,
             channel_mode,
+            &req.layouts,
             &win_condition,
             req.time_limit_secs,
             None,
@@ -2107,6 +2192,8 @@ impl EventRegistry {
             win_condition,
             seeding: req.seeding,
             channel_mode,
+            // The channel layouts this round's heats may fly (#117 S3), validated above.
+            layouts: req.layouts,
             // Heat-lifecycle Slice 2 configs: omitted request fields take their documented defaults.
             staging_timer_secs: req
                 .staging_timer_secs
@@ -2366,6 +2453,7 @@ impl EventRegistry {
             &req.format,
             &req.seeding,
             channel_mode,
+            &req.layouts,
             &win_condition,
             req.time_limit_secs,
             Some(round_id),
@@ -2396,6 +2484,12 @@ impl EventRegistry {
             }
             if effective_channel_mode != existing.channel_mode {
                 frozen.push("channel mode");
+            }
+            // #117 S3: a raced round's layouts are frozen with its channel mode. They do not affect
+            // scoring, but they decide what a re-materialized heat is tuned to — and a raced heat
+            // must keep the channels it raced on. Freezing here means the question never arises.
+            if req.layouts != existing.layouts {
+                frozen.push("channel layouts");
             }
             // The min-lap floor suppresses passes from the scored chain — editing it would
             // silently re-score raced heats, so it freezes with the win condition.
@@ -2433,6 +2527,8 @@ impl EventRegistry {
             win_condition,
             seeding: req.seeding,
             channel_mode,
+            // The channel layouts this round's heats may fly (#117 S3), replaced wholesale.
+            layouts: req.layouts,
             // Heat-lifecycle Slice 2 configs: replaced wholesale, defaulting an omitted field.
             staging_timer_secs: req
                 .staging_timer_secs
@@ -2497,6 +2593,19 @@ impl EventRegistry {
         };
         let class = round_engine::round_class(meta, round_id);
         for heat in round_engine::rematerialize_round_heats(meta, timers, round_id, &events) {
+            // #117 S3: re-assert which layout the re-formed heat flies, so the recorded answer
+            // keeps up with a round whose named layouts have just changed. Appended BEFORE the
+            // schedule, so a reader folding the log in order never sees a heat carrying channels
+            // from one layout while still recorded against another.
+            if heat.layout.is_some() {
+                let _ = state.append(
+                    gridfpv_events::Event::HeatLayoutSet {
+                        heat: heat.heat.clone(),
+                        layout: heat.layout.clone(),
+                    },
+                    None,
+                );
+            }
             let _ = state.append(
                 gridfpv_events::Event::HeatScheduled {
                     heat: heat.heat,
@@ -2603,20 +2712,46 @@ impl EventRegistry {
         };
         let mut out = Vec::new();
         for round in &meta.rounds {
-            let SeedingRule::AllChannels { channels } = &round.seeding else {
-                continue;
-            };
-            for (node, problem) in seat_problems(channels, &timer) {
-                out.push(RoundIssue {
-                    round: round.id.clone(),
-                    round_label: round.label.clone(),
-                    timer: timer.id.clone(),
-                    timer_name: timer.name.clone(),
-                    node,
-                    node_label: Timer::node_label(node),
-                    problem,
-                    detail: seat_problem_detail(round, &timer, node, problem),
-                });
+            if let SeedingRule::AllChannels { channels } = &round.seeding {
+                for (node, problem) in seat_problems(channels, &timer) {
+                    out.push(RoundIssue {
+                        round: round.id.clone(),
+                        round_label: round.label.clone(),
+                        timer: timer.id.clone(),
+                        timer_name: timer.name.clone(),
+                        node,
+                        node_label: Timer::node_label(node),
+                        problem,
+                        layout: None,
+                        layout_name: None,
+                        detail: seat_problem_detail(round, &timer, node, problem),
+                    });
+                }
+            }
+            // #117 S3: the **stored channel layouts** this round's heats fly, re-checked against
+            // the timer as it is now. A layout is validated as a complete, allowed tuning when it
+            // is written — and then the RD enables a node, or unticks a channel, and it is not one
+            // any more. #412 and #416 both landed on *validate stored config on read*, and this is
+            // that same read, so a stale layout surfaces exactly where the impossible seat does
+            // rather than at arm time when nothing can be changed.
+            for id in &round.layouts {
+                let Some(layout) = meta.layout(id) else {
+                    continue;
+                };
+                for (node, problem) in layout_problems(layout, &timer) {
+                    out.push(RoundIssue {
+                        round: round.id.clone(),
+                        round_label: round.label.clone(),
+                        timer: timer.id.clone(),
+                        timer_name: timer.name.clone(),
+                        node,
+                        node_label: Timer::node_label(node),
+                        problem,
+                        layout: Some(layout.id.clone()),
+                        layout_name: Some(layout.name.clone()),
+                        detail: layout_problem_detail(round, layout, &timer, node, problem),
+                    });
+                }
             }
         }
         Some(out)
@@ -2768,10 +2903,10 @@ impl EventRegistry {
             classes: Vec::new(),
             classes_membership: Vec::new(),
             rounds: Vec::new(),
-            // No channel layers until the RD defines one (#117 S2). Deliberately not seeded at
-            // create time: the timer selection is not settled yet, and a layer seeded from the
-            // wrong timer's allowed set is worse than no layer.
-            channel_layers: Vec::new(),
+            // No channel layouts until the RD defines one (#117 S2). Deliberately not seeded at
+            // create time: the timer selection is not settled yet, and a layout seeded from the
+            // wrong timer's allowed set is worse than no layout.
+            channel_layouts: Vec::new(),
         };
         // Persist the freshly-built meta into the event's own SQLite `meta` table (issue
         // #111) so a Director restart can restore it. Only for a persistent (file-backed)
@@ -3012,7 +3147,7 @@ fn write_persisted_active_event(dir: &Path, id: &EventId) -> std::io::Result<()>
 }
 
 /// An error mutating the event registry (a missing event, an invalid request, or a storage
-/// failure). Carries a [`RegistryErrorKind`] so the HTTP layer can map an *unknown id* to `404`, a
+/// failure). Carries a [`RegistryErrorKind`] so the HTTP layout can map an *unknown id* to `404`, a
 /// *bad request* to `400`, and an *I/O / persistence* failure to `500` — mirroring [`PilotError`].
 ///
 /// This matters because the in-memory state is mutated **before** the write-through: a persistence
@@ -3128,6 +3263,25 @@ pub enum SeatProblem {
     /// hardware. A notice, never a refusal: D27's rule is that an observation about a timer is
     /// evidence, not an input to a decision, so this is shown and the round is left alone.
     NotOnTimer,
+    /// A **channel layout** the round names says nothing about a node the timer has **enabled**
+    /// (#117 S3) — the layout went stale when the RD switched that node on.
+    ///
+    /// A layout is validated as a *complete* tuning when it is written, so this can only appear
+    /// afterwards. A heat flying it would seat a pilot on a gate with no channel, which is why the
+    /// fill refuses it (`AssignError::LayoutNodeUntuned`) rather than seating them anyway.
+    LayoutNodeUntuned,
+    /// A **channel layout** the round names tunes a node the timer no longer has, or that the RD
+    /// has since switched **off** (#117 S3). The layout entry is dead weight: no heat will ever fly
+    /// that gate.
+    LayoutNodeGone,
+    /// A **channel layout** the round names tunes a node to a channel the timer is no longer
+    /// **allowed** to use (#117 S3) — the RD unticked it on the Timers page after defining the
+    /// layout.
+    ///
+    /// Grid would still push the frequency (D27: the layout is Grid-owned config *applied* to the
+    /// timer), so this is not a silent failure — but it flies a channel the RD has said this timer
+    /// may not use, and one of the two statements needs to change.
+    LayoutChannelNotAllowed,
 }
 
 /// One problem found in a **stored** round's configuration, on read (#416).
@@ -3161,8 +3315,18 @@ pub struct RoundIssue {
     pub node: u32,
     /// The node's **display name**, 1-based: index `6` is `"Node 7"`.
     pub node_label: String,
-    /// Which of the three impossible-seat cases this is.
+    /// Which case this is — an impossible **seat** (#412/#416) or a stale **channel layout**
+    /// (#117 S3).
     pub problem: SeatProblem,
+    /// The **channel layout** the problem is in, for the `Layout*` cases — the handle the console's
+    /// repair action edits. Absent for a seat problem, which is about the round's own seeding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub layout: Option<LayoutId>,
+    /// That layout's **name**, for display — never its [`LayoutId`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub layout_name: Option<String>,
     /// The RD-facing sentence: what is wrong, and what to do about it. Written server-side so the
     /// console does not re-derive (and drift from) the explanation.
     pub detail: String,
@@ -3196,12 +3360,107 @@ fn seat_problems(channels: &[usize], timer: &Timer) -> Vec<(u32, SeatProblem)> {
     out
 }
 
+/// The **stale-layout problems** in a stored [`ChannelLayout`], checked against `timer` (#117 S3)
+/// — the layout twin of [`seat_problems`], and deliberately the same shape.
+///
+/// A layout is written as a *complete, conflict-free, allowed* tuning of the timer. It stops being
+/// one when the world moves underneath it, and this is the read-side check for exactly that:
+///
+/// - an **enabled** node the layout says nothing about ([`SeatProblem::LayoutNodeUntuned`]) — the
+///   RD switched a node on afterwards, and a heat flying this layout would seat somebody on a gate
+///   with no channel;
+/// - a layout entry for a node the timer no longer has, or that is switched **off**
+///   ([`SeatProblem::LayoutNodeGone`]);
+/// - an entry whose channel is no longer in the timer's **allowed** set
+///   ([`SeatProblem::LayoutChannelNotAllowed`]).
+///
+/// A reported-vs-configured node **drift** is deliberately not checked here: it is an observation
+/// about a timer, and D27 says an observation is evidence, never an input to a decision. The seat
+/// walk already reports that case once, against the round's own seeding.
+///
+/// Returns `(node, problem)` in ascending node order, one entry per offending node.
+fn layout_problems(layout: &ChannelLayout, timer: &Timer) -> Vec<(u32, SeatProblem)> {
+    let view = timer.node_view();
+    let mut out: Vec<(u32, SeatProblem)> = Vec::new();
+    for node in &view.enabled {
+        if layout.channel_for(*node).is_none() {
+            out.push((*node, SeatProblem::LayoutNodeUntuned));
+        }
+    }
+    for entry in &layout.nodes {
+        if !view.enabled.contains(&entry.node) {
+            out.push((entry.node, SeatProblem::LayoutNodeGone));
+        } else if !timer.available_channels.contains(&entry.channel) {
+            out.push((entry.node, SeatProblem::LayoutChannelNotAllowed));
+        }
+    }
+    out.sort_by_key(|(node, _)| *node);
+    out
+}
+
+/// The RD-facing sentence for one **stale-layout** problem (#117 S3): what is wrong, and the way
+/// out of it.
+///
+/// Every noun is a friendly name — the round's label, the layout's name, the timer's name, the
+/// 1-based node label, and the channel as its band+channel label rather than a bare MHz number
+/// (CLAUDE.md). Written server-side, like [`seat_problem_detail`], so the console renders one
+/// explanation rather than re-deriving (and drifting from) it.
+fn layout_problem_detail(
+    round: &RoundDef,
+    layout: &ChannelLayout,
+    timer: &Timer,
+    node: u32,
+    problem: SeatProblem,
+) -> String {
+    let node_label = Timer::node_label(node);
+    let round_label = round.label.trim();
+    let timer_name = timer.name.trim();
+    let layout_name = layout.name.trim();
+    match problem {
+        SeatProblem::LayoutNodeUntuned => format!(
+            "{round_label} flies the {layout_name} channel layout, which does not say what \
+             {node_label} is tuned to — but {node_label} is switched on for {timer_name}, so a heat \
+             would seat a pilot there with no channel. Add {node_label} to {layout_name}."
+        ),
+        SeatProblem::LayoutNodeGone => format!(
+            "{round_label} flies the {layout_name} channel layout, which tunes {node_label} — but \
+             {node_label} is switched off on {timer_name} (or no longer exists), so nothing will \
+             fly it. Re-enable the node, or drop it from {layout_name}."
+        ),
+        SeatProblem::LayoutChannelNotAllowed => {
+            let channel = layout
+                .channel_for(node)
+                .map(crate::timers::channel_label)
+                .unwrap_or_else(|| node_label.clone());
+            format!(
+                "{round_label} flies the {layout_name} channel layout, which puts {node_label} on \
+                 {channel} — a channel {timer_name} is no longer allowed to use. Re-tick it on the \
+                 Timers page, or pick another channel for {node_label} in {layout_name}."
+            )
+        }
+        // The seat problems are explained by `seat_problem_detail`; they never reach here.
+        SeatProblem::NoSuchNode | SeatProblem::Disabled | SeatProblem::NotOnTimer => {
+            seat_problem_detail(round, timer, node, problem)
+        }
+    }
+}
+
 /// The RD-facing sentence for one seat problem: what is wrong, and the way out of it.
+///
+/// The `Layout*` cases belong to [`layout_problem_detail`] — they are about a stored channel
+/// layout, not about the round's own seeding — and are delegated back to it rather than given a
+/// second, drifting explanation here.
 fn seat_problem_detail(round: &RoundDef, timer: &Timer, node: u32, problem: SeatProblem) -> String {
     let node_label = Timer::node_label(node);
     let round_label = round.label.trim();
     let timer_name = timer.name.trim();
     match problem {
+        SeatProblem::LayoutNodeUntuned
+        | SeatProblem::LayoutNodeGone
+        | SeatProblem::LayoutChannelNotAllowed => format!(
+            "{round_label} has a stale channel layout on {node_label} of {timer_name} — open the \
+             event's Channel layouts page to repair it."
+        ),
         SeatProblem::NoSuchNode => format!(
             "{round_label} seats a pilot on {node_label}, but {timer_name} has only {} nodes — \
              that seat can never record a lap. Edit the round and pick a node the timer has.",
@@ -3313,10 +3572,33 @@ fn validate_round_fields(
     format: &str,
     seeding: &SeedingRule,
     channel_mode: ChannelMode,
+    layouts: &[LayoutId],
     win_condition: &WinCondition,
     time_limit_secs: Option<u32>,
     editing: Option<&RoundId>,
 ) -> Result<(), RoundError> {
+    // #117 S3: a round may only name **channel layouts this event has**. A round pointing at a
+    // layout that does not exist would draw heats with no channels and no explanation, so the
+    // refusal names the layout the RD typed — and `remove_channel_layout` refuses to delete a
+    // layout a round names, which closes the same hole from the other end. Duplicates are a
+    // mis-click, not a choice (the first entry is the heats' default, so a repeat says nothing).
+    let mut seen: Vec<&LayoutId> = Vec::new();
+    for layout in layouts {
+        let Some(found) = meta.layout(layout) else {
+            return Err(RoundError::Invalid(
+                "this round names a channel layout the event does not have — pick one from the \
+                 event's Channel layouts page"
+                    .to_string(),
+            ));
+        };
+        if seen.contains(&layout) {
+            return Err(RoundError::Invalid(format!(
+                "this round names the {:?} channel layout twice",
+                found.name
+            )));
+        }
+        seen.push(layout);
+    }
     // A `Static` round (time-trial / qualifying, GQ-style) forms its raced field straight from class
     // membership via the channel-balanced builder, but `round_ranking`/standings rank the
     // *seeding-resolved* field. Those only agree when seeding is the identity `FromRoster`; any other
@@ -4300,6 +4582,7 @@ mod tests {
     /// A minimal [`NewRoundReq`]: a `FromRoster` `timed_qual` round over `classes`.
     fn round_req(label: &str, classes: Vec<ClassId>) -> NewRoundReq {
         NewRoundReq {
+            layouts: Vec::new(),
             label: label.to_string(),
             classes,
             format: "timed_qual".to_string(),
@@ -4375,6 +4658,7 @@ mod tests {
                 .unwrap();
         }
         let frozen_req = UpdateRoundReq {
+            layouts: Vec::new(),
             label: round.label.clone(),
             classes: round.classes.clone(),
             format: round.format.clone(),
@@ -4445,6 +4729,7 @@ mod tests {
             .add_round(
                 &event.id,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Open Practice".into(),
                     classes: vec![],
                     format: "open_practice".into(),
@@ -4553,6 +4838,7 @@ mod tests {
         }
 
         let base = |label: &str| UpdateRoundReq {
+            layouts: Vec::new(),
             label: label.to_string(),
             classes: round.classes.clone(),
             format: round.format.clone(),
@@ -4810,6 +5096,7 @@ mod tests {
                 &event.id,
                 &round.id,
                 UpdateRoundReq {
+                    layouts: Vec::new(),
                     label: "Open Practice".to_string(),
                     classes: vec![open.clone(), spec.clone()],
                     format: "head_to_head".to_string(),
@@ -4925,6 +5212,7 @@ mod tests {
             &event.id,
             &bracket.id,
             UpdateRoundReq {
+                layouts: Vec::new(),
                 label: bracket.label.clone(),
                 classes: bracket.classes.clone(),
                 format: bracket.format.clone(),
@@ -4974,6 +5262,7 @@ mod tests {
             &event.id,
             &next_level.id,
             UpdateRoundReq {
+                layouts: Vec::new(),
                 label: next_level.label.clone(),
                 classes: next_level.classes.clone(),
                 format: next_level.format.clone(),
@@ -5751,6 +6040,7 @@ mod tests {
     /// heat's lineup *is* its channel set, so a channel edit must reach the already-filled heat).
     fn practice_round(channels: &[usize]) -> NewRoundReq {
         NewRoundReq {
+            layouts: Vec::new(),
             label: "Practice".to_string(),
             classes: vec![],
             format: OpenPractice::NAME.to_string(),
@@ -5772,6 +6062,7 @@ mod tests {
     /// The same round as an **edit**, over a (possibly different) channel set.
     fn practice_edit(label: &str, channels: &[usize]) -> UpdateRoundReq {
         UpdateRoundReq {
+            layouts: Vec::new(),
             label: label.to_string(),
             classes: vec![],
             format: OpenPractice::NAME.to_string(),
@@ -5802,12 +6093,27 @@ mod tests {
                 heat,
                 lineup,
                 frequencies,
+                layout,
                 ..
             } => {
                 let frequencies = match frequencies {
                     Some(freqs) => freqs,
-                    None => round_engine::assign_for_event(&meta, &timers, &lineup).unwrap(),
+                    None => round_engine::assign_for_event(&meta, &timers, None, &lineup).unwrap(),
                 };
+                // #117 S3: the handler records which layout the heat flies, before the schedule
+                // carrying the channels it produced. Mirrored here or the fixture would drift from
+                // the thing it is standing in for.
+                if layout.is_some() {
+                    state
+                        .append(
+                            Event::HeatLayoutSet {
+                                heat: heat.clone(),
+                                layout,
+                            },
+                            None,
+                        )
+                        .unwrap();
+                }
                 state
                     .append(
                         Event::HeatScheduled {
@@ -5963,6 +6269,7 @@ mod tests {
             .add_round(
                 &created.id,
                 NewRoundReq {
+                    layouts: Vec::new(),
                     label: "Qualifying".to_string(),
                     classes: vec![class.clone()],
                     format: "timed_qual".to_string(),
@@ -5992,6 +6299,7 @@ mod tests {
             &created.id,
             &round.id,
             UpdateRoundReq {
+                layouts: Vec::new(),
                 label: "Qualifying".to_string(),
                 classes: vec![class],
                 format: "timed_qual".to_string(),
@@ -6157,7 +6465,7 @@ mod tests {
         assert_eq!(state.read().unwrap().0.len(), before);
     }
 
-    // ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────
+    // ── Event channel layouts (#117 S2) ──────────────────────────────────────────────────────────
     //
     // The registry's Mock is the fixture: 8 nodes, `available_channels` = Raceband R1–R8, and a
     // fresh event selects it. So the default event is exactly the "allowed set is the same size as
@@ -6192,21 +6500,21 @@ mod tests {
             .unwrap();
     }
 
-    /// A `node → channel` mapping, for building a layer request by hand.
-    fn nodes(pairs: &[(u32, u16)]) -> Vec<LayerNode> {
+    /// A `node → channel` mapping, for building a layout request by hand.
+    fn nodes(pairs: &[(u32, u16)]) -> Vec<LayoutNode> {
         pairs
             .iter()
-            .map(|(node, channel)| LayerNode {
+            .map(|(node, channel)| LayoutNode {
                 node: *node,
                 channel: *channel,
             })
             .collect()
     }
 
-    /// The Raceband tuning of every one of the Mock's eight nodes — the layer a seed produces.
-    fn raceband_layer() -> Vec<LayerNode> {
+    /// The Raceband tuning of every one of the Mock's eight nodes — the layout a seed produces.
+    fn raceband_layout() -> Vec<LayoutNode> {
         (0..8u32)
-            .map(|node| LayerNode {
+            .map(|node| LayoutNode {
                 node,
                 channel: crate::channels::RACEBAND_MHZ[node as usize],
             })
@@ -6214,63 +6522,63 @@ mod tests {
     }
 
     #[test]
-    fn a_seeded_layer_takes_the_timers_allowed_set_in_order() {
+    fn a_seeded_layout_takes_the_timers_allowed_set_in_order() {
         // The global→event seam: omitting `nodes` seeds enabled node `i` from allowed channel `i`,
         // in the RD's own preference order. The global record is the DEFAULT an event starts from.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         let view = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap();
-        assert_eq!(view.layers.len(), 1);
-        assert_eq!(view.layers[0].name, "Bracket A");
-        assert!(view.layers[0].id.0.starts_with("bracket-a-"));
-        assert_eq!(view.layers[0].nodes, raceband_layer());
+        assert_eq!(view.layouts.len(), 1);
+        assert_eq!(view.layouts[0].name, "Bracket A");
+        assert!(view.layouts[0].id.0.starts_with("bracket-a-"));
+        assert_eq!(view.layouts[0].nodes, raceband_layout());
         // Nothing about the global timer record changed — seeding reads it, it never writes it.
         let mock = reg.timers().get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
         assert_eq!(mock.available_channels, crate::channels::RACEBAND_MHZ);
     }
 
     #[test]
-    fn editing_a_layer_never_touches_the_global_allowed_set() {
+    fn editing_a_layout_never_touches_the_global_allowed_set() {
         // The bug underneath this slice: the event workspace embeds the same TimerManager, so
-        // "editing channels in the event" mutated the GLOBAL timer record. A layer is event state.
+        // "editing channels in the event" mutated the GLOBAL timer record. A layout is event state.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         let view = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap();
-        let id = view.layers[0].id.clone();
+        let id = view.layouts[0].id.clone();
         // Re-tune every node onto a different allowed channel (reverse the Raceband order).
-        let reversed: Vec<LayerNode> = (0..8u32)
-            .map(|node| LayerNode {
+        let reversed: Vec<LayoutNode> = (0..8u32)
+            .map(|node| LayoutNode {
                 node,
                 channel: crate::channels::RACEBAND_MHZ[7 - node as usize],
             })
             .collect();
         let after = reg
-            .update_channel_layer(
+            .update_channel_layout(
                 &created.id,
                 &id,
-                SetChannelLayerRequest {
+                SetChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: reversed.clone(),
                 },
             )
             .unwrap();
-        assert_eq!(after.layers[0].nodes, reversed);
+        assert_eq!(after.layouts[0].nodes, reversed);
         let mock = reg.timers().get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
         assert_eq!(
             mock.available_channels,
@@ -6280,51 +6588,51 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_layer_round_trips_and_survives_a_restart() {
-        // Layers ride the event's persisted meta (issue #115), exactly like rounds/membership.
-        let dir = std::env::temp_dir().join(format!("gridfpv-layers-{}", short_suffix()));
+    fn a_valid_layout_round_trips_and_survives_a_restart() {
+        // Layouts ride the event's persisted meta (issue #115), exactly like rounds/membership.
+        let dir = std::env::temp_dir().join(format!("gridfpv-layouts-{}", short_suffix()));
         std::fs::create_dir_all(&dir).unwrap();
         let id;
         {
             let reg = EventRegistry::new(Some(dir.clone())).unwrap();
             let created = reg.create(&req("Race Night")).unwrap();
             id = created.id.clone();
-            reg.add_channel_layer(
+            reg.add_channel_layout(
                 &id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
-                    nodes: Some(raceband_layer()),
+                    nodes: Some(raceband_layout()),
                 },
             )
             .unwrap();
         }
         let reopened = EventRegistry::new(Some(dir.clone())).unwrap();
-        let view = reopened.channel_layers(&id).unwrap();
-        assert_eq!(view.layers.len(), 1);
-        assert_eq!(view.layers[0].name, "Bracket A");
-        assert_eq!(view.layers[0].nodes, raceband_layer());
-        // And the same layer is on the event's meta — one storage, not two.
+        let view = reopened.channel_layouts(&id).unwrap();
+        assert_eq!(view.layouts.len(), 1);
+        assert_eq!(view.layouts[0].name, "Bracket A");
+        assert_eq!(view.layouts[0].nodes, raceband_layout());
+        // And the same layout is on the event's meta — one storage, not two.
         let meta = reopened.meta_of(&id).unwrap();
-        assert_eq!(meta.channel_layers, view.layers);
+        assert_eq!(meta.channel_layouts, view.layouts);
     }
 
     #[test]
     fn two_nodes_on_the_same_channel_is_refused() {
-        // The one hard rule INSIDE a layer: a node cannot share a frequency with its neighbour.
+        // The one hard rule INSIDE a layout: a node cannot share a frequency with its neighbour.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
-        let mut clashing = raceband_layer();
+        let mut clashing = raceband_layout();
         clashing[2].channel = clashing[1].channel;
         let err = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: Some(clashing),
                 },
             )
             .unwrap_err();
-        let LayerError::Invalid(msg) = &err else {
+        let LayoutError::Invalid(msg) = &err else {
             panic!("expected an Invalid refusal, got {err:?}");
         };
         // CLAUDE.md: the RD reads node LABELS and a band+channel name, never an index or a bare MHz.
@@ -6332,27 +6640,27 @@ mod tests {
         assert!(msg.contains("Raceband R2"), "{msg}");
         assert!(!msg.contains("5695"), "a bare MHz reached the RD: {msg}");
         // Nothing was stored.
-        assert!(reg.channel_layers(&created.id).unwrap().layers.is_empty());
+        assert!(reg.channel_layouts(&created.id).unwrap().layouts.is_empty());
     }
 
     #[test]
     fn a_channel_outside_the_allowed_set_is_refused() {
-        // S1's semantics one level up: `available_channels` is what this timer MAY use, and a layer
+        // S1's semantics one level up: `available_channels` is what this timer MAY use, and a layout
         // draws from it and nothing else — never from the catalog.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         tune_mock(&reg, vec![5658, 5695, 5732, 5769], vec![4, 5, 6, 7]);
         let err = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     // 5800 is Fatshark F4 — a real catalog channel the RD did not tick.
                     nodes: Some(nodes(&[(0, 5658), (1, 5695), (2, 5732), (3, 5800)])),
                 },
             )
             .unwrap_err();
-        let LayerError::Invalid(msg) = &err else {
+        let LayoutError::Invalid(msg) = &err else {
             panic!("expected an Invalid refusal, got {err:?}");
         };
         assert!(msg.contains("Fatshark F4"), "{msg}");
@@ -6362,16 +6670,16 @@ mod tests {
 
     #[test]
     fn a_disabled_or_out_of_range_node_is_refused() {
-        // #412: a disabled node seats nobody, so a layer must not pretend to tune it — and a node
+        // #412: a disabled node seats nobody, so a layout must not pretend to tune it — and a node
         // beyond the timer's width does not exist to tune at all.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         tune_mock(&reg, crate::channels::RACEBAND_MHZ.to_vec(), vec![2]);
 
         let disabled = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: Some(nodes(&[
                         (0, 5658),
@@ -6386,43 +6694,43 @@ mod tests {
                 },
             )
             .unwrap_err();
-        let LayerError::Invalid(msg) = &disabled else {
+        let LayoutError::Invalid(msg) = &disabled else {
             panic!("expected an Invalid refusal, got {disabled:?}");
         };
         assert!(msg.contains("Node 3"), "{msg}");
         assert!(msg.contains("disabled or does not exist"), "{msg}");
 
         let beyond = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: Some(nodes(&[(99, 5658)])),
                 },
             )
             .unwrap_err();
         assert!(
-            matches!(&beyond, LayerError::Invalid(msg) if msg.contains("Node 100")),
+            matches!(&beyond, LayoutError::Invalid(msg) if msg.contains("Node 100")),
             "expected the out-of-range refusal, got {beyond:?}"
         );
     }
 
     #[test]
-    fn a_layer_must_tune_every_enabled_node() {
-        // A layer is a COMPLETE tuning: leaving a gate on whatever it was last set to is exactly
+    fn a_layout_must_tune_every_enabled_node() {
+        // A layout is a COMPLETE tuning: leaving a gate on whatever it was last set to is exactly
         // the D27 hole this model closes.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         let err = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: Some(nodes(&[(0, 5658), (1, 5695)])),
                 },
             )
             .unwrap_err();
-        let LayerError::Invalid(msg) = &err else {
+        let LayoutError::Invalid(msg) = &err else {
             panic!("expected an Invalid refusal, got {err:?}");
         };
         assert!(msg.contains("Node 3"), "the first untuned node: {msg}");
@@ -6433,21 +6741,21 @@ mod tests {
     fn seeding_refuses_an_unconfigured_timer_rather_than_inventing_channels() {
         // The fifth-and-sixth instance of the empty-`available_channels` trap, headed off: empty
         // means "the RD has not configured this timer", never "this timer has no channels" — and
-        // seeding from the catalog would scatter a layer across the band with no intent behind it.
+        // seeding from the catalog would scatter a layout across the band with no intent behind it.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         tune_mock(&reg, vec![], vec![]);
         let err = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap_err();
         assert!(
-            matches!(&err, LayerError::Invalid(msg)
+            matches!(&err, LayoutError::Invalid(msg)
                 if msg.contains("Mock") && msg.contains("Timers page")),
             "expected the unconfigured-timer refusal, got {err:?}"
         );
@@ -6456,67 +6764,67 @@ mod tests {
     #[test]
     fn seeding_refuses_when_the_allowed_set_cannot_cover_every_node() {
         // Four channels ticked, eight nodes enabled: there is no complete tuning to seed, and the
-        // refusal names both numbers and both repairs rather than half-filling the layer.
+        // refusal names both numbers and both repairs rather than half-filling the layout.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         tune_mock(&reg, vec![5658, 5695, 5732, 5769], vec![]);
         let err = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap_err();
         assert!(
-            matches!(&err, LayerError::Invalid(msg)
+            matches!(&err, LayoutError::Invalid(msg)
                 if msg.contains("4 channels") && msg.contains("8 enabled nodes")),
             "expected the too-few-channels refusal, got {err:?}"
         );
     }
 
     #[test]
-    fn cross_layer_channel_overlap_warns_without_blocking() {
+    fn cross_layout_channel_overlap_warns_without_blocking() {
         // The RD's own call: reuse only matters for the keep-pilots-on-one-channel strategy, so it
-        // is FLAGGED and never refused. A bracket run off one layer does not care.
+        // is FLAGGED and never refused. A bracket run off one layout does not care.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         let a = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap();
-        assert!(a.overlaps.is_empty(), "one layer overlaps nothing");
+        assert!(a.overlaps.is_empty(), "one layout overlaps nothing");
 
         // The identical tuning again, under a different name — the maximal overlap.
         let both = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket B".into(),
                     nodes: None,
                 },
             )
             .expect("overlap is a warning, not a refusal");
-        assert_eq!(both.layers.len(), 2, "the layer was accepted and stored");
+        assert_eq!(both.layouts.len(), 2, "the layout was accepted and stored");
         assert_eq!(both.overlaps.len(), 1);
-        assert_eq!(both.overlaps[0].layer, both.layers[0].id);
-        assert_eq!(both.overlaps[0].other, both.layers[1].id);
+        assert_eq!(both.overlaps[0].layout, both.layouts[0].id);
+        assert_eq!(both.overlaps[0].other, both.layouts[1].id);
         assert_eq!(
             both.overlaps[0].channels,
             crate::channels::RACEBAND_MHZ.to_vec()
         );
         // And the read agrees with the write — one computation, not two.
-        assert_eq!(reg.channel_layers(&created.id).unwrap(), both);
+        assert_eq!(reg.channel_layouts(&created.id).unwrap(), both);
     }
 
     #[test]
-    fn layers_that_share_nothing_raise_no_warning() {
+    fn layouts_that_share_nothing_raise_no_warning() {
         // The GQ strategy done right: two disjoint packs, so nothing to flag.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
@@ -6526,143 +6834,712 @@ mod tests {
             vec![5658, 5695, 5732, 5769, 5740, 5760, 5800, 5880],
             vec![4, 5, 6, 7],
         );
-        reg.add_channel_layer(
+        reg.add_channel_layout(
             &created.id,
-            NewChannelLayerRequest {
+            NewChannelLayoutRequest {
                 name: "Pack A".into(),
                 nodes: Some(nodes(&[(0, 5658), (1, 5695), (2, 5732), (3, 5769)])),
             },
         )
         .unwrap();
         let view = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Pack B".into(),
                     nodes: Some(nodes(&[(0, 5740), (1, 5760), (2, 5800), (3, 5880)])),
                 },
             )
             .unwrap();
-        assert_eq!(view.layers.len(), 2);
+        assert_eq!(view.layouts.len(), 2);
         assert!(view.overlaps.is_empty(), "{:?}", view.overlaps);
     }
 
     #[test]
-    fn a_layer_is_renamed_and_removed_by_id() {
+    fn a_layout_is_renamed_and_removed_by_id() {
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         let view = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap();
-        let id = view.layers[0].id.clone();
+        let id = view.layouts[0].id.clone();
         let renamed = reg
-            .update_channel_layer(
+            .update_channel_layout(
                 &created.id,
                 &id,
-                SetChannelLayerRequest {
+                SetChannelLayoutRequest {
                     name: "Mains".into(),
-                    nodes: raceband_layer(),
+                    nodes: raceband_layout(),
                 },
             )
             .unwrap();
-        assert_eq!(renamed.layers[0].name, "Mains");
-        assert_eq!(renamed.layers[0].id, id, "the id is fixed across an edit");
+        assert_eq!(renamed.layouts[0].name, "Mains");
+        assert_eq!(renamed.layouts[0].id, id, "the id is fixed across an edit");
 
-        let after = reg.remove_channel_layer(&created.id, &id).unwrap();
-        assert!(after.layers.is_empty());
+        let after = reg.remove_channel_layout(&created.id, &id).unwrap();
+        assert!(after.layouts.is_empty());
         // Removing it twice is a 404, not a silent success.
         assert!(matches!(
-            reg.remove_channel_layer(&created.id, &id),
-            Err(LayerError::LayerNotFound(_))
+            reg.remove_channel_layout(&created.id, &id),
+            Err(LayoutError::LayoutNotFound(_))
         ));
     }
 
     #[test]
-    fn two_layers_cannot_share_a_name() {
-        // The name is what an RD picks a layer BY (S3), so a duplicate is a mis-click, not a choice.
+    fn two_layouts_cannot_share_a_name() {
+        // The name is what an RD picks a layout BY (S3), so a duplicate is a mis-click, not a choice.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
-        reg.add_channel_layer(
+        reg.add_channel_layout(
             &created.id,
-            NewChannelLayerRequest {
+            NewChannelLayoutRequest {
                 name: "Bracket A".into(),
                 nodes: None,
             },
         )
         .unwrap();
         let err = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "  bracket a ".into(),
                     nodes: None,
                 },
             )
             .unwrap_err();
         assert!(
-            matches!(&err, LayerError::Invalid(msg) if msg.contains("Bracket A")),
+            matches!(&err, LayoutError::Invalid(msg) if msg.contains("Bracket A")),
             "expected the duplicate-name refusal, got {err:?}"
         );
         // A blank name is refused for the same reason.
         assert!(matches!(
-            reg.add_channel_layer(
+            reg.add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "   ".into(),
                     nodes: None,
                 },
             ),
-            Err(LayerError::Invalid(_))
+            Err(LayoutError::Invalid(_))
         ));
     }
 
     #[test]
-    fn an_event_with_no_timer_cannot_define_a_layer() {
-        // A layer is a tuning OF a timer. With no timer selected there is no node set to tune, and
-        // the refusal says so rather than producing an empty layer.
+    fn an_event_with_no_timer_cannot_define_a_layout() {
+        // A layout is a tuning OF a timer. With no timer selected there is no node set to tune, and
+        // the refusal says so rather than producing an empty layout.
         let reg = EventRegistry::new(None).unwrap();
         let created = reg.create(&req("Race Night")).unwrap();
         reg.set_timers(&created.id, vec![]).unwrap();
         let err = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &created.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap_err();
         assert!(
-            matches!(&err, LayerError::Invalid(msg) if msg.contains("no timer selected")),
+            matches!(&err, LayoutError::Invalid(msg) if msg.contains("no timer selected")),
             "expected the no-timer refusal, got {err:?}"
         );
     }
 
     #[test]
-    fn layers_are_addressed_within_their_own_event() {
+    fn layouts_are_addressed_within_their_own_event() {
         let reg = EventRegistry::new(None).unwrap();
         let a = reg.create(&req("Friday")).unwrap();
         let b = reg.create(&req("Saturday")).unwrap();
         let view = reg
-            .add_channel_layer(
+            .add_channel_layout(
                 &a.id,
-                NewChannelLayerRequest {
+                NewChannelLayoutRequest {
                     name: "Bracket A".into(),
                     nodes: None,
                 },
             )
             .unwrap();
-        assert!(reg.channel_layers(&b.id).unwrap().layers.is_empty());
+        assert!(reg.channel_layouts(&b.id).unwrap().layouts.is_empty());
         assert!(matches!(
-            reg.remove_channel_layer(&b.id, &view.layers[0].id),
-            Err(LayerError::LayerNotFound(_))
+            reg.remove_channel_layout(&b.id, &view.layouts[0].id),
+            Err(LayoutError::LayoutNotFound(_))
         ));
-        assert!(reg.channel_layers(&EventId("nope".into())).is_none());
+        assert!(reg.channel_layouts(&EventId("nope".into())).is_none());
+    }
+
+    // ── #117 S3: rounds name layouts, heats fly them ─────────────────────────────────────────
+
+    /// An event with one channel layout over the Mock's eight Raceband nodes, and its id.
+    fn event_with_layout(reg: &EventRegistry, name: &str) -> (EventId, LayoutId) {
+        let created = reg.create(&req(name)).unwrap();
+        let view = reg
+            .add_channel_layout(
+                &created.id,
+                NewChannelLayoutRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        let id = view.layouts[0].id.clone();
+        (created.id, id)
+    }
+
+    #[test]
+    fn a_round_may_only_name_a_layout_the_event_has() {
+        // A round pointing at a layout that does not exist would draw heats with no channels and no
+        // explanation. Refused at write time, on add and on update alike.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, layout) = event_with_layout(&reg, "Race Night");
+
+        let mut good = round_req("Bracket", vec![]);
+        good.layouts = vec![layout.clone()];
+        let round = reg.add_round(&event, good).unwrap();
+        assert_eq!(round.layouts, vec![layout.clone()]);
+
+        let mut bogus = round_req("Nope", vec![]);
+        bogus.layouts = vec![LayoutId("never-existed".into())];
+        let err = reg.add_round(&event, bogus).unwrap_err();
+        assert!(
+            matches!(&err, RoundError::Invalid(m) if m.contains("does not have")),
+            "expected the unknown-layout refusal, got {err:?}"
+        );
+
+        // Naming the same layout twice says nothing (the first entry is the heats' default).
+        let mut twice = round_req("Twice", vec![]);
+        twice.layouts = vec![layout.clone(), layout];
+        let err = reg.add_round(&event, twice).unwrap_err();
+        assert!(
+            matches!(&err, RoundError::Invalid(m) if m.contains("Bracket A") && m.contains("twice")),
+            "the refusal names the layout, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_layout_a_round_flies_cannot_be_deleted_out_from_under_it() {
+        // The other end of the same hole: validation stops a round naming a layout that is gone,
+        // and this stops a layout going while a round still names it. Both nouns by friendly name.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, layout) = event_with_layout(&reg, "Race Night");
+        let mut req_round = round_req("Bracket", vec![]);
+        req_round.layouts = vec![layout.clone()];
+        reg.add_round(&event, req_round).unwrap();
+
+        let err = reg.remove_channel_layout(&event, &layout).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Bracket A"), "names the layout: {msg}");
+        assert!(msg.contains("Bracket"), "names the round: {msg}");
+        assert!(!msg.contains(&layout.0), "leaks the raw layout id: {msg}");
+
+        // Drop it from the round and the delete goes through.
+        let rounds = reg.rounds_of(&event).unwrap();
+        let mut edit = round_edit_of(&rounds[0]);
+        edit.layouts = Vec::new();
+        reg.update_round(&event, &rounds[0].id, edit).unwrap();
+        assert!(reg.remove_channel_layout(&event, &layout).is_ok());
+    }
+
+    /// The `UpdateRoundReq` that reproduces `round` unchanged — for a test that edits one field.
+    fn round_edit_of(round: &RoundDef) -> UpdateRoundReq {
+        UpdateRoundReq {
+            layouts: round.layouts.clone(),
+            label: round.label.clone(),
+            classes: round.classes.clone(),
+            format: round.format.clone(),
+            params: round.params.clone(),
+            win_condition: Some(round.win_condition),
+            seeding: round.seeding.clone(),
+            time_limit_secs: round.time_limit_secs,
+            channel_mode: Some(round.channel_mode),
+            staging_timer_secs: Some(round.staging_timer_secs),
+            start_procedure: Some(round.start_procedure.clone()),
+            grace_window: Some(round.grace_window),
+            protest_window: Some(round.protest_window),
+            min_lap_secs: round.min_lap_secs,
+        }
+    }
+
+    #[test]
+    fn a_stale_layout_surfaces_on_round_issues() {
+        // Layouts are validated at WRITE time only, and a stored one goes stale when the world moves
+        // under it. #412 and #416 both landed on "validate stored config on read", so this is that
+        // same read — `GET /events/{id}/round-issues` — rather than a second mechanism.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, layout) = event_with_layout(&reg, "Race Night");
+        let mut req_round = round_req("Bracket", vec![]);
+        req_round.layouts = vec![layout.clone()];
+        reg.add_round(&event, req_round).unwrap();
+        assert!(
+            reg.round_issues(&event).unwrap().is_empty(),
+            "a freshly-seeded layout is clean"
+        );
+
+        // Untick R3 on the timer AFTER the layout was written: node 3 is now on a channel this
+        // timer is no longer allowed to use.
+        let mut allowed = crate::channels::RACEBAND_MHZ.to_vec();
+        let dropped = allowed.remove(2);
+        tune_mock(&reg, allowed, vec![]);
+        let issues = reg.round_issues(&event).unwrap();
+        let stale: Vec<_> = issues
+            .iter()
+            .filter(|i| i.problem == SeatProblem::LayoutChannelNotAllowed)
+            .collect();
+        assert_eq!(stale.len(), 1, "one node lost its channel: {issues:?}");
+        assert_eq!(stale[0].layout_name.as_deref(), Some("Bracket A"));
+        assert_eq!(stale[0].node_label, "Node 3");
+        // Friendly names only — the round, the layout, the node and the CHANNEL, never a bare MHz.
+        let detail = &stale[0].detail;
+        assert!(detail.contains("Bracket"), "names the round: {detail}");
+        assert!(detail.contains("Bracket A"), "names the layout: {detail}");
+        assert!(detail.contains("Node 3"), "names the node: {detail}");
+        assert!(
+            detail.contains(&crate::timers::channel_label(dropped)),
+            "names the channel by band+channel: {detail}"
+        );
+        assert!(
+            !detail.contains(&dropped.to_string()),
+            "leaks a bare MHz: {detail}"
+        );
+    }
+
+    #[test]
+    fn enabling_a_node_after_a_layout_was_written_leaves_it_untuned() {
+        // The other staleness: the layout was a complete tuning when it was written, and then the
+        // RD switched a node ON. A heat flying it would seat a pilot on a gate with no channel, so
+        // the fill refuses — and this is where the RD is told, before they get there.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        // Seven enabled nodes when the layout is defined; node 7 comes back afterwards.
+        tune_mock(&reg, crate::channels::RACEBAND_MHZ.to_vec(), vec![7]);
+        let view = reg
+            .add_channel_layout(
+                &created.id,
+                NewChannelLayoutRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        let layout = view.layouts[0].id.clone();
+        let mut req_round = round_req("Bracket", vec![]);
+        req_round.layouts = vec![layout];
+        reg.add_round(&created.id, req_round).unwrap();
+        assert!(reg.round_issues(&created.id).unwrap().is_empty());
+
+        tune_mock(&reg, crate::channels::RACEBAND_MHZ.to_vec(), vec![]);
+        let issues = reg.round_issues(&created.id).unwrap();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].problem, SeatProblem::LayoutNodeUntuned);
+        assert_eq!(issues[0].node_label, "Node 8");
+        assert!(issues[0].detail.contains("Node 8"));
+    }
+
+    #[test]
+    fn a_raced_rounds_layouts_are_frozen() {
+        // A raced heat keeps the channels it raced on. Which layouts the round may fly decides what
+        // a re-materialized heat is tuned to, so freezing them with the channel mode means the
+        // question never arises.
+        use gridfpv_events::{CompetitorRef, HeatTransition};
+
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, layout) = event_with_layout(&reg, "Race Night");
+        let round = reg.add_round(&event, round_req("Bracket", vec![])).unwrap();
+
+        let state = reg.resolve(&event).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("h1".into()),
+                    lineup: vec![CompetitorRef("a".into())],
+                    class: None,
+                    round: Some(round.id.clone()),
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: HeatId("h1".into()),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        let mut edit = round_edit_of(&round);
+        edit.layouts = vec![layout];
+        let err = reg.update_round(&event, &round.id, edit).unwrap_err();
+        assert!(
+            matches!(&err, RoundError::Invalid(m) if m.contains("channel layouts")),
+            "expected the raced freeze to name the layouts, got {err:?}"
+        );
+    }
+
+    /// A practice event flying `layout_nodes`, with an already-filled heat. Returns
+    /// `(event, round, layout, heat)` — the fixture the heat→layout tests share.
+    ///
+    /// Open practice on purpose: its seats *name* their own nodes, so what each seat is tuned to is
+    /// exactly the `heat → channel` mapping #402 said did not exist.
+    fn practice_on_a_layout(
+        reg: &EventRegistry,
+        layout_nodes: &[(u32, u16)],
+    ) -> (EventId, RoundId, LayoutId, HeatId) {
+        let created = reg.create(&req("Race Night")).unwrap();
+        let view = reg
+            .add_channel_layout(
+                &created.id,
+                NewChannelLayoutRequest {
+                    name: "Practice A".into(),
+                    nodes: Some(nodes(layout_nodes)),
+                },
+            )
+            .unwrap();
+        let layout = view.layouts[0].id.clone();
+        let mut round_req = practice_round(&[0, 1, 2]);
+        round_req.layouts = vec![layout.clone()];
+        let round = reg.add_round(&created.id, round_req).unwrap();
+        let heat = fill_next_heat(reg, &created.id, &round.id);
+        (created.id, round.id, layout, heat)
+    }
+
+    #[test]
+    fn a_round_restricted_to_a_layout_fills_its_heat_on_that_layouts_channels() {
+        // The whole of #117 S3 in one assertion, and the close of #402: a practice heat's seats now
+        // carry real channels, drawn from the layout its round flies. Before this they were EMPTY
+        // by construction — `frequencies: open_practice.then(Vec::new)` — on the false premise that
+        // "its lineup is the active channels themselves".
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, _round, layout, heat) = practice_on_a_layout(
+            &reg,
+            &[
+                (0, 5658),
+                (1, 5695),
+                (2, 5732),
+                (3, 5769),
+                (4, 5806),
+                (5, 5843),
+                (6, 5880),
+                (7, 5917),
+            ],
+        );
+
+        let (lineup, freqs) = heat_now(&reg, &event, &heat);
+        assert_eq!(lineup, refs(&["node-0", "node-1", "node-2"]));
+        assert_eq!(
+            freqs,
+            vec![
+                (CompetitorRef("node-0".into()), 5658),
+                (CompetitorRef("node-1".into()), 5695),
+                (CompetitorRef("node-2".into()), 5732),
+            ],
+            "each practice seat is on the channel its layout puts that node on"
+        );
+
+        // And the heat records WHICH layout it flew, so the answer survives the round's default
+        // changing later.
+        let (events, _) = reg.resolve(&event).unwrap().read().unwrap();
+        assert_eq!(
+            round_engine::heat_layout_bind(&events, &heat),
+            Some(Some(layout)),
+        );
+    }
+
+    #[test]
+    fn editing_a_layout_re_tunes_the_scheduled_heat_flying_it() {
+        // The RD must be able to fix a layout without deleting and rebuilding every heat under it.
+        // Deliberately the #387 mechanism rather than a second one: re-materialize the rounds that
+        // fly the edited layout, and only their still-`Scheduled` heats.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, _round, layout, heat) = practice_on_a_layout(
+            &reg,
+            &[
+                (0, 5658),
+                (1, 5695),
+                (2, 5732),
+                (3, 5769),
+                (4, 5806),
+                (5, 5843),
+                (6, 5880),
+                (7, 5917),
+            ],
+        );
+        assert_eq!(heat_now(&reg, &event, &heat).1[0].1, 5658);
+
+        // Swap node 0 onto R8 and node 2 onto R2 — a rename in the same breath, to prove the whole
+        // layout is replaced wholesale.
+        reg.update_channel_layout(
+            &event,
+            &layout,
+            SetChannelLayoutRequest {
+                name: "Practice B".into(),
+                nodes: nodes(&[
+                    (0, 5917),
+                    (1, 5695),
+                    (2, 5658),
+                    (3, 5769),
+                    (4, 5806),
+                    (5, 5843),
+                    (6, 5880),
+                    (7, 5732),
+                ]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            heat_now(&reg, &event, &heat).1,
+            vec![
+                (CompetitorRef("node-0".into()), 5917),
+                (CompetitorRef("node-1".into()), 5695),
+                (CompetitorRef("node-2".into()), 5658),
+            ],
+            "the scheduled heat is re-tuned in place — no delete-and-rebuild"
+        );
+    }
+
+    #[test]
+    fn editing_a_layout_leaves_a_heat_that_has_raced_on_the_channels_it_raced_on() {
+        // The binding constraint. A result is never retroactively relabelled: only `Scheduled`
+        // heats are re-materialized, and everything past that keeps what it flew.
+        use gridfpv_events::HeatTransition;
+
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, _round, layout, heat) = practice_on_a_layout(
+            &reg,
+            &[
+                (0, 5658),
+                (1, 5695),
+                (2, 5732),
+                (3, 5769),
+                (4, 5806),
+                (5, 5843),
+                (6, 5880),
+                (7, 5917),
+            ],
+        );
+        let raced = heat_now(&reg, &event, &heat);
+        let state = reg.resolve(&event).unwrap();
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+            HeatTransition::Finished,
+            HeatTransition::Finalized,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: heat.clone(),
+                        transition,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        reg.update_channel_layout(
+            &event,
+            &layout,
+            SetChannelLayoutRequest {
+                name: "Practice A".into(),
+                nodes: nodes(&[
+                    (0, 5917),
+                    (1, 5880),
+                    (2, 5843),
+                    (3, 5806),
+                    (4, 5769),
+                    (5, 5732),
+                    (6, 5695),
+                    (7, 5658),
+                ]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            heat_now(&reg, &event, &heat),
+            raced,
+            "a heat that has raced keeps the channels it raced on"
+        );
+    }
+
+    #[test]
+    fn a_manual_seating_override_survives_a_re_fill() {
+        // "An override silently lost when a round is refilled is worse than none" (#419). The fill
+        // and the #387 re-materialization both apply it through the SAME `apply_heat_decisions`,
+        // which is what makes forgetting impossible rather than merely unlikely.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, round, layout, heat) = practice_on_a_layout(
+            &reg,
+            &[
+                (0, 5658),
+                (1, 5695),
+                (2, 5732),
+                (3, 5769),
+                (4, 5806),
+                (5, 5843),
+                (6, 5880),
+                (7, 5917),
+            ],
+        );
+        let state = reg.resolve(&event).unwrap();
+
+        // The RD re-seats the heat by hand: two seats, on nodes 3 and 4.
+        state
+            .append(
+                Event::HeatSeatingOverridden {
+                    heat: heat.clone(),
+                    lineup: refs(&["node-3", "node-4"]),
+                    frequencies: vec![],
+                },
+                None,
+            )
+            .unwrap();
+
+        // Re-fill the round the way a round edit does — the real path, which re-materializes and
+        // appends. The override wins over the plan the round would otherwise produce.
+        let mut edit = practice_edit("Practice", &[0, 1, 2]);
+        edit.layouts = vec![layout.clone()];
+        reg.update_round(&event, &round, edit).unwrap();
+
+        let (lineup, freqs) = heat_now(&reg, &event, &heat);
+        assert_eq!(
+            lineup,
+            refs(&["node-3", "node-4"]),
+            "the RD's seating survived the round being re-formed"
+        );
+        assert_eq!(
+            freqs,
+            vec![
+                (CompetitorRef("node-3".into()), 5769),
+                (CompetitorRef("node-4".into()), 5806),
+            ],
+            "the RD's pilots, the layout's channels"
+        );
+        let (events, _) = state.read().unwrap();
+        assert_eq!(
+            round_engine::heat_layout_bind(&events, &heat),
+            Some(Some(layout.clone())),
+            "and it is still recorded against the layout it flies"
+        );
+
+        // An empty lineup is the explicit clear — the heat goes back to its round's own plan.
+        state
+            .append(
+                Event::HeatSeatingOverridden {
+                    heat: heat.clone(),
+                    lineup: vec![],
+                    frequencies: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        let mut edit = practice_edit("Practice", &[0, 1, 2]);
+        edit.layouts = vec![layout];
+        reg.update_round(&event, &round, edit).unwrap();
+        assert_eq!(
+            heat_now(&reg, &event, &heat).0,
+            refs(&["node-0", "node-1", "node-2"]),
+            "clearing the override returns the heat to its round's plan"
+        );
+    }
+
+    #[test]
+    fn an_override_may_set_the_pilots_and_leave_the_channels_to_the_layout() {
+        // An RD swapping two pilots should not have to retype four frequencies — and an RD who
+        // *does* type them gets exactly what they typed.
+        let reg = EventRegistry::new(None).unwrap();
+        let (event, round, _layout, heat) = practice_on_a_layout(
+            &reg,
+            &[
+                (0, 5658),
+                (1, 5695),
+                (2, 5732),
+                (3, 5769),
+                (4, 5806),
+                (5, 5843),
+                (6, 5880),
+                (7, 5917),
+            ],
+        );
+        let state = reg.resolve(&event).unwrap();
+        state
+            .append(
+                Event::HeatSeatingOverridden {
+                    heat: heat.clone(),
+                    lineup: refs(&["node-0", "node-1"]),
+                    frequencies: vec![
+                        (CompetitorRef("node-0".into()), 5917),
+                        (CompetitorRef("node-1".into()), 5880),
+                    ],
+                },
+                None,
+            )
+            .unwrap();
+        let mut edit = practice_edit("Practice", &[0, 1, 2]);
+        edit.layouts = vec![_layout];
+        reg.update_round(&event, &round, edit).unwrap();
+        assert_eq!(
+            heat_now(&reg, &event, &heat).1,
+            vec![
+                (CompetitorRef("node-0".into()), 5917),
+                (CompetitorRef("node-1".into()), 5880),
+            ],
+            "typed channels win over the layout's"
+        );
+    }
+
+    #[test]
+    fn a_round_that_names_no_layout_is_unchanged_by_all_of_this() {
+        // The pre-S3 behaviour, kept: no layout means no `heat → channel` mapping to draw on, and
+        // a practice heat's frequencies stay empty rather than being invented from the allowed set.
+        let reg = EventRegistry::new(None).unwrap();
+        let created = reg.create(&req("Race Night")).unwrap();
+        let round = reg.add_round(&created.id, practice_round(&[0, 1])).unwrap();
+        let heat = fill_next_heat(&reg, &created.id, &round.id);
+        let (lineup, freqs) = heat_now(&reg, &created.id, &heat);
+        assert_eq!(lineup, refs(&["node-0", "node-1"]));
+        assert!(freqs.is_empty(), "nothing is invented from the allowed set");
+        let (events, _) = reg.resolve(&created.id).unwrap().read().unwrap();
+        assert_eq!(round_engine::heat_layout_bind(&events, &heat), None);
+    }
+
+    #[test]
+    fn an_event_stored_under_the_old_channel_layers_key_still_loads() {
+        // Pre-release: no migration, no old-key fallback — the field is simply lost. What is NOT
+        // acceptable is failing to open the event, so the unknown key must be ignored on read.
+        let json = serde_json::json!({
+            "id": "e1",
+            "name": "Race Night",
+            "created_at": 0,
+            "persistent": true,
+            "channel_layers": [
+                { "id": "bracket-a-xyz", "name": "Bracket A", "nodes": [{ "node": 0, "channel": 5658 }] }
+            ]
+        });
+        let meta: EventMeta = serde_json::from_value(json).expect("an old-shape meta still loads");
+        assert_eq!(meta.name, "Race Night");
+        assert!(
+            meta.channel_layouts.is_empty(),
+            "the old key is ignored, not adopted"
+        );
     }
 }

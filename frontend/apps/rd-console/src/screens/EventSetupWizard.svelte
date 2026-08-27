@@ -212,8 +212,8 @@
         {#if current.id === 'classes-roster'}
           <EventClassesRoster {session} />
         {:else if current.id === 'timers'}
-          <!-- #117 S2: no layer editor in the wizard. This step is where the RD is still choosing
-               WHICH timer feeds the event, and a layer tunes a settled timer; it stays fully
+          <!-- #117 S2: no layout editor in the wizard. This step is where the RD is still choosing
+               WHICH timer feeds the event, and a layout tunes a settled timer; it stays fully
                editable on the Timers page afterwards, which is this wizard's whole posture. -->
           <EventTimers
             {session}

@@ -33,6 +33,45 @@
       </p>
     </div>
 
+    <div class="callout">
+      <p>
+        <strong>Superseded in part by #117 S1–S3 (2026-08).</strong> Sections 1, 2 and 5 below
+        describe the pre-S1 model, in which <code>available_channels</code> was the pool a heat's
+        channels were <em>assigned from</em>. It is not how GridFPV works now, and the difference
+        matters: the model is <strong>three scopes</strong>, not one.
+      </p>
+      <ul>
+        <li>
+          <strong>Global (a timer)</strong> — <em>what may this timer ever use?</em>
+          <code>available_channels</code> means <strong>allowed</strong>, never assigned. Empty on
+          a <code>Flexible</code> timer means <em>unrestricted</em>, never <em>none</em> — the trap
+          that appeared five separate times (#402, #412, #413, #416, and
+          <code>round_engine.rs</code>'s empty-pool early return, which meant no pilot was ever
+          assigned a channel on real hardware).
+        </li>
+        <li>
+          <strong>Event</strong> — <em>what goes on which node?</em> A <strong>channel layout</strong>
+          is a complete <code>node → channel</code> tuning of the event's timer, one channel per
+          enabled node, defined once and reused. Layouts are event state: editing one never touches
+          a timer record. An allowed set is a <em>set</em> and carries no per-node mapping; a layout
+          is that mapping.
+        </li>
+        <li>
+          <strong>Round and heat</strong> — <em>which layout?</em> A round <strong>names</strong> the
+          layouts its heats may fly; a heat <strong>binds</strong> one, and the layout <em>is</em>
+          that heat's assignment, laid onto the real node indices by
+          <code>Timer::seat_nodes</code>. One layout for a whole bracket, several for a GQ-style
+          qualifier — the RD picks the strategy, the system does not.
+        </li>
+      </ul>
+      <p>
+        The auto-pick described in §5 still exists, and now runs against the <em>whole</em> allowed
+        set, for the one case it was written for: a pool larger than the heat where pilots have no
+        fixed channel. A heat that names a layout never reaches it. This page wants a full rewrite
+        against the three-scope model; until then, read §1 and §5 as history.
+      </p>
+    </div>
+
     <h2>1. The principle — channels belong to the timer, not the event</h2>
     <div class="principle">
       <p><span class="name">Channels are a property of the selected timer.</span> GridFPV does not

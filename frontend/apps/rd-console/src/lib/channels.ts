@@ -163,26 +163,24 @@ export function nodeIndexOf(ref: string): number | undefined {
   return Number(m[1]);
 }
 
-/**
- * The channel a node seat is configured for **within a timer's channel pool**, or `undefined` when
- * the pool says nothing about it.
+/*
+ * `poolChannel(node, pool)` used to live here — the channel a node was "configured for", read as
+ * `Timer.available_channels[node]`. It is gone as of #117 S3, and its absence is the point.
  *
- * # An empty pool is "unrestricted", not "none" (#413, #416)
+ * `available_channels` is a **set**: the channels the RD has said this timer may ever use. It has
+ * no per-node meaning whatsoever, so position `n` in it bore no relationship to node `n` — the
+ * answer was invented, and only looked harmless because the list is **empty on every Flexible
+ * timer** (measured on the bench: the Mock lists eight, both RotorHazard timers list none), so on
+ * real hardware it returned `undefined` every time and the seat degraded to a bare `Node N`.
  *
- * `Timer.available_channels` is the set of channels the RD has *made available* on a timer. It is
- * **empty on every Flexible timer** — measured on the bench, the Mock lists eight channels and both
- * RotorHazard timers list none — and empty there means *"no restriction"*, not *"this timer has no
- * channels"*. Indexing straight into it (`pool[node]`) reads that emptiness as data and answers
- * `undefined` for every node of every real timer, which is how the seat label came to degrade to a
- * bare `Node N` on all RotorHazard hardware.
+ * A **channel layout** (`ChannelLayout.nodes`) is the per-node mapping the allowed set never had:
+ * one channel per node, chosen by the RD, and named by the heat that flies it. Resolve a seat's
+ * channel through `buildCompetitorNames` (`competitorName.ts`), which knows the order to try —
+ * the heat's own assignment, what the node reports, then the heat's layout.
  *
- * So this refuses to index an empty pool at all. The caller asks other sources first (what the node
- * reports it is tuned to, what the heat assigned) and treats `undefined` as **unknown**.
+ * When every source is silent the channel is **genuinely unknown**, and unknown is not "none": the
+ * seat reads as `Node N` and a caller showing a channel column must say "unknown".
  */
-export function poolChannel(node: number, pool: readonly number[] | undefined): number | undefined {
-  if (!pool || pool.length === 0) return undefined;
-  return pool[node];
-}
 
 /**
  * The display label for one node seat: **node + channel**, which is the pair an RD actually needs.

@@ -4,6 +4,7 @@ import type { ClassId } from "./ClassId";
 import type { CompetitorRef } from "./CompetitorRef";
 import type { FillMode } from "./FillMode";
 import type { HeatId } from "./HeatId";
+import type { LayoutId } from "./LayoutId";
 import type { LogRef } from "./LogRef";
 import type { Penalty } from "./Penalty";
 import type { PilotId } from "./PilotId";
@@ -110,7 +111,29 @@ frequencies?: Array<[CompetitorRef, number]>,
  * convention); `None` (the default / the generator path) keeps the auto-name.
  * Threaded straight into the emitted [`Event::HeatScheduled`].
  */
-label?: string, } } | { "FillRound": { 
+label?: string, } } | { "SetHeatLayout": { 
+/**
+ * The heat to bind — one already scheduled in this event, still `Scheduled`.
+ */
+heat: HeatId, 
+/**
+ * The layout it flies, or `None` to clear the bind.
+ */
+layout?: LayoutId, } } | { "OverrideHeatSeating": { 
+/**
+ * The heat to re-seat — one already scheduled in this event, still `Scheduled`.
+ */
+heat: HeatId, 
+/**
+ * The RD's lineup, in seat order. **Empty clears the override.**
+ */
+lineup: Array<CompetitorRef>, 
+/**
+ * The RD's per-pilot channels in raw MHz. Omit for *"my pilots, the layout's channels"* —
+ * the lineup is overridden and the channels still come from the heat's layout, so
+ * swapping two pilots does not mean retyping four frequencies.
+ */
+frequencies?: Array<[CompetitorRef, number]>, } } | { "FillRound": { 
 /**
  * The round to fill — one of the event's [`rounds`](crate::events::EventMeta::rounds).
  */

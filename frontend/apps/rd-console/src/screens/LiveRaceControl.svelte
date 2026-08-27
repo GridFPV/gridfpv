@@ -206,7 +206,11 @@
       // The registry's timer, NOT `gateTimer` — the name inputs are needed by every session, and
       // `gateTimer` is deliberately absent for a read-only one (see the subscription above).
       timer: session.primaryTimer,
-      membership: session.currentEvent?.classes_membership
+      membership: session.currentEvent?.classes_membership,
+      // #117 S3: the event's channel layouts. Paired with the heat's own `layout`, they are the
+      // per-node channel mapping a `node-{i}` seat resolves through — the source that used to be
+      // `available_channels[node]`, which carried no per-node meaning at all.
+      layouts: session.currentEvent?.channel_layouts
     })
   );
 

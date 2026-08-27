@@ -105,7 +105,7 @@ disabled_nodes: Array<number>,
  * - *What is node N tuned to right now?* → [`node_channels`](Timer::node_channels) for what
  *   GridFPV last wrote from the bench, the heat's own `frequencies` for what a race allocated,
  *   `NodeSignal::frequency_mhz` for what the hardware reports. **Never this field indexed by
- *   node** — an allowed set carries no per-node mapping (that is S2's event *layers*).
+ *   node** — an allowed set carries no per-node mapping (that is S2's event *layouts*).
  *
  * ⚠️ **Empty means "the RD has not configured this timer", and what follows differs by
  * context.** Every RotorHazard on the bench reports `Flexible` with an empty set.

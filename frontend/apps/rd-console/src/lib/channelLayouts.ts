@@ -1,35 +1,35 @@
 /**
- * Event **channel layers** — the pure readings behind the layer editor (#117 S2).
+ * Event **channel layouts** — the pure readings behind the layout editor (#117 S2).
  *
- * A layer is one complete tuning of the event's timer: `node → channel`, one channel per enabled
+ * A layout is one complete tuning of the event's timer: `node → channel`, one channel per enabled
  * node, drawn from the timer's **allowed** set. Three scopes answer three different questions and
  * conflating them has been this repo's most repeated bug:
  *
  * | scope            | question                        | state                       |
  * | ---------------- | ------------------------------- | --------------------------- |
  * | Global (a timer) | what may this timer *ever* use? | `Timer.available_channels`  |
- * | **Event**        | **what goes on which node?**    | **layers — this module**    |
- * | Heat             | which layer does it fly?        | S3, not built               |
+ * | **Event**        | **what goes on which node?**    | **layouts — this module**    |
+ * | Heat             | which layout does it fly?        | S3, not built               |
  *
  * Everything here is pure: no I/O, no state. The Director owns the rules (it refuses an invalid
- * layer and computes the cross-layer `overlaps`); this module owns **what the RD reads** — the
- * draft the editor binds to, and the sentences that name a layer, a node and a channel rather than
+ * layout and computes the cross-layout `overlaps`); this module owns **what the RD reads** — the
+ * draft the editor binds to, and the sentences that name a layout, a node and a channel rather than
  * an id, an index or a bare MHz.
  *
  * ## Two things this module deliberately does not do
  *
- * It does not decide a strategy. A bracket is one layer for the whole tournament; a GQ qualifier is
- * many layers so each pilot keeps their own channel. Both fall out of the same mechanism, and
+ * It does not decide a strategy. A bracket is one layout for the whole tournament; a GQ qualifier is
+ * many layouts so each pilot keeps their own channel. Both fall out of the same mechanism, and
  * choosing between them is the RD's job.
  *
- * And it does not treat cross-layer channel reuse as an error. That only matters for the
+ * And it does not treat cross-layout channel reuse as an error. That only matters for the
  * keep-pilots-on-one-channel strategy, so it is a **warning** an RD can read and ignore.
  */
 import type {
   ChannelCatalogEntry,
-  ChannelLayer,
-  LayerId,
-  LayerNode,
+  ChannelLayout,
+  LayoutId,
+  LayoutNode,
   Timer,
   TimerNodes
 } from '@gridfpv/types';
@@ -37,16 +37,16 @@ import { channelLabel, nodeSeatLabel } from './channels.js';
 import { nodeLabel } from './timerNodes.js';
 
 /**
- * A layer being edited: the same shape as a stored {@link ChannelLayer}, except a node's channel
+ * A layout being edited: the same shape as a stored {@link ChannelLayout}, except a node's channel
  * may be **unset** while the RD is still filling it in.
  *
- * The Director refuses an incomplete layer (a layer is a *complete* tuning — a gate left on
+ * The Director refuses an incomplete layout (a layout is a *complete* tuning — a gate left on
  * whatever it happened to be on last is exactly the hole this model closes), so an unset node is a
  * draft state the editor blocks Save on, never something that can be persisted.
  */
 export interface LayerDraft {
-  /** The layer being edited, or `undefined` for a new one that has no id yet. */
-  id?: LayerId;
+  /** The layout being edited, or `undefined` for a new one that has no id yet. */
+  id?: LayoutId;
   /** The RD-typed name. Blank is a draft state; the Director refuses it. */
   name: string;
   /** `node index → channel (MHz)`, for the nodes the RD has set so far. */
@@ -57,21 +57,21 @@ export interface LayerDraft {
  * The draft as the wire mapping, **ascending by node** — the `nodes` a create/update carries.
  *
  * Unset nodes are simply absent, which is what makes the Director's completeness refusal fire on a
- * half-filled layer rather than the console silently inventing a channel for the gap.
+ * half-filled layout rather than the console silently inventing a channel for the gap.
  */
-export function draftNodes(draft: LayerDraft): LayerNode[] {
+export function draftNodes(draft: LayerDraft): LayoutNode[] {
   return [...draft.channels.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([node, channel]) => ({ node, channel }));
 }
 
-/** The channels a layer's per-node dropdown offers: the timer's **allowed** set, in the RD's order.
+/** The channels a layout's per-node dropdown offers: the timer's **allowed** set, in the RD's order.
  *
  * # Why not the catalog, and why not the capability
  *
  * The Tune page's dropdown (`tuning.ts`'s `channelOptions`) offers everything the hardware can do,
  * because there the RD is picking a bench channel and an empty allowed set means *"unrestricted"*.
- * A layer is the opposite question: it is drawn from what the RD said this timer **may use**, so
+ * A layout is the opposite question: it is drawn from what the RD said this timer **may use**, so
  * offering a channel outside that set would offer a choice the Director then refuses. An empty
  * allowed set here is therefore not "offer everything" — it is "there is nothing to choose yet",
  * and the editor says so with {@link unconfiguredTimerMessage} instead of rendering an empty
@@ -91,14 +91,14 @@ export function unconfiguredTimerMessage(timer: Timer | undefined): string | und
     return 'This event has no timer selected, so there is no node set to tune. Pick a timer for this event first.';
   }
   if (allowedChannels(timer).length > 0) return undefined;
-  return `No channels are chosen for ${timer.name} yet. Tick the channels it may use on the Timers page, then define a layer here.`;
+  return `No channels are chosen for ${timer.name} yet. Tick the channels it may use on the Timers page, then define a layout here.`;
 }
 
 /**
- * The node indices a layer tunes: the timer's **enabled** set (#412), in ascending order.
+ * The node indices a layout tunes: the timer's **enabled** set (#412), in ascending order.
  *
  * Not `0..width` — with node index 2 disabled on a four-node timer this is `[0, 1, 3]`, a set with
- * a hole. A disabled node seats nobody, so a layer must not offer to tune it.
+ * a hole. A disabled node seats nobody, so a layout must not offer to tune it.
  */
 export function layerNodes(view: TimerNodes | undefined): number[] {
   return [...(view?.enabled ?? [])];
@@ -106,7 +106,7 @@ export function layerNodes(view: TimerNodes | undefined): number[] {
 
 /**
  * The node indices whose channel is duplicated elsewhere in the draft — the **one hard rule inside
- * a layer**: two nodes cannot share a frequency.
+ * a layout**: two nodes cannot share a frequency.
  *
  * The editor marks these inline and blocks Save; the Director refuses the same thing with a
  * sentence. Mirrored here only so the RD is told while they are still looking at the dropdown they
@@ -124,7 +124,7 @@ export function duplicateNodes(draft: LayerDraft): Set<number> {
   return out;
 }
 
-/** The nodes a draft has not tuned yet — a layer is a *complete* tuning, so Save waits for these. */
+/** The nodes a draft has not tuned yet — a layout is a *complete* tuning, so Save waits for these. */
 export function untunedNodes(draft: LayerDraft, nodes: readonly number[]): number[] {
   return nodes.filter((node) => draft.channels.get(node) === undefined);
 }
@@ -143,7 +143,7 @@ export function draftBlocker(
   catalog: readonly ChannelCatalogEntry[]
 ): string | undefined {
   if (draft.name.trim() === '')
-    return 'Name this layer — it is what you pick when a heat flies it.';
+    return 'Name this layout — it is what you pick when a heat flies it.';
   const dupes = [...duplicateNodes(draft)].sort((a, b) => a - b);
   if (dupes.length > 0) {
     const channel = draft.channels.get(dupes[0]);
@@ -154,7 +154,7 @@ export function draftBlocker(
   const untuned = untunedNodes(draft, nodes);
   if (untuned.length > 0) {
     const names = untuned.map((node) => nodeName(view, node));
-    return `Set a channel for ${names.join(', ')} — a layer tunes every enabled node.`;
+    return `Set a channel for ${names.join(', ')} — a layout tunes every enabled node.`;
   }
   return undefined;
 }
@@ -165,39 +165,42 @@ function nodeName(view: TimerNodes | undefined, node: number): string {
 }
 
 /**
- * A layer id → its **name** (`"Bracket A"`), or a last-resort `"a deleted layer"`.
+ * A layout id → its **name** (`"Bracket A"`), or a last-resort `"a deleted layout"`.
  *
  * The resolver the repo display rule asks for when a new entity has both an id and a name: an
- * overlap warning names two layers, and neither may reach the screen as `bracket-a-k3f9qz`.
+ * overlap warning names two layouts, and neither may reach the screen as `bracket-a-k3f9qz`.
  */
-export function layerName(layers: readonly ChannelLayer[], id: LayerId): string {
-  return layers.find((l) => l.id === id)?.name ?? 'a deleted layer';
+export function layoutName(layouts: readonly ChannelLayout[], id: LayoutId): string {
+  return layouts.find((l) => l.id === id)?.name ?? 'a deleted layout';
 }
 
 /**
- * One node's line in a layer: `"Node 3 · Raceband R7"` — the pair an RD actually needs, through the
+ * One node's line in a layout: `"Node 3 · Raceband R7"` — the pair an RD actually needs, through the
  * shared {@link nodeSeatLabel}.
  */
-export function layerNodeLabel(entry: LayerNode, catalog: readonly ChannelCatalogEntry[]): string {
+export function layerNodeLabel(entry: LayoutNode, catalog: readonly ChannelCatalogEntry[]): string {
   return nodeSeatLabel(entry.node, entry.channel, catalog);
 }
 
-/** A layer's whole tuning as one readable line — every node and the channel it flies. */
-export function layerSummary(layer: ChannelLayer, catalog: readonly ChannelCatalogEntry[]): string {
-  return layer.nodes.map((entry) => layerNodeLabel(entry, catalog)).join(' · ');
+/** A layout's whole tuning as one readable line — every node and the channel it flies. */
+export function layerSummary(
+  layout: ChannelLayout,
+  catalog: readonly ChannelCatalogEntry[]
+): string {
+  return layout.nodes.map((entry) => layerNodeLabel(entry, catalog)).join(' · ');
 }
 
 /**
- * The **warning** sentence for one cross-layer channel overlap — a notice, never a refusal.
+ * The **warning** sentence for one cross-layout channel overlap — a notice, never a refusal.
  *
- * The RD's own call: reusing a channel between layers only matters for the
+ * The RD's own call: reusing a channel between layouts only matters for the
  * keep-pilots-on-one-channel strategy (a GQ-style qualifier), and an RD running a bracket off one
- * layer does not care. So this is written to be *informative and ignorable*: it names both layers
+ * layout does not care. So this is written to be *informative and ignorable*: it names both layouts
  * and the shared channels, and says what it costs, without implying anything is broken.
  */
 export function overlapMessage(
-  overlap: { layer: LayerId; other: LayerId; channels: number[] },
-  layers: readonly ChannelLayer[],
+  overlap: { layout: LayoutId; other: LayoutId; channels: number[] },
+  layouts: readonly ChannelLayout[],
   catalog: readonly ChannelCatalogEntry[]
 ): string {
   const names = overlap.channels.map((mhz) => channelLabel(mhz, [...catalog]));
@@ -207,8 +210,8 @@ export function overlapMessage(
       : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
   const verb = names.length === 1 ? 'uses' : 'use';
   return (
-    `${layerName(layers, overlap.layer)} and ${layerName(layers, overlap.other)} both ${verb} ` +
-    `${shared}. That is fine for a bracket flying one layer; it means a pilot cannot stay on one ` +
+    `${layoutName(layouts, overlap.layout)} and ${layoutName(layouts, overlap.other)} both ${verb} ` +
+    `${shared}. That is fine for a bracket flying one layout; it means a pilot cannot stay on one ` +
     `channel across both if you are running qualifiers that way.`
   );
 }

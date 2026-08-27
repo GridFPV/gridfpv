@@ -78,10 +78,10 @@ import {
   createRound,
   updateRound,
   deleteRound,
-  listChannelLayers,
-  createChannelLayer,
-  updateChannelLayer,
-  deleteChannelLayer,
+  listChannelLayouts,
+  createChannelLayout,
+  updateChannelLayout,
+  deleteChannelLayout,
   listHeats,
   listRoundIssues,
   eventAudit,
@@ -103,7 +103,7 @@ import type {
   AdapterId,
   AuditEntry,
   ChannelCatalogEntry,
-  ChannelLayers,
+  ChannelLayouts,
   Class,
   ClassId,
   ClassStandings,
@@ -122,12 +122,12 @@ import type {
   HeatId,
   HeatResult,
   HeatSummary,
-  LayerId,
+  LayoutId,
   LiveRaceState,
   MemberSlot,
   Pilot,
   PilotId,
-  NewChannelLayerRequest,
+  NewChannelLayoutRequest,
   NewRoundReq,
   ProjectionBody,
   RankEntry,
@@ -136,7 +136,7 @@ import type {
   RoundIssue,
   RoundStanding,
   Scope,
-  SetChannelLayerRequest,
+  SetChannelLayoutRequest,
   SetTimerNodesRequest,
   SignalTraceView,
   Timer,
@@ -415,10 +415,10 @@ export class Session {
   #createRoundImpl: typeof createRound;
   #updateRoundImpl: typeof updateRound;
   #deleteRoundImpl: typeof deleteRound;
-  #listChannelLayersImpl: typeof listChannelLayers;
-  #createChannelLayerImpl: typeof createChannelLayer;
-  #updateChannelLayerImpl: typeof updateChannelLayer;
-  #deleteChannelLayerImpl: typeof deleteChannelLayer;
+  #listChannelLayoutsImpl: typeof listChannelLayouts;
+  #createChannelLayoutImpl: typeof createChannelLayout;
+  #updateChannelLayoutImpl: typeof updateChannelLayout;
+  #deleteChannelLayoutImpl: typeof deleteChannelLayout;
   #listHeatsImpl: typeof listHeats;
   #listRoundIssuesImpl: typeof listRoundIssues;
   #eventAuditImpl: typeof eventAudit;
@@ -469,10 +469,10 @@ export class Session {
     createRoundImpl?: typeof createRound;
     updateRoundImpl?: typeof updateRound;
     deleteRoundImpl?: typeof deleteRound;
-    listChannelLayersImpl?: typeof listChannelLayers;
-    createChannelLayerImpl?: typeof createChannelLayer;
-    updateChannelLayerImpl?: typeof updateChannelLayer;
-    deleteChannelLayerImpl?: typeof deleteChannelLayer;
+    listChannelLayoutsImpl?: typeof listChannelLayouts;
+    createChannelLayoutImpl?: typeof createChannelLayout;
+    updateChannelLayoutImpl?: typeof updateChannelLayout;
+    deleteChannelLayoutImpl?: typeof deleteChannelLayout;
     listHeatsImpl?: typeof listHeats;
     listRoundIssuesImpl?: typeof listRoundIssues;
     eventAuditImpl?: typeof eventAudit;
@@ -524,10 +524,10 @@ export class Session {
     this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
     this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
     this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
-    this.#listChannelLayersImpl = opts?.listChannelLayersImpl ?? listChannelLayers;
-    this.#createChannelLayerImpl = opts?.createChannelLayerImpl ?? createChannelLayer;
-    this.#updateChannelLayerImpl = opts?.updateChannelLayerImpl ?? updateChannelLayer;
-    this.#deleteChannelLayerImpl = opts?.deleteChannelLayerImpl ?? deleteChannelLayer;
+    this.#listChannelLayoutsImpl = opts?.listChannelLayoutsImpl ?? listChannelLayouts;
+    this.#createChannelLayoutImpl = opts?.createChannelLayoutImpl ?? createChannelLayout;
+    this.#updateChannelLayoutImpl = opts?.updateChannelLayoutImpl ?? updateChannelLayout;
+    this.#deleteChannelLayoutImpl = opts?.deleteChannelLayoutImpl ?? deleteChannelLayout;
     this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
     this.#listRoundIssuesImpl = opts?.listRoundIssuesImpl ?? listRoundIssues;
     this.#eventAuditImpl = opts?.eventAuditImpl ?? eventAudit;
@@ -1072,82 +1072,82 @@ export class Session {
     return updated;
   }
 
-  // --- Event channel layers (#117 S2) -----------------------------------------------------------
+  // --- Event channel layouts (#117 S2) -----------------------------------------------------------
   //
-  // A **layer** is one complete tuning of the event's timer — one channel per enabled node, drawn
-  // from the timer's *allowed* set. Layers are **event** state: the read is open, the writes are
-  // control-gated, and every one of them keeps {@link currentEvent}'s `channel_layers` in step so
+  // A **layout** is one complete tuning of the event's timer — one channel per enabled node, drawn
+  // from the timer's *allowed* set. Layouts are **event** state: the read is open, the writes are
+  // control-gated, and every one of them keeps {@link currentEvent}'s `channel_layouts` in step so
   // the cached meta never disagrees with what the Director holds.
   //
-  // Note what these do NOT do: no layer write touches a `Timer`. That is the whole point — the
-  // Timers page's checkboxes edit the global allowed set (what a timer may *ever* use), and a layer
+  // Note what these do NOT do: no layout write touches a `Timer`. That is the whole point — the
+  // Timers page's checkboxes edit the global allowed set (what a timer may *ever* use), and a layout
   // is the event's own answer to what goes on which node.
 
   /**
-   * List the current event's **channel layers** (`GET /events/{id}/layers`, open, no token) — #117
-   * S2. Resolves the {@link ChannelLayers} view — the layers in definition order plus the advisory
-   * cross-layer `overlaps` the Director computed. Resolves an empty view when no event is selected,
+   * List the current event's **channel layouts** (`GET /events/{id}/layouts`, open, no token) — #117
+   * S2. Resolves the {@link ChannelLayouts} view — the layouts in definition order plus the advisory
+   * cross-layout `overlaps` the Director computed. Resolves an empty view when no event is selected,
    * so a caller never has to special-case the picker; rejects on a transport/HTTP failure.
    */
-  listChannelLayers(): Promise<ChannelLayers> {
+  listChannelLayouts(): Promise<ChannelLayouts> {
     const event = this.currentEvent;
-    if (!event) return Promise.resolve({ layers: [], overlaps: [] });
-    return this.#listChannelLayersImpl(this.baseUrl, event.id, { token: this.#token });
+    if (!event) return Promise.resolve({ layouts: [], overlaps: [] });
+    return this.#listChannelLayoutsImpl(this.baseUrl, event.id, { token: this.#token });
   }
 
   /**
-   * Define a **channel layer** on the current event (`POST /events/{id}/layers`) — #117 S2.
-   * RD-gated; the layer id is auto-generated server-side.
+   * Define a **channel layout** on the current event (`POST /events/{id}/layouts`) — #117 S2.
+   * RD-gated; the layout id is auto-generated server-side.
    *
-   * **Omit `nodes` to seed the layer from the timer's allowed set** — the global→event seam. No-op
-   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayers}
-   * view also re-homes {@link currentEvent}'s `channel_layers`; returns it, `undefined` on a
+   * **Omit `nodes` to seed the layout from the timer's allowed set** — the global→event seam. No-op
+   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayouts}
+   * view also re-homes {@link currentEvent}'s `channel_layouts`; returns it, `undefined` on a
    * cancelled prompt, or throws with the Director's own refusal sentence (already phrased for the
    * RD — it names the node, the channel and the timer).
    */
-  async createChannelLayer(request: NewChannelLayerRequest): Promise<ChannelLayers | undefined> {
+  async createChannelLayout(request: NewChannelLayoutRequest): Promise<ChannelLayouts | undefined> {
     const event = this.currentEvent;
     if (!event) return undefined;
     const view = await this.#privilegedWrite((token) =>
-      this.#createChannelLayerImpl(this.baseUrl, event.id, request, token)
+      this.#createChannelLayoutImpl(this.baseUrl, event.id, request, token)
     );
-    if (view) this.currentEvent = { ...event, channel_layers: view.layers };
+    if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
     return view;
   }
 
   /**
-   * Replace a **channel layer**'s name and mapping (`PUT /events/{id}/layers/{layer}`) — #117 S2.
+   * Replace a **channel layout**'s name and mapping (`PUT /events/{id}/layouts/{layout}`) — #117 S2.
    * RD-gated; the id is not editable and the whole mapping is replaced wholesale, re-validated as on
    * create. No-op (resolves `undefined`) when no event is selected. On success the returned
-   * {@link ChannelLayers} view re-homes {@link currentEvent}'s `channel_layers`; returns it,
+   * {@link ChannelLayouts} view re-homes {@link currentEvent}'s `channel_layouts`; returns it,
    * `undefined` on a cancelled prompt, or throws with the Director's own refusal sentence.
    */
-  async updateChannelLayer(
-    layerId: LayerId,
-    request: SetChannelLayerRequest
-  ): Promise<ChannelLayers | undefined> {
+  async updateChannelLayout(
+    layoutId: LayoutId,
+    request: SetChannelLayoutRequest
+  ): Promise<ChannelLayouts | undefined> {
     const event = this.currentEvent;
     if (!event) return undefined;
     const view = await this.#privilegedWrite((token) =>
-      this.#updateChannelLayerImpl(this.baseUrl, event.id, layerId, request, token)
+      this.#updateChannelLayoutImpl(this.baseUrl, event.id, layoutId, request, token)
     );
-    if (view) this.currentEvent = { ...event, channel_layers: view.layers };
+    if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
     return view;
   }
 
   /**
-   * Remove a **channel layer** (`DELETE /events/{id}/layers/{layer}`) — #117 S2. RD-gated. No-op
-   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayers}
-   * view re-homes {@link currentEvent}'s `channel_layers`; returns it, `undefined` on a cancelled
-   * prompt, or throws (an unknown layer is a **404**).
+   * Remove a **channel layout** (`DELETE /events/{id}/layouts/{layout}`) — #117 S2. RD-gated. No-op
+   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayouts}
+   * view re-homes {@link currentEvent}'s `channel_layouts`; returns it, `undefined` on a cancelled
+   * prompt, or throws (an unknown layout is a **404**).
    */
-  async deleteChannelLayer(layerId: LayerId): Promise<ChannelLayers | undefined> {
+  async deleteChannelLayout(layoutId: LayoutId): Promise<ChannelLayouts | undefined> {
     const event = this.currentEvent;
     if (!event) return undefined;
     const view = await this.#privilegedWrite((token) =>
-      this.#deleteChannelLayerImpl(this.baseUrl, event.id, layerId, token)
+      this.#deleteChannelLayoutImpl(this.baseUrl, event.id, layoutId, token)
     );
-    if (view) this.currentEvent = { ...event, channel_layers: view.layers };
+    if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
     return view;
   }
 
@@ -1184,6 +1184,45 @@ export class Session {
    */
   setCurrentHeat(heat: HeatId): Promise<CommandAck> {
     return this.send({ SetCurrentHeat: { heat } });
+  }
+
+  /**
+   * **Bind a heat to a channel layout** (`Command::SetHeatLayout`) — #117 S3, the heat scope of the
+   * three-scope channel model.
+   *
+   * A layout is a complete `node → channel` tuning of the event's timer, so binding one *re-tunes*
+   * the heat: the Director re-emits its schedule with the channel each seat's node is on. Pass
+   * `undefined` to **clear** the bind and fall back to the round's default layout.
+   *
+   * Refused (a failed {@link CommandAck} carrying the Director's own sentence) when the heat is
+   * past `Scheduled` — a heat keeps the channels it raced on — or when the layout is not one the
+   * heat's round names. Sent through the control path; returns the raw {@link CommandAck}.
+   */
+  setHeatLayout(heat: HeatId, layout?: LayoutId): Promise<CommandAck> {
+    return this.send({ SetHeatLayout: layout === undefined ? { heat } : { heat, layout } });
+  }
+
+  /**
+   * **Set a heat's pilots and their channels by hand** (`Command::OverrideHeatSeating`) — #117 S3,
+   * the RD's escape hatch for when the automatic answer is wrong.
+   *
+   * The override is **sticky**: re-filling the round, or editing the round so its heats are
+   * re-materialized, both re-apply it — an override silently lost on a re-fill is worse than no
+   * override at all (#419). Pass an **empty `lineup` to clear it** and return the heat to its
+   * round's plan.
+   *
+   * Omit `frequencies` for *"my pilots, the layout's channels"*: the lineup is overridden and the
+   * channels still come from the heat's layout, so swapping two pilots does not mean retyping four
+   * frequencies. Sent through the control path; returns the raw {@link CommandAck}.
+   */
+  overrideHeatSeating(
+    heat: HeatId,
+    lineup: CompetitorRef[],
+    frequencies: [CompetitorRef, number][] = []
+  ): Promise<CommandAck> {
+    return this.send({
+      OverrideHeatSeating: frequencies.length ? { heat, lineup, frequencies } : { heat, lineup }
+    });
   }
 
   /**

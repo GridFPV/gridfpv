@@ -45,7 +45,8 @@ use std::collections::BTreeMap;
 
 use gridfpv_engine::heat::{HeatState, heat_state};
 use gridfpv_events::{
-    ClassId, CompetitorRef, Event, HeatId, HeatTransition, LogRef, PilotId, RoundId, SourceTime,
+    ClassId, CompetitorRef, Event, HeatId, HeatTransition, LayoutId, LogRef, PilotId, RoundId,
+    SourceTime,
 };
 use gridfpv_projection::{
     CompetitorKey, CrossingDisposition, dispositioned_passes, lap_list_marshaled_with_floor,
@@ -913,6 +914,21 @@ pub struct HeatSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub label: Option<String>,
+    /// The **channel layout** this heat flies (#117 S3) — the last
+    /// [`HeatLayoutSet`](gridfpv_events::Event::HeatLayoutSet) for it.
+    ///
+    /// A wire handle: the console resolves it to the layout's **name** against the event's
+    /// `channel_layouts` (CLAUDE.md), and uses its `node → channel` mapping as the per-node channel
+    /// source a seat resolves through — the value that replaces `available_channels[node]`, which
+    /// an allowed set never had any business answering.
+    ///
+    /// `None` when the heat flies no layout (its round names none, or the RD cleared the bind), in
+    /// which case its channels came from the auto-pick and live on
+    /// [`frequencies`](Self::frequencies) alone. Additive — defaults absent so older logs
+    /// round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub layout: Option<LayoutId>,
     /// The heat's folded loop phase (its derived status: scheduled / running / final / …).
     pub phase: HeatPhase,
     /// Whether this heat is the one currently on the timer (the live `current_heat`).
@@ -948,6 +964,9 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
                 .map(phase_of)
                 .unwrap_or(HeatPhase::Scheduled);
             let is_current = current.as_ref() == Some(&heat);
+            // #117 S3: which channel layout this heat flies, folded independently of the schedule
+            // so a re-fill that re-emits `HeatScheduled` cannot drop it.
+            let layout = latest_layout(events, &heat);
             HeatSummary {
                 heat,
                 lineup,
@@ -955,6 +974,7 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
                 round,
                 frequencies,
                 label,
+                layout,
                 phase,
                 is_current,
             }
@@ -1024,6 +1044,25 @@ fn latest_schedule(
                     frequencies.clone(),
                     label.clone(),
                 );
+            }
+        }
+    }
+    out
+}
+
+/// The **channel layout** a heat flies (#117 S3): the last
+/// [`Event::HeatLayoutSet`] for it, or `None` when it has never been bound (or the bind was
+/// cleared).
+///
+/// Folded separately from [`latest_schedule`] on purpose. The bind and the schedule change at
+/// different moments — a round re-fill re-emits the schedule, and binding a layout re-emits it
+/// again — and folding them together would make the last write of one silently reset the other.
+fn latest_layout(events: &[Event], heat: &HeatId) -> Option<LayoutId> {
+    let mut out = None;
+    for event in events {
+        if let Event::HeatLayoutSet { heat: h, layout } = event {
+            if h == heat {
+                out = layout.clone();
             }
         }
     }

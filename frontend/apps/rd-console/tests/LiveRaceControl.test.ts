@@ -4,6 +4,7 @@ import { fireEvent } from '@testing-library/dom';
 import { tick } from 'svelte';
 import type {
   ChannelCatalogEntry,
+  ChannelLayout,
   EventMeta,
   HeatSummary,
   LiveCrossing,
@@ -1066,6 +1067,18 @@ const OP_CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
   { band: 'Fatshark', channel: 'F4', mhz: 5800 }
 ];
+// #117 S3 / #402: the event's channel layout — the `node → channel` mapping a practice seat's
+// channel resolves through. Before layouts existed there was no such mapping anywhere: a practice
+// heat's `frequencies` are empty by construction, and the console had nothing but the live signal
+// to fall back on (which only two screens carry). That was #402.
+const OP_LAYOUT: ChannelLayout = {
+  id: 'practice-a',
+  name: 'Practice A',
+  nodes: [
+    { node: 0, channel: 5658 },
+    { node: 1, channel: 5800 }
+  ]
+};
 const OP_ROUND: RoundDef = {
   id: 'rp',
   label: 'Open Practice',
@@ -1074,6 +1087,7 @@ const OP_ROUND: RoundDef = {
   params: {},
   win_condition: 'BestLap',
   seeding: { AllChannels: { channels: [0, 1] } },
+  layouts: ['practice-a'],
   channel_mode: 'Static',
   staging_timer_secs: 300,
   start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1088,14 +1102,21 @@ const OP_EVENT: EventMeta = {
   timers: ['mock'],
   roster: [],
   classes: [],
-  rounds: [OP_ROUND]
+  rounds: [OP_ROUND],
+  channel_layouts: [OP_LAYOUT]
 };
+// Deliberately still carrying EMPTY `frequencies`, and still naming every seat's channel: the
+// board resolves them through the heat's **layout**, which is the source that replaced
+// `available_channels[node]` (#117 S3). Isolating it this way is the #402 regression test — a
+// practice seat's channel now has a real source in the event's own config, not just in whatever
+// the hardware happens to report to the two screens that hold a signal subscription.
 const OP_HEAT: HeatSummary = {
   heat: 'practice-1',
   lineup: ['node-0', 'node-1'],
   round: 'rp',
   class: undefined,
   frequencies: [],
+  layout: 'practice-a',
   phase: 'Running',
   is_current: true
 };

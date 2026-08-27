@@ -23,7 +23,7 @@ import type {
   ChangeEnvelope,
   ChannelCatalogEntry,
   ChannelDispatch,
-  ChannelLayers,
+  ChannelLayouts,
   ChannelRequest,
   Class,
   ClassId,
@@ -38,9 +38,9 @@ import type {
   EventMeta,
   FormatSchema,
   HeatSummary,
-  LayerId,
+  LayoutId,
   MemberSlot,
-  NewChannelLayerRequest,
+  NewChannelLayoutRequest,
   NewRoundReq,
   Pilot,
   PilotId,
@@ -52,7 +52,7 @@ import type {
   RoundIssue,
   RoundStanding,
   Scope,
-  SetChannelLayerRequest,
+  SetChannelLayoutRequest,
   SetClassHiddenRequest,
   SetTimerNodesRequest,
   Snapshot,
@@ -1395,23 +1395,23 @@ export async function deleteRound(
   return (await resp.json()) as EventMeta;
 }
 
-// ── Event channel layers (#117 S2) ──────────────────────────────────────────────────────────────
+// ── Event channel layouts (#117 S2) ──────────────────────────────────────────────────────────────
 //
-// A **layer** is one complete tuning of the event's timer — one channel per enabled node, drawn
-// from the timer's *allowed* set. Layers are **event** state: they live on the event's meta beside
+// A **layout** is one complete tuning of the event's timer — one channel per enabled node, drawn
+// from the timer's *allowed* set. Layouts are **event** state: they live on the event's meta beside
 // `timers` / `roster` / `classes`, so editing one never touches the global timer record (which is
 // what the Timers-page checkboxes do, and the bug this slice closes).
 //
-// Every write answers with the whole {@link ChannelLayers} view — the layers *and* the advisory
-// cross-layer `overlaps` — not just the layer that changed, because an overlap is a property of the
+// Every write answers with the whole {@link ChannelLayouts} view — the layouts *and* the advisory
+// cross-layout `overlaps` — not just the layout that changed, because an overlap is a property of the
 // set. The console renders what the Director computed rather than re-deriving the rule.
 
 /**
  * The Director's **typed refusal message**, already phrased for the RD, or `''` when there is no
  * such body (#117 S2).
  *
- * A layer refusal is the whole point of validating one: *"Node 2 and Node 3 are both on Raceband R1
- * in this layer"* is what the RD needs, and `HTTP 400` is not. It names nodes, channels and the
+ * A layout refusal is the whole point of validating one: *"Node 2 and Node 3 are both on Raceband R1
+ * in this layout"* is what the RD needs, and `HTTP 400` is not. It names nodes, channels and the
  * timer by their friendly names (the repo display rule) — so it is thrown verbatim rather than
  * wrapped in a route line carrying a raw event id.
  */
@@ -1427,75 +1427,75 @@ async function directorRefusal(resp: Response): Promise<string> {
 }
 
 /**
- * List an event's **channel layers** (`GET /events/{id}/layers`) — #117 S2. A read (open, no token):
- * the layers in definition order plus the advisory `overlaps` between them. Resolves the
- * {@link ChannelLayers} view, or rejects on a non-2xx / transport failure; an unknown event is 404.
+ * List an event's **channel layouts** (`GET /events/{id}/layouts`) — #117 S2. A read (open, no token):
+ * the layouts in definition order plus the advisory `overlaps` between them. Resolves the
+ * {@link ChannelLayouts} view, or rejects on a non-2xx / transport failure; an unknown event is 404.
  */
-export async function listChannelLayers(
+export async function listChannelLayouts(
   baseUrl: string,
   eventId: EventId,
   options: { token?: string; fetch?: FetchLike } = {}
-): Promise<ChannelLayers> {
+): Promise<ChannelLayouts> {
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layers`, { headers });
-  if (!resp.ok) throw new Error(`GET /events/${eventId}/layers failed: HTTP ${resp.status}`);
-  return (await resp.json()) as ChannelLayers;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts`, { headers });
+  if (!resp.ok) throw new Error(`GET /events/${eventId}/layouts failed: HTTP ${resp.status}`);
+  return (await resp.json()) as ChannelLayouts;
 }
 
 /**
- * Define a **channel layer** on an event (`POST /events/{id}/layers`) — #117 S2. RD-gated; the layer
+ * Define a **channel layout** on an event (`POST /events/{id}/layouts`) — #117 S2. RD-gated; the layout
  * id is generated server-side (never in the body).
  *
- * **Omitting `nodes` seeds the layer from the timer's allowed set** — the global→event seam: what
- * the RD ticked on the Timers page is the default an event starts from, and from here on the layer
+ * **Omitting `nodes` seeds the layout from the timer's allowed set** — the global→event seam: what
+ * the RD ticked on the Timers page is the default an event starts from, and from here on the layout
  * is event-local. A tuning that puts two nodes on one channel, names a channel the timer is not
  * allowed to use, names a disabled/out-of-range node, or leaves an enabled node untuned is a
- * **400** whose message is thrown verbatim (it is already written for the RD). Cross-layer channel
+ * **400** whose message is thrown verbatim (it is already written for the RD). Cross-layout channel
  * reuse is **not** a refusal — it comes back in `overlaps` on a 200. Resolves the whole updated
- * {@link ChannelLayers} view.
+ * {@link ChannelLayouts} view.
  */
-export async function createChannelLayer(
+export async function createChannelLayout(
   baseUrl: string,
   eventId: EventId,
-  request: NewChannelLayerRequest,
+  request: NewChannelLayoutRequest,
   token?: string,
   options: { fetch?: FetchLike } = {}
-): Promise<ChannelLayers> {
+): Promise<ChannelLayouts> {
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json'
   };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layers`, {
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts`, {
     method: 'POST',
     headers,
     body: JSON.stringify(request)
   });
   if (!resp.ok) {
     const detail = await directorRefusal(resp);
-    throw new Error(detail || `The Director refused the channel layer (HTTP ${resp.status}).`);
+    throw new Error(detail || `The Director refused the channel layout (HTTP ${resp.status}).`);
   }
-  return (await resp.json()) as ChannelLayers;
+  return (await resp.json()) as ChannelLayouts;
 }
 
 /**
- * Replace a **channel layer**'s name and mapping (`PUT /events/{id}/layers/{layer}`) — #117 S2.
- * RD-gated; the layer id is the path segment (not editable) and the name plus the whole node →
+ * Replace a **channel layout**'s name and mapping (`PUT /events/{id}/layouts/{layout}`) — #117 S2.
+ * RD-gated; the layout id is the path segment (not editable) and the name plus the whole node →
  * channel mapping are replaced wholesale, re-validated exactly as on create. An unknown event or
- * layer is **404**; an invalid tuning is a **400** thrown verbatim. Resolves the whole updated
- * {@link ChannelLayers} view.
+ * layout is **404**; an invalid tuning is a **400** thrown verbatim. Resolves the whole updated
+ * {@link ChannelLayouts} view.
  */
-export async function updateChannelLayer(
+export async function updateChannelLayout(
   baseUrl: string,
   eventId: EventId,
-  layerId: LayerId,
-  request: SetChannelLayerRequest,
+  layoutId: LayoutId,
+  request: SetChannelLayoutRequest,
   token?: string,
   options: { fetch?: FetchLike } = {}
-): Promise<ChannelLayers> {
+): Promise<ChannelLayouts> {
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -1503,40 +1503,40 @@ export async function updateChannelLayer(
   };
   if (token) headers.Authorization = `Bearer ${token}`;
   const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layers/${encodeURIComponent(layerId)}`,
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
     { method: 'PUT', headers, body: JSON.stringify(request) }
   );
   if (!resp.ok) {
     const detail = await directorRefusal(resp);
-    throw new Error(detail || `The Director refused the channel layer (HTTP ${resp.status}).`);
+    throw new Error(detail || `The Director refused the channel layout (HTTP ${resp.status}).`);
   }
-  return (await resp.json()) as ChannelLayers;
+  return (await resp.json()) as ChannelLayouts;
 }
 
 /**
- * Remove a **channel layer** (`DELETE /events/{id}/layers/{layer}`) — #117 S2. RD-gated; an unknown
- * event or layer is **404** (not a silent success). Resolves the whole updated
- * {@link ChannelLayers} view.
+ * Remove a **channel layout** (`DELETE /events/{id}/layouts/{layout}`) — #117 S2. RD-gated; an unknown
+ * event or layout is **404** (not a silent success). Resolves the whole updated
+ * {@link ChannelLayouts} view.
  */
-export async function deleteChannelLayer(
+export async function deleteChannelLayout(
   baseUrl: string,
   eventId: EventId,
-  layerId: LayerId,
+  layoutId: LayoutId,
   token?: string,
   options: { fetch?: FetchLike } = {}
-): Promise<ChannelLayers> {
+): Promise<ChannelLayouts> {
   const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
   const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layers/${encodeURIComponent(layerId)}`,
+    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
     { method: 'DELETE', headers }
   );
   if (!resp.ok) {
     const detail = await directorRefusal(resp);
     throw new Error(detail || `The Director refused the deletion (HTTP ${resp.status}).`);
   }
-  return (await resp.json()) as ChannelLayers;
+  return (await resp.json()) as ChannelLayouts;
 }
 
 /**

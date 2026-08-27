@@ -2596,6 +2596,7 @@ mod tests {
         use gridfpv_server::events::{NewRoundReq, SeedingRule};
         use gridfpv_server::scope::EventId as ScopeEventId;
         let req = NewRoundReq {
+            layouts: Vec::new(),
             label: "Open Practice".into(),
             classes: vec![],
             format: "open_practice".into(),
@@ -2802,6 +2803,7 @@ mod tests {
 
         let registry = fast_registry(2, 1); // holeshot + 2 laps per pilot, all inside ~10ms
         let req = NewRoundReq {
+            layouts: Vec::new(),
             label: "Short Time".into(),
             classes: vec![],
             format: "timed_qual".into(),
@@ -3039,6 +3041,7 @@ mod tests {
         use gridfpv_server::events::{NewRoundReq, SeedingRule};
         use gridfpv_server::scope::EventId as ScopeEventId;
         let req = NewRoundReq {
+            layouts: Vec::new(),
             label: "Qualifying".into(),
             classes: vec![],
             format: "timed_qual".into(),

@@ -9,4 +9,4 @@
  * clock counts, and nothing is ever detected. Silently rendering that seat is the worst available
  * behaviour, so it is surfaced on **read** as well as refused on write.
  */
-export type SeatProblem = "NoSuchNode" | "Disabled" | "NotOnTimer";
+export type SeatProblem = "NoSuchNode" | "Disabled" | "NotOnTimer" | "LayoutNodeUntuned" | "LayoutNodeGone" | "LayoutChannelNotAllowed";

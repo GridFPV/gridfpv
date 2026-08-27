@@ -37,9 +37,11 @@
  */
 import type {
   ChannelCatalogEntry,
+  ChannelLayout,
   ClassMembership,
   CompetitorRef,
   HeatSummary,
+  LayoutId,
   Pilot,
   PilotId,
   PilotProgress,
@@ -47,7 +49,7 @@ import type {
   TimerSignal
 } from '@gridfpv/types';
 
-import { channelLabel, nodeIndexOf, nodeSeatLabel, poolChannel } from './channels.js';
+import { channelLabel, nodeIndexOf, nodeSeatLabel } from './channels.js';
 import { timerWidth } from './timerNodes.js';
 
 /** The directory + per-heat inputs a {@link CompetitorNameResolver} resolves against. */
@@ -145,8 +147,29 @@ export interface CompetitorNameSources {
    * only one that works on a Flexible RotorHazard timer. Only the Tune page holds a subscription.
    */
   signal?: TimerSignal | null;
-  /** The event's primary timer, for its configured channel pool. */
+  /** The event's primary timer — for its node width, which seeds the seat labels. */
   timer?: Timer | null;
+  /**
+   * The event's **channel layouts** (`EventMeta.channel_layouts`) — #117 S3.
+   *
+   * A layout is a complete `node → channel` tuning of the event's timer, and the heat being
+   * rendered names the one it flies (`HeatSummary.layout`). Together they are the **per-node
+   * mapping** a seat's channel resolves through — the thing an allowed set never had, and the
+   * reason source (3) below used to be a fabrication.
+   */
+  layouts?: readonly ChannelLayout[] | null;
+  /**
+   * The layout to resolve node channels through when there is **no heat to ask** — a screen that is
+   * laying out node seats before any heat exists (#402).
+   *
+   * The open-practice round form is the case this is for: it asks the RD *which nodes practice runs
+   * on*, and #402's sharpest complaint was that the picker is channel-blind at exactly the moment
+   * the RD is choosing which channels practice flies. The round's own selected layout answers it.
+   *
+   * A heat's own {@link HeatSummary.layout} wins when there is one — that is the heat's recorded
+   * fact, and this is only a stand-in for its absence.
+   */
+  layout?: LayoutId | null;
   /** The event's `classes_membership` — a pilot's fixed per-class channel in a Static round. */
   membership?: readonly ClassMembership[] | null;
 }
@@ -161,15 +184,22 @@ export interface CompetitorNameSources {
  * 1. **the heat's own assignment** (`HeatSummary.frequencies`) — what the round allocated for this
  *    heat, and the only source that is per-heat rather than per-timer;
  * 2. **what the node is tuned to** (`NodeSignal.frequency_mhz`) — the hardware's own answer;
- * 3. **the timer's configured pool** (`Timer.available_channels[node]`);
+ * 3. **the heat's channel layout** (`HeatSummary.layout` → that layout's `node → channel` entry);
  * 4. **the pilot's class membership channel**, for a seat bound to a pilot.
  *
- * Step 3 is where #416 was buried. `available_channels` is **empty on every Flexible timer**, and
- * empty there means *"no restriction"*, not *"no channels"* — measured on the bench, the Mock lists
- * eight and both RotorHazard timers list none. Indexing into an empty pool yields `undefined` for
- * every node, so the channel path could never resolve for a real timer and always degraded to a bare
- * `Node N`. {@link poolChannel} refuses to index an empty pool at all, which is the same trap #413
- * hit with a dropdown: an empty-or-zero value that reads as data when it means "not applicable".
+ * ## Source (3) was a fabrication until #117 S3
+ *
+ * It used to read `Timer.available_channels[node]` — indexing the timer's **allowed set** by node
+ * index. An allowed set is a *set*: it says which channels this timer may ever use and carries no
+ * per-node mapping whatsoever, so position `n` in it had no relationship to node `n`. It produced a
+ * plausible-looking answer that was simply invented, and only looked harmless because
+ * `available_channels` is **empty on every Flexible timer** (measured on the bench: the Mock lists
+ * eight, both RotorHazard timers list none) — so on real hardware it always returned `undefined`
+ * and the seat degraded to a bare `Node N`. That was #416's remaining half.
+ *
+ * A **channel layout** is the mapping the allowed set never had: one channel per node, chosen by
+ * the RD, and named by the heat that flies it. So source (3) is now the heat's layout, which is a
+ * real per-node answer rather than a coincidence of list order.
  *
  * When every source comes up empty the channel is **genuinely unknown**, and the seat reads as the
  * node alone (`"Node 7"`). A caller showing a channel *column* must render that as unknown — never
@@ -197,8 +227,14 @@ export function buildCompetitorNames(sources: CompetitorNameSources): Competitor
   for (const node of sources.signal?.nodes ?? []) {
     if (node.frequency_mhz !== undefined) signalMhzByNode.set(node.node, node.frequency_mhz);
   }
-  // (3) The timer's configured pool — read through `poolChannel`, never indexed directly.
-  const pool = sources.timer?.available_channels ?? [];
+  // (3) The heat's channel layout: the RD's own `node → channel` mapping for this heat (#117 S3).
+  // `undefined` when the heat flies no layout — never fall back to indexing the allowed set, which
+  // is what made this source a fabrication before layouts existed.
+  const layoutId = sources.heat?.layout ?? sources.layout ?? undefined;
+  const layout = layoutId ? (sources.layouts ?? []).find((l) => l.id === layoutId) : undefined;
+  const layoutMhzByNode = new Map<number, number>(
+    (layout?.nodes ?? []).map((n) => [n.node, n.channel])
+  );
   // (4) A pilot's fixed per-class channel.
   const membershipMhzByPilot = new Map<PilotId, number>();
   for (const entry of sources.membership ?? []) {
@@ -214,8 +250,8 @@ export function buildCompetitorNames(sources: CompetitorNameSources): Competitor
     if (node !== undefined) {
       const tuned = signalMhzByNode.get(node);
       if (tuned !== undefined) return tuned;
-      const configured = poolChannel(node, pool);
-      if (configured !== undefined) return configured;
+      const tuned_to = layoutMhzByNode.get(node);
+      if (tuned_to !== undefined) return tuned_to;
     }
     const pilot = explicitPilotByRef.get(ref) ?? ref;
     return membershipMhzByPilot.get(pilot);
