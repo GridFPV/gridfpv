@@ -2187,7 +2187,7 @@
                   : schema.key === 'group_size'
                     ? 'Pilots per heat — capped at the primary timer’s node count.'
                     : schema.key === 'rotations'
-                      ? 'Each group races this many heats back to back — scoring accumulates. 1 = everyone races once.'
+                      ? 'How many heats each group races this round — scoring accumulates across them. Groups take turns, so a group’s heats are not run back to back. 1 = everyone races once.'
                       : undefined}
               >
                 {#if schema.key === 'group_size'}
