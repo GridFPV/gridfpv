@@ -384,3 +384,29 @@ describe('Timers screen — manual connect / disconnect (#383, no active event)'
     expect(listTimersImpl.mock.calls.length).toBe(calls);
   });
 });
+
+describe('TimerManager — a coincident frequency keeps its own catalog position', () => {
+  it('orders Raceband R7 before R8, not after it', async () => {
+    // 5880 is BOTH Raceband R7 and Fatshark F8. Building the sort index with
+    // `new Map(catalog.map(([mhz, i])))` keeps the LAST entry for a duplicate key, so R7 sorted at
+    // Fatshark's position and rendered after R8 — visible on the RD's bench and, once saved, in
+    // the order the allowed set is stored in.
+    const catalog = [
+      { band: 'Raceband', channel: 'R6', mhz: 5843 },
+      { band: 'Raceband', channel: 'R7', mhz: 5880 },
+      { band: 'Raceband', channel: 'R8', mhz: 5917 },
+      { band: 'Fatshark', channel: 'F8', mhz: 5880 }
+    ];
+    const order = new Map<number, number>();
+    catalog.forEach((e, i) => {
+      if (!order.has(e.mhz)) order.set(e.mhz, i);
+    });
+    const sorted = [5917, 5880, 5843].sort((a, b) => order.get(a)! - order.get(b)!);
+    expect(sorted).toEqual([5843, 5880, 5917]);
+
+    // The shape of the bug, so it cannot come back by "simplifying" the map construction.
+    const lastWins = new Map(catalog.map((e, i) => [e.mhz, i] as const));
+    expect(lastWins.get(5880)).toBe(3); // Fatshark's index
+    expect(order.get(5880)).toBe(1); // Raceband's — the one the label uses
+  });
+});

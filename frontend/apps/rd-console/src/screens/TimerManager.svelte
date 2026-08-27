@@ -436,7 +436,14 @@
 
   /** The available channels the request carries, ordered by the catalog then custom ascending. */
   function buildAvailable(): number[] {
-    const order = new Map(catalog.map((e, i) => [e.mhz, i]));
+    // FIRST index wins for a coincident frequency. `new Map(catalog.map(...))` would keep the LAST,
+    // and 5880 is both Raceband R7 (index 6) and Fatshark F8 (index 15) — so R7 sorted as if it
+    // were F8 and landed after R8. Same rule `channelLabel` documents: the first catalog entry
+    // whose MHz matches wins, which is why the picker calls 5880 "Raceband R7" in the first place.
+    const order = new Map<number, number>();
+    catalog.forEach((e, i) => {
+      if (!order.has(e.mhz)) order.set(e.mhz, i);
+    });
     return [...formChannels].sort((a, b) => {
       const ai = order.get(a);
       const bi = order.get(b);
