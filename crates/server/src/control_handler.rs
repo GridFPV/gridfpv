@@ -1348,6 +1348,24 @@ fn apply_set_heat_layout(
 /// An **empty lineup clears** the override: the heat is re-formed from its round's plan, exactly as
 /// if the RD had never touched it. That is the only way out, and it is deliberately explicit.
 ///
+/// # The clear re-forms from the ROUND'S PLAN, not from the log (#440)
+///
+/// Two bugs sat on top of each other here. `require_distinct_lineup` ran before the clear was
+/// recognised, so an empty lineup was rejected outright ("a heat needs at least one competitor in
+/// its lineup") and the documented escape hatch was unreachable at all. Behind it, the clear read
+/// its replacement lineup from [`logged_schedule_full`] — the heat's most recent `HeatScheduled`,
+/// which one command after an override *is the override* — and re-appended it with channels
+/// re-assigned for it. A clear that re-applies the very lineup it was asked to discard is a clear
+/// that does nothing, and nothing else re-forms the heat: the round's own fill returns
+/// `AlreadyScheduled` for it, so the "cleared" heat would race the override until some unrelated
+/// round edit rematerialized it.
+///
+/// So the clear goes through [`round_engine::rematerialize_round_heats`] — the same machinery a
+/// round edit uses to re-form its scheduled heats, which recomputes the round's plan and applies
+/// the heat's *remaining* recorded decisions (its layout; the override, which the clear we just
+/// appended has removed). The empty-lineup validation is skipped, because there is no lineup to
+/// validate: the plan supplies it.
+///
 /// Refusals, typed `400`s naming the heat and the timer by their friendly names: a heat past
 /// `Scheduled`; a repeated pilot; a lineup wider than the timer's **enabled** node set; and any
 /// [`AssignError`](crate::round_engine::AssignError) raised while filling the channels the RD did
@@ -1382,13 +1400,16 @@ fn apply_override_heat_seating(
     if let Err(err) = require_retunable(&events, &heat, &name, "seating") {
         return CommandAck::failed(err);
     }
-    if let Err(err) = require_distinct_lineup(&lineup) {
-        return CommandAck::failed(err);
-    }
-    // The same membership/roster validation a hand-built heat gets: an override may re-seat the
-    // heat, but not with somebody who is not in this event.
+    // The lineup validations apply to a lineup the RD SET. An empty one is the documented clear
+    // (#440) — "there is nobody in this heat" is precisely what it does not mean — so it is
+    // neither rejected as empty nor checked for membership; the round's plan supplies both.
     let class = round_engine::round_class(&meta, &round.id);
     if !lineup.is_empty() {
+        if let Err(err) = require_distinct_lineup(&lineup) {
+            return CommandAck::failed(err);
+        }
+        // The same membership/roster validation a hand-built heat gets: an override may re-seat
+        // the heat, but not with somebody who is not in this event.
         if let Err(err) =
             validate_tagged_lineup(registry, &meta, &lineup, &class, &Some(round.id.clone()))
         {
@@ -1413,12 +1434,39 @@ fn apply_override_heat_seating(
         Ok(read) => read,
         Err(err) => return CommandAck::failed(err),
     };
-    let (plan_lineup, _class, round_tag, plan_freqs, label) = logged_schedule_full(&events, &heat);
-    let seated = if lineup.is_empty() {
-        plan_lineup
-    } else {
-        lineup
-    };
+    let (_logged_lineup, _class, round_tag, plan_freqs, label) =
+        logged_schedule_full(&events, &heat);
+
+    // THE CLEAR (#440): re-form the heat from its ROUND'S PLAN. The override is gone from the fold
+    // now, so re-materializing the round recomputes exactly the lineup and channels the fill would
+    // have produced, with the heat's layout still applied — "exactly as if the RD had never touched
+    // it". `rematerialize_round_heats` reports only heats it actually changes, so an override that
+    // happened to match the plan clears to a no-op rather than a redundant re-schedule.
+    if lineup.is_empty() {
+        let re_formed =
+            round_engine::rematerialize_round_heats(&meta, &registry.timers(), &round.id, &events)
+                .into_iter()
+                .find(|re_formed| re_formed.heat == heat);
+        let Some(re_formed) = re_formed else {
+            return CommandAck::ok();
+        };
+        return match state.append(
+            Event::HeatScheduled {
+                heat,
+                lineup: re_formed.lineup,
+                class,
+                round: round_tag,
+                frequencies: re_formed.frequencies,
+                label: re_formed.label,
+            },
+            None,
+        ) {
+            Ok(_offset) => CommandAck::ok(),
+            Err(err) => CommandAck::failed(err),
+        };
+    }
+
+    let seated = lineup;
     let layout = round_engine::layout_for_heat(&meta, Some(round), &events, &heat).cloned();
     let assigned = if frequencies.is_empty() {
         match round_engine::assign_for_event(&meta, &registry.timers(), layout.as_ref(), &seated) {
@@ -4437,7 +4485,6 @@ mod tests {
     /// first today and on the second once the guard is fixed, which is the order they must be
     /// fixed in.
     #[test]
-    #[ignore = "known bug #440: the clear re-applies the override's own lineup — un-ignore with the fix"]
     fn clearing_a_seating_override_re_forms_the_heat_from_its_rounds_plan() {
         let (registry, event, round) = event_with_round(
             "Qualifying",
@@ -4523,6 +4570,88 @@ mod tests {
         assert_eq!(
             seated, plan,
             "every planned pilot has a channel: {seated:?}"
+        );
+    }
+
+    /// #440: the empty lineup is the *clear*, and nothing else about the lineup validations moved.
+    /// An override the RD actually SETS is still refused when it seats one pilot twice — a
+    /// duplicate ref would merge two seats into one pilot's lap stream (#335).
+    #[test]
+    fn an_override_that_seats_one_pilot_twice_is_still_refused() {
+        let (registry, event, round) =
+            event_with_round("Qualifying", "timed_qual", &["alpha", "bravo", "charlie"]);
+        let filled = fill_next(&registry, &event, &round);
+        let heat = filled.scheduled[0].heat.clone();
+        let plan = filled.scheduled[0].lineup.clone();
+        let state = registry.resolve(&event).unwrap();
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: vec![plan[0].clone(), plan[0].clone()],
+                frequencies: vec![],
+            },
+        );
+        assert!(!ack.ok, "a repeated pilot is not a lineup: {ack:?}");
+        assert_eq!(
+            lineup_of(&state, &heat),
+            plan,
+            "a refused override appends nothing"
+        );
+    }
+
+    /// #440: clearing an override that happened to match the round's plan is a **no-op**, not a
+    /// redundant re-schedule — `rematerialize_round_heats` reports only heats it changes, and the
+    /// clear passes that through rather than re-appending an identical `HeatScheduled`.
+    #[test]
+    fn clearing_an_override_that_matched_the_plan_re_schedules_nothing() {
+        let (registry, event, round) =
+            event_with_round("Qualifying", "timed_qual", &["alpha", "bravo", "charlie"]);
+        let filled = fill_next(&registry, &event, &round);
+        let heat = filled.scheduled[0].heat.clone();
+        let plan = filled.scheduled[0].lineup.clone();
+        let state = registry.resolve(&event).unwrap();
+
+        // An override that re-states the plan exactly …
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: plan.clone(),
+                frequencies: vec![],
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        let before = state.read().unwrap().0.len();
+
+        // … clears with nothing left to re-form.
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::OverrideHeatSeating {
+                heat: heat.clone(),
+                lineup: vec![],
+                frequencies: vec![],
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert!(
+            crate::round_engine::heat_seating_override(&events, &heat).is_none(),
+            "the override is cleared"
+        );
+        assert_eq!(lineup_of(&state, &heat), plan, "and the heat is the plan's");
+        assert_eq!(
+            events.len(),
+            before + 1,
+            "only the clearing HeatSeatingOverridden was appended — the heat already matched its \
+             round's plan, so there was nothing to re-schedule"
         );
     }
 
