@@ -39,6 +39,20 @@
    * Director computes the overlaps and hands them back on a **200** — this screen renders them as
    * notices under the list.
    *
+   * ## The IMD reading (#117 S4)
+   *
+   * A layout is defined once and flown all event, so this is the one moment an RD can still act on
+   * how cleanly its channels fly together — the RD asked for exactly that: *"live IMD info, support
+   * as I am picking channels for a layout"*. Each saved layout carries its rating, and the editor
+   * reads the draft live as channels are ticked.
+   *
+   * The number comes from the **Director**, which owns the only implementation of IMDTabler in the
+   * system (#430): its whole value is being the same number the RD reads off RotorHazard for the
+   * same channels. It is **information and never a refusal** — a poor rating saves like any other,
+   * because a Raceband-only timer genuinely cannot beat 0 at five pilots — and it carries **no
+   * verdict word and no clean/marginal/poor band**, because the achievable ceiling collapses with
+   * pilot count and a flat band would call every six-pilot layout dirty.
+   *
    * Every value a person reads goes through the shared resolvers: `Node 3 · Raceband R7`, never an
    * index, a bare MHz, or a layout id (`channels.ts`'s `nodeSeatLabel` / `channelLabel`,
    * `timerNodes.ts`'s `nodeLabel`, and `channelLayouts.ts`'s `layoutName`).
@@ -47,8 +61,10 @@
   import type {
     ChannelCatalogEntry,
     ChannelLayout,
+    ImdReading,
     LayoutId,
     LayoutOverlap,
+    LayoutRating,
     Timer,
     TimerNodes
   } from '@gridfpv/types';
@@ -59,10 +75,13 @@
   import {
     allowedChannels,
     draftBlocker,
+    draftChannelSet,
     draftNodes,
     duplicateNodes,
+    imdMessage,
     layerNodes,
     layerSummary,
+    layoutRating,
     overlapMessage,
     unconfiguredTimerMessage
   } from '../lib/channelLayouts.js';
@@ -85,6 +104,8 @@
   // ── Reads ────────────────────────────────────────────────────────────────
   let layouts = $state<ChannelLayout[]>([]);
   let overlaps = $state<LayoutOverlap[]>([]);
+  /** Each layout's IMD reading (#117 S4) — advisory, computed by the Director, never a blocker. */
+  let ratings = $state<LayoutRating[]>([]);
   let catalog = $state<ChannelCatalogEntry[]>([]);
   let nodeView = $state<TimerNodes | undefined>(undefined);
   let loadError = $state<string | undefined>(undefined);
@@ -136,6 +157,7 @@
       const view = await session.listChannelLayouts();
       layouts = view.layouts;
       overlaps = view.overlaps ?? [];
+      ratings = view.ratings ?? [];
       loadError = undefined;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
@@ -162,6 +184,74 @@
   function label(node: number): string {
     return nodeView ? nodeLabel(nodeView, node) : `Node ${node + 1}`;
   }
+
+  // ── The live IMD reading (#117 S4) ────────────────────────────────────────
+  //
+  // The RD asked for this exactly: *"it would be nice to have some live IMD info, support as I am
+  // picking channels for a layout"*. A layout is defined once and flown all event, so this is the
+  // one moment the information can still change the outcome.
+  //
+  // The number comes from the **Director**, which owns the only implementation of IMDTabler in the
+  // system. That is #430 taken seriously: the whole value of the rating is that it is the number
+  // the RD already reads off RotorHazard for the same channels, and a second port of the algorithm
+  // in the console is precisely how that stops being true. The reading is a pure function of the
+  // channel set, so it caches perfectly — ticking back and forth between two channels re-reads a
+  // set already answered, and never asks twice.
+
+  /** Readings already answered, keyed by the channel set. Pure over its query, so it never goes stale. */
+  const imdCache = new Map<string, ImdReading>();
+  let draftImd = $state<ImdReading | undefined>(undefined);
+  /** A read is in flight for a set we have no answer for yet — the strip says so rather than lying. */
+  let imdPending = $state(false);
+
+  /** The draft's channels as a set — ascending and de-duplicated, so the cache key is stable. */
+  const draftSet = $derived(open ? draftChannelSet(draft) : []);
+  /**
+   * Whether there is anything to rate. Under two channels there are no mixing products at all and
+   * the Director would answer a flattering `100` — which an RD would read as "this layout is
+   * perfect" rather than "you have picked one channel". Two nodes briefly on the same channel is a
+   * draft state the blocker already speaks to; rating the collapsed set would answer about a
+   * different layout than the one on screen.
+   */
+  const rateable = $derived(open && clashing.size === 0 && draftSet.length >= 2);
+
+  $effect(() => {
+    if (!rateable) {
+      draftImd = undefined;
+      imdPending = false;
+      return;
+    }
+    const key = draftSet.join(',');
+    const known = imdCache.get(key);
+    if (known) {
+      draftImd = known;
+      imdPending = false;
+      return;
+    }
+    // Debounced: an RD working down a column of dropdowns changes the set several times a second,
+    // and the intermediate sets are not sets they are asking about.
+    imdPending = true;
+    const wanted = [...draftSet];
+    const timer = setTimeout(() => {
+      session
+        .rateChannels(wanted)
+        .then((reading) => {
+          imdCache.set(key, reading);
+          // Only answer if this is still the set on screen — an out-of-order response must never
+          // put one set's rating against another's channels.
+          if (draftSet.join(',') !== key) return;
+          draftImd = reading;
+          imdPending = false;
+        })
+        .catch(() => {
+          // Information, never a blocker: a failed read shows nothing and the RD carries on saving.
+          if (draftSet.join(',') !== key) return;
+          draftImd = undefined;
+          imdPending = false;
+        });
+    }, 120);
+    return () => clearTimeout(timer);
+  });
 
   // ── Editing ──────────────────────────────────────────────────────────────
 
@@ -208,6 +298,7 @@
       }
       layouts = view.layouts;
       overlaps = view.overlaps ?? [];
+      ratings = view.ratings ?? [];
       open = false;
     } catch (e) {
       // The Director's refusal is already written for the RD — it names the node, the channel and
@@ -227,6 +318,7 @@
       }
       layouts = view.layouts;
       overlaps = view.overlaps ?? [];
+      ratings = view.ratings ?? [];
       if (draftId === layout.id) open = false;
       toast.success(`Removed ${layout.name}.`);
     } catch (e) {
@@ -269,6 +361,13 @@
             <div class="layout-body">
               <span class="layout-name">{layout.name}</span>
               <span class="layout-tuning">{layerSummary(layout, catalog)}</span>
+              {#if layoutRating(ratings, layout.id)}
+                <!-- The rating and the worst offender behind it (#117 S4) — plain information,
+                     with no verdict word and no clean/marginal/poor band. See `imdMessage`. -->
+                <span class="layout-imd"
+                  >{imdMessage(layoutRating(ratings, layout.id)!, catalog)}</span
+                >
+              {/if}
             </div>
             <div class="layout-actions">
               <Button
@@ -334,6 +433,45 @@
           </div>
         {/if}
 
+        <!-- Live IMD, as the RD picks (#117 S4). Deliberately toneless: it is never a verdict, it
+             never blocks Save, and it carries no threshold — the achievable ceiling collapses with
+             pilot count, so a flat "clean/poor" band would call every six-pilot layout dirty. -->
+        <div class="imd" aria-live="polite" aria-label="IMD reading">
+          {#if seeding}
+            <!-- Nothing is picked, so there is nothing to rate: the Director chooses the seed and
+                 its reading comes back with the saved layout. Predicting the seed here would be a
+                 second implementation of a rule the Director owns. -->
+            <span class="imd-hint"
+              >This layout has not picked any channels yet — its IMD reading appears once it is
+              saved, or as soon as you set one here.</span
+            >
+          {:else if !open || draftSet.length === 0}
+            <span class="imd-hint">Pick channels and their IMD reading appears here.</span>
+          {:else if clashing.size > 0}
+            <span class="imd-hint"
+              >Two nodes are on one channel — settle that and the IMD reading returns.</span
+            >
+          {:else if draftSet.length < 2}
+            <span class="imd-hint"
+              >One channel cannot interfere with anything. Pick a second to see how they fly
+              together.</span
+            >
+          {:else if draftImd}
+            <span class="imd-line" class:stale={imdPending}>{imdMessage(draftImd, catalog)}</span>
+          {:else if imdPending}
+            <span class="imd-hint">Reading these channels…</span>
+          {:else}
+            <span class="imd-hint"
+              >Couldn’t read the IMD for these channels. It does not affect saving.</span
+            >
+          {/if}
+          <span class="imd-note">
+            Higher is cleaner and 100 is the ceiling — the same number RotorHazard shows for these
+            channels. What is achievable falls as you use more nodes, so compare layouts against
+            each other rather than against 100.
+          </span>
+        </div>
+
         {#if blocker}
           <Banner tone="warn">{blocker}</Banner>
         {:else if seeding}
@@ -395,6 +533,32 @@
   .layout-tuning {
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
+  }
+  /* Deliberately the same muted treatment whatever the rating says. Colouring it would BE the
+     verdict the RD asked us not to give. */
+  .layout-imd {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .imd {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--gf-font-size-sm);
+  }
+  .imd-line {
+    color: var(--gf-text);
+  }
+  /* An answer for a set the RD has already moved on from: shown, but visibly not settled. */
+  .imd-line.stale {
+    opacity: 0.5;
+  }
+  .imd-hint,
+  .imd-note {
+    color: var(--gf-text-muted);
+  }
+  .imd-note {
+    font-size: var(--gf-font-size-xs, var(--gf-font-size-sm));
   }
   .layout-actions {
     display: flex;

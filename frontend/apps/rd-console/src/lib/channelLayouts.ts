@@ -28,8 +28,10 @@
 import type {
   ChannelCatalogEntry,
   ChannelLayout,
+  ImdReading,
   LayoutId,
   LayoutNode,
+  LayoutRating,
   Timer,
   TimerNodes
 } from '@gridfpv/types';
@@ -214,4 +216,107 @@ export function overlapMessage(
     `${shared}. That is fine for a bracket flying one layout; it means a pilot cannot stay on one ` +
     `channel across both if you are running qualifiers that way.`
   );
+}
+
+/* ── IMD (#117 S4) ────────────────────────────────────────────────────────────────────────────
+ *
+ * How cleanly a layout's channels fly together, read while the RD is still choosing them — the
+ * one moment the information can still change anything. A layout is defined once and flown all
+ * event, so a check paid here is a check the RD can act on; the same check on a filled heat
+ * arrives after the decision is made.
+ *
+ * **The number is not computed here.** `session.rateChannels()` asks the Director, which owns the
+ * only implementation of IMDTabler in the system. That is #430's finding taken seriously: the
+ * number's whole value is that it is the same number the RD reads off RotorHazard for the same
+ * channels, and a second port of the algorithm in the console is exactly how that stops being
+ * true. This module turns the Director's reading into the sentence.
+ *
+ * **No threshold, no verdict word.** There is deliberately no clean/marginal/poor band, because
+ * the achievable ceiling collapses with pilot count (4 nodes → 65, 5 → 33, 6 → 28 from a real
+ * pool): a flat band would tell every RD running a six-pilot heat that their spectrum is dirty.
+ * And nothing here blocks anything — a poor rating still saves, because the RD may have no better
+ * option and a Raceband-only timer genuinely cannot beat 0 at five pilots.
+ */
+
+/** How far (MHz) a mixing product has to miss a used channel to stop mattering — IMDTabler's own
+ * `RATING_DIFF_LIMIT`, and the line the Director rates against. Quoted in the clean sentence so
+ * "clean" means something specific rather than "we found nothing". */
+const IMD_LIMIT_MHZ = 35;
+
+/**
+ * One layout's IMD reading out of the view's `ratings`, or `undefined` when the Director sent none.
+ *
+ * Keyed by layout id rather than by position, because that is how the Director sends it — a
+ * parallel array mis-labels every layout the day the list is filtered or reordered.
+ */
+export function layoutRating(
+  ratings: readonly LayoutRating[] | undefined,
+  id: LayoutId
+): ImdReading | undefined {
+  return ratings?.find((r) => r.layout === id)?.imd;
+}
+
+/**
+ * The rating on its own — `"IMD 29"`.
+ *
+ * Higher is cleaner and 100 is the ceiling; a genuinely bad set goes negative (all eight of
+ * Raceband rates −635), so the minus sign is real and is rendered as one (`−`, not a hyphen).
+ */
+export function imdRatingLabel(reading: ImdReading): string {
+  const n = reading.rating;
+  return `IMD ${n < 0 ? `−${Math.abs(n)}` : n}`;
+}
+
+/**
+ * The **worst offender** in plain language — the specific problem behind the rating.
+ *
+ * `2 × Raceband R2 − Raceband R1 = 5732 MHz — lands on Raceband R3`
+ *
+ * Three of the four values are channels this layout actually tunes — the two that mix and the one
+ * they land near — so all three are named through the shared {@link channelLabel} resolver and
+ * none of them reaches the screen as a bare frequency. The **product** is the exception, and
+ * deliberately so: it is arithmetic, not an entity. It is the frequency the mix creates, nobody is
+ * flying it, and naming it after whichever catalog channel happens to sit at that number would
+ * claim a pilot is there.
+ *
+ * When nothing lands within {@link IMD_LIMIT_MHZ} there is **no offender to name**, and the honest
+ * answer is that the set is clean — not a nearest miss dressed up as a problem.
+ */
+export function imdOffenderMessage(
+  reading: ImdReading,
+  catalog: readonly ChannelCatalogEntry[]
+): string {
+  const worst = reading.worst;
+  if (!worst) {
+    return `nothing mixes within ${IMD_LIMIT_MHZ} MHz of a channel this layout uses`;
+  }
+  const name = (mhz: number) => channelLabel(mhz, [...catalog]);
+  const victim = name(worst.lands_on);
+  const where = worst.gap_mhz === 0 ? `lands on ${victim}` : `${worst.gap_mhz} MHz off ${victim}`;
+  return `2 × ${name(worst.doubled)} − ${name(worst.subtracted)} = ${worst.product} MHz — ${where}`;
+}
+
+/**
+ * The whole reading as one line — the rating, then what is wrong with it.
+ *
+ * `IMD −635 · worst offender: 2 × Raceband R2 − Raceband R1 = 5732 MHz — lands on Raceband R3`
+ *
+ * `IMD 100 · nothing mixes within 35 MHz of a channel this layout uses`
+ */
+export function imdMessage(reading: ImdReading, catalog: readonly ChannelCatalogEntry[]): string {
+  const tail = reading.worst
+    ? `worst offender: ${imdOffenderMessage(reading, catalog)}`
+    : imdOffenderMessage(reading, catalog);
+  return `${imdRatingLabel(reading)} · ${tail}`;
+}
+
+/**
+ * The draft's channels as a **set**: ascending, de-duplicated — what the Director is asked to rate.
+ *
+ * Ascending and de-duplicated so the same choice always produces the same query, which is what
+ * makes the editor's per-set cache actually hit as the RD ticks back and forth between two
+ * channels.
+ */
+export function draftChannelSet(draft: LayerDraft): number[] {
+  return [...new Set(draft.channels.values())].sort((a, b) => a - b);
 }

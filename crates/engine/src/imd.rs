@@ -62,6 +62,9 @@
 //! is dirty. This module produces the number; something else decides what to say about it.
 #![forbid(unsafe_code)]
 
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
 /// The top of the rating scale — a set with no product within [`RATING_DIFF_LIMIT_MHZ`] of any
 /// used channel (`RATING_MAX_VALUE` in `IMDTabler.java`).
 pub const RATING_MAX: i32 = 100;
@@ -166,6 +169,145 @@ pub fn imd_rating(freqs: &[u16]) -> i32 {
     // Scale down by the frequency count "and a bit more", then subtract from the max. The two
     // successive truncating divisions are IMDTabler's, kept in its order.
     RATING_MAX - total / 5 / (n as i32)
+}
+
+/// The single two-tone product that hurts a channel set most — the **worst offender** (#117 S4).
+///
+/// [`imd_rating`] answers *how clean is this set*; it cannot answer *what is wrong with it*. This
+/// does, and it is the other half of what an RD needs while they are still choosing channels: a
+/// number tells them to change something, this tells them **what**.
+///
+/// Every field is a raw wire value. `doubled`, `subtracted` and `lands_on` are channels **in the
+/// set**, so all three have friendly names and none may reach a person as bare MHz — they resolve
+/// through the console's shared channel resolver (`channels.ts`'s `channelLabel`). `product` is
+/// arithmetic, not an entity: it is `2 · doubled − subtracted`, and it is the one number here that
+/// names nothing.
+///
+/// Read as a sentence: *two times `doubled`, minus `subtracted`, equals `product` — which is
+/// `gap_mhz` MHz from `lands_on`, a channel somebody in this heat is flying.*
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ImdProduct {
+    /// The channel that mixes with itself — `f_i` in `2·f_i − f_j`. A channel in the rated set.
+    pub doubled: u16,
+    /// The channel subtracted from it — `f_j` in `2·f_i − f_j`. A channel in the rated set.
+    pub subtracted: u16,
+    /// The product frequency in MHz, `2·doubled − subtracted`. Always inside the receivable band
+    /// (`5100..=6099`), which is why it fits a `u16` where the raw arithmetic would not.
+    pub product: u16,
+    /// The channel in the set the product comes **closest** to — the pilot whose video it breaks.
+    pub lands_on: u16,
+    /// How far the product misses [`lands_on`](Self::lands_on) by, in MHz. Always under
+    /// [`RATING_DIFF_LIMIT_MHZ`] (a product further out than that is not an offender at all), and
+    /// `0` means the product lands *exactly* on a used channel.
+    pub gap_mhz: u16,
+}
+
+/// A channel set's IMD **reading**: the rating, and the worst offender behind it (#117 S4).
+///
+/// The pair is deliberate. The rating alone is the number an RD already reads off RotorHazard, so
+/// it is the one that must be shown — but on its own it is a verdict with no next step. The
+/// offender is the next step, and it is the specific thing the RD can act on while they are still
+/// picking channels.
+///
+/// **Advisory, always.** Nothing consults a reading to accept or refuse anything: a layout with a
+/// poor rating still saves, because the RD may have no better option (a Raceband-only timer
+/// genuinely cannot beat 0 at five pilots) and information that blocks is a refusal wearing a
+/// hint's clothes.
+///
+/// No threshold, no verdict word, and deliberately no clean/marginal/poor band — see this module's
+/// header for why a flat band is unreachable at five or more pilots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ImdReading {
+    /// IMDTabler's rating for the set — **higher is cleaner**, [`RATING_MAX`] is the ceiling, and a
+    /// bad set goes negative. Exactly [`imd_rating`]'s answer; see it for what the number means.
+    pub rating: i32,
+    /// The worst two-tone product, or `None` when **no** product comes within
+    /// [`RATING_DIFF_LIMIT_MHZ`] of a used channel — in which case there is nothing to name, and
+    /// the honest thing to say is that the set is clean rather than to report a nearest miss that
+    /// is not a problem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub worst: Option<ImdProduct>,
+}
+
+/// The worst two-tone product in a channel set, or `None` when nothing lands close enough to matter.
+///
+/// "Worst" is the product carrying the biggest share of [`imd_rating`]'s penalty, which — since the
+/// charge is `(35 − gap)²`, monotonic in the gap — is simply the product with the **smallest gap**
+/// to a used channel. Products [`RATING_DIFF_LIMIT_MHZ`] MHz or further out are not offenders and
+/// are never returned: a set with none of them is clean, and saying "the nearest product is 80 MHz
+/// away" invents a problem.
+///
+/// # Exactly the rating's own arithmetic
+///
+/// Same products (`2·f_i − f_j`, two-tone only), same band filter (`5100..=6099`), same nearest-
+/// channel rule (the whole set, *including* `f_i` and `f_j` themselves — a product landing back on
+/// one of its own parents still breaks that pilot's video). This reads the rating's working out; it
+/// does not compute a second opinion, and it does not change [`imd_rating`] in any way.
+///
+/// # Determinism
+///
+/// Ties are broken by the lowest `doubled`, then the lowest `subtracted`, then the lowest
+/// `lands_on` — so the answer does not depend on the order `freqs` arrives in, and the same set
+/// always names the same product. That matters: an offender that reshuffled as the RD re-ordered a
+/// dropdown would read as noise.
+pub fn worst_two_tone_product(freqs: &[u16]) -> Option<ImdProduct> {
+    let f: Vec<i32> = freqs.iter().map(|&x| i32::from(x)).collect();
+    let mut worst: Option<ImdProduct> = None;
+
+    for (i, &fi) in f.iter().enumerate() {
+        for (j, &fj) in f.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let product = 2 * fi - fj;
+            if !(MIN_PRODUCT_MHZ..=MAX_PRODUCT_MHZ).contains(&product) {
+                continue;
+            }
+            // The nearest used channel, ties broken by the lower channel so the answer is
+            // independent of the order the set arrived in.
+            let (gap, lands_on) = f
+                .iter()
+                .map(|&used| ((product - used).abs(), used))
+                .min()
+                .expect("the set is non-empty");
+            if gap >= RATING_DIFF_LIMIT_MHZ {
+                continue;
+            }
+            let cand = ImdProduct {
+                doubled: fi as u16,
+                subtracted: fj as u16,
+                // In-band by the check above, so both casts are lossless.
+                product: product as u16,
+                lands_on: lands_on as u16,
+                gap_mhz: gap as u16,
+            };
+            let better = match &worst {
+                None => true,
+                Some(best) => {
+                    (cand.gap_mhz, cand.doubled, cand.subtracted, cand.lands_on)
+                        < (best.gap_mhz, best.doubled, best.subtracted, best.lands_on)
+                }
+            };
+            if better {
+                worst = Some(cand);
+            }
+        }
+    }
+    worst
+}
+
+/// A channel set's whole IMD [`ImdReading`] — [`imd_rating`] and [`worst_two_tone_product`] in one
+/// call, because a surface that shows one always wants the other (#117 S4).
+///
+/// Pure, cheap (O(n²) over a heat-sized set) and total: any slice rates, including the empty one.
+pub fn imd_reading(freqs: &[u16]) -> ImdReading {
+    ImdReading {
+        rating: imd_rating(freqs),
+        worst: worst_two_tone_product(freqs),
+    }
 }
 
 /// The smallest spacing (MHz) between any two channels in the set — the adjacent-channel-bleed
@@ -728,5 +870,123 @@ mod tests {
             assert!(pool.contains(ch), "in pool");
         }
         assert_eq!(picked, best_subset_greedy(&pool, 5), "deterministic");
+    }
+
+    // ── The worst offender (#117 S4) ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_worst_offender_is_the_product_that_lands_on_a_used_channel() {
+        // Three consecutive Raceband channels. 2·5695 − 5658 = 5732, *exactly* R3 — gap 0, the
+        // maximum charge, and the thing an RD needs told: R2 and R1 together land on R3.
+        let worst = worst_two_tone_product(&[5658, 5695, 5732]).expect("this set has an offender");
+        assert_eq!(
+            worst,
+            ImdProduct {
+                doubled: 5695,
+                subtracted: 5658,
+                product: 5732,
+                lands_on: 5732,
+                gap_mhz: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn a_clean_set_has_no_offender_to_name() {
+        // Racebnd4 rates 100 precisely because *nothing* comes within 35 MHz. There is no
+        // nearest-miss worth reporting, and inventing one would tell the RD a clean set has a
+        // problem.
+        assert_eq!(imd_rating(&[5658, 5732, 5843, 5917]), RATING_MAX);
+        assert_eq!(worst_two_tone_product(&[5658, 5732, 5843, 5917]), None);
+        // Nor does a set too small to produce a product.
+        assert_eq!(worst_two_tone_product(&[5658]), None);
+        assert_eq!(worst_two_tone_product(&[]), None);
+    }
+
+    #[test]
+    fn the_worst_offender_is_the_tightest_one_not_merely_the_first() {
+        // RotorHazard's own IMD6C. Several products fall inside 35 MHz; the one that must be
+        // named is the closest — 2·5800 − 5695 = 5905, 12 MHz off 5917 (R8).
+        let worst = worst_two_tone_product(&[5658, 5695, 5760, 5800, 5880, 5917])
+            .expect("IMD6C has offenders");
+        assert_eq!(worst.product, 5905);
+        assert_eq!(worst.lands_on, 5917);
+        assert_eq!(worst.gap_mhz, 12);
+        assert_eq!((worst.doubled, worst.subtracted), (5800, 5695));
+    }
+
+    #[test]
+    fn the_offender_does_not_depend_on_the_order_the_set_arrives_in() {
+        // A reshuffling offender would read as noise while the RD edits a dropdown.
+        let a = worst_two_tone_product(&[5658, 5695, 5760, 5800, 5880, 5917]);
+        let b = worst_two_tone_product(&[5917, 5800, 5658, 5880, 5695, 5760]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn the_offender_reads_the_ratings_own_working_out() {
+        // The two must agree about *whether* a set has a problem at all: an offender exists
+        // exactly when the rating has been charged something. Checked across the canonical table
+        // plus the full catalog's own sets, so the two can never drift into disagreeing.
+        let sets: [&[u16]; 6] = [
+            &[5658, 5732, 5843, 5917],
+            &[5645, 5685, 5760, 5905, 5945],
+            &[5645, 5685, 5760, 5805, 5905, 5945],
+            &[5658, 5695, 5760, 5800, 5880, 5917],
+            &RACEBAND,
+            &[5658, 5695],
+        ];
+        for set in sets {
+            let charged = imd_rating(set) < RATING_MAX;
+            assert_eq!(
+                charged,
+                worst_two_tone_product(set).is_some(),
+                "{set:?}: a charged rating must have an offender to name, and a clean one must not"
+            );
+        }
+    }
+
+    #[test]
+    fn the_offenders_arithmetic_actually_holds() {
+        // The sentence an RD reads is `2 × doubled − subtracted = product`, `gap` MHz from
+        // `lands_on`. If the numbers do not add up the sentence is a lie, so check them over
+        // every pair in Raceband — the band an RD is most likely to be stuck inside.
+        for (a, &lo) in RACEBAND.iter().enumerate() {
+            for &hi in RACEBAND.iter().skip(a + 1) {
+                let set = [lo, hi];
+                let Some(w) = worst_two_tone_product(&set) else {
+                    continue;
+                };
+                assert_eq!(
+                    i32::from(w.product),
+                    2 * i32::from(w.doubled) - i32::from(w.subtracted),
+                    "{set:?}: the product must be the arithmetic it claims"
+                );
+                assert_eq!(
+                    i32::from(w.gap_mhz),
+                    (i32::from(w.product) - i32::from(w.lands_on)).abs(),
+                    "{set:?}: the gap must be the distance it claims"
+                );
+                assert!(set.contains(&w.doubled) && set.contains(&w.subtracted));
+                assert!(
+                    set.contains(&w.lands_on),
+                    "the victim is a channel in the set"
+                );
+                assert!(i32::from(w.gap_mhz) < RATING_DIFF_LIMIT_MHZ);
+            }
+        }
+    }
+
+    #[test]
+    fn a_reading_is_the_rating_and_the_offender_together() {
+        let reading = imd_reading(&RACEBAND);
+        assert_eq!(reading.rating, imd_rating(&RACEBAND));
+        assert_eq!(reading.worst, worst_two_tone_product(&RACEBAND));
+        // And the rating is untouched by any of this (#430's table still holds).
+        assert_eq!(imd_reading(&[5658, 5732, 5843, 5917]).rating, 100);
+        assert_eq!(
+            imd_reading(&[5658, 5695, 5760, 5800, 5880, 5917]).rating,
+            29
+        );
     }
 }
