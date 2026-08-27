@@ -12,6 +12,54 @@
 //! Read-only in production (drain [`RotorHazardConnection::events`]); the
 //! `stage_race` / `simulate_lap` / `stop_race` helpers exist to **drive** a
 //! dockerized RH from the live integration test.
+//!
+//! # Receipts: `current_laps`, lap deletion, and who runs first
+//!
+//! Read out of RotorHazard's own source at **v4.3.0 and v4.4.0** (`RHRace.py`, `RHUI.py`,
+//! `server.py`, `eventmanager.py`, `RHAPI.py`). Everything below is identical on both versions
+//! unless it says otherwise. Recorded here because two shipped bugs (#434, #447) rested on
+//! plausible guesses about exactly these behaviours.
+//!
+//! **`build_laps_list` — what reaches the wire.** It walks `race.node_laps[node]` and emits a lap
+//! only `if (not lap.invalid) and ((not lap.deleted) or lap.late_lap)`. Consequences:
+//!
+//! - A crossing the RD deletes is marked `invalid = True` and is **absent from the payload
+//!   entirely** — it is not flagged, it is gone. There is no "deleted lap" frame to react to.
+//! - `deleted: true` therefore only ever rides on a `late_lap` (`_add_lap` records a post-finish
+//!   crossing as `deleted = late_lap = True`), and the builder numbers **every** late lap `-1`. So
+//!   a lap that is both *numbered* and `deleted` is a shape neither version can produce.
+//! - v4.3.0's per-lap dict has **no `deleted` key and no `source` key** (and calls the raw time
+//!   `lap_raw`); v4.4.0 added `deleted`, `source`, and renamed to `lap_time` /
+//!   `lap_time_formatted`. `lap_index`, `lap_number`, `lap_time_stamp`, `splits`, `late_lap` are
+//!   common to both.
+//!
+//! **`delete_lap` renumbers.** `RHRace.delete_lap` sets `invalid`/`deleted` and `lap_number = None`
+//! on the target, then walks the seat's whole list assigning `lap.lap_number = 0, 1, 2, …` to every
+//! survivor. `restore_deleted_lap` and `replace_laps` (the `replace_current_laps` handler) renumber
+//! the same way. **A `lap_number` is a position in the current table, not a crossing id.** All
+//! three paths leave `lap_time_stamp` untouched — only `lap_time` (the pass-to-pass delta of the
+//! lap *following* the edit) is recomputed — so the stamp is the stable per-crossing identity, and
+//! it is what the adapter's dedup keys on (#434). Each of these ends with `emit_current_laps()`.
+//!
+//! **Emission cadence.** Mid-race, `emit_current_laps()` lands **once per recorded crossing**:
+//! `RHRace._add_lap` calls it inline right after appending the lap. The other call sites are
+//! staging, race-status edges, node-count changes, the marshaling edits above, and a client's own
+//! `load_data('current_laps')`. There is no periodic re-send.
+//!
+//! **Plugin handlers are asynchronous; `current_laps` is not.** `eventmanager.trigger` runs a
+//! handler **inline** when its `priority < 100` and `gevent.spawn`s it otherwise;
+//! `RHAPI.EventsAPI.on` defaults `priority = 200` for everything except the `*_INITIALIZE` events.
+//! The GridFPV plugin registers `RACE_LAP_RECORDED` through that default, so its `gridfpv_pass`
+//! broadcast is spawned — while `_add_lap` reaches `emit_current_laps()` on the very next
+//! statement. **The snapshot for a lap normally arrives before the plugin's pass for it**, and a
+//! whole field crossing inside one scheduling window yields up to one snapshot per seat before any
+//! spawned handler runs. That is what sets `PLUGIN_GRACE_SNAPSHOTS` (#447).
+//!
+//! **Every socket event gets its own greenlet.** `SOCKET_IO = SocketIO(APP, async_mode='gevent',
+//! …)` on both versions, with no `async_handlers=False`, so Flask-SocketIO's default applies. A
+//! read issued after a write can be served before that write commits — which is why every readback
+//! in this file re-asks rather than trusting its first answer (`confirm_seating`,
+//! [`RotorHazardConnection::confirm_min_lap_neutral`]).
 
 // `rust_socketio::Error` is a large external enum; we thread it through unchanged
 // rather than box every signature in this thin wrapper.

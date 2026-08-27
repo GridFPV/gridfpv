@@ -26,6 +26,27 @@
 //! competitors — or two different sources — that happen to emit the same sequence
 //! number or the same timestamp are **never** collapsed into one.
 //!
+//! ## When the sequence is not an identity
+//!
+//! That default rests on a premise — "the source's own monotonic counter is
+//! authoritative" — that is **false for some sources**, and silently so. A source
+//! whose `sequence` is a *display ordinal* recomputed over the whole list can hand
+//! two different crossings the same number over the life of a race, and the default
+//! keying then swallows the second one as a replay of the first.
+//!
+//! RotorHazard is exactly that source (#434): `RHRace.delete_lap` marks the deleted
+//! crossing and then **renumbers every surviving lap of that seat sequentially from
+//! 0**, so the pilot's next genuine crossing arrives carrying a `lap_number` already
+//! accepted. `restore_deleted_lap` and `replace_laps` renumber the same way. All
+//! three leave `lap_time_stamp` — and therefore the pass's `at` — untouched.
+//! Verified against RH 4.3.0 and 4.4.0.
+//!
+//! Such a source constructs its deduplicator with
+//! [`PassIdentity::CrossingTime`](PassIdentity::CrossingTime), which ignores
+//! `sequence` and keys on the timestamp. The pass still *carries* its `sequence` —
+//! it is the right lap number to display and to order by, it is just not an
+//! identity.
+//!
 //! ## Limitation
 //!
 //! The fallback is only as good as the timestamps. A source that provides **no**
@@ -83,13 +104,43 @@ pub struct PassKey {
     discriminator: Discriminator,
 }
 
+/// What a source's passes are identified **by** — see the [module docs](self).
+///
+/// A property of the *source*, fixed for the life of its [`Deduplicator`], not of an
+/// individual pass: whether a `sequence` names a crossing is a fact about how the
+/// source numbers things, and answering it per-pass would be guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PassIdentity {
+    /// The source's `sequence` where it carries one, falling back to the timestamp.
+    /// The right choice for a source whose counter is genuinely per-crossing and
+    /// monotonic, because it survives clock adjustments and separates two passes that
+    /// share a timestamp.
+    #[default]
+    SourceSequence,
+    /// The source **timestamp**, always — `sequence` is ignored for identity.
+    ///
+    /// For a source whose `sequence` is a display ordinal that can be recomputed, so
+    /// the same number can name different crossings over a race. See the [module
+    /// docs](self) for RotorHazard's renumbering, which is the case this exists for
+    /// (#434).
+    CrossingTime,
+}
+
 impl PassKey {
-    /// Derive the dedup key for a pass: sequence-keyed when the pass carries a
+    /// Derive the dedup key for a pass under the default
+    /// [`PassIdentity::SourceSequence`] rule: sequence-keyed when the pass carries a
     /// `sequence`, timestamp-keyed otherwise.
     pub fn of(pass: &Pass) -> Self {
-        let discriminator = match pass.sequence {
-            Some(seq) => Discriminator::Seq(seq),
-            None => Discriminator::Time(pass.at),
+        Self::of_with(PassIdentity::SourceSequence, pass)
+    }
+
+    /// Derive the dedup key for a pass under an explicit [`PassIdentity`].
+    pub fn of_with(identity: PassIdentity, pass: &Pass) -> Self {
+        let discriminator = match (identity, pass.sequence) {
+            (PassIdentity::SourceSequence, Some(seq)) => Discriminator::Seq(seq),
+            (PassIdentity::SourceSequence, None) | (PassIdentity::CrossingTime, _) => {
+                Discriminator::Time(pass.at)
+            }
         };
         Self {
             adapter: pass.adapter.clone(),
@@ -108,12 +159,30 @@ impl PassKey {
 #[derive(Debug, Clone, Default)]
 pub struct Deduplicator {
     seen: HashSet<PassKey>,
+    /// What this source's passes are identified by. Fixed for the deduplicator's life —
+    /// changing it mid-race would leave the keys already accepted un-matchable.
+    identity: PassIdentity,
 }
 
 impl Deduplicator {
-    /// A fresh deduplicator that has seen nothing.
+    /// A fresh deduplicator that has seen nothing, keyed the default way
+    /// ([`PassIdentity::SourceSequence`]).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A fresh deduplicator that identifies passes the given way — for a source whose
+    /// `sequence` is not a per-crossing identity. See [`PassIdentity`].
+    pub fn keyed_on(identity: PassIdentity) -> Self {
+        Self {
+            seen: HashSet::new(),
+            identity,
+        }
+    }
+
+    /// What this deduplicator identifies passes by.
+    pub fn identity(&self) -> PassIdentity {
+        self.identity
     }
 
     /// Observe one pass. Returns `true` if it is new — its key had not been seen, so
@@ -122,14 +191,19 @@ impl Deduplicator {
     pub fn observe(&mut self, pass: &Pass) -> bool {
         // `HashSet::insert` returns `true` when the value was newly inserted, which
         // is exactly "this pass is new". A duplicate leaves the set unchanged.
-        self.seen.insert(PassKey::of(pass))
+        self.seen.insert(self.key(pass))
+    }
+
+    /// This deduplicator's key for `pass`, under the identity it was constructed with.
+    fn key(&self, pass: &Pass) -> PassKey {
+        PassKey::of_with(self.identity, pass)
     }
 
     /// Whether `pass` would be treated as a duplicate, **without** recording it.
     /// Useful for inspection/metrics; [`observe`](Self::observe) is the one that
     /// updates state.
     pub fn is_duplicate(&self, pass: &Pass) -> bool {
-        self.seen.contains(&PassKey::of(pass))
+        self.seen.contains(&self.key(pass))
     }
 
     /// Filter a batch of events in place, keeping only first-seen passes.
@@ -304,6 +378,63 @@ mod tests {
             dedup.observe(&pass("manual", "Bee", 7_000_000, None)),
             "same timestamp, different competitor is a different pass"
         );
+    }
+
+    // ── PassIdentity::CrossingTime — for a source whose sequence is a display ordinal ────────
+
+    /// **A renumbered source must not lose its next real crossing** (#434).
+    ///
+    /// RotorHazard's shape exactly: three crossings numbered 0,1,2; the RD deletes the middle one,
+    /// so RH drops it from the payload and renumbers the survivors — and the *next* genuine
+    /// crossing arrives as `2`, a number already accepted. Under the default keying that pass is
+    /// indistinguishable from a replay; keyed on the crossing time it is what it is.
+    #[test]
+    fn crossing_time_keying_survives_a_renumbering() {
+        let mut dedup = Deduplicator::keyed_on(PassIdentity::CrossingTime);
+        for (seq, at) in [(0, 2_000_000), (1, 7_000_000), (2, 12_000_000)] {
+            assert!(dedup.observe(&pass("rh", "node-0", at, Some(seq))));
+        }
+        // The RD deletes the 7 s crossing: 12 s comes back as lap 1, and the new 17 s crossing
+        // arrives as lap 2.
+        assert!(
+            !dedup.observe(&pass("rh", "node-0", 12_000_000, Some(1))),
+            "the same crossing under a new number is still the same crossing"
+        );
+        assert!(
+            dedup.observe(&pass("rh", "node-0", 17_000_000, Some(2))),
+            "a genuinely new crossing must not be swallowed by the number a deletion freed up"
+        );
+
+        // The default keying is what the bug was: it loses that lap.
+        let mut sequenced = Deduplicator::new();
+        for (seq, at) in [(0, 2_000_000), (1, 7_000_000), (2, 12_000_000)] {
+            assert!(sequenced.observe(&pass("rh", "node-0", at, Some(seq))));
+        }
+        assert!(
+            !sequenced.observe(&pass("rh", "node-0", 17_000_000, Some(2))),
+            "…which is precisely why RotorHazard does not use it"
+        );
+    }
+
+    /// Crossing-time keying still keeps competitors and adapters apart, and still suppresses the
+    /// replay it exists for: a re-sent snapshot repeats both the stamp and the number.
+    #[test]
+    fn crossing_time_keying_still_dedups_replays_and_separates_seats() {
+        let mut dedup = Deduplicator::keyed_on(PassIdentity::CrossingTime);
+        assert!(dedup.observe(&pass("rh", "node-0", 5_000_000, Some(0))));
+        assert!(
+            !dedup.observe(&pass("rh", "node-0", 5_000_000, Some(0))),
+            "a re-sent snapshot is still a duplicate"
+        );
+        assert!(
+            dedup.observe(&pass("rh", "node-1", 5_000_000, Some(0))),
+            "two seats crossing at the same stamp are two passes"
+        );
+        assert!(
+            dedup.observe(&pass("other", "node-0", 5_000_000, Some(0))),
+            "two sources are never collapsed"
+        );
+        assert_eq!(dedup.identity(), PassIdentity::CrossingTime);
     }
 
     #[test]
