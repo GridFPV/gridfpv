@@ -170,20 +170,24 @@ pub enum Raw {
     /// An `enter_and_exit_at_levels` message carrying the per-node detection thresholds.
     /// Emits [`Event::SignalThresholds`] for a signal-capable adapter.
     EnterExitLevels(RawEnterExitLevels),
-    /// A `current_marshal_data` response (`RHUI.emit_race_marshal_data`), requested at heat end on
-    /// **newer** RotorHazard. Carries the **dense** per-node `history_values`/`history_times` trace
+    /// A `current_marshal_data` response (`RHUI.emit_race_marshal_data`), requested at heat end —
+    /// **v4.4.0 only**; the handler and the emitter both post-date v4.3.0, the D16 floor (#423).
+    /// Carries the **dense** per-node `history_values`/`history_times` trace
     /// for every seat at once; emits one [`Event::SignalHistory`] per node for a signal-capable
     /// adapter (the full-fidelity trace that supersedes the coarse streamed [`SignalChunk`]s — see
     /// [`RawMarshalData`]).
     MarshalData(RawMarshalData),
     /// A `race_list` response (`RHUI.emit_race_list`), listing the **saved** races and their
-    /// per-pilot `pilotrace_id`s. On the RotorHazard build whose marshal API is per-pilotrace
-    /// ([`Raw::RaceDetails`]), the transport reads these ids to pull each seat's dense history.
+    /// per-pilot `pilotrace_id`s. Present and wire-identical on v4.3.0 and v4.4.0; the transport
+    /// reads these ids to pull each seat's dense history per-pilotrace ([`Raw::RaceDetails`]) —
+    /// the only dense route on v4.3.0, and driven on both.
     /// Emits no canonical events itself (it is a transport routing payload); the adapter exposes the
     /// ids via [`take_pilotrace_requests`](RotorHazardAdapter::take_pilotrace_requests).
     RaceList(RawRaceList),
-    /// A `race_details` response (`get_pilotrace`), the **per-pilotrace** dense marshal payload on
-    /// the RotorHazard build that has no aggregate `current_marshal_data`. Carries one seat's
+    /// A `race_details` response (`get_pilotrace`), the **per-pilotrace** dense marshal payload —
+    /// present on v4.3.0 and v4.4.0 alike (v4.4.0 adds a per-lap `peak_rssi` and a `marshal_type`
+    /// GridFPV ignores), and the *only* dense route on v4.3.0, which has no aggregate
+    /// `current_marshal_data` at all. Carries one seat's
     /// `history_values`/`history_times` + `enter_at`/`exit_at`; emits a [`Event::SignalHistory`]
     /// (and refreshes [`SignalThresholds`]) for that seat — see [`RawRaceDetails`].
     RaceDetails(RawRaceDetails),
@@ -476,7 +480,13 @@ pub struct RawEnterExitLevels {
 /// A RotorHazard `current_marshal_data` response (`RHUI.emit_race_marshal_data`), the
 /// **request-driven** dense marshal payload its own marshal page pulls *after* a race.
 ///
-/// Shape (validated against `src/server/RHUI.py::emit_race_marshal_data`):
+/// ⚠️ **v4.4.0 only** (#423). Neither the `current_race_marshal` request handler nor
+/// `RHUI.emit_race_marshal_data` exists on v4.3.0 — the D16 floor — so this frame never arrives
+/// from a floor timer and the per-pilotrace [`RawRaceDetails`] route carries the dense history
+/// there. Both are driven at heat end, so the difference is invisible in behaviour; it is only
+/// invisible because it is driven, not because the emit works.
+///
+/// Shape (validated against v4.4.0's `src/server/RHUI.py::emit_race_marshal_data`):
 /// `{ "race": { "start_time": <monotonic-seconds>, … }, "seats": { "<index>": { history_values,
 /// history_times, enter_at, exit_at, laps, … }, … } }`. The `seats` map is keyed by **stringified
 /// node index** (JSON object keys are strings). Each seat carries the detector's own per-tick
@@ -618,6 +628,12 @@ pub struct RawHeat {
 /// `alter_heat` assigns a pilot to a heat by **slot id** (the `HeatNode` primary key), not by node
 /// index — so seating the heat's bound pilots reads each seat's `(node_index, id)` here and emits
 /// `alter_heat { heat, slot_id: id, pilot }` for the seat at the bound node index.
+///
+/// `pilot_id` is the **readback** of that write (#423): `RHUI.emit_heat_data` serialises
+/// `heatNode.pilot_id` for every slot, so re-requesting `heat_data` after seating is how the
+/// transport learns whether the assignment actually landed. Nothing else tells it —
+/// `on_alter_heat` answers with `emit_heat_data(noself=True)`, which explicitly **excludes the
+/// socket that made the write**, and `@catchLogExcWithDBWrapper` swallows a failure into RH's log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawHeatSlot {
     /// The slot's id (`HeatNode` primary key) — the `slot_id` `alter_heat` targets.
@@ -625,6 +641,40 @@ pub struct RawHeatSlot {
     /// The node index this slot seats a pilot on (0-based). `None` for an unprogrammed slot.
     #[serde(default)]
     pub node_index: Option<usize>,
+    /// The pilot seated in this slot, **as RotorHazard reports it** — the raw wire value.
+    ///
+    /// ⚠️ RotorHazard's "no pilot" sentinel **changed between the two supported versions**:
+    /// `RHUtils.PILOT_ID_NONE` is `0` on v4.3.0 and `None` on v4.4.0. So an empty slot arrives here
+    /// as `Some(0)` from a 4.3.0 timer and as `None` from a 4.4.0 one. Read this through
+    /// [`HeatSeat::pilot_id`], which normalises both to `None`; comparing against `0` alone silently
+    /// treats every 4.4.0 slot as seated, and comparing against `null` alone does the same for 4.3.0.
+    #[serde(default)]
+    pub pilot_id: Option<i64>,
+}
+
+/// One seat of a heat as the transport uses it: the slot id to write to, and who is **currently**
+/// seated there (#423).
+///
+/// Built from a [`RawHeatSlot`] with RotorHazard's two different "no pilot" sentinels already
+/// collapsed, so callers never re-derive that per-version rule (and so only one place can get it
+/// wrong).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeatSeat {
+    /// The slot's id (`HeatNode` primary key) — the `slot_id` `alter_heat` targets.
+    pub slot_id: i64,
+    /// The pilot seated here, or `None` when the slot is empty. **Both** of RotorHazard's sentinels
+    /// (`0` on v4.3.0, `null` on v4.4.0) normalise to `None` — see [`RawHeatSlot::pilot_id`].
+    pub pilot_id: Option<i64>,
+}
+
+impl HeatSeat {
+    /// Fold a wire slot into a [`HeatSeat`], collapsing RotorHazard's per-version empty sentinel.
+    fn from_raw(slot: &RawHeatSlot) -> Self {
+        Self {
+            slot_id: slot.id,
+            pilot_id: slot.pilot_id.filter(|id| *id != 0),
+        }
+    }
 }
 
 /// A RotorHazard `pilot_data` response (`RHUI.emit_pilot_data`): the configured pilots.
@@ -869,7 +919,7 @@ pub struct RotorHazardAdapter {
     /// drained by the transport via [`take_heat_slots`](Self::take_heat_slots). Seating a heat's
     /// bound pilots needs each node's slot id (the `HeatNode` PK `alter_heat` targets). Keyed by heat
     /// id → `(node_index → slot_id)`. Empty until a `heat_data` is folded.
-    pending_heat_slots: std::collections::HashMap<i64, std::collections::HashMap<usize, i64>>,
+    pending_heat_slots: std::collections::HashMap<i64, std::collections::HashMap<usize, HeatSeat>>,
     /// Configured RotorHazard pilot ids learned from the most recent `pilot_data`, drained by the
     /// transport via [`take_pilot_ids`](Self::take_pilot_ids) so it can learn the id of a pilot it
     /// just created (`add_pilot` — the highest id) to assign onto a heat seat when seating. Empty
@@ -1184,13 +1234,15 @@ impl RotorHazardAdapter {
         std::mem::take(&mut self.pending_heat_ids)
     }
 
-    /// Take (and clear) the per-node slot ids of each configured heat learned from the most recent
-    /// `heat_data`. The transport calls this when **seating** a heat's bound pilots: it picks the
-    /// freshest heat (the one it just `add_heat`ed) and reads each node's slot id to assign a pilot
-    /// (`alter_heat { heat, slot_id, pilot }`). Empty when no `heat_data` has been folded.
+    /// Take (and clear) the per-node [`HeatSeat`]s of each configured heat learned from the most
+    /// recent `heat_data`. The transport calls this when **seating** a heat's bound pilots: it picks
+    /// the freshest heat (the one it just `add_heat`ed) and reads each node's slot id to assign a
+    /// pilot (`alter_heat { heat, slot_id, pilot }`) — and then calls it **again**, after a fresh
+    /// `load_data { heat_data }`, to read each seat's `pilot_id` back and confirm the assignment
+    /// landed (#423). Empty when no `heat_data` has been folded.
     pub fn take_heat_slots(
         &mut self,
-    ) -> std::collections::HashMap<i64, std::collections::HashMap<usize, i64>> {
+    ) -> std::collections::HashMap<i64, std::collections::HashMap<usize, HeatSeat>> {
         std::mem::take(&mut self.pending_heat_slots)
     }
 
@@ -1234,6 +1286,17 @@ impl RotorHazardAdapter {
     }
 
     /// The session id RotorHazard exposes for a heat, or a generic label when none.
+    /// ⚠️ **The two supported RotorHazard versions disagree in practice mode** (#423, noted not
+    /// fixed). `RHUtils.HEAT_ID_NONE` is `0` on v4.3.0 and `None` on v4.4.0, so a race with no
+    /// current heat reports `race_heat_id: 0` from a floor timer and `null` from a v4.4.0 one —
+    /// which lands here as `heat-0` and `race` respectively, two names for the same state, and
+    /// `heat-0` naming a heat that does not exist.
+    ///
+    /// Left alone deliberately. It is consistent *within* a connection (a timer does not change
+    /// version mid-event), it is an inbound decode rather than one of the emits #423 set out to
+    /// audit, and [`SessionId`] is keyed on by layers outside this crate — so normalising it is a
+    /// change with a wider blast radius than the audit's remit. Collapse both to `None` here if
+    /// this is ever picked up, exactly as [`HeatSeat`] does for `PILOT_ID_NONE`.
     fn session_id(heat_id: Option<i64>) -> SessionId {
         match heat_id {
             Some(id) => SessionId(format!("heat-{id}")),
@@ -1838,12 +1901,12 @@ impl RotorHazardAdapter {
             .heats
             .into_iter()
             .map(|h| {
-                let node_to_slot = h
+                let node_to_seat = h
                     .slots
-                    .into_iter()
-                    .filter_map(|s| s.node_index.map(|n| (n, s.id)))
+                    .iter()
+                    .filter_map(|s| s.node_index.map(|n| (n, HeatSeat::from_raw(s))))
                     .collect();
-                (h.id, node_to_slot)
+                (h.id, node_to_seat)
             })
             .collect();
     }
@@ -2685,8 +2748,8 @@ mod tests {
     #[test]
     fn heat_data_records_per_node_slot_ids_for_seating() {
         // Seating a heat's bound pilots needs each node's slot id (the `HeatNode` PK `alter_heat`
-        // targets). The adapter records heat id → (node_index → slot_id) from `heat_data` for the
-        // transport to drain when it seats.
+        // targets). The adapter records heat id → (node_index → HeatSeat) from `heat_data` for the
+        // transport to drain when it seats — and to read the seating back afterwards (#423).
         let mut adapter = RotorHazardAdapter::new();
         adapter.translate(Raw::HeatData(RawHeatData {
             heats: vec![RawHeat {
@@ -2695,27 +2758,89 @@ mod tests {
                     RawHeatSlot {
                         id: 21,
                         node_index: Some(0),
+                        pilot_id: Some(4),
                     },
                     RawHeatSlot {
                         id: 22,
                         node_index: Some(1),
+                        pilot_id: Some(4),
                     },
                     // An unprogrammed slot (no node) is ignored.
                     RawHeatSlot {
                         id: 23,
                         node_index: None,
+                        pilot_id: None,
                     },
                 ],
             }],
         }));
         let slots = adapter.take_heat_slots();
         let heat = slots.get(&7).expect("heat 7 slots recorded");
-        assert_eq!(heat.get(&0), Some(&21), "node-0 maps to slot 21");
-        assert_eq!(heat.get(&1), Some(&22), "node-1 maps to slot 22");
+        assert_eq!(
+            heat.get(&0).map(|s| s.slot_id),
+            Some(21),
+            "node-0 → slot 21"
+        );
+        assert_eq!(
+            heat.get(&1).map(|s| s.slot_id),
+            Some(22),
+            "node-1 → slot 22"
+        );
         assert_eq!(heat.len(), 2, "the unprogrammed (no-node) slot is dropped");
         assert!(
             adapter.take_heat_slots().is_empty(),
             "draining clears the heat slots"
+        );
+    }
+
+    /// RotorHazard's "no pilot seated" sentinel is **`0` on v4.3.0 and `null` on v4.4.0**
+    /// (`RHUtils.PILOT_ID_NONE`), and the seating readback (#423) is only honest if it reads both as
+    /// empty. Testing one version's sentinel alone is how this becomes "every 4.4.0 seat looks
+    /// seated" — the accepted-but-dead write in its most expensive form (a whole run of laps).
+    #[test]
+    fn heat_slot_pilot_reads_both_rotorhazard_empty_sentinels_as_unseated() {
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::HeatData(RawHeatData {
+            heats: vec![RawHeat {
+                id: 3,
+                slots: vec![
+                    // v4.3.0's empty slot.
+                    RawHeatSlot {
+                        id: 10,
+                        node_index: Some(0),
+                        pilot_id: Some(0),
+                    },
+                    // v4.4.0's empty slot.
+                    RawHeatSlot {
+                        id: 11,
+                        node_index: Some(1),
+                        pilot_id: None,
+                    },
+                    // A genuinely seated slot, on either version.
+                    RawHeatSlot {
+                        id: 12,
+                        node_index: Some(2),
+                        pilot_id: Some(9),
+                    },
+                ],
+            }],
+        }));
+        let slots = adapter.take_heat_slots();
+        let heat = slots.get(&3).expect("heat 3 slots recorded");
+        assert_eq!(
+            heat.get(&0).and_then(|s| s.pilot_id),
+            None,
+            "v4.3.0's `pilot_id: 0` is an EMPTY slot, not pilot number zero"
+        );
+        assert_eq!(
+            heat.get(&1).and_then(|s| s.pilot_id),
+            None,
+            "v4.4.0's `pilot_id: null` is an empty slot"
+        );
+        assert_eq!(
+            heat.get(&2).and_then(|s| s.pilot_id),
+            Some(9),
+            "a real pilot id survives on both versions"
         );
     }
 

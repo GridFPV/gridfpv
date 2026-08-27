@@ -72,7 +72,13 @@ PROTOCOL_VERSION = 1
 PLUGIN_VERSION = "0.4.0"
 
 # Capabilities this build implements — the Director keys transport decisions off these.
-# Native start/stop control ("clean_control") lands in a later step.
+#
+# "clean_control" is deliberately NOT here, and #423's audit narrowed what it should ever mean.
+# Native start/stop is not worth a capability: RH's `on_stage_race`/`on_stop_race`/`on_save_laps`
+# ARE `race.stage()`/`race.stop()`/`race.save()`, identical on 4.3.0 and 4.4.0, so going through
+# the plugin adds a hop and a version gate to reach the same call. Native *seating* is worth it —
+# `db.heat_add()`/`db.pilot_add()` return the row, retiring the Director's "learn the new id from
+# a broadcast" heuristic — and that is what a future capability here should cover. See README.md.
 #
 # BASE_CAPABILITIES are unconditional. PASS_CAPABILITY ("live_pass" — the plugin emits per-node
 # passes natively from RACE_LAP_RECORDED, so the Director takes the pass atom directly rather

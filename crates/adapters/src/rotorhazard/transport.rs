@@ -38,7 +38,7 @@ use rust_socketio::{ClientBuilder, Payload, RawClient};
 use serde_json::{Value, json};
 
 use super::{
-    Raw, RawCurrentLaps, RawEnterExitLevels, RawGridPass, RawGridSignal, RawHeatData,
+    HeatSeat, Raw, RawCurrentLaps, RawEnterExitLevels, RawGridPass, RawGridSignal, RawHeatData,
     RawMarshalData, RawNodeData, RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList,
     RawRaceStatus, RotorHazardAdapter, reported_nodes_from_frequency_data,
     reported_nodes_from_levels,
@@ -287,6 +287,39 @@ pub const CAPTURE_WINDOW_MILLIS: u32 = 3_000;
 /// `KeyError` and a success. See [`RotorHazardConnection::capture_enter_at_level`].
 fn capture_payload(node: u64) -> serde_json::Value {
     json!({ "node_index": node })
+}
+
+/// Whether RotorHazard's own `heat_data` really seats `pilot_id` on `node_index` (#423).
+///
+/// A seat "holds" only when the slot at that node exists **and** carries exactly the pilot the
+/// preceding `alter_heat` asked for. A missing slot, an empty slot, or a *different* pilot are all
+/// failures — the last one matters because a concurrent edit on RotorHazard's own screen can seat
+/// somebody else there, and "some pilot is present" would happily call that a success.
+///
+/// Empty is `Some(0)` from a v4.3.0 timer and `None` from a v4.4.0 one; [`HeatSeat`] has already
+/// collapsed both to `None`, which is the whole reason this compares against `Some(pilot_id)` rather
+/// than testing a sentinel here.
+fn seat_holds(
+    seated: &std::collections::HashMap<usize, HeatSeat>,
+    node_index: usize,
+    pilot_id: i64,
+) -> bool {
+    seated.get(&node_index).and_then(|s| s.pilot_id) == Some(pilot_id)
+}
+
+/// Whether **every** intended `(node_index, pilot_id, callsign)` seat holds — see [`seat_holds`].
+///
+/// All-or-nothing on purpose. A partially seated heat is not a partial success: RotorHazard's pass
+/// gate dismisses every crossing on the unseated nodes, so those pilots lose their entire run while
+/// the rest race normally — a far worse outcome than practice mode, which keeps every lap and costs
+/// only the dense RSSI trace.
+fn seating_holds(
+    seated: &std::collections::HashMap<usize, HeatSeat>,
+    intended: &[(usize, i64, &str)],
+) -> bool {
+    intended
+        .iter()
+        .all(|(node_index, pilot_id, _)| seat_holds(seated, *node_index, *pilot_id))
 }
 
 /// Read a RotorHazard crossing flag that may be wired as a bool **or** as a 0/1 number.
@@ -1266,11 +1299,15 @@ impl RotorHazardConnection {
                         }
                     }
                     if request_marshal {
-                        // Heat just ended: pull the dense history. Two RotorHazard builds expose it
-                        // differently, so drive both — whichever the server implements answers:
-                        //  • newer RH: the aggregate `current_race_marshal` -> `current_marshal_data`;
-                        //  • older RH: per-pilotrace — `save_laps` (persist the run), then request the
-                        //    saved-race tree (`race_list`) whose ids drive `get_pilotrace` below.
+                        // Heat just ended: pull the dense history. The two supported RotorHazard
+                        // versions expose it differently, so drive both — see
+                        // [`request_marshal_data`], which names exactly which is which. In short:
+                        //  • **v4.4.0 only**: the aggregate `current_race_marshal` ->
+                        //    `current_marshal_data`. There is no such handler on v4.3.0 — the emit
+                        //    is silently discarded there, which is why the second path is not a
+                        //    fallback but the *only* route at the D16 floor.
+                        //  • **both**: per-pilotrace — `save_laps` (persist the run), then request
+                        //    the saved-race tree (`race_list`) whose ids drive `get_pilotrace` below.
                         // All best-effort: a failed emit on a dropped link just leaves the coarse
                         // streamed trace, which the driver's reconnect path tolerates.
                         let _ = client.emit("current_race_marshal", Payload::Text(vec![]));
@@ -1749,7 +1786,13 @@ impl RotorHazardConnection {
     ///      "Racing heat … pilots: …" log are right,
     ///   3. assigns it to the heat's slot at that node (`alter_heat { heat, slot_id, pilot }`).
     ///
-    /// Then it selects the heat as current (`set_current_heat`) so the seats take effect for the race.
+    /// Then it **reads the seating back** (`load_data { heat_data }`, checking each slot's
+    /// `pilot_id` — see [`confirm_seating`](Self::confirm_seating)) and only then selects the heat as
+    /// current (`set_current_heat`) so the seats take effect for the race. The readback is not
+    /// ceremony: none of the writes above echoes to the socket that made them (`alter_heat` answers
+    /// `noself`, and RH swallows a handler exception into its log), and racing a heat whose seats did
+    /// not take costs the affected pilots **every lap** — the loudest version of the accepted-but-dead
+    /// write this whole audit exists to find (#423).
     ///
     /// The heat is **freshly added** here (`add_heat`) and this is the heat the finish-time dense save
     /// then reuses (it is already current + savable), so seating doubles as the savable-heat selection
@@ -1776,19 +1819,27 @@ impl RotorHazardConnection {
         };
 
         // Learn the current highest pilot id BEFORE creating any, so each `add_pilot` can be
-        // identified as "the new id strictly greater than the floor" rather than the bare max — RH
-        // also broadcasts `pilot_data` on an `alter_pilot` rename, so a stale broadcast carrying an
-        // *existing* (lower-or-equal) id must not be mistaken for the just-added pilot.
+        // identified as "the new id strictly greater than the floor" rather than the bare max —
+        // `on_add_pilot` broadcasts `pilot_data` to every socket (this one included), so the burst
+        // in flight while we seat carries the *whole* pilot list, and a frame listing only existing
+        // (lower-or-equal) ids must not be mistaken for the pilot we just added. (An `alter_pilot`
+        // rename answers `emit_pilot_data(noself=True)` and so never reaches this socket at all —
+        // the floor still holds, and it is `add_pilot`'s own broadcast that makes it necessary.)
         self.client
             .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
         // The current highest pilot id (0 if RH has no pilots yet); the next created pilot exceeds it.
         let mut pilot_floor = self.wait_for_pilot_above(i64::MIN).unwrap_or(0);
 
-        let mut seated_any = false;
+        // What we *intended* to seat: `(node_index, pilot_id, callsign)` for every seat whose write
+        // chain got as far as an `alter_heat`. This is the list the readback below has to find
+        // reflected in RotorHazard's own `heat_data` before the heat may be selected.
+        let mut intended: Vec<(usize, i64, &str)> = Vec::new();
         for (node_index, callsign) in seats {
-            let Some(&slot_id) = node_to_slot.get(&(*node_index as usize)) else {
+            let node_index = *node_index as usize;
+            let Some(seat) = node_to_slot.get(&node_index) else {
                 // The freshly-added heat has no slot for this node index (more bound nodes than RH
-                // nodes) — skip it; RH won't record there, which is the correct degradation.
+                // nodes) — skip it; RH won't record there, which is the correct degradation. It is
+                // deliberately NOT in `intended`: there is no receiver at that seat to lose laps on.
                 continue;
             };
             // Create a pilot and learn its id (the new id strictly above the running floor).
@@ -1808,9 +1859,9 @@ impl RotorHazardConnection {
             // Seat the pilot on the heat's node slot.
             self.client.emit(
                 "alter_heat",
-                json!({ "heat": heat_id, "slot_id": slot_id, "pilot": pilot_id }),
+                json!({ "heat": heat_id, "slot_id": seat.slot_id, "pilot": pilot_id }),
             )?;
-            seated_any = true;
+            intended.push((node_index, pilot_id, callsign.as_str()));
         }
 
         // Only make the heat current (and claim it as savable + seated) if at least one bound pilot
@@ -1819,7 +1870,27 @@ impl RotorHazardConnection {
         // ("Pilot not defined") → zero laps, strictly worse than NOT selecting it. Returning `None`
         // leaves the connection in practice mode (no current heat), where RH still records via its
         // `current_heat is HEAT_ID_NONE` gate branch, and the finish path adds its own savable heat.
-        if !seated_any {
+        if intended.is_empty() {
+            return Ok(None);
+        }
+        // **Confirm the seating landed before selecting the heat** (#423). Everything above is
+        // fire-and-forget: `on_alter_heat` answers with `emit_heat_data(noself=True)`, which
+        // excludes the socket that made the write, and `@catchLogExcWithDBWrapper` swallows any
+        // failure into RotorHazard's log — so an accepted `alter_heat` proves only that the bytes
+        // left. Selecting a heat whose seats did not take is the worst outcome this file can
+        // produce: RH's pass gate then dismisses **every** crossing on the unseated node
+        // (`RHRace.py`: `pilot_id is not None and pilot_id != PILOT_ID_NONE`), so a competitor's
+        // whole race is silently absent — while GridFPV reported a seated heat. Practice mode loses
+        // only the dense per-tick RSSI trace, so it is strictly the safer degradation.
+        //
+        // Note this confirms the pilots are on **this** heat, which matters beyond "did the write
+        // fail". `RHData.alter_heat` resolves the slot as a bare `HeatNode.query.get(slot_id)` — a
+        // primary-key lookup NOT scoped to the heat — so a slot id belonging to some *other* heat
+        // seats the pilot there, successfully, while the heat selected below stays empty. The slot
+        // ids above come from "the freshest heat in whatever `heat_data` arrived", and RH dispatches
+        // each socket event on its own greenlet, so a pre-`add_heat` snapshot is a legal answer.
+        // Checking the heat by id is what makes that unreachable rather than unlikely.
+        if !self.confirm_seating(heat_id, &intended) {
             return Ok(None);
         }
         // Make the seated heat current so the seats take effect (and so it is the savable heat the
@@ -1829,24 +1900,133 @@ impl RotorHazardConnection {
         Ok(Some(heat_id as u64))
     }
 
-    /// Wait (bounded) for a `heat_data` response after [`seat_heat`]'s `add_heat`, returning the
-    /// **freshest** heat (highest id) and its `node_index → slot_id` map — but only once that map is
-    /// **non-empty** (RH may broadcast a `heat_data` for a freshly-added heat before its `HeatNode`
-    /// rows carry a `node_index`; accepting an empty map would seat nobody yet still mark the heat
-    /// savable). `None` on timeout.
-    fn wait_for_heat_slots(&self) -> Option<(i64, std::collections::HashMap<usize, i64>)> {
+    /// Read the seating of `heat_id` back off RotorHazard and check every `intended`
+    /// `(node_index, pilot_id, callsign)` is really there (#423); `true` when all of them are.
+    ///
+    /// The readback is `load_data { heat_data }`, which RH answers **`nobroadcast`** — addressed to
+    /// this socket, so unlike the `noself` broadcast `alter_heat` triggers it actually reaches the
+    /// writer. `RHUI.emit_heat_data` serialises each slot's `pilot_id`, which is the one value that
+    /// says whether the write took.
+    ///
+    /// A mismatch is announced through the [`crate::diag`] sink naming the **callsigns** that did
+    /// not seat, because "node 2 is empty" is not what the RD needs to hear at Stage.
+    ///
+    /// ## Why it asks repeatedly rather than once
+    ///
+    /// RotorHazard builds its `SocketIO` without `async_handlers=False` (`server.py`, both
+    /// versions), so Flask-SocketIO's default applies and **every event is dispatched on its own
+    /// greenlet**. The `load_data` behind this readback can therefore be served *before* the
+    /// `alter_heat` ahead of it has committed — a single ask would then read a pre-write snapshot
+    /// and drop a perfectly good heat into practice mode. So this re-asks until the seating is
+    /// confirmed or [`SEAT_RESPONSE_TIMEOUT`] elapses, and only reports failure on the last
+    /// observation. Re-asking is free: `load_data` is a pure read, addressed to this socket.
+    fn confirm_seating(&self, heat_id: i64, intended: &[(usize, i64, &str)]) -> bool {
+        /// How often to re-ask while waiting for the seating to appear.
+        const RETRY_INTERVAL: Duration = Duration::from_millis(300);
+
         let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
+        // The last `heat_data` seen for this heat, so the failure line can say what RH actually
+        // reported rather than only that it timed out.
+        let mut last: Option<std::collections::HashMap<usize, HeatSeat>> = None;
+        loop {
+            self.adapter.lock().unwrap().take_heat_slots();
+            if self
+                .client
+                .emit("load_data", json!({ "load_types": ["heat_data"] }))
+                .is_err()
+            {
+                return false;
+            }
+            if let Some(seated) = self.wait_for_heat(heat_id, RETRY_INTERVAL) {
+                if seating_holds(&seated, intended) {
+                    return true;
+                }
+                last = Some(seated);
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                break;
+            }
+        }
+        let Some(seated) = last else {
+            crate::diag!(
+                "gridfpv: rotorhazard: could not confirm the heat's seating — RotorHazard did not \
+                 answer load_data(heat_data) for heat {heat_id} within {}s. Racing this heat \
+                 unseated would make RotorHazard dismiss every crossing (\"Pilot not defined\"), so \
+                 GridFPV is racing it in practice mode instead: laps are still recorded and \
+                 GridFPV attributes them itself, but RotorHazard's own dense per-tick RSSI trace \
+                 for this run is not saved",
+                SEAT_RESPONSE_TIMEOUT.as_secs(),
+            );
+            return false;
+        };
+        let unseated: Vec<&str> = intended
+            .iter()
+            .filter(|(node_index, pilot_id, _)| !seat_holds(&seated, *node_index, *pilot_id))
+            .map(|(_, _, callsign)| *callsign)
+            .collect();
+        crate::diag!(
+            "gridfpv: rotorhazard: RotorHazard did not seat {} on heat {heat_id} — after {}s its \
+             own heat_data still reports {} of {} seat(s) unseated. Racing the heat anyway would \
+             make RotorHazard's pass gate dismiss every crossing on those nodes (\"Pilot not \
+             defined\") and lose those pilots' whole run, so GridFPV is racing in practice mode \
+             instead: every lap is still captured and GridFPV attributes it, but RotorHazard's \
+             dense per-tick RSSI trace for this run is not saved",
+            unseated.join(", "),
+            SEAT_RESPONSE_TIMEOUT.as_secs(),
+            unseated.len(),
+            intended.len(),
+        );
+        false
+    }
+
+    /// Wait (bounded) for a `heat_data` response after [`seat_heat`]'s `add_heat`, returning the
+    /// **freshest** heat (highest id) and its `node_index → `[`HeatSeat`] map — but only once that
+    /// map is **non-empty** (RH may broadcast a `heat_data` for a freshly-added heat before its
+    /// `HeatNode` rows carry a `node_index`; accepting an empty map would seat nobody yet still mark
+    /// the heat savable). `None` on timeout.
+    fn wait_for_heat_slots(&self) -> Option<(i64, std::collections::HashMap<usize, HeatSeat>)> {
+        self.wait_for_matching_heat(SEAT_RESPONSE_TIMEOUT, |slots| {
+            // Pick the freshest heat (highest id) that actually carries node→slot mappings.
+            slots
+                .iter()
+                .filter(|(_, m)| !m.is_empty())
+                .max_by_key(|(id, _)| **id)
+                .map(|(&heat_id, seats)| (heat_id, seats.clone()))
+        })
+    }
+
+    /// Wait up to `budget` for a `heat_data` response carrying **this** heat, returning its
+    /// `node_index → `[`HeatSeat`] map. `None` if none arrived in time. The seating readback
+    /// ([`confirm_seating`](Self::confirm_seating)) uses it: unlike
+    /// [`wait_for_heat_slots`](Self::wait_for_heat_slots) it must not settle for "the freshest heat"
+    /// — a `heat_data` for some *other* heat would confirm nothing — and it takes a short budget
+    /// because the caller re-asks rather than waiting out the whole seating timeout on one answer.
+    fn wait_for_heat(
+        &self,
+        heat_id: i64,
+        budget: Duration,
+    ) -> Option<std::collections::HashMap<usize, HeatSeat>> {
+        self.wait_for_matching_heat(budget, |slots| slots.get(&heat_id).cloned())
+    }
+
+    /// The shared bounded wait behind [`wait_for_heat_slots`](Self::wait_for_heat_slots) and
+    /// [`wait_for_heat`](Self::wait_for_heat): drain each `heat_data` the adapter has folded and
+    /// hand it to `pick`, returning the first non-`None` answer. `None` once `budget` elapses or
+    /// the socket drops.
+    fn wait_for_matching_heat<T>(
+        &self,
+        budget: Duration,
+        pick: impl Fn(
+            &std::collections::HashMap<i64, std::collections::HashMap<usize, HeatSeat>>,
+        ) -> Option<T>,
+    ) -> Option<T> {
+        let deadline = Instant::now() + budget;
         loop {
             {
                 let mut a = self.adapter.lock().unwrap();
                 let slots = a.take_heat_slots();
-                // Pick the freshest heat (highest id) that actually carries node→slot mappings.
-                if let Some((&heat_id, node_to_slot)) = slots
-                    .iter()
-                    .filter(|(_, m)| !m.is_empty())
-                    .max_by_key(|(id, _)| **id)
-                {
-                    return Some((heat_id, node_to_slot.clone()));
+                if let Some(found) = pick(&slots) {
+                    return Some(found);
                 }
             }
             if Instant::now() >= deadline || !self.is_alive() {
@@ -2056,6 +2236,12 @@ impl RotorHazardConnection {
                 "staging_delay_tones": 0,
                 "start_delay_min_ms": 0,
                 "start_delay_max_ms": 0,
+                // `1` = NO time limit. Verified rather than assumed (#423): `RHData.alter_raceFormat`
+                // stores `1 if data['unlimited_time'] else 0`, and `RHRace` branches on
+                // `unlimited_time == 0` for "count down" — the same on v4.3.0 and v4.4.0. The
+                // often-repeated "this field means the opposite of its name" is about the *column*
+                // it maps to (`DB.Column('race_mode', …)`, with a deprecated `race_mode` property
+                // beside it), not about this key, which lands the way it reads.
                 "unlimited_time": 1,
             }),
         )?;
@@ -2511,9 +2697,10 @@ impl RotorHazardConnection {
     /// per-tick RSSI history (the marshaling Slice 1 / path-2 precondition).
     ///
     /// RotorHazard only writes a run's `history_values`/`history_times` (the dense trace its marshal
-    /// page reviews, pulled via `current_marshal_data` / `get_pilotrace`) when a heat is current —
-    /// `on_save_laps` and `emit_race_marshal_data` both no-op while `current_heat == HEAT_ID_NONE`,
-    /// the default in practice mode. The production staging path drives RH through
+    /// page reviews, pulled via `get_pilotrace` on both versions, or `current_marshal_data` on
+    /// v4.4.0) when a heat is current — `RHRace.save` *discards* rather than saves while
+    /// `current_heat == HEAT_ID_NONE` (the default in practice mode), and v4.4.0's
+    /// `emit_race_marshal_data` returns early on the same condition. The production staging path drives RH through
     /// `stop_race`/`discard_laps`/`stage_race` but never selects a heat, so without this the dense
     /// pull always comes back empty and only the coarse streamed [`SignalChunk`]s survive.
     ///
@@ -2542,16 +2729,38 @@ impl RotorHazardConnection {
             .emit("set_current_heat", json!({ "heat": heat }))
     }
 
-    /// Request RotorHazard's dense **post-race marshal data** (`current_race_marshal`) — the
-    /// request-driven `current_marshal_data` with each node's `history_values`/`history_times`.
+    /// Request RotorHazard's dense **post-race marshal data** — each node's
+    /// `history_values`/`history_times`, by whichever of the two routes this timer implements.
     ///
     /// In normal operation the adapter auto-requests this on the heat-end (`DONE`) transition (see
     /// the `race_status` handler); this explicit helper lets a test pull it on demand after staging a
-    /// race down, so the dense-history capture can be asserted deterministically. RotorHazard only
-    /// answers while the race is `DONE` (`emit_race_marshal_data` returns early otherwise).
+    /// race down, so the dense-history capture can be asserted deterministically.
+    ///
+    /// ## `current_race_marshal` **does not exist on v4.3.0** (#423)
+    ///
+    /// The aggregate route — `current_race_marshal` → `current_marshal_data` — is a **v4.4.0-only**
+    /// handler. Verified by absence: `current_race_marshal` appears nowhere in the v4.3.0 tree, and
+    /// `RHUI.emit_race_marshal_data` (the function that builds the payload) was *added* in v4.4.0.
+    /// Socket.IO discards an emit no handler is registered for, so on v4.3.0 — the D16 floor and
+    /// what the RD's field timer runs — this emit returns `Ok`, produces no reply, and no error
+    /// anywhere. Another accepted-but-dead write, found by reading the source rather than the name.
+    ///
+    /// So this drives **both** routes, exactly as the heat-end path does, and the per-pilotrace one
+    /// is what actually answers at the floor:
+    ///
+    /// * `current_race_marshal` — v4.4.0 only. Answers only while the race is `DONE` **and** a heat
+    ///   is current (`emit_race_marshal_data` returns early on either).
+    /// * `save_laps` then `load_data { race_list }` — **both versions**. Persists the run, then asks
+    ///   for the saved-race tree whose `pilotrace_id`s the adapter turns into `get_pilotrace` pulls
+    ///   (`race_details`, identical on both versions bar two extra keys GridFPV ignores). This also
+    ///   needs a current heat: `RHRace.save` discards rather than saves while
+    ///   `current_heat == HEAT_ID_NONE`.
     pub fn request_marshal_data(&self) -> Result<(), rust_socketio::Error> {
         self.client
-            .emit("current_race_marshal", Payload::Text(vec![]))
+            .emit("current_race_marshal", Payload::Text(vec![]))?;
+        self.client.emit("save_laps", Payload::Text(vec![]))?;
+        self.client
+            .emit("load_data", json!({ "load_types": ["race_list"] }))
     }
 
     /// Discard the current race's laps, returning RotorHazard to a READY state —
@@ -2625,6 +2834,62 @@ mod tests {
 
     fn text(value: serde_json::Value) -> Payload {
         Payload::Text(vec![value])
+    }
+
+    /// Build a `node_index → HeatSeat` map from `(node, slot, pilot)` triples, where a `pilot` of
+    /// `None` is an empty slot (as [`HeatSeat`] already normalises both RH sentinels).
+    fn seats(rows: &[(usize, i64, Option<i64>)]) -> std::collections::HashMap<usize, HeatSeat> {
+        rows.iter()
+            .map(|&(node, slot_id, pilot_id)| (node, HeatSeat { slot_id, pilot_id }))
+            .collect()
+    }
+
+    /// The seating readback (#423) is the only thing standing between a silently-failed
+    /// `alter_heat` and a heat that loses every crossing on the unseated node. Each way it can be
+    /// wrong is a way a pilot's whole run disappears, so pin all of them.
+    #[test]
+    fn seating_holds_only_when_every_intended_seat_carries_its_own_pilot() {
+        let intended = [(0usize, 11i64, "ALPHA"), (1usize, 12i64, "BRAVO")];
+
+        assert!(
+            seating_holds(&seats(&[(0, 100, Some(11)), (1, 101, Some(12))]), &intended),
+            "both seats carry the pilot they were written with"
+        );
+        assert!(
+            !seating_holds(&seats(&[(0, 100, Some(11)), (1, 101, None)]), &intended),
+            "an EMPTY slot is the failure this exists to catch — RH would dismiss every crossing \
+             on node 1 (\"Pilot not defined\") and lose BRAVO's whole run"
+        );
+        assert!(
+            !seating_holds(&seats(&[(0, 100, Some(11)), (1, 101, Some(99))]), &intended),
+            "a DIFFERENT pilot is not a success either: a concurrent edit on RotorHazard's own \
+             screen would otherwise pass as seated, and BRAVO's laps would land on someone else"
+        );
+        assert!(
+            !seating_holds(&seats(&[(0, 100, Some(11))]), &intended),
+            "a slot that is not in the readback at all is unconfirmed, not assumed"
+        );
+        assert!(
+            seating_holds(&seats(&[]), &[]),
+            "nothing intended is vacuously confirmed (the caller returns early before this)"
+        );
+    }
+
+    /// v4.3.0 spells "no pilot" as `0` and v4.4.0 as `null` (`RHUtils.PILOT_ID_NONE`). Both must
+    /// read as unseated here, and — the trap worth naming — pilot id `0` must never be something a
+    /// seat can legitimately hold, or the 4.3.0 empty slot would confirm itself.
+    #[test]
+    fn a_zero_pilot_id_is_an_empty_seat_not_a_seated_one() {
+        let seated = seats(&[(0, 100, None)]);
+        assert!(
+            !seat_holds(&seated, 0, 0),
+            "RotorHazard v4.3.0 writes an empty slot as pilot_id 0; treating that as \"pilot 0 is \
+             seated\" would confirm exactly the failure the readback exists to detect"
+        );
+        assert!(
+            !seat_holds(&seated, 0, 11),
+            "an empty slot does not confirm a real pilot either"
+        );
     }
 
     /// A stock RotorHazard 4.3.0 heartbeat, as it arrives at idle with no race running.
@@ -2962,8 +3227,10 @@ mod tests {
     /// is a *server config* item in a different store, and it is the second one that decides
     /// whether an under-minimum crossing is merely logged or destroyed. 4.4.0's extra
     /// `min_first_crossing` key must not break the parse — a struct deserialize would have been
-    /// fine here, but only by luck, and `unlimited_time`/`race_mode` is the standing example of a
-    /// name that did not carry across versions.
+    /// fine here, but only by luck. The standing example of a name that does not carry is
+    /// `PILOT_ID_NONE`, which is `0` on v4.3.0 and `None` on v4.4.0 (#423); `unlimited_time` is
+    /// often cited for this too, but that one is a *column* rename (`race_mode`) under a field
+    /// whose own meaning is stable across both versions.
     #[test]
     fn the_min_lap_readback_carries_both_values_on_both_versions() {
         assert_eq!(

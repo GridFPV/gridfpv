@@ -112,7 +112,27 @@ S3 added the `"live_pass"` capability: the plugin emits each pass natively from
 `RACE_LAP_RECORDED`, attributed by node seat (the Director folds it like a `current_laps`
 lap, deduped on `lap_number`).
 
-S3b added `"owned_format"` (#403/#404/#405) — see above. The remaining "clean_control" half —
-native `race.stage()`/`stop()` replacing the seating socket workarounds — is planned next; the
-Director keeps its legacy in-place neutralisation as a loud fallback for plugin builds older
-than `owned_format`.
+S3b added `"owned_format"` (#403/#404/#405) — see above. The Director keeps its legacy in-place
+neutralisation as a loud fallback for plugin builds older than `owned_format`.
+
+### What is actually left of "clean_control" (#423)
+
+The audit against RotorHazard's source split the remaining half in two, and only one half is
+worth building:
+
+- **Start/stop: don't.** `on_stage_race` and `on_stop_race` *are* `race.stage()` and
+  `race.stop()` — the same calls RHAPI would make, identical on 4.3.0 and 4.4.0. Routing them
+  Director → plugin → RHAPI adds a hop and a capability gate to reach the same line of Python.
+  Same for `save_laps` (`race.save()`), `discard_laps` (`race.clear()`), `set_current_heat`
+  (`race.heat =`) and `set_race_format` — the last of which RHAPI **monkey-patches to the socket
+  handler itself** (`RHAPI.race._raceformat_set = on_set_race_format`). "Newer" is not "better".
+- **Seating: yes.** `db.heat_add()` and `db.pilot_add()` **return the row they create**. The
+  socket dance cannot: it emits, waits up to 3 s for a broadcast, and infers the new id as "the
+  highest" / "the one above the floor" — a heuristic that is wrong the moment anything else
+  touches RH's heats or pilots concurrently. That is the real win, and it needs a socket fallback
+  for the v0.3.0 field plugin.
+
+Until then, the socket seating dance is kept honest by the readback added in #423: the Director
+re-reads `heat_data` and checks each slot's `pilot_id` before racing the heat, because
+`alter_heat` answers `emit_heat_data(noself=True)` — excluding the very socket that wrote — and a
+seat that silently failed makes RH dismiss **every** crossing on that node.

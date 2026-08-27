@@ -443,10 +443,21 @@ fn heat_past_rh_lap_limit_still_delivers_every_crossing() {
     // Seat a pilot on node 0 and make that heat current, exactly as the Director does at Stage.
     // Selecting a heat can switch RotorHazard's effective race format, so this is where a
     // selection that only *looked* durable would come undone.
+    //
+    // Since #423 this assertion has teeth on both versions: `seat_heat` no longer returns a heat id
+    // because its emits were *accepted*, but because it re-read `heat_data` and found this pilot on
+    // node 0's slot. RotorHazard answers `alter_heat` with `emit_heat_data(noself=True)` — excluding
+    // the socket that wrote — so before the readback a seating that silently failed still reported a
+    // seated heat, and RH's pass gate then dismissed every crossing on the unseated node. A `None`
+    // here now means the timer really did not seat it.
     let seated = conn
         .seat_heat(&[(0, "LAPCAP".to_string())])
         .expect("seat node 0");
-    assert!(seated.is_some(), "seating did not produce a heat to race");
+    assert!(
+        seated.is_some(),
+        "seating did not produce a heat to race — RotorHazard's own heat_data did not confirm \
+         LAPCAP on node 0 after the alter_heat write"
+    );
     let _ = conn.events();
 
     // The driver re-prepares immediately before staging, for exactly the reason above.
