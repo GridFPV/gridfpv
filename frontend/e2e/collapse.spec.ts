@@ -74,7 +74,10 @@ test('RD collapses a class placement section and a round; both persist across a 
         classes: [classId],
         format: 'timed_qual',
         params: {},
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }

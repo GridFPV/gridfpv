@@ -4,12 +4,18 @@
  * A real click-through against a **real** Director (open / no token): enter the Practice event,
  * open **Rounds & Heats**, add a round with the **open_practice** format, pick a couple of the
  * primary timer's **active channels** (the picker that swaps in for the class/seeding inputs),
- * screenshot the picker, save, **Fill** the round to mint the open practice heat, jump to **Live
- * control**, and assert the **per-channel practice board** renders one row per active channel
- * (labelled band + channel · MHz). Then exercise the **New run** reset and clean up the round.
+ * screenshot the picker, save (the round's one heat is auto-created), jump to **Race control**, and
+ * assert the **per-channel practice board** renders one row per active channel — and that the
+ * board's old "New run" control is gone (#393) — then clean up the round.
  *
- * The Practice event's built-in Mock timer ships an 8-seat Raceband pool, so the picker / board
- * populate with no extra timer config. Screenshots land in `e2e/screenshots/` for the PR.
+ * Every seat is named through the shared resolver: **node + channel** where the channel is known
+ * (`Node 1 · Raceband R1`), the **node alone** where it is genuinely unknown (`Node 1`) — which is
+ * the case here, with no channel layout and nothing running. The raw `node-{i}` wire ref must never
+ * reach the screen (`CLAUDE.md`), so this spec asserts its *absence*; an earlier version asserted it
+ * was **visible**, pinning that leak as the expected behaviour.
+ *
+ * The Practice event's built-in Mock timer is 8 seats wide, so the picker / board populate with no
+ * extra timer config. Screenshots land in `e2e/screenshots/` for the PR.
  */
 import { expect, test } from './observability.js';
 import type { Page } from '@playwright/test';
@@ -39,7 +45,8 @@ async function openTab(page: Page, name: string) {
 }
 
 test('RD defines an open-practice round, picks active channels, and runs a per-channel board', async ({
-  page
+  page,
+  director
 }) => {
   const LABEL = `E2E-OpenPractice-${Date.now()}`;
   await page.goto('/');
@@ -67,9 +74,19 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await expect(form.getByLabel('Time limit minutes')).toBeVisible();
   await expect(form.getByLabel('Time limit hours')).toBeHidden();
 
-  // The primary timer's Raceband seats label by band + channel · MHz (node 0 → R1 · 5658).
-  const r1 = form.getByLabel('Channel Raceband R1 · 5658');
-  const r2 = form.getByLabel('Channel Raceband R2 · 5695');
+  // A seat is named **node + channel**, not channel alone (#416, `nodeSeatLabel`): the node number
+  // is what the RD reads off the hardware and the channel is what the pilot dials in, and neither
+  // alone identifies the seat. Node index 0 is the node the RD calls "Node 1".
+  //
+  // The `· <channel>` half is present only when the seat's channel is actually KNOWN — from the
+  // heat's own assignment, from what the node reports, or from a channel layout. It is not read off
+  // the timer's `available_channels` any more (#117 S3): that is a set of channels the timer may
+  // use, with no per-node meaning, so indexing it by node invented the answer. On this event —
+  // no layout, no running heat — every seat's channel is genuinely unknown, so the label is the
+  // node alone. Hence the prefix match: the assertion is about the seat's identity, and it must not
+  // break the day a layout gives these seats channels.
+  const r1 = form.getByLabel(/^Channel Node 1\b/);
+  const r2 = form.getByLabel(/^Channel Node 2\b/);
   await expect(r1).toBeVisible();
   await expect(r2).toBeVisible();
 
@@ -89,7 +106,9 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   // `open_practice` wire key is unchanged; only the friendly label was shortened to "Practice"
   // (#218 — see `lib/formats.ts` FORMAT_LABELS).
   await expect(row.getByText('Practice', { exact: true })).toBeVisible();
-  await expect(row.getByText(/Open practice · 2 channel/)).toBeVisible();
+  // Seeded from 2 **node seats**, and the summary says so: `ActiveNodes { nodes }` carries node
+  // indices, not frequencies (#117 S3 / the rename), so "2 nodes" is the honest count.
+  await expect(row.getByText(/Open practice · 2 node/)).toBeVisible();
   await expect(row.getByText('1m', { exact: true })).toBeVisible();
 
   // ── The heat is auto-created (no manual Fill) ───────────────────────────────────────────────
@@ -99,8 +118,15 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await expect(heatSection.getByRole('button', { name: 'Generate next heat' })).toHaveCount(0);
   await expect(heatSection.getByRole('button', { name: 'Generate heats' })).toHaveCount(0);
   await expect(heatSection.getByRole('button', { name: 'Add heat' })).toBeVisible();
-  // The auto-created heat lands (its node lineup shows in the heats list).
-  await expect(heatSection.getByText(/node-0/).first()).toBeVisible({ timeout: 15_000 });
+  // The auto-created heat lands, and its lineup names the seats — `Node 1`, not the raw `node-0`
+  // wire ref. This assertion used to be `getByText(/node-0/)` **visible**: it pinned the raw-ref
+  // leak `CLAUDE.md` forbids as the expected behaviour, so it is inverted rather than repaired. The
+  // resolver (`buildCompetitorNames`) turns an unbound `node-{i}` seat into its seat label; a raw
+  // ref reaching the screen is the bug.
+  await expect(heatSection.getByText('Node 1', { exact: false }).first()).toBeVisible({
+    timeout: 15_000
+  });
+  await expect(heatSection.getByText(/node-\d/)).toHaveCount(0);
   // It displays under the friendly name "Practice Heat", not its generated heat id
   // (`OPEN_PRACTICE_HEAT_NAME` in `lib/heats.ts`).
   await expect(heatSection.getByText('Practice Heat').first()).toBeVisible();
@@ -120,13 +146,15 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
     .find((e) => e.id === director.event)
     ?.rounds?.find((r) => r.label === LABEL)?.id;
   expect(roundId, 'the open-practice round exists').toBeTruthy();
-  const heats = (await (await page.request.get('/events/practice/heats')).json()) as Array<{
+  // Addressed through the fixture's `eventRoot`: there is no built-in `practice` event any more
+  // (#414) — the worker creates one and its id is generated.
+  const heats = (await (await page.request.get(`${director.eventRoot}/heats`)).json()) as Array<{
     heat: string;
     round?: string;
   }>;
   const opHeatId = heats.find((h) => h.round === roundId)?.heat;
   expect(opHeatId, 'the open-practice round has an auto-created heat').toBeTruthy();
-  const focused = await page.request.post('/events/practice/control', {
+  const focused = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { SetCurrentHeat: { heat: opHeatId } }
   });
@@ -136,24 +164,50 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   await openTab(page, 'Race control');
   const board = page.getByRole('list', { name: 'Per-channel practice board' });
   await expect(board).toBeVisible({ timeout: 15_000 });
-  // One row per active channel, labelled by its timer channel.
-  await expect(page.getByLabel('Channel Raceband R1 · 5658')).toBeVisible();
-  await expect(page.getByLabel('Channel Raceband R2 · 5695')).toBeVisible();
+  // One row per active channel, named node + channel through the same shared resolver.
+  await expect(page.getByLabel(/^Channel Node 1\b/)).toBeVisible();
+  await expect(page.getByLabel(/^Channel Node 2\b/)).toBeVisible();
+  // No raw seat ref anywhere on the board either.
+  await expect(page.getByText(/node-\d/)).toHaveCount(0);
   await page.screenshot({ path: `${SHOTS}open-practice-board.png`, fullPage: true });
 
-  // ── Reset: New run re-fills the round to clear the board (a fresh practice session) ─────────
-  const newRun = page.getByRole('button', { name: /New run/ });
-  await expect(newRun).toBeVisible();
-  await newRun.click();
-  // The board still renders its per-channel rows after the reset (a fresh, cleared run).
-  await expect(page.getByLabel('Channel Raceband R1 · 5658')).toBeVisible({ timeout: 15_000 });
+  // ── Going again: the board's own "New run" button is GONE (#393) ─────────────────────────────
+  // It re-filled the round, on the pre-#398 theory that a fresh heat was how you cleared the laps —
+  // but an open-practice round mints exactly ONE heat, ever, so once the run had ended that fill
+  // scheduled nothing and still acked ok: a control that reported success and did nothing. Going
+  // again is the transition row's **Run again** (the `Restart` command).
+  //
+  // This spec asserts the removal and stops there, deliberately. Driving a real practice run to
+  // reach `Restart` (only legal once the heat is committed) would leave the round holding a RACED
+  // heat, and `remove_round` correctly refuses to delete one of those — so the cleanup below could
+  // no longer run and the shared Director would keep the round. The behaviour itself is covered
+  // where it is cheap and deterministic: `LiveRaceControl.test.ts` ("carries no second new-run
+  // control", "Run again fires the Restart command", "never strands a practice heat at Final") and
+  // `transitions.test.ts`.
+  await expect(page.getByRole('button', { name: /New run/ })).toHaveCount(0);
 
-  // ── Clean up: remove the round so the shared Director's event goes back to empty ────────────
+  // ── Removing the round is REFUSED while its heat is on the timer (#418) ─────────────────────
+  // This used to be a cleanup step. It cannot be one any more, and that is the correct behaviour,
+  // not a regression: `remove_round` refuses while any of the round's heats is *in progress*, and
+  // "in progress" includes a heat that is still `Scheduled` but **loaded on the timer** — which is
+  // exactly what the `SetCurrentHeat` above made this one. Pulling a round's config out from under
+  // the heat the timer is holding is the thing that rule exists to prevent.
+  //
+  // So the step is inverted into coverage of the refusal itself: the round survives the click.
+  //
+  // The toast it raises is NOT asserted here, and that is deliberate. It currently reads
+  // "DELETE /events/{eventId}/rounds/{roundId} failed: HTTP 400" — it throws away the explanation
+  // the server wrote ("this round has a heat in progress (Practice Heat) — finalize or reset it
+  // before removing the round", which names the heat by its friendly name precisely so it can be
+  // shown) and puts two raw ids on screen instead, which `CLAUDE.md` forbids. Pinning that text
+  // would document the leak as expected, exactly the thing this backlog is not allowed to do. It is
+  // not repaired here either: every `!resp.ok` throw in `packages/protocol-client/src/client.ts`
+  // is built this way, so the fix is one shared "read the server's message" helper across ~40 call
+  // sites — its own change, reported rather than smuggled in.
   await openTab(page, 'Rounds & Heats');
   const cleanupRow = page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL });
   await cleanupRow.getByRole('button', { name: 'Remove' }).click();
-  await expect(page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL })).toHaveCount(
-    0,
-    { timeout: 15_000 }
-  );
+  // The refusal held: the round is still listed.
+  await expect(cleanupRow).toHaveCount(1);
+  await expect(cleanupRow).toBeVisible();
 });

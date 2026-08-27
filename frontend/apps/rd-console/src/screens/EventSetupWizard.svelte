@@ -7,14 +7,17 @@
    * those stages **reusing the SAME components and commands the pages use** — there is no separate
    * config bag. Everything it sets is persisted by the embedded stage component itself (via
    * `setEventClasses` / `setEventRoster` / `setClassMembership` / `setEventTimers` / `createRound`),
-   * so it all remains fully editable on the pages afterward. The wizard is optional and re-runnable.
+   * so it all remains fully editable on the pages afterward. The wizard is optional.
    *
-   * It is launched on **creating a new event** (the Events page offers "Set up event") and from a
-   * **"Setup wizard"** button in the event workspace header. Each step **embeds the actual stage
-   * component** inside a stepper frame (Back / Next / Skip + a progress indicator) — one source of
-   * truth per step. Steps are skippable (everything stays editable later); the final Review shows a
-   * gentle "ready to race?" summary read straight off the live event (classes ≥1, ≥1 member, a
-   * timer, ≥1 round).
+   * It is launched on **creating a new event** — the Events page offers "Set up event" — and only
+   * there. The workspace header's old "Setup wizard" relaunch button is gone along with the gear
+   * dialog (`App.svelte`): v1 keeps no manual settings surface, and re-running a first-pass over
+   * stages that are all directly editable was a second way to do the same thing.
+   *
+   * Each step **embeds the actual stage component** inside a stepper frame (Back / Next / Skip + a
+   * progress indicator) — one source of truth per step. Steps are skippable (everything stays
+   * editable later); the final Review shows a gentle "ready to race?" summary read straight off the
+   * live event (classes ≥1, ≥1 member, a timer, ≥1 round).
    *
    * Field-readable (large text, dark) and consistent with the stage screens it embeds.
    */

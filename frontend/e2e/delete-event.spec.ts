@@ -41,9 +41,19 @@ async function gotoPicker(page: import('@playwright/test').Page) {
   const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
-    await page.getByRole('button', { name: /Switch event/ }).click();
+    // Auto-entered the active event's workspace. The "← Switch event" button is gone
+    // (`ContextHeader.svelte`): the way back out is the breadcrumb's **Events** crumb.
+    await leaveToPicker(page);
   }
   await expect(picker).toBeVisible({ timeout: 15_000 });
+}
+
+/** Leave the event workspace for the picker — the breadcrumb's Events crumb. */
+async function leaveToPicker(page: import('@playwright/test').Page) {
+  await page
+    .getByRole('navigation', { name: 'Breadcrumb' })
+    .getByRole('button', { name: 'Events' })
+    .click();
 }
 
 test('create an event, then permanently delete it through the hard-confirm dialog', async ({
@@ -67,7 +77,7 @@ test('create an event, then permanently delete it through the hard-confirm dialo
 
   // The new event entered its workspace; return to the picker to see/delete it in the list.
   await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: /Switch event/ }).click();
+  await leaveToPicker(page);
   await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
     timeout: 15_000
   });

@@ -21,6 +21,19 @@
  */
 import { expect, test } from './observability.js';
 
+/**
+ * The Marshaling screen's audit surface: a **"Recent rulings"** strip holding the marshaled heat's
+ * latest few entries, newest first.
+ *
+ * It was a full "Audit trail" panel. #358 moved the complete, searchable, reverse-chronological
+ * history to the event-wide **Audit page** (the strip carries a "View full audit →" jump to it,
+ * pre-filtered to this heat) and left only the "what just changed here?" glance behind. These specs
+ * assert on the entry they *just* produced, so the strip is the right surface for them — but a spec
+ * that needs older history must go to the Audit page.
+ */
+const recentRulings = (page: import('@playwright/test').Page) =>
+  page.getByRole('complementary', { name: 'Recent rulings' });
+
 const PILOTS = ['Mar', 'Nor', 'Ortega'];
 // Unique per run so the shared worker Director (which accumulates events across specs) never
 // collides this heat with a leftover from another spec.
@@ -79,7 +92,8 @@ test('a marshaling DQ correction re-folds the heat result', async ({ page, direc
   await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID, { timeout: 15_000 });
 
-  // Stage → Start; the runtime auto-advances Armed → Running, then ForceEnd to Unofficial.
+  // Stage → Start; the runtime auto-advances Armed → Running, then the Stop button (the ForceEnd
+  // command — the button label, not the wire tag) to Unofficial.
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Staged');
   await page.getByRole('button', { name: 'Start', exact: true }).click();
@@ -98,7 +112,7 @@ test('a marshaling DQ correction re-folds the heat result', async ({ page, direc
       { timeout: 30_000, message: 'live laps should appear before ending the heat' }
     )
     .toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
   // ── Baseline: every pilot placed, none disqualified ───────────────────────────────────
@@ -197,18 +211,17 @@ test('the Marshaling screen corrects laps and the audit + standings update live'
       { timeout: 30_000, message: 'live laps should bank before marshaling' }
     )
     .toBeGreaterThan(1);
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
   // ── Open the Marshaling screen ───────────────────────────────────────────────────────
   await page.getByRole('button', { name: /Marshaling/ }).click();
   const marshaling = page.getByRole('region', { name: 'Marshaling' });
   await expect(marshaling).toBeVisible();
-  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+  const audit = recentRulings(page);
 
   // A lap shows up in the list once the snapshot loads.
   await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
-  const correctionTime = marshaling.getByLabel('Correction time');
 
   // Select the first lap and confirm it took (a re-fold from a prior correction can briefly clear
   // the selection, so select-then-confirm via aria-pressed is the robust pattern). Re-click if the
@@ -223,14 +236,18 @@ test('the Marshaling screen corrects laps and the audit + standings update live'
   };
 
   // ── Select a lap and EDIT its time — the audit gains a "Re-timed" entry ───────────────
+  // The separate "corrections box" is gone (#358): the editor is INLINE, rendered under the lap
+  // once it is selected, so its "Lap time" field does not exist until then. "Edit time" became
+  // "Save time" — the button now sits beside the field it saves.
   await selectFirstLap();
-  await correctionTime.fill('1.234');
-  await marshaling.getByRole('button', { name: 'Edit time' }).click();
+  await marshaling.getByLabel('Lap time').fill('1.234');
+  await marshaling.getByRole('button', { name: 'Save time' }).click();
   await expect(audit.getByText(/Re-timed/i).first()).toBeVisible({ timeout: 10_000 });
 
   // ── Select a lap and SPLIT it — the audit gains a "Split" entry ───────────────────────
+  // Split takes no time value any more: it splits the lap at its MIDPOINT (a missed crossing), and
+  // either half is re-timed after. So there is nothing to fill first.
   await selectFirstLap();
-  await correctionTime.fill('0.500');
   await marshaling.getByRole('button', { name: 'Split' }).click();
   await expect(audit.getByText(/Split/i).first()).toBeVisible({ timeout: 10_000 });
 
@@ -277,10 +294,12 @@ test('the Marshaling screen corrects laps and the audit + standings update live'
 // ── Slice 6: the full adjudication framework (DQ / points / throw-out / protests) ─────────────
 //
 // Drives the complete adjudication surface through the Marshaling screen against a real Director:
-// file a protest, throw out a lap, DQ + reverse — asserting the AUDIT panel and the result
-// snapshot re-fold at each step. Points deduction is driven over the control API and asserted on
-// the class STANDINGS snapshot (points are season/event-level, not per-heat). The append→re-fold
-// path is the load-bearing proof: every ruling is a recorded, reversible fact (marshaling.html §3).
+// file a protest, throw out a lap, DQ + reverse, deduct points — asserting the recent-rulings strip
+// and the result snapshot re-fold at each step. Every ruling goes through the screen, including the
+// points deduction (it used to be fired over the control API while the screen was open, which is a
+// different thing: the audit re-reads on a live advance, and a ruling on a finished heat is not
+// one). The append→re-fold path is the load-bearing proof: every ruling is a recorded, reversible
+// fact (marshaling.html §3).
 const S6_PILOTS = ['Sol', 'Tama', 'Uma'];
 const S6_HEAT = `marshal-s6-${Date.now()}`;
 
@@ -307,7 +326,7 @@ test('the full adjudication framework: protest, throw-out, DQ+reverse re-fold au
   await page.getByRole('button', { name: /Marshaling/ }).click();
   const marshaling = page.getByRole('region', { name: 'Marshaling' });
   await expect(marshaling).toBeVisible();
-  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+  const audit = recentRulings(page);
   await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
 
   const result = async () => {
@@ -335,7 +354,9 @@ test('the full adjudication framework: protest, throw-out, DQ+reverse re-fold au
   // Select that pilot's first lap and throw it out (the throw-out targets the lap's end pass).
   const pilotCard = marshaling.locator('.comp', { hasText: firstLapPilot });
   await pilotCard.locator('button.lap').first().click();
-  await marshaling.getByRole('button', { name: 'Throw out lap' }).click();
+  // The per-lap actions moved INTO the selected lap's inline editor (#358), and their names came
+  // with them: "Throw out lap" is now just "Throw out", sitting beside Save time / Split.
+  await marshaling.getByRole('button', { name: 'Throw out', exact: true }).click();
   await expect(audit.getByText(/Thrown out/i).first()).toBeVisible({ timeout: 10_000 });
   // The scored count for that pilot drops by one (the lap stays real, just uncounted).
   await expect
@@ -372,18 +393,18 @@ test('the full adjudication framework: protest, throw-out, DQ+reverse re-fold au
     )
     .toBe(false);
 
-  // ── DEDUCT POINTS over the control API → the audit shows it (points are standings-level) ─────
-  expect(
-    (await control({ DeductPoints: { heat: S6_HEAT, competitor: S6_PILOTS[2], points: 3 } })).ok()
-  ).toBeTruthy();
-  await expect(
-    page
-      .getByLabel('Marshaling')
-      .getByText(/-3 points/i)
-      .first()
-  ).toBeVisible({
-    timeout: 10_000
-  });
+  // ── DEDUCT POINTS through the ruling panel → the audit gains a "-3 points" entry ─────────────
+  // This used to fire `DeductPoints` over the control API and then assert the open screen had
+  // caught up. It hadn't, and that is not a regression to fix here: the Marshaling audit re-reads
+  // when the heat's live state advances, and a points deduction on a finished, quiet heat advances
+  // nothing — an out-of-band write to a screen that is already open simply has no tick to ride in
+  // on. Every other ruling in this test is driven through the UI, which is also what the test's
+  // title claims; the odd one out was the API call, so it now goes through the panel too.
+  await marshaling.getByLabel('Ruling competitor').selectOption(S6_PILOTS[2]);
+  await marshaling.getByLabel('Penalty kind').selectOption('points');
+  await marshaling.getByLabel('Points to deduct').fill('3');
+  await marshaling.getByRole('button', { name: 'Apply' }).click();
+  await expect(audit.getByText(/-3 points/i).first()).toBeVisible({ timeout: 10_000 });
 });
 
 test('a read-only session sees the laps + audit but cannot mutate', async ({ page, director }) => {
@@ -419,15 +440,20 @@ test('a read-only session sees the laps + audit but cannot mutate', async ({ pag
   await expect(marshaling).toBeVisible();
   // The read-only banner shows, and NO mutating controls are present.
   await expect(marshaling.getByText(/Read-only/i)).toBeVisible();
-  await expect(marshaling.getByRole('button', { name: 'Remove (void)' })).toHaveCount(0);
+  // The per-lap mutators are named as they are TODAY — "Remove lap N" / "Throw out", not the old
+  // "Remove (void)" / "Throw out lap". A `toHaveCount(0)` against a name nothing renders any more
+  // passes for the wrong reason: it stops proving the read-only guard the moment the control is
+  // renamed, which is exactly what had happened here.
+  await expect(marshaling.getByRole('button', { name: /^Remove lap/ })).toHaveCount(0);
+  await expect(marshaling.getByRole('button', { name: '+ Add lap' })).toHaveCount(0);
   await expect(marshaling.getByRole('button', { name: 'Apply' })).toHaveCount(0);
   await expect(marshaling.getByRole('button', { name: 'Void heat' })).toHaveCount(0);
   // Slice 6 mutating controls are equally hidden for a read-only pilot.
-  await expect(marshaling.getByRole('button', { name: 'Throw out lap' })).toHaveCount(0);
+  await expect(marshaling.getByRole('button', { name: 'Throw out', exact: true })).toHaveCount(0);
   await expect(marshaling.getByRole('button', { name: 'File protest' })).toHaveCount(0);
   await expect(marshaling.getByRole('button', { name: 'Resolve protest' })).toHaveCount(0);
   // The audit panel is still present (read access is unrestricted).
-  await expect(page.getByRole('complementary', { name: 'Audit trail' })).toBeVisible();
+  await expect(recentRulings(page)).toBeVisible();
 });
 
 // ── Friendly names everywhere: lap headings + audit show callsigns, not raw pilot ids ─────────
@@ -465,6 +491,19 @@ test('the Marshaling screen shows pilot callsigns (not raw ids) in lap headings 
   const beeId = await mkPilot(BEE);
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [classId] } });
   await page.request.put(`${ev}/roster`, { ...json, data: { pilot_ids: [aceId, beeId] } });
+  // …and into the CLASS, each on their OWN channel. Two separate requirements the fill enforces:
+  // rostering only marks a pilot present, while a `FromRoster` round draws the eligible class's
+  // MEMBERSHIP; and a `Static` (time-trial) round refuses to draw a member with no assigned
+  // channel — "static" means each pilot keeps one channel across the round, so there has to be one.
+  await page.request.put(`${ev}/classes/${classId}/membership`, {
+    ...json,
+    data: {
+      pilots: [
+        { pilot: aceId, channel: 5658 },
+        { pilot: beeId, channel: 5695 }
+      ]
+    }
+  });
   const round = (await (
     await page.request.post(`${ev}/rounds`, {
       ...json,
@@ -473,7 +512,10 @@ test('the Marshaling screen shows pilot callsigns (not raw ids) in lap headings 
         classes: [classId],
         format: 'timed_qual',
         params: {},
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'Static'
       }
@@ -481,19 +523,23 @@ test('the Marshaling screen shows pilot callsigns (not raw ids) in lap headings 
   ).json()) as { id: string };
 
   // Fill the round → a single Scheduled heat whose competitor refs ARE the pilot ids.
-  expect(
-    (
-      await page.request.post(`${ev}/control`, {
-        ...json,
-        data: { FillRound: { round: round.id } }
-      })
-    ).ok()
-  ).toBeTruthy();
+  //
+  // The control path answers **HTTP 200 with a `CommandAck`**, so `.ok()` only says the request was
+  // understood — a refused command still reads 200 with `{ ok: false, error }`. Assert the ack, or a
+  // rejection walks straight past this line and dies further down as an unrelated `undefined`.
+  const fillRes = await page.request.post(`${ev}/control`, {
+    ...json,
+    data: { FillRound: { round: round.id } }
+  });
+  const fillAck = (await fillRes.json()) as { ok: boolean; error?: { message: string } };
+  expect(fillAck.ok, fillAck.error?.message ?? 'FillRound was refused').toBe(true);
   const heats = (await (await page.request.get(`${ev}/heats`)).json()) as Array<{
     heat: string;
     round?: string;
   }>;
-  const heat = heats.find((h) => h.round === round.id)!.heat;
+  const filled = heats.find((h) => h.round === round.id);
+  expect(filled, 'the fill should have scheduled a heat for this round').toBeTruthy();
+  const heat = filled!.heat;
   expect(
     (await page.request.post(`${ev}/control`, { ...json, data: { SetCurrentHeat: { heat } } })).ok()
   ).toBeTruthy();
@@ -513,13 +559,25 @@ test('the Marshaling screen shows pilot callsigns (not raw ids) in lap headings 
   await expect(marshaling).toBeVisible();
   await expect(marshaling.locator('button.lap').first()).toBeVisible({ timeout: 15_000 });
 
-  // The Marshaling header shows the friendly heat name (not the raw heat id).
-  await expect(marshaling.locator('.heat')).toContainText(`${ROUND_LABEL} Heat 1`);
+  // The Marshaling header shows the friendly heat name (not the raw heat id). Scoped to the `h2` —
+  // the "Heat rulings & protests" region heading also carries a `.heat` class now, so a bare
+  // `.heat` matches two elements.
+  await expect(marshaling.locator('h2 .heat')).toContainText(`${ROUND_LABEL} Heat 1`);
 
-  // The lap-list headings show CALLSIGNS — never the raw pilot ids.
+  // The screen marshals ONE pilot at a time now (the declutter): the "Pilot to marshal" selector
+  // chooses whose trace and laps are under review, and only that pilot's card renders. So both
+  // pilots are checked through it — and the selector's own options must read as callsigns too,
+  // which is the display rule applied to the control that picks them.
+  const pilotPicker = marshaling.getByLabel('Pilot to marshal');
+  await expect(pilotPicker.getByRole('option', { name: ACE })).toHaveCount(1);
+  await expect(pilotPicker.getByRole('option', { name: BEE })).toHaveCount(1);
+
+  // The lap-list heading shows the CALLSIGN — never the raw pilot id — for each in turn.
+  await pilotPicker.selectOption({ label: ACE });
   await expect(marshaling.locator('.comp h4', { hasText: ACE })).toBeVisible();
-  await expect(marshaling.locator('.comp h4', { hasText: BEE })).toBeVisible();
   await expect(marshaling.getByText(aceId)).toHaveCount(0);
+  await pilotPicker.selectOption({ label: BEE });
+  await expect(marshaling.locator('.comp h4', { hasText: BEE })).toBeVisible();
   await expect(marshaling.getByText(beeId)).toHaveCount(0);
 
   // The ruling dropdown labels are callsigns (the option value is still the ref the command targets).
@@ -529,7 +587,7 @@ test('the Marshaling screen shows pilot callsigns (not raw ids) in lap headings 
   // DQ Ace via the ruling panel → the audit line composes the CALLSIGN, not the pilot id.
   await ruling.selectOption({ label: ACE });
   await marshaling.getByRole('button', { name: 'Apply' }).click();
-  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+  const audit = recentRulings(page);
   await expect(audit.getByText(new RegExp(`${ACE}.*DQ applied`))).toBeVisible({ timeout: 10_000 });
   // The raw pilot id never appears in the audit line.
   await expect(audit.getByText(aceId)).toHaveCount(0);
@@ -592,7 +650,7 @@ test('a sim heat (no captured trace) shows no RSSI graph and keeps the lap-only 
       { timeout: 30_000, message: 'live laps should bank before marshaling' }
     )
     .toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
   await page.getByRole('button', { name: /Marshaling/ }).click();
@@ -646,12 +704,16 @@ test('the Add-lap control inserts a new lap and it appears in the lap list', asy
   const before = await firstCard.locator('button.lap').count();
   const target = (await firstCard.locator('h4').textContent())!.trim();
 
-  await marshaling.getByLabel('Add-lap competitor').selectOption({ label: target });
-  await marshaling.getByLabel('Add-lap time').fill('3.5');
-  await marshaling.getByRole('button', { name: 'Add lap' }).click();
+  // The add-lap control is per-competitor and INLINE now (#358): "+ Add lap" sits in that pilot's
+  // own card and reveals the time field there. The separate "Add-lap competitor" select is gone —
+  // the card already says whose lap it is, so asking again was the redundancy the declutter removed.
+  const targetCard = marshaling.locator('.comp', { hasText: target });
+  await targetCard.getByRole('button', { name: '+ Add lap' }).click();
+  await targetCard.getByLabel('Add-lap time').fill('3.5');
+  await targetCard.getByRole('button', { name: 'Add', exact: true }).click();
 
   // The append→re-fold adds a lap to that competitor's list, and the audit logs an "Inserted" entry.
-  const audit = page.getByRole('complementary', { name: 'Audit trail' });
+  const audit = recentRulings(page);
   await expect(audit.getByText(/Inserted/i).first()).toBeVisible({ timeout: 10_000 });
   await expect
     .poll(
@@ -680,7 +742,7 @@ test('the Add-lap control inserts a new lap and it appears in the lap list', asy
 // `Off` by design), so this seeds a class + a `timed_qual` round with a short `After` window over
 // the open REST API, then schedules the heat tagged with that round.
 
-/** Run the focused current heat from Scheduled to Unofficial (Stage → Start → bank laps → ForceEnd). */
+/** Run the focused current heat from Scheduled to Unofficial (Stage → Start → bank laps → Stop). */
 async function runToUnofficial(page: import('@playwright/test').Page): Promise<void> {
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Staged');
@@ -697,7 +759,7 @@ async function runToUnofficial(page: import('@playwright/test').Page): Promise<v
       { timeout: 30_000, message: 'live laps should bank before ending the heat' }
     )
     .toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 }
 
@@ -705,26 +767,26 @@ test('a configured protest window auto-finalizes the heat after the window elaps
   page,
   director
 }) => {
+  const json = { headers: { 'Content-Type': 'application/json' } };
+  // App-level routes hang off the Director root; per-event ones off `eventRoot`. These used to be
+  // spelled `/events/practice/...` against a built-in event that no longer exists (#414) — the
+  // worker creates its own and its id is generated.
+  const appPost = (path: string, data: unknown) =>
+    page.request.post(`${director.baseUrl}${path}`, { ...json, data });
   const post = (path: string, data: unknown) =>
-    page.request.post(`${director.baseUrl}${path}`, {
-      headers: { 'Content-Type': 'application/json' },
-      data
-    });
+    page.request.post(`${director.eventRoot}${path}`, { ...json, data });
   const put = (path: string, data: unknown) =>
-    page.request.put(`${director.baseUrl}${path}`, {
-      headers: { 'Content-Type': 'application/json' },
-      data
-    });
-  const control = (cmd: unknown) => post('/events/practice/control', cmd);
+    page.request.put(`${director.eventRoot}${path}`, { ...json, data });
+  const control = (cmd: unknown) => post('/control', cmd);
 
-  // Seed a class + select it on Practice, then a `timed_qual` round with a SHORT protest window
+  // Seed a class + select it on the event, then a `timed_qual` round with a SHORT protest window
   // (`After { micros }`) so the auto-official timer fires within the test, not minutes later.
-  const classRes = await post('/classes', { name: `protest-${Date.now()}` });
+  const classRes = await appPost('/classes', { name: `protest-${Date.now()}` });
   expect(classRes.ok()).toBeTruthy();
   const classId = (await classRes.json()).id as string;
-  expect((await put('/events/practice/classes', { ids: [classId] })).ok()).toBeTruthy();
+  expect((await put('/classes', { ids: [classId] })).ok()).toBeTruthy();
 
-  const roundRes = await post('/events/practice/rounds', {
+  const roundRes = await post('/rounds', {
     label: 'Protest Qual',
     classes: [classId],
     format: 'timed_qual',
@@ -762,6 +824,16 @@ test('a configured protest window auto-finalizes the heat after the window elaps
   // with no RD action. (The banner flips to Official.)
   await expect(page.locator('.phase').first()).toHaveText('Final', { timeout: 15_000 });
   await expect(lifecycle).toContainText(/Official/i);
+
+  // ── Put the shared Director's event back as we found it ──────────────────────────────────────
+  // This test SELECTS a class onto the event (its round needs an eligible one), and the selection
+  // is event state every later spec inherits. Leaving it behind is not harmless: the Roster stage
+  // only auto-places a present pilot when the event has exactly ONE class, so a stale extra class
+  // turns that auto-fill into a manual "Place …" checkbox — and `roster.spec.ts` goes looking for a
+  // channel selector that never renders. (It went unnoticed while these writes were still aimed at
+  // `/events/practice/...` and quietly 404ing.) The round is left alone: it has a Final heat, and
+  // `remove_round` rightly refuses to strand a scored result.
+  expect((await put('/classes', { ids: [] })).ok()).toBeTruthy();
 });
 
 test('the RD can finalize early, and Revert re-opens the result to provisional', async ({
