@@ -99,6 +99,58 @@ jobs:
       # built with the embed-assets feature, the frontend dist is baked into the
       # binary, so it self-serves the RD console with no external assets folder — a
       # standalone executable. This is the ONLY release artifact (portable-only).
+      # Does the thing we are about to ship actually START? The build proves it compiles and
+      # bundles; it does not prove it runs. That gap is the whole of #58's "done when the single
+      # binary launches on all three OSes" — and the maintainer has no Mac to check it on, so
+      # without this the macOS leg ships entirely unverified.
+      #
+      # The check is deliberately narrow and honest about it: the app must get past Tauri's setup,
+      # spawn its embedded Director, write its startup line, and still be alive a few seconds later.
+      # That catches a missing runtime library, a panic in setup, an embedded-asset failure, or an
+      # immediate exit. It does NOT prove the window renders or the console is usable — a human
+      # still has to click it once per platform.
+      - name: Smoke-test the portable binary (does it start?)
+        shell: bash
+        env:
+          BIN: ${{ matrix.portable-path }}
+        run: |
+          set -uo pipefail
+          LOGDIR="$(mktemp -d)"
+          export GRIDFPV_LOG_DIR="$LOGDIR"
+          # Linux CI has no display; Tauri needs one to create its window. xvfb is the standard
+          # answer. Windows and macOS runners already have a session.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+            xvfb-run -a "$BIN" & APP=$!
+          else
+            "$BIN" & APP=$!
+          fi
+
+          # Give it room to boot: Tauri setup, the Director binding its ephemeral loopback port,
+          # and the first window paint.
+          for _ in $(seq 1 20); do
+            sleep 1
+            kill -0 "$APP" 2>/dev/null || break
+            grep -rqs "starting" "$LOGDIR" && break
+          done
+
+          if ! kill -0 "$APP" 2>/dev/null; then
+            echo "::error::gridfpv-desktop exited on startup — it does not launch on $RUNNER_OS"
+            echo "--- log ---"; cat "$LOGDIR"/* 2>/dev/null || echo "(no log written at all)"
+            exit 1
+          fi
+          if ! grep -rqs "starting" "$LOGDIR"; then
+            echo "::error::gridfpv-desktop is running but never wrote its startup line — it did not get past setup"
+            cat "$LOGDIR"/* 2>/dev/null || echo "(no log written at all)"
+            kill "$APP" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "started cleanly on $RUNNER_OS:"
+          grep -rhs "starting" "$LOGDIR" | head -1
+          kill "$APP" 2>/dev/null || true
+          wait "$APP" 2>/dev/null || true
+
       - name: Upload portable binary
         uses: actions/upload-artifact@v7
         with:
