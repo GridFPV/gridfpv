@@ -23,7 +23,9 @@
  * are **wire handles** and must never reach the screen (the repo display rule) — here that is not
  * merely tidiness: an off-by-one in this boundary puts a pilot on a dead gate.
  */
-import type { SetTimerNodesRequest, Timer, TimerNodes } from '@gridfpv/types';
+import type { CompetitorRef, SetTimerNodesRequest, Timer, TimerNodes } from '@gridfpv/types';
+
+import { nodeIndexOf } from './channels.js';
 
 /**
  * The width a timer falls back to when nothing is configured **and** nothing has been observed —
@@ -92,11 +94,77 @@ export function timerWidth(timer: Timer): number {
   return timer.node_count ?? timer.reported_nodes ?? DEFAULT_NODE_COUNT;
 }
 
+/**
+ * The node indices a heat can actually be seated on, ascending — the timer's effective width minus
+ * the RD's disabled set. Mirror of the Director's `Timer::enabled_nodes`.
+ *
+ * The indices are **never renumbered** to close a gap: with node 2 disabled on a 4-node timer this
+ * returns `[0, 1, 3]`, not `[0, 1, 2]`. A `node-{i}` competitor ref, `NodeSignal.node` and the
+ * signal trace all mean the same physical gate, and compacting would make them disagree about
+ * where a pass came from.
+ */
+export function enabledNodes(timer: Timer): number[] {
+  const width = Math.max(0, Math.round(timerWidth(timer)));
+  const disabled = new Set(timer.disabled_nodes ?? []);
+  const out: number[] = [];
+  for (let node = 0; node < width; node++) if (!disabled.has(node)) out.push(node);
+  return out;
+}
+
 /** How many nodes are enabled on a timer — the real per-heat pilot cap. */
 export function timerSeats(timer: Timer): number {
-  const width = timerWidth(timer);
-  const disabled = new Set((timer.disabled_nodes ?? []).filter((n) => n < width));
-  return width - disabled.size;
+  return enabledNodes(timer).length;
+}
+
+/** One lineup entry and the gate it flies. */
+export interface SeatNode {
+  /** The **real** 0-based node index — RotorHazard's `seat_index`, never a compacted position. */
+  node: number;
+  /** The competitor sitting on it. */
+  ref: CompetitorRef;
+}
+
+/**
+ * Lay a heat's `lineup` onto real node indices — the console-side mirror of the Director's
+ * `Timer::seat_nodes`, and the only rule that says which gate each competitor flies.
+ *
+ * Two kinds of lineup entry, handled together because a heat may mix them:
+ *
+ *  - a **`node-{i}` seat ref** (an open-practice / pilot-less seat) already *names* its gate, so it
+ *    keeps index `i` verbatim — that is the whole point of the handle;
+ *  - any other ref (a pilot id) takes the next enabled index no explicit seat has claimed.
+ *
+ * Entries that cannot be placed are **dropped, not squeezed in**, exactly as the Director drops
+ * them: a `node-{i}` ref naming a disabled or non-existent gate, and any pilot beyond the enabled
+ * set. Squeezing would seat somebody on the wrong gate, which records *the wrong pilot*.
+ *
+ * This exists so the seating editor can show the RD the gate a seat will actually fly rather than
+ * guessing from row order — the two must not be able to disagree.
+ */
+export function seatNodes(
+  enabled: readonly number[],
+  lineup: readonly CompetitorRef[]
+): SeatNode[] {
+  const seatable = new Set(enabled);
+  const claimed = new Set<number>();
+  for (const ref of lineup) {
+    const named = nodeIndexOf(ref);
+    if (named !== undefined && seatable.has(named)) claimed.add(named);
+  }
+  const free = enabled.filter((node) => !claimed.has(node));
+  let next = 0;
+  const seats: SeatNode[] = [];
+  for (const ref of lineup) {
+    const named = nodeIndexOf(ref);
+    if (named !== undefined) {
+      // An explicit seat ref names its own gate; a gate the RD switched off is not flown.
+      if (seatable.has(named)) seats.push({ node: named, ref });
+      continue;
+    }
+    if (next >= free.length) break; // Beyond the enabled set — the heat-size cap should have refused it.
+    seats.push({ node: free[next++], ref });
+  }
+  return seats;
 }
 
 /**
