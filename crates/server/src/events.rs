@@ -832,15 +832,19 @@ pub struct RoundDef {
     /// - **one** — the bracket case. *"n channels where n is the number of pilots per heat, and
     ///   those channels stay for the whole tournament."* Every heat the round draws flies that
     ///   layout automatically; there is nothing per-heat to do.
-    /// - **several** — the GQ-style qualifier, where many layouts exist so each pilot can stay on
-    ///   their own channel. The first is each heat's default and the RD re-picks per heat.
+    /// - **several** — the round's heats **alternate** across them, round-robin by each heat's
+    ///   position in the round: heat 1 flies the first, heat 2 the second, and back round again
+    ///   (#117 S3). The point is what that buys with no pilot awareness at all — adjacent heats stop
+    ///   sharing channels, so a group landing does not sit on the frequencies of the group staging
+    ///   behind it. The RD still re-picks any individual heat, and that pick wins. Keeping pilots
+    ///   on their own channel (the GQ strategy) is a *different* problem and is #419's, deferred.
     /// - **none** (the default, and every round persisted before S3) — the round names no layout,
     ///   so its heats fall back to the auto-pick from the timer's allowed set. Unchanged behaviour.
     ///
-    /// Order is meaningful only in that the **first** entry is a heat's default. Each id must name
-    /// a layout the event actually has (checked on add *and* update); a layout a round names cannot
-    /// be deleted out from under it. Additive (`#[serde(default)]`) so pre-S3 meta reads back
-    /// empty.
+    /// Order is meaningful: it is the order the round's heats cycle through. Each id must name a
+    /// layout the event actually has (checked on add *and* update), and no layout may be named
+    /// twice — a repeat would only skew the cycle. A layout a round names cannot be deleted out
+    /// from under it. Additive (`#[serde(default)]`) so pre-S3 meta reads back empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layouts: Vec<LayoutId>,
     /// The **staging timer** for this round, in seconds (heat-lifecycle Slice 2). *Informational
@@ -1358,8 +1362,9 @@ pub struct NewRoundReq {
     #[ts(optional)]
     pub channel_mode: Option<ChannelMode>,
     /// The **channel layouts** this round's heats may fly (#117 S3). Optional — omit for none (the
-    /// auto-pick, the pre-S3 behaviour). Each must name a layout this event has. Stored on
-    /// [`RoundDef::layouts`]; the first is each heat's default.
+    /// auto-pick, the pre-S3 behaviour). Each must name a layout this event has, and none twice.
+    /// Stored on [`RoundDef::layouts`]; naming several makes the round's heats **alternate** across
+    /// them in this order (#117 S3), which the RD may still override per heat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layouts: Vec<LayoutId>,
     /// The round's staging timer in seconds (heat-lifecycle Slice 2). Optional — omit for the
@@ -7337,7 +7342,7 @@ mod tests {
             "expected the unknown-layout refusal, got {err:?}"
         );
 
-        // Naming the same layout twice says nothing (the first entry is the heats' default).
+        // Naming the same layout twice says nothing useful — it only skews the cycle (#117 S3).
         let mut twice = round_req("Twice", vec![]);
         twice.layouts = vec![layout.clone(), layout];
         let err = reg.add_round(&event, twice).unwrap_err();

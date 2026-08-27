@@ -94,15 +94,19 @@ channel_mode: ChannelMode,
  * - **one** — the bracket case. *"n channels where n is the number of pilots per heat, and
  *   those channels stay for the whole tournament."* Every heat the round draws flies that
  *   layout automatically; there is nothing per-heat to do.
- * - **several** — the GQ-style qualifier, where many layouts exist so each pilot can stay on
- *   their own channel. The first is each heat's default and the RD re-picks per heat.
+ * - **several** — the round's heats **alternate** across them, round-robin by each heat's
+ *   position in the round: heat 1 flies the first, heat 2 the second, and back round again
+ *   (#117 S3). The point is what that buys with no pilot awareness at all — adjacent heats stop
+ *   sharing channels, so a group landing does not sit on the frequencies of the group staging
+ *   behind it. The RD still re-picks any individual heat, and that pick wins. Keeping pilots
+ *   on their own channel (the GQ strategy) is a *different* problem and is #419's, deferred.
  * - **none** (the default, and every round persisted before S3) — the round names no layout,
  *   so its heats fall back to the auto-pick from the timer's allowed set. Unchanged behaviour.
  *
- * Order is meaningful only in that the **first** entry is a heat's default. Each id must name
- * a layout the event actually has (checked on add *and* update); a layout a round names cannot
- * be deleted out from under it. Additive (`#[serde(default)]`) so pre-S3 meta reads back
- * empty.
+ * Order is meaningful: it is the order the round's heats cycle through. Each id must name a
+ * layout the event actually has (checked on add *and* update), and no layout may be named
+ * twice — a repeat would only skew the cycle. A layout a round names cannot be deleted out
+ * from under it. Additive (`#[serde(default)]`) so pre-S3 meta reads back empty.
  */
 layouts?: Array<LayoutId>, 
 /**
