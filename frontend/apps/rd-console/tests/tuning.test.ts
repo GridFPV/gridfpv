@@ -305,10 +305,9 @@ describe('markSent — a LATE write resolve must not clobber a newer value (#442
   // badge reads "On timer" over a number the RD did not choose: the #403 sent-vs-landed lie, in the
   // UI layer.
   //
-  // `it.fails` rather than a skip: this runs in CI, passes while the bug stands, and turns red the
-  // moment `markSent` learns to leave a moved-on state alone — which forces the marker off with the
-  // fix instead of leaving a skipped test nobody remembers to re-enable.
-  it.fails('leaves the value the RD moved on to standing, and leaves it pending', () => {
+  // Fixed by making the write mark only the state it actually wrote: a resolve that finds the value
+  // already moved on returns the state untouched.
+  it('leaves the value the RD moved on to standing, and leaves it pending', () => {
     // The state at the instant `commit()` issued the 100-write, then the RD's 120 typed over it.
     const rdTyped120: ThresholdState = { value: 120, confirmed: 90, phase: 'pending' };
 
@@ -332,6 +331,35 @@ describe('markSent — a LATE write resolve must not clobber a newer value (#442
       sent: 100,
       sentAt: T0
     });
+  });
+
+  it('returns the moved-on state IDENTICALLY, so nothing downstream reads as a change', () => {
+    // Not just equal — the same object. `ingest` and the confirm backstop both compare states by
+    // identity to decide whether anything happened; a fresh clone here would churn the reactive
+    // record on every late resolve and re-render a column the RD is mid-drag on.
+    const movedOn: ThresholdState = { value: 120, confirmed: 90, phase: 'pending' };
+    expect(markSent(movedOn, 100, T0)).toBe(movedOn);
+  });
+
+  it('leaves no receipt behind for a write the state moved on from', () => {
+    // `sent`/`sentAt` are what `foldPolled` confirms against. Recording 100 on a state holding 120
+    // would arm the poll to "confirm" a value the RD had already abandoned, and settle it green.
+    const movedOn: ThresholdState = { value: 120, confirmed: 90, phase: 'pending' };
+    const after = markSent(movedOn, 100, T0);
+    expect(after.sent).toBeUndefined();
+    expect(after.sentAt).toBeUndefined();
+  });
+
+  it('a re-typed value that lands back on what was written still marks sent', () => {
+    // The RD went 100 → 120 → 100 inside the round trip. The write and the state agree again, so
+    // there is nothing newer to protect and the receipt is the honest one.
+    const backTo100: ThresholdState = { value: 100, confirmed: 90, phase: 'pending' };
+    expect(markSent(backTo100, 100, T0).phase).toBe('sent');
+  });
+
+  it('clears a stale failure detail on the write it does mark', () => {
+    const retry: ThresholdState = { value: 100, confirmed: 90, phase: 'failed', detail: 'boom' };
+    expect(markSent(retry, 100, T0).detail).toBeUndefined();
   });
 });
 

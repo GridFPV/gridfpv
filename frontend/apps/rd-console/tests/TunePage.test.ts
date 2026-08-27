@@ -235,6 +235,12 @@ async function renderTune(
     /** The Director's verdict on whether the node's thresholds are now stale. */
     staleThresholds?: boolean;
     channelRejects?: Error;
+    /**
+     * Holds the channel `POST` open until the test resolves it — the window where the write is
+     * literally on the wire, as opposed to the far longer one where it is merely unconfirmed. The
+     * default mock resolves immediately, which is the *unconfirmed* case and cannot exercise this.
+     */
+    holdChannelWrite?: Promise<void>;
     /** Override the timer under test (its capability / channel pool). */
     timer?: Timer;
     /**
@@ -307,6 +313,7 @@ async function renderTune(
   // The channel write behaves like the real one: the Director answers with a DISPATCH, and the
   // channel itself only reappears on a later poll (RotorHazard's heartbeat carries it).
   const applyChannel = vi.fn(async (_timer: string, body: { node: number; mhz: number }) => {
+    if (opts.holdChannelWrite) await opts.holdChannelWrite;
     if (opts.channelRejects) throw opts.channelRejects;
     const took = opts.tunes ? opts.tunes(body.mhz) : body.mhz;
     const target = feed.nodes.find((n) => n.node === body.node);
@@ -1103,43 +1110,139 @@ describe('TunePage — the channel is settable, not just shown (#413)', () => {
   // for while reading as though it were the RD's own choice.
   //
   // Deliberately accepts EITHER honest fix — queue/apply the pick, or refuse it out loud — because
-  // both are defensible and only the silence is not. `it.fails` (not a skip) so it runs in CI,
-  // passes while the bug stands, and goes red the moment either fix lands.
-  it.fails(
-    'never silently drops a channel pick made while the previous write is unconfirmed',
-    async () => {
-      // No second poll (the default 10-minute cadence) and a confirm backstop far out of the way, so
-      // the first write simply stays `sent` — exactly the window this is about.
-      const h = await renderTune({ confirmMs: 5_000 });
-      const panel = () => screen.getByTestId('channel-0');
-      // Addressed through the panel's own testid rather than the node's accessible name, because that
-      // name follows the channel and is mid-change for the whole of this test.
-      const select = () => panel().querySelector('select') as HTMLSelectElement;
+  // both are defensible and only the silence is not.
+  //
+  // Fixed the first way: waiting on a poll is not a reason to refuse a pick (the POST is already
+  // back and the wire is free), so the second pick is written immediately and `channelSeq` retires
+  // the first write's answer. The narrower window where the POST itself is still open is queued
+  // instead — the two tests below own that half.
+  it('never silently drops a channel pick made while the previous write is unconfirmed', async () => {
+    // No second poll (the default 10-minute cadence) and a confirm backstop far out of the way, so
+    // the first write simply stays `sent` — exactly the window this is about.
+    const h = await renderTune({ confirmMs: 5_000 });
+    const panel = () => screen.getByTestId('channel-0');
+    // Addressed through the panel's own testid rather than the node's accessible name, because that
+    // name follows the channel and is mid-change for the whole of this test.
+    const select = () => panel().querySelector('select') as HTMLSelectElement;
 
-      await fireEvent.change(select(), { target: { value: '5800' } });
-      await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
-      // The write is out and unconfirmed — and the control is still live, so the RD may pick again.
-      expect(within(panel()).getByText('Sending…')).toBeInTheDocument();
-      expect(select()).not.toBeDisabled();
+    await fireEvent.change(select(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    // The write is out and unconfirmed — and the control is still live, so the RD may pick again.
+    expect(within(panel()).getByText('Sending…')).toBeInTheDocument();
+    expect(select()).not.toBeDisabled();
 
-      // The RD changes their mind inside the round trip.
-      await fireEvent.change(select(), { target: { value: '5695' } });
+    // The RD changes their mind inside the round trip.
+    await fireEvent.change(select(), { target: { value: '5695' } });
 
-      await waitFor(
-        () => {
-          const outcome = {
-            // Either the pick reached the timer (immediately, or queued behind the first write)…
-            wroteThePick: h.applyChannel.mock.calls.some((call) => call[1].mhz === 5695),
-            // …or the node says out loud that it was not sent. `phaseLabel('refused')` is 'Not sent'.
-            toldTheRD: within(panel()).queryByText('Not sent') !== null
-          };
-          expect(outcome).not.toEqual({ wroteThePick: false, toldTheRD: false });
-        },
-        { timeout: 300 }
-      );
-      h.unmount();
-    }
-  );
+    await waitFor(
+      () => {
+        const outcome = {
+          // Either the pick reached the timer (immediately, or queued behind the first write)…
+          wroteThePick: h.applyChannel.mock.calls.some((call) => call[1].mhz === 5695),
+          // …or the node says out loud that it was not sent. `phaseLabel('refused')` is 'Not sent'.
+          toldTheRD: within(panel()).queryByText('Not sent') !== null
+        };
+        expect(outcome).not.toEqual({ wroteThePick: false, toldTheRD: false });
+      },
+      { timeout: 300 }
+    );
+    h.unmount();
+  });
+
+  it('shows the RD their own pick, not the one it superseded (#442)', async () => {
+    // The half of the bug that is invisible in a call log: `value={chan.mhz}` is one-way, so a pick
+    // the handler drops is also ERASED from the control — the select snaps back to the previous
+    // channel and reads as though the RD had chosen it.
+    const h = await renderTune({ confirmMs: 5_000 });
+    const select = () =>
+      screen.getByTestId('channel-0').querySelector('select') as HTMLSelectElement;
+
+    await fireEvent.change(select(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    await fireEvent.change(select(), { target: { value: '5695' } });
+
+    await waitFor(() => expect(select().value).toBe('5695'));
+    h.unmount();
+  });
+
+  it('QUEUES a pick made while the write is literally on the wire, and sends only the newest', async () => {
+    // The narrow window the immediate write must not be used for: `on_set_frequency` is a
+    // fire-and-forget socket emit with no ack and no ordering guarantee (CLAUDE.md), so two
+    // overlapping writes to one node can land in either order — and the loser could be the newer.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = await renderTune({ confirmMs: 5_000, holdChannelWrite: held });
+    const panel = () => screen.getByTestId('channel-0');
+    const select = () => panel().querySelector('select') as HTMLSelectElement;
+
+    await fireEvent.change(select(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+
+    // Two more picks while the first POST is still open. Nothing new goes out…
+    await fireEvent.change(select(), { target: { value: '5880' } });
+    await fireEvent.change(select(), { target: { value: '5695' } });
+    expect(h.applyChannel).toHaveBeenCalledTimes(1);
+    // …but the RD's latest choice is on screen and reads as in-hand, not as landed.
+    expect(select().value).toBe('5695');
+    expect(within(panel()).getByText('Adjusting')).toBeInTheDocument();
+
+    release();
+
+    // Exactly one follow-up write, carrying the LAST pick. The 5880 the RD clicked through on the
+    // way is not a write anybody asked for.
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(2));
+    expect(h.applyChannel.mock.calls[1][1]).toMatchObject({ node: 0, mhz: 5695 });
+    expect(h.applyChannel.mock.calls.some((c) => c[1].mhz === 5880)).toBe(false);
+    h.unmount();
+  });
+
+  it('flushes a queued pick even when the write it was queued behind FAILED', async () => {
+    // The failure belongs to the channel the RD moved off. Swallowing their newer choice with it
+    // would leave the node on neither, silently — the same drop, one path over.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = await renderTune({
+      confirmMs: 5_000,
+      holdChannelWrite: held,
+      channelRejects: new Error('the timer said no')
+    });
+    const select = () =>
+      screen.getByTestId('channel-0').querySelector('select') as HTMLSelectElement;
+
+    await fireEvent.change(select(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    await fireEvent.change(select(), { target: { value: '5695' } });
+    release();
+
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(2));
+    expect(h.applyChannel.mock.calls[1][1]).toMatchObject({ mhz: 5695 });
+    h.unmount();
+  });
+
+  it('does not flush a queued pick into a page the RD has already left', async () => {
+    // The write would go out with nothing on screen waiting for it or reporting on it — the same
+    // reason every timer on this page is cleared with the component.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = await renderTune({ confirmMs: 5_000, holdChannelWrite: held });
+    const select = () =>
+      screen.getByTestId('channel-0').querySelector('select') as HTMLSelectElement;
+
+    await fireEvent.change(select(), { target: { value: '5800' } });
+    await waitFor(() => expect(h.applyChannel).toHaveBeenCalledTimes(1));
+    await fireEvent.change(select(), { target: { value: '5695' } });
+
+    h.unmount();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.applyChannel).toHaveBeenCalledTimes(1);
+  });
 
   it('says NOT TAKEN when the timer never comes back on the new channel', async () => {
     // The #403 failure class: a write that reports dispatched and never lands. Silence here would

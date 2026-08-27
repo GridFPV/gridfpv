@@ -338,6 +338,19 @@
   const channelSeq = new Map<number, number>();
   /** The "this should have come back by now" backstops, one per node (see {@link confirmTimers}). */
   const channelTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  /**
+   * The nodes whose channel `POST` is open right now — not "unconfirmed", which lasts far longer
+   * (see {@link commitChannel}). Two overlapping writes to one node are the one thing worth
+   * serialising: RotorHazard's `on_set_frequency` is a fire-and-forget emit with no ack and no
+   * ordering guarantee, so racing them can leave the node on the older channel.
+   */
+  const channelWriting = new Set<number>();
+  /**
+   * The newest channel a node's dropdown was set to while its write was open, waiting to be sent
+   * (#442). Only ever one per node — an RD clicking through four channels wants the fourth, and the
+   * three they passed through are not writes anybody asked for.
+   */
+  const channelQueued = new Map<number, number>();
 
   /**
    * A per-(node, threshold) write sequence. Non-reactive on purpose — it exists only so a write
@@ -739,10 +752,42 @@
    * The **band and channel travel with the frequency**: RotorHazard stores them on its profile, and
    * an unlabelled channel on the page the RD refreshes to check this worked reads as a half-failure.
    * The Director validates the pair against its own catalog, so nothing invented can reach a timer.
+   *
+   * ## A pick is never silently dropped (#442, defect 2)
+   *
+   * This used to bail on `held.phase === 'sent'`, which reads as "a write is busy" but is really
+   * "the last write has not been seen on a poll yet" — a window up to {@link CONFIRM_TIMEOUT_MS}
+   * (3 s) wide, during which the dropdown stayed enabled, took the RD's pick, wrote nothing, said
+   * nothing, and then snapped back to the previous channel because `value={chan.mhz}` is one-way.
+   * The page ended up on a channel nobody asked for, reading as though it were the RD's own choice.
+   *
+   * The wait for a poll is not a reason to refuse a pick: the POST has already come back and the
+   * wire is free, so a pick made in that window is written immediately, exactly as a fresh one is,
+   * and `channelSeq` retires the older write's answer.
+   *
+   * The one window where a second write must *not* go out is while the POST itself is still open —
+   * two overlapping `on_set_frequency` emits to the same node have no ordering guarantee at
+   * RotorHazard's end (CLAUDE.md: fire-and-forget, no ack), so the loser could be the newer one.
+   * A pick made there is **queued**, shown on the node as `Adjusting` so the RD sees their own
+   * choice standing, and written the moment the open write resolves. Only the newest is kept: an
+   * RD who clicks through four channels wants the fourth, not all four in sequence. This is the
+   * threshold model — {@link markSent} leaves a moved-on threshold `pending` and the typing-idle
+   * commit flushes it — spelled for a control that has no idle to hang it on.
    */
   async function commitChannel(node: number, mhz: number): Promise<void> {
     const held = channels[node];
-    if (!held || held.phase === 'sent') return;
+    if (!held) return;
+    if (channelWriting.has(node)) {
+      // The POST is still open. Hold the newest pick, show it, and let the resolve flush it.
+      channelQueued.set(node, mhz);
+      // Retire the open write's answer: the RD has moved on, and `markChannelSent` stamping the
+      // superseded channel over this one is the same clobber `markSent` had to stop doing.
+      channelSeq.set(node, (channelSeq.get(node) ?? 0) + 1);
+      channels[node] = { ...held, mhz, phase: 'pending', detail: undefined };
+      return;
+    }
+    // This pick is newer than anything parked, and supersedes it.
+    channelQueued.delete(node);
     if (mhz === held.confirmed) {
       // Re-picked what it is already on — nothing to write, and the phase returns to rest.
       if (held.phase !== 'confirmed')
@@ -762,6 +807,7 @@
     const option = optionsFor(node).find((o) => o.mhz === mhz);
     const seq = (channelSeq.get(node) ?? 0) + 1;
     channelSeq.set(node, seq);
+    channelWriting.add(node);
     try {
       const dispatch = await writeChannel(timer.id, {
         node,
@@ -787,6 +833,15 @@
       const message = e instanceof Error ? e.message : String(e);
       channels[node] = { ...current, phase: 'failed', detail: message };
       toast.error(`${nodeLabel(node)}: the channel change did not reach the timer. ${message}`);
+    } finally {
+      channelWriting.delete(node);
+      // Flush a pick the RD made while this write was open — including after a FAILED one: the
+      // failure belongs to the channel they moved off, and their newer choice is still unanswered.
+      const queued = channelQueued.get(node);
+      if (queued !== undefined) {
+        channelQueued.delete(node);
+        void commitChannel(node, queued);
+      }
     }
   }
 
@@ -1007,6 +1062,9 @@
     channelTimers.clear();
     for (const t of captureTimers.values()) clearTimeout(t);
     captureTimers.clear();
+    // A queued channel pick is dropped for the same reason: the RD has left the page, and flushing
+    // it would put a write on the wire that nothing on screen is waiting for or reporting on.
+    channelQueued.clear();
   });
 
   // ── Layout ──────────────────────────────────────────────────────────────────────────────────
