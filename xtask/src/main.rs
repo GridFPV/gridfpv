@@ -71,6 +71,23 @@ fn lint() -> bool {
     )
 }
 
+/// Type-check every **live** target without running it (`--features live --no-run`).
+///
+/// `cargo test --all` does not build these — they sit behind the `live` feature and need Docker to
+/// run — so a change to a shared type compiles clean, passes every gate, and then fails at the
+/// **matrix**, minutes into a container run. That is exactly how `NewRoundReq` gaining a `layouts`
+/// field reached `devel`: five green gates, then a leg failed on `error[E0063]`.
+///
+/// Compiling them costs seconds and moves that discovery back to `ci`, where it belongs. It does
+/// not run them — running still needs Docker and still belongs to `cargo xtask live`.
+fn live_check() -> bool {
+    run_env(
+        "cargo",
+        &["test", "--workspace", "--features", "live", "--no-run"],
+        &[("TS_RS_EXPORT_DIR", &workspace_root())],
+    )
+}
+
 fn test() -> bool {
     // `cargo test --all` also runs ts-rs's generated export tests, which write the
     // `.ts` files. Pin `TS_RS_EXPORT_DIR` to the workspace root so they land in the
@@ -824,7 +841,9 @@ fn main() {
         // Every `bindings/*.ts` is re-exported from the frontend's `@gridfpv/types` barrel
         // (#410) — the twin of `gen_check`, one layer out. See [`barrel_check`].
         "barrel" => barrel_check(),
-        "ci" => fmt() && lint() && test() && gen_check() && barrel_check(),
+        // Type-check the Docker-gated live targets without running them (see `live_check`).
+        "live-check" => live_check(),
+        "ci" => fmt() && lint() && test() && live_check() && gen_check() && barrel_check(),
         // The RotorHazard version × plugin live matrix; bare `live` runs all four legs.
         "live" => live(&args[1..]),
         // The browser e2e suite, in Microsoft's Playwright image (#426). See `docker/playwright/`.

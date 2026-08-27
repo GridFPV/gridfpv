@@ -685,6 +685,9 @@ async fn add_qualifying(addr: &str, token: &str, event: &EventId, class: &ClassI
         &NewRoundReq {
             label: "Qualifying".into(),
             classes: vec![class.clone()],
+            // #117 S3: this event names no channel layouts, so its rounds fly none —
+            // assignment falls to the IMD auto-pick, which is what this e2e exercised before.
+            layouts: Vec::new(),
             format: "timed_qual".into(),
             params: BTreeMap::from([("rounds".to_string(), QUAL_HEATS.to_string())]),
             // Most laps in the window. The window is far longer than a harness heat, so every
@@ -726,6 +729,9 @@ async fn add_main(
         &NewRoundReq {
             label: "A-Main".into(),
             classes: vec![class.clone()],
+            // #117 S3: this event names no channel layouts, so its rounds fly none —
+            // assignment falls to the IMD auto-pick, which is what this e2e exercised before.
+            layouts: Vec::new(),
             format: "head_to_head".into(),
             params: BTreeMap::from([
                 ("group_size".to_string(), CALLSIGNS.len().to_string()),
