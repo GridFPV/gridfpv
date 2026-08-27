@@ -78,9 +78,13 @@
     draftChannelSet,
     draftNodes,
     duplicateNodes,
-    imdMessage,
+    imdRatingLabel,
+    imdTail,
+    imdTone,
+    imdToneHint,
     layerNodes,
     layerSummary,
+    layoutPilotCount,
     layoutRating,
     overlapMessage,
     unconfiguredTimerMessage
@@ -357,16 +361,23 @@
     {#if layouts.length > 0}
       <ul class="layouts" aria-label="Channel layouts">
         {#each layouts as layout (layout.id)}
+          {@const rating = layoutRating(ratings, layout.id)}
           <li class="layout-row" class:editing={open && draftId === layout.id}>
             <div class="layout-body">
               <span class="layout-name">{layout.name}</span>
               <span class="layout-tuning">{layerSummary(layout, catalog)}</span>
-              {#if layoutRating(ratings, layout.id)}
-                <!-- The rating and the worst offender behind it (#117 S4) — plain information,
-                     with no verdict word and no clean/marginal/poor band. See `imdMessage`. -->
-                <span class="layout-imd"
-                  >{imdMessage(layoutRating(ratings, layout.id)!, catalog)}</span
+              {#if rating}
+                <!-- The rating and the worst offender behind it (#117 S4). Still no verdict WORD;
+                     the rating itself is now coloured against what is achievable at this layout's
+                     own pilot count (#474), and the worst-offender half is unchanged. -->
+                <span
+                  class="layout-imd"
+                  data-tone={imdTone(rating, layoutPilotCount(layout))}
+                  title={imdToneHint(rating, layoutPilotCount(layout))}
                 >
+                  <span class="imd-rating">{imdRatingLabel(rating)}</span>
+                  <span class="imd-offender"> · {imdTail(rating, catalog)}</span>
+                </span>
               {/if}
             </div>
             <div class="layout-actions">
@@ -457,7 +468,18 @@
               together.</span
             >
           {:else if draftImd}
-            <span class="imd-line" class:stale={imdPending}>{imdMessage(draftImd, catalog)}</span>
+            <span
+              class="imd-line"
+              class:stale={imdPending}
+              data-tone={imdTone(draftImd, draftSet.length)}
+              title={imdToneHint(draftImd, draftSet.length)}
+            >
+              <!-- Coloured against what is achievable for THIS many channels flying at once
+                   (#474) — the whole reason a flat band was refused. The offender half keeps the
+                   body colour: it is the fact, not the verdict. -->
+              <span class="imd-rating">{imdRatingLabel(draftImd)}</span>
+              <span class="imd-offender"> · {imdTail(draftImd, catalog)}</span>
+            </span>
           {:else if imdPending}
             <span class="imd-hint">Reading these channels…</span>
           {:else}
@@ -534,10 +556,27 @@
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
   }
-  /* Deliberately the same muted treatment whatever the rating says. Colouring it would BE the
-     verdict the RD asked us not to give. */
   .layout-imd {
     font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  /* #474: the RATING carries the colour, the offender sentence does not. The offender names three
+     real channels, and tinting it red would read as a verdict on those channels rather than on the
+     set. Tokens, never literal greens — these are the same three the whole console tones with. */
+  .imd-rating {
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  [data-tone='success'] .imd-rating {
+    color: var(--gf-success);
+  }
+  [data-tone='warn'] .imd-rating {
+    color: var(--gf-warn);
+  }
+  [data-tone='danger'] .imd-rating {
+    color: var(--gf-danger);
+  }
+  .layout-imd .imd-offender,
+  .imd-line .imd-offender {
     color: var(--gf-text-muted);
   }
   .imd {
