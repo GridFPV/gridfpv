@@ -698,3 +698,39 @@ And `pick_best_imd_set` maximises it, so it prefers sets the standard rates poor
 ## Standing rule added
 
 `CLAUDE.md` gained **"Pre-release: break things freely, and do not write migrations."** Agents were writing old-key fallbacks for data nobody has. Bounded: a record in an old shape must still *load*, data the RD cannot recreate is still preserved, and a change that drops data must say so. It names the condition that flips it — the first public release — and instructs its own deletion then.
+
+## Overnight — 2026-08-27 into 28: v0.4 cleared to two issues
+
+Closed **#355, #397, #405, #117, #421, #423, #424, #425, #428, #429, #430, #433**, plus #42/#53/#65/#78 earlier. v0.4 went 20 → 2 open (**#58** packaging, **#13** tracking).
+
+### The audit paid for itself
+
+**#423 found a lap-loss bug in the seating write.** `on_alter_heat` answers `emit_heat_data(noself=True)` — excluding the socket that wrote it — and swallows exceptions into RotorHazard's own log. A seat that did not take left RH holding a current heat with an **empty node**, whose pass gate dismisses every crossing there: that pilot's entire run lost, while GridFPV reported success.
+
+Reachable rather than theoretical — `RHData.alter_heat` resolves the slot as a bare query **not scoped to the heat**, so a stale slot id seats the pilot on a *different* heat, successfully.
+
+Only **one** migration came out of 25 emits, and the restraint is the finding: `set_race_format`'s RHAPI setter is monkey-patched to the handler it would replace, and migrating calibration would have *reintroduced* the dead write, because the same `frequencyset_alter` that pushes frequencies does not push thresholds.
+
+### The IMD metric was measuring the wrong thing
+
+`imd_score` rated MultiGP's official 6-pilot set, RotorHazard's default, and a perfect-100 Raceband-4 set all at **0** — identical to all-eight-Raceband, the worst set in FPV. The three-tone term hits exactly zero whenever two pairs share a sum, which is what a balanced set *is*. And `pick_best_imd_set` maximised it, so it preferred sets the standard rates poorly — its best 6-set had two channels **15 MHz apart**.
+
+Now a faithful IMDTabler port, reproducing its published ratings exactly. The picker independently arrives at **ETBest6 — MultiGP's official set** — from a 39-channel catalog.
+
+A second finding worth keeping: **the separation floor is 35 MHz, and 40 would have been harmful.** Raceband's native step is 37 MHz, so a 40 floor declares every adjacent Raceband pair unflyable.
+
+### e2e: 21 → 46 of 46
+
+25 failures were **three shared causes**, not 25 problems. The agent explicitly checked my guess (that a 400 was the `ActiveNodes` rename) and disproved it — no spec posts the old tag; the cause was `win_condition: BestLap` with no time limit, which is correct behaviour and a stale spec.
+
+Several fixes were judgement, not green-chasing: a `getByText(/node-0/)` **visible** assertion was inverted; a spec pinning "R1, R2" now accepts the IMD-aware picker's *better* R1+R8; a read-only guard asserting `toHaveCount(0)` on controls that no longer render was **passing for the wrong reason**.
+
+### Two corrections to my own claims
+
+**`unlimited_time` is not inverted.** I asserted it across four issues as the standing "never trust a name" example. Both RH versions read `unlimited_time == 0` as "count down" — exactly what it says. The badly-named thing is the *column* (`race_mode`). Corrected on #403, #404, #407. The lesson survives sharper: a claim about a name is itself a claim needing verification.
+
+**Making refusals visible exposed a second bug.** #433 stopped the console discarding the Director's message — which turned every raw id *in refusal prose* into a live display-rule violation that had been hidden by the client throwing the text away. `isAuthFailure` was also matching on the exact string the fix removes, so the token prompt would have gone **silently** dead.
+
+### Capture corrected its own brief
+
+I briefed #355's Capture as *"fly a lap, then capture the peak"*. Reading RH's source showed both halves wrong: the 3-second window starts **at the press**, and it **averages** `current_rssi` rather than peaking. Shipped copy is *"press it, then fly the pass"*.
