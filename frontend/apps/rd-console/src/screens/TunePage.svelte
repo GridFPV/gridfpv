@@ -141,19 +141,26 @@
   import { timerWidth } from '../lib/timerNodes.js';
   import { isOpenPracticeRound } from '../lib/heats.js';
   import {
+    CAPTURE_EXPLAINER,
     CONFIRM_TIMEOUT_MS,
     HEAT_OVERWRITES_CHANNEL,
     RSSI_MAX,
     RSSI_MIN,
     SIGNAL_POLL_MS,
+    captureButtonHint,
+    captureButtonLabel,
+    captureLabel,
+    captureTone,
     channelGate,
     channelOptions,
     clampLevel,
     duplicateChannelNodes,
     duplicateChannelNote,
+    foldCapture,
     foldPolled,
     foldPolledChannel,
     isParsableLevel,
+    idleCapture,
     markChannelSent,
     markSent,
     nodeCountOf,
@@ -163,13 +170,18 @@
     phaseTone,
     plottable,
     readoutsOf,
+    samplingCapture,
     seedChannel,
     seedThreshold,
     staleThresholdNote,
+    startingCapture,
     writeGate,
     type ApplyChannel,
     type ApplyLevels,
+    type CaptureState,
+    type CaptureThreshold,
     type ChannelState,
+    type StartCapture,
     type FetchNodes,
     type FetchSignal,
     type StopSignal,
@@ -193,6 +205,7 @@
     onevent,
     fetchSignal,
     applyLevels,
+    startCapture,
     applyChannel,
     fetchNodes,
     stopSignal,
@@ -223,6 +236,8 @@
     fetchSignal?: FetchSignal;
     /** Test/host seam for the calibration write; defaults to the session's `setCalibration`. */
     applyLevels?: ApplyLevels;
+    /** Test/host seam for the capture write (#355); defaults to the session's `captureLevel`. */
+    startCapture?: StartCapture;
     /** Test/host seam for the channel write (#413); defaults to the session's `setNodeChannel`. */
     applyChannel?: ApplyChannel;
     /** Test/host seam for the node-set read (#412); defaults to the session's `timerNodes`. */
@@ -247,6 +262,9 @@
       (async (id, body) => {
         await session.setCalibration(id, body);
       })
+  );
+  const beginCapture = $derived<StartCapture>(
+    startCapture ?? ((id, body) => session.captureLevel(id, body))
   );
   const releaseSignal = $derived<StopSignal>(stopSignal ?? ((id) => session.stopTimerSignal(id)));
   const writeChannel = $derived<ApplyChannel>(
@@ -278,6 +296,39 @@
   // sitting on a made-up default is a control the RD can drag away from without realising they
   // never saw the real one.
   let levels = $state<Record<number, { enter: ThresholdState; exit: ThresholdState }>>({});
+
+  /**
+   * The **capture** state per (node, threshold) (#355) — the RD pressing "measure it for me"
+   * instead of typing a number.
+   *
+   * Kept beside {@link levels} rather than inside it because it is a different kind of fact: a
+   * threshold's phase says where a *value the RD chose* stands against the hardware, while this says
+   * whether the timer is currently watching the gate. They also resolve independently — a capture
+   * that lands settles the level through the ordinary `adoptReported` path, exactly as if the RD had
+   * tuned in RotorHazard's own UI, because that is precisely what happened.
+   */
+  let captures = $state<Record<string, CaptureState>>({});
+  /** Per-(node, threshold) capture sequence, so a superseded press never stamps a stale verdict. */
+  const captureSeq = new Map<string, number>();
+  /**
+   * The "this should have come back by now" backstops for a capture, one per (node, threshold).
+   *
+   * The poll settles a capture in the ordinary case, exactly as it settles a write. This covers the
+   * case where the poll itself has stopped — the feed errored, the tab was hidden, the Director went
+   * away — so a capture cannot sit reading `Reading the level…` forever. Same verdict either way,
+   * through the same {@link foldCapture}.
+   */
+  const captureTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * A 4 Hz clock, advanced by the poll rather than by a timer of its own.
+   *
+   * The capture button counts its sampling window down, and the countdown is the whole reason the
+   * control is honest: RotorHazard's window opens the moment the emit lands, so an RD who does not
+   * know how long they have is an RD who flies the pass too late. `ingest` already runs on every
+   * poll, so the cadence is free — and if the feed dies the countdown freezes, which is the truth.
+   */
+  let clock = $state(Date.now());
 
   // ── The ONE value per node's CHANNEL (#413) ─────────────────────────────────────────────────
   // Same shape and same lifecycle as a threshold, for the same reason: there is no Apply button, so
@@ -325,6 +376,19 @@
    */
   function ingest(snap: TimerSignal): void {
     const now = Date.now();
+    clock = now;
+    // A capture is confirmed by exactly the same evidence a typed level is: the threshold coming
+    // back on this feed. Folded BEFORE the thresholds so a capture reads its own `previous` against
+    // the level the timer held when it started, not against one this same poll is about to adopt.
+    for (const n of snap.nodes) {
+      for (const th of ['enter', 'exit'] as const) {
+        const key = keyOf(n.node, th);
+        const held = captures[key];
+        if (!held) continue;
+        const next = foldCapture(held, th === 'enter' ? n.enter_at : n.exit_at, now);
+        if (next !== held) captures[key] = next;
+      }
+    }
     for (const n of snap.nodes) {
       const held = levels[n.node];
       if (!held) {
@@ -526,6 +590,91 @@
         );
       }, confirmMs)
     );
+  }
+
+  /**
+   * The RD pressed Capture — ask the timer to **measure** this threshold.
+   *
+   * The write half is trivial (there is no value to send); everything interesting is the window it
+   * opens. RotorHazard starts sampling the moment the emit lands and sets the threshold from what it
+   * saw three seconds later — so between accepting and settling, the page's only job is to tell the
+   * RD, unmistakably, that *now* is when to fly the pass.
+   *
+   * Gated per press, exactly as {@link commit} is: a capture ends by setting a threshold, so it
+   * moves a detector under a scored heat just as surely as a typed level does.
+   */
+  async function commitCapture(node: number, th: Threshold): Promise<void> {
+    const key = keyOf(node, th);
+    const held = captures[key] ?? idleCapture();
+    if (held.phase === 'starting' || held.phase === 'sampling' || held.phase === 'waiting') return;
+
+    const allow = canControl
+      ? writeGate(session.liveState?.phase, heatKind)
+      : ({ allowed: false, reason: NO_CONTROL } as const);
+    if (!allow.allowed) {
+      captures[key] = { ...held, phase: 'failed', detail: allow.reason };
+      return;
+    }
+
+    const seq = (captureSeq.get(key) ?? 0) + 1;
+    captureSeq.set(key, seq);
+    captures[key] = startingCapture(held);
+    const existing = captureTimers.get(key);
+    if (existing !== undefined) clearTimeout(existing);
+
+    try {
+      const dispatch = await beginCapture(timer.id, {
+        node,
+        threshold: th as CaptureThreshold
+      });
+      if (captureSeq.get(key) !== seq) return; // superseded by a newer press — drop this answer
+      const started = samplingCapture(captures[key] ?? held, dispatch, Date.now());
+      captures[key] = started;
+      armCaptureBackstop(node, th, seq, started);
+    } catch (e) {
+      if (captureSeq.get(key) !== seq) return;
+      const message = e instanceof Error ? e.message : String(e);
+      captures[key] = { ...(captures[key] ?? held), phase: 'failed', detail: message };
+      toast.error(`${nodeLabel(node)}: the ${th} capture did not start. ${message}`);
+    }
+  }
+
+  /**
+   * Arm the backstop for a capture the poll has not settled. See {@link captureTimers}: the poll is
+   * the confirmation, and this only decides the case where the poll never comes.
+   */
+  function armCaptureBackstop(
+    node: number,
+    th: Threshold,
+    seq: number,
+    started: CaptureState
+  ): void {
+    const key = keyOf(node, th);
+    const existing = captureTimers.get(key);
+    if (existing !== undefined) clearTimeout(existing);
+    captureTimers.set(
+      key,
+      setTimeout(
+        () => {
+          captureTimers.delete(key);
+          if (captureSeq.get(key) !== seq) return;
+          const held = captures[key];
+          if (!held || (held.phase !== 'sampling' && held.phase !== 'waiting')) return;
+          const snap = nodeById.get(node);
+          captures[key] = foldCapture(
+            held,
+            th === 'enter' ? snap?.enter_at : snap?.exit_at,
+            Date.now()
+          );
+        },
+        started.windowMs + started.settleMs + 250
+      )
+    );
+  }
+
+  /** Whether this node may be **captured** on at all (#412): the Director says it exists and is enabled. */
+  function captureOffered(node: number): boolean {
+    return offerable.has(node);
   }
 
   /**
@@ -856,6 +1005,8 @@
     confirmTimers.clear();
     for (const t of channelTimers.values()) clearTimeout(t);
     channelTimers.clear();
+    for (const t of captureTimers.values()) clearTimeout(t);
+    captureTimers.clear();
   });
 
   // ── Layout ──────────────────────────────────────────────────────────────────────────────────
@@ -1198,11 +1349,64 @@
                         }}
                       />
                     </div>
+                    {#if captureOffered(node)}
+                      {@const cap = captures[keyOf(node, row.th)] ?? idleCapture()}
+                      {@const busy =
+                        cap.phase === 'starting' ||
+                        cap.phase === 'sampling' ||
+                        cap.phase === 'waiting'}
+                      <!-- CAPTURE (#355). The fourth way to set this threshold, and the only one
+                           that does not need the RD to already know a number — which is exactly the
+                           RD who has a badly-tuned timer and no saved profile (#411).
+
+                           Labelled with the MECHANISM, never a bare verb: the RD had not seen this
+                           in RotorHazard and did not know it existed. "Capture" alone would not tell
+                           them the timer starts watching the instant they press, which is the one
+                           fact that decides whether their pass counts. -->
+                      <div class="capture" data-testid={`capture-${node}-${row.th}`}>
+                        <button
+                          type="button"
+                          class="capture-btn"
+                          class:sampling={cap.phase === 'sampling'}
+                          title={captureButtonHint(row.th as CaptureThreshold, nodeLabel(node))}
+                          aria-label={captureButtonHint(
+                            row.th as CaptureThreshold,
+                            nodeLabel(node)
+                          )}
+                          disabled={!canControl || !gate.allowed || busy}
+                          onclick={() => void commitCapture(node, row.th)}
+                        >
+                          {captureButtonLabel(row.th as CaptureThreshold)}
+                        </button>
+                        {#if cap.phase !== 'idle'}
+                          <!-- The countdown IS the instruction. RotorHazard's window opens at the
+                               emit, so an RD who does not know how long they have is an RD who
+                               flies the pass too late. -->
+                          <Badge tone={captureTone(cap.phase)} variant="outline">
+                            {captureLabel(cap, clock)}
+                          </Badge>
+                        {/if}
+                      </div>
+                      {#if cap.detail}
+                        <p
+                          class="capture-detail"
+                          data-testid={`capture-detail-${node}-${row.th}`}
+                          role="status"
+                        >
+                          {cap.detail}
+                        </p>
+                      {/if}
+                    {/if}
                     {#if state.detail}
                       <p class="threshold-detail" role="status">{state.detail}</p>
                     {/if}
                   </div>
                 {/each}
+                {#if captureOffered(node)}
+                  <!-- Said once per node rather than twice per threshold: it is the same mechanism
+                       for both, and repeating it would make a working surface read like a manual. -->
+                  <p class="capture-note">{CAPTURE_EXPLAINER}</p>
+                {/if}
               </div>
             {:else}
               <p class="node-waiting" role="status">
@@ -1508,6 +1712,51 @@
     min-width: 0;
     accent-color: var(--gf-accent);
     height: 1.75rem;
+  }
+  /* CAPTURE (#355). Deliberately full-width and text-labelled rather than an icon beside the
+     slider: the control has to explain itself before it is pressed, and an icon cannot. */
+  .capture {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    margin-top: var(--gf-space-2);
+  }
+  .capture-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-2);
+    background: var(--gf-surface-2);
+    color: var(--gf-text);
+    font: inherit;
+    font-size: var(--gf-font-size-1);
+    cursor: pointer;
+    text-align: left;
+  }
+  .capture-btn:hover:not(:disabled) {
+    border-color: var(--gf-accent);
+  }
+  .capture-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  /* While RotorHazard is watching, the button is the most important thing on the column: this is
+     the only window in which flying the pass does anything at all. */
+  .capture-btn.sampling {
+    border-color: var(--gf-accent);
+    box-shadow: 0 0 0 2px var(--gf-accent-soft, transparent);
+  }
+  .capture-detail {
+    margin: var(--gf-space-1) 0 0;
+    font-size: var(--gf-font-size-0);
+    color: var(--gf-warn-text, var(--gf-text-muted));
+  }
+  .capture-note {
+    margin: var(--gf-space-2) 0 0;
+    font-size: var(--gf-font-size-0);
+    color: var(--gf-text-muted);
   }
   .threshold-detail {
     margin: 0;

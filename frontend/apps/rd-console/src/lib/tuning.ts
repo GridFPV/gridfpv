@@ -37,7 +37,13 @@
  * failure class, and the one thing a tuning page must never do. {@link RSSI_MIN} and
  * {@link RSSI_MAX} clamp them away at the only place a value can enter the state.
  */
-import type { CalibrationRequest, ChannelRequest } from '@gridfpv/protocol-client';
+import type {
+  CalibrationRequest,
+  CaptureDispatch,
+  CaptureRequest,
+  CaptureThreshold,
+  ChannelRequest
+} from '@gridfpv/protocol-client';
 import type {
   ChannelCapability,
   ChannelCatalogEntry,
@@ -476,6 +482,271 @@ export function phaseTone(phase: ThresholdPhase): 'success' | 'info' | 'warn' | 
     case 'failed':
       return 'danger';
   }
+}
+
+// ── Capture: let the timer MEASURE the level (#355) ─────────────────────────────────────────────
+//
+// The three editors above all require the RD to already know a number. A fresh RD with a
+// badly-tuned timer and no saved profile (#411) does not — and GridFPV deliberately ships no
+// fabricated default, because the right level depends on craft, VTX power, antenna and gate
+// geometry, none of which GridFPV knows, and because a default would change the hardware on first
+// connect (the surprise D27's drift rule exists to prevent). Capture is the only non-guessing
+// bootstrap there is: it measures the RD's actual craft on their actual gate.
+
+/**
+ * Start a capture: `POST /timers/{id}/capture`.
+ *
+ * Resolves with the Director's dispatch when the capture was **started** — which is weaker than
+ * {@link ApplyLevels}'s "accepted", because at that moment the level does not exist anywhere yet.
+ * The dispatch is read for its `window_ms` (how long the RD has to fly the pass) and its `previous`
+ * (what the capture is replacing, and what "a new level arrived" is measured against).
+ */
+export type StartCapture = (
+  timer: TimerId,
+  body: CaptureRequest
+) => Promise<CaptureDispatch | undefined | void>;
+
+/** The capture wire shapes, re-exported for the same one-import-site reason {@link CalibrationRequest} is. */
+export type { CaptureDispatch, CaptureRequest, CaptureThreshold };
+
+/**
+ * RotorHazard's sampling window, in ms — `CAP_ENTER_EXIT_AT_MILLIS`, `3000` on v4.3.0 and v4.4.0.
+ *
+ * A **fallback only.** The Director puts the real value on every `CaptureDispatch`, and the page
+ * uses that; this is what the countdown starts on before the dispatch lands, so a press feels
+ * immediate rather than waiting a round trip to show anything.
+ */
+export const CAPTURE_WINDOW_MS = 3_000;
+
+/**
+ * How long after the window closes the page waits for the captured level before calling the capture
+ * **not landed**. Fallback for {@link CaptureDispatch.settle_ms}, for the same reason.
+ */
+export const CAPTURE_SETTLE_MS = 4_000;
+
+/**
+ * Where one node's capture of one threshold stands.
+ *
+ *  - `idle`      — nothing has been captured on this threshold this session. The resting state.
+ *  - `starting`  — the button was pressed; the Director has not answered yet.
+ *  - `sampling`  — RotorHazard is watching the gate **right now**. This is the state the RD has to
+ *                  see, because it is the only window in which flying the pass does anything.
+ *  - `waiting`   — the window has closed and the level has not come back yet.
+ *  - `captured`  — a new level arrived. It is now GridFPV's value (D27), recorded by the Director.
+ *  - `unchanged` — the window and the grace both elapsed and the timer is still reporting the same
+ *                  level. The capture did **not** land, and this says so rather than showing a
+ *                  success: RotorHazard refuses a capture (a node not answering, one already
+ *                  capturing) in complete silence, so this is the only evidence of that refusal
+ *                  there is.
+ *  - `failed`    — the request itself was refused or never arrived.
+ */
+export type CapturePhase =
+  | 'idle'
+  | 'starting'
+  | 'sampling'
+  | 'waiting'
+  | 'captured'
+  | 'unchanged'
+  | 'failed';
+
+/** Everything one (node, threshold) capture tracks. */
+export interface CaptureState {
+  /** Where the capture stands. */
+  phase: CapturePhase;
+  /** When the sampling window opened (ms), once the Director has accepted it. */
+  startedAt?: number;
+  /** How long RotorHazard is sampling for, from the dispatch. */
+  windowMs: number;
+  /** How long to keep waiting past the window before calling it not landed, from the dispatch. */
+  settleMs: number;
+  /** The level the timer was reporting when the capture started — what "changed" is measured against. */
+  previous?: number;
+  /** The level that came back, once one did. */
+  level?: number;
+  /** Why, when `phase` is `unchanged` / `failed`. Rendered on the node, never swallowed. */
+  detail?: string;
+}
+
+/** The resting state — nothing captured, nothing pending. */
+export function idleCapture(): CaptureState {
+  return { phase: 'idle', windowMs: CAPTURE_WINDOW_MS, settleMs: CAPTURE_SETTLE_MS };
+}
+
+/**
+ * The button was pressed and the Director has not answered yet. Deliberately a state of its own:
+ * the RD must not be told to fly a pass before RotorHazard has actually been asked to watch.
+ */
+export function startingCapture(state: CaptureState): CaptureState {
+  return { ...state, phase: 'starting', level: undefined, detail: undefined };
+}
+
+/**
+ * The Director accepted the capture — **the window is open now**. `dispatch` supplies the window and
+ * grace the Director read off RotorHazard's own constants, so the countdown the RD watches is the
+ * timer's, not a number this file guessed.
+ */
+export function samplingCapture(
+  state: CaptureState,
+  dispatch: CaptureDispatch | undefined | void,
+  now: number
+): CaptureState {
+  return {
+    ...state,
+    phase: 'sampling',
+    startedAt: now,
+    windowMs: dispatch?.window_ms ?? state.windowMs,
+    settleMs: dispatch?.settle_ms ?? state.settleMs,
+    previous: dispatch?.previous,
+    level: undefined,
+    detail: undefined
+  };
+}
+
+/**
+ * How many whole seconds of the sampling window are left — what the button counts down while the RD
+ * is flying. `0` once the window has closed.
+ */
+export function captureSecondsLeft(state: CaptureState, now: number): number {
+  if (state.phase !== 'sampling' || state.startedAt === undefined) return 0;
+  return Math.max(0, Math.ceil((state.startedAt + state.windowMs - now) / 1000));
+}
+
+/**
+ * Fold what a **poll** reports into a capture's state. This is the whole confirmation mechanism, and
+ * it is the same one a typed level uses: the evidence is the level coming back on
+ * `GET /timers/{id}/signal`, never the response to the write.
+ *
+ * Three rules, in order:
+ *
+ *  1. **Nothing is credited to the capture before its window closes.** A threshold that moved during
+ *     those three seconds moved for some other reason — RotorHazard has not computed a level yet —
+ *     and crediting it would report a number that was never measured.
+ *  2. After the window, a reported level that **differs** from what the timer held when the capture
+ *     started is the captured level.
+ *  3. Once the grace has also elapsed with no change, the capture did **not** land. Said plainly,
+ *     and worded for what is actually known: the level is unchanged. It could be that the pass fell
+ *     outside the window, that RotorHazard refused the capture in silence, or — rarely — that the
+ *     measurement came out at exactly the old value. All three are "nothing changed", and claiming
+ *     more than that would be inventing a diagnosis.
+ */
+/**
+ * Round a reported threshold to the integer domain a level lives in — **without** clamping.
+ *
+ * Deliberately not {@link clampLevel}. That is the rule for a value an *editor* produces, and it
+ * pulls anything outside `1..=254` to the nearest end; here the number is the **timer's own**, and a
+ * capture is decided by comparing it against `previous`, which the Director rounded the same way.
+ * Clamping only one side of that comparison would report a level that never moved as captured (a
+ * timer sitting on 255 would read as 254 against a `previous` of 255), which is a fabricated
+ * success — the one outcome this control must never produce.
+ */
+function reportedLevel(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value)) return undefined;
+  return Math.round(value);
+}
+
+export function foldCapture(
+  state: CaptureState,
+  reported: number | undefined,
+  now: number
+): CaptureState {
+  if (state.phase !== 'sampling' && state.phase !== 'waiting') return state;
+  const startedAt = state.startedAt;
+  if (startedAt === undefined) return state;
+  const elapsed = now - startedAt;
+  if (elapsed < state.windowMs) return state;
+  const holding = reportedLevel(reported);
+  if (holding !== undefined && holding !== state.previous) {
+    return { ...state, phase: 'captured', level: holding, detail: undefined };
+  }
+  if (elapsed < state.windowMs + state.settleMs) {
+    return state.phase === 'waiting' ? state : { ...state, phase: 'waiting' };
+  }
+  return {
+    ...state,
+    phase: 'unchanged',
+    level: undefined,
+    detail:
+      holding === undefined
+        ? 'The timer never reported a level for this threshold, so nothing was captured and nothing was recorded.'
+        : `The timer is still reporting ${holding}. Nothing was captured and nothing was recorded — either the pass fell outside the window, or the timer did not take the capture.`
+  };
+}
+
+/** A short arm's-length label for a capture phase, for the badge beside the button. */
+export function captureLabel(state: CaptureState, now: number): string {
+  switch (state.phase) {
+    case 'idle':
+      return '';
+    case 'starting':
+      return 'Starting…';
+    case 'sampling': {
+      const left = captureSecondsLeft(state, now);
+      return left > 0 ? `Fly the pass now — ${left}s` : 'Fly the pass now';
+    }
+    case 'waiting':
+      return 'Reading the level…';
+    case 'captured':
+      return state.level === undefined ? 'Captured' : `Captured ${state.level}`;
+    case 'unchanged':
+      return 'Nothing captured';
+    case 'failed':
+      return 'Capture failed';
+  }
+}
+
+/** The `Badge` tone a capture phase reads as: in-flight, settled, or wrong. */
+export function captureTone(
+  phase: CapturePhase
+): 'success' | 'info' | 'warn' | 'danger' | 'accent' {
+  switch (phase) {
+    case 'idle':
+    case 'starting':
+      return 'info';
+    case 'sampling':
+      return 'accent';
+    case 'waiting':
+      return 'info';
+    case 'captured':
+      return 'success';
+    case 'unchanged':
+      return 'warn';
+    case 'failed':
+      return 'danger';
+  }
+}
+
+/**
+ * What the Capture control says **before** it is pressed — the RD's own stated requirement.
+ *
+ * > *"Must be clearly labelled: the RD had never seen this in RH and did not know it existed, so it
+ * > cannot be a bare icon or an unexplained verb."*
+ *
+ * So the copy has to carry the mechanism, not the verb. Two things in it are load-bearing and were
+ * read off RotorHazard's source rather than assumed:
+ *
+ *  - **The window starts when you press.** RotorHazard arms a 3-second sampling window at the emit
+ *    (`CAP_ENTER_EXIT_AT_MILLIS`) — it does not look back at a lap you already flew. "Fly a lap,
+ *    then capture" would send the RD to the gate three seconds too late.
+ *  - **It averages, it does not peak.** `BaseHardwareInterface` sets the level to the *mean* RSSI
+ *    across the window (the enter threshold is then pulled to `node_peak_rssi - 5` if it came out
+ *    within 5 of the node's peak). Saying "captures the peak" would set a wrong expectation about
+ *    what number to expect back.
+ */
+export const CAPTURE_EXPLAINER =
+  'Capture measures the level instead of you typing one. The timer watches this gate for three seconds starting the moment you press, and sets the threshold from the signal it sees — so press it, then fly the pass. Nothing is recorded unless a new level comes back.';
+
+/** The per-threshold button label. Says what it will do, not what it is called. */
+export function captureButtonLabel(threshold: CaptureThreshold): string {
+  return threshold === 'enter' ? 'Capture Enter at from a pass' : 'Capture Exit at from a pass';
+}
+
+/**
+ * The full accessible name for one node's capture button — the friendly node name, the threshold,
+ * and the mechanism, so a screen reader hears the same explanation the sighted RD reads.
+ */
+export function captureButtonHint(threshold: CaptureThreshold, nodeName: string): string {
+  const label = threshold === 'enter' ? 'Enter at' : 'Exit at';
+  return `Capture ${label} for ${nodeName}: the timer watches this gate for three seconds from the moment you press and sets the level from the pass you fly`;
 }
 
 // ── The channel a node is listening on (#413) ───────────────────────────────────────────────────

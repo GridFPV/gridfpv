@@ -1098,6 +1098,167 @@ pub struct PendingCalibration {
     pub during_open_practice: bool,
 }
 
+/// Which of a node's two detection thresholds a **capture** is for (#355).
+///
+/// A capture is per threshold because RotorHazard's are: `cap_enter_at_btn` and `cap_exit_at_btn`
+/// are separate handlers arming separate sampling windows, and the enter branch applies a peak
+/// margin the exit branch does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "bindings/")]
+pub enum CaptureThreshold {
+    /// The **enter** threshold — the level a rising signal must pass for the gate to open.
+    Enter,
+    /// The **exit** threshold — the level a falling signal must drop back past to close it.
+    Exit,
+}
+
+impl CaptureThreshold {
+    /// The threshold's name as the console and every refusal message say it — never a raw variant.
+    pub fn label(self) -> &'static str {
+        match self {
+            CaptureThreshold::Enter => "Enter at",
+            CaptureThreshold::Exit => "Exit at",
+        }
+    }
+}
+
+/// How long RotorHazard samples once a capture starts, in milliseconds (#355).
+///
+/// `BaseHardwareInterface::CAP_ENTER_EXIT_AT_MILLIS`, verified `3000` on **v4.3.0 and v4.4.0**
+/// (the capture path is byte-identical on both). The window opens the moment the emit lands, not
+/// when the pass happens — so this is the interval the RD has to fly through the gate, and the
+/// Director hands it to the console rather than letting the console hardcode a number that could
+/// drift from RotorHazard's.
+pub const CAPTURE_WINDOW_MS: u32 = 3_000;
+
+/// How long after the sampling window closes GridFPV keeps waiting for the captured level to come
+/// back before calling the capture **not landed** (#355).
+///
+/// The capture has to survive RotorHazard's own `gevent.sleep(0.025)`, its profile write, the
+/// `node_enter_at_level` broadcast (or the driver's readback behind it), the Director's 5 Hz
+/// decimation and the console's poll. Generous enough for a slow LAN; short enough that an RD
+/// standing at the gate is not left watching a spinner over a capture RotorHazard silently refused.
+pub const CAPTURE_SETTLE_MS: u32 = 4_000;
+
+/// The body of `POST /timers/{timer_id}/capture` (#355) — have the timer **measure** one node's
+/// threshold instead of being told it.
+///
+/// The answer to the gap #411 names: a fresh RD with no saved profile and a badly-tuned timer has
+/// no starting point, and GridFPV deliberately ships no fabricated default because the right level
+/// depends on craft, VTX power, antenna and gate geometry — none of which GridFPV knows. A capture
+/// measures the RD's actual craft on their actual gate, which is the only honest way to bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct CaptureRequest {
+    /// The node to capture on, `0`-based — RotorHazard's `seat_index`, and the same index
+    /// [`NodeSignal::node`] and [`CalibrationRequest::node`] carry.
+    pub node: u32,
+    /// Which threshold to capture.
+    pub threshold: CaptureThreshold,
+}
+
+/// The answer to `POST /timers/{timer_id}/capture` (#355): **what was dispatched**, never a
+/// captured level — the level does not exist yet when this returns.
+///
+/// A capture is dispatched, then measured for [`window_ms`](CaptureDispatch::window_ms), and only
+/// then does RotorHazard have a value. So this is a `200` meaning *the capture was started*, and
+/// the fields exist to let the console count the window down and say what it is waiting for.
+///
+/// **Confirmation is by poll**, exactly as it is for [`CalibrationDispatch`]: the level arrives as
+/// [`NodeSignal::enter_at`] / [`NodeSignal::exit_at`] on a later `GET /timers/{id}/signal`, fed
+/// both by RotorHazard's end-of-capture `node_enter_at_level` broadcast and by the readback the
+/// driver fires once the window has elapsed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct CaptureDispatch {
+    /// The timer the capture was started on.
+    pub timer: TimerId,
+    /// The node it addresses, `0`-based.
+    pub node: u32,
+    /// Which threshold is being captured.
+    pub threshold: CaptureThreshold,
+    /// How long RotorHazard will sample for, in milliseconds — [`CAPTURE_WINDOW_MS`]. The RD has to
+    /// fly the pass **inside** this window, which starts now.
+    pub window_ms: u32,
+    /// How long after the window GridFPV waits for the level before reporting the capture did not
+    /// land — [`CAPTURE_SETTLE_MS`].
+    pub settle_ms: u32,
+    /// The level the timer was reporting for this threshold when the capture started, if it was
+    /// reporting one. The console shows it as what the capture is replacing, and GridFPV uses it to
+    /// tell "a new level arrived" from "nothing happened".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous: Option<u32>,
+}
+
+/// One queued **capture** the connection reconciler drains (#355) — the internal twin of
+/// [`CaptureDispatch`], and the exact shape [`PendingCalibration`] is for a typed level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCapture {
+    /// Which timer to capture on.
+    pub timer: TimerId,
+    /// The node, `0`-based.
+    pub node: u32,
+    /// Which threshold.
+    pub threshold: CaptureThreshold,
+    /// Whether the route accepted this capture **with an open-practice heat racing on the timer**
+    /// (#355, #398) — the same flag [`PendingCalibration::during_open_practice`] carries, and for
+    /// the same reason: a capture *ends by setting a threshold*, so the driver's armed-heat backstop
+    /// would otherwise drop one the route deliberately allowed.
+    pub during_open_practice: bool,
+}
+
+/// A capture GridFPV has started and is still waiting on (#355) — held in memory beside the signal
+/// rings, never persisted.
+///
+/// It exists so that a captured level becomes **GridFPV's value** (D27) rather than something read
+/// back off the timer. Nobody knows the level at request time, so the record of it cannot be
+/// written at accept time the way [`TimerRegistry::request_calibration`] writes a typed one. This
+/// is the outstanding half of that write: when the level lands on the signal feed it is copied onto
+/// [`Timer::calibration`], and when it does not, the capture is dropped and nothing is recorded —
+/// because recording a level GridFPV never saw arrive is exactly the fabricated-success failure
+/// this whole page exists to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutstandingCapture {
+    /// The node being captured, `0`-based.
+    pub node: u32,
+    /// Which threshold.
+    pub threshold: CaptureThreshold,
+    /// The level the timer reported when the capture started, if any — what "changed" is measured
+    /// against.
+    pub previous: Option<u32>,
+    /// When the capture was accepted. The sampling window runs from here.
+    started: Instant,
+}
+
+impl OutstandingCapture {
+    /// Whether this capture has had its window **and** its settle grace and is out of time.
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.started)
+            >= Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + u64::from(CAPTURE_SETTLE_MS))
+    }
+}
+
+/// How one capture ended (#355) — what [`TimerRegistry::resolve_captures`] settled.
+///
+/// `level: Some` is a capture that **landed**: the timer came back reporting a threshold it was not
+/// reporting before, and that level is now recorded on [`Timer::calibration`] as GridFPV's own
+/// (D27). `level: None` is a capture that did **not** land, and nothing was recorded — which is the
+/// honest reading of RotorHazard's silence, since it refuses a capture (a node not answering, or one
+/// already capturing) without emitting anything at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureOutcome {
+    /// The timer it ran on.
+    pub timer: TimerId,
+    /// The node, `0`-based.
+    pub node: u32,
+    /// Which threshold was being captured.
+    pub threshold: CaptureThreshold,
+    /// The level that came back, or `None` if none ever did.
+    pub level: Option<u32>,
+}
+
 /// The lowest raw centre frequency a channel write may carry (#413) — the bottom of the 5.8 GHz
 /// band the catalog lives in, matching the console's own custom-MHz guard.
 ///
@@ -1222,6 +1383,18 @@ pub struct TimerRegistry {
     /// disk, restored on boot, or turned into an [`Event`](gridfpv_events::Event); the whole map
     /// evaporates when the Director exits, which is the point.
     signal: Arc<Mutex<HashMap<TimerId, TimerSignalState>>>,
+    /// **Captures in flight** (#355), keyed by timer — the RD pressed Capture and RotorHazard is
+    /// sampling; GridFPV is waiting to see what level comes back.
+    ///
+    /// Its own lock, beside `signal` and for the same reason: nothing in here is ever written to
+    /// disk or restored on boot. A capture is a three-second intent, and a Director restart must
+    /// not resume one — the RD is not standing at the gate any more.
+    ///
+    /// **Never held across another lock.** Every method here takes this, the signal store and the
+    /// timer set in separate, non-overlapping critical sections, so there is no ordering to get
+    /// wrong. The cost is that a capture requested between two of those sections is simply handled
+    /// on the next pass, which at 5 Hz is not a cost at all.
+    captures: Arc<Mutex<HashMap<TimerId, Vec<OutstandingCapture>>>>,
 }
 
 /// The guarded interior: the timer map and where `timers.json` lives.
@@ -1269,6 +1442,16 @@ struct Registry {
     /// ([`TimerRegistry::take_channel_requests`]), and never persisted — a Director restart must
     /// not retune whatever timer happens to be plugged in now.
     channel_requests: Vec<PendingChannel>,
+    /// **Pending captures** (#355), in request order — the RD pressed Capture on a node and the
+    /// `cap_enter_at_btn` / `cap_exit_at_btn` emit has not reached a live socket yet.
+    ///
+    /// The same hand-off queue as [`calibration_requests`](Registry::calibration_requests), with
+    /// one deliberate difference: it is **not coalesced**. A repeated capture is not a repeated
+    /// value, it is a second measurement the RD asked for; and RotorHazard refuses a capture that
+    /// is already running on that node/threshold, which is what
+    /// [`TimerRegistry::request_capture`] checks before ever queueing a second one. Never
+    /// persisted — a Director restart must not fire a capture at whatever timer is plugged in now.
+    capture_requests: Vec<PendingCapture>,
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1633,8 +1816,10 @@ impl TimerRegistry {
                 restart_requests: Vec::new(),
                 calibration_requests: Vec::new(),
                 channel_requests: Vec::new(),
+                capture_requests: Vec::new(),
             })),
             signal: Arc::new(Mutex::new(HashMap::new())),
+            captures: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -2111,6 +2296,302 @@ impl TimerRegistry {
     /// stays on [`Timer::calibration`] regardless.
     pub fn take_calibration_requests(&self) -> Vec<PendingCalibration> {
         std::mem::take(&mut self.write().calibration_requests)
+    }
+
+    /// **Start a capture** on one node's threshold (#355), returning what was dispatched.
+    ///
+    /// The Tune page's third write, and the only one that does not carry a number. The RD presses
+    /// Capture, RotorHazard samples this node for [`CAPTURE_WINDOW_MS`] and sets the threshold from
+    /// what it saw — so this is GridFPV asking the timer to *measure* a level rather than telling it
+    /// one.
+    ///
+    /// # Why this exists at all
+    ///
+    /// A fresh RD with no saved profile (#411) and a badly-tuned timer has no starting point, and
+    /// GridFPV deliberately ships no fabricated default: the right threshold depends on craft, VTX
+    /// power, antenna and gate geometry, and a made-up number would also *change the hardware on
+    /// first connect*, which is the surprise D27's drift rule exists to prevent. A capture measures
+    /// the RD's actual craft on their actual gate. It is the only non-guessing bootstrap there is.
+    ///
+    /// # D27: the captured level becomes GridFPV's value — but only once it exists
+    ///
+    /// [`request_calibration`](Self::request_calibration) records its level on
+    /// [`Timer::calibration`] at accept time, because it *has* one. A capture does not: the value
+    /// is three seconds in the future and nobody, GridFPV included, knows what it will be. So the
+    /// record is deferred to [`resolve_captures`](Self::resolve_captures), which writes it the
+    /// moment the level is actually observed — and writes **nothing** if it never is. Recording a
+    /// level GridFPV never saw arrive would be the fabricated success this page exists to remove.
+    ///
+    /// # Refused
+    ///
+    /// Everything [`request_calibration`](Self::request_calibration) refuses — an unknown id, a
+    /// non-RotorHazard timer, a timer that is not connected, a `node` beyond the timer's width, and
+    /// a node the RD has **disabled** (#412) — plus one more:
+    ///
+    /// * **A capture of this threshold is already running on this node.** RotorHazard's
+    ///   `start_capture_enter_at_level` returns `False` in exactly that case and emits nothing at
+    ///   all, so a second press would be accepted here, ignored there, and shown as started. That is
+    ///   a fourth silent write (#423), and it is refused instead.
+    ///
+    /// As with the calibration write, the **race-phase refusal** is not here — it needs the event
+    /// log, so it lives in the route — and `during_open_practice` is that route's answer carried
+    /// through to the driver's own backstop.
+    pub fn request_capture(
+        &self,
+        id: &TimerId,
+        request: &CaptureRequest,
+        during_open_practice: bool,
+    ) -> Result<CaptureDispatch, TimerError> {
+        // 1. Validate against the timer set. Read-only, and the guard is dropped before anything
+        //    else is locked — see `captures`' note: no lock here is ever held across another.
+        {
+            let reg = self.read();
+            let timer = reg
+                .timers
+                .get(id)
+                .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+            if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
+                return Err(TimerError(format!(
+                    "{:?} is not a RotorHazard timer — there is no detector to capture from",
+                    timer.name
+                )));
+            }
+            if timer.status != TimerStatus::Connected {
+                return Err(TimerError(format!(
+                    "{:?} is not connected — connect it before capturing a level",
+                    timer.name
+                )));
+            }
+            if request.node >= timer.node_width() {
+                return Err(TimerError(format!(
+                    "{:?} has {} nodes — there is no {} to capture on",
+                    timer.name,
+                    timer.node_width(),
+                    Timer::node_label(request.node)
+                )));
+            }
+            if !timer.node_enabled(request.node) {
+                return Err(TimerError(format!(
+                    "{} is disabled on {:?} — enable it before capturing a level",
+                    Timer::node_label(request.node),
+                    timer.name
+                )));
+            }
+        }
+
+        // 2. What the timer is reporting for this threshold right now. Read from the signal feed —
+        //    evidence about the timer, used only to tell "a new level arrived" from "nothing
+        //    happened", never adopted as GridFPV's value.
+        let previous = self.reported_level(id, request.node, request.threshold);
+
+        // 3. Claim the capture. Check-and-insert under one lock so two presses a millisecond apart
+        //    cannot both start a capture RotorHazard would refuse the second of.
+        let now = Instant::now();
+        {
+            let mut captures = self.capture_store();
+            let outstanding = captures.entry(id.clone()).or_default();
+            // Drop anything that has already run out of time — the resolver prunes these too, but a
+            // press arriving between two resolver passes must not be refused by a ghost.
+            outstanding.retain(|c| !c.expired(now));
+            if outstanding
+                .iter()
+                .any(|c| c.node == request.node && c.threshold == request.threshold)
+            {
+                return Err(TimerError(format!(
+                    "{} is already capturing its {} level — wait for that capture to finish",
+                    Timer::node_label(request.node),
+                    request.threshold.label()
+                )));
+            }
+            outstanding.push(OutstandingCapture {
+                node: request.node,
+                threshold: request.threshold,
+                previous,
+                started: now,
+            });
+        }
+
+        // 4. Queue the emit. NOT coalesced (see `Registry::capture_requests`): a second capture is a
+        //    second measurement, not a restatement of a value — and step 3 has already refused the
+        //    one case where two would collide.
+        {
+            let mut reg = self.write();
+            reg.capture_requests.push(PendingCapture {
+                timer: id.clone(),
+                node: request.node,
+                threshold: request.threshold,
+                during_open_practice,
+            });
+        }
+
+        Ok(CaptureDispatch {
+            timer: id.clone(),
+            node: request.node,
+            threshold: request.threshold,
+            window_ms: CAPTURE_WINDOW_MS,
+            settle_ms: CAPTURE_SETTLE_MS,
+            previous,
+        })
+    }
+
+    /// Take every pending capture (#355), leaving the queue empty — the connection reconciler's
+    /// drain, and the twin of [`take_calibration_requests`](Self::take_calibration_requests).
+    ///
+    /// Handed out **exactly once**. If no live connection is found the capture is dropped and
+    /// logged, never re-queued: a capture that fires minutes later would sample an empty gate and
+    /// set a threshold off the noise floor, which is worse than not capturing at all. The RD sees it
+    /// as a capture that never comes back with a level, which is the honest outcome.
+    pub fn take_capture_requests(&self) -> Vec<PendingCapture> {
+        std::mem::take(&mut self.write().capture_requests)
+    }
+
+    /// Whether a capture is running on `id` right now (#355) — read by the driver so it knows to
+    /// fire the post-window threshold readback.
+    pub fn capture_in_flight(&self, id: &TimerId) -> bool {
+        let now = Instant::now();
+        self.capture_store()
+            .get(id)
+            .is_some_and(|list| list.iter().any(|c| !c.expired(now)))
+    }
+
+    /// **Settle every capture that has run its course** (#355) — called on the reconciler's tick.
+    ///
+    /// This is the half of a capture that makes it a *GridFPV* value rather than an observation.
+    /// For each outstanding capture whose sampling window has closed:
+    ///
+    /// * the timer is reporting a level, and it **differs** from what it was reporting when the
+    ///   capture started ⇒ the capture landed. The level is recorded on [`Timer::calibration`]
+    ///   (D27 — written the same way a typed one is, and persisted), and the capture is done.
+    /// * the settle window has also elapsed and the level has **not** changed ⇒ the capture did not
+    ///   land. Nothing is recorded, and the capture is dropped. RotorHazard refuses a capture
+    ///   silently — a node that is not answering, or one already capturing — so "no new level" is
+    ///   the only evidence of that refusal there is, and inventing a success here would be the
+    ///   fourth silently-ignored write (#423).
+    ///
+    /// A capture is deliberately **not** resolved before its window closes, even if a level changes
+    /// during it: a threshold that moved in those three seconds moved for some other reason, and
+    /// crediting it to the capture would report a number RotorHazard had not measured yet.
+    ///
+    /// Returns what was settled, so the caller can log it. Takes each of its three locks in a
+    /// separate critical section (see [`TimerRegistry::captures`]).
+    pub fn resolve_captures(&self) -> Vec<CaptureOutcome> {
+        let now = Instant::now();
+
+        // 1. What is outstanding, per timer. Cloned out; the lock is not held past this block.
+        let pending: Vec<(TimerId, OutstandingCapture)> = {
+            let captures = self.capture_store();
+            captures
+                .iter()
+                .flat_map(|(timer, list)| list.iter().map(|c| (timer.clone(), c.clone())))
+                .collect()
+        };
+        if pending.is_empty() {
+            return Vec::new();
+        }
+
+        // 2. Decide each one against the level the timer is reporting now.
+        let mut settled: Vec<CaptureOutcome> = Vec::new();
+        for (timer, capture) in pending {
+            if now.duration_since(capture.started)
+                < Duration::from_millis(u64::from(CAPTURE_WINDOW_MS))
+            {
+                continue; // still sampling — the RD is mid-pass.
+            }
+            let reported = self.reported_level(&timer, capture.node, capture.threshold);
+            match reported {
+                Some(level) if Some(level) != capture.previous => settled.push(CaptureOutcome {
+                    timer,
+                    node: capture.node,
+                    threshold: capture.threshold,
+                    level: Some(level),
+                }),
+                _ if capture.expired(now) => settled.push(CaptureOutcome {
+                    timer,
+                    node: capture.node,
+                    threshold: capture.threshold,
+                    level: None,
+                }),
+                _ => {}
+            }
+        }
+        if settled.is_empty() {
+            return Vec::new();
+        }
+
+        // 3. Record the ones that landed (D27), then persist once for the whole batch.
+        let landed: Vec<&CaptureOutcome> = settled.iter().filter(|o| o.level.is_some()).collect();
+        if !landed.is_empty() {
+            let mut reg = self.write();
+            for outcome in &landed {
+                let Some(timer) = reg.timers.get_mut(&outcome.timer) else {
+                    continue;
+                };
+                let level = outcome.level;
+                match timer
+                    .calibration
+                    .iter_mut()
+                    .find(|c| c.node == outcome.node)
+                {
+                    Some(existing) => match outcome.threshold {
+                        CaptureThreshold::Enter => existing.enter_at = level,
+                        CaptureThreshold::Exit => existing.exit_at = level,
+                    },
+                    None => {
+                        timer.calibration.push(match outcome.threshold {
+                            CaptureThreshold::Enter => NodeCalibration {
+                                node: outcome.node,
+                                enter_at: level,
+                                exit_at: None,
+                            },
+                            CaptureThreshold::Exit => NodeCalibration {
+                                node: outcome.node,
+                                enter_at: None,
+                                exit_at: level,
+                            },
+                        });
+                        timer.calibration.sort_by_key(|c| c.node);
+                    }
+                }
+            }
+            // Best-effort, exactly as the calibration write's persist is: the in-memory record is
+            // already correct, and a disk failure must not lose the level the RD just flew for.
+            let _ = reg.persist();
+        }
+
+        // 4. Retire them. Re-locked rather than held: a capture started while step 3 was writing is
+        //    simply left alone, which is what we want.
+        {
+            let mut captures = self.capture_store();
+            for outcome in &settled {
+                if let Some(list) = captures.get_mut(&outcome.timer) {
+                    list.retain(|c| !(c.node == outcome.node && c.threshold == outcome.threshold));
+                }
+            }
+            captures.retain(|_, list| !list.is_empty());
+        }
+
+        settled
+    }
+
+    /// The level the timer is **reporting** for one node/threshold on the live signal feed, rounded
+    /// to the integer domain a threshold actually lives in.
+    ///
+    /// Evidence about the timer, never GridFPV's store (D27) — it is used to tell whether a capture
+    /// produced a new level, and for nothing else.
+    fn reported_level(&self, id: &TimerId, node: u32, threshold: CaptureThreshold) -> Option<u32> {
+        let store = self.signal_store();
+        let ring = store.get(id)?.nodes.get(node as usize)?;
+        let level = match threshold {
+            CaptureThreshold::Enter => ring.latest.enter_at,
+            CaptureThreshold::Exit => ring.latest.exit_at,
+        }?;
+        (level.is_finite() && level >= 0.0).then(|| level.round() as u32)
+    }
+
+    fn capture_store(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<TimerId, Vec<OutstandingCapture>>> {
+        self.captures.lock().expect("timer capture lock poisoned")
     }
 
     /// **Set a node's channel** on `id` (#413), returning what was dispatched.

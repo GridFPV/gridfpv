@@ -20,6 +20,8 @@
 import type {
   ActiveEvent,
   CalibrationRequest,
+  CaptureDispatch,
+  CaptureRequest,
   ChangeEnvelope,
   ChannelCatalogEntry,
   ChannelDispatch,
@@ -628,6 +630,66 @@ export async function setCalibration(
       .catch(() => '');
     throw new Error(detail || `The Director refused the change (HTTP ${resp.status}).`);
   }
+}
+
+/**
+ * Start a **capture** of one node's threshold (`POST /timers/{id}/capture`) — issue #355.
+ *
+ * The Tune page's third write, and the only one that does not carry a number: RotorHazard measures
+ * the level instead of being told it. That is the honest bootstrap for a timer nobody has ever
+ * tuned — GridFPV ships no fabricated default because the right level depends on craft, VTX power,
+ * antenna and gate geometry (#411), so the only non-guessing starting point is the RD's own craft
+ * flown through their own gate.
+ *
+ * **The window starts now.** RotorHazard samples for `window_ms` (3000 on every version we support)
+ * from the moment the emit lands and averages what it sees — it does not look back at a lap already
+ * flown, and it does not take the peak. The dispatch is returned (unlike {@link setCalibration}'s)
+ * precisely so the caller can count that window down and tell the RD to fly *now*.
+ *
+ * **The response is a dispatch, not a readback** — one step stronger than {@link setCalibration}'s,
+ * because the level does not exist yet when this resolves. The captured level arrives as
+ * `NodeSignal.enter_at` / `exit_at` on a later `GET /timers/{id}/signal`. A capture whose level
+ * never comes back did not land, and must be reported as such rather than shown as a success:
+ * RotorHazard refuses a capture (a node not answering, one already capturing) in complete silence.
+ *
+ * RD-gated exactly like {@link setCalibration}, so a token-gated Director answers **401** without
+ * one. The Director **refuses** (a **400**) for a Mock, a timer that is not connected, a node the
+ * timer does not have or the RD has disabled, a scored heat in progress, or a capture of that
+ * threshold already running on that node; an unknown id answers **404**.
+ */
+export async function captureLevel(
+  baseUrl: string,
+  id: TimerId,
+  request: CaptureRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CaptureDispatch> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'content-type': 'application/json'
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/capture`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request)
+  });
+  if (!resp.ok) {
+    // Same rule as `setCalibration`: the Director's typed refusal is already phrased for the RD and
+    // names the timer and the node by their FRIENDLY names. Throw it verbatim — a raw timer id must
+    // never reach a user (repo display rule).
+    const detail = await resp
+      .json()
+      .then((body: unknown) =>
+        typeof body === 'object' && body !== null && 'message' in body
+          ? String((body as { message: unknown }).message)
+          : ''
+      )
+      .catch(() => '');
+    throw new Error(detail || `The Director refused the capture (HTTP ${resp.status}).`);
+  }
+  return (await resp.json()) as CaptureDispatch;
 }
 
 /**

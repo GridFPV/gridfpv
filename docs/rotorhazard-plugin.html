@@ -173,6 +173,72 @@
       </ul>
     </div>
 
+    <div class="callout" id="capture-route">
+      <p>
+        <strong>Capture — letting the timer <em>measure</em> the level (#355).</strong> The write
+        above needs the RD to already know a number. An RD with a badly-tuned timer and no saved
+        profile (#411) does not, and
+        Grid deliberately ships <em>no</em> fabricated default — the right level depends on craft, VTX
+        power, antenna and gate geometry, and a default would also change the hardware on first
+        connect, the surprise D27's drift rule exists to prevent. Capture is the only non-guessing
+        bootstrap: it measures the RD's own craft on their own gate.
+      </p>
+      <p>
+        Also stock RotorHazard, also no plugin, and verified <strong>byte-identical on v4.3.0 and
+        v4.4.0</strong> across <code>server.py</code>, <code>calibration.py</code> and
+        <code>interface/BaseHardwareInterface.py</code>:
+      </p>
+      <ul>
+        <li><strong>Events:</strong> <code>cap_enter_at_btn</code> and
+        <code>cap_exit_at_btn</code> (<code>server.py::on_cap_enter_at_btn</code> /
+        <code>on_cap_exit_at_btn</code>).</li>
+        <li><strong>Payload:</strong> <code>{ node_index }</code>, the 0-based seat index.
+        <strong>Note the key.</strong> It is <code>node_index</code> here and <code>node</code> on
+        <code>set_enter_at_level</code> — same socket, same node, two names. A wrong key raises a
+        <code>KeyError</code> that <code>@catchLogExcWithDBWrapper</code> swallows into the log, so the
+        emit “succeeds” and nothing is captured.</li>
+        <li><strong>No auth</strong>, like every other socket handler in that file.</li>
+        <li><strong>No preconditions.</strong> It needs no race, no crossing and no seated pilot — it
+        works on a wholly idle timer, which is the entire point.</li>
+      </ul>
+      <p><strong>What it actually does — which is not what the name suggests:</strong></p>
+      <ul>
+        <li><strong>The window opens at the emit, not at the pass.</strong>
+        <code>start_capture_enter_at_level</code> arms a sampling window of
+        <code>CAP_ENTER_EXIT_AT_MILLIS</code> = <strong>3000&nbsp;ms</strong> starting <em>now</em>.
+        RotorHazard does not look back at a lap already flown. Any UI wording along the lines of “fly a
+        lap, then capture” sends the RD to the gate three seconds too late — the control has to say
+        that the timer starts watching the moment it is pressed.</li>
+        <li><strong>It averages; it does not take the peak.</strong> Over the window the RSSI loop
+        accumulates <code>current_rssi</code> and a sample count, and at the deadline the level becomes
+        <code>round(total / count)</code>. For the <em>enter</em> threshold only there is then one
+        correction: if <code>node_peak_rssi - level &lt; ENTER_AT_PEAK_MARGIN</code> (5), the level is
+        pulled down to <code>node_peak_rssi - 5</code>. The exit branch has no such margin.</li>
+        <li><strong>It is refused in complete silence.</strong>
+        <code>start_capture_*_at_level</code> returns <code>False</code> — emitting nothing — when a
+        capture of that threshold is <em>already running</em> on that node, or when the node's
+        <code>api_valid_flag</code> is clear (nothing answering at that seat). An out-of-range
+        <code>node_index</code> is an <code>IndexError</code> the exception wrapper logs and drops.
+        This is the same hazard as the three writes RotorHazard silently ignored
+        (#423), so Grid refuses a
+        second capture of an in-flight threshold itself rather than dispatching one that will vanish,
+        and treats “no new level came back” as a failure rather than a success.</li>
+        <li><strong>This one <em>does</em> echo.</strong> Unlike the direct level set: when the window
+        closes, <code>new_enter_or_exit_at_callback</code> calls
+        <code>calibration.set_enter_at_level</code> (profile row, hardware push,
+        <code>Evt.ENTER_AT_LEVEL_SET</code>) <em>and</em> <code>rhui.emit_enter_at_level(node)</code>,
+        broadcasting <code>node_enter_at_level</code> <code>{ node_index, level }</code> roughly
+        3.0–3.1&nbsp;s after the emit. Grid folds that into the tune tap, and <em>also</em> fires the
+        ordinary <code>enter_and_exit_at_levels</code> readback once the window has elapsed — a gate's
+        calibration is not a thing to stake on one unsolicited broadcast.</li>
+        <li><strong>Confirmation is still by poll.</strong> Either way the level reaches the console as
+        <code>NodeSignal.enter_at</code> / <code>exit_at</code> on <code>GET /timers/{id}/signal</code>,
+        exactly as a typed level does. Grid records a captured level on <code>Timer.calibration</code>
+        <em>only</em> once it has actually observed it (D27): recording one it never saw arrive would be
+        the fabricated success this whole path exists to remove.</li>
+      </ul>
+    </div>
+
     <h2>3. The Grid&harr;plugin protocol</h2>
     <p>
       A versioned <code>gridfpv_*</code> event namespace the plugin registers on RH's existing socket.io
