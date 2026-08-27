@@ -261,6 +261,135 @@ describe('TimersPage (app-level timer registry)', () => {
     );
   });
 
+  it('ticks a whole band from its header box, tri-state, in catalog order (#429)', async () => {
+    const created: Timer = {
+      id: 'flex-b',
+      name: 'Band',
+      kind: { Mock: { laps: 3, lap_ms: 30000 } },
+      status: 'Ready',
+      channel_capability: 'Flexible',
+      node_count: 8,
+      available_channels: [5658, 5695],
+      manual_connect: false,
+      calibration: [],
+      disabled_nodes: []
+    };
+    const listTimersImpl = vi.fn(async () => [MOCK]);
+    const createTimerImpl = vi.fn(async () => created);
+    const listChannelsImpl = vi.fn(async () => CATALOG);
+    const { session } = makeTestSession({ listTimersImpl, createTimerImpl, listChannelsImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Mock');
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
+    const name = (await screen.findByLabelText('Timer name')) as HTMLInputElement;
+    await fireEvent.input(name, { target: { value: 'Band' } });
+
+    const box = (await screen.findByLabelText('All Raceband channels')) as HTMLInputElement;
+    const r1 = screen.getByLabelText('Raceband R1, 5658 MHz') as HTMLInputElement;
+    const r2 = screen.getByLabelText('Raceband R2, 5695 MHz') as HTMLInputElement;
+    const f4 = screen.getByLabelText('Fatshark F4, 5800 MHz') as HTMLInputElement;
+
+    // Nothing chosen: unchecked, and NOT indeterminate.
+    expect(box.checked).toBe(false);
+    expect(box.indeterminate).toBe(false);
+
+    // One channel of the band: the box goes indeterminate — a partial band is a normal state.
+    await fireEvent.click(r1);
+    await waitFor(() => expect(box.indeterminate).toBe(true));
+    expect(box.checked).toBe(false);
+
+    // Clicking an indeterminate box FILLS the band; it does not wipe the RD's subset. Other bands
+    // are untouched.
+    await fireEvent.click(box);
+    await waitFor(() => expect(r2.checked).toBe(true));
+    expect(r1.checked).toBe(true);
+    expect(f4.checked).toBe(false);
+    expect(box.checked).toBe(true);
+    expect(box.indeterminate).toBe(false);
+
+    // A full band clears on the next click…
+    await fireEvent.click(box);
+    await waitFor(() => expect(r1.checked).toBe(false));
+    expect(r2.checked).toBe(false);
+    // …and fills again from empty.
+    await fireEvent.click(box);
+    await waitFor(() => expect(r1.checked).toBe(true));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Add timer' }));
+    await waitFor(() => expect(createTimerImpl).toHaveBeenCalledTimes(1));
+    expect(createTimerImpl).toHaveBeenCalledWith(
+      expect.anything(),
+      // Catalog order, unchanged by the band toggle.
+      expect.objectContaining({ available_channels: [5658, 5695] }),
+      expect.anything()
+    );
+  });
+
+  it('a Fixed timer’s band box ticks only that timer’s DECLARED channels (#429)', async () => {
+    // The picker is already narrowed to `Fixed.channels`; the band box must tick from that, or it
+    // would select channels the timer refuses. Raceband R2 is in the catalog but not declared.
+    const fixed: Timer = {
+      id: 'fix-2',
+      name: 'Fixed RH',
+      kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
+      status: 'Configured',
+      channel_capability: { Fixed: { channels: [5658, 5800] } },
+      node_count: 2,
+      available_channels: [],
+      manual_connect: false,
+      calibration: [],
+      disabled_nodes: []
+    };
+    const listTimersImpl = vi.fn(async () => [MOCK, fixed]);
+    const updateTimerImpl = vi.fn(async () => fixed);
+    const listChannelsImpl = vi.fn(async () => CATALOG);
+    const { session } = makeTestSession({ listTimersImpl, updateTimerImpl, listChannelsImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Fixed RH');
+    const list = screen.getByRole('list', { name: 'Configured timers' });
+    const row = within(list).getAllByRole('listitem')[1];
+    await fireEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+
+    const box = (await screen.findByLabelText('All Raceband channels')) as HTMLInputElement;
+    // R2 is not offered at all, so the Raceband band here is R1 alone.
+    expect(screen.queryByLabelText('Raceband R2, 5695 MHz')).toBeNull();
+
+    await fireEvent.click(box);
+    // One declared channel = the whole offered band: checked outright, never stuck indeterminate.
+    await waitFor(() => expect(box.checked).toBe(true));
+    expect(box.indeterminate).toBe(false);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(updateTimerImpl).toHaveBeenCalledTimes(1));
+    expect(updateTimerImpl).toHaveBeenCalledWith(
+      expect.anything(),
+      'fix-2',
+      expect.objectContaining({ available_channels: [5658] }),
+      expect.anything()
+    );
+  });
+
+  it('offers no “select all bands” — the pool a Flexible timer draws from stays deliberate', async () => {
+    // Not an oversight (#429): the allowed set is what the IMD picker chooses from when a round
+    // names no layout, so a needlessly wide pool makes the automatic answer worse.
+    const listTimersImpl = vi.fn(async () => [MOCK]);
+    const listChannelsImpl = vi.fn(async () => CATALOG);
+    const { session } = makeTestSession({ listTimersImpl, listChannelsImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Mock');
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
+    await screen.findByLabelText('All Raceband channels');
+
+    const picker = screen.getByRole('group', { name: 'Available channels' });
+    const boxes = within(picker).getAllByRole('checkbox') as HTMLInputElement[];
+    // Two bands + three channels; no fourth "all" control above them.
+    expect(boxes).toHaveLength(5);
+    expect(within(picker).queryByLabelText(/^All channels$/)).toBeNull();
+  });
+
   it('removes a non-built-in timer', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
     const deleteTimerImpl = vi.fn(async () => undefined as unknown as void);
