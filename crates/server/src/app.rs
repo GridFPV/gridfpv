@@ -5727,11 +5727,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_capture_that_does_not_land_is_reported_and_records_nothing() {
-        // RotorHazard refuses a capture — a node that is not answering, or one already capturing —
-        // by returning False and emitting nothing at all. So an unchanged level is the ONLY evidence
-        // of that refusal there is, and inventing a recorded level to fill the gap would be the
-        // fabricated success this whole control exists to avoid.
+    async fn a_capture_that_changes_nothing_records_nothing_and_claims_nothing() {
+        // Inventing a recorded level to fill the gap would be the fabricated success this whole
+        // control exists to avoid — so nothing is recorded, and that half is unchanged.
+        //
+        // What #446 changed is the *claim*. RotorHazard refuses a capture — a node that is not
+        // answering, or one already capturing — by returning False and emitting nothing at all, so
+        // this was reported as a refusal. But a capture that measured the same number looks exactly
+        // the same from here, and on a stable gate (or a second press) that is an ordinary result.
+        // GridFPV cannot tell them apart, so it says so instead of picking one.
         let (registry, _state, _) = state_with(vec![]);
         let rh = connected_rh_timer_selected_by_the_event(&registry);
         report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
@@ -5754,11 +5758,23 @@ mod tests {
         assert_eq!(settled.len(), 1);
         assert_eq!(
             settled[0].level, None,
-            "a capture that produced no new level must be reported as such, never as a success"
+            "a capture that produced no new level must never be reported as a success"
+        );
+        assert_eq!(
+            settled[0].resolution,
+            crate::timers::CaptureResolution::Unchanged,
+            "…and must not be reported as a REFUSAL either (#446): that is a claim about \
+             RotorHazard GridFPV has no evidence for"
+        );
+        assert_eq!(
+            settled[0].reported,
+            Some(90),
+            "the level the gate is detecting against travels with the outcome, so the operator \
+             line can say what it is"
         );
         assert!(
             registry.timers().calibration(&rh.id).is_empty(),
-            "nothing may be recorded for a capture that did not land"
+            "nothing may be recorded for a level GridFPV cannot attribute to the capture"
         );
         // And it is retired, so a later capture on the same threshold is not refused by a ghost.
         assert!(registry.timers().resolve_captures().is_empty());

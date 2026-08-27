@@ -1245,13 +1245,47 @@ impl OutstandingCapture {
     }
 }
 
-/// How one capture ended (#355) — what [`TimerRegistry::resolve_captures`] settled.
+/// **How much GridFPV can honestly say about a finished capture** (#355, #446).
 ///
-/// `level: Some` is a capture that **landed**: the timer came back reporting a threshold it was not
-/// reporting before, and that level is now recorded on [`Timer::calibration`] as GridFPV's own
-/// (D27). `level: None` is a capture that did **not** land, and nothing was recorded — which is the
-/// honest reading of RotorHazard's silence, since it refuses a capture (a node not answering, or one
-/// already capturing) without emitting anything at all.
+/// A capture is confirmed by *watching the level change*, because that is the only signal there is:
+/// RotorHazard refuses a capture (a node that is not answering, or one already capturing) by
+/// returning `False` and emitting nothing at all. That works, but it leaves two states that are not
+/// failures and were being reported as one — which is what #446 is.
+///
+/// Three outcomes, then, because there are three things that actually happen. The boundary between
+/// them is not "did it work" but **"what did GridFPV see"**, and each says exactly that much.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureResolution {
+    /// The timer came back reporting a level it was **not** reporting when the capture started.
+    /// The capture measured something, and that level is now recorded on [`Timer::calibration`] as
+    /// GridFPV's own (D27).
+    Measured,
+    /// The timer is reporting the **same** level it reported before the capture.
+    ///
+    /// Not a failure, and not a success: GridFPV cannot tell a capture that measured the same
+    /// number — an ordinary outcome on a stable gate with an unchanged craft, and the usual result
+    /// of capturing twice in a row — from one RotorHazard refused in silence. Reported as the
+    /// ambiguity it is, which is the whole of #446's first false negative: the RD used to be told
+    /// their capture produced no level and that RotorHazard had refused it, for a threshold that is
+    /// sitting at exactly what they flew for.
+    ///
+    /// **Nothing is recorded.** The level GridFPV would write is one it cannot attribute to the
+    /// capture, and writing it would be adopting a readback as config — the one thing D27 forbids.
+    /// The RD sees the level on the Tune page regardless; it comes off the same feed.
+    Unchanged,
+    /// GridFPV could **not read a level at all** across the capture's window — the tune feed
+    /// carried nothing for this node/threshold.
+    ///
+    /// The other half of #446: this used to be reported identically to a refusal, complete with
+    /// "RotorHazard refuses a capture silently", which is a claim about RotorHazard that GridFPV is
+    /// in no position to make. It means the link dropped, the node never answered, or the tune
+    /// subscription was never open — GridFPV was not watching, so it says so. (A subscription that
+    /// merely *lapses* mid-capture no longer causes this: an outstanding capture holds the tap open
+    /// on its own, so the confirming readback still arrives.) Nothing is recorded.
+    Unobserved,
+}
+
+/// How one capture ended (#355, #446) — what [`TimerRegistry::resolve_captures`] settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureOutcome {
     /// The timer it ran on.
@@ -1260,10 +1294,30 @@ pub struct CaptureOutcome {
     pub node: u32,
     /// Which threshold was being captured.
     pub threshold: CaptureThreshold,
-    /// The level that came back, or `None` if none ever did.
+    /// The level GridFPV **recorded** on [`Timer::calibration`] — `Some` only for
+    /// [`CaptureResolution::Measured`], because that is the only outcome GridFPV can attribute to
+    /// the capture. `None` is never a claim that the capture failed; read
+    /// [`resolution`](CaptureOutcome::resolution) for that.
     pub level: Option<u32>,
+    /// What the timer is **reporting** for this threshold now, whether or not it changed. Evidence
+    /// about the timer (D27), carried so the operator line can say what the gate is actually
+    /// detecting against even when GridFPV recorded nothing.
+    pub reported: Option<u32>,
+    /// How much GridFPV can honestly say happened.
+    pub resolution: CaptureResolution,
 }
 
+impl CaptureOutcome {
+    /// Whether GridFPV **saw the capture take effect** — a level it did not have before.
+    ///
+    /// Deliberately the narrow reading: [`Unchanged`](CaptureResolution::Unchanged) is not `true`
+    /// here (nothing was proven, and nothing was recorded) and it is not a failure either, which is
+    /// why callers should match on [`resolution`](CaptureOutcome::resolution) rather than treat
+    /// this as a boolean verdict.
+    pub fn measured(&self) -> bool {
+        self.resolution == CaptureResolution::Measured
+    }
+}
 /// The lowest raw centre frequency a channel write may carry (#413) — the bottom of the 5.8 GHz
 /// band the catalog lives in, matching the console's own custom-MHz guard.
 ///
@@ -2532,19 +2586,26 @@ impl TimerRegistry {
             .is_some_and(|list| list.iter().any(|c| !c.expired(now)))
     }
 
-    /// **Settle every capture that has run its course** (#355) — called on the reconciler's tick.
+    /// **Settle every capture that has run its course** (#355, #446) — called on the reconciler's
+    /// tick.
     ///
     /// This is the half of a capture that makes it a *GridFPV* value rather than an observation.
-    /// For each outstanding capture whose sampling window has closed:
+    /// For each outstanding capture whose sampling window has closed, GridFPV says exactly what it
+    /// saw — [`CaptureResolution`] has the three cases and the reasoning; in short:
     ///
-    /// * the timer is reporting a level, and it **differs** from what it was reporting when the
-    ///   capture started ⇒ the capture landed. The level is recorded on [`Timer::calibration`]
+    /// * a level that **differs** from what the timer reported when the capture started ⇒
+    ///   [`Measured`](CaptureResolution::Measured). It is recorded on [`Timer::calibration`]
     ///   (D27 — written the same way a typed one is, and persisted), and the capture is done.
-    /// * the settle window has also elapsed and the level has **not** changed ⇒ the capture did not
-    ///   land. Nothing is recorded, and the capture is dropped. RotorHazard refuses a capture
-    ///   silently — a node that is not answering, or one already capturing — so "no new level" is
-    ///   the only evidence of that refusal there is, and inventing a success here would be the
-    ///   fourth silently-ignored write (#423).
+    /// * the settle window has also elapsed and the level is the **same** ⇒
+    ///   [`Unchanged`](CaptureResolution::Unchanged). Nothing is recorded, and — this is #446 —
+    ///   nothing is *claimed*: an unchanged level is what a capture that re-measured the same
+    ///   number looks like, and also what a capture RotorHazard refused in silence looks like, and
+    ///   GridFPV cannot tell them apart. It used to report the second, which is a claim about
+    ///   RotorHazard it is in no position to make.
+    /// * the settle window elapsed with **no level readable at all** ⇒
+    ///   [`Unobserved`](CaptureResolution::Unobserved). GridFPV was not watching (the link dropped,
+    ///   the node never answered, no tune subscription was ever open) — the other #446 false
+    ///   failure, and again nothing is recorded.
     ///
     /// A capture is deliberately **not** resolved before its window closes, even if a level changes
     /// during it: a threshold that moved in those three seconds moved for some other reason, and
@@ -2576,28 +2637,43 @@ impl TimerRegistry {
                 continue; // still sampling — the RD is mid-pass.
             }
             let reported = self.reported_level(&timer, capture.node, capture.threshold);
-            match reported {
-                Some(level) if Some(level) != capture.previous => settled.push(CaptureOutcome {
-                    timer,
-                    node: capture.node,
-                    threshold: capture.threshold,
-                    level: Some(level),
-                }),
-                _ if capture.expired(now) => settled.push(CaptureOutcome {
-                    timer,
-                    node: capture.node,
-                    threshold: capture.threshold,
-                    level: None,
-                }),
-                _ => {}
-            }
+            let resolution = match reported {
+                // A level GridFPV did not have before: the capture measured something.
+                Some(level) if Some(level) != capture.previous => {
+                    settled.push(CaptureOutcome {
+                        timer,
+                        node: capture.node,
+                        threshold: capture.threshold,
+                        level: Some(level),
+                        reported,
+                        resolution: CaptureResolution::Measured,
+                    });
+                    continue;
+                }
+                // Everything else waits out the settle grace first — the level may still arrive.
+                _ if !capture.expired(now) => continue,
+                // Out of time with the level unchanged, or with nothing readable at all. Both are
+                // "GridFPV cannot say", and they are different kinds of cannot-say (#446).
+                Some(_) => CaptureResolution::Unchanged,
+                None => CaptureResolution::Unobserved,
+            };
+            settled.push(CaptureOutcome {
+                timer,
+                node: capture.node,
+                threshold: capture.threshold,
+                // Recorded: nothing. Neither of these outcomes is attributable to the capture, and
+                // writing the level anyway would be adopting a readback as GridFPV's config (D27).
+                level: None,
+                reported,
+                resolution,
+            });
         }
         if settled.is_empty() {
             return Vec::new();
         }
 
-        // 3. Record the ones that landed (D27), then persist once for the whole batch.
-        let landed: Vec<&CaptureOutcome> = settled.iter().filter(|o| o.level.is_some()).collect();
+        // 3. Record the ones GridFPV actually measured (D27), then persist once for the batch.
+        let landed: Vec<&CaptureOutcome> = settled.iter().filter(|o| o.measured()).collect();
         if !landed.is_empty() {
             let mut reg = self.write();
             for outcome in &landed {
@@ -2906,15 +2982,35 @@ impl TimerRegistry {
     ///
     /// **Prunes as it reads**: a lapsed subscription's state is dropped here, so a Tune page that
     /// went away leaves nothing behind at all.
+    ///
+    /// # An outstanding capture holds it open (#446)
+    ///
+    /// A capture is a promise GridFPV made to *watch* — it accepted the RD's press, told
+    /// RotorHazard to measure, and owes them an answer about what came back. The tune feed is the
+    /// only place that answer can arrive, so a lease lapsing inside the capture's own window used
+    /// to shut the gate on the confirming readback and leave [`resolve_captures`](
+    /// Self::resolve_captures) reporting a capture that had every chance of landing as one that
+    /// produced no level at all.
+    ///
+    /// That window is short (three seconds of sampling plus the settle) and the lease is five, so
+    /// it takes a page that stops polling at exactly the wrong moment — a tab switched away, a
+    /// laptop that dozed, a hiccup on venue Wi-Fi — which is precisely the moment an RD standing at
+    /// a gate would least understand the answer. The state survives only while the capture does;
+    /// once it settles, the ordinary lease takes over and prunes as before.
     pub fn signal_wanted(&self, id: &TimerId) -> bool {
         let now = Instant::now();
+        // Read the capture store BEFORE the signal store — no lock here is ever held across
+        // another (see `TimerRegistry::captures`).
+        let capturing = self.capture_in_flight(id);
         let mut store = self.signal_store();
         match store.get(id) {
-            Some(state) if state.leased(now) => true,
+            Some(state) if state.leased(now) || capturing => true,
             Some(_) => {
                 store.remove(id);
                 false
             }
+            // Never subscribed (or already pruned): there is nothing to keep open, and a capture
+            // running against no subscription at all resolves as `Unobserved` — which is the truth.
             None => false,
         }
     }
@@ -2927,20 +3023,22 @@ impl TimerRegistry {
     ///
     /// A push with **no live lease is dropped**, and takes the state with it. The gate should
     /// already be shut by then; this is the second lock on the same door, so a driver that is a
-    /// tick behind can never resurrect a stream nobody is watching.
+    /// tick behind can never resurrect a stream nobody is watching. An outstanding capture holds it
+    /// open for exactly as long as [`signal_wanted`](Self::signal_wanted) does — the two doors have
+    /// to agree, or the gate the driver opens is one the store then refuses to write to (#446).
     pub fn push_signal(&self, id: &TimerId, readings: &[NodeReading]) {
         let now = Instant::now();
+        let capturing = self.capture_in_flight(id);
         let mut store = self.signal_store();
         let Some(state) = store.get_mut(id) else {
             return;
         };
-        if !state.leased(now) {
+        if !state.leased(now) && !capturing {
             store.remove(id);
             return;
         }
         state.push(readings, now);
     }
-
     fn signal_store(&self) -> std::sync::MutexGuard<'_, HashMap<TimerId, TimerSignalState>> {
         self.signal.lock().expect("timer signal lock poisoned")
     }
@@ -3286,6 +3384,212 @@ mod tests {
                 "a persisted Timer must carry no telemetry ({leaked} leaked into {json})"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #446 — a capture that landed must not be reported as a failure.
+    // ---------------------------------------------------------------------------------------
+
+    /// One tick of readings carrying a node-0 **threshold pair**, which is what a capture is
+    /// settled against (the RSSI samples are irrelevant here).
+    fn levels(enter: f32, exit: f32) -> Vec<NodeReading> {
+        vec![NodeReading {
+            seen: true,
+            rssi: Some(50.0),
+            enter_at: Some(enter),
+            exit_at: Some(exit),
+            ..Default::default()
+        }]
+    }
+
+    /// Back-date every outstanding capture on `id` by `elapsed`, so the far side of RotorHazard's
+    /// three-second sampling window — and the settle grace behind it — is reachable without
+    /// sleeping seven seconds per case.
+    fn age_captures(timers: &TimerRegistry, id: &TimerId, elapsed: Duration) {
+        let mut store = timers.capture_store();
+        for capture in store.get_mut(id).into_iter().flatten() {
+            capture.started = capture
+                .started
+                .checked_sub(elapsed)
+                .expect("the test clock has room behind it");
+        }
+    }
+
+    /// A connected RH timer with a live Tune subscription reporting `enter`/`exit` on node 0 —
+    /// the state an RD is in when they press Capture.
+    fn tuning_rh(enter: f32, exit: f32) -> (TimerRegistry, TimerId) {
+        let (timers, rh) = registry_with_rh();
+        timers.set_status(&rh, TimerStatus::Connected);
+        timers.signal(&rh);
+        timers.push_signal(&rh, &levels(enter, exit));
+        (timers, rh)
+    }
+
+    /// Start a capture of node 0's enter threshold.
+    fn start_capture(timers: &TimerRegistry, rh: &TimerId) {
+        timers
+            .request_capture(
+                rh,
+                &CaptureRequest {
+                    node: 0,
+                    threshold: CaptureThreshold::Enter,
+                },
+                false,
+            )
+            .expect("a connected RH timer with an enabled node 0");
+    }
+
+    /// **A capture that re-measures the same level is not a failure (#446).**
+    ///
+    /// RotorHazard sets the threshold to the mean RSSI it saw across its window. On a stable gate
+    /// with an unchanged craft — and always when the RD captures twice in a row — that can land on
+    /// exactly the number the node was already detecting against. GridFPV saw no change, and
+    /// reported "produced no new level ... RotorHazard refuses a capture silently, so nothing was
+    /// recorded": a flat claim that RotorHazard refused, made about a capture that may well have
+    /// run perfectly.
+    ///
+    /// It is now reported as the ambiguity it is. Still nothing recorded — a level GridFPV cannot
+    /// attribute to the capture is a readback, and adopting a readback as config is what D27
+    /// forbids — but nothing *claimed* either.
+    #[test]
+    fn a_capture_that_re_measures_the_same_level_is_unchanged_not_refused() {
+        let (timers, rh) = tuning_rh(96.0, 80.0);
+        start_capture(&timers, &rh);
+
+        // The window closes and the settle grace runs out with the level exactly where it was.
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + u64::from(CAPTURE_SETTLE_MS) + 1),
+        );
+        timers.push_signal(&rh, &levels(96.0, 80.0));
+
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(
+            settled[0].resolution,
+            CaptureResolution::Unchanged,
+            "an unchanged level is consistent with a refusal AND with a capture that measured the \
+             same number; reporting the first is a claim about RotorHazard GridFPV cannot make"
+        );
+        assert_eq!(
+            settled[0].reported,
+            Some(96),
+            "the level the gate is actually detecting against still travels, so the operator line \
+             can say what it is"
+        );
+        assert_eq!(settled[0].level, None, "and nothing was recorded");
+        assert!(!settled[0].measured());
+        assert!(
+            timers.calibration(&rh).is_empty(),
+            "recording a level GridFPV cannot attribute to the capture would be adopting a \
+             readback as config (D27)"
+        );
+        // Retired, so a later capture on the same threshold is not refused by a ghost.
+        assert!(timers.resolve_captures().is_empty());
+    }
+
+    /// **A capture GridFPV could not watch is not a failure either (#446).**
+    ///
+    /// With no level readable at all — the link dropped, the node never answered, no Tune
+    /// subscription was ever open — the old code reported the same "RotorHazard refuses a capture
+    /// silently" line as an unchanged level did. That is a statement about a foreign server made
+    /// from no evidence whatsoever.
+    #[test]
+    fn a_capture_with_no_readable_level_is_unobserved_not_refused() {
+        let (timers, rh) = registry_with_rh();
+        timers.set_status(&rh, TimerStatus::Connected);
+        // No subscription, so nothing is ever reported for this node's thresholds.
+        start_capture(&timers, &rh);
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + u64::from(CAPTURE_SETTLE_MS) + 1),
+        );
+
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].resolution, CaptureResolution::Unobserved);
+        assert_eq!(settled[0].reported, None);
+        assert_eq!(settled[0].level, None);
+        assert!(timers.calibration(&rh).is_empty());
+    }
+
+    /// **A level that genuinely changed still lands, and is still recorded (D27).**
+    ///
+    /// The guard on the fix above: three outcomes are only an improvement if the one that means
+    /// "it worked" still means it. A resolution enum that never returned `Measured` would pass
+    /// both tests above and quietly stop recording every capture an RD ever flies.
+    #[test]
+    fn a_capture_that_moves_the_level_is_measured_and_recorded() {
+        let (timers, rh) = tuning_rh(96.0, 80.0);
+        start_capture(&timers, &rh);
+
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + 1),
+        );
+        timers.push_signal(&rh, &levels(118.0, 80.0));
+
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].resolution, CaptureResolution::Measured);
+        assert!(settled[0].measured());
+        assert_eq!(settled[0].level, Some(118));
+        assert_eq!(
+            timers.calibration(&rh),
+            vec![NodeCalibration {
+                node: 0,
+                enter_at: Some(118),
+                exit_at: None,
+            }],
+            "D27: GridFPV holds the value, not merely the timer"
+        );
+    }
+
+    /// **A lapsed Tune lease no longer costs a capture its answer (#446).**
+    ///
+    /// The lease is the subscription, and shutting the tap when a page stops polling is right —
+    /// except inside a capture's own window, where the tap is the only route the confirming
+    /// readback has. A tab switched away at the wrong moment used to shut the gate, so the level
+    /// never arrived, so the capture resolved as producing nothing. An outstanding capture holds
+    /// the tap open until it settles; after that the ordinary lease prunes as before.
+    #[test]
+    fn an_outstanding_capture_holds_the_tune_tap_open_across_a_lapsed_lease() {
+        let (timers, rh) = tuning_rh(96.0, 80.0);
+        start_capture(&timers, &rh);
+        expire(&timers, &rh);
+
+        assert!(
+            timers.signal_wanted(&rh),
+            "the capture GridFPV accepted is a promise to watch; the gate stays open for it"
+        );
+        // …and the driver's push still lands, or the open gate would write to nothing.
+        timers.push_signal(&rh, &levels(118.0, 80.0));
+        assert!(
+            timers.signal_store().contains_key(&rh),
+            "the two doors have to agree: `signal_wanted` opening one the push shuts is no fix"
+        );
+
+        // So the capture resolves on the level that arrived, rather than on silence.
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + 1),
+        );
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].resolution, CaptureResolution::Measured);
+        assert_eq!(settled[0].level, Some(118));
+
+        // Once it has settled the hold is gone, and the lapsed lease prunes exactly as it did.
+        expire(&timers, &rh);
+        assert!(
+            !timers.signal_wanted(&rh),
+            "a capture holds the tap open only while it is outstanding — not for ever after"
+        );
+        assert!(!timers.signal_store().contains_key(&rh));
     }
 
     #[test]

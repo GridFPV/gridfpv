@@ -37,7 +37,9 @@ use std::time::Duration;
 use gridfpv_events::CompetitorRef;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{PendingTimerWrite, Timer, TimerId, TimerKind, TimerRegistry};
+use gridfpv_server::timers::{
+    CaptureResolution, PendingTimerWrite, Timer, TimerId, TimerKind, TimerRegistry,
+};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
@@ -484,31 +486,47 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                         eprintln!("gridfpv: {}", orphaned_write(&write, &timers));
                     }
                 }
-                // …then settle every capture whose sampling window has run out (#355). This is where
-                // a captured level becomes **GridFPV's** value (D27): the registry compares what the
-                // timer is reporting now against what it reported when the capture started, records
-                // the new level on `Timer::calibration` if one arrived, and records **nothing** if
-                // none did. RotorHazard refuses a capture in complete silence — a node that is not
-                // answering, or one already capturing — so "no new level" is the only evidence of
-                // that refusal there is, and it is reported rather than dressed up as a success.
+                // …then settle every capture whose sampling window has run out (#355, #446). This
+                // is where a captured level becomes **GridFPV's** value (D27): the registry
+                // compares what the timer is reporting now against what it reported when the
+                // capture started, and records the new level on `Timer::calibration` if one
+                // arrived.
+                //
+                // What it says when one did not is the whole of #446. RotorHazard refuses a capture
+                // in complete silence, so an unchanged level is *consistent* with a refusal — but
+                // it is equally consistent with a capture that measured the same number, which is
+                // an ordinary result on a stable gate. The Director says which of the three things
+                // it actually saw, and claims nothing beyond that.
                 for outcome in timers.resolve_captures() {
                     let name = timers.get(&outcome.timer).map(|t| t.name);
                     let name = name.as_deref().unwrap_or("that timer");
-                    match outcome.level {
-                        Some(level) => eprintln!(
-                            "gridfpv: captured node {}'s {} level on {:?} — {}",
-                            outcome.node + 1,
-                            outcome.threshold.label(),
-                            name,
-                            level
+                    // Friendly name, 1-based node (CLAUDE.md): this is the line an RD reads at the
+                    // gate to find out what their pass did.
+                    let what = format!(
+                        "{}'s {} capture on {:?}",
+                        Timer::node_label(outcome.node),
+                        outcome.threshold.label(),
+                        name
+                    );
+                    match outcome.resolution {
+                        CaptureResolution::Measured => eprintln!(
+                            "gridfpv: {what} measured {} — recorded as GridFPV's level for that \
+                             gate",
+                            outcome.level.unwrap_or_default()
                         ),
-                        None => eprintln!(
-                            "gridfpv: node {}'s {} capture on {:?} produced no new level — \
-                             RotorHazard refuses a capture silently (a node that is not answering, \
-                             or one already capturing), so nothing was recorded",
-                            outcome.node + 1,
-                            outcome.threshold.label(),
-                            name
+                        CaptureResolution::Unchanged => eprintln!(
+                            "gridfpv: {what} came back on the level it was already on ({}) — that \
+                             is what a capture measuring the same number looks like AND what a \
+                             capture RotorHazard refused in silence looks like, and they cannot be \
+                             told apart, so nothing was recorded. Capture again if the gate is not \
+                             detecting as it should.",
+                            outcome.reported.unwrap_or_default()
+                        ),
+                        CaptureResolution::Unobserved => eprintln!(
+                            "gridfpv: {what} produced no readable level at all — GridFPV was not \
+                             watching (the link dropped, the node never answered, or the Tune page \
+                             was never open), so nothing was recorded and nothing is claimed about \
+                             whether RotorHazard measured it"
                         ),
                     }
                 }
