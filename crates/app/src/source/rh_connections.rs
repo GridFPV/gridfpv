@@ -561,6 +561,33 @@ fn wanted_connections(registry: &EventRegistry, timers: &TimerRegistry) -> Vec<W
     wanted
 }
 
+/// The **add/startup dial** (#462): hold every RotorHazard timer the first time this reconciler
+/// sees it, so the driver's capped automatic attempts (3, then rest as `Unreachable`) run without
+/// the RD pressing Connect. The first sweep covers startup — every timer already in the registry —
+/// and later sweeps catch timers added while running.
+///
+/// `seen` is the reconciler's memory of ids it has already granted the courtesy hold, and it is
+/// what keeps this from overriding the RD: a timer the RD explicitly Disconnects is *seen*, so it
+/// is never re-held here — only Connect (#383) or an event's selection dials it again. The set is
+/// per-process on purpose: a restart is a startup, and per Ryan's spec a startup re-attempts every
+/// timer, including one disconnected in a previous run.
+///
+/// Non-RotorHazard timers are marked seen without a hold (there is nothing to dial); a timer whose
+/// kind is later *edited* to RotorHazard therefore does not auto-dial — the edit flow already ends
+/// with the RD on the Timers page where Connect is the next gesture.
+fn auto_hold_new_timers(timers: &TimerRegistry, seen: &mut HashSet<TimerId>) {
+    for timer in timers.list() {
+        if !seen.insert(timer.id.clone()) {
+            continue;
+        }
+        if matches!(timer.kind, TimerKind::Rotorhazard { .. }) && !timer.manual_connect {
+            // A failed set (the timer deleted between list and here) is fine to ignore: there is
+            // nothing to dial anymore, and the next sweep will not see the id again.
+            let _ = timers.set_manual_connect(&timer.id, true);
+        }
+    }
+}
+
 /// Spawn the reconciler (#105, #383): poll [`wanted_connections`] on [`RECONCILE_INTERVAL`] and keep
 /// `connections` in sync — opening a persistent connection for each selected RotorHazard timer of
 /// the active event and each manually-held one, and closing those no longer wanted (deselected,
@@ -574,8 +601,10 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
         let connections = connections.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
+            let mut seen: HashSet<TimerId> = HashSet::new();
             loop {
                 ticker.tick().await;
+                auto_hold_new_timers(&timers, &mut seen);
                 let wanted = wanted_connections(&registry, &timers);
                 connections.reconcile(&wanted, &timers);
                 // Carry every **queued write** (#457) from the timer registry — where the RD-gated
@@ -1411,6 +1440,44 @@ mod tests {
                 Step::Supersede(key.clone()),
                 Step::Open(key, NEW_URL.to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn every_rh_timer_auto_dials_once_and_a_disconnect_is_never_overridden() {
+        // #462: the add/startup dial. The first sweep holds every existing RH timer (startup);
+        // a later sweep holds a timer added while running (add); and a timer the RD explicitly
+        // Disconnected is seen, so no sweep ever re-holds it — Connect is the RD's word, and the
+        // courtesy dial must never argue with it.
+        let events = EventRegistry::new(None).expect("in-memory event registry");
+        let timers = events.timers();
+        let existing = rh_timer(&timers, "Field RH", OLD_URL);
+        let mut seen = HashSet::new();
+
+        auto_hold_new_timers(&timers, &mut seen);
+        assert!(
+            timers.get(&existing).expect("timer").manual_connect,
+            "the startup sweep dials every RotorHazard timer already in the registry (#462)"
+        );
+
+        timers
+            .set_manual_connect(&existing, false)
+            .expect("RD disconnects");
+        auto_hold_new_timers(&timers, &mut seen);
+        assert!(
+            !timers.get(&existing).expect("timer").manual_connect,
+            "an RD's explicit Disconnect stands — a seen timer is never re-held"
+        );
+
+        let added = rh_timer(&timers, "Added RH", NEW_URL);
+        auto_hold_new_timers(&timers, &mut seen);
+        assert!(
+            timers.get(&added).expect("timer").manual_connect,
+            "a timer added while running dials on add, without the RD pressing Connect (#462)"
+        );
+        assert!(
+            !timers.get(&existing).expect("timer").manual_connect,
+            "…and dialling the new timer does not resurrect the disconnected one"
         );
     }
 

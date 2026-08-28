@@ -63,6 +63,30 @@ describe('bandSelection / toggleBandSelection (#429, the per-band tri-state box)
     expect([...toggleBandSelection(RACEBAND, new Set([5658, 5695]))]).toEqual([]);
   });
 
+  it('clearing a band keeps a frequency another offered band still holds (#464)', () => {
+    // Raceband R7 and Fatshark F8 are both 5880 MHz. The selection is frequency-keyed, so with
+    // all of an overlapping Raceband chosen, clearing Fatshark must not take R7 down with F8.
+    const overlapping: ChannelCatalogEntry[] = [
+      { band: 'Raceband', channel: 'R6', mhz: 5843 },
+      { band: 'Raceband', channel: 'R7', mhz: 5880 },
+      { band: 'Fatshark', channel: 'F7', mhz: 5860 },
+      { band: 'Fatshark', channel: 'F8', mhz: 5880 }
+    ];
+    const [raceband, fatshark] = groupByBand(overlapping).map((b) => b.entries);
+    const all = new Set([5843, 5880, 5860]);
+
+    const cleared = toggleBandSelection(fatshark, all, overlapping);
+    expect([...cleared].sort()).toEqual([5843, 5880]); // F7 gone; the shared 5880 survives
+    expect(bandSelection(raceband, cleared)).toBe('all'); // R7 still on — the point of #464
+    expect(bandSelection(fatshark, cleared)).toBe('some'); // honest: 5880 IS still enabled
+
+    // The guard needs EVIDENCE: a selection that was only ever Fatshark's clears completely —
+    // the RD asked for the band off, and no other band shows a chosen channel to defend 5880.
+    const alone = toggleBandSelection(fatshark, new Set([5860, 5880]), overlapping);
+    expect([...alone]).toEqual([]);
+    expect(bandSelection(raceband, alone)).toBe('none');
+  });
+
   it('FILLS a partial band rather than wiping the RD’s subset', () => {
     // The indeterminate box clicks to checked. Clearing here would throw away channels chosen one
     // at a time, on a control reached for in order to add; filling is undone by one more click.
