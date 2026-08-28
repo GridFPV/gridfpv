@@ -860,26 +860,11 @@ async fn restart_timer(
     Path(timer_id): Path<TimerId>,
 ) -> Result<Json<Timer>, ProtocolError> {
     let timers = registry.timers();
-    // Resolve the timer first so the refusals below can name it, and so an unknown id is a clean
-    // 404 rather than a message about a timer that does not exist.
-    let timer = timers.get(&timer_id).ok_or_else(|| {
-        ProtocolError::new(
-            ErrorCode::UnknownScope,
-            format!("no timer with id {:?}", timer_id.0),
-        )
-    })?;
-    // Kind first: the built-in Mock is in every event's DEFAULT timer selection, so gating on the
-    // heat before the kind answered a Mock with "… is running Heat 1 — finish or reset that heat",
-    // which is both wrong and actionable-looking. A Mock has no timing server at all.
-    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
-        return Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "{} is not a RotorHazard timer — there is no timing server to restart",
-                timer.name
-            ),
-        ));
-    }
+    // Resolve the timer and refuse a non-RotorHazard one — kind FIRST, and that ordering is the
+    // reason this preamble is shared rather than re-typed: the built-in Mock is in every event's
+    // DEFAULT timer selection, so gating on the heat before the kind answered a Mock with "… is
+    // running Heat 1 — finish or reset that heat", which is both wrong and actionable-looking.
+    let timer = rotorhazard_timer(&timers, &timer_id, "there is no timing server to restart")?;
     // The hard gate: never restart the timing hardware out from under a live race.
     if let Some(heat) = registry.heat_in_progress_on_timer(&timer_id) {
         return Err(ProtocolError::new(
@@ -1031,46 +1016,11 @@ async fn calibrate_timer(
     Path(timer_id): Path<TimerId>,
     Json(request): Json<crate::timers::CalibrationRequest>,
 ) -> Result<Json<crate::timers::CalibrationDispatch>, ProtocolError> {
+    // Resolve, kind-check, and refuse a scored heat — the shared preamble; it answers whether an
+    // (exempt) open-practice heat is racing. The node half of the ladder runs inside
+    // `request_calibration`, under the lock that performs the write.
     let timers = registry.timers();
-    // Resolve first so the refusals can name the timer, and so an unknown id is a clean 404 rather
-    // than a message about a timer that does not exist.
-    let timer = timers.get(&timer_id).ok_or_else(|| {
-        ProtocolError::new(
-            ErrorCode::UnknownScope,
-            format!("no timer with id {:?}", timer_id.0),
-        )
-    })?;
-    // Kind before phase, for the same reason [`restart_timer`] does it: the built-in Mock is in
-    // every event's default selection, so gating on the heat first would answer a Mock with "… is
-    // running Heat 1", which is both wrong and actionable-looking.
-    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
-        return Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "{} is not a RotorHazard timer — there is no detector to calibrate",
-                timer.name
-            ),
-        ));
-    }
-    // The hard gate: never move a detection threshold under a SCORED race. Open practice is
-    // exempt (#398 excludes it from scoring), which is what lets an RD tune with pilots in the air.
-    let scored_heat = registry.scored_heat_in_progress_on_timer(&timer_id);
-    if let Some(heat) = scored_heat {
-        return Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "{} is running {}, a scored heat — finish or reset it before changing its \
-                 thresholds (open practice can be tuned while it runs)",
-                timer.name, heat
-            ),
-        ));
-    }
-    // Whether a heat — necessarily an open-practice one, the scored case having just refused — is
-    // racing on this timer right now. Carried onto the write so the driver's own armed-heat
-    // backstop knows this one was cleared: without it the route would accept a practice write the
-    // driver then silently dropped, and a write that reports dispatched but never lands is the
-    // exact failure this page exists to catch.
-    let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
+    let during_open_practice = tune_write_preamble(&registry, &timers, &timer_id, ROUTE_CALIBRATE)?;
     timers
         .request_calibration(&timer_id, &request, during_open_practice)
         .map(Json)
@@ -1155,35 +1105,7 @@ async fn capture_timer_level(
     Json(request): Json<crate::timers::CaptureRequest>,
 ) -> Result<Json<crate::timers::CaptureDispatch>, ProtocolError> {
     let timers = registry.timers();
-    let timer = timers.get(&timer_id).ok_or_else(|| {
-        ProtocolError::new(
-            ErrorCode::UnknownScope,
-            format!("no timer with id {:?}", timer_id.0),
-        )
-    })?;
-    // Kind before phase, exactly as `calibrate_timer` does it: the Mock is in every event's default
-    // selection, so gating on the heat first would answer a Mock with "… is running Heat 1".
-    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
-        return Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "{} is not a RotorHazard timer — there is no detector to capture from",
-                timer.name
-            ),
-        ));
-    }
-    if let Some(heat) = registry.scored_heat_in_progress_on_timer(&timer_id) {
-        return Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "{} is running {}, a scored heat — a capture sets the threshold when it finishes, \
-                 so it would change which laps that heat counts (open practice can be captured \
-                 while it runs)",
-                timer.name, heat
-            ),
-        ));
-    }
-    let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
+    let during_open_practice = tune_write_preamble(&registry, &timers, &timer_id, ROUTE_CAPTURE)?;
     timers
         .request_capture(&timer_id, &request, during_open_practice)
         .map(Json)
@@ -1240,39 +1162,7 @@ async fn set_timer_channel(
     Json(request): Json<crate::timers::ChannelRequest>,
 ) -> Result<Json<crate::timers::ChannelDispatch>, ProtocolError> {
     let timers = registry.timers();
-    // Resolve first so every refusal can name the timer, and so an unknown id is a clean 404.
-    let timer = timers.get(&timer_id).ok_or_else(|| {
-        ProtocolError::new(
-            ErrorCode::UnknownScope,
-            format!("no timer with id {:?}", timer_id.0),
-        )
-    })?;
-    // Kind before phase, exactly as [`calibrate_timer`] does it: the built-in Mock is in every
-    // event's default selection, so gating on the heat first would answer a Mock with "… is running
-    // Heat 1", which is both wrong and actionable-looking.
-    if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
-        return Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "{} is not a RotorHazard timer — there is no receiver to tune",
-                timer.name
-            ),
-        ));
-    }
-    // The hard gate: never retune a node's receiver under a SCORED race. Open practice is exempt.
-    if let Some(heat) = registry.scored_heat_in_progress_on_timer(&timer_id) {
-        return Err(ProtocolError::new(
-            ErrorCode::BadRequest,
-            format!(
-                "{} is running {}, a scored heat — finish or reset it before changing a node's \
-                 channel (open practice can be retuned while it runs)",
-                timer.name, heat
-            ),
-        ));
-    }
-    // Whether a heat — necessarily an open-practice one — is racing right now, carried onto the
-    // write so the driver's own armed-heat backstop knows this one was already cleared.
-    let during_open_practice = registry.heat_in_progress_on_timer(&timer_id).is_some();
+    let during_open_practice = tune_write_preamble(&registry, &timers, &timer_id, ROUTE_CHANNEL)?;
     timers
         .request_channel(&timer_id, &request, during_open_practice)
         .map(Json)
@@ -1310,6 +1200,30 @@ fn signal_capable_timer(
     timers: &crate::timers::TimerRegistry,
     timer_id: &TimerId,
 ) -> Result<Timer, ProtocolError> {
+    rotorhazard_timer(
+        timers,
+        timer_id,
+        "it has no detector signal to tune against",
+    )
+}
+
+/// Resolve `timer_id` to a **RotorHazard** timer, or the typed refusal — the first two rungs of
+/// every timer route's guard ladder, spelled once (#458).
+///
+/// An unknown id is a clean `404` (`UnknownScope`) rather than a message about a timer that does
+/// not exist, and the kind refusal is a `400` naming the timer by its **friendly name** (repo
+/// display rule). `missing` completes "`… is not a RotorHazard timer — {missing}`": what this
+/// particular route needed and a Mock has not got.
+///
+/// **Kind is checked before any race-phase gate**, at every call site, and that ordering is
+/// load-bearing rather than incidental: the built-in Mock is in every event's default timer
+/// selection, so gating on the heat first answers a Mock with "… is running Heat 1", which is both
+/// wrong and actionable-looking.
+fn rotorhazard_timer(
+    timers: &crate::timers::TimerRegistry,
+    timer_id: &TimerId,
+    missing: &str,
+) -> Result<Timer, ProtocolError> {
     let timer = timers.get(timer_id).ok_or_else(|| {
         ProtocolError::new(
             ErrorCode::UnknownScope,
@@ -1319,14 +1233,82 @@ fn signal_capable_timer(
     if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
         return Err(ProtocolError::new(
             ErrorCode::BadRequest,
-            format!(
-                "{} is not a RotorHazard timer — it has no detector signal to tune against",
-                timer.name
-            ),
+            format!("{} is not a RotorHazard timer — {missing}", timer.name),
         ));
     }
     Ok(timer)
 }
+
+/// The words one **Tune write route**'s refusals use — see [`tune_write_preamble`].
+#[derive(Debug, Clone, Copy)]
+struct TuneRoute {
+    /// Completes "`… is not a RotorHazard timer — {}`", as [`rotorhazard_timer`] takes it.
+    missing_hardware: &'static str,
+    /// Completes "`{timer} is running {heat}, a scored heat — {}`". Each verb explains the harm in
+    /// its own terms, and each says in as many words that open practice is exempt.
+    scored_refusal: &'static str,
+}
+
+/// The preamble the three **Tune write** routes share (#458): resolve a RotorHazard timer, refuse
+/// a *scored* heat in progress, and answer whether an (exempt) open-practice heat is racing.
+///
+/// Returns `during_open_practice`, which is carried onto the queued write so the driver's own
+/// armed-heat backstop knows this one was cleared: without it the route would accept a practice
+/// write the driver then silently dropped, and a write that reports dispatched but never lands is
+/// the exact failure the Tune page exists to catch.
+///
+/// # Why the scored gate lives HERE and the node gate does not
+///
+/// "Is a scored heat running on this timer?" needs the **event log**, which `crate::timers` cannot
+/// see — so this half of the ladder can only be a route. The node half (exists, and enabled) is
+/// the mirror case: it must be read under the same registry lock that performs the write, or the
+/// width could change between the check and the write, so it stays in
+/// [`TimerRegistry`](crate::timers::TimerRegistry). The two halves covering different ground is
+/// deliberate, and it is the reason a single guard call cannot replace both.
+///
+/// Open practice is exempt from every scored refusal (#398 excludes it from scoring), which is what
+/// lets an RD tune with pilots in the air. [`restart_timer`] is NOT one of these routes: it refuses
+/// *any* heat in progress, practice included, because restarting the timing hardware under a
+/// practice session still drops the session.
+fn tune_write_preamble(
+    registry: &EventRegistry,
+    timers: &crate::timers::TimerRegistry,
+    timer_id: &TimerId,
+    op: TuneRoute,
+) -> Result<bool, ProtocolError> {
+    let timer = rotorhazard_timer(timers, timer_id, op.missing_hardware)?;
+    if let Some(heat) = registry.scored_heat_in_progress_on_timer(timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is running {}, a scored heat — {}",
+                timer.name, heat, op.scored_refusal
+            ),
+        ));
+    }
+    Ok(registry.heat_in_progress_on_timer(timer_id).is_some())
+}
+
+/// Writing a detection threshold (`POST /timers/{id}/calibrate`).
+const ROUTE_CALIBRATE: TuneRoute = TuneRoute {
+    missing_hardware: "there is no detector to calibrate",
+    scored_refusal: "finish or reset it before changing its thresholds (open practice can be \
+                     tuned while it runs)",
+};
+
+/// Measuring a pair of thresholds (`POST /timers/{id}/capture`).
+const ROUTE_CAPTURE: TuneRoute = TuneRoute {
+    missing_hardware: "there is no detector to capture from",
+    scored_refusal: "a capture sets the threshold when it finishes, so it would change which laps \
+                     that heat counts (open practice can be captured while it runs)",
+};
+
+/// Retuning a node's receiver (`POST /timers/{id}/channel`).
+const ROUTE_CHANNEL: TuneRoute = TuneRoute {
+    missing_hardware: "there is no receiver to tune",
+    scored_refusal: "finish or reset it before changing a node's channel (open practice can be \
+                     retuned while it runs)",
+};
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).
 ///
@@ -5136,6 +5118,118 @@ mod tests {
         serde_json::from_slice::<ProtocolError>(bytes)
             .expect("a ProtocolError body")
             .message
+    }
+
+    /// **The shared Tune preamble still refuses in each verb's own words (#458).**
+    ///
+    /// The three Tune write routes each re-typed resolve → kind → scored-heat before calling into
+    /// the registry; they now share [`tune_write_preamble`], with the wording carried as a
+    /// [`TuneRoute`]. That is a safe swap only if every sentence reads exactly as it did — these
+    /// are what an RD sees when the page refuses, and each verb explains a *different* harm (a
+    /// capture would change which laps the heat counts; a calibration or a retune simply must not
+    /// move mid-race). So this pins all six literally, through the real routes.
+    ///
+    /// The three sibling suites below cover the substance across every scored transition; this one
+    /// covers the exact text, which those deliberately do not.
+    #[tokio::test]
+    async fn the_shared_tune_preamble_keeps_each_verbs_own_refusals() {
+        // A Mock — in every event's default selection, which is why kind is checked first.
+        let (mocks, _, _) = state_with(vec![]);
+        for (post, expected) in [
+            (
+                "calibration",
+                "Mock is not a RotorHazard timer — there is no detector to calibrate",
+            ),
+            (
+                "capture",
+                "Mock is not a RotorHazard timer — there is no detector to capture from",
+            ),
+            (
+                "channel",
+                "Mock is not a RotorHazard timer — there is no receiver to tune",
+            ),
+        ] {
+            let (status, bytes) = post_tune(mocks.clone(), post, "mock").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal(&bytes), expected);
+        }
+
+        // A connected RotorHazard running a SCORED heat.
+        let (registry, state, _) = state_with(vec![]);
+        let rh = connected_rh_timer_selected_by_the_event(&registry);
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: HeatId("q-1".into()),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                    label: Some("Qualifier Heat 1".into()),
+                },
+                None,
+            )
+            .unwrap();
+        for t in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: HeatId("q-1".into()),
+                        transition: t,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        for (post, expected) in [
+            (
+                "calibration",
+                "Field RH is running Qualifier Heat 1, a scored heat — finish or reset it before \
+                 changing its thresholds (open practice can be tuned while it runs)",
+            ),
+            (
+                "capture",
+                "Field RH is running Qualifier Heat 1, a scored heat — a capture sets the \
+                 threshold when it finishes, so it would change which laps that heat counts (open \
+                 practice can be captured while it runs)",
+            ),
+            (
+                "channel",
+                "Field RH is running Qualifier Heat 1, a scored heat — finish or reset it before \
+                 changing a node's channel (open practice can be retuned while it runs)",
+            ),
+        ] {
+            let (status, bytes) = post_tune(registry.clone(), post, &rh.id.0).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal(&bytes), expected);
+        }
+    }
+
+    /// Post the minimal valid body to one of the three Tune write routes — enough to reach the
+    /// preamble, which refuses before any of it is looked at.
+    async fn post_tune(
+        registry: EventRegistry,
+        route: &str,
+        timer_id: &str,
+    ) -> (StatusCode, Vec<u8>) {
+        match route {
+            "calibration" => {
+                post_calibration(registry, timer_id, json!({ "node": 0, "enter_at": 90 })).await
+            }
+            "capture" => post_capture(registry, timer_id, json!({ "node": 0 })).await,
+            _ => {
+                post_channel(
+                    registry,
+                    timer_id,
+                    json!({ "node": 0, "mhz": 5880, "band": "Raceband", "channel": "R7" }),
+                )
+                .await
+            }
+        }
     }
 
     #[tokio::test]
