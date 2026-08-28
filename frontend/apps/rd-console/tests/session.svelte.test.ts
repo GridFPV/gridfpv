@@ -10,17 +10,17 @@ import type {
   Pilot,
   Timer
 } from '@gridfpv/types';
-import { Session } from '../src/lib/session.svelte.js';
+import { Session, type SessionApi } from '../src/lib/session.svelte.js';
 import type { ControlClient, createControlClient } from '../src/lib/control.js';
 import { heatResult, liveRunning, okAck, failAck } from './fixtures.js';
 
 /**
- * Per-test overrides for the `Session` constructor's injected impls. Derived from the
- * constructor's own options so the `*Impl` fields stay in lock-step with `Session`.
- * (Vitest 4 widened `vi.fn()`'s return type, so the old `ReturnType<typeof vi.fn>`
- * field typing no longer assigned to the specific impl signatures.)
+ * Per-test overrides for the seams a `Session` calls outward through — the session's own
+ * {@link SessionApi} record, every key optional. Derived from it rather than restated, so a new
+ * endpoint is steerable here the moment it exists. (Vitest 4 widened `vi.fn()`'s return type, so
+ * the old `ReturnType<typeof vi.fn>` field typing no longer assigned to the specific signatures.)
  */
-type SessionOverrides = Partial<NonNullable<ConstructorParameters<typeof Session>[0]>>;
+type SessionOverrides = Partial<SessionApi>;
 
 /** An ordinary **created** event named "Practice" — the RD's own, not a built-in (#414). */
 const PRACTICE: EventMeta = {
@@ -83,7 +83,10 @@ describe('Session', () => {
     const control = { baseUrl: 'http://d.local', sendCommand: vi.fn(async () => okAck) };
     const controlFactory = vi.fn(() => control);
 
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
     expect(session.currentEvent).toBeUndefined();
     expect(connect).not.toHaveBeenCalled();
 
@@ -105,9 +108,8 @@ describe('Session', () => {
     const { connect } = mockConnect(connecting);
     const control = { baseUrl: 'http://d.local', sendCommand: vi.fn(async () => okAck) };
     const session = new Session({
-      connectImpl: connect,
-      controlFactory: () => control,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: () => control }
     });
     // The Director's wall clock is 1000ms AHEAD of this client device.
     const serverAheadMs = 1000;
@@ -133,7 +135,10 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
 
     session.selectEvent(PRACTICE);
     session.selectEvent(EVENT_A);
@@ -153,7 +158,10 @@ describe('Session', () => {
     const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
     const tokenProvider = vi.fn(async () => 'lazy-tok');
 
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
     session.setTokenProvider(tokenProvider);
     session.selectEvent(PRACTICE);
 
@@ -181,7 +189,10 @@ describe('Session', () => {
     const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
     const tokenProvider = vi.fn(async () => 'lazy-tok');
 
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
     session.setTokenProvider(tokenProvider);
     session.selectEvent(PRACTICE);
 
@@ -206,7 +217,10 @@ describe('Session', () => {
     const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
     const tokenProvider = vi.fn(async () => undefined); // cancelled
 
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
     session.setTokenProvider(tokenProvider);
     session.selectEvent(PRACTICE);
 
@@ -222,7 +236,10 @@ describe('Session', () => {
     const sendCommand = vi.fn(async (): Promise<CommandAck> => failAck);
     const controlFactory = vi.fn(() => ({ baseUrl: 'http://d.local', sendCommand }));
 
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
     session.setToken('tok');
     session.selectEvent(PRACTICE);
 
@@ -248,18 +265,16 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const createEventImpl = vi.fn(async () => EVENT_A);
+    const createEvent = vi.fn(async () => EVENT_A);
 
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      createEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, createEvent }
     });
     session.setToken('tok');
 
     const meta = await session.createEventAndEnter('Friday Series');
-    expect(createEventImpl).toHaveBeenCalledWith(session.baseUrl, 'Friday Series', 'tok', {
+    expect(createEvent).toHaveBeenCalledWith(session.baseUrl, 'Friday Series', 'tok', {
       fields: undefined
     });
     expect(meta?.id).toBe('evt-a');
@@ -272,14 +287,12 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const createEventImpl = vi.fn(async () => EVENT_A);
+    const createEvent = vi.fn(async () => EVENT_A);
     const tokenProvider = vi.fn(async () => 'lazy-tok');
 
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      createEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, createEvent }
     });
     session.setTokenProvider(tokenProvider);
 
@@ -288,7 +301,7 @@ describe('Session', () => {
       location: 'Main field'
     });
     // Sent with no token and the optional fields forwarded; no prompt against an open Director.
-    expect(createEventImpl).toHaveBeenCalledWith(session.baseUrl, 'Friday Series', undefined, {
+    expect(createEvent).toHaveBeenCalledWith(session.baseUrl, 'Friday Series', undefined, {
       fields: { date: '2026-06-20', location: 'Main field' }
     });
     expect(tokenProvider).not.toHaveBeenCalled();
@@ -302,7 +315,7 @@ describe('Session', () => {
       sendCommand: vi.fn(async () => okAck)
     }));
     let calls = 0;
-    const createEventImpl = vi.fn(async () => {
+    const createEvent = vi.fn(async () => {
       calls += 1;
       if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
       return EVENT_A;
@@ -310,16 +323,14 @@ describe('Session', () => {
     const tokenProvider = vi.fn(async () => 'lazy-tok');
 
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      createEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, createEvent }
     });
     session.setTokenProvider(tokenProvider);
 
     const meta = await session.createEventAndEnter('Friday Series');
     expect(tokenProvider).toHaveBeenCalledOnce();
-    expect(createEventImpl).toHaveBeenCalledTimes(2);
+    expect(createEvent).toHaveBeenCalledTimes(2);
     expect(session.hasToken).toBe(true);
     expect(meta?.id).toBe('evt-a');
   });
@@ -327,12 +338,12 @@ describe('Session', () => {
   // ── deleteEvent: permanent delete + all data (the papercut fix) ──────────────────────
 
   it('deleteEvent calls DELETE with the held token and resolves true', async () => {
-    const deleteEventImpl = vi.fn(async () => undefined as unknown as void);
-    const session = new Session({ deleteEventImpl, autoRestore: false });
+    const deleteEvent = vi.fn(async () => undefined as unknown as void);
+    const session = new Session({ autoRestore: false, api: { deleteEvent } });
     session.setToken('tok');
 
     const ok = await session.deleteEvent('evt-a');
-    expect(deleteEventImpl).toHaveBeenCalledWith(session.baseUrl, 'evt-a', 'tok');
+    expect(deleteEvent).toHaveBeenCalledWith(session.baseUrl, 'evt-a', 'tok');
     expect(ok).toBe(true);
   });
 
@@ -342,12 +353,10 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const deleteEventImpl = vi.fn(async () => undefined as unknown as void);
+    const deleteEvent = vi.fn(async () => undefined as unknown as void);
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      deleteEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, deleteEvent }
     });
     session.selectEvent(EVENT_A);
     expect(session.currentEvent?.id).toBe('evt-a');
@@ -359,26 +368,26 @@ describe('Session', () => {
 
   it('deleteEvent prompts + retries when the Director gates delete with a 401', async () => {
     let calls = 0;
-    const deleteEventImpl = vi.fn(async () => {
+    const deleteEvent = vi.fn(async () => {
       calls += 1;
       if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
       return undefined as unknown as void;
     });
     const tokenProvider = vi.fn(async () => 'lazy-tok');
-    const session = new Session({ deleteEventImpl, autoRestore: false });
+    const session = new Session({ autoRestore: false, api: { deleteEvent } });
     session.setTokenProvider(tokenProvider);
 
     const ok = await session.deleteEvent('evt-a');
     expect(tokenProvider).toHaveBeenCalledOnce();
-    expect(deleteEventImpl).toHaveBeenCalledTimes(2);
+    expect(deleteEvent).toHaveBeenCalledTimes(2);
     expect(ok).toBe(true);
   });
 
   it('deleteEvent re-throws a non-auth (400/404) failure for the UI to surface', async () => {
-    const deleteEventImpl = vi.fn(async () => {
+    const deleteEvent = vi.fn(async () => {
       throw refusal(400, 'Practice is in progress — finish it before deleting the event.');
     });
-    const session = new Session({ deleteEventImpl, autoRestore: false });
+    const session = new Session({ autoRestore: false, api: { deleteEvent } });
     session.setToken('tok');
     // Surfaced verbatim: the Director's sentence, not a route line (#433).
     await expect(session.deleteEvent('practice-ab12')).rejects.toThrow(
@@ -395,17 +404,15 @@ describe('Session', () => {
       sendCommand: vi.fn(async () => okAck)
     }));
     // The Director has an active event set → resume into it (no picker).
-    const getActiveEventImpl = vi.fn(async () => ({ event: EVENT_A }));
+    const getActiveEvent = vi.fn(async () => ({ event: EVENT_A }));
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      getActiveEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, getActiveEvent }
     });
 
     expect(session.resolvingActiveEvent).toBe(true);
     await session.resolveActiveEvent();
-    expect(getActiveEventImpl).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
+    expect(getActiveEvent).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
     expect(session.currentEvent?.id).toBe('evt-a');
     expect(connect).toHaveBeenLastCalledWith(expect.objectContaining({ eventId: 'evt-a' }));
     expect(session.resolvingActiveEvent).toBe(false);
@@ -413,8 +420,8 @@ describe('Session', () => {
 
   it('resolveActiveEvent stays at the picker when no event is active', async () => {
     const { connect } = mockConnect(connecting);
-    const getActiveEventImpl = vi.fn(async () => ({ event: null }));
-    const session = new Session({ connectImpl: connect, getActiveEventImpl, autoRestore: false });
+    const getActiveEvent = vi.fn(async () => ({ event: null }));
+    const session = new Session({ autoRestore: false, api: { connect, getActiveEvent } });
 
     await session.resolveActiveEvent();
     expect(session.currentEvent).toBeUndefined();
@@ -423,10 +430,10 @@ describe('Session', () => {
   });
 
   it('resolveActiveEvent falls back to the picker when the Director is unreachable', async () => {
-    const getActiveEventImpl = vi.fn(async () => {
+    const getActiveEvent = vi.fn(async () => {
       throw new Error('fetch failed');
     });
-    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    const session = new Session({ autoRestore: false, api: { getActiveEvent } });
     await session.resolveActiveEvent();
     expect(session.currentEvent).toBeUndefined();
     expect(session.resolvingActiveEvent).toBe(false);
@@ -435,23 +442,23 @@ describe('Session', () => {
   // ── #91: the picker reads the active event id to mark the live row ───────────────────
 
   it('getActiveEventId returns the Director active event id', async () => {
-    const getActiveEventImpl = vi.fn(async () => ({ event: EVENT_A }));
-    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    const getActiveEvent = vi.fn(async () => ({ event: EVENT_A }));
+    const session = new Session({ autoRestore: false, api: { getActiveEvent } });
     expect(await session.getActiveEventId()).toBe('evt-a');
-    expect(getActiveEventImpl).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
+    expect(getActiveEvent).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
   });
 
   it('getActiveEventId resolves undefined when nothing is active', async () => {
-    const getActiveEventImpl = vi.fn(async () => ({ event: null }));
-    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    const getActiveEvent = vi.fn(async () => ({ event: null }));
+    const session = new Session({ autoRestore: false, api: { getActiveEvent } });
     expect(await session.getActiveEventId()).toBeUndefined();
   });
 
   it('getActiveEventId swallows a read failure (no pill, never blocks the list)', async () => {
-    const getActiveEventImpl = vi.fn(async () => {
+    const getActiveEvent = vi.fn(async () => {
       throw new Error('fetch failed');
     });
-    const session = new Session({ getActiveEventImpl, autoRestore: false });
+    const session = new Session({ autoRestore: false, api: { getActiveEvent } });
     expect(await session.getActiveEventId()).toBeUndefined();
   });
 
@@ -461,17 +468,15 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const setActiveEventImpl = vi.fn(async () => EVENT_A);
+    const setActiveEvent = vi.fn(async () => EVENT_A);
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      setActiveEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, setActiveEvent }
     });
 
     const chosen = await session.chooseEvent(EVENT_A);
     // The choice is persisted as the Director active event (no token against an open Director)…
-    expect(setActiveEventImpl).toHaveBeenCalledWith(session.baseUrl, 'evt-a', undefined);
+    expect(setActiveEvent).toHaveBeenCalledWith(session.baseUrl, 'evt-a', undefined);
     // …and then entered.
     expect(chosen?.id).toBe('evt-a');
     expect(session.currentEvent?.id).toBe('evt-a');
@@ -485,23 +490,21 @@ describe('Session', () => {
       sendCommand: vi.fn(async () => okAck)
     }));
     let calls = 0;
-    const setActiveEventImpl = vi.fn(async () => {
+    const setActiveEvent = vi.fn(async () => {
       calls += 1;
       if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
       return EVENT_A;
     });
     const tokenProvider = vi.fn(async () => 'lazy-tok');
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      setActiveEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, setActiveEvent }
     });
     session.setTokenProvider(tokenProvider);
 
     const chosen = await session.chooseEvent(EVENT_A);
     expect(tokenProvider).toHaveBeenCalledOnce();
-    expect(setActiveEventImpl).toHaveBeenCalledTimes(2);
+    expect(setActiveEvent).toHaveBeenCalledTimes(2);
     expect(chosen?.id).toBe('evt-a');
     expect(session.currentEvent?.id).toBe('evt-a');
   });
@@ -514,19 +517,17 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const setActiveEventImpl = vi.fn(async () => EVENT_A);
+    const setActiveEvent = vi.fn(async () => EVENT_A);
     const session = new Session({
-      connectImpl: connect,
-      controlFactory,
-      setActiveEventImpl,
-      autoRestore: false
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory, setActiveEvent }
     });
 
     await session.chooseEvent(EVENT_A);
-    setActiveEventImpl.mockClear();
+    setActiveEvent.mockClear();
     session.leaveEvent();
     // No call to clear/reset the server active event — switch is purely local.
-    expect(setActiveEventImpl).not.toHaveBeenCalled();
+    expect(setActiveEvent).not.toHaveBeenCalled();
     expect(session.currentEvent).toBeUndefined();
   });
 
@@ -541,7 +542,10 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
     session.selectEvent(PRACTICE);
 
     session.leaveEvent();
@@ -557,7 +561,10 @@ describe('Session', () => {
       baseUrl: 'http://d.local',
       sendCommand: vi.fn(async () => okAck)
     }));
-    const session = new Session({ connectImpl: connect, controlFactory, autoRestore: false });
+    const session = new Session({
+      autoRestore: false,
+      api: { connect, createControlClient: controlFactory }
+    });
     session.setToken('tok');
     session.selectEvent(PRACTICE);
     expect(session.hasToken).toBe(true);
@@ -592,21 +599,19 @@ describe('Session', () => {
         sendCommand: vi.fn(async () => okAck)
       }));
       const session = new Session({
-        connectImpl: connect,
-        controlFactory,
         baseUrl: 'http://d.local',
         autoRestore: false,
-        ...overrides
+        api: { connect, createControlClient: controlFactory, ...overrides }
       });
       return session;
     }
 
     it('listTimers reads the registry open (no token)', async () => {
-      const listTimersImpl = vi.fn(async () => [MOCK_TIMER]);
-      const session = timerSession({ listTimersImpl });
+      const listTimers = vi.fn(async () => [MOCK_TIMER]);
+      const session = timerSession({ listTimers });
       const timers = await session.listTimers();
       expect(timers).toEqual([MOCK_TIMER]);
-      expect(listTimersImpl).toHaveBeenCalledWith('http://d.local', { token: undefined });
+      expect(listTimers).toHaveBeenCalledWith('http://d.local', { token: undefined });
     });
 
     it('createTimer returns the new timer (full-trust, no token)', async () => {
@@ -622,12 +627,12 @@ describe('Session', () => {
         calibration: [],
         disabled_nodes: []
       };
-      const createTimerImpl = vi.fn(async () => created);
-      const session = timerSession({ createTimerImpl });
+      const createTimer = vi.fn(async () => created);
+      const session = timerSession({ createTimer });
       const req = { name: 'Fast', kind: { Mock: { laps: 5, lap_ms: 12000 } } } as const;
       const result = await session.createTimer(req);
       expect(result).toEqual(created);
-      expect(createTimerImpl).toHaveBeenCalledWith('http://d.local', req, undefined);
+      expect(createTimer).toHaveBeenCalledWith('http://d.local', req, undefined);
     });
 
     it('createTimer prompts then retries once on an auth (401) failure', async () => {
@@ -637,52 +642,52 @@ describe('Session', () => {
         name: 'RH',
         kind: { Rotorhazard: { url: 'http://rh' } }
       };
-      const createTimerImpl = vi
+      const createTimer = vi
         .fn()
         .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(created);
-      const session = timerSession({ createTimerImpl });
+      const session = timerSession({ createTimer });
       session.setTokenProvider(async () => 'tok');
       const result = await session.createTimer({
         name: 'RH',
         kind: { Rotorhazard: { url: 'http://rh' } }
       });
       expect(result).toEqual(created);
-      expect(createTimerImpl).toHaveBeenCalledTimes(2);
+      expect(createTimer).toHaveBeenCalledTimes(2);
       // The retry carried the freshly-entered token.
-      expect(createTimerImpl).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
+      expect(createTimer).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
     });
 
     it('createTimer resolves undefined when the auth prompt is cancelled', async () => {
-      const createTimerImpl = vi
+      const createTimer = vi
         .fn()
         .mockRejectedValue(refusal(401, 'Control on this Director needs a token.'));
-      const session = timerSession({ createTimerImpl });
+      const session = timerSession({ createTimer });
       session.setTokenProvider(async () => undefined);
       const result = await session.createTimer({
         name: 'X',
         kind: { Mock: { laps: 1, lap_ms: 1000 } }
       });
       expect(result).toBeUndefined();
-      expect(createTimerImpl).toHaveBeenCalledTimes(1);
+      expect(createTimer).toHaveBeenCalledTimes(1);
     });
 
     it('deleteTimer re-throws a non-auth (400) failure for the UI to surface', async () => {
-      const deleteTimerImpl = vi
+      const deleteTimer = vi
         .fn()
         .mockRejectedValue(refusal(400, 'The built-in Mock timer cannot be deleted.'));
-      const session = timerSession({ deleteTimerImpl });
+      const session = timerSession({ deleteTimer });
       await expect(session.deleteTimer('mock')).rejects.toThrow(
         /The built-in Mock timer cannot be deleted\./
       );
     });
 
     it('setEventTimers is a no-op (undefined) with no event selected', async () => {
-      const setEventTimersImpl = vi.fn();
-      const session = timerSession({ setEventTimersImpl });
+      const setEventTimers = vi.fn();
+      const session = timerSession({ setEventTimers });
       const result = await session.setEventTimers(['mock']);
       expect(result).toBeUndefined();
-      expect(setEventTimersImpl).not.toHaveBeenCalled();
+      expect(setEventTimers).not.toHaveBeenCalled();
     });
 
     // ── Live status polling for the header pills (#73, Slice 2b) ─────────────────
@@ -691,18 +696,18 @@ describe('Session', () => {
     it('polls listTimers while inside an event and exposes the live list', async () => {
       vi.useFakeTimers();
       try {
-        const listTimersImpl = vi.fn(async () => [MOCK_TIMER]);
-        const session = timerSession({ listTimersImpl });
+        const listTimers = vi.fn(async () => [MOCK_TIMER]);
+        const session = timerSession({ listTimers });
         session.selectEvent(PRACTICE);
         // An immediate poll fires on enter.
         await vi.advanceTimersByTimeAsync(0);
-        expect(listTimersImpl).toHaveBeenCalledTimes(1);
+        expect(listTimers).toHaveBeenCalledTimes(1);
         expect(session.timers).toEqual([MOCK_TIMER]);
 
         // The Director mutates status live; the next poll picks it up.
-        listTimersImpl.mockResolvedValue([MOCK_CONNECTED]);
+        listTimers.mockResolvedValue([MOCK_CONNECTED]);
         await vi.advanceTimersByTimeAsync(2_500);
-        expect(listTimersImpl).toHaveBeenCalledTimes(2);
+        expect(listTimers).toHaveBeenCalledTimes(2);
         expect(session.timers).toEqual([MOCK_CONNECTED]);
       } finally {
         vi.clearAllTimers();
@@ -713,17 +718,17 @@ describe('Session', () => {
     it('stops polling and clears the list on leaveEvent', async () => {
       vi.useFakeTimers();
       try {
-        const listTimersImpl = vi.fn(async () => [MOCK_TIMER]);
-        const session = timerSession({ listTimersImpl });
+        const listTimers = vi.fn(async () => [MOCK_TIMER]);
+        const session = timerSession({ listTimers });
         session.selectEvent(PRACTICE);
         await vi.advanceTimersByTimeAsync(0);
-        expect(listTimersImpl).toHaveBeenCalledTimes(1);
+        expect(listTimers).toHaveBeenCalledTimes(1);
 
         session.leaveEvent();
         expect(session.timers).toEqual([]);
         // No further polls after leaving.
         await vi.advanceTimersByTimeAsync(10_000);
-        expect(listTimersImpl).toHaveBeenCalledTimes(1);
+        expect(listTimers).toHaveBeenCalledTimes(1);
       } finally {
         vi.clearAllTimers();
         vi.useRealTimers();
@@ -745,8 +750,8 @@ describe('Session', () => {
           calibration: [],
           disabled_nodes: []
         };
-        const listTimersImpl = vi.fn(async () => [rh, MOCK_CONNECTED]); // registry order differs
-        const session = timerSession({ listTimersImpl });
+        const listTimers = vi.fn(async () => [rh, MOCK_CONNECTED]); // registry order differs
+        const session = timerSession({ listTimers });
         // Event selects mock then rh-1 — selectedTimers must honor THAT order.
         session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
         await vi.advanceTimersByTimeAsync(0);
@@ -762,8 +767,8 @@ describe('Session', () => {
     it('selectedTimers skips a selected id not yet in the registry, and is empty at the picker', async () => {
       vi.useFakeTimers();
       try {
-        const listTimersImpl = vi.fn(async () => [MOCK_TIMER]); // only mock is known
-        const session = timerSession({ listTimersImpl });
+        const listTimers = vi.fn(async () => [MOCK_TIMER]); // only mock is known
+        const session = timerSession({ listTimers });
         expect(session.selectedTimers).toEqual([]); // picker: no event
         session.selectEvent({ ...PRACTICE, timers: ['mock', 'ghost'] });
         await vi.advanceTimersByTimeAsync(0);
@@ -777,12 +782,12 @@ describe('Session', () => {
 
     it('setEventTimers saves and re-homes currentEvent with the server response', async () => {
       const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'] };
-      const setEventTimersImpl = vi.fn(async () => updated);
-      const session = timerSession({ setEventTimersImpl });
+      const setEventTimers = vi.fn(async () => updated);
+      const session = timerSession({ setEventTimers });
       session.selectEvent(PRACTICE);
       const result = await session.setEventTimers(['mock', 'rh-1']);
       expect(result).toEqual(updated);
-      expect(setEventTimersImpl).toHaveBeenCalledWith(
+      expect(setEventTimers).toHaveBeenCalledWith(
         'http://d.local',
         'practice-ab12',
         ['mock', 'rh-1'],
@@ -792,21 +797,21 @@ describe('Session', () => {
     });
 
     it('setPrimaryTimer is a no-op (undefined) with no event selected', async () => {
-      const setPrimaryTimerImpl = vi.fn();
-      const session = timerSession({ setPrimaryTimerImpl });
+      const setPrimaryTimer = vi.fn();
+      const session = timerSession({ setPrimaryTimer });
       const result = await session.setPrimaryTimer('mock');
       expect(result).toBeUndefined();
-      expect(setPrimaryTimerImpl).not.toHaveBeenCalled();
+      expect(setPrimaryTimer).not.toHaveBeenCalled();
     });
 
     it('setPrimaryTimer designates and re-homes currentEvent with the server response', async () => {
       const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'], primary_timer: 'rh-1' };
-      const setPrimaryTimerImpl = vi.fn(async () => updated);
-      const session = timerSession({ setPrimaryTimerImpl });
+      const setPrimaryTimer = vi.fn(async () => updated);
+      const session = timerSession({ setPrimaryTimer });
       session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
       const result = await session.setPrimaryTimer('rh-1');
       expect(result).toEqual(updated);
-      expect(setPrimaryTimerImpl).toHaveBeenCalledWith(
+      expect(setPrimaryTimer).toHaveBeenCalledWith(
         'http://d.local',
         'practice-ab12',
         'rh-1',
@@ -832,17 +837,17 @@ describe('Session', () => {
 
     it('setPrimaryTimer prompts then retries once on an auth (401) failure', async () => {
       const updated: EventMeta = { ...PRACTICE, timers: ['mock', 'rh-1'], primary_timer: 'rh-1' };
-      const setPrimaryTimerImpl = vi
+      const setPrimaryTimer = vi
         .fn()
         .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(updated);
-      const session = timerSession({ setPrimaryTimerImpl });
+      const session = timerSession({ setPrimaryTimer });
       session.selectEvent({ ...PRACTICE, timers: ['mock', 'rh-1'] });
       session.setTokenProvider(async () => 'tok');
       const result = await session.setPrimaryTimer('rh-1');
       expect(result).toEqual(updated);
-      expect(setPrimaryTimerImpl).toHaveBeenCalledTimes(2);
-      expect(setPrimaryTimerImpl).toHaveBeenLastCalledWith(
+      expect(setPrimaryTimer).toHaveBeenCalledTimes(2);
+      expect(setPrimaryTimer).toHaveBeenLastCalledWith(
         'http://d.local',
         'practice-ab12',
         'rh-1',
@@ -861,74 +866,72 @@ describe('Session', () => {
         sendCommand: vi.fn(async () => okAck)
       }));
       return new Session({
-        connectImpl: connect,
-        controlFactory,
         baseUrl: 'http://d.local',
         autoRestore: false,
-        ...overrides
+        api: { connect, createControlClient: controlFactory, ...overrides }
       });
     }
 
     it('listPilots reads the directory open (no token)', async () => {
-      const listPilotsImpl = vi.fn(async () => [ACE]);
-      const session = pilotSession({ listPilotsImpl });
+      const listPilots = vi.fn(async () => [ACE]);
+      const session = pilotSession({ listPilots });
       const pilots = await session.listPilots();
       expect(pilots).toEqual([ACE]);
-      expect(listPilotsImpl).toHaveBeenCalledWith('http://d.local', { token: undefined });
+      expect(listPilots).toHaveBeenCalledWith('http://d.local', { token: undefined });
     });
 
     it('createPilot returns the new pilot (full-trust, no token)', async () => {
-      const createPilotImpl = vi.fn(async () => ACE);
-      const session = pilotSession({ createPilotImpl });
+      const createPilot = vi.fn(async () => ACE);
+      const session = pilotSession({ createPilot });
       const req: CreatePilotRequest = { callsign: 'Ace', vtx_types: [] };
       const result = await session.createPilot(req);
       expect(result).toEqual(ACE);
-      expect(createPilotImpl).toHaveBeenCalledWith('http://d.local', req, undefined);
+      expect(createPilot).toHaveBeenCalledWith('http://d.local', req, undefined);
     });
 
     it('createPilot prompts then retries once on an auth (401) failure', async () => {
-      const createPilotImpl = vi
+      const createPilot = vi
         .fn()
         .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(ACE);
-      const session = pilotSession({ createPilotImpl });
+      const session = pilotSession({ createPilot });
       session.setTokenProvider(async () => 'tok');
       const result = await session.createPilot({ callsign: 'Ace', vtx_types: [] });
       expect(result).toEqual(ACE);
-      expect(createPilotImpl).toHaveBeenCalledTimes(2);
-      expect(createPilotImpl).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
+      expect(createPilot).toHaveBeenCalledTimes(2);
+      expect(createPilot).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
     });
 
     it('createPilot resolves undefined when the auth prompt is cancelled', async () => {
-      const createPilotImpl = vi
+      const createPilot = vi
         .fn()
         .mockRejectedValue(refusal(401, 'Control on this Director needs a token.'));
-      const session = pilotSession({ createPilotImpl });
+      const session = pilotSession({ createPilot });
       session.setTokenProvider(async () => undefined);
       const result = await session.createPilot({ callsign: 'X', vtx_types: [] });
       expect(result).toBeUndefined();
-      expect(createPilotImpl).toHaveBeenCalledTimes(1);
+      expect(createPilot).toHaveBeenCalledTimes(1);
     });
 
     it('updatePilot passes the clear-via-null diff through verbatim', async () => {
       const updated: Pilot = { ...ACE, name: 'Alice' };
-      const updatePilotImpl = vi.fn(async () => updated);
-      const session = pilotSession({ updatePilotImpl });
+      const updatePilot = vi.fn(async () => updated);
+      const session = pilotSession({ updatePilot });
       // A representative diff: set name, clear color/country with null, leave the rest absent.
       const req = { name: 'Alice', color: null, country: null } as const;
       const result = await session.updatePilot('p1', req);
       expect(result).toEqual(updated);
-      expect(updatePilotImpl).toHaveBeenCalledWith('http://d.local', 'p1', req, undefined);
+      expect(updatePilot).toHaveBeenCalledWith('http://d.local', 'p1', req, undefined);
     });
 
     it('deletePilot resolves true on success and re-throws a non-auth (404) failure', async () => {
-      const deletePilotImpl = vi.fn(async () => undefined as unknown as void);
-      const session = pilotSession({ deletePilotImpl });
+      const deletePilot = vi.fn(async () => undefined as unknown as void);
+      const session = pilotSession({ deletePilot });
       await expect(session.deletePilot('p1')).resolves.toBe(true);
-      expect(deletePilotImpl).toHaveBeenCalledWith('http://d.local', 'p1', undefined);
+      expect(deletePilot).toHaveBeenCalledWith('http://d.local', 'p1', undefined);
 
       const failing = pilotSession({
-        deletePilotImpl: vi.fn().mockRejectedValue(refusal(404, 'That pilot no longer exists.'))
+        deletePilot: vi.fn().mockRejectedValue(refusal(404, 'That pilot no longer exists.'))
       });
       await expect(failing.deletePilot('p1')).rejects.toThrow(/That pilot no longer exists\./);
     });
@@ -944,83 +947,81 @@ describe('Session', () => {
         sendCommand: vi.fn(async () => okAck)
       }));
       return new Session({
-        connectImpl: connect,
-        controlFactory,
         baseUrl: 'http://d.local',
         autoRestore: false,
-        ...overrides
+        api: { connect, createControlClient: controlFactory, ...overrides }
       });
     }
 
     it('listClasses reads the directory open (no token)', async () => {
-      const listClassesImpl = vi.fn(async () => [OPEN]);
-      const session = classSession({ listClassesImpl });
+      const listClasses = vi.fn(async () => [OPEN]);
+      const session = classSession({ listClasses });
       const classes = await session.listClasses();
       expect(classes).toEqual([OPEN]);
-      expect(listClassesImpl).toHaveBeenCalledWith('http://d.local', { token: undefined });
+      expect(listClasses).toHaveBeenCalledWith('http://d.local', { token: undefined });
     });
 
     it('createClass returns the new class (full-trust, no token)', async () => {
-      const createClassImpl = vi.fn(async () => OPEN);
-      const session = classSession({ createClassImpl });
+      const createClass = vi.fn(async () => OPEN);
+      const session = classSession({ createClass });
       const req: CreateClassRequest = { name: 'Open', source: 'MultiGP' };
       const result = await session.createClass(req);
       expect(result).toEqual(OPEN);
-      expect(createClassImpl).toHaveBeenCalledWith('http://d.local', req, undefined);
+      expect(createClass).toHaveBeenCalledWith('http://d.local', req, undefined);
     });
 
     it('createClass prompts then retries once on an auth (401) failure', async () => {
-      const createClassImpl = vi
+      const createClass = vi
         .fn()
         .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
         .mockResolvedValueOnce(OPEN);
-      const session = classSession({ createClassImpl });
+      const session = classSession({ createClass });
       session.setTokenProvider(async () => 'tok');
       const result = await session.createClass({ name: 'Open', source: 'MultiGP' });
       expect(result).toEqual(OPEN);
-      expect(createClassImpl).toHaveBeenCalledTimes(2);
-      expect(createClassImpl).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
+      expect(createClass).toHaveBeenCalledTimes(2);
+      expect(createClass).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
     });
 
     it('updateClass passes the clear-via-null diff through verbatim', async () => {
       const updated: Class = { ...OPEN, name: 'Pro Open' };
-      const updateClassImpl = vi.fn(async () => updated);
-      const session = classSession({ updateClassImpl });
+      const updateClass = vi.fn(async () => updated);
+      const session = classSession({ updateClass });
       const req = { name: 'Pro Open', reference: null, description: null } as const;
       const result = await session.updateClass('c1', req);
       expect(result).toEqual(updated);
-      expect(updateClassImpl).toHaveBeenCalledWith('http://d.local', 'c1', req, undefined);
+      expect(updateClass).toHaveBeenCalledWith('http://d.local', 'c1', req, undefined);
     });
 
     it('deleteClass resolves true on success and re-throws a non-auth (404) failure', async () => {
-      const deleteClassImpl = vi.fn(async () => undefined as unknown as void);
-      const session = classSession({ deleteClassImpl });
+      const deleteClass = vi.fn(async () => undefined as unknown as void);
+      const session = classSession({ deleteClass });
       await expect(session.deleteClass('c1')).resolves.toBe(true);
-      expect(deleteClassImpl).toHaveBeenCalledWith('http://d.local', 'c1', undefined);
+      expect(deleteClass).toHaveBeenCalledWith('http://d.local', 'c1', undefined);
 
       const failing = classSession({
-        deleteClassImpl: vi.fn().mockRejectedValue(refusal(404, 'That class no longer exists.'))
+        deleteClass: vi.fn().mockRejectedValue(refusal(404, 'That class no longer exists.'))
       });
       await expect(failing.deleteClass('c1')).rejects.toThrow(/That class no longer exists\./);
     });
 
     it('setEventClasses is a no-op (undefined) with no event selected', async () => {
-      const setEventClassesImpl = vi.fn();
-      const session = classSession({ setEventClassesImpl });
+      const setEventClasses = vi.fn();
+      const session = classSession({ setEventClasses });
       const result = await session.setEventClasses(['c1']);
       expect(result).toBeUndefined();
-      expect(setEventClassesImpl).not.toHaveBeenCalled();
+      expect(setEventClasses).not.toHaveBeenCalled();
     });
 
     it('setEventClasses saves and re-homes currentEvent with the server response', async () => {
       const updated: EventMeta = { ...PRACTICE, classes: ['c1'] };
-      const setEventClassesImpl = vi.fn(async () => updated);
-      const session = classSession({ setEventClassesImpl });
+      const setEventClasses = vi.fn(async () => updated);
+      const session = classSession({ setEventClasses });
       session.setToken('tok');
       session.selectEvent(PRACTICE);
       const result = await session.setEventClasses(['c1']);
       expect(result).toEqual(updated);
-      expect(setEventClassesImpl).toHaveBeenCalledWith(
+      expect(setEventClasses).toHaveBeenCalledWith(
         'http://d.local',
         'practice-ab12',
         ['c1'],
@@ -1033,7 +1034,7 @@ describe('Session', () => {
   describe('heats (race redesign Slice 3b)', () => {
     function heatSession(overrides?: {
       sendCommand?: ControlClient['sendCommand'];
-      listHeatsImpl?: SessionOverrides['listHeatsImpl'];
+      listHeats?: SessionOverrides['listHeats'];
     }) {
       const { connect } = mockConnect(connecting);
       const sendCommand = overrides?.sendCommand ?? vi.fn(async () => okAck);
@@ -1042,11 +1043,9 @@ describe('Session', () => {
         sendCommand
       });
       const session = new Session({
-        connectImpl: connect,
-        controlFactory,
         baseUrl: 'http://d.local',
         autoRestore: false,
-        listHeatsImpl: overrides?.listHeatsImpl
+        api: { connect, createControlClient: controlFactory, listHeats: overrides?.listHeats }
       });
       return { session, sendCommand };
     }
@@ -1086,15 +1085,15 @@ describe('Session', () => {
       const heats: HeatSummary[] = [
         { heat: 'q-1', lineup: ['p1'], round: 'r1', phase: 'Scheduled', is_current: true }
       ];
-      const listHeatsImpl = vi.fn(async () => heats);
-      const { session } = heatSession({ listHeatsImpl });
+      const listHeats = vi.fn(async () => heats);
+      const { session } = heatSession({ listHeats });
       // No event selected → resolves [] without calling the impl.
       await expect(session.listHeats()).resolves.toEqual([]);
-      expect(listHeatsImpl).not.toHaveBeenCalled();
+      expect(listHeats).not.toHaveBeenCalled();
       // Inside an event → reads GET /events/{id}/heats.
       session.selectEvent(PRACTICE);
       await expect(session.listHeats()).resolves.toEqual(heats);
-      expect(listHeatsImpl).toHaveBeenCalledWith('http://d.local', 'practice-ab12', {
+      expect(listHeats).toHaveBeenCalledWith('http://d.local', 'practice-ab12', {
         token: undefined
       });
     });
@@ -1107,32 +1106,32 @@ describe('Session', () => {
       // \b(401|403)\b scan matched it and opened the token dialog on a plain server error, and
       // matching a `failed: HTTP <status>` suffix would tie auth detection to wording the Director
       // now writes itself (#433). Only the structural status counts.
-      const deleteEventImpl = vi.fn(async () => {
+      const deleteEvent = vi.fn(async () => {
         throw refusal(500, 'The event could not be deleted — 403 laps were still being written.');
       });
       const tokenProvider = vi.fn(async () => 'lazy-tok');
-      const session = new Session({ deleteEventImpl, autoRestore: false });
+      const session = new Session({ autoRestore: false, api: { deleteEvent } });
       session.setTokenProvider(tokenProvider);
 
       await expect(session.deleteEvent('evt-401')).rejects.toThrow(/403 laps/);
       expect(tokenProvider).not.toHaveBeenCalled();
-      expect(deleteEventImpl).toHaveBeenCalledOnce();
+      expect(deleteEvent).toHaveBeenCalledOnce();
     });
 
     it('prompts + retries on an error carrying the HTTP status STRUCTURALLY (status: 403)', async () => {
       let calls = 0;
-      const deleteEventImpl = vi.fn(async () => {
+      const deleteEvent = vi.fn(async () => {
         calls += 1;
         if (calls === 1) throw refusal(403, 'Control on this Director needs a token.');
         return undefined as unknown as void;
       });
       const tokenProvider = vi.fn(async () => 'lazy-tok');
-      const session = new Session({ deleteEventImpl, autoRestore: false });
+      const session = new Session({ autoRestore: false, api: { deleteEvent } });
       session.setTokenProvider(tokenProvider);
 
       const ok = await session.deleteEvent('evt-a');
       expect(tokenProvider).toHaveBeenCalledOnce();
-      expect(deleteEventImpl).toHaveBeenCalledTimes(2);
+      expect(deleteEvent).toHaveBeenCalledTimes(2);
       expect(ok).toBe(true);
     });
   });
@@ -1157,9 +1156,8 @@ describe('Session', () => {
       const { connect, push } = mockConnect(connecting);
       const control = { baseUrl: 'http://d.local', sendCommand: vi.fn(async () => okAck) };
       const session = new Session({
-        connectImpl: connect,
-        controlFactory: () => control,
-        autoRestore: false
+        autoRestore: false,
+        api: { connect, createControlClient: () => control }
       });
       session.selectEvent(PRACTICE);
       return { session, push };
@@ -1214,10 +1212,9 @@ describe('Session', () => {
       const { connect } = mockConnect(connecting);
       const control = { baseUrl: 'http://d.local', sendCommand: vi.fn(async () => okAck) };
       const session = new Session({
-        connectImpl: connect,
-        controlFactory: () => control,
         baseUrl: 'http://d.local',
-        autoRestore: false
+        autoRestore: false,
+        api: { connect, createControlClient: () => control }
       });
       session.selectEvent(PRACTICE);
 

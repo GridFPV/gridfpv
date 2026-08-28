@@ -185,10 +185,11 @@ const isProtocolError = (v: unknown): v is ProtocolError =>
 
 // ── Request failures: the Director's own words, and the status carried structurally ───────────
 //
-// Every non-2xx response in this file rejects through `requestFailed` (#433). Before it, each of
-// ~40 call sites formatted its own `METHOD /events/{id}/rounds/{id} failed: HTTP 400` line and
-// threw the Director's typed body away — which put two raw ids on screen (the repo display rule
-// forbids exactly that) *and* discarded the one sentence worth showing.
+// Every non-2xx response in this file rejects through `requestFailed` (#433) — from `apiRequest`,
+// the single call site every endpoint now shares (#459). Before #433, each of ~40 call sites
+// formatted its own `METHOD /events/{id}/rounds/{id} failed: HTTP 400` line and threw the
+// Director's typed body away — which put two raw ids on screen (the repo display rule forbids
+// exactly that) *and* discarded the one sentence worth showing.
 
 /**
  * The rejection every non-2xx response in this client produces (#433).
@@ -252,6 +253,70 @@ async function requestFailed(resp: Response, attempted: string): Promise<Request
   return err;
 }
 
+/**
+ * The per-call knobs every endpoint in this file shares (#459).
+ *
+ * `token` is the caller's optional bearer credential — an open (unconfigured) Director needs none,
+ * so every endpoint sends it only when held. `fetch` is the injection seam tests and Node use.
+ * `body` is the value to serialise (its presence is what adds `Content-Type`), and `method` is
+ * omitted entirely for a GET so the init object stays exactly what it was per endpoint.
+ */
+interface RequestOptions {
+  /** The HTTP method; omitted for a GET. */
+  method?: string;
+  /** The value to send as a JSON body. Its **presence** is what sets `Content-Type`. */
+  body?: unknown;
+  /** Bearer token, sent as `Authorization: Bearer …` only when held. */
+  token?: string;
+  /** Abandon a request in flight (the Tune page's signal/node polls). */
+  signal?: AbortSignal;
+  /** Inject a `fetch` (defaults to the global). Used by tests and Node. */
+  fetch?: FetchLike;
+}
+
+/**
+ * **The one request path.** Every endpoint below routes through here: it resolves the injected
+ * `fetch`, builds the headers (Accept always; `Content-Type` when there is a body; `Authorization`
+ * when a token is held), issues the call, and funnels **every** non-2xx through {@link requestFailed}
+ * — which is what keeps the Director's typed refusal verbatim and the `status` structural (#433).
+ *
+ * Before this, ~50 endpoints each re-typed that preamble, which is how a cross-cutting change (a new
+ * header, an `AbortSignal`) became a 50-site edit and how one endpoint drifted from the rest.
+ *
+ * Returns the raw {@link Response}: the handful of endpoints whose 2xx carries **no content**
+ * (the DELETEs, `setCalibration`, `stopTimerSignal`) must not parse a body that isn't there.
+ * Everything that answers with JSON goes through {@link apiJson}.
+ */
+async function apiRequest(
+  baseUrl: string,
+  path: string,
+  options: RequestOptions,
+  attempted: string
+): Promise<Response> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const init: RequestInit = { headers };
+  if (options.method) init.method = options.method;
+  if (options.body !== undefined) init.body = JSON.stringify(options.body);
+  if (options.signal) init.signal = options.signal;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${path}`, init);
+  if (!resp.ok) throw await requestFailed(resp, attempted);
+  return resp;
+}
+
+/** {@link apiRequest} plus the JSON parse — the shape all but a handful of endpoints want. */
+async function apiJson<T>(
+  baseUrl: string,
+  path: string,
+  options: RequestOptions,
+  attempted: string
+): Promise<T> {
+  const resp = await apiRequest(baseUrl, path, options, attempted);
+  return (await resp.json()) as T;
+}
+
 const isChangeEnvelope = (v: unknown): v is ChangeEnvelope =>
   typeof v === 'object' && v !== null && 'sequence' in v && 'projection' in v && 'change' in v;
 
@@ -309,12 +374,7 @@ export async function listEvents(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<EventMeta[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the events');
-  return (await resp.json()) as EventMeta[];
+  return apiJson<EventMeta[]>(baseUrl, '/events', options, 'list the events');
 }
 
 /**
@@ -332,20 +392,13 @@ export async function createEvent(
   token?: string,
   options: { fetch?: FetchLike; fields?: Omit<CreateEventRequest, 'name'> } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const body: CreateEventRequest = { name, ...(options.fields ?? {}) };
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'create the event');
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    '/events',
+    { method: 'POST', body, token, fetch: options.fetch },
+    'create the event'
+  );
 }
 
 /**
@@ -363,14 +416,12 @@ export async function deleteEvent(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'delete the event');
+  await apiRequest(
+    baseUrl,
+    `/events/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the event'
+  );
 }
 
 /**
@@ -384,12 +435,7 @@ export async function getActiveEvent(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ActiveEvent> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/active-event`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'read the active event');
-  return (await resp.json()) as ActiveEvent;
+  return apiJson<ActiveEvent>(baseUrl, '/active-event', options, 'read the active event');
 }
 
 /**
@@ -406,19 +452,12 @@ export async function setActiveEvent(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/active-event`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ id })
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'set the active event');
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    '/active-event',
+    { method: 'PUT', body: { id }, token, fetch: options.fetch },
+    'set the active event'
+  );
 }
 
 /**
@@ -432,12 +471,7 @@ export async function listTimers(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<Timer[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the timers');
-  return (await resp.json()) as Timer[];
+  return apiJson<Timer[]>(baseUrl, '/timers', options, 'list the timers');
 }
 
 /**
@@ -453,19 +487,12 @@ export async function createTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Timer> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'add the timer');
-  return (await resp.json()) as Timer;
+  return apiJson<Timer>(
+    baseUrl,
+    '/timers',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the timer'
+  );
 }
 
 /**
@@ -481,19 +508,12 @@ export async function updateTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Timer> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'save the timer');
-  return (await resp.json()) as Timer;
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the timer'
+  );
 }
 
 /**
@@ -556,15 +576,12 @@ export async function restartTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Timer> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/restart`, {
-    method: 'POST',
-    headers
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'restart the timer');
-  return (await resp.json()) as Timer;
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/restart`,
+    { method: 'POST', token, fetch: options.fetch },
+    'restart the timer'
+  );
 }
 
 /**
@@ -588,15 +605,12 @@ export async function timerSignal(
   id: TimerId,
   options: { token?: string; fetch?: FetchLike; signal?: AbortSignal } = {}
 ): Promise<TimerSignal> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/signal`, {
-    headers,
-    signal: options.signal
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'read the timer signal');
-  return (await resp.json()) as TimerSignal;
+  return apiJson<TimerSignal>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/signal`,
+    options,
+    'read the timer signal'
+  );
 }
 
 /**
@@ -613,14 +627,12 @@ export async function stopTimerSignal(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/signal/stop`,
-    { method: 'POST', headers }
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/signal/stop`,
+    { method: 'POST', token, fetch: options.fetch },
+    'stop the signal feed'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'stop the signal feed');
 }
 
 /**
@@ -646,17 +658,12 @@ export async function setCalibration(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'content-type': 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/calibration`,
-    { method: 'POST', headers, body: JSON.stringify(request) }
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/calibration`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'save the calibration'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'save the calibration');
 }
 
 /**
@@ -698,19 +705,12 @@ export async function captureLevel(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<CaptureDispatch> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'content-type': 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/capture`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'start the capture');
-  return (await resp.json()) as CaptureDispatch;
+  return apiJson<CaptureDispatch>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/capture`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'start the capture'
+  );
 }
 
 /**
@@ -730,15 +730,12 @@ export async function timerNodes(
   id: TimerId,
   options: { token?: string; fetch?: FetchLike; signal?: AbortSignal } = {}
 ): Promise<TimerNodes> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/nodes`, {
-    headers,
-    signal: options.signal
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'read the timer nodes');
-  return (await resp.json()) as TimerNodes;
+  return apiJson<TimerNodes>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/nodes`,
+    options,
+    'read the timer nodes'
+  );
 }
 
 /**
@@ -756,19 +753,12 @@ export async function setTimerNodes(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<TimerNodes> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'content-type': 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/nodes`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'save the node change');
-  return (await resp.json()) as TimerNodes;
+  return apiJson<TimerNodes>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/nodes`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the node change'
+  );
 }
 
 /**
@@ -802,19 +792,12 @@ export async function setNodeChannel(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<ChannelDispatch> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'content-type': 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/channel`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'set the node channel');
-  return (await resp.json()) as ChannelDispatch;
+  return apiJson<ChannelDispatch>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/channel`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'set the node channel'
+  );
 }
 
 /** The shared body of {@link connectTimer} / {@link disconnectTimer} — same shape, same errors. */
@@ -825,19 +808,12 @@ async function setTimerConnection(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Timer> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}/${action}`, {
-    method: 'POST',
-    headers
-  });
-  if (!resp.ok)
-    throw await requestFailed(
-      resp,
-      action === 'connect' ? 'connect to that timer' : 'disconnect from that timer'
-    );
-  return (await resp.json()) as Timer;
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/${action}`,
+    { method: 'POST', token, fetch: options.fetch },
+    action === 'connect' ? 'connect to that timer' : 'disconnect from that timer'
+  );
 }
 
 /**
@@ -851,14 +827,12 @@ export async function deleteTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'delete the timer');
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the timer'
+  );
 }
 
 /**
@@ -874,19 +848,12 @@ export async function setEventTimers(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/timers`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ ids })
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'save the event timers');
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/timers`,
+    { method: 'PUT', body: { ids }, token, fetch: options.fetch },
+    'save the event timers'
+  );
 }
 
 /**
@@ -904,19 +871,12 @@ export async function setPrimaryTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/primary-timer`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ id })
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'set the primary timer');
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/primary-timer`,
+    { method: 'PUT', body: { id }, token, fetch: options.fetch },
+    'set the primary timer'
+  );
 }
 
 /**
@@ -930,12 +890,7 @@ export async function listPilots(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<Pilot[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the pilots');
-  return (await resp.json()) as Pilot[];
+  return apiJson<Pilot[]>(baseUrl, '/pilots', options, 'list the pilots');
 }
 
 /**
@@ -950,19 +905,12 @@ export async function createPilot(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Pilot> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'add the pilot');
-  return (await resp.json()) as Pilot;
+  return apiJson<Pilot>(
+    baseUrl,
+    '/pilots',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the pilot'
+  );
 }
 
 /**
@@ -978,19 +926,12 @@ export async function updatePilot(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Pilot> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'save the pilot');
-  return (await resp.json()) as Pilot;
+  return apiJson<Pilot>(
+    baseUrl,
+    `/pilots/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the pilot'
+  );
 }
 
 /**
@@ -1004,14 +945,12 @@ export async function deletePilot(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'delete the pilot');
+  await apiRequest(
+    baseUrl,
+    `/pilots/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the pilot'
+  );
 }
 
 /**
@@ -1028,19 +967,12 @@ export async function setEventRoster(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/roster`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ pilot_ids: pilotIds })
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'save the roster');
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/roster`,
+    { method: 'PUT', body: { pilot_ids: pilotIds }, token, fetch: options.fetch },
+    'save the roster'
+  );
 }
 
 /**
@@ -1055,15 +987,12 @@ export async function addToRoster(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
-    { method: 'POST', headers }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
+    { method: 'POST', token, fetch: options.fetch },
+    'add that pilot to the roster'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'add that pilot to the roster');
-  return (await resp.json()) as EventMeta;
 }
 
 /**
@@ -1078,15 +1007,12 @@ export async function removeFromRoster(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
-    { method: 'DELETE', headers }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove that pilot from the roster'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'remove that pilot from the roster');
-  return (await resp.json()) as EventMeta;
 }
 
 /**
@@ -1099,12 +1025,7 @@ export async function listClasses(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<Class[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the classes');
-  return (await resp.json()) as Class[];
+  return apiJson<Class[]>(baseUrl, '/classes', options, 'list the classes');
 }
 
 /**
@@ -1119,19 +1040,12 @@ export async function createClass(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Class> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'add the class');
-  return (await resp.json()) as Class;
+  return apiJson<Class>(
+    baseUrl,
+    '/classes',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the class'
+  );
 }
 
 /**
@@ -1148,19 +1062,12 @@ export async function updateClass(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Class> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'save the class');
-  return (await resp.json()) as Class;
+  return apiJson<Class>(
+    baseUrl,
+    `/classes/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the class'
+  );
 }
 
 /**
@@ -1175,14 +1082,12 @@ export async function deleteClass(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'delete the class');
+  await apiRequest(
+    baseUrl,
+    `/classes/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the class'
+  );
 }
 
 /**
@@ -1201,20 +1106,13 @@ export async function setClassHidden(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Class> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
   const body: SetClassHiddenRequest = { hidden };
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}/hidden`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(body)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'change the class visibility');
-  return (await resp.json()) as Class;
+  return apiJson<Class>(
+    baseUrl,
+    `/classes/${encodeURIComponent(id)}/hidden`,
+    { method: 'PUT', body, token, fetch: options.fetch },
+    'change the class visibility'
+  );
 }
 
 /**
@@ -1231,19 +1129,12 @@ export async function setEventClasses(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/classes`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ ids })
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'save the event classes');
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/classes`,
+    { method: 'PUT', body: { ids }, token, fetch: options.fetch },
+    'save the event classes'
+  );
 }
 
 /**
@@ -1266,25 +1157,15 @@ export async function setClassMembership(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/membership`,
-    {
-      method: 'PUT',
-      headers,
-      // The wire shape carries member **slots** (`{ pilot, channel? }`) — race redesign Slice 7a.
-      // The server accepts a bare pilot-id element too (legacy shim), so a plain id here sets a
-      // channel-less slot while a `MemberSlot` carries the pilot's fixed channel (Slice 7b).
-      body: JSON.stringify({ pilots: members })
-    }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/membership`,
+    // The wire shape carries member **slots** (`{ pilot, channel? }`) — race redesign Slice 7a.
+    // The server accepts a bare pilot-id element too (legacy shim), so a plain id here sets a
+    // channel-less slot while a `MemberSlot` carries the pilot's fixed channel (Slice 7b).
+    { method: 'PUT', body: { pilots: members }, token, fetch: options.fetch },
+    'save the class membership'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'save the class membership');
-  return (await resp.json()) as EventMeta;
 }
 
 /**
@@ -1298,12 +1179,7 @@ export async function listFormatSchemas(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<FormatSchema[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/formats`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the formats');
-  return (await resp.json()) as FormatSchema[];
+  return apiJson<FormatSchema[]>(baseUrl, '/formats', options, 'list the formats');
 }
 
 /**
@@ -1331,12 +1207,7 @@ export async function listChannels(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ChannelCatalogEntry[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the channels');
-  return (await resp.json()) as ChannelCatalogEntry[];
+  return apiJson<ChannelCatalogEntry[]>(baseUrl, '/channels', options, 'list the channels');
 }
 
 /**
@@ -1359,13 +1230,13 @@ export async function rateChannels(
   channels: readonly number[],
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ImdReading> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const query = encodeURIComponent(channels.join(','));
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels/imd?channels=${query}`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'rate those channels');
-  return (await resp.json()) as ImdReading;
+  return apiJson<ImdReading>(
+    baseUrl,
+    `/channels/imd?channels=${query}`,
+    options,
+    'rate those channels'
+  );
 }
 
 /**
@@ -1382,19 +1253,12 @@ export async function createRound(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<RoundDef> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'add the round');
-  return (await resp.json()) as RoundDef;
+  return apiJson<RoundDef>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the round'
+  );
 }
 
 /**
@@ -1412,22 +1276,12 @@ export async function updateRound(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<RoundDef> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
-    {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify(request)
-    }
+  return apiJson<RoundDef>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the round'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'save the round');
-  return (await resp.json()) as RoundDef;
 }
 
 /**
@@ -1442,18 +1296,12 @@ export async function deleteRound(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
-    {
-      method: 'DELETE',
-      headers
-    }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove the round'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'remove the round');
-  return (await resp.json()) as EventMeta;
 }
 
 // ── Event channel layouts (#117 S2) ──────────────────────────────────────────────────────────────
@@ -1477,12 +1325,12 @@ export async function listChannelLayouts(
   eventId: EventId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ChannelLayouts> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the channel layouts');
-  return (await resp.json()) as ChannelLayouts;
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts`,
+    options,
+    'list the channel layouts'
+  );
 }
 
 /**
@@ -1504,19 +1352,12 @@ export async function createChannelLayout(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<ChannelLayouts> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'add the channel layout');
-  return (await resp.json()) as ChannelLayouts;
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the channel layout'
+  );
 }
 
 /**
@@ -1534,18 +1375,12 @@ export async function updateChannelLayout(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<ChannelLayouts> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
-    { method: 'PUT', headers, body: JSON.stringify(request) }
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the channel layout'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'save the channel layout');
-  return (await resp.json()) as ChannelLayouts;
 }
 
 /**
@@ -1560,15 +1395,12 @@ export async function deleteChannelLayout(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<ChannelLayouts> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
-    { method: 'DELETE', headers }
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the channel layout'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'delete the channel layout');
-  return (await resp.json()) as ChannelLayouts;
 }
 
 /**
@@ -1583,12 +1415,7 @@ export async function listHeats(
   eventId: EventId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<HeatSummary[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/heats`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'list the heats');
-  return (await resp.json()) as HeatSummary[];
+  return apiJson<HeatSummary[]>(baseUrl, `${eventRoot(eventId)}/heats`, options, 'list the heats');
 }
 
 /**
@@ -1611,14 +1438,12 @@ export async function listRoundIssues(
   eventId: EventId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<RoundIssue[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/round-issues`, {
-    headers
-  });
-  if (!resp.ok) throw await requestFailed(resp, 'check the rounds for issues');
-  return (await resp.json()) as RoundIssue[];
+  return apiJson<RoundIssue[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/round-issues`,
+    options,
+    'check the rounds for issues'
+  );
 }
 
 /**
@@ -1633,12 +1458,12 @@ export async function eventAudit(
   eventId: EventId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<EventAuditEntry[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/audit`, { headers });
-  if (!resp.ok) throw await requestFailed(resp, 'read the event audit log');
-  return (await resp.json()) as EventAuditEntry[];
+  return apiJson<EventAuditEntry[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/audit`,
+    options,
+    'read the event audit log'
+  );
 }
 
 /**
@@ -1654,15 +1479,12 @@ export async function roundRanking(
   roundId: RoundId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<RankEntry[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/ranking`,
-    { headers }
+  return apiJson<RankEntry[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/ranking`,
+    options,
+    'read the round ranking'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'read the round ranking');
-  return (await resp.json()) as RankEntry[];
 }
 
 /**
@@ -1679,15 +1501,12 @@ export async function roundStandings(
   roundId: RoundId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<RoundStanding[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/standings`,
-    { headers }
+  return apiJson<RoundStanding[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/standings`,
+    options,
+    'read the round standings'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'read the round standings');
-  return (await resp.json()) as RoundStanding[];
 }
 
 /**
@@ -1704,15 +1523,12 @@ export async function classStandings(
   classId: ClassId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ClassStandings> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/standings`,
-    { headers }
+  return apiJson<ClassStandings>(
+    baseUrl,
+    `${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/standings`,
+    options,
+    'read the class standings'
   );
-  if (!resp.ok) throw await requestFailed(resp, 'read the class standings');
-  return (await resp.json()) as ClassStandings;
 }
 
 /**
