@@ -1130,6 +1130,15 @@ fn format_config(round: &RoundDef, field: Vec<CompetitorRef>) -> FormatConfig {
 ///   - [`WinCondition::BestConsecutive`] → `"best-consecutive"` (fastest N-lap window),
 ///   - [`WinCondition::Timed`] (Most Laps) → `"most-laps"`,
 ///   - [`WinCondition::FirstToLaps`] is **not** a qualifying metric → the default `"best-lap"`.
+///
+///   The `Timed` arm is a **seeding** mapping, not a taxonomy claim. #472 (Ryan, 2026-08-27)
+///   reclassified "Timed — Most Laps" as a **head-to-head** win condition — a field flying
+///   together and competing on lap count in one window is racing each other, not running a time
+///   trial — so the Rounds form's win-condition picker no longer offers it for a Time Trial
+///   (`winConditionKindsFor` in `frontend/apps/rd-console/src/lib/formats.ts` is the taxonomy).
+///   The arm stays because ranking a qualifying field *by* total laps is a legitimate round-level
+///   seeding concern: a round persisted before #472, or set over the raw API, must keep ranking
+///   the way it raced rather than silently re-ranking on best lap.
 /// - `round_robin` (`RrMetric`, a carved-out format kept only as an inert string arm):
 ///   - [`WinCondition::Timed`] (Most Laps) → `"total-laps"`,
 ///   - every other condition → the default `"points"` standing.

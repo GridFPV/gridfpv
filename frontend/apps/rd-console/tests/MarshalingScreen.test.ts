@@ -1492,6 +1492,100 @@ describe('Marshaling (Slice 3)', () => {
       ).toBe(false);
     });
 
+    // --- the min-lap floor binds re-detection, not the RD's hand (#469) ---------------------
+    //
+    // The same fixture, but the heat now belongs to a round with a 25s minimum lap. Adding the
+    // 60s crossing would mint a 19s lap (41s → 60s) — under the floor. Because a commit inserts
+    // it as a MARSHAL-CREATED pass, which the corrected-passes fold exempts from the floor,
+    // nothing downstream could strip that lap: the refusal has to happen in the redetect math.
+    const FLOORED_ROUND = {
+      id: 'r-floor',
+      label: 'Qualifying',
+      classes: ['c1'],
+      format: 'timed_qual',
+      params: {},
+      win_condition: { Timed: { window_micros: 120_000_000 } },
+      seeding: 'FromRoster',
+      channel_mode: 'Static',
+      protest_window: 'Off',
+      min_lap_secs: 25
+    } as unknown as RoundDef;
+    const FLOORED_EVENT = {
+      id: 'e1',
+      name: 'Friday',
+      created_at: 0,
+      persistent: true,
+      timers: ['mock'],
+      roster: [],
+      classes: ['c1'],
+      rounds: [FLOORED_ROUND]
+    } as EventMeta;
+    const FLOORED_HEAT = {
+      heat: 'heat-1',
+      round: 'r-floor',
+      lineup: ['ALICE']
+    } as unknown as HeatSummary;
+
+    function renderFloored() {
+      return makeTestSession({
+        live: liveRunning,
+        laps: TUNE_LAPS,
+        signal: TUNE_TRACE,
+        event: FLOORED_EVENT,
+        listHeatsImpl: vi.fn(async () => [FLOORED_HEAT])
+      });
+    }
+
+    it('refuses to mint a re-detected lap under the round min lap, and flags why', async () => {
+      const { session, sendSpy } = renderFloored();
+      render(Marshaling, { session });
+      // Wait for the heats read (the floor is resolved from the heat's round).
+      await screen.findByLabelText('Enter threshold');
+
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+          'Would be 2 laps (+0 added, −0 removed, 1 under the 25s min lap refused)'
+        )
+      );
+      // Nothing to commit: the ONLY thing the new levels found was the sub-floor crossing.
+      expect(
+        (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
+      ).toBe(true);
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
+    it('without the floor the identical re-detection DOES add the lap (control)', async () => {
+      // The un-floored fixture is the same trace, same levels — so the test above cannot be
+      // passing because the 60s peak went missing.
+      const { session } = renderTune();
+      render(Marshaling, { session });
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 3 laps (+1 added, −0 removed)'
+      );
+    });
+
+    it('the RD may still ADD a sub-floor lap by hand — the floor binds the automated path only', async () => {
+      // The other half of the rule: an explicit ruling outranks the floor. Typing a time 2s after
+      // ALICE's 41s pass — far under the 25s floor — still sends the InsertLap unrefused.
+      const { session, sendSpy } = renderFloored();
+      render(Marshaling, { session });
+      await fireEvent.click((await screen.findAllByRole('button', { name: '+ Add lap' }))[0]);
+      await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '43' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+      await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+      const cmd = sendSpy.mock.calls[0][0] as {
+        InsertLap: { competitor: string; at: number };
+      };
+      expect(cmd.InsertLap.competitor).toBe('ALICE');
+      expect(cmd.InsertLap.at).toBe(43_000_000);
+    });
+
     it('passes the new levels DROP interleave as struck "removed" rows in the one preview list', async () => {
       const { session, sendSpy } = renderTune();
       render(Marshaling, { session });
