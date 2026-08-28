@@ -395,3 +395,25 @@ describe('EventTimers — the GridFPV-plugin selection gate (#405)', () => {
     expect(setEventTimersImpl).toHaveBeenCalledWith('http://d.local', 'e2', ['mock'], 'tok');
   });
 });
+
+describe('the Simulator warning (#491)', () => {
+  it('shows the standing banner while a Simulator timer is selected, and drops it when unticked', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT }); // EVENT selects 'mock'
+    render(EventTimers, { session });
+
+    // Selected Simulator → the banner states the behavior in words, as a status the RD can't
+    // miss. Anchored on the banner's own closing sentence — "fly themselves" also appears in the
+    // Simulator ROW's summary, which stays put whether or not the banner shows.
+    const banner = await screen.findByText(/Untick it before racing/);
+    expect(banner.closest('[role="status"]')).not.toBeNull();
+    expect(banner.textContent).toMatch(/Simulator/);
+    expect(banner.textContent).toMatch(/fly\s+themselves/);
+
+    // Unticking the Simulator removes the banner — the warning tracks the SELECTION, not the
+    // timer's existence in the registry (whose row keeps its own warning summary).
+    const mockBox = (await screen.findByLabelText('Use Mock')) as HTMLInputElement;
+    await fireEvent.click(mockBox);
+    await waitFor(() => expect(screen.queryByText(/Untick it before racing/)).toBeNull());
+  });
+});

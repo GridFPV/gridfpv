@@ -25,27 +25,39 @@ export function kindTag(kind: TimerKind): TimerKindTag {
   return 'Unknown';
 }
 
-/** The short display label for the kind **badge** (RotorHazard is the brand spelling). */
+/**
+ * The short display label for the kind **badge** (RotorHazard is the brand spelling).
+ *
+ * A Mock reads **Simulator** (#491): "Mock" told an RD nothing about what selecting one does —
+ * heats fly themselves with synthetic laps and RSSI — and a field session mistook exactly that
+ * for phantom control of the Director. The name now carries the behavior.
+ */
 export function kindLabel(kind: TimerKind): string {
-  if ('Mock' in kind) return 'Mock';
+  if ('Mock' in kind) return 'Simulator';
   if ('Rotorhazard' in kind) return 'RotorHazard';
   // A newer Director's kind: show its discriminant verbatim rather than a wrong brand.
   return Object.keys(kind)[0] ?? 'Unknown';
 }
 
-/** The Badge `tone` for a kind: Mock is the brand accent; RotorHazard reads as informational. */
-export function kindTone(kind: TimerKind): 'accent' | 'info' | 'neutral' {
-  if ('Mock' in kind) return 'accent';
+/**
+ * The Badge `tone` for a kind: a Simulator reads as a **warning** (#491 — selecting it makes
+ * heats race themselves, which must never look like just another timer); RotorHazard reads as
+ * informational.
+ */
+export function kindTone(kind: TimerKind): 'warn' | 'info' | 'neutral' {
+  if ('Mock' in kind) return 'warn';
   if ('Rotorhazard' in kind) return 'info';
   return 'neutral';
 }
 
-/** A one-line summary of a kind's config for the timer row (the sim pace, or the RH url). */
+/** A one-line summary of a kind's config for the timer row (the sim behavior, or the RH url). */
 export function kindSummary(kind: TimerKind): string {
   if ('Mock' in kind) {
     const { laps, lap_ms } = kind.Mock;
     const lapName = laps === 1 ? 'lap' : 'laps';
-    return `${laps} ${lapName} · ${(lap_ms / 1000).toFixed(1)}s pace`;
+    // The behavior IS the summary (#491): an RD scanning the row must see what selecting this
+    // does, not just its pace numbers.
+    return `Synthetic races — heats fly themselves: ${laps} ${lapName} · ${(lap_ms / 1000).toFixed(1)}s pace`;
   }
   if ('Rotorhazard' in kind) return kind.Rotorhazard.url || 'No URL set';
   return 'Unsupported by this console build — update the console';

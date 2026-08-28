@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
 import {
+  LIVE_GLIDE_CAP_MICROS,
+  glideShiftPx,
+  liveGlideMicros,
   monotoneTangents,
+  plotW,
   pointsAttr,
   samplePoints,
   smoothPath,
@@ -295,5 +299,32 @@ describe('RssiGraph — the smoothing toggle', () => {
     await fireEvent.click(toggle()); // smoothing ON
     expect(document.querySelector('path.signal')).not.toBeNull();
     expect(bandGeometry()).toEqual(raw);
+  });
+});
+
+describe('live glide (#473) — the wall-clock scroll between polls', () => {
+  it('grows with the wall clock and resets to zero at a fresh poll', () => {
+    // A poll landed at t=1000ms; 240ms later the plot has glided 240ms of source time.
+    expect(liveGlideMicros(1000, 1240)).toBe(240_000);
+    // The next poll re-stamps latestSeenAtMs = now, so the glide restarts at 0 exactly as the
+    // re-rendered geometry (pinned to the new latest sample) takes over — no visual jump.
+    expect(liveGlideMicros(1240, 1240)).toBe(0);
+    // A clock that hasn't advanced (or ran backwards across a suspend) never glides negative.
+    expect(liveGlideMicros(2000, 1900)).toBe(0);
+  });
+
+  it('freezes at the cap so a stalled feed stops instead of scrolling data away', () => {
+    expect(liveGlideMicros(0, 10_000)).toBe(LIVE_GLIDE_CAP_MICROS);
+    expect(liveGlideMicros(0, 1_500)).toBe(LIVE_GLIDE_CAP_MICROS);
+  });
+
+  it('shifts on exactly the time→px scale the plot draws with', () => {
+    // Half the window glided = half the plot width shifted; xOf uses the same ratio, so glided
+    // geometry lands where the next re-render will draw it.
+    const windowMicros = 12_000_000;
+    expect(glideShiftPx(6_000_000, windowMicros)).toBeCloseTo(plotW / 2, 6);
+    expect(glideShiftPx(0, windowMicros)).toBe(0);
+    // Degenerate window never divides by zero.
+    expect(Number.isFinite(glideShiftPx(1_000, 0))).toBe(true);
   });
 });
