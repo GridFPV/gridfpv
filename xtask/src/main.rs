@@ -88,6 +88,39 @@ fn live_check() -> bool {
     )
 }
 
+/// Run the `live`-gated **unit** tests that `cargo test --all` cannot see (#477).
+///
+/// `crates/adapters/src/rotorhazard.rs` declares `pub mod transport` behind
+/// `#[cfg(feature = "live")]`, so transport.rs's ~40 unit tests — the RotorHazard translation
+/// seam, the seating readback, the min-lap confirms, the channel-write encoding — simply do not
+/// *compile* under `cargo test --all`, and [`live_check`] is `--no-run`. Between the two, the
+/// single most safety-critical test module in the workspace was type-checked and **never
+/// executed** by `ci` or GitHub Actions.
+///
+/// This runs them, and only them: `--lib` restricts to the crate's unit tests, so the Docker-gated
+/// integration targets (`tests/rh_live.rs` and friends) are still merely built, and their
+/// `#[ignore]` keeps them out of the run regardless. No Docker, no network — offline-safe.
+///
+/// Why a second cargo invocation instead of moving the tests out from behind `live`: the tests
+/// take `rust_socketio::Payload` values as their input (that type *is* the translate seam's raw
+/// message type). Un-gating them would mean inventing a shim payload type and rewriting both the
+/// adapter's public signature and every test against it — far more fragile, and a much larger
+/// blast radius, than one extra gate command.
+fn test_live_units() -> bool {
+    run_env(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "gridfpv-adapters",
+            "--features",
+            "live",
+            "--lib",
+        ],
+        &[("TS_RS_EXPORT_DIR", &workspace_root())],
+    )
+}
+
 fn test() -> bool {
     // `cargo test --all` also runs ts-rs's generated export tests, which write the
     // `.ts` files. Pin `TS_RS_EXPORT_DIR` to the workspace root so they land in the
@@ -97,7 +130,7 @@ fn test() -> bool {
         "cargo",
         &["test", "--all"],
         &[("TS_RS_EXPORT_DIR", &workspace_root())],
-    )
+    ) && test_live_units()
 }
 
 /// Regenerate the Rust→TypeScript bindings (#4, #40).
