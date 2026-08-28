@@ -95,7 +95,10 @@ use gridfpv_storage::StoredEvent;
 use crate::app::{AppState, resolve_event};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{EventRegistry, RoundDef};
-use crate::live_state::{live_state_over_with_floor, live_state_with_floor, with_heat_timing};
+use crate::live_state::{
+    live_state_over_with_floor, live_state_over_with_rounds, live_state_with_rounds,
+    with_heat_timing,
+};
 use crate::scope::{EventId, Scope};
 use crate::snapshot::{ProjectionBody, ProjectionKind};
 use crate::stream::{Change, ChangeEnvelope, Cursor, StreamMessage};
@@ -223,9 +226,14 @@ impl ScopeProjection {
     /// a pure-log fold cannot see it. The floor itself is **not** a parameter: it is re-derived
     /// inside this fold, from *this* prefix, because the floor belongs to the heat the prefix
     /// reports as current and the current heat changes as the stream crosses into the next round.
-    /// A floor captured once at subscribe would be wrong from that crossing onward. Every live
-    /// scope resolves it through [`crate::app::live_fold_floor`], the same helper the snapshot
-    /// handlers use, so a subscriber and a snapshot of one scope still converge.
+    /// A floor captured once at subscribe — or once per `advance` batch — would be wrong from
+    /// that crossing onward. What each scope hands down is the `rounds` list, and the live fold
+    /// resolves the floor from the heat it *itself* picks
+    /// ([`live_state_with_rounds`](crate::live_state::live_state_with_rounds) /
+    /// [`live_state_over_with_rounds`](crate::live_state::live_state_over_with_rounds)), which is
+    /// the same value the snapshot handlers get from the same entry points — so a subscriber and
+    /// a snapshot of one scope still converge, and neither pays for a pre-pass that re-folds
+    /// `current_heat` over the same slice (#460).
     fn fold(scope: &Scope, stored: &[StoredEvent], rounds: &[RoundDef]) -> Option<ProjectionBody> {
         // The bare-event view the lap/phase fold consumes; the live-state clock timing is
         // folded separately from `stored` (which carries the `recorded_at` server timestamps).
@@ -234,12 +242,11 @@ impl ScopeProjection {
         match scope {
             Scope::Event { .. } => {
                 // `with_heat_timing` anchors the clock to the current heat's race-go (#62 follow-up).
-                let floor = crate::app::live_fold_floor(events, rounds);
-                // …and the rounds the event still defines decide which heats it may report as
-                // current / on deck (#439), exactly as they do for the snapshot.
-                let defined = crate::live_state::defined_round_ids(rounds);
+                // `rounds` carries both the D26 floor and the rounds the event still defines (#439),
+                // which decide which heats it may report as current / on deck — exactly as they do
+                // for the snapshot.
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state_with_floor(events, floor, Some(&defined)),
+                    live_state_with_rounds(events, rounds),
                     stored,
                 )))
             }
@@ -248,14 +255,15 @@ impl ScopeProjection {
                 // fold as `snapshot_class`, so snapshot and stream converge (they used to
                 // diverge: the stream folded the whole event). Offsets matter so marshaling
                 // adjudications (global LogRef targets) resolve inside the filtered view.
+                //
+                // The floor is resolved over the WINDOW — the class fold picks its current heat
+                // from the filtered slice, so that is the heat whose round owns the floor — and it
+                // is resolved *inside* the fold, which already holds that slice. The pre-pass this
+                // replaces needed a bare `&[Event]`, so it deep-cloned the whole window a second
+                // time on every folded offset (#460 item 1).
                 let window = crate::app::class_window_offsets(events, class);
-                // The floor is resolved over the WINDOW: the class fold picks its current heat
-                // from the filtered slice, so that is the heat whose round owns the floor.
-                let window_events: Vec<Event> = window.iter().map(|(_, e)| e.clone()).collect();
-                let floor = crate::app::live_fold_floor(&window_events, rounds);
-                let defined = crate::live_state::defined_round_ids(rounds);
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state_over_with_floor(&window, floor, Some(&defined)),
+                    live_state_over_with_rounds(&window, rounds),
                     stored,
                 )))
             }

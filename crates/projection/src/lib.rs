@@ -791,21 +791,66 @@ pub fn lap_list_marshaled_with_floor<'a, I>(events: I, min_lap_micros: Option<i6
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    // Group the corrected pass stream by competitor and derive laps. The fold itself
-    // lives in `corrected_passes`; here we only project it into the lap-list view. Each
-    // pass keeps the global offset that addresses it, so the derived laps carry their
-    // `start_ref`/`end_ref` command targets.
-    //
-    // The window is walked twice (once for the lineup seed, once for the corrections fold),
-    // so materialise the pairs — they are borrowed `(offset, &Event)` handles and the window
-    // is per-heat, so this is a pointer copy, not the log.
-    let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
-    // #388 — SEED FROM THE LINEUP, not only from what the timer observed. A competitor the
-    // timer never detected (mis-tuned gate, dead VTX) must still appear, with zero laps, or
-    // the one pilot who most needs marshaling is the one who cannot be marshaled.
-    let seats = lineup_keys(pairs.iter().map(|(_, e)| *e));
-    let (surviving, voided) =
-        corrected_and_voided_passes_with_floor(pairs.iter().copied(), min_lap_micros);
+    CorrectedWindow::of(events, min_lap_micros).into_lap_list()
+}
+
+/// One window's **correction fold, folded once** — the shared input to both views of it: the
+/// lap list ([`into_lap_list`](Self::into_lap_list)) and the crossing feed
+/// ([`crossings`](Self::crossings)).
+///
+/// It exists because those two views want the same fold. The live race-state projection derives
+/// both from the same run window on every wake, and running
+/// [`corrected_and_voided_passes_with_floor`] twice over an identical slice is the single most
+/// expensive thing on the 16/s signal-append path (#460 item 2). Folding once and reading the
+/// result two ways is also what *guarantees* they agree — a crossing the lap fold counted is
+/// `Counted` in the feed with the same lap number, and one the floor suppressed is
+/// `RejectedTooShort` in both, because there is only one fold to disagree with.
+pub struct CorrectedWindow {
+    /// The corrected lap-gate pass stream, ascending by global append offset.
+    surviving: Vec<(u64, Pass)>,
+    /// The removal record (auto-suppressed + RD-voided), ascending by offset.
+    voided: Vec<VoidedEmit>,
+    /// The window's lineup seats (#388) — competitors the lap list must show even with no passes.
+    seats: BTreeSet<CompetitorKey>,
+}
+
+impl CorrectedWindow {
+    /// Fold `events` (a window of `(offset, event)` pairs) under the D26 floor.
+    pub fn of<'a, I>(events: I, min_lap_micros: Option<i64>) -> Self
+    where
+        I: IntoIterator<Item = (u64, &'a Event)>,
+    {
+        // The window is walked twice (once for the lineup seed, once for the corrections fold),
+        // so materialise the pairs — they are borrowed `(offset, &Event)` handles and the window
+        // is per-heat, so this is a pointer copy, not the log.
+        let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
+        // #388 — SEED FROM THE LINEUP, not only from what the timer observed. A competitor the
+        // timer never detected (mis-tuned gate, dead VTX) must still appear, with zero laps, or
+        // the one pilot who most needs marshaling is the one who cannot be marshaled.
+        let seats = lineup_keys(pairs.iter().map(|(_, e)| *e));
+        let (surviving, voided) =
+            corrected_and_voided_passes_with_floor(pairs.iter().copied(), min_lap_micros);
+        Self {
+            surviving,
+            voided,
+            seats,
+        }
+    }
+
+    /// Project the fold into the **lap-list** view: group the corrected pass stream by competitor
+    /// and derive laps. Each pass keeps the global offset that addresses it, so the derived laps
+    /// carry their `start_ref`/`end_ref` command targets.
+    pub fn into_lap_list(self) -> LapList {
+        lap_list_of_corrected(self.seats, self.surviving, self.voided)
+    }
+}
+
+/// The lap-list projection of one folded window — see [`CorrectedWindow::into_lap_list`].
+fn lap_list_of_corrected(
+    seats: BTreeSet<CompetitorKey>,
+    surviving: Vec<(u64, Pass)>,
+    voided: Vec<VoidedEmit>,
+) -> LapList {
     let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
     for key in seats {
         by_competitor.entry(key).or_default();
@@ -946,51 +991,112 @@ pub fn dispositioned_passes<'a, I>(events: I, min_lap_micros: Option<i64>) -> Ve
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
-    let (surviving, voided) =
-        corrected_and_voided_passes_with_floor(pairs.iter().copied(), min_lap_micros);
+    CorrectedWindow::of(events, min_lap_micros).crossings(None)
+}
 
-    // Group the surviving stream per competitor so chain POSITION is per-seat: seat 3's first
-    // crossing is seat 3's holeshot however many other seats crossed before it.
-    let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
-    for (offset, pass) in surviving {
-        by_competitor
-            .entry(CompetitorKey::from_pass(&pass))
-            .or_default()
-            .push((offset, pass));
-    }
+impl CorrectedWindow {
+    /// Project the fold into the **crossing** view — see [`dispositioned_passes`] for the rules.
+    ///
+    /// `limit` keeps only the most recent `n` crossings by offset (the tail; the head is dropped,
+    /// so every surviving `pass_ref` is still above anything a consumer already retired). It is a
+    /// parameter rather than the caller's job because the caller's job was to materialise *every*
+    /// crossing of a possibly-unbounded open-practice run and then throw all but 64 away (#460
+    /// item 2). Here the cutoff is found first — both inputs are offset-sorted, so it costs one
+    /// walk of `n` from their tails — and only the crossings at or above it are built.
+    ///
+    /// Chain positions are still counted over the **whole** chain, so a bounded read reports the
+    /// same `lap_number` for a crossing as an unbounded one; only the head is missing.
+    pub fn crossings(&self, limit: Option<usize>) -> Vec<DispositionedPass> {
+        if limit == Some(0) {
+            return Vec::new();
+        }
+        let cutoff = limit.and_then(|limit| self.nth_newest_offset(limit));
+        let keep = |offset: u64| cutoff.is_none_or(|cutoff| offset >= cutoff);
 
-    let mut out: Vec<DispositionedPass> = Vec::new();
-    for (_, mut chain) in by_competitor {
-        // The SAME ordering key the lap list uses, so chain position and `Lap::number` cannot
-        // drift apart.
-        chain.sort_by_key(|(_, p)| corrected_order_key(p));
-        for (position, (offset, pass)) in chain.into_iter().enumerate() {
+        // Group the surviving stream per competitor so chain POSITION is per-seat: seat 3's first
+        // crossing is seat 3's holeshot however many other seats crossed before it.
+        let mut by_competitor: BTreeMap<CompetitorKey, Vec<&(u64, Pass)>> = BTreeMap::new();
+        for entry in &self.surviving {
+            by_competitor
+                .entry(CompetitorKey::from_pass(&entry.1))
+                .or_default()
+                .push(entry);
+        }
+
+        let mut out: Vec<DispositionedPass> = Vec::new();
+        for (_, mut chain) in by_competitor {
+            // The SAME ordering key the lap list uses, so chain position and `Lap::number` cannot
+            // drift apart.
+            chain.sort_by_key(|(_, p)| corrected_order_key(p));
+            for (position, (offset, pass)) in chain.into_iter().enumerate() {
+                if !keep(*offset) {
+                    continue;
+                }
+                out.push(DispositionedPass {
+                    offset: LogRef(*offset),
+                    pass: pass.clone(),
+                    // Position 0 opens the first lap and closes none — that IS the holeshot,
+                    // derived rather than flagged, because nothing in the log says "holeshot".
+                    disposition: if position == 0 {
+                        CrossingDisposition::Holeshot
+                    } else {
+                        CrossingDisposition::Counted
+                    },
+                    lap_number: (position > 0).then_some(position as u32),
+                });
+            }
+        }
+        for (offset, _void_ref, pass, reason) in &self.voided {
+            if !keep(*offset) {
+                continue;
+            }
             out.push(DispositionedPass {
-                offset: LogRef(offset),
-                pass,
-                // Position 0 opens the first lap and closes none — that IS the holeshot, derived
-                // rather than flagged, because nothing in the log says "holeshot".
-                disposition: if position == 0 {
-                    CrossingDisposition::Holeshot
-                } else {
-                    CrossingDisposition::Counted
-                },
-                lap_number: (position > 0).then_some(position as u32),
+                offset: LogRef(*offset),
+                pass: pass.clone(),
+                disposition: CrossingDisposition::of_void(*reason),
+                lap_number: None,
             });
         }
-    }
-    for (offset, _void_ref, pass, reason) in voided {
-        out.push(DispositionedPass {
-            offset: LogRef(offset),
-            pass,
-            disposition: CrossingDisposition::of_void(reason),
-            lap_number: None,
-        });
+
+        out.sort_by_key(|d| d.offset.0);
+        out
     }
 
-    out.sort_by_key(|d| d.offset.0);
-    out
+    /// The offset of the `n`th-newest crossing across both lists, or `None` when there are fewer
+    /// than `n` (nothing to trim). Both lists are ascending by offset, so this is a merge walked
+    /// backwards `n` steps — `O(n)`, never `O(window)`. `n` is never 0 (the caller short-circuits).
+    fn nth_newest_offset(&self, n: usize) -> Option<u64> {
+        let mut alive = self.surviving.len();
+        let mut voided = self.voided.len();
+        if alive + voided < n {
+            return None;
+        }
+        let mut cutoff = None;
+        for _ in 0..n {
+            let a = (alive > 0).then(|| self.surviving[alive - 1].0);
+            let v = (voided > 0).then(|| self.voided[voided - 1].0);
+            cutoff = match (a, v) {
+                (Some(a), Some(v)) if a >= v => {
+                    alive -= 1;
+                    Some(a)
+                }
+                (Some(_), Some(v)) => {
+                    voided -= 1;
+                    Some(v)
+                }
+                (Some(a), None) => {
+                    alive -= 1;
+                    Some(a)
+                }
+                (None, Some(v)) => {
+                    voided -= 1;
+                    Some(v)
+                }
+                (None, None) => break,
+            };
+        }
+        cutoff
+    }
 }
 
 /// Ordering key for a corrected pass.
@@ -3492,6 +3598,91 @@ mod marshaling_tests {
                 n - 1
             );
         }
+    }
+
+    /// **A bounded crossing read is exactly the tail of the unbounded one (#460 item 2).**
+    ///
+    /// The live projection used to materialise every crossing of a possibly-unbounded run and then
+    /// keep the last `MAX_LIVE_CROSSINGS`; the bound now goes into the fold, which finds the cutoff
+    /// offset first and builds only the crossings at or above it. That is a pure efficiency change
+    /// only if it is byte-identical to the slice it replaces — including `lap_number`, which is a
+    /// position in the *whole* chain and must not be renumbered from the truncated head.
+    ///
+    /// The fixture interleaves seats, a marshal void and a floor rejection so the tail spans all
+    /// four dispositions and both input lists (surviving and the removal record).
+    #[test]
+    fn a_bounded_crossing_read_is_exactly_the_tail_of_the_unbounded_one() {
+        let mut log = vec![scheduled("q-1", &["node-0", "node-1"])];
+        for lap in 0..12i64 {
+            log.push(pass("rh", "node-0", lap * 30_000_000, None));
+            log.push(pass("rh", "node-1", lap * 30_000_000 + 1_000_000, None));
+            // A sub-floor echo right behind node-1's crossing — auto-suppressed under the floor.
+            log.push(pass("rh", "node-1", lap * 30_000_000 + 1_100_000, None));
+        }
+        // And one crossing the marshal removed outright, mid-run.
+        log.push(voided(10));
+
+        let floor = Some(5_000_000);
+        let window = CorrectedWindow::of(tagged(&log), floor);
+        let full = window.crossings(None);
+        assert!(
+            full.len() > 8,
+            "the fixture must overflow every bound under test ({} crossings)",
+            full.len()
+        );
+        assert!(
+            full.iter()
+                .any(|d| d.disposition == CrossingDisposition::RejectedTooShort)
+                && full
+                    .iter()
+                    .any(|d| d.disposition == CrossingDisposition::VoidedByMarshal)
+                && full
+                    .iter()
+                    .any(|d| d.disposition == CrossingDisposition::Holeshot),
+            "the fixture must exercise the removal record as well as the surviving chain"
+        );
+
+        for limit in [1usize, 2, 8, full.len() - 1, full.len(), full.len() + 5] {
+            let bounded = window.crossings(Some(limit));
+            let expected = &full[full.len().saturating_sub(limit)..];
+            assert_eq!(
+                bounded, expected,
+                "crossings(Some({limit})) must equal the last {limit} of the unbounded read"
+            );
+        }
+
+        // Degenerate, but it must not panic or quietly return everything.
+        assert!(window.crossings(Some(0)).is_empty());
+
+        // And the free function still answers the whole run.
+        assert_eq!(dispositioned_passes(tagged(&log), floor), full);
+    }
+
+    /// **One fold, two views.** The lap list and the crossing feed are now read off a single
+    /// [`CorrectedWindow`], so this pins that each still equals what its own standalone entry point
+    /// produced when they each ran the correction fold themselves.
+    #[test]
+    fn the_shared_fold_agrees_with_both_standalone_entry_points() {
+        let log = vec![
+            scheduled("q-1", &["node-0", "node-1", "node-2"]),
+            pass("rh", "node-0", 0, None),
+            pass("rh", "node-1", 1_000_000, None),
+            pass("rh", "node-0", 30_000_000, None),
+            pass("rh", "node-0", 30_100_000, None), // sub-floor echo
+            pass("rh", "node-1", 31_000_000, None),
+            voided(3),
+            pass("rh", "node-0", 60_000_000, None),
+        ];
+        let floor = Some(5_000_000);
+        let window = CorrectedWindow::of(tagged(&log), floor);
+        assert_eq!(
+            window.crossings(None),
+            dispositioned_passes(tagged(&log), floor)
+        );
+        assert_eq!(
+            window.into_lap_list(),
+            lap_list_marshaled_with_floor(tagged(&log), floor)
+        );
     }
 
     #[test]
