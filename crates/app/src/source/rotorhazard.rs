@@ -608,6 +608,10 @@ impl Drop for RhConnection {
 /// registry lives in `gridfpv-server` *below* it, so the two cannot share one type without pointing
 /// the dependency arrow the wrong way. The mapping is the seam, and it is the only place the two
 /// shapes meet.
+///
+/// Since #461 the target [`NodeReading`] is *also* the flattened wire body of `NodeSignal`, so
+/// this is now the only hand-written copy on the path — a field added to the reading reaches the
+/// Tune page without a second mirror to keep in step.
 fn readings(ticks: Vec<NodeTick>) -> Vec<NodeReading> {
     ticks
         .into_iter()
@@ -617,7 +621,7 @@ fn readings(ticks: Vec<NodeTick>) -> Vec<NodeReading> {
             frequency_mhz: tick.frequency_mhz,
             loop_time_micros: tick.loop_time_micros,
             crossing: tick.crossing,
-            crossed: tick.crossed,
+            crossed_recently: tick.crossed,
             node_peak_rssi: tick.node_peak_rssi,
             node_nadir_rssi: tick.node_nadir_rssi,
             pass_peak_rssi: tick.pass_peak_rssi,

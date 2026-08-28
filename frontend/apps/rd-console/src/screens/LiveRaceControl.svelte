@@ -239,12 +239,12 @@
   const gateCollapse = $derived(collapse('race-gate-signal', false));
   const gateOthersCollapse = $derived(collapse('race-gate-signal-others', false));
 
-  // `heatName(id)` → the friendly "<Round> Heat N" / "Open Practice Heat" name for a heat id (the
-  // same helper the picker uses), falling back to the bare id for an untagged/free-text heat. Used
-  // for the current-heat title and the on-deck heat.
+  // `heatName(id)` → the friendly "<Round> Heat N" / "Practice Heat" name for a heat id (the same
+  // helper the picker uses). The name is resolved server-side and carried on the summary (#456);
+  // this is the id → summary lookup. Used for the current-heat title and the on-deck heat.
   function heatName(id: HeatId | undefined): string {
     if (!id) return '';
-    return heatNameById(id, heats, session.currentEvent?.rounds ?? []);
+    return heatNameById(id, heats);
   }
 
   // `competitorName(ref)` → the **callsign** (directory pilot), else an open-practice seat's
@@ -277,23 +277,21 @@
   // ── Heat picker (manual current-heat selection) ──────────────────────────────────────────────
   // Filling a new heat no longer steals Live control's focus (the backend's current_heat only moves
   // on a real transition or an explicit selection), so the RD picks which heat to show/control here.
-  // Each option is labelled with the shared "<Round> Heat N" / "Open Practice Heat" name (the same
-  // helper the Rounds & Heats stage uses), derived from the heat's round off `currentEvent.rounds`
-  // and its position within that round's heats. Untagged/free-text heats fall back to the bare id.
+  // Each option is labelled with the shared "<Round> Heat N" / "Practice Heat" name the server
+  // resolved onto the summary (#456) — the same name the Rounds & Heats stage renders, because it
+  // is the same string. Untagged/free-text heats fall back to the bare handle.
   interface HeatOption {
     heat: HeatId;
     label: string;
     isCurrent: boolean;
   }
-  const heatOptions = $derived.by<HeatOption[]>(() => {
-    const rounds = session.currentEvent?.rounds ?? [];
-    return heats.map((h) => {
-      const round = h.round ? rounds.find((r) => r.id === h.round) : undefined;
-      const inRound = round ? heats.filter((x) => x.round === round.id) : [];
-      const label = round ? heatDisplayName(round, h, inRound) : h.heat;
-      return { heat: h.heat, label, isCurrent: h.heat === heat };
-    });
-  });
+  const heatOptions = $derived.by<HeatOption[]>(() =>
+    heats.map((h) => ({
+      heat: h.heat,
+      label: heatDisplayName(h),
+      isCurrent: h.heat === heat
+    }))
+  );
 
   // The picker is **locked** once the current heat is mid-commit — its phase is Staged/Armed/Running.
   // After Stage you're committed to that race; you switch only by aborting it back to Scheduled or

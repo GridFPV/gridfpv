@@ -2313,38 +2313,89 @@ pub fn heat_on_timer(events: &[Event]) -> Option<HeatId> {
     })
 }
 
-/// The fixed display name for an open-practice round's single auto-created heat — the server-side
-/// twin of the console's `OPEN_PRACTICE_HEAT_NAME` (`frontend/.../lib/heats.ts`).
-const OPEN_PRACTICE_HEAT_NAME: &str = "Practice Heat";
-
-/// The **friendly display name** of a heat within its round — the server-side twin of the console's
-/// `heatNameById` / `heatDisplayName` (`frontend/apps/rd-console/src/lib/heats.ts`), for the
-/// RD-facing messages the server writes (a raw heat id must never reach a user — repo display rule).
+/// The base display name for an open-practice round's auto-created heat.
 ///
-/// Same convention as the console, in the same order:
+/// Unnumbered while the round holds **one** heat, which is all its own fill ever generates. An RD
+/// who adds more by hand gets `"Practice Heat 2"`, `"Practice Heat 3"`, … — see [`heat_name`].
+pub const OPEN_PRACTICE_HEAT_NAME: &str = "Practice Heat";
+
+/// The format string of the retired **multi-main** finals round (#219, D14).
+///
+/// Multi-main *authoring* is gone (primitives-first release) and no generator answers to this name
+/// any more, so there is no `Format::NAME` to reach for the way [`OpenPractice::NAME`] is reached
+/// above. The constant exists so a **persisted** `multi_main` round still resolves its heats to
+/// tier names rather than leaking a raw id, and so the check is a name rather than a bare literal
+/// buried in a comparison (#458/#456).
+///
+/// [`OpenPractice::NAME`]: gridfpv_engine::format::OpenPractice::NAME
+pub const MULTI_MAIN_FORMAT: &str = "multi_main";
+
+/// The **friendly display name** of a heat — the ONE derivation, from the four facts that decide
+/// it. A raw heat id must never reach a user (repo display rule), and until #456 this rule existed
+/// twice: here, folded out of the log, and again in the console's `heatDisplayName`. They had
+/// already drifted.
+///
+/// The server now resolves the name once and puts it on the wire
+/// ([`HeatSummary::name`](crate::live_state::HeatSummary::name),
+/// [`ScheduledHeat::name`](crate::control::ScheduledHeat::name)), and the console consumes it. This
+/// function is that resolution; [`heat_display_name`] is the entry point that folds its inputs out
+/// of the log, and [`crate::live_state::heat_summaries`] is the one that already has them from its
+/// own single pass — same answer, no second fold.
+///
+/// The convention, in order:
 /// - a manually-built heat's RD-typed `label` wins;
-/// - an **open-practice** round's single heat → "Practice Heat";
-/// - a **multi-main** round's heats are tiered mains → "A-Main", "B-Main", …;
-/// - every other heat → "‹Round label› Heat N", N being its 1-based position in the round.
-pub fn heat_display_name(round: &RoundDef, events: &[Event], heat: &HeatId) -> String {
-    if let (_, _, Some(label)) = logged_schedule(events, heat) {
-        let label = label.trim().to_string();
+/// - an **open-practice** round → `"Practice Heat"`, numbered `"Practice Heat 2"`, … only once the
+///   round holds more than one heat (the round's own fill generates exactly one, ever, so the
+///   unnumbered name is right for the common case — but two heats both reading "Practice Heat" is
+///   a name that identifies nothing, so they are told apart the moment there is something to tell
+///   apart). **This is the console's rule, and the server's used to be an unconditional "Practice
+///   Heat"** — an RD with a hand-added second practice heat saw numbered names on screen and the
+///   ambiguous one in every sentence the server wrote (#456).
+/// - a **multi-main** round's heats are tiered mains → `"A-Main"`, `"B-Main"`, …;
+/// - every other heat → `"‹Round label› Heat N"`.
+///
+/// `position` is the heat's **0-based** position in its round, and `heats_in_round` how many heats
+/// the round holds. A heat not (yet) in the round's list is passed `position == heats_in_round`,
+/// which names it as the next one — so a just-filled heat is sensibly numbered.
+pub fn heat_name(
+    round: &RoundDef,
+    label: Option<&str>,
+    position: usize,
+    heats_in_round: usize,
+) -> String {
+    if let Some(label) = label {
+        let label = label.trim();
         if !label.is_empty() {
-            return label;
+            return label.to_string();
         }
     }
     if round.format == gridfpv_engine::format::OpenPractice::NAME {
-        return OPEN_PRACTICE_HEAT_NAME.to_string();
+        if heats_in_round <= 1 {
+            return OPEN_PRACTICE_HEAT_NAME.to_string();
+        }
+        return format!("{} {}", OPEN_PRACTICE_HEAT_NAME, position + 1);
     }
-    // The heat's position in its round, through the ONE derivation of it (#117 S3): the alternating
-    // layout default numbers heats the same way, so "Qualifying Heat 2" and "the second layout"
-    // always name the same heat. A not-yet-listed heat is the next position, matching the console.
-    let index = heat_position_in_round(events, &round.id, heat);
-    if round.format == "multi_main" {
+    if round.format == MULTI_MAIN_FORMAT {
         // The main's tier is its position in the round (A=first, B=second, …).
-        return main_tier_name(index);
+        return main_tier_name(position);
     }
-    format!("{} Heat {}", round.label, index + 1)
+    format!("{} Heat {}", round.label, position + 1)
+}
+
+/// [`heat_name`] with its inputs folded out of the log — the entry point for the RD-facing
+/// sentences the server writes (`CommandAck` details, refusals) where only the log is in hand.
+///
+/// The position comes from [`scheduled_round_heats`], the ONE derivation of a heat's place in its
+/// round (#117 S3): the alternating layout default numbers heats the same way, so "Qualifying
+/// Heat 2" and "the second layout" always name the same heat.
+pub fn heat_display_name(round: &RoundDef, events: &[Event], heat: &HeatId) -> String {
+    let (_, _, label) = logged_schedule(events, heat);
+    let scheduled = scheduled_round_heats(events, &round.id);
+    let position = scheduled
+        .iter()
+        .position(|h| h == heat)
+        .unwrap_or(scheduled.len());
+    heat_name(round, label.as_deref(), position, scheduled.len())
 }
 
 /// The tier name for the main at 0-based `index`: 0 → "A-Main", 1 → "B-Main", … matching the
@@ -5466,6 +5517,14 @@ mod tests {
         assert_eq!(heat_on_timer(&log), Some(HeatId("q1-h1".into())));
     }
 
+    /// **The one naming convention, including the practice heats the server used to leave
+    /// ambiguous (#456).**
+    ///
+    /// This test previously asserted that a practice heat is *always* "Practice Heat", which is
+    /// what the server did and what the console did not — so CI blessed the divergence rather than
+    /// catching it. An RD who adds a second practice heat by hand saw "Practice Heat 2" on screen
+    /// and a bare "Practice Heat" in every sentence the server wrote about either one. The
+    /// console's rule is the correct one and is now the only one; this pins it.
     #[test]
     fn heat_display_name_matches_the_console_convention() {
         // "‹Round label› Heat N", numbered by position within the round.
@@ -5480,12 +5539,148 @@ mod tests {
             "Qualifying Heat 2"
         );
 
-        // An open-practice round's single heat is named, not numbered.
+        // An open-practice round's SINGLE heat is named, not numbered — the round's own fill
+        // generates exactly one, ever, so this is the common case.
         let practice = open_practice_round("op1", &[0, 1]);
-        let log = vec![scheduled_with("op1-heat", "op1", &["node-0"], &[])];
+        let one = vec![scheduled_with("op1-heat", "op1", &["node-0"], &[])];
         assert_eq!(
-            heat_display_name(&practice, &log, &HeatId("op1-heat".into())),
+            heat_display_name(&practice, &one, &HeatId("op1-heat".into())),
             "Practice Heat"
+        );
+
+        // Add a second by hand and BOTH are numbered — a name that no longer identifies anything
+        // is not a name. This is the half the server used to get wrong.
+        let two = vec![
+            scheduled_with("op1-heat", "op1", &["node-0"], &[]),
+            scheduled_with("op1-heat-2", "op1", &["node-1"], &[]),
+        ];
+        assert_eq!(
+            heat_display_name(&practice, &two, &HeatId("op1-heat".into())),
+            "Practice Heat 1"
+        );
+        assert_eq!(
+            heat_display_name(&practice, &two, &HeatId("op1-heat-2".into())),
+            "Practice Heat 2"
+        );
+
+        // A heat not (yet) listed in its round is named as the NEXT one, so a just-filled heat is
+        // sensibly numbered — and on a round holding one heat that is still the unnumbered name,
+        // exactly as the console has it.
+        assert_eq!(
+            heat_display_name(&practice, &two, &HeatId("op1-heat-3".into())),
+            "Practice Heat 3"
+        );
+        assert_eq!(
+            heat_display_name(&practice, &one, &HeatId("op1-heat-2".into())),
+            "Practice Heat"
+        );
+
+        // A retired-but-persisted multi-main round still resolves tier names rather than an id.
+        let mut mains = qual_round("f1", "open");
+        mains.format = MULTI_MAIN_FORMAT.into();
+        let log = vec![
+            scheduled_with("main-A", "f1", &["A"], &[]),
+            scheduled_with("main-B", "f1", &["B"], &[]),
+        ];
+        assert_eq!(
+            heat_display_name(&mains, &log, &HeatId("main-B".into())),
+            "B-Main"
+        );
+    }
+
+    /// **ONE derivation: the name on the projection IS the name the log fold gives (#456).**
+    ///
+    /// `heat_display_name` (log-folded, for the sentences the server writes) and
+    /// `live_state::heat_summaries` (which resolves every heat's name from its own single pass,
+    /// so `GET /heats` does not go quadratic) are two entry points to [`heat_name`] and must never
+    /// be two conventions. The console no longer has a third: it renders `HeatSummary::name`.
+    ///
+    /// This asserts them equal for every heat of a fixture that covers all four branches — numbered
+    /// heats, a numbered practice pair, retired-but-persisted mains, a custom label — plus the two
+    /// fallbacks (a heat whose round the event does not define, and an untagged free-text one).
+    #[test]
+    fn the_heat_projections_name_is_the_log_folded_name() {
+        let mut qual = qual_round("q1", "open");
+        qual.label = "Qualifying".into();
+        let practice = open_practice_round("op1", &[0, 1]);
+        let mut mains = qual_round("f1", "open");
+        mains.format = MULTI_MAIN_FORMAT.into();
+        let rounds = vec![qual.clone(), practice.clone(), mains.clone()];
+
+        let mut log = vec![
+            scheduled_with("q1-h1", "q1", &["A"], &[]),
+            scheduled_with("q1-h2", "q1", &["B"], &[]),
+            // Two practice heats: the auto-created one plus one the RD added by hand.
+            scheduled_with("op1-heat", "op1", &["node-0"], &[]),
+            scheduled_with("op1-heat-2", "op1", &["node-1"], &[]),
+            scheduled_with("main-A", "f1", &["A"], &[]),
+            scheduled_with("main-B", "f1", &["B"], &[]),
+            // A heat of a round the event does NOT define, and an untagged free-text one.
+            scheduled_with("gone-h1", "removed", &["C"], &[]),
+        ];
+        log.push(Event::HeatScheduled {
+            heat: HeatId("free-1".into()),
+            lineup: vec![CompetitorRef("D".into())],
+            class: None,
+            round: None,
+            frequencies: vec![],
+            label: Some("  Grudge match  ".into()),
+        });
+        // A custom label wins over the derived name even inside a round.
+        log.push(Event::HeatScheduled {
+            heat: HeatId("q1-h3".into()),
+            lineup: vec![CompetitorRef("E".into())],
+            class: None,
+            round: Some(RoundId("q1".into())),
+            frequencies: vec![],
+            label: Some("Shootout".into()),
+        });
+
+        let summaries = crate::live_state::heat_summaries(&log, Some(&rounds));
+        for summary in &summaries {
+            let def = summary
+                .round
+                .as_ref()
+                .and_then(|id| rounds.iter().find(|r| &r.id == id));
+            let Some(def) = def else {
+                // No round to derive from: the RD's own label, else the raw handle — the resolver's
+                // last resort, and the only place an id is allowed to reach a screen.
+                let expected = summary
+                    .label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| summary.heat.0.clone());
+                assert_eq!(summary.name, expected, "fallback for {:?}", summary.heat);
+                continue;
+            };
+            assert_eq!(
+                summary.name,
+                heat_display_name(def, &log, &summary.heat),
+                "the projection and the log fold must name {:?} identically",
+                summary.heat
+            );
+        }
+
+        // …and those names are the console's convention, spelled out.
+        let named: Vec<(&str, &str)> = summaries
+            .iter()
+            .map(|s| (s.heat.0.as_str(), s.name.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("q1-h1", "Qualifying Heat 1"),
+                ("q1-h2", "Qualifying Heat 2"),
+                ("op1-heat", "Practice Heat 1"),
+                ("op1-heat-2", "Practice Heat 2"),
+                ("main-A", "A-Main"),
+                ("main-B", "B-Main"),
+                ("gone-h1", "gone-h1"),
+                ("free-1", "Grudge match"),
+                ("q1-h3", "Shootout"),
+            ]
         );
     }
 

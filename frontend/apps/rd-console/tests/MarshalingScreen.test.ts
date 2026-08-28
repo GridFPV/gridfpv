@@ -67,6 +67,7 @@ describe('Marshaling (Slice 3)', () => {
     const heats: HeatSummary[] = [
       {
         heat: 'heat-1',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['ALICE'],
         round: 'r1',
         class: 'c1',
@@ -76,6 +77,7 @@ describe('Marshaling (Slice 3)', () => {
       },
       {
         heat: 'heat-2',
+        name: 'Qualifying R1 Heat 2',
         lineup: ['BOB'],
         round: 'r1',
         class: 'c1',
@@ -1020,6 +1022,7 @@ describe('Marshaling (Slice 3)', () => {
     };
     const FN_HEAT: HeatSummary = {
       heat: 'q1-heat',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
       round: 'r1',
       class: 'c1',
@@ -1272,6 +1275,7 @@ describe('Marshaling (Slice 3)', () => {
       };
       const NODE_HEAT: HeatSummary = {
         heat: 'q1-heat',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['node-0'],
         round: 'r1',
         class: 'c1',

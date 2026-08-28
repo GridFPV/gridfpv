@@ -263,10 +263,9 @@
     })
   );
   const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
-  // The current heat's friendly "<Round> Heat N" / "Open Practice Heat" name (the raw id otherwise).
-  const heatName = $derived(
-    heat ? heatNameById(heat, heats, session.currentEvent?.rounds ?? []) : ''
-  );
+  // The current heat's friendly "<Round> Heat N" / "Practice Heat" name (the raw id otherwise), as
+  // the server resolved it onto the summary (#456).
+  const heatName = $derived(heat ? heatNameById(heat, heats) : '');
 
   // Drive the marshaling reads off the live stream: whenever the current heat (or the stream's
   // cursor — a new appended event, e.g. a correction we or another client made) changes, re-pull
@@ -1039,13 +1038,11 @@
           >
             <option value=""
               >Current heat (live){currentHeat
-                ? ` — ${heatNameById(currentHeat, heats, session.currentEvent?.rounds ?? [])}`
+                ? ` — ${heatNameById(currentHeat, heats)}`
                 : ''}</option
             >
             {#each heats as h (h.heat)}
-              <option value={h.heat}
-                >{heatNameById(h.heat, heats, session.currentEvent?.rounds ?? [])}</option
-              >
+              <option value={h.heat}>{heatNameById(h.heat, heats)}</option>
             {/each}
           </Select>
         </div>

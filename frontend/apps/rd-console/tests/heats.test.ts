@@ -1,13 +1,21 @@
+/**
+ * `lib/heats.ts` after #456: the console **consumes** the heat name the server resolved onto
+ * {@link HeatSummary.name} rather than re-deriving it.
+ *
+ * So these no longer assert the naming convention — that lives once, in the server's
+ * `round_engine::heat_name`, and is pinned by its own tests (including the practice-heat numbering
+ * the two used to disagree about). What is left to assert here is the console's actual job: the
+ * id → summary lookup, the removed-heat answer for an id the event no longer serves, and the
+ * raw-handle last resort.
+ */
 import { describe, expect, it } from 'vitest';
 import type { HeatSummary, RoundDef } from '@gridfpv/types';
 import {
   heatDisplayName,
   heatNameById,
   REMOVED_HEAT_NAME,
-  isMultiMainRound,
-  isOpenPracticeRound,
-  mainTierName,
-  OPEN_PRACTICE_HEAT_NAME
+  isDeterministicRound,
+  isOpenPracticeRound
 } from '../src/lib/heats.js';
 
 const round = (over: Partial<RoundDef> = {}): RoundDef =>
@@ -26,8 +34,10 @@ const round = (over: Partial<RoundDef> = {}): RoundDef =>
     ...over
   }) as RoundDef;
 
-const heat = (id: string): HeatSummary => ({
+/** A heat as the server serves it — `name` already resolved. */
+const heat = (id: string, name = `Qualifying R1 ${id}`): HeatSummary => ({
   heat: id,
+  name,
   lineup: [],
   round: 'r1',
   class: 'c1',
@@ -36,136 +46,51 @@ const heat = (id: string): HeatSummary => ({
   is_current: false
 });
 
-describe('heats — shared heat-name helper', () => {
-  it('names a non-practice heat "<Round> Heat <N>" by its 1-based position in the round', () => {
-    const r = round();
-    const list = [heat('h-a'), heat('h-b'), heat('h-c')];
-    expect(heatDisplayName(r, list[0], list)).toBe('Qualifying R1 Heat 1');
-    expect(heatDisplayName(r, list[1], list)).toBe('Qualifying R1 Heat 2');
-    expect(heatDisplayName(r, list[2], list)).toBe('Qualifying R1 Heat 3');
+describe('heats — heatDisplayName renders the name the server resolved', () => {
+  it('returns the wire name verbatim', () => {
+    expect(heatDisplayName(heat('h-b', 'Qualifying R1 Heat 2'))).toBe('Qualifying R1 Heat 2');
+    expect(heatDisplayName(heat('main-B', 'B-Main'))).toBe('B-Main');
+    expect(heatDisplayName(heat('p-2', 'Practice Heat 2'))).toBe('Practice Heat 2');
+    // A custom label is resolved server-side too — it arrives as the name, not as a second field
+    // the console has to prefer for itself.
+    expect(heatDisplayName(heat('h-a', 'Featured Heat'))).toBe('Featured Heat');
   });
 
-  it('names a heat not yet in the list as the next position', () => {
-    const r = round();
-    const list = [heat('h-a')];
-    expect(heatDisplayName(r, heat('h-new'), list)).toBe('Qualifying R1 Heat 2');
-  });
-
-  it('names the one open-practice heat the fixed practice name', () => {
-    const r = round({ format: 'open_practice', label: 'Open Practice' });
-    expect(isOpenPracticeRound(r)).toBe(true);
-    expect(heatDisplayName(r, heat('p-1'), [heat('p-1')])).toBe(OPEN_PRACTICE_HEAT_NAME);
-  });
-
-  it('numbers practice heats only once the RD has added a second by hand', () => {
-    // The round's own fill emits one practice heat, ever — so the plain name is right for it. But
-    // "Add heat" can seat more, and two rows both reading "Practice Heat" name nothing at all.
-    const r = round({ format: 'open_practice', label: 'Open Practice' });
-    const list = [heat('p-1'), heat('p-2')];
-    expect(heatDisplayName(r, list[0], list)).toBe(`${OPEN_PRACTICE_HEAT_NAME} 1`);
-    expect(heatDisplayName(r, list[1], list)).toBe(`${OPEN_PRACTICE_HEAT_NAME} 2`);
-    // An RD-typed label still wins over the derived name, as it does everywhere.
-    expect(heatDisplayName(r, { ...list[1], label: 'Whoop session' }, list)).toBe('Whoop session');
-  });
-
-  it('reports a non-practice round as not open-practice', () => {
-    expect(isOpenPracticeRound(round())).toBe(false);
+  it('falls back to the raw handle when the server had no name to give', () => {
+    // A sim / free-text heat with no round to derive from: the handle IS the RD's own identifier,
+    // and this is the resolver's documented last resort rather than an id leak.
+    expect(heatDisplayName(heat('q-1', 'q-1'))).toBe('q-1');
+    expect(heatDisplayName(heat('q-1', '   '))).toBe('q-1');
+    expect(heatDisplayName({ ...heat('q-1'), name: undefined as unknown as string })).toBe('q-1');
   });
 });
 
 describe('heats — heatNameById (by-id resolution for Live control)', () => {
-  it('resolves a heat id to its "<Round> Heat N" name via the heats list + rounds', () => {
-    const r = round();
-    const list = [heat('h-a'), heat('h-b')];
-    expect(heatNameById('h-b', list, [r])).toBe('Qualifying R1 Heat 2');
-  });
-
-  it('resolves an open-practice heat id to the fixed practice name', () => {
-    const r = round({ format: 'open_practice', label: 'Open Practice' });
-    expect(heatNameById('p-1', [heat('p-1')], [r])).toBe(OPEN_PRACTICE_HEAT_NAME);
+  it('resolves a heat id through the heats list to that heat’s name', () => {
+    const list = [heat('h-a', 'Qualifying R1 Heat 1'), heat('h-b', 'Qualifying R1 Heat 2')];
+    expect(heatNameById('h-b', list)).toBe('Qualifying R1 Heat 2');
   });
 
   it('#418: a heat the event no longer serves is NAMED as removed, never rendered as its id', () => {
     // Removing a round takes its unstarted heats with it. The live `current_heat` can still be
     // pointing at one (the RD had it loaded in Live control), and the raw id must not surface.
-    expect(heatNameById('unknown', [heat('h-a')], [round()])).toBe(REMOVED_HEAT_NAME);
-    expect(heatNameById('unknown', [heat('h-a')], [round()])).not.toContain('unknown');
+    expect(heatNameById('unknown', [heat('h-a')])).toBe(REMOVED_HEAT_NAME);
+    expect(heatNameById('unknown', [heat('h-a')])).not.toContain('unknown');
   });
 
-  it('falls back to the bare id when the heat carries no resolvable round (sim/free-text)', () => {
-    const untagged: HeatSummary = { ...heat('q-1'), round: undefined };
-    expect(heatNameById('q-1', [untagged], [round()])).toBe('q-1');
-  });
-
-  it('prefers a custom label even when the heat has no resolvable round', () => {
-    const labelled: HeatSummary = { ...heat('q-1'), round: undefined, label: 'Featured Heat' };
-    expect(heatNameById('q-1', [labelled], [round()])).toBe('Featured Heat');
+  it('falls back to the bare handle for a heat the server could not name', () => {
+    expect(heatNameById('q-1', [{ ...heat('q-1', 'q-1'), round: undefined }])).toBe('q-1');
   });
 });
 
-describe('heats — a custom label overrides the derived auto-name (build-heat)', () => {
-  it('heatDisplayName returns the custom label over the "<Round> Heat N" convention', () => {
-    const r = round();
-    const labelled: HeatSummary = { ...heat('h-a'), label: 'Featured Heat' };
-    expect(heatDisplayName(r, labelled, [labelled])).toBe('Featured Heat');
+describe('heats — round predicates', () => {
+  it('reports an open-practice round as such, and a competition round as not', () => {
+    expect(isOpenPracticeRound(round({ format: 'open_practice' }))).toBe(true);
+    expect(isOpenPracticeRound(round())).toBe(false);
   });
 
-  it('heatDisplayName returns the custom label over the multi-main tier name', () => {
-    const r = round({ format: 'multi_main' });
-    const labelled: HeatSummary = { ...heat('main-A'), label: 'Grand Final' };
-    expect(heatDisplayName(r, labelled, [labelled])).toBe('Grand Final');
-  });
-
-  it('falls back to the derived name when the label is absent or blank', () => {
-    const r = round();
-    const list = [heat('h-a')];
-    expect(heatDisplayName(r, { ...list[0], label: undefined }, list)).toBe('Qualifying R1 Heat 1');
-    expect(heatDisplayName(r, { ...list[0], label: '   ' }, list)).toBe('Qualifying R1 Heat 1');
-  });
-
-  it('heatNameById resolves a labelled heat to its custom label', () => {
-    const r = round();
-    const labelled: HeatSummary = { ...heat('h-a'), label: 'Featured Heat' };
-    expect(heatNameById('h-a', [labelled], [r])).toBe('Featured Heat');
-  });
-});
-
-describe('heats — multi-main tier naming (#219)', () => {
-  const mainsRound = (over: Partial<RoundDef> = {}): RoundDef =>
-    round({ format: 'multi_main', label: 'Mains', ...over });
-
-  it('reports a multi-main round as such (and not open-practice)', () => {
-    expect(isMultiMainRound(mainsRound())).toBe(true);
-    expect(isOpenPracticeRound(mainsRound())).toBe(false);
-    expect(isMultiMainRound(round())).toBe(false);
-  });
-
-  it('maps a main index to its tier name (A-Main, B-Main, …)', () => {
-    expect(mainTierName(0)).toBe('A-Main');
-    expect(mainTierName(1)).toBe('B-Main');
-    expect(mainTierName(2)).toBe('C-Main');
-    expect(mainTierName(25)).toBe('Z-Main');
-    // Past the alphabet falls back to a numbered main rather than running off the letters.
-    expect(mainTierName(26)).toBe('Main 27');
-  });
-
-  it('names each multi-main heat by its tier (position in the round)', () => {
-    const r = mainsRound();
-    const list = [heat('main-A'), heat('main-B'), heat('main-C')];
-    expect(heatDisplayName(r, list[0], list)).toBe('A-Main');
-    expect(heatDisplayName(r, list[1], list)).toBe('B-Main');
-    expect(heatDisplayName(r, list[2], list)).toBe('C-Main');
-  });
-
-  it('names a not-yet-listed multi-main heat as the next tier', () => {
-    const r = mainsRound();
-    const list = [heat('main-A')];
-    expect(heatDisplayName(r, heat('main-B'), list)).toBe('B-Main');
-  });
-
-  it('resolves a multi-main heat id to its tier name via heatNameById', () => {
-    const r = mainsRound();
-    const list = [heat('main-A'), heat('main-B')];
-    expect(heatNameById('main-B', list, [r])).toBe('B-Main');
+  it('reports every format but open practice as deterministic (one-action generate)', () => {
+    expect(isDeterministicRound(round())).toBe(true);
+    expect(isDeterministicRound(round({ format: 'open_practice' }))).toBe(false);
   });
 });

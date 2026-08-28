@@ -310,13 +310,22 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const raced: HeatSummary[] = [
       {
         heat: 'q-1',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
         phase: 'Final',
         is_current: false
       },
-      { heat: 'q-2', lineup: ['p3'], class: 'c1', round: 'r1', phase: 'Final', is_current: false }
+      {
+        heat: 'q-2',
+        name: 'Qualifying R1 Heat 2',
+        lineup: ['p3'],
+        class: 'c1',
+        round: 'r1',
+        phase: 'Final',
+        is_current: false
+      }
     ];
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
       ...QUAL,
@@ -1204,6 +1213,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   it("lists a round's heats with lineup callsigns, status, and the current marker", async () => {
     const heat: HeatSummary = {
       heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1230,6 +1240,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const heats: HeatSummary[] = [
       {
         heat: 'q-a',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1238,6 +1249,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       },
       {
         heat: 'q-b',
+        name: 'Qualifying R1 Heat 2',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1258,6 +1270,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   it("renders each pilot's assigned channel as a band+channel label, custom MHz, or — (Slice 4b)", async () => {
     const heat: HeatSummary = {
       heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1287,6 +1300,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   it('says the channel is UNKNOWN, not "none", for a heat with no assignment (#416)', async () => {
     const heat: HeatSummary = {
       heat: 'q-2',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1329,6 +1343,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     };
     const heat: HeatSummary = {
       heat: 'op1-heat-7x2',
+      name: 'Practice Heat',
       lineup: ['p1', 'p2'],
       round: 'op1',
       phase: 'Scheduled',
@@ -1350,6 +1365,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const impls = heatsImpls([]);
     const newHeat: HeatSummary = {
       heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1377,6 +1393,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const filled: HeatSummary[] = [
       {
         heat: 'q-1',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1385,6 +1402,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       },
       {
         heat: 'q-2',
+        name: 'Qualifying R1 Heat 2',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1858,7 +1876,15 @@ describe('EventRounds — a round with a heat in progress cannot be edited (#387
   }
   /** A heat of the `r1` round in the given phase. */
   function heatIn(phase: HeatSummary['phase'], is_current = false): HeatSummary {
-    return { heat: 'q-1', lineup: ['p1', 'p2'], class: 'c1', round: 'r1', phase, is_current };
+    return {
+      heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
+      lineup: ['p1', 'p2'],
+      class: 'c1',
+      round: 'r1',
+      phase,
+      is_current
+    };
   }
   /** The round's Edit button, and the row it lives in. */
   async function editButton() {
@@ -2117,6 +2143,7 @@ describe('EventRounds — a round names the channel layouts its heats may fly (#
   /** A scheduled heat in the qual round, flying Bracket A. */
   const HEAT: HeatSummary = {
     heat: 'r1-h0',
+    name: 'Qualifying R1 Heat 1',
     lineup: ['p1', 'p2'],
     class: 'c1',
     round: 'r1',
@@ -2296,6 +2323,7 @@ describe('EventRounds — a round names the channel layouts its heats may fly (#
   /** Its heat, seated on two node refs and flying no layout — the case that could not be edited. */
   const PRACTICE_HEAT: HeatSummary = {
     heat: 'op1-heat',
+    name: 'Practice Heat',
     lineup: ['node-0', 'node-1'],
     round: 'op1',
     phase: 'Scheduled',

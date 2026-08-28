@@ -617,6 +617,66 @@ pub struct Timer {
     pub node_channels: Vec<NodeChannel>,
 }
 
+/// The words one Tune write's refusals use — the only thing that differs between the three
+/// copies of the live-RotorHazard-node guard ladder (#458).
+///
+/// `request_calibration` / `request_capture` / `request_channel` each re-typed the same four
+/// checks (kind → connected → node exists → node enabled) with per-verb strings threaded through
+/// them, so nothing but discipline kept a fourth write from picking a different subset. The checks
+/// now live once, on [`Timer::require_live_rh`] and [`Timer::require_enabled_node`]; the wording
+/// travels as this.
+///
+/// # What the ladder deliberately does NOT include
+///
+/// - **The race-phase gate.** "Is a scored heat running on this timer?" needs the event log, which
+///   this crate cannot see, so it lives in the route ([`crate::app`]'s tune-write preamble) and
+///   arrives here only as the already-decided `during_open_practice` flag. That subset difference
+///   is intentional, not drift.
+/// - **The node checks, for the routes.** The route preamble stops at kind + race phase; the node
+///   half runs here, where `node_width()`/`node_enabled()` are read under the registry lock that
+///   also performs the write. Splitting it would let the width change between check and write.
+#[derive(Debug, Clone, Copy)]
+struct TimerOp {
+    /// Completes `"… is not a RotorHazard timer — there is no {}"`: `detector to calibrate`.
+    no_hardware: &'static str,
+    /// Completes `"… is not connected — connect it before {}"`: `setting its thresholds`.
+    before_connecting: &'static str,
+    /// Completes `"… has N nodes — there is no Node M to {}"`: `calibrate`.
+    no_node: &'static str,
+    /// Completes `"Node M is disabled on … — enable it before {}"`: `setting its thresholds`.
+    before_enabling: &'static str,
+}
+
+/// Writing a detection threshold ([`TimerRegistry::request_calibration`]).
+const OP_CALIBRATE: TimerOp = TimerOp {
+    no_hardware: "detector to calibrate",
+    before_connecting: "setting its thresholds",
+    no_node: "calibrate",
+    before_enabling: "setting its thresholds",
+};
+
+/// Measuring a pair of thresholds ([`TimerRegistry::request_capture`]).
+const OP_CAPTURE: TimerOp = TimerOp {
+    no_hardware: "detector to capture from",
+    before_connecting: "capturing a level",
+    no_node: "capture on",
+    before_enabling: "capturing a level",
+};
+
+/// Retuning a node's receiver ([`TimerRegistry::request_channel`]).
+const OP_CHANNEL: TimerOp = TimerOp {
+    no_hardware: "receiver to tune",
+    before_connecting: "setting a node's channel",
+    no_node: "tune",
+    before_enabling: "setting its channel",
+};
+
+/// The refusal for an id no timer answers to — spelled once, so the three writes cannot drift on
+/// even this.
+fn no_such_timer(id: &TimerId) -> TimerError {
+    TimerError(format!("no timer with id {:?}", id.0))
+}
+
 impl Timer {
     /// The timer's **effective width** in nodes (#412) — how many node indices exist at all.
     ///
@@ -671,6 +731,56 @@ impl Timer {
     /// goes through here; everything that reaches a wire keeps the raw index.
     pub fn node_label(node: u32) -> String {
         format!("Node {}", node + 1)
+    }
+
+    /// **This timer is a live RotorHazard** — a RotorHazard at all, and connected right now.
+    ///
+    /// One of the two halves of the guard ladder every Tune write runs (#458); see [`TimerOp`] for
+    /// why the wording is a parameter and what the two halves deliberately do *not* cover.
+    fn require_live_rh(&self, op: TimerOp) -> Result<(), TimerError> {
+        if !matches!(self.kind, TimerKind::Rotorhazard { .. }) {
+            return Err(TimerError(format!(
+                "{:?} is not a RotorHazard timer — there is no {}",
+                self.name, op.no_hardware
+            )));
+        }
+        if self.status != TimerStatus::Connected {
+            return Err(TimerError(format!(
+                "{:?} is not connected — connect it before {}",
+                self.name, op.before_connecting
+            )));
+        }
+        Ok(())
+    }
+
+    /// **This node exists on this timer, and the RD has left it enabled** (#412).
+    ///
+    /// The other half of the ladder. Tuning a node the RD has switched off is pointless at best and
+    /// misleading at worst: the value would be applied to hardware no heat is ever seated on, and
+    /// the page would show a confirmed write on a dead gate. The width half is not cosmetic either
+    /// — RotorHazard validates `0 <= node_index < num_nodes` and otherwise only writes a log line,
+    /// so an out-of-range write would look accepted here and land nowhere at all.
+    ///
+    /// Both refusals name the node the way the page labels it (1-based), per the repo display rule.
+    fn require_enabled_node(&self, node: u32, op: TimerOp) -> Result<(), TimerError> {
+        if node >= self.node_width() {
+            return Err(TimerError(format!(
+                "{:?} has {} nodes — there is no {} to {}",
+                self.name,
+                self.node_width(),
+                Timer::node_label(node),
+                op.no_node
+            )));
+        }
+        if !self.node_enabled(node) {
+            return Err(TimerError(format!(
+                "{} is disabled on {:?} — enable it before {}",
+                Timer::node_label(node),
+                self.name,
+                op.before_enabling
+            )));
+        }
+        Ok(())
     }
 
     /// The disagreement between what the timer **reported** and what GridFPV is **configured** for
@@ -1796,20 +1906,23 @@ pub const SIGNAL_RING: usize = 150;
 /// the page flicker between "live" and "stalled".
 const SIGNAL_STREAMING_WITHIN: Duration = Duration::from_millis(1500);
 
-/// One node's live signal, as a Tune page reads it (#355).
+/// One node's latest readings — the thirteen per-node values the timer reports, and **the** wire
+/// definition of them.
+///
+/// This is both the crate-boundary twin of the adapter's `NodeTick` (the live socket lives in
+/// `gridfpv-app`, *above* this crate, so the registry cannot name the adapter's type — restating
+/// the fields here keeps the dependency arrow pointing the right way, and the app crate does the
+/// trivial mapping) **and** the flattened body of [`NodeSignal`] on the wire. It is one struct for
+/// both jobs on purpose (#461): the two used to be hand-mirrored field lists joined by a
+/// field-by-field copy, which is a shape that can silently drift. Now the ingest type and the
+/// published type are the same type, so a field added here reaches the console or fails to compile.
 ///
 /// Everything is `Option` because everything is genuinely optional: a node RotorHazard has not
 /// reported yet, a timer whose thresholds have not arrived, a build that omits a readout. A
 /// missing value renders as "—", which is information; a zero would be a lie.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct NodeSignal {
-    /// The node's index on the timer, `0`-based. The **display** name is built from this plus the
-    /// channel (`Node 1 · Raceband R7`) — see the repo display rule.
-    pub node: u32,
-    /// The stable per-node competitor handle (`node-0`, `node-1`, …) the rest of GridFPV uses for
-    /// a seat. A wire handle, not a label.
-    pub seat: CompetitorRef,
+pub struct NodeReading {
     /// Whether RotorHazard has reported anything at all for this node.
     ///
     /// **Unseated nodes are included, and this is why.** "Is this node even alive?" is half the
@@ -1861,6 +1974,26 @@ pub struct NodeSignal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exit_at: Option<f32>,
+}
+
+/// One node's live signal, as a Tune page reads it (#355): its seat, its
+/// [readings](NodeReading), and its rolling RSSI window.
+///
+/// The readings are `#[serde(flatten)]`ed, so on the wire this is one flat object —
+/// `node`/`seat`, then [`NodeReading`]'s thirteen fields, then `samples` — byte-identical to the
+/// shape that was hand-mirrored before #461.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NodeSignal {
+    /// The node's index on the timer, `0`-based. The **display** name is built from this plus the
+    /// channel (`Node 1 · Raceband R7`) — see the repo display rule.
+    pub node: u32,
+    /// The stable per-node competitor handle (`node-0`, `node-1`, …) the rest of GridFPV uses for
+    /// a seat. A wire handle, not a label.
+    pub seat: CompetitorRef,
+    /// The node's latest readings, flattened onto this object.
+    #[serde(flatten)]
+    pub reading: NodeReading,
     /// The rolling RSSI window, **oldest first**, one value per entry in
     /// [`TimerSignal::sample_micros`]. At most [`SIGNAL_RING`] long, always.
     pub samples: Vec<f32>,
@@ -1902,42 +2035,6 @@ pub struct TimerSignal {
     /// Every node the timer reports, **including unseated ones** (see [`NodeSignal::seen`]), in
     /// node order.
     pub nodes: Vec<NodeSignal>,
-}
-
-/// One node's latest readings as the connection layer hands them over — the crate-boundary twin of
-/// the adapter's `NodeTick`.
-///
-/// It exists because the live socket lives in `gridfpv-app`, *above* this crate, so the registry
-/// cannot name the adapter's type. Restating the fields here keeps the dependency arrow pointing
-/// the right way; the app crate does the (trivial) mapping.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct NodeReading {
-    /// Whether the timer has reported this node at all.
-    pub seen: bool,
-    /// Live RSSI.
-    pub rssi: Option<f32>,
-    /// Tuned frequency in MHz, `None` when untuned.
-    pub frequency_mhz: Option<u16>,
-    /// Detector loop time in microseconds.
-    pub loop_time_micros: Option<u32>,
-    /// Crossing state as of the newest frame.
-    pub crossing: bool,
-    /// Any crossing seen since the previous reading was taken.
-    pub crossed: bool,
-    /// Running peak RSSI.
-    pub node_peak_rssi: Option<f32>,
-    /// Running nadir RSSI.
-    pub node_nadir_rssi: Option<f32>,
-    /// Most recent pass's peak RSSI.
-    pub pass_peak_rssi: Option<f32>,
-    /// Most recent pass's nadir RSSI.
-    pub pass_nadir_rssi: Option<f32>,
-    /// Passes detected.
-    pub pass_count: Option<u32>,
-    /// Enter threshold.
-    pub enter_at: Option<f32>,
-    /// Exit threshold.
-    pub exit_at: Option<f32>,
 }
 
 /// The live tune-telemetry state for **one** timer: the lease, the shared time base and the
@@ -2030,19 +2127,7 @@ impl TimerSignalState {
                 .map(|(index, ring)| NodeSignal {
                     node: index as u32,
                     seat: CompetitorRef(format!("node-{index}")),
-                    seen: ring.latest.seen,
-                    rssi: ring.latest.rssi,
-                    frequency_mhz: ring.latest.frequency_mhz,
-                    loop_time_micros: ring.latest.loop_time_micros,
-                    crossing: ring.latest.crossing,
-                    crossed_recently: ring.latest.crossed,
-                    node_peak_rssi: ring.latest.node_peak_rssi,
-                    node_nadir_rssi: ring.latest.node_nadir_rssi,
-                    pass_peak_rssi: ring.latest.pass_peak_rssi,
-                    pass_nadir_rssi: ring.latest.pass_nadir_rssi,
-                    pass_count: ring.latest.pass_count,
-                    enter_at: ring.latest.enter_at,
-                    exit_at: ring.latest.exit_at,
+                    reading: ring.latest.clone(),
                     samples: ring.samples.iter().copied().collect(),
                 })
                 .collect(),
@@ -2529,41 +2614,9 @@ impl TimerRegistry {
         }
 
         let mut reg = self.write();
-        let timer = reg
-            .timers
-            .get_mut(id)
-            .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
-        if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
-            return Err(TimerError(format!(
-                "{:?} is not a RotorHazard timer — there is no detector to calibrate",
-                timer.name
-            )));
-        }
-        if timer.status != TimerStatus::Connected {
-            return Err(TimerError(format!(
-                "{:?} is not connected — connect it before setting its thresholds",
-                timer.name
-            )));
-        }
-        // The node must exist AND be enabled (#412). Tuning a node the RD has switched off is
-        // pointless at best and misleading at worst: the threshold would be applied to hardware no
-        // heat is ever seated on, and the page would show a confirmed write on a dead gate.
-        if request.node >= timer.node_width() {
-            return Err(TimerError(format!(
-                "{:?} has {} nodes — there is no {} to calibrate",
-                timer.name,
-                timer.node_width(),
-                // Display the node the way the page labels it (1-based), per the repo display rule.
-                Timer::node_label(request.node)
-            )));
-        }
-        if !timer.node_enabled(request.node) {
-            return Err(TimerError(format!(
-                "{} is disabled on {:?} — enable it before setting its thresholds",
-                Timer::node_label(request.node),
-                timer.name
-            )));
-        }
+        let timer = reg.timers.get_mut(id).ok_or_else(|| no_such_timer(id))?;
+        timer.require_live_rh(OP_CALIBRATE)?;
+        timer.require_enabled_node(request.node, OP_CALIBRATE)?;
 
         // D27: record GridFPV's value first — the store, not the timer, is where this lives.
         match timer
@@ -2674,37 +2727,9 @@ impl TimerRegistry {
         //    else is locked — see `captures`' note: no lock here is ever held across another.
         {
             let reg = self.read();
-            let timer = reg
-                .timers
-                .get(id)
-                .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
-            if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
-                return Err(TimerError(format!(
-                    "{:?} is not a RotorHazard timer — there is no detector to capture from",
-                    timer.name
-                )));
-            }
-            if timer.status != TimerStatus::Connected {
-                return Err(TimerError(format!(
-                    "{:?} is not connected — connect it before capturing a level",
-                    timer.name
-                )));
-            }
-            if request.node >= timer.node_width() {
-                return Err(TimerError(format!(
-                    "{:?} has {} nodes — there is no {} to capture on",
-                    timer.name,
-                    timer.node_width(),
-                    Timer::node_label(request.node)
-                )));
-            }
-            if !timer.node_enabled(request.node) {
-                return Err(TimerError(format!(
-                    "{} is disabled on {:?} — enable it before capturing a level",
-                    Timer::node_label(request.node),
-                    timer.name
-                )));
-            }
+            let timer = reg.timers.get(id).ok_or_else(|| no_such_timer(id))?;
+            timer.require_live_rh(OP_CAPTURE)?;
+            timer.require_enabled_node(request.node, OP_CAPTURE)?;
         }
 
         // 2. What the timer is reporting for BOTH thresholds right now. Read from the signal feed —
@@ -2989,40 +3014,9 @@ impl TimerRegistry {
         during_open_practice: bool,
     ) -> Result<ChannelDispatch, TimerError> {
         let mut reg = self.write();
-        let timer = reg
-            .timers
-            .get_mut(id)
-            .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
-        if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
-            return Err(TimerError(format!(
-                "{:?} is not a RotorHazard timer — there is no receiver to tune",
-                timer.name
-            )));
-        }
-        if timer.status != TimerStatus::Connected {
-            return Err(TimerError(format!(
-                "{:?} is not connected — connect it before setting a node's channel",
-                timer.name
-            )));
-        }
-        // The node must exist AND be enabled (#412). RotorHazard validates
-        // `0 <= node_index < num_nodes` and otherwise only writes a log line, so an out-of-range
-        // write would look accepted here and land nowhere at all.
-        if request.node >= timer.node_width() {
-            return Err(TimerError(format!(
-                "{:?} has {} nodes — there is no {} to tune",
-                timer.name,
-                timer.node_width(),
-                Timer::node_label(request.node)
-            )));
-        }
-        if !timer.node_enabled(request.node) {
-            return Err(TimerError(format!(
-                "{} is disabled on {:?} — enable it before setting its channel",
-                Timer::node_label(request.node),
-                timer.name
-            )));
-        }
+        let timer = reg.timers.get_mut(id).ok_or_else(|| no_such_timer(id))?;
+        timer.require_live_rh(OP_CHANNEL)?;
+        timer.require_enabled_node(request.node, OP_CHANNEL)?;
         if !(CHANNEL_MHZ_MIN..=CHANNEL_MHZ_MAX).contains(&request.mhz) {
             return Err(TimerError(format!(
                 "{} MHz is not a 5.8 GHz channel — a node's channel must be between {} and {} MHz",
@@ -3429,6 +3423,67 @@ mod tests {
             .lease_until = Instant::now() - Duration::from_millis(1);
     }
 
+    /// **The flattened `NodeReading` is byte-identical to the field list it replaced (#461).**
+    ///
+    /// `NodeSignal` used to re-declare thirteen of `NodeReading`'s fields and copy them across one
+    /// by one; it now embeds the reading with `#[serde(flatten)]`, which is only a safe swap if the
+    /// JSON is *exactly* the same. So this pins the literal wire text rather than a field-by-field
+    /// comparison: key spelling, key ORDER, the `crossed_recently` name for what the ingest side
+    /// calls a crossing, and the fact that `flatten` still honours `skip_serializing_if` — a `None`
+    /// reading is an absent key, never `null`.
+    #[test]
+    fn a_node_signals_wire_shape_survives_the_flatten() {
+        let full = NodeSignal {
+            node: 2,
+            seat: CompetitorRef("node-2".to_string()),
+            reading: NodeReading {
+                seen: true,
+                rssi: Some(120.0),
+                frequency_mhz: Some(5917),
+                loop_time_micros: Some(1200),
+                crossing: true,
+                crossed_recently: true,
+                node_peak_rssi: Some(180.0),
+                node_nadir_rssi: Some(30.0),
+                pass_peak_rssi: Some(175.0),
+                pass_nadir_rssi: Some(40.0),
+                pass_count: Some(7),
+                enter_at: Some(90.0),
+                exit_at: Some(80.0),
+            },
+            samples: vec![10.0, 20.5],
+        };
+        assert_eq!(
+            serde_json::to_string(&full).expect("serializable"),
+            concat!(
+                r#"{"node":2,"seat":"node-2","seen":true,"rssi":120.0,"frequency_mhz":5917,"#,
+                r#""loop_time_micros":1200,"crossing":true,"crossed_recently":true,"#,
+                r#""node_peak_rssi":180.0,"node_nadir_rssi":30.0,"pass_peak_rssi":175.0,"#,
+                r#""pass_nadir_rssi":40.0,"pass_count":7,"enter_at":90.0,"exit_at":80.0,"#,
+                r#""samples":[10.0,20.5]}"#,
+            ),
+        );
+
+        // A node the timer has told us nothing about: every optional reading is omitted, so the
+        // console renders "—" rather than reading a zero as a measurement.
+        let empty = NodeSignal {
+            node: 0,
+            seat: CompetitorRef("node-0".to_string()),
+            reading: NodeReading::default(),
+            samples: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).expect("serializable"),
+            r#"{"node":0,"seat":"node-0","seen":false,"crossing":false,"crossed_recently":false,"samples":[]}"#,
+        );
+
+        // And the flat form reads back into the nested one, so the console's shape is our shape.
+        let round_tripped: NodeSignal =
+            serde_json::from_str(&serde_json::to_string(&full).expect("serializable"))
+                .expect("deserializable");
+        assert_eq!(round_tripped, full);
+    }
+
     /// **The first GET starts the stream; nothing else does.** Before anyone asks, the connection
     /// driver is told not to capture — an idle Director must not be paying for a heartbeat parse.
     #[test]
@@ -3505,7 +3560,7 @@ mod tests {
         // Oldest-first, last-value-wins: the window holds the MOST RECENT `SIGNAL_RING` samples.
         let first = &snapshot.nodes[0];
         assert_eq!(first.samples[SIGNAL_RING - 1], (SIGNAL_RING * 3 - 1) as f32);
-        assert_eq!(first.rssi, Some((SIGNAL_RING * 3 - 1) as f32));
+        assert_eq!(first.reading.rssi, Some((SIGNAL_RING * 3 - 1) as f32));
         // And the shared time base stays parallel to every node's window.
         assert!(snapshot.sample_micros.windows(2).all(|w| w[0] <= w[1]));
     }
@@ -3528,8 +3583,8 @@ mod tests {
         let snapshot = timers.signal(&rh);
         assert_eq!(snapshot.nodes.len(), 8);
         assert_eq!(snapshot.nodes[7].seat, CompetitorRef("node-7".to_string()));
-        assert!(snapshot.nodes[7].seen);
-        assert_eq!(snapshot.nodes[7].rssi, Some(9.0));
+        assert!(snapshot.nodes[7].reading.seen);
+        assert_eq!(snapshot.nodes[7].reading.rssi, Some(9.0));
     }
 
     /// A timer that comes back a different width restarts the window rather than shifting every
@@ -3625,6 +3680,133 @@ mod tests {
         timers
             .request_capture(rh, &CaptureRequest { node: 0 }, false)
             .expect("a connected RH timer with an enabled node 0");
+    }
+
+    /// **Every rung of the shared guard ladder still refuses in its own words (#458).**
+    ///
+    /// The three Tune writes used to re-type the kind → connected → node-exists → node-enabled
+    /// ladder each with its own strings. They now share [`Timer::require_live_rh`] /
+    /// [`Timer::require_enabled_node`] with the wording carried as a [`TimerOp`], which is a safe
+    /// swap only if every refusal reads exactly as it did — these messages are what the Tune page
+    /// shows an RD chasing a dead gate, and "capture from" vs "capture on" is the difference
+    /// between a sentence and a typo.
+    ///
+    /// So this pins all twelve literally: three verbs × four rungs.
+    #[test]
+    fn each_tune_write_refuses_in_its_own_words_at_every_rung() {
+        let calibrate = |timers: &TimerRegistry, id: &TimerId, node: u32| {
+            timers
+                .request_calibration(
+                    id,
+                    &CalibrationRequest {
+                        node,
+                        enter_at: Some(90),
+                        exit_at: None,
+                    },
+                    false,
+                )
+                .map(|_| ())
+        };
+        let capture = |timers: &TimerRegistry, id: &TimerId, node: u32| {
+            timers
+                .request_capture(id, &CaptureRequest { node }, false)
+                .map(|_| ())
+        };
+        let channel = |timers: &TimerRegistry, id: &TimerId, node: u32| {
+            timers
+                .request_channel(
+                    id,
+                    &ChannelRequest {
+                        node,
+                        mhz: 5917,
+                        band: None,
+                        channel: None,
+                    },
+                    false,
+                )
+                .map(|_| ())
+        };
+
+        type Write = fn(&TimerRegistry, &TimerId, u32) -> Result<(), TimerError>;
+        let cases: [(Write, [&str; 4]); 3] = [
+            (
+                calibrate,
+                [
+                    "\"Field RH\" is not a RotorHazard timer — there is no detector to calibrate",
+                    "\"Field RH\" is not connected — connect it before setting its thresholds",
+                    "\"Field RH\" has 8 nodes — there is no Node 9 to calibrate",
+                    "Node 3 is disabled on \"Field RH\" — enable it before setting its thresholds",
+                ],
+            ),
+            (
+                capture,
+                [
+                    "\"Field RH\" is not a RotorHazard timer — there is no detector to capture from",
+                    "\"Field RH\" is not connected — connect it before capturing a level",
+                    "\"Field RH\" has 8 nodes — there is no Node 9 to capture on",
+                    "Node 3 is disabled on \"Field RH\" — enable it before capturing a level",
+                ],
+            ),
+            (
+                channel,
+                [
+                    "\"Field RH\" is not a RotorHazard timer — there is no receiver to tune",
+                    "\"Field RH\" is not connected — connect it before setting a node's channel",
+                    "\"Field RH\" has 8 nodes — there is no Node 9 to tune",
+                    "Node 3 is disabled on \"Field RH\" — enable it before setting its channel",
+                ],
+            ),
+        ];
+
+        for (write, [not_rh, not_connected, no_node, disabled]) in cases {
+            // Rung 1 — not a RotorHazard at all. A Mock renamed to the same friendly name, so the
+            // only thing that differs between this and the rungs below is the kind.
+            let mocks = TimerRegistry::new(None, 5, 2500).expect("in-memory registry");
+            let mock = mocks
+                .create(&CreateTimerRequest {
+                    name: "Field RH".to_string(),
+                    kind: TimerKind::Mock {
+                        laps: 3,
+                        lap_ms: 20_000,
+                    },
+                    channel_capability: None,
+                    node_count: None,
+                    available_channels: None,
+                })
+                .expect("timer created")
+                .id;
+            assert_eq!(
+                write(&mocks, &mock, 0).unwrap_err().0,
+                not_rh,
+                "kind is checked first, before anything about the node"
+            );
+
+            // Rung 2 — a RotorHazard that is not connected. There is no socket to emit on.
+            let (timers, rh) = registry_with_rh();
+            assert_eq!(write(&timers, &rh, 0).unwrap_err().0, not_connected);
+
+            // Rung 3 — connected, but the node is past the timer's width.
+            timers.set_status(&rh, TimerStatus::Connected);
+            assert_eq!(write(&timers, &rh, 8).unwrap_err().0, no_node);
+
+            // Rung 4 — the node exists, but the RD has switched it off (#412).
+            timers
+                .set_nodes(
+                    &rh,
+                    &SetTimerNodesRequest {
+                        node_count: None,
+                        enabled: Some(vec![0, 1, 3, 4, 5, 6, 7]),
+                    },
+                )
+                .expect("node 2 disabled");
+            assert_eq!(write(&timers, &rh, 2).unwrap_err().0, disabled);
+
+            // And an id no timer answers to reads the same for all three.
+            assert_eq!(
+                write(&timers, &TimerId("ghost".into()), 0).unwrap_err().0,
+                "no timer with id \"ghost\""
+            );
+        }
     }
 
     /// **A capture that re-measures the same level is not a failure (#446).**

@@ -162,6 +162,7 @@ function heatOn(round: RoundDef): HeatSummary[] {
   return [
     {
       heat: 'heat-1',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['node-0', 'node-1'],
       round: round.id,
       phase: 'Running',

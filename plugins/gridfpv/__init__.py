@@ -81,15 +81,14 @@ PLUGIN_VERSION = "0.4.0"
 # `db.heat_add()`/`db.pilot_add()` return the row, retiring the Director's "learn the new id from
 # a broadcast" heuristic — and that is what a future capability here should cover. See README.md.
 #
-# BASE_CAPABILITIES are unconditional. PASS_CAPABILITY ("live_pass" — the plugin emits per-node
-# passes natively from RACE_LAP_RECORDED, so the Director takes the pass atom directly rather
-# than diffing the current_laps snapshot) is **earned, not assumed**: it is added to the advertised
-# set only when the load-time self-check (`_self_check_live_pass`) proves this RotorHazard build's
-# lap atom is readable. Advertising it makes the plugin the *authoritative* pass source on the
-# Director side, so a plugin that cannot actually read a lap must not claim it — it must degrade
-# to RotorHazard's own `current_laps` rather than pre-empt it (#389).
-BASE_CAPABILITIES = ["hello", "live_signal", "owned_format", "min_lap_neutral"]
-PASS_CAPABILITY = "live_pass"
+# Every capability name is spelled ONCE, here, and BASE_CAPABILITIES is built from those names
+# (#461) — the constants used to sit below the list and restate its literals, which is a shape
+# that can drift a name on one side and not the other.
+
+# The plugin is present and speaks the gridfpv_* namespace at PROTOCOL_VERSION.
+HELLO_CAPABILITY = "hello"
+# Dense per-node RSSI pushed live during a race, retiring the post-race save-then-pull.
+SIGNAL_CAPABILITY = "live_signal"
 # The Grid-owned race format (#404/#405). Unconditional, unlike `live_pass`: the Director's
 # fallback here is the OLD behaviour (alter the RD's active format in place), which is
 # safe-but-wrong rather than lap-destroying, and a load-time DB hiccup must not strand a timer on
@@ -103,6 +102,21 @@ FORMAT_CAPABILITY = "owned_format"
 # decide whether the plugin is even *trying* — a plugin build older than this one advertises
 # nothing here, and the Director does the job itself over the socket.
 MIN_LAP_CAPABILITY = "min_lap_neutral"
+# The plugin emits per-node passes natively from RACE_LAP_RECORDED, so the Director takes the pass
+# atom directly rather than diffing the current_laps snapshot. **Earned, not assumed**: it is added
+# to the advertised set only when the load-time self-check (`_self_check_live_pass`) proves this
+# RotorHazard build's lap atom is readable. Advertising it makes the plugin the *authoritative*
+# pass source on the Director side, so a plugin that cannot actually read a lap must not claim it —
+# it must degrade to RotorHazard's own `current_laps` rather than pre-empt it (#389).
+PASS_CAPABILITY = "live_pass"
+
+# The unconditional set — everything above except the earned `live_pass`.
+BASE_CAPABILITIES = [
+    HELLO_CAPABILITY,
+    SIGNAL_CAPABILITY,
+    FORMAT_CAPABILITY,
+    MIN_LAP_CAPABILITY,
+]
 # Everything this build implements, for reference/tests. The *advertised* set is computed per
 # server in `initialize()` and reported in the hello ack.
 CAPABILITIES = BASE_CAPABILITIES + [PASS_CAPABILITY]

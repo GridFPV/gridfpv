@@ -116,6 +116,7 @@ export type * from '@bindings/Metric';
 export type * from '@bindings/NewChannelLayoutRequest';
 export type * from '@bindings/NewRoundReq';
 export type * from '@bindings/NodeDrift';
+export type * from '@bindings/NodeReading';
 export type * from '@bindings/NodeSignal';
 export type * from '@bindings/OptionalEdit';
 export type * from '@bindings/ParamKind';
