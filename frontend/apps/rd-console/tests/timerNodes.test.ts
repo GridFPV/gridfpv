@@ -228,15 +228,31 @@ describe('the timer-row reading', () => {
   // types the field as `reported_nodes?: number`, which cannot express the `null` the wire sends —
   // and a fixture that can only express shapes the wire does not send is how this shipped.
   //
-  // `it.fails` rather than a skip: it runs in CI, passes while the bug stands, and goes red the
-  // moment the guard becomes `!= null`, which forces the marker off with the fix.
-  it.fails('does not flag drift on a timer the Director has never asked (wire: null)', () => {
+  it('does not flag drift on a timer the Director has never asked (wire: null)', () => {
     // A Mock: width pinned by the RD, nothing to ask.
     const mock = { ...base, node_count: 8, reported_nodes: null } as unknown as Timer;
     expect(timerDrifts(mock)).toBe(false);
     // A never-connected RotorHazard: nothing pinned and nothing observed either.
     const neverDialed = { ...base, node_count: null, reported_nodes: null } as unknown as Timer;
     expect(timerDrifts(neverDialed)).toBe(false);
+  });
+
+  it('still flags a real disagreement when BOTH numbers arrive as the wire spells them', () => {
+    // The other half of the guard: `!= null` must not have turned into "never flag anything".
+    // `node_count` is the RD's override and is normally `null` too, so the shape that has to keep
+    // flagging is a pinned width against a different observed one.
+    const pinnedWide = { ...base, node_count: 8, reported_nodes: 4 } as unknown as Timer;
+    expect(timerDrifts(pinnedWide)).toBe(true);
+    // And an unpinned timer follows what it reported, so there is nothing to disagree with.
+    const unpinned = { ...base, node_count: null, reported_nodes: 4 } as unknown as Timer;
+    expect(timerDrifts(unpinned)).toBe(false);
+  });
+
+  it('does not flag a reported width of ZERO as "never asked"', () => {
+    // `0` is falsy, so a truthiness guard would have swallowed it — and a timer reporting zero
+    // nodes against a pinned width of 8 is precisely the disagreement worth opening the dialog for.
+    const reportsNone = { ...base, node_count: 8, reported_nodes: 0 } as unknown as Timer;
+    expect(timerDrifts(reportsNone)).toBe(true);
   });
 });
 

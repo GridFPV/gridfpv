@@ -407,6 +407,77 @@ describe('EventChannelLayouts — the IMD reading (#117 S4)', () => {
     expect(row.textContent).toContain('5769 MHz');
   });
 
+  // ── The green/amber/red scale (#474) ───────────────────────────────────────────────────────
+
+  it('colours the RATING and leaves the worst-offender sentence exactly as it was', async () => {
+    const { session } = makeTestSession({ ...impls(store(RATED)), event: EVENT });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    const list = await screen.findByRole('list', { name: 'Channel layouts' });
+    const row = within(list).getByText('Bracket A').closest('li') as HTMLElement;
+    await waitFor(() => expect(row.textContent).toContain('IMD 29'));
+
+    // Bracket A flies three channels; 29 is well under what three pilots can reach, so it reads
+    // red. The tone is a token name, never a colour — the stylesheet owns the palette.
+    const reading = row.querySelector('.layout-imd') as HTMLElement;
+    expect(reading.dataset.tone).toBe('danger');
+
+    // The offender half carries no tone of its own: it names three real channels, and tinting it
+    // would read as a verdict on those channels rather than on the set.
+    const offender = reading.querySelector('.imd-offender') as HTMLElement;
+    expect(offender.dataset.tone).toBeUndefined();
+    expect(offender.textContent).toContain('worst offender:');
+    expect(offender.textContent).toContain('lands on Raceband R4');
+
+    // And the whole line still reads exactly as it did before the colour existed.
+    expect(reading.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'IMD 29 · worst offender: 2 × Raceband R3 − Raceband R2 = 5769 MHz — lands on Raceband R4'
+    );
+  });
+
+  it('explains the colour as guidance, against the layout’s own pilot count', async () => {
+    const { session } = makeTestSession({ ...impls(store(RATED)), event: EVENT });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    const list = await screen.findByRole('list', { name: 'Channel layouts' });
+    const row = within(list).getByText('Bracket A').closest('li') as HTMLElement;
+    await waitFor(() => expect(row.textContent).toContain('IMD 29'));
+
+    const hint = (row.querySelector('.layout-imd') as HTMLElement).title;
+    expect(hint).toMatch(/guidance only/i);
+    // Bracket A tunes three nodes, and that is what it was judged against — "is 29 good?" has no
+    // answer without a pilot count.
+    expect(hint).toContain('3 channels flying at once');
+    // Never a refusal: the reading has never blocked a save and the tooltip must not imply it does.
+    expect(hint).toMatch(/blocks saving/i);
+  });
+
+  it('tones the LIVE reading too, as the RD picks', async () => {
+    const rateChannelsImpl = vi.fn<typeof rateChannels>(async () => ({ rating: 67 }));
+    const { session } = makeTestSession({
+      ...impls(store(), { rateChannelsImpl }),
+      event: EVENT
+    });
+    render(EventChannelLayouts, { session, timer: TIMER });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add layout' }));
+    await fireEvent.change(await screen.findByLabelText('Channel for Node 1'), {
+      target: { value: '5695' }
+    });
+    await fireEvent.change(screen.getByLabelText('Channel for Node 2'), {
+      target: { value: '5732' }
+    });
+
+    const strip = screen.getByLabelText('IMD reading');
+    await waitFor(() => expect(strip.textContent).toContain('IMD 67'));
+    // Two channels can reach the ceiling easily, so 67 is "cleaner sets exist" rather than clean.
+    const line = strip.querySelector('.imd-line') as HTMLElement;
+    expect(line.dataset.tone).toBe('warn');
+    expect(line.title).toMatch(/guidance only/i);
+    // The caption that stops the number being read as a pass mark is still there beside it.
+    expect(strip.textContent).toContain('What is achievable falls as you use more nodes');
+  });
+
   it('reads live as the RD picks, asking the Director about the channel SET', async () => {
     const rateChannelsImpl = vi.fn<typeof rateChannels>(async () => IMD6C);
     const { session } = makeTestSession({

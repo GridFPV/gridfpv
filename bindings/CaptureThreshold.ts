@@ -6,6 +6,6 @@
  * RotorHazard's captures are per threshold: `cap_enter_at_btn` and `cap_exit_at_btn` are separate
  * handlers arming separate sampling windows, and the enter branch applies a peak margin the exit
  * branch does not. Since #465 this is **not something the RD picks** — one press runs both — so it
- * names which half of a capture a level, an outcome or a refusal is about.
+ * names which half of a capture a level, a [`CaptureOutcome`] or a refusal is about.
  */
 export type CaptureThreshold = "enter" | "exit";

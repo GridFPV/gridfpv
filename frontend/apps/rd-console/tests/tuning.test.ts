@@ -312,10 +312,9 @@ describe('markSent — a LATE write resolve must not clobber a newer value (#442
   // badge reads "On timer" over a number the RD did not choose: the #403 sent-vs-landed lie, in the
   // UI layer.
   //
-  // `it.fails` rather than a skip: this runs in CI, passes while the bug stands, and turns red the
-  // moment `markSent` learns to leave a moved-on state alone — which forces the marker off with the
-  // fix instead of leaving a skipped test nobody remembers to re-enable.
-  it.fails('leaves the value the RD moved on to standing, and leaves it pending', () => {
+  // Fixed by making the write mark only the state it actually wrote: a resolve that finds the value
+  // already moved on returns the state untouched.
+  it('leaves the value the RD moved on to standing, and leaves it pending', () => {
     // The state at the instant `commit()` issued the 100-write, then the RD's 120 typed over it.
     const rdTyped120: ThresholdState = { value: 120, confirmed: 90, phase: 'pending' };
 
@@ -339,6 +338,35 @@ describe('markSent — a LATE write resolve must not clobber a newer value (#442
       sent: 100,
       sentAt: T0
     });
+  });
+
+  it('returns the moved-on state IDENTICALLY, so nothing downstream reads as a change', () => {
+    // Not just equal — the same object. `ingest` and the confirm backstop both compare states by
+    // identity to decide whether anything happened; a fresh clone here would churn the reactive
+    // record on every late resolve and re-render a column the RD is mid-drag on.
+    const movedOn: ThresholdState = { value: 120, confirmed: 90, phase: 'pending' };
+    expect(markSent(movedOn, 100, T0)).toBe(movedOn);
+  });
+
+  it('leaves no receipt behind for a write the state moved on from', () => {
+    // `sent`/`sentAt` are what `foldPolled` confirms against. Recording 100 on a state holding 120
+    // would arm the poll to "confirm" a value the RD had already abandoned, and settle it green.
+    const movedOn: ThresholdState = { value: 120, confirmed: 90, phase: 'pending' };
+    const after = markSent(movedOn, 100, T0);
+    expect(after.sent).toBeUndefined();
+    expect(after.sentAt).toBeUndefined();
+  });
+
+  it('a re-typed value that lands back on what was written still marks sent', () => {
+    // The RD went 100 → 120 → 100 inside the round trip. The write and the state agree again, so
+    // there is nothing newer to protect and the receipt is the honest one.
+    const backTo100: ThresholdState = { value: 100, confirmed: 90, phase: 'pending' };
+    expect(markSent(backTo100, 100, T0).phase).toBe('sent');
+  });
+
+  it('clears a stale failure detail on the write it does mark', () => {
+    const retry: ThresholdState = { value: 100, confirmed: 90, phase: 'failed', detail: 'boom' };
+    expect(markSent(retry, 100, T0).detail).toBeUndefined();
   });
 });
 
@@ -555,8 +583,62 @@ describe('channelOptions — the dropdown source is the CAPABILITY, never `avail
     // A dropdown that cannot show the node's actual value would silently render some OTHER option
     // as selected — the RD would read a channel the gate is not on.
     expect(channelOptions(FLEXIBLE, FULL, [], 5905).some((o) => o.mhz === 5905)).toBe(true);
-    // …but not one a Fixed timer cannot tune to: that would offer a refusal.
-    expect(channelOptions(FIXED, FULL, [], 5905).some((o) => o.mhz === 5905)).toBe(false);
+  });
+
+  // #449. This assertion used to read the other way — "…but not one a Fixed timer cannot tune to:
+  // that would offer a refusal" — which asserted the bug as the behaviour. It is wrong on its own
+  // terms: nothing is being offered *as a write* here, the node is ALREADY on that channel, and
+  // `<select value={chan.mhz}>` matching no option does not hide the situation, it makes the
+  // browser show the first option instead — a channel the node is not on, presented as the RD's
+  // own selection.
+  it('shows a Fixed timer the channel its node is on, even outside the declared set', () => {
+    // How a real timer gets here: a heat retuned the node before the RD narrowed the declared set,
+    // or RotorHazard came back holding a stale profile.
+    const options = channelOptions(FIXED, FULL, [], 5905);
+    expect(options.some((o) => o.mhz === 5905)).toBe(true);
+    // Named through the shared helper, so the off-catalog frequency reads as the RD's own rather
+    // than as a bare number standing in for a name it does not have.
+    expect(options.find((o) => o.mhz === 5905)?.label).toBe('Custom — 5905');
+    // And the declared set is still all it OFFERS beyond that — the escape hatch is one channel
+    // wide, not a hole in the capability.
+    expect(options.map((o) => o.mhz)).toEqual([5658, 5800, 5905]);
+  });
+
+  it('shows a Fixed timer a CATALOG channel its node is on but that it does not declare', () => {
+    // The same situation with a channel the catalog can name: it keeps its band and channel, so
+    // the emit that moves the node off it can still label itself on RotorHazard.
+    const options = channelOptions(FIXED, FULL, [], 5880);
+    expect(options.find((o) => o.mhz === 5880)).toMatchObject({
+      mhz: 5880,
+      label: 'Raceband R7 (F8) — 5880',
+      custom: false
+    });
+  });
+
+  it('does not duplicate the current channel when the capability already offers it', () => {
+    expect(channelOptions(FIXED, FULL, [], 5800).filter((o) => o.mhz === 5800)).toHaveLength(1);
+    expect(channelOptions(FLEXIBLE, FULL, [5891], 5891).filter((o) => o.mhz === 5891)).toHaveLength(
+      1
+    );
+  });
+
+  // #449, the second half: `offeredCatalog` filtered the catalog, so a Fixed timer's declared
+  // frequency that the catalog had no entry for was dropped before it ever reached an option.
+  it('offers a Fixed timer a declared channel the catalog does not know', () => {
+    const oddball: ChannelCapability = { Fixed: { channels: [5658, 5891] } };
+    const options = channelOptions(oddball, FULL, []);
+    expect(options.map((o) => o.mhz)).toEqual([5658, 5891]);
+    // Labelled from the raw MHz through `channels.ts`, and marked as the non-catalog entry it is.
+    expect(options[1]).toMatchObject({ label: 'Custom — 5891', custom: true });
+    // No band/channel invented for it — the emit omits them rather than handing RotorHazard a
+    // made-up label (see `commitChannel`).
+    expect(options[1].band).toBeUndefined();
+    expect(options[1].channel).toBeUndefined();
+  });
+
+  it('offers a Fixed timer whose declared set is entirely off-catalog, rather than nothing', () => {
+    const oddball: ChannelCapability = { Fixed: { channels: [5921, 5891] } };
+    expect(channelOptions(oddball, FULL, []).map((o) => o.mhz)).toEqual([5891, 5921]);
   });
 
   it('labels every option by band, channel AND frequency, and marks a custom one', () => {
@@ -769,7 +851,7 @@ describe('Capture — the timer measures BOTH levels from one pass (#355, #465)'
     expect(foldCapture(started(), 118, 64, 2_999).enter.outcome).toBeUndefined();
     const midRun = foldCapture(started(), 118, 64, 4_000);
     expect(midRun.phase).toBe('clearing');
-    expect(midRun.enter.outcome).toBe('captured');
+    expect(midRun.enter.outcome).toBe('measured');
     expect(midRun.exit.outcome).toBeUndefined();
   });
 
@@ -799,6 +881,10 @@ describe('Capture — the timer measures BOTH levels from one pass (#355, #465)'
     expect(next.exit.level).toBeUndefined();
     expect(next.detail).toContain('still reporting Enter at 90 and Exit at 80');
     expect(next.detail).toContain('nothing was recorded');
+    // #446's vocabulary, per half: this is `unchanged`, not a refusal GridFPV cannot evidence.
+    expect(next.enter.outcome).toBe('unchanged');
+    expect(next.exit.outcome).toBe('unchanged');
+    expect(next.detail).not.toMatch(/did not take the capture/i);
   });
 
   it('says which half did not land when only one did', () => {
@@ -807,7 +893,7 @@ describe('Capture — the timer measures BOTH levels from one pass (#355, #465)'
     // "captured" and quietly showing one number would hide a threshold that was never measured.
     const enterOnly = foldCapture(started(), 118, 80, 10_100);
     expect(enterOnly.phase).toBe('captured');
-    expect(enterOnly.enter.outcome).toBe('captured');
+    expect(enterOnly.enter.outcome).toBe('measured');
     expect(enterOnly.exit.outcome).toBe('unchanged');
     expect(enterOnly.detail).toContain('Exit at did not change');
     expect(enterOnly.detail).toContain('cleared the gate');
@@ -818,18 +904,36 @@ describe('Capture — the timer measures BOTH levels from one pass (#355, #465)'
     expect(exitOnly.detail).toContain('outside the first window');
   });
 
-  it('says so plainly when the timer never reported the thresholds at all', () => {
+  it('says GridFPV was not WATCHING, when that is the true thing to say (#446)', () => {
+    // `unobserved` is a different kind of cannot-say from `unchanged`, and the Director keeps them
+    // apart: one is a statement about the timer's level, the other about GridFPV's own watching.
+    // Reporting "the timer is still reporting …" when nothing was read at all would be inventing
+    // an observation.
     const next = foldCapture({ ...started(), enter: {}, exit: {} }, undefined, undefined, 10_100);
     expect(next.phase).toBe('unchanged');
-    expect(next.detail).toContain('never reported a level');
+    expect(next.enter.outcome).toBe('unobserved');
+    expect(next.exit.outcome).toBe('unobserved');
+    expect(next.detail).toContain('did not read a level');
+    expect(next.detail).toContain('still connected');
+    expect(next.detail).not.toContain('still reporting');
+  });
+
+  it('names the unobserved half when only one of them went unread', () => {
+    const enterOnly = foldCapture({ ...started(), exit: {} }, 118, undefined, 10_100);
+    expect(enterOnly.enter.outcome).toBe('measured');
+    expect(enterOnly.exit.outcome).toBe('unobserved');
+    expect(enterOnly.detail).toContain('Exit at did not change');
+    expect(enterOnly.detail).toContain('did not read a level for it');
   });
 
   it('claims no diagnosis it cannot support', () => {
-    // A capture CAN legitimately measure the same level it started from. "Nothing changed" is the
-    // whole of what is known, and the copy has to stop there rather than assert a cause.
+    // A capture CAN legitimately measure the same level it started from — an ordinary result on a
+    // stable gate, and the usual one when the RD captures twice. "GridFPV cannot tell them apart"
+    // is the whole of what is known, and the copy has to stop there rather than assert a cause.
     const next = foldCapture(started(), 90, 80, 10_100);
-    expect(next.detail).toContain('either the pass fell outside the window');
+    expect(next.detail).toContain('cannot tell a capture that measured the same level');
     expect(next.detail).not.toMatch(/RotorHazard is not responding|the node is dead/i);
+    expect(next.detail).not.toMatch(/the timer did not take the capture\b/i);
   });
 
   it('counts the CURRENT stretch down in whole seconds, and stops at zero', () => {
@@ -922,7 +1026,7 @@ describe('Capture — the timer measures BOTH levels from one pass (#355, #465)'
     expect(armed.enter.previous).toBe(91);
     expect(armed.exit.previous).toBe(81);
     // …and a press clears the previous run's results rather than leaving them to be misread.
-    const stale = { ...armed, enter: { previous: 91, level: 118, outcome: 'captured' as const } };
+    const stale = { ...armed, enter: { previous: 91, level: 118, outcome: 'measured' as const } };
     expect(startingCapture(stale).enter).toEqual({});
   });
 });

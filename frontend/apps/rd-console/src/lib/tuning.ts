@@ -56,6 +56,7 @@ import type {
 } from '@gridfpv/types';
 
 import {
+  capabilityTag,
   channelLabel,
   channelOptionLabel,
   entryOptionLabel,
@@ -401,8 +402,27 @@ export function adoptReported(state: ThresholdState, level: number): ThresholdSt
  * Mark a threshold as written: the Director accepted the level, and the page is now waiting for a
  * **poll** to show the timer holding it. `sent`/`sentAt` are the two things {@link foldPolled}
  * needs to answer "did it take?" — what was asked for, and how long ago.
+ *
+ * ## A write may only mark the state it actually wrote (#442)
+ *
+ * The answer to a write arrives a round trip late, and the RD keeps typing inside that round trip.
+ * Commit `enter = 100`, type `120` before it comes back, and the page has two claims about the
+ * threshold: the write's ("I sent 100") and the RD's ("I want 120"). The RD's is newer and it is
+ * the one that has to survive — so a resolve that finds the state already moved on leaves it
+ * **exactly** as it is, still `pending`, and the typing-idle commit writes the newer value.
+ *
+ * `pending` is load-bearing there, not incidental: it is the only phase {@link ThresholdState}
+ * has that a follow-up commit will write from. Stamping `sent` over a moved-on value loses the
+ * value *and* wedges the state that would have recovered it, and the badge then reads `On timer`
+ * over a number the RD never chose — #403's sent-vs-landed lie, one layer up.
+ *
+ * Deliberately **not** "never overwrite": the ordinary, unraced write still has to record its
+ * receipt here, or {@link foldPolled} has nothing to confirm against. The discriminator is whether
+ * the state still holds the value this write carried.
  */
 export function markSent(state: ThresholdState, sent: number, now: number): ThresholdState {
+  // The state moved on between issuing this write and it resolving — the newer value wins.
+  if (state.value !== sent) return state;
   return { ...state, value: sent, phase: 'sent', detail: undefined, sent, sentAt: now };
 }
 
@@ -570,14 +590,33 @@ export type CapturePhase =
   | 'unchanged'
   | 'failed';
 
+/**
+ * How much the console can honestly say about one settled half of a capture.
+ *
+ * The **same three words the Director uses** (`CaptureResolution` in
+ * `crates/server/src/timers.rs`, #446), deliberately: the two layers are answering the same
+ * question off the same evidence, and letting them use different vocabularies is how one ends up
+ * claiming something the other refused to.
+ *
+ *  - `measured`   — the timer came back reporting a level it was **not** reporting when the capture
+ *                   started. That level is now GridFPV's (D27), recorded by the Director.
+ *  - `unchanged`  — the timer reports the **same** level it did before. Not a failure and not a
+ *                   success: a capture that re-measured the same number and one RotorHazard refused
+ *                   in silence look identical from here, so the console says so rather than
+ *                   picking. Nothing is recorded.
+ *  - `unobserved` — no level could be read at all across the window. A different kind of
+ *                   cannot-say: it is a statement about GridFPV's watching, not about the capture.
+ */
+export type CaptureHalfOutcome = 'measured' | 'unchanged' | 'unobserved';
+
 /** One threshold's half of a capture. */
 export interface CaptureHalf {
   /** The level the timer was reporting when the capture started — what "changed" is measured against. */
   previous?: number;
-  /** The level that came back, once one did. */
+  /** The level that came back, once one did — only ever set for `measured`. */
   level?: number;
   /** Whether this half has settled, and how. `undefined` while it is still outstanding. */
-  outcome?: 'captured' | 'unchanged';
+  outcome?: CaptureHalfOutcome;
 }
 
 /** Everything one node's capture tracks. */
@@ -692,35 +731,59 @@ function foldHalf(
   if (half.outcome !== undefined || !closed) return half;
   const holding = reportedLevel(reported);
   if (holding !== undefined && holding !== half.previous) {
-    return { ...half, level: holding, outcome: 'captured' };
+    return { ...half, level: holding, outcome: 'measured' };
   }
-  return expired ? { ...half, outcome: 'unchanged' } : half;
+  if (!expired) return half;
+  // The two ways of not knowing, kept apart exactly as the Director keeps them (#446): a level that
+  // is sitting where it was is `unchanged`, and no readable level at all is `unobserved`. Collapsing
+  // them would make the console claim RotorHazard refused a capture that may have run perfectly.
+  return { ...half, outcome: holding === undefined ? 'unobserved' : 'unchanged' };
 }
 
-/** The sentence for a capture where neither threshold moved. */
+/**
+ * The sentence for a capture where **neither** threshold could be attributed.
+ *
+ * Says what is known and stops (#446). The old copy asserted "the timer did not take the capture",
+ * which is a claim about RotorHazard from evidence that cannot support it: a capture that measured
+ * the same number it started from — an ordinary result on a stable gate, and the usual one when the
+ * RD captures twice — looks identical from here. `unobserved` is a different sentence again,
+ * because it is about GridFPV's watching rather than about the capture at all.
+ */
 function unchangedDetail(state: CaptureState): string {
   const held = [
-    state.enter.previous === undefined ? undefined : `Enter at ${state.enter.previous}`,
-    state.exit.previous === undefined ? undefined : `Exit at ${state.exit.previous}`
+    state.enter.outcome === 'unchanged' && state.enter.previous !== undefined
+      ? `Enter at ${state.enter.previous}`
+      : undefined,
+    state.exit.outcome === 'unchanged' && state.exit.previous !== undefined
+      ? `Exit at ${state.exit.previous}`
+      : undefined
   ].filter((s): s is string => s !== undefined);
   if (held.length === 0) {
-    return 'The timer never reported a level for this node, so nothing was captured and nothing was recorded.';
+    return (
+      'GridFPV did not read a level for this node across the capture, so there is nothing to ' +
+      'compare and nothing was recorded. Check the timer is still connected, then capture again.'
+    );
   }
   return (
-    `The timer is still reporting ${held.join(' and ')}. Nothing was captured and nothing was ` +
-    'recorded — either the pass fell outside the window, or the timer did not take the capture.'
+    `The timer is still reporting ${held.join(' and ')}, which is what it reported before. ` +
+    'GridFPV cannot tell a capture that measured the same level from one the timer never took, ' +
+    'so nothing was recorded. Capture again if the pass fell outside the window.'
   );
 }
 
-/** The sentence for a capture where one threshold moved and the other did not. */
+/** The sentence for a capture where one threshold was measured and the other was not. */
 function partialDetail(state: CaptureState): string | undefined {
-  const enterLanded = state.enter.outcome === 'captured';
-  const exitLanded = state.exit.outcome === 'captured';
+  const enterLanded = state.enter.outcome === 'measured';
+  const exitLanded = state.exit.outcome === 'measured';
   if (enterLanded === exitLanded) return undefined;
   const missed = enterLanded ? 'Exit at' : 'Enter at';
-  const reason = enterLanded
-    ? 'the craft may not have cleared the gate before the second window opened'
-    : 'the pass may have fallen outside the first window';
+  const other = enterLanded ? state.exit : state.enter;
+  const reason =
+    other.outcome === 'unobserved'
+      ? 'GridFPV did not read a level for it across its window'
+      : enterLanded
+        ? 'the craft may not have cleared the gate before the second window opened'
+        : 'the pass may have fallen outside the first window';
   return `${missed} did not change, so it was not recorded — ${reason}. Capture again to measure it.`;
 }
 
@@ -772,8 +835,12 @@ export function foldCapture(
   if (enter.outcome === undefined || exit.outcome === undefined) {
     return { ...state, phase: 'waiting', enter, exit };
   }
-  if (enter.outcome === 'unchanged' && exit.outcome === 'unchanged') {
-    return { ...state, phase: 'unchanged', enter, exit, detail: unchangedDetail(state) };
+  // Neither half measured anything. `unchanged` is the phase for both of the cannot-say outcomes —
+  // the copy tells them apart (#446), but the RD's next action is the same either way, so the badge
+  // is not made to carry a distinction that changes nothing they would do.
+  if (enter.outcome !== 'measured' && exit.outcome !== 'measured') {
+    const settled = { ...state, enter, exit };
+    return { ...settled, phase: 'unchanged', detail: unchangedDetail(settled) };
   }
   const next = { ...state, phase: 'captured' as const, enter, exit };
   return { ...next, detail: partialDetail(next) };
@@ -812,7 +879,7 @@ export function captureLabel(state: CaptureState, now: number): string {
  */
 export function captureResultLabel(state: CaptureState): string {
   const half = (h: CaptureHalf, name: string) =>
-    h.outcome === 'captured' && h.level !== undefined ? `${name} ${h.level}` : `${name} unchanged`;
+    h.outcome === 'measured' && h.level !== undefined ? `${name} ${h.level}` : `${name} unchanged`;
   return `Captured ${half(state.enter, 'Enter at')}, ${half(state.exit, 'Exit at')}`;
 }
 
@@ -945,9 +1012,14 @@ export interface ChannelOption {
  * contributes, and only for the entries the catalog does not already know. Custom channels are a
  * Flexible-only idea (a Fixed timer supports what it supports), so they are ignored for a Fixed one.
  *
+ * A Fixed timer's declared set is offered **whole**, including any frequency the catalog has no
+ * entry for (#449) — the declared set is the timer's statement about itself, and a missing name is
+ * not a missing channel. Those are labelled from their raw MHz through `channels.ts`.
+ *
  * `current` is what the node is tuned to right now: it is appended if nothing above already offers
  * it, so the dropdown can always show the node's actual channel rather than silently selecting some
- * other option. Catalog order is preserved; custom entries follow, ascending.
+ * other option — **unconditionally**, capability included (#449; see the branch below for why).
+ * Catalog order is preserved; custom entries follow, ascending.
  */
 export function channelOptions(
   capability: ChannelCapability | undefined,
@@ -962,20 +1034,27 @@ export function channelOptions(
   // knows their VTX as F8 still finds it.
   const seenMhz = new Set<number>();
   const options: ChannelOption[] = [];
-  for (const entry of offeredCatalog(capability, catalog)) {
-    if (seenMhz.has(entry.mhz)) continue;
-    seenMhz.add(entry.mhz);
+  for (const offer of offeredCatalog(capability, catalog)) {
+    if (seenMhz.has(offer.mhz)) continue;
+    seenMhz.add(offer.mhz);
+    // A Fixed timer may declare a frequency the catalog has no entry for (#449). It is still a
+    // channel the timer supports, so it is still offered — named from its raw MHz through the
+    // shared helper, which says `Custom — 5891` rather than inventing a band for it.
+    if (!offer.entry) {
+      options.push({ mhz: offer.mhz, label: channelOptionLabel(offer.mhz, catalog), custom: true });
+      continue;
+    }
     options.push({
-      mhz: entry.mhz,
-      band: entry.band,
-      channel: entry.channel,
-      label: entryOptionLabel(entry, catalog),
+      mhz: offer.entry.mhz,
+      band: offer.entry.band,
+      channel: offer.entry.channel,
+      label: entryOptionLabel(offer.entry, catalog),
       custom: false
     });
   }
   // A Fixed timer offers its declared set and nothing else — a custom MHz it cannot tune to is not
   // an option, it is a refusal waiting to happen.
-  const flexible = capabilityIsFlexible(capability);
+  const flexible = capabilityTag(capability) === 'Flexible';
   const extras = new Set<number>();
   if (flexible) {
     for (const mhz of custom) {
@@ -984,8 +1063,19 @@ export function channelOptions(
   }
   // What the node is ON always appears, even if it is off-catalog and off-pool: a dropdown that
   // cannot show the current value would quietly display some other channel as if it were selected.
+  //
+  // ALWAYS — the capability has no say here (#449). This used to gate the append on
+  // `capabilityAllows`, which is false exactly when it matters: a Fixed timer whose node is tuned
+  // outside its declared set (a heat retuned it before the RD narrowed that set, or RotorHazard
+  // came back on a stale profile). The `<select value={chan.mhz}>` then matched no option and the
+  // browser fell back to showing the FIRST one — so the page displayed a channel the node was not
+  // on, as though the RD had chosen it, which is the exact failure this branch exists to prevent.
+  //
+  // The capability describes what the timer may be *sent*, not what it is. Refusing to show where
+  // a node actually is does not make the node move; it only hides the thing the RD needs to see in
+  // order to fix it, and this is the page they would fix it from.
   if (current !== undefined && !options.some((o) => o.mhz === current) && !extras.has(current)) {
-    if (flexible || capabilityAllows(capability, current)) extras.add(current);
+    extras.add(current);
   }
   for (const mhz of [...extras].sort((a, b) => a - b)) {
     options.push({
@@ -995,18 +1085,6 @@ export function channelOptions(
     });
   }
   return options;
-}
-
-/** Whether a capability is the permissive `Flexible` one (the default for an undeclared timer). */
-function capabilityIsFlexible(capability: ChannelCapability | undefined): boolean {
-  return !(capability && typeof capability === 'object' && 'Fixed' in capability);
-}
-
-/** Whether a capability permits `mhz` — anything for Flexible, the declared set for Fixed. */
-function capabilityAllows(capability: ChannelCapability | undefined, mhz: number): boolean {
-  if (capabilityIsFlexible(capability)) return true;
-  const cap = capability as { Fixed: { channels: number[] } };
-  return cap.Fixed.channels.includes(mhz);
 }
 
 /**

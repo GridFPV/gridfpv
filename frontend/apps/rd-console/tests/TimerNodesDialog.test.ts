@@ -102,6 +102,27 @@ describe('TimerNodesDialog (#412)', () => {
     expect(within(row).getByText('Timer reports 4')).toBeInTheDocument();
   });
 
+  it('shows NO drift badge on a timer the Director has never asked (#445)', async () => {
+    // `reported_nodes` is `Option<u32>` with no `skip_serializing_if`, so a Mock — or any timer
+    // that has not connected yet — arrives as `"reported_nodes": null`, not as an absent key. That
+    // put a danger badge reading "Timer reports " (with nothing after it, `null` renders empty) on
+    // every such row: an alarm about a disagreement between a number and nothing at all.
+    //
+    // Cast for the same reason the unit fixtures do: `#[ts(optional)]` types the field
+    // `reported_nodes?: number`, which cannot express the `null` the wire actually sends.
+    const neverAsked = { ...BENCH, reported_nodes: null } as unknown as Timer;
+    const listTimersImpl = vi.fn(async () => [neverAsked]);
+    const { session } = makeTestSession({ listTimersImpl });
+    render(TimersPage, { session, onhome: noop });
+
+    await screen.findByText('Track RH');
+    const list = screen.getByRole('list', { name: 'Configured timers' });
+    const row = within(list).getAllByRole('listitem')[0];
+    expect(within(row).queryByText(/Timer reports/)).toBeNull();
+    // The row still reads the width the RD pinned — the badge is the only thing that goes.
+    expect(within(row).getByRole('button', { name: /8 nodes/ })).toBeInTheDocument();
+  });
+
   it('renders reported alongside configured, and names the phantom nodes 1-based', async () => {
     const timerNodesImpl = vi.fn(async () => BENCH_VIEW);
     await openNodes({ timerNodesImpl });
