@@ -370,6 +370,37 @@ fn seating_holds(
         .all(|(node_index, pilot_id, _)| seat_holds(seated, *node_index, *pilot_id))
 }
 
+/// Which pilot in a `pilot_data` roster is the one a preceding `add_pilot` just created — the id
+/// that is in `roster` but not in `known`. `None` when the roster adds nothing we did not have.
+///
+/// **Identity by absence, not by magnitude** (#451). This used to be "the highest id above a
+/// floor", with the floor guessed as `0` whenever the pre-seating roster read timed out — and a
+/// floor of `0` admits the RD's entire roster, so a delayed `pilot_data` listing only pre-existing
+/// pilots handed back the RD's highest pilot as "the one we just made". The caller then renamed a
+/// real pilot to a GridFPV callsign and seated it, and every check downstream agreed, because the
+/// pilot it was asked about genuinely was seated.
+///
+/// Verified against RotorHazard 4.3.0 (`server.py:1363`) and 4.4.0 (`server.py:1320`), which are
+/// identical: `on_add_pilot(*args)` **discards its payload**, calls `RHData.add_pilot()` with no
+/// `init`, and then `emit_pilot_data()` with no `noself` — so the new pilot's broadcast does come
+/// back to us, but it arrives as the *whole* roster with nothing marking which row is new, and
+/// there is no way to name the pilot at creation time (`RHData.add_pilot` accepts
+/// `init={'callsign': …}`, but the socket handler never passes one — `RHData.py:895`). The pilot is
+/// created as `~Callsign <id>`, a name that is itself localised through `self.__`, so matching on
+/// it would be a guess in a different costume. Diffing the roster is the only identification that
+/// depends on nothing but what RotorHazard actually tells us.
+///
+/// When several unknown ids appear at once (the RD adding pilots on their own screen while we
+/// seat) the highest is taken — but every id is then recorded as known, so no id is ever handed
+/// out twice, and the pilots we did not create are simply left alone.
+fn added_pilot(known: &std::collections::BTreeSet<i64>, roster: &[i64]) -> Option<i64> {
+    roster
+        .iter()
+        .copied()
+        .filter(|id| !known.contains(id))
+        .max()
+}
+
 /// Read a RotorHazard crossing flag that may be wired as a bool **or** as a 0/1 number.
 fn truthy(value: &serde_json::Value) -> bool {
     match value {
@@ -2105,7 +2136,9 @@ impl RotorHazardConnection {
     ///
     /// `seats` is the heat's `(node_index, callsign)` bind, one entry per **bound** node (unbound
     /// nodes are simply left unseated — RH won't record there, which is correct). For each seat this:
-    ///   1. adds a fresh RH pilot (`add_pilot`) and learns its id (the highest from `pilot_data`),
+    ///   1. adds a fresh RH pilot (`add_pilot`) and learns its id — the id `pilot_data`'s roster
+    ///      gained, never merely its highest, so a pilot the RD already had can never be adopted as
+    ///      ours and renamed out from under them (see [`added_pilot`] and #451),
     ///   2. names it with the GridFPV callsign (`alter_pilot { callsign }`) so RH's own view + its
     ///      "Racing heat … pilots: …" log are right,
     ///   3. assigns it to the heat's slot at that node (`alter_heat { heat, slot_id, pilot }`).
@@ -2142,17 +2175,36 @@ impl RotorHazardConnection {
             return Ok(None);
         };
 
-        // Learn the current highest pilot id BEFORE creating any, so each `add_pilot` can be
-        // identified as "the new id strictly greater than the floor" rather than the bare max —
-        // `on_add_pilot` broadcasts `pilot_data` to every socket (this one included), so the burst
-        // in flight while we seat carries the *whole* pilot list, and a frame listing only existing
-        // (lower-or-equal) ids must not be mistaken for the pilot we just added. (An `alter_pilot`
-        // rename answers `emit_pilot_data(noself=True)` and so never reaches this socket at all —
-        // the floor still holds, and it is `add_pilot`'s own broadcast that makes it necessary.)
+        // Learn **which pilots already exist** BEFORE creating any, so each `add_pilot` can be
+        // identified as "the id the roster gained" — `on_add_pilot` broadcasts `pilot_data` to
+        // every socket (this one included, no `noself`), so the burst in flight while we seat
+        // carries the *whole* pilot list, and a frame listing only pre-existing pilots must not be
+        // mistaken for the pilot we just added. (An `alter_pilot` rename answers
+        // `emit_pilot_data(noself=True)` and so never reaches this socket at all — it is
+        // `add_pilot`'s own broadcast that makes this necessary.)
+        //
+        // Drop any roster already sitting in the adapter first, so what we read back is the answer
+        // to *this* `load_data` and not a frame from before the heat was added.
+        self.adapter.lock().unwrap().take_pilot_roster();
         self.client
             .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
-        // The current highest pilot id (0 if RH has no pilots yet); the next created pilot exceeds it.
-        let mut pilot_floor = self.wait_for_pilot_above(i64::MIN).unwrap_or(0);
+        // **This read may not be guessed at** (#451). It used to fall back to a floor of 0 when it
+        // timed out, and a floor of 0 admits every pilot RotorHazard has: the delayed reply to this
+        // very `load_data` then arrived mid-seat, listing only the RD's pre-existing pilots, and
+        // the highest of them was adopted as "the pilot we just created". `alter_pilot` renamed a
+        // real entry on the RD's roster to a GridFPV callsign, `alter_heat` seated it, and
+        // `confirm_seating` confirmed it — the wrong pilot, successfully, with nothing to surface.
+        //
+        // So: no answer, no seating. Returning `None` here drops to the practice-mode flow, which
+        // still records laps via RH's `current_heat is HEAT_ID_NONE` gate branch and costs only the
+        // dense per-tick RSSI trace. Clobbering the RD's roster is not a degradation, it is damage.
+        // An RH with no pilots at all answers `Some(vec![])`, which is a real answer and seats fine.
+        let Some(roster) = self.wait_for_pilot_roster() else {
+            return Ok(None);
+        };
+        // Every pilot id we must NOT adopt as our own: the RD's existing roster, plus each pilot we
+        // create as we go.
+        let mut known: std::collections::BTreeSet<i64> = roster.into_iter().collect();
 
         // What we *intended* to seat: `(node_index, pilot_id, callsign)` for every seat whose write
         // chain got as far as an `alter_heat`. This is the list the readback below has to find
@@ -2166,15 +2218,17 @@ impl RotorHazardConnection {
                 // deliberately NOT in `intended`: there is no receiver at that seat to lose laps on.
                 continue;
             };
-            // Create a pilot and learn its id (the new id strictly above the running floor).
-            self.adapter.lock().unwrap().take_pilot_ids();
+            // Create a pilot and learn its id — the one id in the roster we did not already know.
+            // A delayed frame carrying only pilots we knew about adds nothing, so it is ignored and
+            // the wait continues rather than adopting somebody else's pilot (#451).
+            self.adapter.lock().unwrap().take_pilot_roster();
             self.client.emit("add_pilot", Payload::Text(vec![]))?;
             self.client
                 .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
-            let Some(pilot_id) = self.wait_for_pilot_above(pilot_floor) else {
+            let Some(pilot_id) = self.wait_for_added_pilot(&known) else {
                 continue;
             };
-            pilot_floor = pilot_id;
+            known.insert(pilot_id);
             // Name it with the GridFPV callsign so RH's own view + its staging log show the callsign.
             self.client.emit(
                 "alter_pilot",
@@ -2360,21 +2414,35 @@ impl RotorHazardConnection {
         }
     }
 
-    /// Wait (bounded) for a `pilot_data` response carrying a pilot id **strictly greater than**
-    /// `floor`, returning that id (the highest such) — used to identify the pilot a preceding
-    /// `add_pilot` just created. Passing `i64::MIN` returns the current highest id (the seating
-    /// floor). `None` on timeout (no id above `floor` arrived).
-    fn wait_for_pilot_above(&self, floor: i64) -> Option<i64> {
+    /// Wait (bounded) for a `pilot_data` response and return the roster it carried — used once, at
+    /// the top of [`seat_heat`](Self::seat_heat), to learn which pilots RotorHazard already has.
+    ///
+    /// `Some(vec![])` is a real answer ("no pilots yet") and `None` means RotorHazard never
+    /// answered. The caller must not conflate them: see the `#451` note at the call site.
+    fn wait_for_pilot_roster(&self) -> Option<Vec<i64>> {
+        let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
+        loop {
+            if let Some(roster) = self.adapter.lock().unwrap().take_pilot_roster() {
+                return Some(roster);
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Wait (bounded) for a `pilot_data` response that reports a pilot **we did not already know
+    /// about** — the one a preceding `add_pilot` just created — and return its id.
+    ///
+    /// Frames listing only `known` pilots are the delayed broadcasts in flight from earlier
+    /// `add_pilot`s and `load_data`s; they are skipped and the wait continues. `None` on timeout.
+    fn wait_for_added_pilot(&self, known: &std::collections::BTreeSet<i64>) -> Option<i64> {
         let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
         loop {
             {
-                let mut a = self.adapter.lock().unwrap();
-                let id = a
-                    .take_pilot_ids()
-                    .into_iter()
-                    .filter(|id| *id > floor)
-                    .max();
-                if let Some(id) = id {
+                let roster = self.adapter.lock().unwrap().take_pilot_roster();
+                if let Some(id) = roster.as_deref().and_then(|r| added_pilot(known, r)) {
                     return Some(id);
                 }
             }
@@ -3237,6 +3305,96 @@ mod tests {
         assert!(
             seating_holds(&seats(&[]), &[]),
             "nothing intended is vacuously confirmed (the caller returns early before this)"
+        );
+    }
+
+    /// Fold a `pilot_data` frame through the adapter and hand back the roster the transport would
+    /// read — the same seam `seat_heat` waits on, so these tests exercise the real message path
+    /// rather than a hand-built vector.
+    fn folded_roster(adapter: &mut RotorHazardAdapter, pilot_ids: &[i64]) -> Option<Vec<i64>> {
+        adapter.translate(Raw::PilotData(RawPilotData {
+            pilots: pilot_ids
+                .iter()
+                .map(|&pilot_id| crate::rotorhazard::RawPilotEntry { pilot_id })
+                .collect(),
+        }));
+        adapter.take_pilot_roster()
+    }
+
+    /// **The #451 race, at the seam it happens on.**
+    ///
+    /// The pre-seating roster read times out on a congested link; its reply lands *later*, in the
+    /// middle of the seat loop, listing only the RD's own pre-existing pilots. Under the old
+    /// "highest id above a floor of 0" rule that frame answered the wait, and pilot 12 — a real
+    /// entry on the RD's roster — was renamed to `ALPHA` and seated as though we had created it.
+    #[test]
+    fn a_delayed_frame_of_pre_existing_pilots_is_never_mistaken_for_the_pilot_we_added() {
+        let mut adapter = RotorHazardAdapter::new();
+        let known: std::collections::BTreeSet<i64> = [11, 12].into_iter().collect();
+
+        // The delayed reply to the pre-seating `load_data`: the RD's roster, nothing of ours.
+        let roster = folded_roster(&mut adapter, &[11, 12]).expect("a frame did arrive");
+        assert_eq!(
+            added_pilot(&known, &roster),
+            None,
+            "this frame adds nothing we did not already have, so it is not evidence that our \
+             `add_pilot` landed — adopting pilot 12 here renames the RD's own pilot and seats it"
+        );
+
+        // The real `add_pilot` broadcast then arrives, and it is unmistakable: a new id.
+        let roster = folded_roster(&mut adapter, &[11, 12, 13]).expect("a frame did arrive");
+        assert_eq!(
+            added_pilot(&known, &roster),
+            Some(13),
+            "the id the roster GAINED is the pilot we just created"
+        );
+    }
+
+    /// The floor read must be able to say "this timer has no pilots" out loud. `None` means
+    /// RotorHazard never answered, and `seat_heat` refuses to seat on that rather than guessing a
+    /// floor of 0 — which is precisely the guess that made the race above reachable.
+    #[test]
+    fn an_empty_roster_is_an_answer_and_silence_is_not() {
+        let mut adapter = RotorHazardAdapter::new();
+        assert_eq!(
+            adapter.take_pilot_roster(),
+            None,
+            "nothing folded yet: RotorHazard has not answered"
+        );
+
+        let roster =
+            folded_roster(&mut adapter, &[]).expect("an empty pilot list is still a frame");
+        assert!(roster.is_empty());
+        let known: std::collections::BTreeSet<i64> = roster.into_iter().collect();
+
+        // A fresh timer's first seated pilot is then identified perfectly well.
+        let roster = folded_roster(&mut adapter, &[1]).expect("a frame did arrive");
+        assert_eq!(added_pilot(&known, &roster), Some(1));
+    }
+
+    /// Ids are not assumed to be increasing, and a concurrent edit on RotorHazard's own screen
+    /// does not derail the seat loop: the highest unknown id is taken, and the caller records
+    /// every id it is handed, so no pilot is ever adopted twice.
+    #[test]
+    fn identification_is_by_absence_not_by_magnitude() {
+        // A gap re-used below the RD's highest id — "the max" would answer 40 here, forever.
+        let known: std::collections::BTreeSet<i64> = [7, 40].into_iter().collect();
+        assert_eq!(
+            added_pilot(&known, &[7, 40, 8]),
+            Some(8),
+            "the new pilot is the one that was not there before, wherever it sorts"
+        );
+
+        let mut known = known;
+        // Two unknown ids at once (the RD added one while we seated): take one, remember both.
+        let roster = [7, 40, 41, 42];
+        let picked = added_pilot(&known, &roster).expect("something is new");
+        assert_eq!(picked, 42);
+        known.extend(roster.iter().copied());
+        assert_eq!(
+            added_pilot(&known, &roster),
+            None,
+            "once recorded, no id is ever handed out a second time"
         );
     }
 

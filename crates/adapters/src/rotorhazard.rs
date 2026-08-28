@@ -198,10 +198,10 @@ pub enum Raw {
     /// the default practice mode). Exposed via [`take_heat_ids`](RotorHazardAdapter::take_heat_ids).
     HeatData(RawHeatData),
     /// A `pilot_data` response (`RHUI.emit_pilot_data`), the configured pilots with their ids. Emits
-    /// no canonical events; the adapter records the ids so the transport can learn the id of a pilot
-    /// it just created (`add_pilot`) — the newest (highest) id — to then assign it onto a heat seat
-    /// when **seating** a heat's bound pilots before racing (the laps-attribute fix). Exposed via
-    /// [`take_pilot_ids`](RotorHazardAdapter::take_pilot_ids).
+    /// no canonical events; the adapter records the roster so the transport can learn the id of a
+    /// pilot it just created (`add_pilot`) — the id the roster gained — to then assign it onto a
+    /// heat seat when **seating** a heat's bound pilots before racing (the laps-attribute fix).
+    /// Exposed via [`take_pilot_roster`](RotorHazardAdapter::take_pilot_roster).
     PilotData(RawPilotData),
     /// A `gridfpv_signal` broadcast from the **GridFPV RH plugin** (D16, Slice 2): live per-node
     /// signal pushed in-process — `current_rssi`, the enter/exit detection levels, and the dense
@@ -967,10 +967,15 @@ pub struct RotorHazardAdapter {
     /// id → `(node_index → slot_id)`. Empty until a `heat_data` is folded.
     pending_heat_slots: std::collections::HashMap<i64, std::collections::HashMap<usize, HeatSeat>>,
     /// Configured RotorHazard pilot ids learned from the most recent `pilot_data`, drained by the
-    /// transport via [`take_pilot_ids`](Self::take_pilot_ids) so it can learn the id of a pilot it
-    /// just created (`add_pilot` — the highest id) to assign onto a heat seat when seating. Empty
-    /// until a `pilot_data` is folded.
-    pending_pilot_ids: Vec<i64>,
+    /// transport via [`take_pilot_roster`](Self::take_pilot_roster) so it can learn the id of a
+    /// pilot it just created (`add_pilot`) to assign onto a heat seat when seating.
+    ///
+    /// `None` until a `pilot_data` is folded — **the distinction from `Some(vec![])` is
+    /// load-bearing** (#451). A RotorHazard with no pilots yet answers `load_data` with an empty
+    /// pilot list, which is a perfectly good answer meaning "the roster is empty"; a congested link
+    /// that never answers at all is not. Collapsing both to an empty `Vec` is what let the seating
+    /// floor fall back to 0 and adopt a delayed frame's pre-existing pilots as its own.
+    pending_pilot_roster: Option<Vec<i64>>,
     /// Whether the connected GridFPV plugin advertised the **`live_pass`** capability (#389). Set
     /// by the transport from the `gridfpv_hello_ack`, and reset to `false` on every (re)connect so
     /// a timer whose plugin was removed degrades to `current_laps` instead of waiting forever for
@@ -1153,7 +1158,7 @@ impl RotorHazardAdapter {
             pilotrace_start_time: std::collections::HashMap::new(),
             pending_heat_ids: Vec::new(),
             pending_heat_slots: std::collections::HashMap::new(),
-            pending_pilot_ids: Vec::new(),
+            pending_pilot_roster: None,
             // No plugin has spoken yet: `current_laps` is authoritative until one advertises
             // `live_pass` (#389).
             plugin_live_pass: false,
@@ -1313,12 +1318,16 @@ impl RotorHazardAdapter {
         std::mem::take(&mut self.pending_heat_slots)
     }
 
-    /// Take (and clear) the configured pilot ids learned from the most recent `pilot_data`. The
-    /// transport calls this after creating a pilot (`add_pilot`) when seating a heat's bound pilots:
-    /// the **highest** id is the pilot just added, to be assigned onto a heat seat. Empty when no
-    /// `pilot_data` has been folded.
-    pub fn take_pilot_ids(&mut self) -> Vec<i64> {
-        std::mem::take(&mut self.pending_pilot_ids)
+    /// Take (and clear) the pilot roster learned from the most recent `pilot_data`. The transport
+    /// calls this while seating a heat's bound pilots, to learn the id of a pilot it just created
+    /// (`add_pilot`).
+    ///
+    /// `None` means **no `pilot_data` has arrived** since the last take; `Some(ids)` is a roster
+    /// RotorHazard actually reported, and `Some(vec![])` is the real, useful answer "this timer has
+    /// no pilots". The transport depends on telling those apart — see
+    /// [`pending_pilot_roster`](Self::pending_pilot_roster) and #451.
+    pub fn take_pilot_roster(&mut self) -> Option<Vec<i64>> {
+        self.pending_pilot_roster.take()
     }
 
     /// Take (and clear) the per-pilotrace marshal pulls discovered from the most recent `race_list`.
@@ -2040,14 +2049,24 @@ impl RotorHazardAdapter {
             .collect();
     }
 
-    /// Record the configured pilot ids from a `pilot_data` response for the transport to drain.
+    /// Record the pilot roster from a `pilot_data` response for the transport to drain.
     ///
-    /// Emits no canonical events — `pilot_data` is a transport routing payload. The ids queue in
-    /// [`pending_pilot_ids`](Self::pending_pilot_ids); the transport reads the highest (the pilot it
-    /// just `add_pilot`ed) to assign onto a heat seat when seating. A re-sent `pilot_data` rebuilds
-    /// the list.
+    /// Emits no canonical events — `pilot_data` is a transport routing payload. The roster lands in
+    /// [`pending_pilot_roster`](Self::pending_pilot_roster); the transport diffs it against the
+    /// pilots it already knew to identify the one it just `add_pilot`ed. A re-sent `pilot_data`
+    /// replaces the roster wholesale, which is what RotorHazard's frame means: it is always the
+    /// complete list, never a delta.
+    ///
+    /// Note this records `Some(...)` even for an empty pilot list — "RotorHazard says it has no
+    /// pilots" is an answer, and the seating floor is only safe because it can tell that from
+    /// silence (#451).
     fn translate_pilot_data(&mut self, data: RawPilotData) {
-        self.pending_pilot_ids = data.pilots.into_iter().map(|p| p.pilot_id).collect();
+        self.pending_pilot_roster = Some(
+            data.pilots
+                .into_iter()
+                .map(|p| p.pilot_id)
+                .collect::<Vec<_>>(),
+        );
     }
 
     /// Emit per-node [`Event::SignalThresholds`] from an `enter_and_exit_at_levels` message —
@@ -2994,11 +3013,28 @@ mod tests {
             ],
         }));
         assert!(events.is_empty(), "pilot_data emits no canonical events");
-        // The transport reads the highest (the just-added pilot).
-        assert_eq!(adapter.take_pilot_ids().into_iter().max(), Some(5));
-        assert!(
-            adapter.take_pilot_ids().is_empty(),
-            "draining clears the pilot ids"
+        // The transport diffs this roster against the pilots it already knew.
+        assert_eq!(
+            adapter.take_pilot_roster().map(|mut ids| {
+                ids.sort_unstable();
+                ids
+            }),
+            Some(vec![1, 3, 5])
+        );
+        assert_eq!(
+            adapter.take_pilot_roster(),
+            None,
+            "draining clears the roster, and `None` then means 'no frame since' — not 'no pilots'"
+        );
+
+        // An RH with no pilots yet answers with an empty list, which is an ANSWER. Collapsing it
+        // into the same value as silence is what made the seating floor unsafe (#451).
+        let mut empty = RotorHazardAdapter::new();
+        empty.translate(Raw::PilotData(RawPilotData { pilots: vec![] }));
+        assert_eq!(
+            empty.take_pilot_roster(),
+            Some(vec![]),
+            "'this timer has no pilots' is distinguishable from 'this timer did not answer'"
         );
     }
 
