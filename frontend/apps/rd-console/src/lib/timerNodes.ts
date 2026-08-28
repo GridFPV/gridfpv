@@ -168,6 +168,73 @@ export function seatNodes(
 }
 
 /**
+ * The **largest width the RD may pin** on this timer, or `undefined` when there is no ceiling
+ * (#463).
+ *
+ * The ceiling is whatever the timer reported, because a width above it manufactures seats the
+ * hardware does not have — a pilot on one flies a heat that records nothing, which is the bench
+ * failure #412 exists to prevent. The Director refuses such a write; this is the same rule, applied
+ * where the RD is typing, so the refusal is a thing they cannot reach rather than a thing they hit.
+ *
+ * `undefined` — a free override — for a timer that has **never reported**: a Mock, an adapter that
+ * cannot report, or a RotorHazard nobody has dialed yet. Configuring a timer offline the night
+ * before has to work, and there is no observation to clamp against.
+ *
+ * Guarded with `!= null` deliberately: the wire spells "never asked" as `reported_nodes: null`
+ * (`Option<u32>` with `#[serde(default)]` and no `skip_serializing_if`), which `#[ts(optional)]`
+ * types as `number | undefined`. A `!== undefined` test would read `null` as a ceiling of `null`
+ * and clamp every never-dialed timer to zero — the same null-vs-undefined slip #445 is about.
+ */
+export function maxNodeCount(timer: Timer): number | undefined {
+  return timer.reported_nodes ?? undefined;
+}
+
+/**
+ * Hold a typed width inside what the timer reported (#463) — the console-side half of the clamp.
+ *
+ * Returns the value to use and whether it had to be pulled down, so the form can *say* what it did
+ * rather than silently rewriting what the RD typed. A width at or below the report, and any width
+ * on a never-reported timer, comes back untouched.
+ */
+export function clampNodeCount(
+  timer: Timer,
+  requested: number
+): { value: number; clamped: boolean } {
+  const max = maxNodeCount(timer);
+  if (max === undefined || !Number.isFinite(requested) || requested <= max) {
+    return { value: requested, clamped: false };
+  }
+  return { value: max, clamped: true };
+}
+
+/**
+ * What the form says when it pulls a typed width down to the reported one — the RD's own words for
+ * why they cannot have nine seats on an eight-node timer.
+ *
+ * Names the timer by its **display name** and states the width as a count; no id, no node index.
+ */
+export function clampExplanation(timer: Timer, requested: number): string {
+  const max = maxNodeCount(timer);
+  if (max === undefined) return '';
+  const nodeWord = max === 1 ? 'node' : 'nodes';
+  return (
+    `“${timer.name}” reports ${max} ${nodeWord}, so ${requested} is more than it has — ` +
+    `a pilot seated on a node the hardware lacks would fly and record nothing. Set ${max} or ` +
+    `fewer, or use Nodes on the row to follow the timer.`
+  );
+}
+
+/** The hint under the Node-count field: the ceiling, when the timer has given one. */
+export function nodeCountHint(timer: Timer | undefined): string {
+  const base =
+    'Slots on the timer — caps a heat’s size. Only sent if you change it; use Nodes on the row to disable one node or follow the timer.';
+  const max = timer ? maxNodeCount(timer) : undefined;
+  if (max === undefined) return base;
+  const nodeWord = max === 1 ? 'node' : 'nodes';
+  return `${base} This timer reports ${max} ${nodeWord}, which is the most it can be set to.`;
+}
+
+/**
  * Whether the row should flag drift: the timer reported a width and GridFPV is using another one.
  *
  * Deliberately looser than the Director's `NodeDrift` (which also fires on an enabled phantom

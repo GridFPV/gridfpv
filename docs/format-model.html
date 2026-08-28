@@ -78,7 +78,7 @@
           <td><strong>Time Trial</strong></td>
           <td>Qualify against the clock on fixed channels; your best result ranks you.</td>
           <td>best result ranks the field</td>
-          <td><strong>Best of N laps</strong> (N configurable; <em>N = 1 is "best lap"</em>) or <strong>Timed — most laps</strong>, + a race time; <em>"Heats per pilot"</em> (<code>rounds</code>, default 3; <strong>0 = open-ended</strong> — generate the next rotation on demand)</td>
+          <td><strong>Best of N laps</strong> (N configurable; <em>N = 1 is "best lap"</em>), + a race time; <em>"Heats per pilot"</em> (<code>rounds</code>, default 3; <strong>0 = open-ended</strong> — generate the next rotation on demand)</td>
         </tr>
         <tr>
           <td><strong>Head-to-Head</strong></td>
@@ -91,6 +91,13 @@
     <p>
       Best-Lap folds into Best-of-N (N&nbsp;=&nbsp;1), so Time Trial has a single ranking metric rather
       than two. Practice is one format; the "class" variant is purely the round/heat name.
+    </p>
+    <p>
+      <strong>"Timed — most laps" is a Head-to-Head win condition, not a Time Trial one</strong>
+      (#472, decided 2026-08-27). Pilots flying simultaneously and competing on lap count inside one
+      shared window are racing <em>each other</em>; "time trial" means the solo/async run against the
+      clock. Qualifying a field <em>by</em> total laps is a round-level seeding concern — it does not
+      make most-laps a time-trial format.
     </p>
 
     <h2>2 · Two orthogonal knobs: win condition vs scoring</h2>

@@ -54,8 +54,8 @@ use gridfpv_adapters::rotorhazard::transport::{
 };
 use gridfpv_events::{AdapterId, CompetitorRef, Event};
 use gridfpv_server::timers::{
-    CaptureThreshold, NodeReading, PendingTimerWrite, PluginPresence, SIGNAL_SAMPLE_INTERVAL,
-    TimerId, TimerRegistry, TimerStatus,
+    CAPTURE_EXIT_DELAY_MS, CONNECT_ATTEMPT_CAP, NodeReading, PendingTimerWrite, PluginPresence,
+    SIGNAL_SAMPLE_INTERVAL, TimerId, TimerRegistry, TimerStatus,
 };
 use tokio::task::JoinHandle;
 
@@ -215,6 +215,35 @@ type PendingWriteSlot = Arc<Mutex<Vec<PendingTimerWrite>>>;
 /// The slack covers the sleep and the write.
 const CAPTURE_READBACK_DELAY: Duration = Duration::from_millis(3_400);
 
+/// How long after `cap_enter_at_btn` the driver fires `cap_exit_at_btn` for the same node (#465) —
+/// [`CAPTURE_EXIT_DELAY_MS`], in the type this loop measures with.
+///
+/// Read from the server crate rather than restated, because the registry stamps its outstanding
+/// exit capture's window from the same number: if the emit and the window it is settled against
+/// drifted apart, GridFPV would decide a capture had not landed while RotorHazard was still
+/// sampling for it.
+const CAPTURE_EXIT_DELAY: Duration = Duration::from_millis(CAPTURE_EXIT_DELAY_MS as u64);
+
+/// The **exit** half of a one-pass capture, waiting for its window to open (#465).
+///
+/// Held in `maintain`'s own loop state rather than on the shared [`PendingWriteSlot`]: it is a
+/// schedule, not a request. A request is something the *route* accepted and the registry is
+/// tracking; this is the driver's own half-finished work, and it exists only for as long as the
+/// connection that made the enter emit does. If the link drops in between, the exit capture is
+/// simply never fired — the registry's outstanding entry then runs out and is reported as a
+/// threshold that did not land, which is what a dropped calibration write does too.
+///
+/// Deliberately **not** a second `PendingTimerWrite`: putting it on the queue would make it
+/// eligible for the clear-on-reconnect (#436/#437) and for coalescing policy it has no business
+/// being subject to, and would let a reconnect fire an exit capture whose enter half never happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingExitCapture {
+    /// The node, 0-based (RotorHazard's `seat_index`).
+    node: u64,
+    /// When `cap_exit_at_btn` should go out — the moment RotorHazard's enter window closes.
+    due: Instant,
+}
+
 /// The RH heat id **seated** for the current arming, if seating succeeded (the laps-attribute fix):
 /// a fresh RH heat built at Stage with the bound pilots assigned + made current, so RH records +
 /// attributes passes. Held by [`drive`] **outside** its reconnect loop (not a `maintain`-local) so it
@@ -331,7 +360,10 @@ pub struct RhConnection {
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
-    _driver: JoinHandle<()>,
+    ///
+    /// Also **read**, by [`driver_finished`](Self::driver_finished): a driver that rested (#462) has
+    /// exited without anyone cancelling it, and the reconciler has no other way to notice.
+    driver: JoinHandle<()>,
 }
 
 impl RhConnection {
@@ -383,7 +415,7 @@ impl RhConnection {
             prepare,
             seat,
             writes,
-            _driver: driver,
+            driver,
         }
     }
 
@@ -542,6 +574,24 @@ impl RhConnection {
         self.yield_status.store(true, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
+
+    /// Whether the driver thread has **exited** (#462).
+    ///
+    /// Nothing in the reconciler's map removes an entry because its thread ended, so a driver that
+    /// gave up dialling ([`CONNECT_ATTEMPT_CAP`] attempts spent, timer left `Unreachable`) would
+    /// otherwise sit in the live map forever, looking healthy: still wanted, same URL, left alone —
+    /// and never reopened, not even when the RD pressed Connect. This is how the reconciler tells a
+    /// corpse from a live link.
+    ///
+    /// A cancelled or superseded driver also finishes, but those entries are removed from the map in
+    /// the same breath as the cancel, so the only entry this is ever asked about is a rested one.
+    ///
+    /// Distinct from [`is_connected`](Self::is_connected), which is the #437 write gate: that says
+    /// *"this link is up right now"*, this says *"this driver is never coming back"*. A dialling
+    /// driver is neither connected nor finished.
+    pub fn driver_finished(&self) -> bool {
+        self.driver.is_finished()
+    }
 }
 
 impl Drop for RhConnection {
@@ -675,6 +725,13 @@ fn drive(
     writes: PendingWriteSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
+    // How many times in a row we have failed to **establish** this link (#462).
+    //
+    // Spent attempts rest the timer at `Unreachable` rather than pulsing `Connecting`/`Error` at a
+    // dead address forever. Declared beside `backoff`, and reset beside it at the one place that
+    // matters — the `Connected` line below. That reset is the whole boundary: a link that ever came
+    // up gets its full count back, so a mid-race drop is not rationed by an add-time cap.
+    let mut attempts: u32 = 0;
     // The RH heat id **seated** for the current arming (the laps-attribute fix), if seating
     // succeeded: a fresh RH heat built at Stage with the bound pilots assigned + made current. Lives
     // here in `drive` — **outside** the reconnect loop — so it **survives a mid-race reconnect**: the
@@ -732,6 +789,28 @@ fn drive(
                     error_chain(&e)
                 );
                 carry_adapter = Some(recovered);
+                attempts += 1;
+                // #462: stop dialling on our own once the cap is spent — UNLESS a heat is armed on
+                // this connection. That is the boundary between the two retries that live in this
+                // one loop. Establishing a link nobody is waiting on (a timer just added, a
+                // Director just started) is capped; keeping alive the link a *running race* needs
+                // is not, and never will be — a heat that has started must reconnect for as long as
+                // it takes. The check is made here, on every failure, so a heat armed while the
+                // driver is already retrying lifts the cap on the spot.
+                let racing = armed.lock().expect("armed-heat lock poisoned").is_some();
+                if attempts >= CONNECT_ATTEMPT_CAP && !racing {
+                    eprintln!(
+                        "gridfpv: RotorHazard {:?} unreachable after {attempts} attempts; resting \
+                         until it is connected from the Timers menu or an event needs it",
+                        timer_name(&timers, &timer_id)
+                    );
+                    // Publish the rest and leave. `return`, not `break`: the tail below would
+                    // overwrite this with `Disconnected`, which promises a retry that is not coming.
+                    // `connected` was never set on this path, so no write can be queued onto the
+                    // dead link (#437) — the orphaned-write line reports them instead.
+                    timers.set_status(&timer_id, TimerStatus::Unreachable);
+                    return;
+                }
                 timers.set_status(&timer_id, TimerStatus::Error);
                 if sleep_unless_cancelled(backoff, &cancel) {
                     break;
@@ -742,6 +821,9 @@ fn drive(
         };
         timers.set_status(&timer_id, TimerStatus::Connected);
         backoff = RECONNECT_BACKOFF_MIN;
+        // The boundary (#462): a link that came up gets its full attempt count back, so the
+        // reconnect after a mid-race drop is never rationed by an add-time cap.
+        attempts = 0;
         clear_writes_that_outlived_the_previous_connection(&writes);
         // Only NOW may this connection accept writes (#437) — after the clear, never before it.
         // Flipping this the other way round would leave a window in which a write is accepted onto
@@ -978,6 +1060,10 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
     // still running as one that did not land. Set to the latest outstanding capture's deadline, so
     // a batch of presses costs one `load_data` rather than one each. `None` ⇒ nothing outstanding.
     let mut capture_readback_at: Option<Instant> = None;
+    // The **exit** half of each one-pass capture, waiting for its window (#465). One press arms two
+    // of RotorHazard's captures, and they must not overlap — see [`PendingExitCapture`] and
+    // `CAPTURE_EXIT_DELAY`. A `Vec` because several nodes can be capturing at once.
+    let mut pending_exit_captures: Vec<PendingExitCapture> = Vec::new();
 
     while !cancel.load(Ordering::Relaxed) {
         // The source of truth for a drop (#105): `rust_socketio` runs with `.reconnect(false)`, so a
@@ -1077,19 +1163,27 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
                     // counts as a lap under a scored heat just as surely. Open practice is
                     // allowed, and is the natural moment to capture — the pass a capture needs is
                     // one a pilot is already flying (#398).
+                    //
+                    // **One arming is two emits** (#465). `cap_enter_at_btn` goes out now, over the
+                    // pass; `cap_exit_at_btn` goes out when that window closes, by which time the
+                    // craft has flown on. They cannot go out together: RotorHazard's two branches
+                    // average the SAME samples over the SAME window
+                    // (`BaseHardwareInterface.process_lap_stats` accumulates both from one
+                    // `node.current_rssi` per iteration), so a simultaneous pair returns
+                    // exit == enter, which is a gate that never closes. See `CAPTURE_EXIT_DELAY_MS`.
                     PendingTimerWrite::Capture(w) => {
                         if heat_armed && !w.during_open_practice {
                             refused_capture += 1;
                             continue;
                         }
                         let node = u64::from(w.node);
-                        let emitted = match w.threshold {
-                            CaptureThreshold::Enter => conn.capture_enter_at_level(node),
-                            CaptureThreshold::Exit => conn.capture_exit_at_level(node),
-                        };
-                        if emitted.is_err() {
+                        if conn.capture_enter_at_level(node).is_err() {
                             return true;
                         }
+                        pending_exit_captures.push(PendingExitCapture {
+                            node,
+                            due: Instant::now() + CAPTURE_EXIT_DELAY,
+                        });
                         captures_started += 1;
                     }
                     // The emit carries the catalog **band and channel** as well as the frequency:
@@ -1149,20 +1243,41 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
                 }
             }
             if captures_started > 0 {
-                // Schedule the readback past the end of RotorHazard's sampling window. RH also
-                // broadcasts the captured level itself (`node_enter_at_level`, folded by the
-                // transport), so this is the second witness rather than the only one — but a gate's
-                // calibration is not something to stake on one unsolicited frame, and a capture the
-                // RD flew a pass for deserves both.
-                let due = Instant::now() + CAPTURE_READBACK_DELAY;
+                // Schedule the readback past the end of the **last** sampling window — the exit one
+                // (#465), so the delay carries the enter window as well. Asking after only the
+                // first would read the exit threshold back before RotorHazard had measured it, and
+                // `resolve_captures` would then call a running capture `Unchanged`. RH also
+                // broadcasts each captured level itself (`node_enter_at_level` /
+                // `node_exit_at_level`, folded by the transport), so this is the second witness
+                // rather than the only one — but a gate's calibration is not something to stake on
+                // one unsolicited frame, and a capture the RD flew a pass for deserves both.
+                let due = Instant::now() + CAPTURE_EXIT_DELAY + CAPTURE_READBACK_DELAY;
                 capture_readback_at = Some(match capture_readback_at {
                     Some(existing) if existing > due => existing,
                     _ => due,
                 });
             }
         }
+        // Fire the **exit** half of each armed capture as its window comes due (#465). Deliberately
+        // its own step, three seconds after the enter emit, with this loop turning over every 100 ms
+        // in between: the whole point is that the two sampling windows do not overlap.
+        //
+        // A link that drops in between simply never fires it — the registry's outstanding exit
+        // capture then runs out and resolves `Unchanged`/`Unobserved`, which is the honest outcome
+        // and exactly what a dropped calibration write does.
+        if !pending_exit_captures.is_empty() {
+            let now = Instant::now();
+            let (due_now, still_waiting): (Vec<PendingExitCapture>, Vec<PendingExitCapture>) =
+                pending_exit_captures.iter().partition(|p| now >= p.due);
+            for exit in &due_now {
+                if conn.capture_exit_at_level(exit.node).is_err() {
+                    return true;
+                }
+            }
+            pending_exit_captures = still_waiting;
+        }
         // …and fire the capture readback when it comes due. Deliberately outside the block above:
-        // the emit and the readback are separated by three seconds of RotorHazard sampling, and
+        // the emit and the readback are separated by six seconds of RotorHazard sampling, and
         // this loop turns over every 100 ms in between.
         if let Some(due) = capture_readback_at {
             if Instant::now() >= due {
@@ -1846,7 +1961,6 @@ mod tests {
             PendingTimerWrite::Capture(gridfpv_server::timers::PendingCapture {
                 timer: timer.clone(),
                 node: 0,
-                threshold: CaptureThreshold::Enter,
                 during_open_practice: false,
             }),
             PendingTimerWrite::SetChannel(gridfpv_server::timers::PendingChannel {

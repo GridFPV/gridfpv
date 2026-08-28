@@ -55,6 +55,23 @@ pub const MOCK_TIMER_NAME: &str = "Mock";
 /// — reads back as an 8-node timer, the same heat-size cap a real 8-seat timer enforces.
 pub const DEFAULT_NODE_COUNT: u32 = 8;
 
+/// How many times the Director dials a RotorHazard timer **on its own** before resting (#462).
+///
+/// Adding a timer and starting the Director both open a connection nobody has asked to keep alive
+/// yet; against a wrong URL — a typo, the wrong subnet, RotorHazard not running — the driver used
+/// to alternate [`Connecting`](TimerStatus::Connecting) and [`Error`](TimerStatus::Error) at a dead
+/// address for as long as the Director ran, logging a line every ten seconds.
+///
+/// Three attempts is enough to ride out a timer that is still booting and short enough that a wrong
+/// address stops shouting. After them the timer rests at
+/// [`Unreachable`](TimerStatus::Unreachable) until something **asks**: the RD's Connect in the
+/// Timers menu (#383), or an event that needs it.
+///
+/// **It caps establishing a link, never keeping one.** A heat armed on the connection lifts the cap
+/// entirely — a race that has started must reconnect for as long as it takes — and every successful
+/// connect spends the count back to zero.
+pub const CONNECT_ATTEMPT_CAP: u32 = 3;
+
 /// The file name (under the data dir) the timer registry is persisted to (issue #73).
 pub const TIMERS_FILE: &str = "timers.json";
 
@@ -158,9 +175,10 @@ impl ChannelCapability {
 /// **dynamic** connection states the Director drives on a live (`live`-feature) RotorHazard timer
 /// as its connection comes and goes: [`Connecting`](TimerStatus::Connecting) while the socket is
 /// being established, [`Connected`](TimerStatus::Connected) once it is up,
-/// [`Disconnected`](TimerStatus::Disconnected) when it drops, and [`Error`](TimerStatus::Error)
-/// when the connection attempt fails. They are **additive on the wire** — a console that only knows
-/// `Ready`/`Configured` still parses the type; new variants surface richer status.
+/// [`Disconnected`](TimerStatus::Disconnected) when it drops, [`Error`](TimerStatus::Error) when a
+/// connection attempt fails, and [`Unreachable`](TimerStatus::Unreachable) once the Director has
+/// **stopped** trying on its own (#462). They are **additive on the wire** — a console that only
+/// knows `Ready`/`Configured` still parses the type; new variants surface richer status.
 ///
 /// These dynamic states are **not persisted** (`timers.json` always restores a timer's resting
 /// status from its kind — see [`Timer::status_for`]); they are live, in-memory, and reset to
@@ -180,7 +198,23 @@ pub enum TimerStatus {
     /// A live RotorHazard timer whose connection has dropped (was up, now down).
     Disconnected,
     /// A live RotorHazard timer whose connection attempt failed (could not reach the server).
+    ///
+    /// **Transient**: another attempt is coming. The Director publishes this between tries, and
+    /// [`Unreachable`](TimerStatus::Unreachable) once it has given up on its own.
     Error,
+    /// A live RotorHazard timer the Director tried to reach, could not, and has **stopped trying**
+    /// (#462).
+    ///
+    /// The automatic connect attempts made on add and at startup are capped
+    /// ([`CONNECT_ATTEMPT_CAP`]); once they are spent the timer rests here rather than pulsing
+    /// `Connecting`/`Error` at a dead address forever. It is a **resting** state, not a failing one:
+    /// nothing is in flight, and nothing will be until something asks. The RD's Connect in the
+    /// Timers menu (#383) asks, and so does an event that needs the timer.
+    ///
+    /// It exists so the console can say the true thing. Leaving a timer on `Connecting` would
+    /// promise an attempt that is not happening, and leaving it on `Error` would promise a retry
+    /// that is not coming.
+    Unreachable,
 }
 
 /// Whether a connected RotorHazard timer carries the **GridFPV plugin** (RH plugin design D16,
@@ -768,6 +802,43 @@ impl Timer {
         }
     }
 
+    /// Why an explicit **width override** of `node_count` cannot be accepted on this timer (#463),
+    /// or `None` when it can.
+    ///
+    /// **The rule: never wider than the hardware said it is.** A width above
+    /// [`reported_nodes`](Timer::reported_nodes) manufactures seats that do not exist — a pilot
+    /// seated on one flies a heat that records nothing, which is exactly the bench failure #412 was
+    /// filed for. #412 could only *surface* that as a [`NodeDrift`] after the fact; this refuses to
+    /// create it in the first place.
+    ///
+    /// Two cases are deliberately **allowed**, and both are decisions an RD really makes:
+    ///
+    /// - **Never reported** (`reported_nodes: None`) — a Mock, an adapter that cannot report, or a
+    ///   RotorHazard nobody has dialed yet. Offline configuration at a kitchen table has to work,
+    ///   and there is no observation to contradict. The clamp appears the moment the timer reports.
+    /// - **Fewer than reported** — deliberate node disabling by count ("this 8-node timer is a
+    ///   4-node timer today"). Narrower than the hardware costs a seat, never a lap.
+    ///
+    /// The single source of the rule, shared by both write paths ([`TimerRegistry::update`]'s
+    /// `node_count` and [`TimerRegistry::set_nodes`]), so the two cannot drift on what an
+    /// over-report means. [`TimerRegistry::create`] does not consult it: a timer being created has
+    /// reported nothing yet, by construction.
+    ///
+    /// The message is the refusal the Race Director reads (#433), so it names the timer by its
+    /// **display name** and the width as a count — never an id, never a raw node index.
+    pub fn width_override_refusal(&self, node_count: u32) -> Option<String> {
+        let reported = self.reported_nodes?;
+        if node_count <= reported {
+            return None;
+        }
+        let node_word = if reported == 1 { "node" } else { "nodes" };
+        Some(format!(
+            "{:?} reports {reported} {node_word} — GridFPV cannot be set to {node_count}. \
+             Set {reported} or fewer, or clear the width so GridFPV follows the timer.",
+            self.name
+        ))
+    }
+
     /// Why this timer cannot be **selected by an event** (#405), or `None` when it can.
     ///
     /// The single source of the rule, so the API route, the arm-time backstop and any future
@@ -1103,11 +1174,12 @@ pub struct PendingCalibration {
     pub during_open_practice: bool,
 }
 
-/// Which of a node's two detection thresholds a **capture** is for (#355).
+/// Which of a node's two detection thresholds a captured level belongs to (#355, #465).
 ///
-/// A capture is per threshold because RotorHazard's are: `cap_enter_at_btn` and `cap_exit_at_btn`
-/// are separate handlers arming separate sampling windows, and the enter branch applies a peak
-/// margin the exit branch does not.
+/// RotorHazard's captures are per threshold: `cap_enter_at_btn` and `cap_exit_at_btn` are separate
+/// handlers arming separate sampling windows, and the enter branch applies a peak margin the exit
+/// branch does not. Since #465 this is **not something the RD picks** — one press runs both — so it
+/// names which half of a capture a level, a [`CaptureOutcome`] or a refusal is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "bindings/")]
@@ -1146,21 +1218,67 @@ pub const CAPTURE_WINDOW_MS: u32 = 3_000;
 /// standing at the gate is not left watching a spinner over a capture RotorHazard silently refused.
 pub const CAPTURE_SETTLE_MS: u32 = 4_000;
 
-/// The body of `POST /timers/{timer_id}/capture` (#355) — have the timer **measure** one node's
-/// threshold instead of being told it.
+/// How long after arming a capture GridFPV starts RotorHazard's **exit** sampling window (#465).
+///
+/// One press, one pass, both thresholds — but **sequenced, not simultaneous**, and the reason is in
+/// RotorHazard's own source rather than in taste.
+///
+/// `BaseHardwareInterface.process_lap_stats` runs both capture branches in the **same loop
+/// iteration over the same `node.current_rssi`**, each accumulating into its own total:
+///
+/// ```text
+/// if node.cap_enter_at_flag:   node.cap_enter_at_total += node.current_rssi; …
+/// if node.cap_exit_at_flag:    node.cap_exit_at_total  += node.current_rssi; …
+/// ```
+///
+/// The flags are independent, so RotorHazard happily accepts both `cap_enter_at_btn` and
+/// `cap_exit_at_btn` on one node at once — and then averages *the identical samples* over *the
+/// identical window* and hands back `exit_at == enter_at` (give or take the enter branch's
+/// `node_peak_rssi - ENTER_AT_PEAK_MARGIN` pull, which can only push enter **up**). An exit level at
+/// or above the enter level is not a calibration; it is a gate that never closes.
+///
+/// So the two windows run back to back over the one pass instead. The enter window opens at the
+/// press and covers the pass — the craft at the gate, which is the level a rising signal must clear.
+/// The exit window opens the instant it closes, by which time the craft has flown on — the level a
+/// falling signal drops back past. That is exactly RotorHazard's own two-button workflow ("capture
+/// with the craft at the gate, capture again with it away"), run from one arming, with
+/// RotorHazard's own arithmetic measuring at both ends. **GridFPV invents no coefficient**: it does
+/// not read the signal curve and derive levels from a peak-and-floor formula of its own, because
+/// the fractions such a formula needs would be a guess wearing a calibration's clothes.
+///
+/// Equal to [`CAPTURE_WINDOW_MS`] by construction: the exit window starts the moment the enter one
+/// closes. Named separately because the two mean different things — one is RotorHazard's sampling
+/// length, the other is GridFPV's sequencing — and a later RotorHazard that changed one would not
+/// necessarily change the other.
+///
+/// ⚠️ **The known limit.** The exit window samples the three seconds *after* the enter window, so a
+/// craft back at the gate inside that window makes the exit level too high. That is a lap under
+/// about six seconds from the press, which no real course is; and it is visible rather than silent,
+/// because [`CaptureResolution::Measured`] on both halves with `exit >= enter` is exactly what the
+/// RD sees on the page.
+pub const CAPTURE_EXIT_DELAY_MS: u32 = CAPTURE_WINDOW_MS;
+
+/// The body of `POST /timers/{timer_id}/capture` (#355, #465) — have the timer **measure** one
+/// node's thresholds instead of being told them.
 ///
 /// The answer to the gap #411 names: a fresh RD with no saved profile and a badly-tuned timer has
 /// no starting point, and GridFPV deliberately ships no fabricated default because the right level
 /// depends on craft, VTX power, antenna and gate geometry — none of which GridFPV knows. A capture
 /// measures the RD's actual craft on their actual gate, which is the only honest way to bootstrap.
+///
+/// **One arm, one pass, both thresholds** (#465). The RD used to press Capture twice per node and
+/// fly two passes; a single press now runs both of RotorHazard's captures over the one pass — see
+/// [`CAPTURE_EXIT_DELAY_MS`] for why they are sequenced rather than fired together, and for the
+/// reason GridFPV does not derive the pair from the signal curve itself.
+///
+/// There is deliberately **no threshold field**. It was the RD's choice and is not one any more;
+/// keeping it would let a caller ask for half a capture, which is the thing this issue removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct CaptureRequest {
     /// The node to capture on, `0`-based — RotorHazard's `seat_index`, and the same index
     /// [`NodeSignal::node`] and [`CalibrationRequest::node`] carry.
     pub node: u32,
-    /// Which threshold to capture.
-    pub threshold: CaptureThreshold,
 }
 
 /// The answer to `POST /timers/{timer_id}/capture` (#355): **what was dispatched**, never a
@@ -1181,32 +1299,47 @@ pub struct CaptureDispatch {
     pub timer: TimerId,
     /// The node it addresses, `0`-based.
     pub node: u32,
-    /// Which threshold is being captured.
-    pub threshold: CaptureThreshold,
-    /// How long RotorHazard will sample for, in milliseconds — [`CAPTURE_WINDOW_MS`]. The RD has to
-    /// fly the pass **inside** this window, which starts now.
+    /// How long RotorHazard samples for **each** threshold, in milliseconds —
+    /// [`CAPTURE_WINDOW_MS`]. The RD has to fly the pass inside the *first* one, which starts now.
     pub window_ms: u32,
-    /// How long after the window GridFPV waits for the level before reporting the capture did not
-    /// land — [`CAPTURE_SETTLE_MS`].
+    /// How long after the press the **exit** window opens — [`CAPTURE_EXIT_DELAY_MS`] (#465).
+    ///
+    /// The console needs it to say the true thing while the capture runs: for the first stretch the
+    /// instruction is *fly the pass*, and for the second it is *let it clear the gate*. One
+    /// countdown over the whole thing would send the RD back through the gate during the exit
+    /// window, which is the one way to spoil the measurement.
+    pub exit_delay_ms: u32,
+    /// How long after the **last** window GridFPV waits for the levels before reporting the capture
+    /// did not land — [`CAPTURE_SETTLE_MS`].
     pub settle_ms: u32,
-    /// The level the timer was reporting for this threshold when the capture started, if it was
-    /// reporting one. The console shows it as what the capture is replacing, and GridFPV uses it to
-    /// tell "a new level arrived" from "nothing happened".
+    /// The **enter** level the timer was reporting when the capture started, if it was reporting
+    /// one. Shown as what the capture is replacing, and used to tell "a new level arrived" from
+    /// "nothing happened".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub previous: Option<u32>,
+    pub previous_enter: Option<u32>,
+    /// The **exit** level the timer was reporting when the capture started, if it was reporting one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_exit: Option<u32>,
 }
 
-/// One queued **capture** the connection reconciler drains (#355) — the internal twin of
+/// One queued **capture** the connection reconciler drains (#355, #465) — the internal twin of
 /// [`CaptureDispatch`], and the exact shape [`PendingCalibration`] is for a typed level.
+///
+/// Carries **no threshold**: one arming is both of RotorHazard's captures, and the *sequencing* of
+/// them (`cap_enter_at_btn` now, `cap_exit_at_btn` at [`CAPTURE_EXIT_DELAY_MS`]) belongs to the
+/// driver, which is the only layer holding a clock against the live socket.
+///
+/// Still **never coalesced** — see [`PendingTimerWrite::coalesces_with`]. #465 makes that policy
+/// slightly stronger rather than weaker: one entry is now one *pass the RD flew*, and folding two
+/// of them would drop a whole pass rather than half of one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCapture {
     /// Which timer to capture on.
     pub timer: TimerId,
     /// The node, `0`-based.
     pub node: u32,
-    /// Which threshold.
-    pub threshold: CaptureThreshold,
     /// Whether the route accepted this capture **with an open-practice heat racing on the timer**
     /// (#355, #398) — the same flag [`PendingCalibration::during_open_practice`] carries, and for
     /// the same reason: a capture *ends by setting a threshold*, so the driver's armed-heat backstop
@@ -1233,7 +1366,15 @@ pub struct OutstandingCapture {
     /// The level the timer reported when the capture started, if any — what "changed" is measured
     /// against.
     pub previous: Option<u32>,
-    /// When the capture was accepted. The sampling window runs from here.
+    /// When **this threshold's** sampling window opens. Everything else is measured from here: the
+    /// window, the settle grace, and so expiry.
+    ///
+    /// Not the accept time (#465). One press arms two of these, and the exit one's window does not
+    /// open until [`CAPTURE_EXIT_DELAY_MS`] later — so its `started` is stamped that far ahead.
+    /// Sharing the accept time would settle the exit capture while RotorHazard was still sampling
+    /// for it, and report the level it held *before* the capture as
+    /// [`Measured`](CaptureResolution::Measured) — or, worse, call it
+    /// [`Unchanged`](CaptureResolution::Unchanged) three seconds before the measurement existed.
     started: Instant,
 }
 
@@ -2049,7 +2190,8 @@ impl TimerRegistry {
     /// Edit a timer's name and/or kind (issue #73), returning the updated [`Timer`].
     ///
     /// The built-in Mock may be retuned (e.g. a new `lap_ms`) but not renamed away — any
-    /// timer's name/kind is editable. An unknown id is a [`TimerError`]. The registry is
+    /// timer's name/kind is editable. An unknown id is a [`TimerError`], and so is a `node_count`
+    /// **above what the timer reported** ([`Timer::width_override_refusal`], #463). The registry is
     /// **persisted** on success.
     pub fn update(&self, id: &TimerId, request: &UpdateTimerRequest) -> Result<Timer, TimerError> {
         let mut reg = self.write();
@@ -2057,6 +2199,15 @@ impl TimerRegistry {
             .timers
             .get_mut(id)
             .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+        // Every refusal is decided **before** the first field is written: this edits the live
+        // registry in place, so a check made half-way through would leave a partially-applied timer
+        // behind an error the caller was told nothing landed for.
+        if let Some(node_count) = request.node_count {
+            // #463: a width above what the timer reported is refused, not surfaced as drift.
+            if let Some(refusal) = timer.width_override_refusal(node_count) {
+                return Err(TimerError(refusal));
+            }
+        }
         if let Some(name) = &request.name {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
@@ -2143,9 +2294,10 @@ impl TimerRegistry {
     /// a width change should not lose the edit — and the stored disabled set keeps any index the RD
     /// turned off earlier, so a timer that comes back *wider* does not silently un-disable a node.
     ///
-    /// Refused (a [`TimerError`], reported as a `400`) for an unknown id, and for an edit that would
+    /// Refused (a [`TimerError`], reported as a `400`) for an unknown id, for an edit that would
     /// leave the timer with **no enabled node at all** — that caps every heat to no pilots, which is
-    /// the same refusal [`validate_timer_config`] makes for a zero `node_count`.
+    /// the same refusal [`validate_timer_config`] makes for a zero `node_count` — and for a width
+    /// **above what the timer reported** ([`Timer::width_override_refusal`], #463).
     pub fn set_nodes(
         &self,
         id: &TimerId,
@@ -2162,6 +2314,13 @@ impl TimerRegistry {
                     "node_count must be at least 1 (a 0-node timer caps every heat to no pilots)"
                         .to_string(),
                 ));
+            }
+            // #463: a width above what the timer reported is refused, not surfaced as drift. Both
+            // refusals are decided before anything is written — `enabled` below is applied against
+            // the width, so a half-applied edit here would disable nodes for a width that never
+            // took. Clearing the override (`null`) is always allowed: it goes back to the report.
+            if let Some(refusal) = node_count.and_then(|n| timer.width_override_refusal(n)) {
+                return Err(TimerError(refusal));
             }
             timer.node_count = node_count;
         }
@@ -2224,6 +2383,16 @@ impl TimerRegistry {
             )));
         }
         timer.manual_connect = held;
+        // **Connect is also the "try again" button** (#462). A timer that spent its automatic
+        // connect attempts rests at `Unreachable`, and the reconciler leaves a resting timer alone;
+        // holding it clears that back to the kind's resting status, which is the signal the
+        // reconciler reads to dial once more. Without this a re-press of Connect on an already-held
+        // timer would change nothing at all — the hold is already set, so no key changes and
+        // nothing would re-dial — and the one control the RD has for "try again" would be dead
+        // exactly when they needed it.
+        if held && timer.status == TimerStatus::Unreachable {
+            timer.status = Timer::status_for(&timer.kind);
+        }
         Ok(timer.clone())
     }
 
@@ -2440,12 +2609,27 @@ impl TimerRegistry {
         })
     }
 
-    /// **Start a capture** on one node's threshold (#355), returning what was dispatched.
+    /// **Start a capture** on one node — **both** thresholds, from one pass (#355, #465) —
+    /// returning what was dispatched.
     ///
     /// The Tune page's third write, and the only one that does not carry a number. The RD presses
-    /// Capture, RotorHazard samples this node for [`CAPTURE_WINDOW_MS`] and sets the threshold from
-    /// what it saw — so this is GridFPV asking the timer to *measure* a level rather than telling it
-    /// one.
+    /// Capture once; RotorHazard samples this node for [`CAPTURE_WINDOW_MS`] and sets the *enter*
+    /// threshold from what it saw, and [`CAPTURE_EXIT_DELAY_MS`] later does the same again for the
+    /// *exit* threshold, by which time the craft has flown on. So this is GridFPV asking the timer
+    /// to *measure* its levels rather than telling it any.
+    ///
+    /// # Two captures, one arming, and why they cannot be fired together
+    ///
+    /// See [`CAPTURE_EXIT_DELAY_MS`]: RotorHazard's two capture branches average the *same* samples
+    /// over the *same* window, so firing them at once yields `exit_at == enter_at` — a gate that
+    /// never closes. Sequencing them is RotorHazard's own two-button workflow, done from one press.
+    ///
+    /// Both are claimed here, in one lock, so the pair either starts together or not at all: a
+    /// capture that armed enter and was refused exit would leave the node half-measured with no
+    /// way for the RD to tell. They then settle **independently** through
+    /// [`resolve_captures`](Self::resolve_captures) — each against its own window — so one half can
+    /// come back [`Measured`](CaptureResolution::Measured) while the other is
+    /// [`Unchanged`](CaptureResolution::Unchanged), which is a real outcome and is reported as one.
     ///
     /// # Why this exists at all
     ///
@@ -2470,10 +2654,12 @@ impl TimerRegistry {
     /// non-RotorHazard timer, a timer that is not connected, a `node` beyond the timer's width, and
     /// a node the RD has **disabled** (#412) — plus one more:
     ///
-    /// * **A capture of this threshold is already running on this node.** RotorHazard's
+    /// * **A capture is already running on this node.** RotorHazard's
     ///   `start_capture_enter_at_level` returns `False` in exactly that case and emits nothing at
     ///   all, so a second press would be accepted here, ignored there, and shown as started. That is
-    ///   a fourth silent write (#423), and it is refused instead.
+    ///   a fourth silent write (#423), and it is refused instead. The refusal names whichever
+    ///   threshold is still running, because with a sequenced pair (#465) "wait for that capture to
+    ///   finish" means a different number of seconds depending on which half it is in.
     ///
     /// As with the calibration write, the **race-phase refusal** is not here — it needs the event
     /// log, so it lives in the route — and `during_open_practice` is that route's answer carried
@@ -2521,48 +2707,56 @@ impl TimerRegistry {
             }
         }
 
-        // 2. What the timer is reporting for this threshold right now. Read from the signal feed —
+        // 2. What the timer is reporting for BOTH thresholds right now. Read from the signal feed —
         //    evidence about the timer, used only to tell "a new level arrived" from "nothing
         //    happened", never adopted as GridFPV's value.
-        let previous = self.reported_level(id, request.node, request.threshold);
+        let previous_enter = self.reported_level(id, request.node, CaptureThreshold::Enter);
+        let previous_exit = self.reported_level(id, request.node, CaptureThreshold::Exit);
 
-        // 3. Claim the capture. Check-and-insert under one lock so two presses a millisecond apart
-        //    cannot both start a capture RotorHazard would refuse the second of.
+        // 3. Claim the pair. Check-and-insert under one lock so two presses a millisecond apart
+        //    cannot both start a capture RotorHazard would refuse the second of — and so the two
+        //    halves either both start or neither does.
         let now = Instant::now();
+        let exit_delay = Duration::from_millis(u64::from(CAPTURE_EXIT_DELAY_MS));
         {
             let mut captures = self.capture_store();
             let outstanding = captures.entry(id.clone()).or_default();
             // Drop anything that has already run out of time — the resolver prunes these too, but a
             // press arriving between two resolver passes must not be refused by a ghost.
             outstanding.retain(|c| !c.expired(now));
-            if outstanding
-                .iter()
-                .any(|c| c.node == request.node && c.threshold == request.threshold)
-            {
+            if let Some(running) = outstanding.iter().find(|c| c.node == request.node) {
                 return Err(TimerError(format!(
                     "{} is already capturing its {} level — wait for that capture to finish",
                     Timer::node_label(request.node),
-                    request.threshold.label()
+                    running.threshold.label()
                 )));
             }
             outstanding.push(OutstandingCapture {
                 node: request.node,
-                threshold: request.threshold,
-                previous,
+                threshold: CaptureThreshold::Enter,
+                previous: previous_enter,
                 started: now,
+            });
+            outstanding.push(OutstandingCapture {
+                node: request.node,
+                threshold: CaptureThreshold::Exit,
+                previous: previous_exit,
+                // The exit window has not opened yet — see `OutstandingCapture::started`.
+                started: now + exit_delay,
             });
         }
 
-        // 4. Queue the emit (#457, one queue). **Never coalesced** — see
-        //    `PendingTimerWrite::coalesces_with`, where that is stated as the policy it is: a
-        //    second capture is a second *measurement*, not a restatement of a value, and step 3
-        //    has already refused the one case where two would collide.
+        // 4. Queue **one** emit for the pair (#457's one queue, #465's one press). **Never
+        //    coalesced** — see `PendingTimerWrite::coalesces_with`, where that is stated as the
+        //    policy it is: a second capture is a second *measurement* (now a second whole pass),
+        //    not a restatement of a value, and step 3 has already refused the one case where two
+        //    would collide. The driver owns the enter/exit sequencing, because it is the only layer
+        //    holding a clock against the live socket.
         {
             let mut reg = self.write();
             reg.queue_write(PendingTimerWrite::Capture(PendingCapture {
                 timer: id.clone(),
                 node: request.node,
-                threshold: request.threshold,
                 during_open_practice,
             }));
         }
@@ -2570,10 +2764,11 @@ impl TimerRegistry {
         Ok(CaptureDispatch {
             timer: id.clone(),
             node: request.node,
-            threshold: request.threshold,
             window_ms: CAPTURE_WINDOW_MS,
+            exit_delay_ms: CAPTURE_EXIT_DELAY_MS,
             settle_ms: CAPTURE_SETTLE_MS,
-            previous,
+            previous_enter,
+            previous_exit,
         })
     }
 
@@ -3425,17 +3620,10 @@ mod tests {
         (timers, rh)
     }
 
-    /// Start a capture of node 0's enter threshold.
+    /// Start a capture on node 0 — **both** thresholds, from one pass (#465).
     fn start_capture(timers: &TimerRegistry, rh: &TimerId) {
         timers
-            .request_capture(
-                rh,
-                &CaptureRequest {
-                    node: 0,
-                    threshold: CaptureThreshold::Enter,
-                },
-                false,
-            )
+            .request_capture(rh, &CaptureRequest { node: 0 }, false)
             .expect("a connected RH timer with an enabled node 0");
     }
 
@@ -3579,11 +3767,29 @@ mod tests {
             Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + 1),
         );
         let settled = timers.resolve_captures();
-        assert_eq!(settled.len(), 1);
+        assert_eq!(settled.len(), 1, "the enter half, out of its window first");
+        assert_eq!(settled[0].threshold, CaptureThreshold::Enter);
         assert_eq!(settled[0].resolution, CaptureResolution::Measured);
         assert_eq!(settled[0].level, Some(118));
 
-        // Once it has settled the hold is gone, and the lapsed lease prunes exactly as it did.
+        // The EXIT half of the same press is still outstanding (#465), so the hold has to stand:
+        // its window has not even opened yet, and shutting the tap on the enter half's settlement
+        // would close the gate on the level the exit half exists to see.
+        expire(&timers, &rh);
+        assert!(
+            timers.signal_wanted(&rh),
+            "one press arms two captures; the tap is held until BOTH have settled"
+        );
+
+        // Once the exit half settles too, the hold is gone and the lapsed lease prunes as it did.
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_EXIT_DELAY_MS) + u64::from(CAPTURE_SETTLE_MS)),
+        );
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].threshold, CaptureThreshold::Exit);
         expire(&timers, &rh);
         assert!(
             !timers.signal_wanted(&rh),
@@ -3840,6 +4046,39 @@ mod tests {
     }
 
     #[test]
+    fn connect_is_also_the_try_again_button_for_a_timer_that_gave_up() {
+        // #462. A timer that spent its automatic connect attempts rests at `Unreachable`, and the
+        // reconciler leaves a resting timer alone — so Connect on an ALREADY-held timer has to do
+        // something, or the one control the RD has for "try again" is dead exactly when they need
+        // it. It clears the rest back to the kind's resting status, which is the signal the
+        // reconciler reads.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&rh_req("Field RH", "http://rh.local:5000"))
+            .unwrap();
+        reg.set_manual_connect(&rh.id, true).unwrap();
+        reg.set_status(&rh.id, TimerStatus::Unreachable);
+
+        let held = reg.set_manual_connect(&rh.id, true).unwrap();
+        assert!(held.manual_connect, "the hold is untouched");
+        assert_eq!(
+            held.status,
+            TimerStatus::Configured,
+            "…and the rest is over"
+        );
+
+        // Disconnect never resurrects a status — the rest is ended by asking, not by letting go.
+        reg.set_status(&rh.id, TimerStatus::Unreachable);
+        let released = reg.set_manual_connect(&rh.id, false).unwrap();
+        assert_eq!(released.status, TimerStatus::Unreachable);
+
+        // And a status that is not a rest is left exactly where it is.
+        reg.set_status(&rh.id, TimerStatus::Connected);
+        let held = reg.set_manual_connect(&rh.id, true).unwrap();
+        assert_eq!(held.status, TimerStatus::Connected);
+    }
+
+    #[test]
     fn live_status_is_not_persisted_and_resets_to_configured_on_reopen() {
         // Dynamic connection states are in-memory only: a reopen restores the RH timer at its
         // resting `Configured`, never a stale `Connected`/`Error`.
@@ -4091,6 +4330,182 @@ mod tests {
             vec![4, 5, 6, 7],
             "the four seats that would record nothing are named"
         );
+    }
+
+    // ── #463: a width override may never exceed what the timer reported ───────────
+
+    /// An RH timer that has reported `reported` nodes — the state the clamp exists for.
+    fn reporting_rh(reg: &TimerRegistry, name: &str, reported: u32) -> Timer {
+        let rh = discoverable_rh(reg, name);
+        reg.set_reported_nodes(&rh.id, reported);
+        reg.get(&rh.id).unwrap()
+    }
+
+    #[test]
+    fn an_over_report_width_is_refused_by_both_write_paths_and_the_timer_is_untouched() {
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reporting_rh(&reg, "Field RH", 4);
+
+        for refusal in [
+            reg.set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(Some(8)),
+                    enabled: None,
+                },
+            )
+            .expect_err("PUT /nodes must refuse a width above the report")
+            .0,
+            reg.update(
+                &rh.id,
+                &UpdateTimerRequest {
+                    node_count: Some(8),
+                    ..Default::default()
+                },
+            )
+            .expect_err("PUT /timers/{id} must refuse it too")
+            .0,
+        ] {
+            // #433: this is prose an RD reads. It names the timer and the width in words.
+            assert!(
+                refusal.contains("Field RH"),
+                "the refusal names the timer: {refusal}"
+            );
+            assert!(
+                refusal.contains("reports 4 nodes"),
+                "…and the width the hardware reported: {refusal}"
+            );
+            assert!(
+                refusal.contains('8'),
+                "…and the width that was refused: {refusal}"
+            );
+            // Friendly names only — no id, no route, no raw node index.
+            assert!(
+                !refusal.contains(&rh.id.0),
+                "the raw id must never reach the RD: {refusal}"
+            );
+            assert!(!refusal.contains('/'), "no route line: {refusal}");
+        }
+
+        let after = reg.get(&rh.id).unwrap();
+        assert_eq!(after.node_count, None, "nothing was pinned");
+        assert_eq!(after.node_width(), 4, "the width still follows the report");
+    }
+
+    #[test]
+    fn a_refused_width_does_not_half_apply_the_rest_of_the_edit() {
+        // `update` edits the live registry in place, so the refusal has to be decided BEFORE the
+        // first field is written — otherwise a rejected width leaves a renamed timer behind an
+        // error that said nothing landed.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reporting_rh(&reg, "Field RH", 4);
+
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                name: Some("Renamed RH".into()),
+                channel_capability: Some(ChannelCapability::Fixed {
+                    channels: vec![5800],
+                }),
+                node_count: Some(8),
+                ..Default::default()
+            },
+        )
+        .expect_err("refused");
+
+        let after = reg.get(&rh.id).unwrap();
+        assert_eq!(after.name, "Field RH", "the rename did not land either");
+        assert_eq!(after.channel_capability, ChannelCapability::default());
+    }
+
+    #[test]
+    fn fewer_than_reported_stays_allowed_because_it_is_deliberate_node_disabling() {
+        // "This 8-node timer is a 4-node timer today." Narrower than the hardware costs a seat,
+        // never a lap — the failure the clamp guards against runs the other way.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reporting_rh(&reg, "Field RH", 8);
+
+        let view = reg
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(Some(4)),
+                    enabled: None,
+                },
+            )
+            .expect("fewer than reported is a decision, not an error");
+        assert_eq!(view.width, 4);
+
+        // Exactly the reported width is the boundary, and it is allowed.
+        let updated = reg
+            .update(
+                &rh.id,
+                &UpdateTimerRequest {
+                    node_count: Some(8),
+                    ..Default::default()
+                },
+            )
+            .expect("the reported width itself is not an over-report");
+        assert_eq!(updated.node_count, Some(8));
+    }
+
+    #[test]
+    fn a_never_reported_timer_keeps_a_free_override_so_offline_setup_works() {
+        // A RotorHazard nobody has dialed yet, at a kitchen table the night before. There is no
+        // observation to contradict, so there is nothing to clamp to — the clamp appears the
+        // moment the timer reports.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        assert_eq!(rh.reported_nodes, None);
+
+        let view = reg
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(Some(12)),
+                    enabled: None,
+                },
+            )
+            .expect("no report ⇒ no clamp");
+        assert_eq!(view.width, 12);
+        assert_eq!(rh.width_override_refusal(12), None);
+
+        // The Mock has nothing to ask either, and is configured the same way.
+        let mock = reg.get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
+        assert_eq!(mock.reported_nodes, None);
+        assert_eq!(mock.width_override_refusal(99), None);
+    }
+
+    #[test]
+    fn following_the_timer_is_always_allowed_even_from_a_stale_over_report_width() {
+        // A `timers.json` written before this rule can hold 8 against a timer that reports 4.
+        // Clearing the override is the repair, so `null` must never be refused.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: Some(8),
+                available_channels: None,
+            })
+            .unwrap();
+        reg.set_reported_nodes(&rh.id, 4);
+
+        let view = reg
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(None),
+                    enabled: None,
+                },
+            )
+            .expect("follow-the-timer clears the override rather than raising it");
+        assert_eq!(view.configured, None);
+        assert_eq!(view.width, 4);
+        assert_eq!(view.drift, None, "and the drift is resolved by clearing it");
     }
 
     #[test]
@@ -4384,9 +4799,13 @@ mod tests {
     fn setting_nodes_is_three_valued_on_the_width_override() {
         // "Go back to trusting the hardware" is a real thing an RD does after a drift notice, so
         // `null` must be distinguishable from absent.
+        //
+        // The timer reports **8** and the pin is **6** — a narrowing, which is the only kind of pin
+        // #463 still accepts. This test is about the three-valued field, not the clamp; pinning a
+        // width above the report here would be exercising the refusal by accident.
         let reg = TimerRegistry::new(None, 5, 2500).unwrap();
         let rh = discoverable_rh(&reg, "Field RH");
-        reg.set_reported_nodes(&rh.id, 4);
+        reg.set_reported_nodes(&rh.id, 8);
 
         let pin: SetTimerNodesRequest = serde_json::from_str(r#"{"node_count": 6}"#).unwrap();
         assert_eq!(reg.set_nodes(&rh.id, &pin).unwrap().width, 6);
@@ -4399,7 +4818,7 @@ mod tests {
         assert_eq!(clear.node_count, Some(None), "null is not absent");
         let view = reg.set_nodes(&rh.id, &clear).unwrap();
         assert_eq!(view.configured, None);
-        assert_eq!(view.width, 4, "back to what the timer reports");
+        assert_eq!(view.width, 8, "back to what the timer reports");
     }
 
     #[test]

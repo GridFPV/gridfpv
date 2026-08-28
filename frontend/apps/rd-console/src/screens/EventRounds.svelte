@@ -59,13 +59,17 @@
   import { buildCompetitorNames } from '../lib/competitorName.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import {
+    defaultWinConditionKindFor,
     fieldsForFormat,
     formatLabel,
     isHeadToHeadFormat,
     isQualifyingFormat,
     isRoundTypeFormat,
     OPEN_PRACTICE,
-    ROUND_TYPE_FORMATS
+    ROUND_TYPE_FORMATS,
+    WIN_CONDITION_LABELS,
+    winConditionKindsFor,
+    type WinConditionKind
   } from '../lib/formats.js';
   import {
     heatDisplayName as sharedHeatDisplayName,
@@ -852,11 +856,12 @@
   // seeding are kept as discriminator + a couple of numeric knobs, assembled into the wire shapes on
   // submit; each format's declared params are surfaced inline as proper labeled fields (item 4).
 
-  // Win-condition kinds the form authors. `BestOfN` is the converged time-trial metric — best of N
-  // laps, where N = 1 is just the best single lap (it serialises to BestLap on the wire) and N > 1 is
-  // the best N consecutive laps (BestConsecutive). Head-to-Head offers only Timed / FirstToLaps;
-  // qualifying offers only Timed / BestOfN; everything else offers all three.
-  type WinKind = 'Timed' | 'FirstToLaps' | 'BestOfN';
+  // Win-condition kinds the form authors, and WHICH kinds each format family offers, both live in
+  // the format-taxonomy module (`lib/formats.ts`) — this screen groups the picker by
+  // `winConditionKindsFor`, it does not re-declare the taxonomy. Head-to-Head offers Timed /
+  // FirstToLaps; qualifying offers BestOfN alone (#472 moved Timed — Most Laps out of the
+  // time-trial bucket); everything else offers all three.
+  type WinKind = WinConditionKind;
   type SeedKind = 'FromRoster' | 'FromRanking';
 
   let editing = $state<RoundId | undefined>(undefined);
@@ -982,9 +987,11 @@
   // A **qualifying** format (timed_qual / round_robin): the cross-round ranking metric *is* the win
   // condition (the qualifying metric is derived from the win condition, not a separate field —
   // Rounds form redesign). So the win-condition dropdown offers only the qualifying-applicable
-  // conditions (Best lap, Best N consecutive, Timed — Most Laps); First-to-N-laps is not a
-  // qualifying metric and is hidden for these formats.
+  // condition (Best of N laps); First-to-N-laps is not a qualifying metric, and Timed — Most Laps
+  // is head-to-head racing, not a time trial (#472).
   const isQualifying = $derived(isQualifyingFormat(format));
+  // The win-condition kinds this format offers, from the taxonomy — the picker's option list.
+  const winKinds = $derived(winConditionKindsFor(format));
   // A Head-to-Head round, and whether it ranks by a points table (vs placement) — the latter drives
   // the per-position points editor.
   const isHeadToHead = $derived(isHeadToHeadFormat(format));
@@ -1076,15 +1083,16 @@
     }
   });
 
-  // Keep the win condition valid for the chosen format. A qualifying format offers only Timed /
-  // Best-of-N, so snap off First-to-N to Best-of-N. Head-to-Head offers only Timed / First-to-N
-  // (Best-of-N is a time-trial metric, not how you decide a race), so snap off Best-of-N to
-  // First-to-N. The win condition then drives the round's ranking / advancement.
+  // Keep the win condition valid for the chosen format: a kind the format's family does not offer
+  // snaps to that family's default. One effect over the taxonomy, rather than a per-pair rule that
+  // has to be extended every time the taxonomy moves.
+  //
+  // This also fires when EDITING a round persisted under the old taxonomy — a Time Trial stored
+  // with `Timed` (Most Laps) loads fine and still ranks by most-laps on the server, but opening it
+  // in the form snaps it to Best-of-N, and saving would rewrite it. That is the intended #472
+  // correction, not an accident: such a round is now mis-classified.
   $effect(() => {
-    if (isQualifying && winKind === 'FirstToLaps') winKind = 'BestOfN';
-  });
-  $effect(() => {
-    if (isHeadToHead && winKind === 'BestOfN') winKind = 'FirstToLaps';
+    if (!winKinds.includes(winKind)) winKind = defaultWinConditionKindFor(format);
   });
 
   function setParamValue(key: string, value: string) {
@@ -1102,7 +1110,9 @@
       ROUND_TYPE_FORMATS.find((f) => f !== OPEN_PRACTICE && formats.includes(f)) ??
       formats[0] ??
       '';
-    winKind = 'Timed';
+    // Open on the kind the chosen format's family actually offers — a new Time Trial defaults to
+    // Best-of-N, not to a `Timed` the taxonomy would immediately snap away (#472).
+    winKind = defaultWinConditionKindFor(format);
     winSeconds = 120;
     winLaps = 3;
     seedKind = 'FromRoster';
@@ -1542,7 +1552,7 @@
 <section class="event-rounds" aria-label="Rounds and heats">
   <Card
     title="Rounds"
-    subtitle="Define this event's rounds — eligible classes, format, win condition, and seeding. Rounds are added as you go."
+    help="Define this event's rounds — eligible classes, format, win condition, and seeding. Rounds are added as you go."
   >
     {#snippet actions()}
       <Button
@@ -1644,7 +1654,7 @@
        heat" button any more. One door per room: the RD works down the round they are looking at. -->
   <Card
     title="Heats"
-    subtitle="Fill each round’s heats from its field, or add one by hand. Run them from Race control."
+    help="Fill each round’s heats from its field, or add one by hand. Run them from Race control."
   >
     {#if rounds.length === 0}
       <p class="empty" role="status">
@@ -1934,8 +1944,10 @@
       <!-- Open practice does no scoring (open-practice refinement): hide the win-condition input and
              offer the practice **Time limit** instead. A normal round keeps its win condition.
              For a **qualifying** format the win condition IS the qualifying metric, so only the
-             qualifying-applicable conditions are offered (First-to-N-laps is hidden) and there is no
-             separate "qualifying metric" field — the win condition drives the ranking. -->
+             qualifying-applicable condition is offered (Best of N laps — First-to-N-laps is not a
+             qualifying metric, and Timed — Most Laps is head-to-head racing, #472) and there is no
+             separate "qualifying metric" field — the win condition drives the ranking. The offered
+             set comes from `winConditionKindsFor` in the format-taxonomy module. -->
       {#if fields.winCondition}
         <div class="form-grid">
           <Field
@@ -1945,13 +1957,9 @@
               : undefined}
           >
             <Select bind:value={winKind} aria-label="Win condition">
-              <option value="Timed">Timed — Most Laps</option>
-              {#if !isQualifying}
-                <option value="FirstToLaps">First to N laps</option>
-              {/if}
-              {#if !isHeadToHead}
-                <option value="BestOfN">Best of N laps</option>
-              {/if}
+              {#each winKinds as kind (kind)}
+                <option value={kind}>{WIN_CONDITION_LABELS[kind]}</option>
+              {/each}
             </Select>
           </Field>
 

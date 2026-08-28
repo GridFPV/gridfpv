@@ -217,15 +217,17 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
   await expect(form).toBeVisible();
   await form.getByLabel('Format').selectOption('timed_qual');
 
-  // The win-condition selector shows only the qualifying conditions (no First-to-N), and there is
-  // NO separate "qualifying metric" field — the win condition drives the qualifying ranking. The
-  // old separate "Best lap" / "Best N consecutive" entries converged into one **Best of N laps**
-  // (9705af5): N = 1 IS best-lap (it still serialises to `BestLap` on the wire), N > 1 is best-N-
-  // consecutive — so the hint spells that out instead of the picker carrying two near-identical rows.
+  // The win-condition selector shows only the qualifying condition, and there is NO separate
+  // "qualifying metric" field — the win condition drives the qualifying ranking. The old separate
+  // "Best lap" / "Best N consecutive" entries converged into one **Best of N laps** (9705af5):
+  // N = 1 IS best-lap (it still serialises to `BestLap` on the wire), N > 1 is best-N-consecutive —
+  // so the hint spells that out instead of the picker carrying two near-identical rows. First-to-N
+  // is not a qualifying metric; "Timed — Most Laps" was reclassified head-to-head-only in #472
+  // (this assertion read `toHaveCount(1)` before that decision).
   const win = form.getByLabel('Win condition');
   await expect(win).toBeVisible();
   await expect(win.locator('option', { hasText: 'Best of N laps' })).toHaveCount(1);
-  await expect(win.locator('option', { hasText: 'Timed — Most Laps' })).toHaveCount(1);
+  await expect(win.locator('option', { hasText: 'Timed — Most Laps' })).toHaveCount(0);
   await expect(win.locator('option', { hasText: 'First to N laps' })).toHaveCount(0);
   await win.selectOption('BestOfN');
   await expect(form.getByLabel('Laps', { exact: true })).toBeVisible();

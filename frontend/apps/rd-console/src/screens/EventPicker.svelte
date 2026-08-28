@@ -312,10 +312,6 @@
         autocomplete="off"
       />
     </Field>
-    <p class="new-hint">
-      A persistent event keeps its heats, registration, and results. The id is generated for you.
-    </p>
-
     <!-- Optional details behind a collapsible section — name-only stays one-click (#72 C). -->
     <details class="details" bind:open={detailsOpen}>
       <summary>Add details (optional)</summary>
@@ -701,11 +697,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-3);
-  }
-  .new-hint {
-    margin: 0;
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
   }
   .details {
     border-top: 1px solid var(--gf-border-subtle);

@@ -31,6 +31,11 @@ describe('StatusPill', () => {
     // A dropped/errored timer reads as a problem.
     expect(pill({ status: 'Disconnected' }).tone).toBe('warn');
     expect(pill({ status: 'Error' }).tone).toBe('danger');
+    // #462: tried, could not reach it, stopped trying. `warn` and NOT pulsing — the pulse says
+    // "something is happening", and for a rested timer nothing is.
+    const rested = pill({ status: 'Unreachable' });
+    expect(rested.tone).toBe('warn');
+    expect(rested.pulses).toBe(false);
   });
 
   it('phase still maps to its phase tone (no regression)', () => {

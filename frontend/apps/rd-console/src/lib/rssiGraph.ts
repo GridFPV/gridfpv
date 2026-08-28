@@ -122,10 +122,20 @@ export function timeAt(x: number, span: Span): number {
   return span.from + frac * w;
 }
 
-/** The downsampled sample polyline as an SVG points string. */
-export function polyline(t: CompetitorTrace, span: Span, range: Range): string {
+/** One plotted sample, in user units. */
+export type Point = { x: number; y: number };
+
+/**
+ * The downsampled sample points, in user units — the geometry both the raw polyline
+ * ({@link pointsAttr}) and the smoothed curve ({@link smoothPath}) are built from.
+ *
+ * Split out of {@link polyline} for #473 so the two renderings are guaranteed to be drawn from the
+ * SAME points: a smoothing mode that re-derived its own point list could quietly disagree with the
+ * raw trace about where a sample is, which is exactly the dishonesty the issue rules out.
+ */
+export function samplePoints(t: CompetitorTrace, span: Span, range: Range): Point[] {
   const n = t.samples.length;
-  if (n === 0) return '';
+  if (n === 0) return [];
   // Only the samples inside the (possibly zoomed, or live-windowed) span, plus one neighbor each
   // side so the line enters/exits the frame — this is what makes zooming reveal detail, and what
   // keeps a live window cheap: the downsampling budget is spent on the visible window, not the
@@ -136,13 +146,130 @@ export function polyline(t: CompetitorTrace, span: Span, range: Range): string {
   while (hi > 0 && sampleTimeOf(t, hi - 1) > span.to) hi--;
   const visible = hi - lo + 1;
   const stride = visible > MAX_POINTS ? Math.ceil(visible / MAX_POINTS) : 1;
-  const pts: string[] = [];
+  const pts: Point[] = [];
   for (let i = lo; i <= hi; i += stride) {
-    pts.push(`${xOf(sampleTimeOf(t, i), span).toFixed(1)},${yOf(t.samples[i], range).toFixed(1)}`);
+    pts.push({ x: xOf(sampleTimeOf(t, i), span), y: yOf(t.samples[i], range) });
   }
   // Always include the last visible sample so the line reaches the end of the span.
-  pts.push(`${xOf(sampleTimeOf(t, hi), span).toFixed(1)},${yOf(t.samples[hi], range).toFixed(1)}`);
-  return pts.join(' ');
+  pts.push({ x: xOf(sampleTimeOf(t, hi), span), y: yOf(t.samples[hi], range) });
+  return pts;
+}
+
+/** Points in user units → an SVG `points` attribute (one decimal, the plot's drawing precision). */
+export function pointsAttr(pts: Point[]): string {
+  return pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+}
+
+/** The downsampled sample polyline as an SVG points string. */
+export function polyline(t: CompetitorTrace, span: Span, range: Range): string {
+  return pointsAttr(samplePoints(t, span, range));
+}
+
+/**
+ * Fritsch–Carlson tangents for a **monotone** cubic Hermite interpolant (#473).
+ *
+ * This is the half of the smoothing that has to be right, so it is a pure function of two arrays
+ * and unit-tested on its own. Two properties are load-bearing, and both are why this scheme was
+ * chosen over the alternatives the issue listed (draw-time EMA / leading-edge tweening):
+ *
+ *  1. **It interpolates.** The curve passes exactly through every sample point, so a peak stays at
+ *     the x of the sample that produced it. An EMA or a tween *shifts the signal in time* — the
+ *     peak slides, and with it the apparent instant of a gate pass. On a page whose whole job is
+ *     telling a marshal *when* a crossing happened, that is not a cosmetic difference.
+ *  2. **It never overshoots.** The limiter below (`s > 9 → τ = 3/√s`, and the zero-tangent rule at
+ *     a direction change) is what keeps the curve inside the box of each segment's two endpoints.
+ *     An unconstrained spline rings past a sharp peak, and a curve that bulges above `enter`
+ *     between two samples that never reached it would draw a crossing the detector never saw.
+ *
+ * Together those two are the issue's "a smoothed curve must not visually move where a pass peak
+ * sits": the peak cannot move (1) and no new peak can appear (2).
+ *
+ * `xs` must be non-decreasing. Segments of zero width contribute no slope (their tangents are
+ * pinned to 0), so duplicate sample instants degrade to a flat join rather than dividing by zero.
+ */
+export function monotoneTangents(xs: number[], ys: number[]): number[] {
+  const n = Math.min(xs.length, ys.length);
+  if (n === 0) return [];
+  if (n === 1) return [0];
+
+  // Secant slope of each segment.
+  const delta: number[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const h = xs[i + 1] - xs[i];
+    delta.push(h > 0 ? (ys[i + 1] - ys[i]) / h : 0);
+  }
+
+  // Initial tangents: the average of the two adjacent secants, one-sided at the ends.
+  const m: number[] = new Array(n);
+  m[0] = delta[0];
+  m[n - 1] = delta[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = (delta[i - 1] + delta[i]) / 2;
+
+  // The Fritsch–Carlson limiter — this is what makes it monotone (and so non-overshooting).
+  for (let i = 0; i < n - 1; i++) {
+    if (delta[i] === 0) {
+      // A flat segment. Pinning BOTH ends to zero is what puts a horizontal tangent exactly at a
+      // local extremum — the peak of a pass sits ON its sample, with no ringing either side.
+      m[i] = 0;
+      m[i + 1] = 0;
+      continue;
+    }
+    const a = m[i] / delta[i];
+    const b = m[i + 1] / delta[i];
+    // A tangent pointing against the segment's direction is a local extremum: flatten it, or the
+    // curve leaves the segment's value box on the way in/out.
+    if (a < 0) m[i] = 0;
+    if (b < 0) m[i + 1] = 0;
+    const s = a * a + b * b;
+    if (s > 9) {
+      const tau = 3 / Math.sqrt(s);
+      m[i] = tau * a * delta[i];
+      m[i + 1] = tau * b * delta[i];
+    }
+  }
+  return m;
+}
+
+/**
+ * The smoothed signal as an SVG path `d` — a monotone cubic Hermite spline through the SAME points
+ * the raw polyline draws, emitted as cubic Béziers (#473).
+ *
+ * Hermite → Bézier is exact: for a segment of width `h`, the control points sit a third of the way
+ * in along each endpoint's tangent. So this draws precisely the curve {@link monotoneTangents}
+ * describes, with no re-approximation.
+ *
+ * Degenerate inputs render as themselves rather than as nothing: no points → an empty `d`, one
+ * point → a bare move (an empty stroke, which is what a single sample looks like), two points → the
+ * straight line between them. A zero-width segment (two samples at the same instant) is emitted as
+ * a `L`, because a Bézier across zero width has no shape to describe.
+ */
+export function smoothPath(pts: Point[]): string {
+  const n = pts.length;
+  if (n === 0) return '';
+  const head = `M ${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+  if (n === 1) return head;
+
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  const m = monotoneTangents(xs, ys);
+
+  const out: string[] = [head];
+  for (let i = 0; i < n - 1; i++) {
+    const h = xs[i + 1] - xs[i];
+    if (h <= 0) {
+      out.push(`L ${xs[i + 1].toFixed(1)},${ys[i + 1].toFixed(1)}`);
+      continue;
+    }
+    const c1x = xs[i] + h / 3;
+    const c1y = ys[i] + (m[i] * h) / 3;
+    const c2x = xs[i + 1] - h / 3;
+    const c2y = ys[i + 1] - (m[i + 1] * h) / 3;
+    out.push(
+      `C ${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ` +
+        `${xs[i + 1].toFixed(1)},${ys[i + 1].toFixed(1)}`
+    );
+  }
+  return out.join(' ');
 }
 
 /**

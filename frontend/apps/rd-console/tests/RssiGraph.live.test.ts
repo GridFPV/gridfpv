@@ -96,6 +96,20 @@ function xForTime(time: number, end: number): number {
   return PAD_L + ((time - (end - WINDOW)) / WINDOW) * PLOT_W;
 }
 
+/**
+ * The RAW sample polyline's `points`, whichever way the graph is currently drawn (#473).
+ *
+ * Smoothing is a rendering choice on top of one shared point list, so the raw polyline is always
+ * present: it is `.signal` when smoothing is off and the ghosted `.signal-raw` under the curve when
+ * it is on, with identical `points` either way. These tests are about the AXIS — where a sample
+ * projects — so they read the raw trace and stay true whichever default the component ships.
+ */
+function rawPoints(svg: Element): string {
+  const poly = svg.querySelector('polyline.signal, polyline.signal-raw');
+  if (!poly) throw new Error('no raw sample polyline rendered');
+  return poly.getAttribute('points')!;
+}
+
 /** Pin the SVG's client box so clientX/clientY map 1:1 onto the viewBox. */
 function pinSvgBox(svg: Element): void {
   vi.spyOn(svg as SVGElement, 'getBoundingClientRect').mockReturnValue({
@@ -118,9 +132,7 @@ describe('RssiGraph live mode — the rolling window', () => {
     // is off the left of the plot entirely, and the NEWEST sample is flush to the right edge.
     renderLive(nodeBuffer(floor(100)));
     const svg = plot();
-    const pts = svg
-      .querySelector('polyline.signal')!
-      .getAttribute('points')!
+    const pts = rawPoints(svg)
       .trim()
       .split(' ')
       .map((p) => parseFloat(p.split(',')[0]));
@@ -317,9 +329,9 @@ describe('RssiGraph live mode — none of the review furniture', () => {
     renderLive(nodeBuffer(floor(100)));
     const svg = plot();
     pinSvgBox(svg);
-    const before = svg.querySelector('polyline.signal')!.getAttribute('points');
+    const before = rawPoints(svg);
     await fireEvent.wheel(svg, { deltaY: -120, clientX: 500 });
-    expect(svg.querySelector('polyline.signal')!.getAttribute('points')).toBe(before);
+    expect(rawPoints(svg)).toBe(before);
   });
 
   it('says it is waiting rather than "no samples captured" when a node has sent nothing', () => {

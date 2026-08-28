@@ -534,7 +534,7 @@
         : currentView?.kind === 'heat'
           ? currentView.label
           : 'Standings'}
-      subtitle={currentView?.kind === 'class'
+      help={currentView?.kind === 'class'
         ? "Per-class season standings, aggregated across the class's rounds."
         : currentView?.kind === 'heat'
           ? 'Placements for this heat, as scored.'
@@ -564,7 +564,7 @@
       {/snippet}
 
       {#if viewOptions.length === 0}
-        <p class="empty" role="status">No results yet. They appear here as rounds are scored.</p>
+        <p class="empty" role="status">No results yet.</p>
       {:else if currentView?.kind === 'round'}
         {#if isTimedQualFormat(currentView.round.format)}
           {#if roundStandingsLoading && roundStandingRows.length === 0}
@@ -651,7 +651,7 @@
 
   {#if !session && !hasEventProjection}
     <Card elevation="flat">
-      <p class="empty">No results yet. They appear here as heats are scored.</p>
+      <p class="empty">No results yet.</p>
     </Card>
   {/if}
 </section>

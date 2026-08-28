@@ -342,6 +342,34 @@ pub fn consumes_pass(
     }
 }
 
+/// The grace window that **actually applies** to a heat raced under `condition` — the round's
+/// configured window for every condition that has one, and *no window at all* for
+/// [`WinCondition::FirstToLaps`] (#471).
+///
+/// A grace window buys trailing pilots time to bank a lap after the race-end criterion fires. That
+/// makes sense for [`WinCondition::Timed`], where the criterion is a **buzzer**: the window closes
+/// on everyone at once, mid-lap, and the grace is what lets a pilot two metres from the gate finish
+/// the lap they were already flying. It makes no sense for first-to-N, where the criterion is now
+/// "**every** still-flying pilot has reached `n`"
+/// ([`race_end_reached`](crate::scoring::race_end_reached)): by the time it fires there is nobody
+/// left with a lap to bank, so a grace window can only add dead air to the end of a race the
+/// maintainer asked to end immediately — and any crossing it did admit would be a post-target lap
+/// that [`score_first_to_laps`](crate::scoring) refuses to score anyway.
+///
+/// Returned rather than enforced here so it stays a **pure** rule the runtime clock reads (like
+/// [`consumes_pass`]), testable without a Director. `Duration { micros: 0 }` is the "no window"
+/// spelling — an explicit zero-length window, not [`GraceWindow::UntilScored`], which would mean
+/// the opposite (an *open* window) to every reader of this type.
+pub fn effective_grace_window(
+    condition: crate::scoring::WinCondition,
+    configured: GraceWindow,
+) -> GraceWindow {
+    match condition {
+        crate::scoring::WinCondition::FirstToLaps { .. } => GraceWindow::Duration { micros: 0 },
+        _ => configured,
+    }
+}
+
 /// The **protest window** for the provisional → official lifecycle (marshaling Slice 5,
 /// marshaling.html §3.3): an optional, OFF-by-default **auto-official timer**.
 ///
@@ -826,6 +854,57 @@ mod tests {
             assert!(
                 !consumes_pass(state, GraceWindow::UntilScored, None),
                 "{state:?} must not consume passes",
+            );
+        }
+    }
+
+    // --- the effective grace window (#471) --------------------------------------------
+
+    #[test]
+    fn first_to_laps_has_no_grace_window_whatever_the_round_configured() {
+        use crate::scoring::WinCondition;
+        // #471(c). Every spelling of a configured window collapses to a zero-length one.
+        for configured in [
+            GraceWindow::UntilScored,
+            GraceWindow::Duration { micros: 30_000_000 },
+            GraceWindow::Duration { micros: 0 },
+        ] {
+            assert_eq!(
+                effective_grace_window(WinCondition::FirstToLaps { n: 3 }, configured),
+                GraceWindow::Duration { micros: 0 },
+                "a first-to-N round has no grace window (configured: {configured:?})",
+            );
+        }
+        // And a zero-length window really is closed the instant the heat finishes — the
+        // completion driver's hold is zero, and a late crossing is not consumed.
+        assert!(!consumes_pass(
+            HeatState::Unofficial,
+            effective_grace_window(WinCondition::FirstToLaps { n: 3 }, GraceWindow::UntilScored),
+            Some(1),
+        ));
+    }
+
+    #[test]
+    fn every_other_win_condition_keeps_the_round_configured_grace_window() {
+        use crate::scoring::WinCondition;
+        // The exception is first-to-N and ONLY first-to-N: a Timed round's buzzer still buys
+        // trailing pilots the round's window, and the qualifying pair are untouched.
+        let configured = GraceWindow::Duration { micros: 30_000_000 };
+        for condition in [
+            WinCondition::Timed {
+                window_micros: 120_000_000,
+            },
+            WinCondition::BestLap,
+            WinCondition::BestConsecutive { n: 3 },
+        ] {
+            assert_eq!(
+                effective_grace_window(condition, configured),
+                configured,
+                "{condition:?} must keep the round's window",
+            );
+            assert_eq!(
+                effective_grace_window(condition, GraceWindow::UntilScored),
+                GraceWindow::UntilScored,
             );
         }
     }

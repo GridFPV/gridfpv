@@ -312,6 +312,11 @@ pub fn apply_command_in_event(
         // round mid-fill) and always needs to select the next heat, so it runs through the
         // event-aware path where the registry/meta are in scope — see [`apply_advance`].
         Command::Advance { heat } => apply_advance(registry, event_id, state, heat),
+        // `Stage` is the moment a heat's channel layout stops being a live derivation and becomes
+        // history, so it stamps the resolved layout onto the heat (#478). That needs the event meta
+        // (the layouts, the round that names them), so it runs here rather than in the log-only
+        // `apply_command` — see [`apply_stage_heat`].
+        Command::Stage { heat } => apply_stage_heat(registry, event_id, state, heat),
         // `Start` is the **arm** (it opens the gate to detections). It is the last moment Grid can
         // refuse before RotorHazard is driving a live race, so it carries the GridFPV-plugin
         // backstop (#405) — see [`refuse_arm_without_plugin`].
@@ -1214,6 +1219,109 @@ fn require_retunable(
              channels it raced on. Abort or restart it first to put it back to Scheduled."
         ),
     ))
+}
+
+/// Handle [`Command::Stage`]: the `Scheduled → Staged` transition, plus the **layout stamp** that
+/// turns the heat's channel layout from a live derivation into recorded history (#478).
+///
+/// Two events, in order: the [`Event::HeatLayoutSet`] recording the layout the heat resolved to
+/// *right now*, then the [`Event::HeatStateChanged`] staging it. Stamping first means a reader
+/// folding the log in order never sees a `Staged` heat whose layout is still being re-derived.
+/// A refused transition appends **neither**.
+///
+/// # Why stage, and not finalize
+///
+/// Stage is where the layout stops being changeable, so it is where the record has to be taken:
+///
+/// - [`require_retunable`] already refuses `SetHeatLayout` (and `OverrideHeatSeating`) on anything
+///   past `Scheduled`. Stamping at the `Scheduled → Staged` edge therefore captures the value at
+///   the last instant it could still have been different — the stamp is always exactly what the RD
+///   last chose, and never a value that drifted in between.
+/// - It is the **same boundary the rest of the codebase already calls "raced"**:
+///   `RoundHeatFacts.raced` — which freezes a round's layouts in
+///   [`EventRegistry::update_round`](crate::events::EventRegistry::update_round) — is *"the first
+///   heat of this round that has left `Scheduled`"*. Stamping anywhere else would give the codebase
+///   two different definitions of when a heat's channels became history.
+/// - Finalize is far too late. A `Staged`/`Armed`/`Running`/`Unofficial` heat has its pilots tuned
+///   to those channels — some of it has already been flown — and until the RD signs the result off
+///   its reported layout would still be re-derived from current config. Immutability has to begin
+///   when the channels are handed to pilots, not when the paperwork is done.
+/// - Staging is also when the heat's channels actually go to the timer, so from that moment "which
+///   layout this heat flies" is a fact about a flight rather than a plan.
+///
+/// # What the stamp does and does not freeze
+///
+/// It freezes **which layout**, not **what that layout is called**. A raced heat resolves to the
+/// layout it flew even if its round's list later changes, or the round is re-planned around it.
+/// Renaming the layout itself still renames it everywhere, raced heats included — that is the
+/// display rule working as intended (a friendly name resolves from the entity's own record, the
+/// way renaming a pilot updates their name in a finished result); the bug was re-*pointing* a
+/// finished heat at a different layout, not re-*labelling* the one it flew.
+///
+/// # What is deliberately NOT stamped
+///
+/// - A heat that **already carries an explicit bind** — the RD picked it by hand, so there is
+///   nothing to record that is not already recorded, and re-writing it would only add log noise.
+/// - A heat that resolves to **no layout** (its round names none, or it has no round tag at all —
+///   a sim / free-text heat). There is no layout to make immutable, and writing `Some(None)` would
+///   spell the *cleared* bind (#441), which says something different.
+///
+/// A heat aborted or restarted back to `Scheduled` keeps the stamp from the run it staged for, so
+/// it no longer follows its round's layout edits. That is deliberate and recoverable: it was staged
+/// on that layout, and `SetHeatLayout { layout: None }` is legal again while it is `Scheduled` — the
+/// clear puts it back on the round's default (#441).
+fn apply_stage_heat(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    heat: HeatId,
+) -> CommandAck {
+    let _guard = state.command_guard();
+    // Validate the transition FIRST: an illegal stage must leave the log completely untouched, so
+    // a refusal can never leave a stamp behind on a heat that did not stage.
+    let transition = match heat_transition(state, heat.clone(), HeatCommand::Stage) {
+        Ok(event) => event,
+        Err(err) => return CommandAck::failed(err),
+    };
+    if let Some(stamp) = resolved_layout_stamp(registry, event_id, state, &heat) {
+        if let Err(err) = state.append(
+            Event::HeatLayoutSet {
+                heat: heat.clone(),
+                layout: Some(stamp),
+            },
+            None,
+        ) {
+            return CommandAck::failed(err);
+        }
+    }
+    match state.append(transition, None) {
+        Ok(_offset) => CommandAck::ok(),
+        Err(err) => CommandAck::failed(err),
+    }
+}
+
+/// The layout id [`apply_stage_heat`] should stamp onto `heat`, or `None` when there is nothing to
+/// stamp — see that function's doc for the three cases (already bound, no layout, no round).
+///
+/// Resolves through [`round_engine::layout_for_heat`], the same helper every reader uses, so the
+/// stamped value is by construction the layout the heat was already reported as flying. A missing
+/// event or an unreadable log yields `None`: staging must not fail because the stamp could not be
+/// taken — the heat still races, it just keeps deriving its layout as it did before.
+fn resolved_layout_stamp(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    heat: &HeatId,
+) -> Option<gridfpv_events::LayoutId> {
+    let meta = registry.meta_of(event_id)?;
+    let (events, _cursor) = state.read().ok()?;
+    // An explicit bind is already the record; `Some(None)` (the RD cleared it) is not — a cleared
+    // heat follows its round right up to the moment it stages, and then stamps what it landed on.
+    if let Some(Some(_)) = crate::round_engine::heat_layout_bind(&events, heat) {
+        return None;
+    }
+    let (round, _name) = named_heat(&meta, &events, heat)?;
+    crate::round_engine::layout_for_heat(&meta, Some(round), &events, heat).map(|l| l.id.clone())
 }
 
 /// Handle [`Command::SetHeatLayout`] (#117 S3): bind a `Scheduled` heat to one of the channel
@@ -4492,6 +4600,305 @@ mod tests {
             channels_of(&state, &h1),
             vec![5658, 5695],
             "heat 1 was never touched by any of it"
+        );
+    }
+
+    /// #478: staging a heat **stamps** the layout it resolved to, so a raced heat's reported
+    /// layout is a recorded fact instead of a re-derivation from whatever the round says later.
+    ///
+    /// Since #441 the fill writes no bind — generated heats follow their round, which is right
+    /// while they are `Scheduled` and wrong the instant one races: nothing in the heat's own record
+    /// then says which layout it flew. (The visible symptom is the Rounds screen's *"Flew the X
+    /// channel layout"* line, which reads `HeatSummary.layout` — the raw bind — and so rendered
+    /// nothing at all for every generated heat that had raced.)
+    ///
+    /// The contrast is the whole test: after heat 1 stages, resolving both heats against a round
+    /// whose layout list has since changed must give heat 1 the layout it staged on and heat 2 —
+    /// still `Scheduled`, still unstamped — the round's new answer.
+    #[test]
+    fn staging_stamps_the_layout_a_heat_flies_and_leaves_scheduled_heats_following_their_round() {
+        use crate::events::{
+            ChannelMode, LayoutNode, NewChannelLayoutRequest, NewRoundReq, SeedingRule,
+        };
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let (registry, event, _warmup) =
+            event_with_round("Warmup", "timed_qual", &["a", "b", "c", "d"]);
+        let layout_id = |view: &crate::events::ChannelLayouts, name: &str| {
+            view.layouts
+                .iter()
+                .find(|l| l.name == name)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let a = layout_id(
+            &registry
+                .add_channel_layout(
+                    &event,
+                    NewChannelLayoutRequest {
+                        name: "Bracket A".into(),
+                        nodes: None,
+                    },
+                )
+                .unwrap(),
+            "Bracket A",
+        );
+        let reversed: Vec<LayoutNode> = crate::channels::RACEBAND_MHZ
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(node, channel)| LayoutNode {
+                node: node as u32,
+                channel: *channel,
+            })
+            .collect();
+        let b = layout_id(
+            &registry
+                .add_channel_layout(
+                    &event,
+                    NewChannelLayoutRequest {
+                        name: "Bracket B".into(),
+                        nodes: Some(reversed),
+                    },
+                )
+                .unwrap(),
+            "Bracket B",
+        );
+
+        // A round flying both, 2-up, so four pilots draw two heats that alternate A then B.
+        let classes = registry.meta_of(&event).unwrap().classes;
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    layouts: vec![a.clone(), b.clone()],
+                    label: "Qualifying".into(),
+                    classes,
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([
+                        ("rounds".into(), "1".into()),
+                        ("heat_size".into(), "2".into()),
+                    ]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap()
+            .id;
+        let h1 = fill_next(&registry, &event, &round).scheduled[0]
+            .heat
+            .clone();
+        let h2 = fill_next(&registry, &event, &round).scheduled[0]
+            .heat
+            .clone();
+        let state = registry.resolve(&event).unwrap();
+        let bind_of = |heat: &HeatId| {
+            let (events, _) = state.read().unwrap();
+            crate::round_engine::heat_layout_bind(&events, heat)
+        };
+        // The #441 starting point: neither generated heat carries a bind of its own.
+        assert_eq!(bind_of(&h1), None);
+        assert_eq!(bind_of(&h2), None);
+
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::Stage { heat: h1.clone() },
+        );
+        assert!(ack.ok, "{ack:?}");
+        assert_eq!(
+            bind_of(&h1),
+            Some(Some(a.clone())),
+            "staging records the layout the heat resolved to"
+        );
+        assert_eq!(
+            bind_of(&h2),
+            None,
+            "the heat that did NOT stage is untouched — it still follows its round"
+        );
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&state.read().unwrap().0, &h1),
+            Some(gridfpv_engine::heat::HeatState::Staged),
+            "the stamp rides along with the transition, it does not replace it"
+        );
+
+        // The round's layout list changes afterwards. (`update_round` refuses this outright while
+        // the round has a raced heat, which is a second, coarser guard on the same drift; resolving
+        // against the edited round directly is what pins the heat's OWN record as the thing that
+        // holds — the reason the raced heat is safe must be its stamp, not somebody else's refusal.)
+        let meta = registry.meta_of(&event).unwrap();
+        let mut edited = meta
+            .rounds
+            .iter()
+            .find(|r| r.id == round)
+            .expect("the round is stored")
+            .clone();
+        edited.layouts = vec![b];
+        let flies = |heat: &HeatId| -> Option<String> {
+            let (events, _) = state.read().unwrap();
+            crate::round_engine::layout_for_heat(&meta, Some(&edited), &events, heat)
+                .map(|l| l.name.clone())
+        };
+        assert_eq!(
+            flies(&h1).as_deref(),
+            Some("Bracket A"),
+            "the staged heat reports the layout it staged on, whatever the round says now"
+        );
+        assert_eq!(
+            flies(&h2).as_deref(),
+            Some("Bracket B"),
+            "the Scheduled heat still follows its round (#441)"
+        );
+    }
+
+    /// #478's two exclusions, and the refusal case:
+    ///
+    /// - a heat the RD **already bound** by hand gains no second, redundant bind;
+    /// - a **refused** stage appends nothing at all — no stamp on a heat that did not stage.
+    #[test]
+    fn the_stage_stamp_skips_an_explicit_bind_and_a_refused_stage_records_nothing() {
+        use crate::events::{
+            ChannelMode, LayoutNode, NewChannelLayoutRequest, NewRoundReq, SeedingRule,
+        };
+        use gridfpv_engine::scoring::WinCondition;
+        use std::collections::BTreeMap;
+
+        let (registry, event, _warmup) = event_with_round("Warmup", "timed_qual", &["a", "b"]);
+        let view = registry
+            .add_channel_layout(
+                &event,
+                NewChannelLayoutRequest {
+                    name: "Bracket A".into(),
+                    nodes: None,
+                },
+            )
+            .unwrap();
+        let a = view
+            .layouts
+            .iter()
+            .find(|l| l.name == "Bracket A")
+            .unwrap()
+            .id
+            .clone();
+        let reversed: Vec<LayoutNode> = crate::channels::RACEBAND_MHZ
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(node, channel)| LayoutNode {
+                node: node as u32,
+                channel: *channel,
+            })
+            .collect();
+        let both = registry
+            .add_channel_layout(
+                &event,
+                NewChannelLayoutRequest {
+                    name: "Bracket B".into(),
+                    nodes: Some(reversed),
+                },
+            )
+            .unwrap();
+        let b = both
+            .layouts
+            .iter()
+            .find(|l| l.name == "Bracket B")
+            .unwrap()
+            .id
+            .clone();
+        let classes = registry.meta_of(&event).unwrap().classes;
+        let round = registry
+            .add_round(
+                &event,
+                NewRoundReq {
+                    layouts: vec![a, b.clone()],
+                    label: "Qualifying".into(),
+                    classes,
+                    format: "timed_qual".into(),
+                    params: BTreeMap::from([
+                        ("rounds".into(), "1".into()),
+                        ("heat_size".into(), "2".into()),
+                    ]),
+                    win_condition: Some(WinCondition::BestLap),
+                    seeding: SeedingRule::FromRoster,
+                    time_limit_secs: Some(60),
+                    channel_mode: Some(ChannelMode::PerHeat),
+                    staging_timer_secs: None,
+                    start_procedure: None,
+                    grace_window: None,
+                    protest_window: None,
+                    min_lap_secs: None,
+                },
+            )
+            .unwrap()
+            .id;
+        let heat = fill_next(&registry, &event, &round).scheduled[0]
+            .heat
+            .clone();
+        let state = registry.resolve(&event).unwrap();
+
+        // The RD picks B by hand (heat 1's default would be A), then stages.
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::SetHeatLayout {
+                heat: heat.clone(),
+                layout: Some(b.clone()),
+            },
+        );
+        assert!(ack.ok, "{ack:?}");
+        let binds_before = state
+            .read()
+            .unwrap()
+            .0
+            .iter()
+            .filter(|e| matches!(e, Event::HeatLayoutSet { heat: h, .. } if h == &heat))
+            .count();
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::Stage { heat: heat.clone() },
+        );
+        assert!(ack.ok, "{ack:?}");
+        let (events, _) = state.read().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::HeatLayoutSet { heat: h, .. } if h == &heat))
+                .count(),
+            binds_before,
+            "the RD's own pick is already the record — staging adds no second bind"
+        );
+        assert_eq!(
+            crate::round_engine::heat_layout_bind(&events, &heat),
+            Some(Some(b)),
+            "…and the pick is unchanged"
+        );
+
+        // Staging again is illegal from `Staged`, and must leave the log completely untouched.
+        let before = state.read().unwrap().0.len();
+        let ack = apply_command_in_event(
+            &registry,
+            &event,
+            &state,
+            Command::Stage { heat: heat.clone() },
+        );
+        assert!(!ack.ok, "a second Stage is illegal: {ack:?}");
+        assert_eq!(
+            state.read().unwrap().0.len(),
+            before,
+            "a refused stage appends nothing — least of all a stamp"
         );
     }
 

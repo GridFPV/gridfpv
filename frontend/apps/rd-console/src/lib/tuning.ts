@@ -504,7 +504,7 @@ export function phaseTone(phase: ThresholdPhase): 'success' | 'info' | 'warn' | 
   }
 }
 
-// ── Capture: let the timer MEASURE the level (#355) ─────────────────────────────────────────────
+// ── Capture: let the timer MEASURE the levels (#355, #465) ──────────────────────────────────────
 //
 // The three editors above all require the RD to already know a number. A fresh RD with a
 // badly-tuned timer and no saved profile (#411) does not — and GridFPV deliberately ships no
@@ -512,14 +512,22 @@ export function phaseTone(phase: ThresholdPhase): 'success' | 'info' | 'warn' | 
 // geometry, none of which GridFPV knows, and because a default would change the hardware on first
 // connect (the surprise D27's drift rule exists to prevent). Capture is the only non-guessing
 // bootstrap there is: it measures the RD's actual craft on their actual gate.
+//
+// #465 made it ONE button per node instead of one per threshold. A press now runs both of
+// RotorHazard's captures over a single pass, back to back — enter while the craft is at the gate,
+// exit once it has flown on. The two windows must not overlap: RotorHazard averages both capture
+// branches off the same `node.current_rssi` in the same loop iteration, so a simultaneous pair
+// returns exit == enter, which is a gate that never closes. That is why the run has two stretches
+// and the page says a different thing during each.
 
 /**
  * Start a capture: `POST /timers/{id}/capture`.
  *
  * Resolves with the Director's dispatch when the capture was **started** — which is weaker than
- * {@link ApplyLevels}'s "accepted", because at that moment the level does not exist anywhere yet.
- * The dispatch is read for its `window_ms` (how long the RD has to fly the pass) and its `previous`
- * (what the capture is replacing, and what "a new level arrived" is measured against).
+ * {@link ApplyLevels}'s "accepted", because at that moment neither level exists anywhere yet. The
+ * dispatch is read for its `window_ms` and `exit_delay_ms` (which stretch the RD is in) and its
+ * `previous_enter` / `previous_exit` (what the capture is replacing, and what "a new level arrived"
+ * is measured against).
  */
 export type StartCapture = (
   timer: TimerId,
@@ -539,22 +547,34 @@ export type { CaptureDispatch, CaptureRequest, CaptureThreshold };
 export const CAPTURE_WINDOW_MS = 3_000;
 
 /**
- * How long after the window closes the page waits for the captured level before calling the capture
- * **not landed**. Fallback for {@link CaptureDispatch.settle_ms}, for the same reason.
+ * How long after the press the **exit** window opens. Fallback for
+ * {@link CaptureDispatch.exit_delay_ms}, for the same reason — and equal to the window by
+ * construction, since the exit window starts where the enter one ends.
+ */
+export const CAPTURE_EXIT_DELAY_MS = 3_000;
+
+/**
+ * How long after the last window closes the page waits for the captured levels before calling the
+ * capture **not landed**. Fallback for {@link CaptureDispatch.settle_ms}, for the same reason.
  */
 export const CAPTURE_SETTLE_MS = 4_000;
 
 /**
- * Where one node's capture of one threshold stands.
+ * Where one node's capture stands.
  *
- *  - `idle`      — nothing has been captured on this threshold this session. The resting state.
+ *  - `idle`      — nothing has been captured on this node this session. The resting state.
  *  - `starting`  — the button was pressed; the Director has not answered yet.
- *  - `sampling`  — RotorHazard is watching the gate **right now**. This is the state the RD has to
- *                  see, because it is the only window in which flying the pass does anything.
- *  - `waiting`   — the window has closed and the level has not come back yet.
- *  - `captured`  — a new level arrived. It is now GridFPV's value (D27), recorded by the Director.
- *  - `unchanged` — the window and the grace both elapsed and the timer is still reporting the same
- *                  level. The capture did **not** land, and this says so rather than showing a
+ *  - `pass`      — RotorHazard is watching the gate **right now**, for the enter level. This is the
+ *                  state the RD has to see, because it is the only window in which flying the pass
+ *                  does anything.
+ *  - `clearing`  — the enter window has closed and the exit one is open. The instruction inverts:
+ *                  the craft must now be **away** from the gate, because this stretch is what
+ *                  measures the level a falling signal drops back past.
+ *  - `waiting`   — both windows have closed and the levels have not come back yet.
+ *  - `captured`  — at least one new level arrived. Those are now GridFPV's values (D27), recorded
+ *                  by the Director.
+ *  - `unchanged` — every window and the grace elapsed and the timer is still reporting the same
+ *                  levels. The capture did **not** land, and this says so rather than showing a
  *                  success: RotorHazard refuses a capture (a node not answering, one already
  *                  capturing) in complete silence, so this is the only evidence of that refusal
  *                  there is.
@@ -563,33 +583,77 @@ export const CAPTURE_SETTLE_MS = 4_000;
 export type CapturePhase =
   | 'idle'
   | 'starting'
-  | 'sampling'
+  | 'pass'
+  | 'clearing'
   | 'waiting'
   | 'captured'
   | 'unchanged'
   | 'failed';
 
-/** Everything one (node, threshold) capture tracks. */
+/**
+ * How much the console can honestly say about one settled half of a capture.
+ *
+ * The **same three words the Director uses** (`CaptureResolution` in
+ * `crates/server/src/timers.rs`, #446), deliberately: the two layers are answering the same
+ * question off the same evidence, and letting them use different vocabularies is how one ends up
+ * claiming something the other refused to.
+ *
+ *  - `measured`   — the timer came back reporting a level it was **not** reporting when the capture
+ *                   started. That level is now GridFPV's (D27), recorded by the Director.
+ *  - `unchanged`  — the timer reports the **same** level it did before. Not a failure and not a
+ *                   success: a capture that re-measured the same number and one RotorHazard refused
+ *                   in silence look identical from here, so the console says so rather than
+ *                   picking. Nothing is recorded.
+ *  - `unobserved` — no level could be read at all across the window. A different kind of
+ *                   cannot-say: it is a statement about GridFPV's watching, not about the capture.
+ */
+export type CaptureHalfOutcome = 'measured' | 'unchanged' | 'unobserved';
+
+/** One threshold's half of a capture. */
+export interface CaptureHalf {
+  /** The level the timer was reporting when the capture started — what "changed" is measured against. */
+  previous?: number;
+  /** The level that came back, once one did — only ever set for `measured`. */
+  level?: number;
+  /** Whether this half has settled, and how. `undefined` while it is still outstanding. */
+  outcome?: CaptureHalfOutcome;
+}
+
+/** Everything one node's capture tracks. */
 export interface CaptureState {
   /** Where the capture stands. */
   phase: CapturePhase;
-  /** When the sampling window opened (ms), once the Director has accepted it. */
+  /** When the enter window opened (ms), once the Director has accepted it. */
   startedAt?: number;
-  /** How long RotorHazard is sampling for, from the dispatch. */
+  /** How long RotorHazard samples for, per threshold, from the dispatch. */
   windowMs: number;
-  /** How long to keep waiting past the window before calling it not landed, from the dispatch. */
+  /** How long after the press the exit window opens, from the dispatch. */
+  exitDelayMs: number;
+  /** How long to keep waiting past the last window before calling it not landed, from the dispatch. */
   settleMs: number;
-  /** The level the timer was reporting when the capture started — what "changed" is measured against. */
-  previous?: number;
-  /** The level that came back, once one did. */
-  level?: number;
+  /** The enter threshold's half. */
+  enter: CaptureHalf;
+  /** The exit threshold's half. */
+  exit: CaptureHalf;
   /** Why, when `phase` is `unchanged` / `failed`. Rendered on the node, never swallowed. */
   detail?: string;
 }
 
 /** The resting state — nothing captured, nothing pending. */
 export function idleCapture(): CaptureState {
-  return { phase: 'idle', windowMs: CAPTURE_WINDOW_MS, settleMs: CAPTURE_SETTLE_MS };
+  return {
+    phase: 'idle',
+    windowMs: CAPTURE_WINDOW_MS,
+    exitDelayMs: CAPTURE_EXIT_DELAY_MS,
+    settleMs: CAPTURE_SETTLE_MS,
+    enter: {},
+    exit: {}
+  };
+}
+
+/** When the whole run — both windows — is over, relative to `startedAt`. */
+function captureRunMs(state: CaptureState): number {
+  return state.exitDelayMs + state.windowMs;
 }
 
 /**
@@ -597,13 +661,13 @@ export function idleCapture(): CaptureState {
  * the RD must not be told to fly a pass before RotorHazard has actually been asked to watch.
  */
 export function startingCapture(state: CaptureState): CaptureState {
-  return { ...state, phase: 'starting', level: undefined, detail: undefined };
+  return { ...state, phase: 'starting', enter: {}, exit: {}, detail: undefined };
 }
 
 /**
- * The Director accepted the capture — **the window is open now**. `dispatch` supplies the window and
- * grace the Director read off RotorHazard's own constants, so the countdown the RD watches is the
- * timer's, not a number this file guessed.
+ * The Director accepted the capture — **the enter window is open now**. `dispatch` supplies the
+ * windows and grace the Director read off RotorHazard's own constants, so the countdown the RD
+ * watches is the timer's, not a number this file guessed.
  */
 export function samplingCapture(
   state: CaptureState,
@@ -612,43 +676,33 @@ export function samplingCapture(
 ): CaptureState {
   return {
     ...state,
-    phase: 'sampling',
+    phase: 'pass',
     startedAt: now,
     windowMs: dispatch?.window_ms ?? state.windowMs,
+    exitDelayMs: dispatch?.exit_delay_ms ?? state.exitDelayMs,
     settleMs: dispatch?.settle_ms ?? state.settleMs,
-    previous: dispatch?.previous,
-    level: undefined,
+    enter: { previous: dispatch?.previous_enter },
+    exit: { previous: dispatch?.previous_exit },
     detail: undefined
   };
 }
 
 /**
- * How many whole seconds of the sampling window are left — what the button counts down while the RD
- * is flying. `0` once the window has closed.
+ * How many whole seconds of the **current** stretch are left — what the button counts down while
+ * the RD is flying, and then while they are clearing the gate. `0` once both windows have closed.
  */
 export function captureSecondsLeft(state: CaptureState, now: number): number {
-  if (state.phase !== 'sampling' || state.startedAt === undefined) return 0;
-  return Math.max(0, Math.ceil((state.startedAt + state.windowMs - now) / 1000));
+  if (state.startedAt === undefined) return 0;
+  const elapsed = now - state.startedAt;
+  if (state.phase === 'pass') {
+    return Math.max(0, Math.ceil((state.exitDelayMs - elapsed) / 1000));
+  }
+  if (state.phase === 'clearing') {
+    return Math.max(0, Math.ceil((captureRunMs(state) - elapsed) / 1000));
+  }
+  return 0;
 }
 
-/**
- * Fold what a **poll** reports into a capture's state. This is the whole confirmation mechanism, and
- * it is the same one a typed level uses: the evidence is the level coming back on
- * `GET /timers/{id}/signal`, never the response to the write.
- *
- * Three rules, in order:
- *
- *  1. **Nothing is credited to the capture before its window closes.** A threshold that moved during
- *     those three seconds moved for some other reason — RotorHazard has not computed a level yet —
- *     and crediting it would report a number that was never measured.
- *  2. After the window, a reported level that **differs** from what the timer held when the capture
- *     started is the captured level.
- *  3. Once the grace has also elapsed with no change, the capture did **not** land. Said plainly,
- *     and worded for what is actually known: the level is unchanged. It could be that the pass fell
- *     outside the window, that RotorHazard refused the capture in silence, or — rarely — that the
- *     measurement came out at exactly the old value. All three are "nothing changed", and claiming
- *     more than that would be inventing a diagnosis.
- */
 /**
  * Round a reported threshold to the integer domain a level lives in — **without** clamping.
  *
@@ -664,32 +718,132 @@ function reportedLevel(value: number | undefined): number | undefined {
   return Math.round(value);
 }
 
+/**
+ * Settle one half of a capture against what the timer is reporting, once that half's own window has
+ * closed. `settled` says whether the grace has run out too.
+ */
+function foldHalf(
+  half: CaptureHalf,
+  reported: number | undefined,
+  closed: boolean,
+  expired: boolean
+): CaptureHalf {
+  if (half.outcome !== undefined || !closed) return half;
+  const holding = reportedLevel(reported);
+  if (holding !== undefined && holding !== half.previous) {
+    return { ...half, level: holding, outcome: 'measured' };
+  }
+  if (!expired) return half;
+  // The two ways of not knowing, kept apart exactly as the Director keeps them (#446): a level that
+  // is sitting where it was is `unchanged`, and no readable level at all is `unobserved`. Collapsing
+  // them would make the console claim RotorHazard refused a capture that may have run perfectly.
+  return { ...half, outcome: holding === undefined ? 'unobserved' : 'unchanged' };
+}
+
+/**
+ * The sentence for a capture where **neither** threshold could be attributed.
+ *
+ * Says what is known and stops (#446). The old copy asserted "the timer did not take the capture",
+ * which is a claim about RotorHazard from evidence that cannot support it: a capture that measured
+ * the same number it started from — an ordinary result on a stable gate, and the usual one when the
+ * RD captures twice — looks identical from here. `unobserved` is a different sentence again,
+ * because it is about GridFPV's watching rather than about the capture at all.
+ */
+function unchangedDetail(state: CaptureState): string {
+  const held = [
+    state.enter.outcome === 'unchanged' && state.enter.previous !== undefined
+      ? `Enter at ${state.enter.previous}`
+      : undefined,
+    state.exit.outcome === 'unchanged' && state.exit.previous !== undefined
+      ? `Exit at ${state.exit.previous}`
+      : undefined
+  ].filter((s): s is string => s !== undefined);
+  if (held.length === 0) {
+    return (
+      'GridFPV did not read a level for this node across the capture, so there is nothing to ' +
+      'compare and nothing was recorded. Check the timer is still connected, then capture again.'
+    );
+  }
+  return (
+    `The timer is still reporting ${held.join(' and ')}, which is what it reported before. ` +
+    'GridFPV cannot tell a capture that measured the same level from one the timer never took, ' +
+    'so nothing was recorded. Capture again if the pass fell outside the window.'
+  );
+}
+
+/** The sentence for a capture where one threshold was measured and the other was not. */
+function partialDetail(state: CaptureState): string | undefined {
+  const enterLanded = state.enter.outcome === 'measured';
+  const exitLanded = state.exit.outcome === 'measured';
+  if (enterLanded === exitLanded) return undefined;
+  const missed = enterLanded ? 'Exit at' : 'Enter at';
+  const other = enterLanded ? state.exit : state.enter;
+  const reason =
+    other.outcome === 'unobserved'
+      ? 'GridFPV did not read a level for it across its window'
+      : enterLanded
+        ? 'the craft may not have cleared the gate before the second window opened'
+        : 'the pass may have fallen outside the first window';
+  return `${missed} did not change, so it was not recorded — ${reason}. Capture again to measure it.`;
+}
+
+/**
+ * Fold what a **poll** reports into a capture's state. This is the whole confirmation mechanism, and
+ * it is the same one a typed level uses: the evidence is the levels coming back on
+ * `GET /timers/{id}/signal`, never the response to the write.
+ *
+ * The rules, in order:
+ *
+ *  1. **Nothing is credited to a half before that half's own window closes.** A threshold that moved
+ *     while RotorHazard was still sampling for it moved for some other reason, and crediting it
+ *     would report a number that was never measured. The enter half closes at `exitDelayMs`; the
+ *     exit half only at `exitDelayMs + windowMs`, which is why they are folded separately (#465).
+ *  2. After a half's window, a reported level that **differs** from what the timer held when the
+ *     capture started is that half's captured level.
+ *  3. Once the grace has also elapsed with no change, that half did **not** land. Said plainly, and
+ *     worded for what is actually known: the level is unchanged. It could be that the pass fell
+ *     outside the window, that RotorHazard refused the capture in silence, or — rarely — that the
+ *     measurement came out at exactly the old value. All three are "nothing changed", and claiming
+ *     more than that would be inventing a diagnosis.
+ */
 export function foldCapture(
   state: CaptureState,
-  reported: number | undefined,
+  reportedEnter: number | undefined,
+  reportedExit: number | undefined,
   now: number
 ): CaptureState {
-  if (state.phase !== 'sampling' && state.phase !== 'waiting') return state;
+  if (state.phase !== 'pass' && state.phase !== 'clearing' && state.phase !== 'waiting') {
+    return state;
+  }
   const startedAt = state.startedAt;
   if (startedAt === undefined) return state;
   const elapsed = now - startedAt;
-  if (elapsed < state.windowMs) return state;
-  const holding = reportedLevel(reported);
-  if (holding !== undefined && holding !== state.previous) {
-    return { ...state, phase: 'captured', level: holding, detail: undefined };
+  const runMs = captureRunMs(state);
+  const expired = elapsed >= runMs + state.settleMs;
+
+  const enter = foldHalf(state.enter, reportedEnter, elapsed >= state.exitDelayMs, expired);
+  const exit = foldHalf(state.exit, reportedExit, elapsed >= runMs, expired);
+
+  // Still sampling: report WHICH stretch, because the instruction differs. Flying back through the
+  // gate during the exit window is the one way to spoil the measurement.
+  if (elapsed < state.exitDelayMs) {
+    return state.phase === 'pass' ? state : { ...state, phase: 'pass', enter, exit };
   }
-  if (elapsed < state.windowMs + state.settleMs) {
-    return state.phase === 'waiting' ? state : { ...state, phase: 'waiting' };
+  if (elapsed < runMs) {
+    return { ...state, phase: 'clearing', enter, exit };
   }
-  return {
-    ...state,
-    phase: 'unchanged',
-    level: undefined,
-    detail:
-      holding === undefined
-        ? 'The timer never reported a level for this threshold, so nothing was captured and nothing was recorded.'
-        : `The timer is still reporting ${holding}. Nothing was captured and nothing was recorded — either the pass fell outside the window, or the timer did not take the capture.`
-  };
+  if (enter.outcome === undefined || exit.outcome === undefined) {
+    return { ...state, phase: 'waiting', enter, exit };
+  }
+  // Neither half measured anything. `unchanged` is the phase for both of the cannot-say outcomes —
+  // the copy tells them apart (#446), but the RD's next action is the same either way, so the badge
+  // is not made to carry a distinction that changes nothing they would do.
+  if (enter.outcome !== 'measured' && exit.outcome !== 'measured') {
+    const settled = { ...state, enter, exit };
+    return { ...settled, phase: 'unchanged', detail: unchangedDetail(settled) };
+  }
+  const next = { ...state, phase: 'captured' as const, enter, exit };
+  return { ...next, detail: partialDetail(next) };
 }
 
 /** A short arm's-length label for a capture phase, for the badge beside the button. */
@@ -699,19 +853,34 @@ export function captureLabel(state: CaptureState, now: number): string {
       return '';
     case 'starting':
       return 'Starting…';
-    case 'sampling': {
+    case 'pass': {
       const left = captureSecondsLeft(state, now);
       return left > 0 ? `Fly the pass now — ${left}s` : 'Fly the pass now';
     }
+    case 'clearing': {
+      const left = captureSecondsLeft(state, now);
+      return left > 0 ? `Stay clear of the gate — ${left}s` : 'Stay clear of the gate';
+    }
     case 'waiting':
-      return 'Reading the level…';
+      return 'Reading the levels…';
     case 'captured':
-      return state.level === undefined ? 'Captured' : `Captured ${state.level}`;
+      return captureResultLabel(state);
     case 'unchanged':
       return 'Nothing captured';
     case 'failed':
       return 'Capture failed';
   }
+}
+
+/**
+ * Both results in one line — the point of the feature, so the RD can see the pair they just
+ * measured without hunting for two badges. A half that did not land says so rather than being
+ * quietly omitted.
+ */
+export function captureResultLabel(state: CaptureState): string {
+  const half = (h: CaptureHalf, name: string) =>
+    h.outcome === 'measured' && h.level !== undefined ? `${name} ${h.level}` : `${name} unchanged`;
+  return `Captured ${half(state.enter, 'Enter at')}, ${half(state.exit, 'Exit at')}`;
 }
 
 /** The `Badge` tone a capture phase reads as: in-flight, settled, or wrong. */
@@ -722,7 +891,8 @@ export function captureTone(
     case 'idle':
     case 'starting':
       return 'info';
-    case 'sampling':
+    case 'pass':
+    case 'clearing':
       return 'accent';
     case 'waiting':
       return 'info';
@@ -741,7 +911,7 @@ export function captureTone(
  * > *"Must be clearly labelled: the RD had never seen this in RH and did not know it existed, so it
  * > cannot be a bare icon or an unexplained verb."*
  *
- * So the copy has to carry the mechanism, not the verb. Two things in it are load-bearing and were
+ * So the copy has to carry the mechanism, not the verb. Three things in it are load-bearing and were
  * read off RotorHazard's source rather than assumed:
  *
  *  - **The window starts when you press.** RotorHazard arms a 3-second sampling window at the emit
@@ -751,22 +921,25 @@ export function captureTone(
  *    across the window (the enter threshold is then pulled to `node_peak_rssi - 5` if it came out
  *    within 5 of the node's peak). Saying "captures the peak" would set a wrong expectation about
  *    what number to expect back.
+ *  - **Stay clear for the second three seconds** (#465). One press runs both captures back to back,
+ *    and the second one measures the level with the craft *away* from the gate. Flying back through
+ *    it during that stretch is the one way to spoil the pair — so the copy has to say so, and the
+ *    badge repeats it live while it is happening.
  */
 export const CAPTURE_EXPLAINER =
-  'Capture measures the level instead of you typing one. The timer watches this gate for three seconds starting the moment you press, and sets the threshold from the signal it sees — so press it, then fly the pass. Nothing is recorded unless a new level comes back.';
+  'Capture measures both levels instead of you typing them. Press it, fly one pass through this gate in the first three seconds, then stay clear of the gate for three more — the timer sets Enter at from the pass and Exit at from the signal once you have cleared. Nothing is recorded unless a new level comes back.';
 
-/** The per-threshold button label. Says what it will do, not what it is called. */
-export function captureButtonLabel(threshold: CaptureThreshold): string {
-  return threshold === 'enter' ? 'Capture Enter at from a pass' : 'Capture Exit at from a pass';
+/** The per-node button label. Says what it will do, not what it is called. */
+export function captureButtonLabel(): string {
+  return 'Capture both levels from a pass';
 }
 
 /**
- * The full accessible name for one node's capture button — the friendly node name, the threshold,
- * and the mechanism, so a screen reader hears the same explanation the sighted RD reads.
+ * The full accessible name for one node's capture button — the friendly node name and the
+ * mechanism, so a screen reader hears the same explanation the sighted RD reads.
  */
-export function captureButtonHint(threshold: CaptureThreshold, nodeName: string): string {
-  const label = threshold === 'enter' ? 'Enter at' : 'Exit at';
-  return `Capture ${label} for ${nodeName}: the timer watches this gate for three seconds from the moment you press and sets the level from the pass you fly`;
+export function captureButtonHint(nodeName: string): string {
+  return `Capture Enter at and Exit at for ${nodeName} from one pass: fly through this gate in the three seconds after you press, then stay clear of it for three more`;
 }
 
 // ── The channel a node is listening on (#413) ───────────────────────────────────────────────────

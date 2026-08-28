@@ -67,6 +67,10 @@
   } from '../lib/channels.js';
   import {
     DEFAULT_NODE_COUNT,
+    clampExplanation,
+    clampNodeCount,
+    maxNodeCount,
+    nodeCountHint,
     timerDrifts,
     timerNodeSummary,
     timerWidth
@@ -502,17 +506,29 @@
       formError = built.problem;
       return;
     }
-    const nodeCount = Number(formNodeCount);
-    if (!Number.isFinite(nodeCount) || nodeCount < 1) {
+    const typedNodeCount = Number(formNodeCount);
+    if (!Number.isFinite(typedNodeCount) || typedNodeCount < 1) {
       formError = 'Node count must be at least 1.';
       return;
     }
+    // #463: never wider than the timer said it is. The `max` on the input stops the spinner, but a
+    // typed digit walks straight past it — so the clamp is applied here, and the RD is TOLD what
+    // happened rather than watching their number silently change. A never-reported timer (a Mock, a
+    // RotorHazard nobody has dialed) has no ceiling: offline setup keeps its free override.
+    const clamp = editing
+      ? clampNodeCount(editing, Math.round(typedNodeCount))
+      : { value: Math.round(typedNodeCount), clamped: false };
+    if (clamp.clamped && editing) {
+      formNodeCount = String(clamp.value);
+      formError = clampExplanation(editing, Math.round(typedNodeCount));
+      return;
+    }
+    const nodeCount = clamp.value;
     const channel_capability = buildCapability();
     const available_channels = buildAvailable();
     // Only carried when the RD actually set a width — see `seededNodeCount`. Omitted otherwise, so
     // an unrelated edit never pins an override the RD did not ask for.
-    const node_count =
-      String(formNodeCount) === seededNodeCount ? undefined : Math.round(nodeCount);
+    const node_count = String(formNodeCount) === seededNodeCount ? undefined : nodeCount;
     saving = true;
     formError = undefined;
     try {
@@ -802,11 +818,18 @@
           <option value="Fixed">Fixed (built-in set)</option>
         </Select>
       </Field>
-      <Field
-        label="Node count"
-        hint={'Slots on the timer — caps a heat’s size. Only sent if you change it; use Nodes on the row to disable one node or follow the timer.'}
-      >
-        <Input type="number" min="1" step="1" bind:value={formNodeCount} aria-label="Node count" />
+      <!-- #463: the ceiling is what the timer reported. `max` stops the spinner and the hint says
+           why; a typed digit is caught (and explained) on submit. A never-reported timer gets no
+           ceiling at all, so configuring one offline still works. -->
+      <Field label="Node count" hint={nodeCountHint(editing)}>
+        <Input
+          type="number"
+          min="1"
+          step="1"
+          max={editing ? maxNodeCount(editing) : undefined}
+          bind:value={formNodeCount}
+          aria-label="Node count"
+        />
       </Field>
     </div>
 
@@ -996,7 +1019,10 @@
   /* When the manager is embedded in select mode, the chosen rows read as "on". */
   .timer-row.checked {
     border-color: var(--gf-accent);
-    background: var(--gf-accent-soft);
+    /* Flattened against the row's own surface rather than --gf-accent-soft's translucent wash:
+       the background TRANSITIONS on check, and animating an alpha layer over a large box is the
+       WebKitGTK compositing path #476 implicates. Same idiom as Marshaling's .danger-zone. */
+    background: color-mix(in srgb, var(--gf-accent) 16%, var(--gf-surface));
   }
   .timer-main {
     display: flex;

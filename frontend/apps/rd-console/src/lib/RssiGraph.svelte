@@ -60,6 +60,8 @@
     polyline,
     rollingSpanOf,
     rssiAt,
+    samplePoints,
+    smoothPath,
     spanOf,
     timeAt,
     valueFromPointer,
@@ -288,6 +290,40 @@
     return selected != null && selected.competitor === ref && selected.lap.end_ref === lap.end_ref;
   }
 
+  // ── Visual smoothing (#473) ───────────────────────────────────────────────────────────────────
+  // A RENDER-SIDE curve only: `samplePoints` is the single source of geometry, and the smooth trace
+  // and the raw trace are drawn from the SAME points, so smoothing cannot disagree with the data
+  // about where a sample is. Nothing here touches `trace`, the crossing windows, the thresholds or
+  // the detection — `crossingWindows` still replays the hysteresis over the stored samples, so the
+  // shaded bands and the lap markers are exactly where they were.
+  //
+  // **Monotone cubic, not an EMA or a leading-edge tween.** The two rejected options both smooth by
+  // moving the signal in *time*: the curve lags, and the apparent instant of a pass peak slides with
+  // it. On a graph a marshal reads crossing edges off, that is a lie. A monotone cubic spline
+  // interpolates — it passes through every sample, so a peak stays at its own x — and the
+  // Fritsch–Carlson limiter forbids overshoot, so the curve can never bulge above `enter` between
+  // two samples that never got there and draw a crossing the detector did not see. See
+  // {@link monotoneTangents}.
+  //
+  // The raw trace stays visible underneath as a faint ghost whenever smoothing is on, so the samples
+  // GridFPV actually holds are never hidden behind the interpolation — and the toggle turns the
+  // curve off entirely for anyone who wants only the recorded points.
+  //
+  // **The default is per-mode, and deliberately so.** The issue asks to smooth "the movement of the
+  // RSSI graphs" — that is the LIVE plot, which slides under the operator at the poll cadence and is
+  // where a stair-stepped line actually reads as jitter; live starts smoothed. REVIEW is evidence a
+  // marshal adjudicates from, so it starts on the raw samples and the curve is something they turn
+  // on: the smoothing is honest (it interpolates and cannot overshoot), but "honest" is a weaker
+  // claim than "these are the recorded points", and on the screen where a lap is voided the
+  // stronger one should be what loads. Either mode can be toggled either way.
+  //
+  // Held as an OVERRIDE rather than as a copy of the default: the mode picks the default, and the
+  // operator's choice — once they make one — wins over it. (A `$state` seeded from `mode` would
+  // capture only its initial value, which is the thing Svelte warns about and the thing that would
+  // silently ignore a mode the parent supplied a beat later.)
+  let smoothOverride = $state<boolean | undefined>(undefined);
+  const smooth = $derived(smoothOverride ?? mode === 'live');
+
   // ── Hover crosshair + time/RSSI readout ───────────────────────────────────────────────────────
   // As the operator moves over a trace we show a vertical guide at the cursor and read out the exact
   // time + the RSSI sample there — the "where exactly is this?" the lap-add needs, and the "what is
@@ -474,6 +510,18 @@
     {#if preview}
       <span class="swatch preview"></span> Preview pass (uncommitted)
     {/if}
+    <!-- The smoothing toggle (#473). Sits in the legend rather than per-trace because it is a
+         property of the whole picture, and it says which way it is pointing so the reader always
+         knows whether they are looking at the curve or at the samples. -->
+    <button
+      type="button"
+      class="smooth-toggle"
+      aria-pressed={smooth}
+      title={smooth
+        ? 'Smoothing on — a monotone curve through the samples, with the raw trace ghosted underneath. Click to show only the raw samples.'
+        : 'Smoothing off — the raw samples only. Click to draw a smooth curve through them.'}
+      onclick={() => (smoothOverride = !smooth)}>Smoothing: {smooth ? 'on' : 'off'}</button
+    >
     <span class="cadence-note">{chrome.note}</span>
   </div>
 
@@ -576,8 +624,15 @@
               <line class="exit-line" x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} />
             {/if}
 
-            <!-- The sample line -->
-            <polyline class="signal" points={polyline(ct, v.span, v.range)} />
+            <!-- The sample line. Smoothed (#473) it is a monotone cubic curve through exactly these
+                 points, with the raw polyline kept underneath as a ghost so the recorded samples are
+                 never hidden; unsmoothed it is the raw polyline alone, unchanged. -->
+            {#if smooth}
+              <polyline class="signal-raw" points={polyline(ct, v.span, v.range)} />
+              <path class="signal" d={smoothPath(samplePoints(ct, v.span, v.range))} />
+            {:else}
+              <polyline class="signal" points={polyline(ct, v.span, v.range)} />
+            {/if}
 
             <!-- Lap markers (vertical) at each lap's gate-pass time. Review only — `v.laps` is
                empty in live, so the whole block disappears without a mode check. -->
@@ -776,6 +831,28 @@
     font-size: var(--gf-font-size-2xs);
     color: var(--gf-text-muted);
   }
+  /* The smoothing toggle (#473) — legend-sized, so it reads as part of the key rather than as an
+     action on the data (it changes nothing but the drawing). */
+  .smooth-toggle {
+    font-family: inherit;
+    font-size: var(--gf-font-size-2xs);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    padding: 0.1rem var(--gf-space-2);
+    border-radius: var(--gf-radius-sm);
+    border: 1px solid var(--gf-border);
+    background: transparent;
+    color: var(--gf-text-muted);
+    cursor: pointer;
+  }
+  .smooth-toggle[aria-pressed='true'] {
+    border-color: var(--gf-accent);
+    color: var(--gf-text-secondary);
+  }
+  .smooth-toggle:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
+  }
   .plot.panning {
     cursor: grabbing;
   }
@@ -832,6 +909,18 @@
     fill: none;
     stroke: var(--gf-accent);
     stroke-width: 1.5;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+  /* The raw sample polyline, ghosted under the smoothed curve (#473) — thin and dim enough to read
+     as "the underlying samples" rather than as a second signal, but present, so the interpolation
+     never hides what was actually recorded. */
+  .signal-raw {
+    fill: none;
+    stroke: var(--gf-accent);
+    stroke-width: 1;
+    opacity: 0.3;
     stroke-linejoin: round;
     stroke-linecap: round;
     vector-effect: non-scaling-stroke;

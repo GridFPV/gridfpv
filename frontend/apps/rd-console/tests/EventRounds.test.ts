@@ -631,7 +631,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('Static');
   });
 
-  it('for a qualifying format, the win condition IS the metric — no separate metric field, no First-to-N option', async () => {
+  it('for a qualifying format, the win condition IS the metric — Best-of-N only, no separate metric field', async () => {
     // The qualifying metric is derived from the win condition (Rounds form redesign), so a
     // qualifying format (timed_qual / round_robin) shows NO separate "qualifying metric" field and
     // the win-condition dropdown offers only the qualifying-applicable conditions.
@@ -646,16 +646,25 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(screen.queryByLabelText(/qualifying metric/i)).toBeNull();
     expect(screen.queryByLabelText(/ranking metric/i)).toBeNull();
 
-    // The win-condition dropdown offers only the qualifying conditions — Timed and the converged
-    // Best-of-N (best of N laps; N=1 = best lap). First-to-N is hidden.
+    // The win-condition dropdown offers only the converged Best-of-N (best of N laps; N=1 = best
+    // lap). First-to-N is not a qualifying metric; and #472 moved "Timed — Most Laps" out of the
+    // time-trial bucket entirely (pilots racing each other on lap count in one window is
+    // head-to-head), so it is no longer offered here either — the option list used to be
+    // ['Timed', 'BestOfN'].
     const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
     const options = Array.from(win.options).map((o) => o.value);
-    expect(options).toEqual(['Timed', 'BestOfN']);
+    expect(options).toEqual(['BestOfN']);
     expect(options).not.toContain('FirstToLaps');
+    expect(options).not.toContain('Timed');
+    // …and the form opens on it, rather than on a Timed it would have to snap away.
+    expect(win.value).toBe('BestOfN');
+    expect(screen.queryByText('Timed — Most Laps')).toBeNull();
   });
 
-  it('shows the First-to-N win condition for a non-qualifying (head-to-head) format', async () => {
-    // A racing (non-qualifying) format keeps the full win-condition catalogue, including First-to-N.
+  it('head-to-head keeps both racing win conditions — First-to-N and Timed — Most Laps (#472)', async () => {
+    // The head-to-head bucket is where "Timed — Most Laps" belongs: a field flying together,
+    // competing on lap count inside one shared window. Best-of-N (the time-trial metric) is not
+    // how you decide a race, so it stays out.
     const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
     render(EventRounds, { session });
 
@@ -664,7 +673,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
 
     const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
-    expect(Array.from(win.options).map((o) => o.value)).toContain('FirstToLaps');
+    expect(Array.from(win.options).map((o) => o.value)).toEqual(['Timed', 'FirstToLaps']);
   });
 
   it('Add-round offers only the three round types — not tournament structures (D17 taxonomy)', async () => {

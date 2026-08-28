@@ -9,7 +9,7 @@
    * host differs (a routed page here; the in-event {@link EventClassesRoster} embeds the same
    * component with per-event selection layered on). `Breadcrumbs` + the brand root get you home.
    */
-  import { Button, Card } from '@gridfpv/components';
+  import { Button, Card, InfoTip } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
@@ -34,12 +34,15 @@
 
     <header class="page-head">
       <div class="page-titles">
-        <h1 class="page-title">Classes</h1>
-        <p class="lead">
-          The application-level class directory — maintained once here, selected per event. The
-          standard FPV classes are <strong>built in</strong> (locked, identical on every Director);
-          add your own <strong>Custom</strong> classes, which need only a <strong>name</strong>.
-        </p>
+        <div class="page-titleline">
+          <h1 class="page-title">Classes</h1>
+          <!-- #466: the standing explainer moved into a tooltip. The built-in/Custom distinction is
+               already visible on every row (a lock chip + a Badge), so this is reference, not news. -->
+          <InfoTip
+            label="About the class directory"
+            text="The application-level class directory — maintained once here, selected per event. The standard FPV classes are built in (locked, identical on every Director); add your own Custom classes, which need only a name."
+          />
+        </div>
       </div>
       <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add class</Button>
     </header>
@@ -83,20 +86,14 @@
     gap: var(--gf-space-2);
     min-width: 0;
   }
+  .page-titleline {
+    display: flex;
+    align-items: center;
+  }
   .page-title {
     margin: 0;
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
-  }
-  .lead {
-    margin: 0;
-    max-width: 38rem;
-    color: var(--gf-text-muted);
-    font-size: var(--gf-font-size-sm);
-  }
-  .lead strong {
-    color: var(--gf-text-secondary);
-    font-weight: var(--gf-font-weight-semibold);
   }
   .manager-wrap {
     padding: var(--gf-space-2);

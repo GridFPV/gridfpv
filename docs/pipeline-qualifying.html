@@ -84,15 +84,22 @@
     </p>
     <ul>
       <li><strong>Win condition</strong> (the round form's <em>Win condition</em> dropdown) — for a
-        qualifying format the form shows only the qualifying-applicable conditions — as built, two entries: <em>Timed — most laps</em> and <em>Best of N laps</em> (N=1 serialises <code>BestLap</code>, N&gt;1 <code>BestConsecutive</code>). The usual <em>last-lap rule</em> applies to timed
-        windows: a lap whose start/finish crossing came before the limit completes and counts even
-        if it ends after the buzzer.</li>
+        qualifying format the form shows only the qualifying-applicable condition — as built, a
+        single entry: <em>Best of N laps</em> (N=1 serialises <code>BestLap</code>, N&gt;1
+        <code>BestConsecutive</code>). <em>Timed — most laps</em> was <strong>reclassified
+        head-to-head-only</strong> (#472, decided 2026-08-27): a field flying together and competing
+        on lap count in one window is racing each other, not running a time trial. The usual
+        <em>last-lap rule</em> applies to timed windows wherever they are used: a lap whose
+        start/finish crossing came before the limit completes and counts even if it ends after the
+        buzzer.</li>
       <li><strong>Derived ranking metric</strong> — the engine
         (<code>qual_metric_for</code> in <code>round_engine.rs</code>) maps the win condition to the
         ranking metric, so the two can never disagree. For <code>timed_qual</code>:
         <em>Best lap</em>&nbsp;&rarr;&nbsp;<code>best-lap</code>,
         <em>Best N consecutive</em>&nbsp;&rarr;&nbsp;<code>best-consecutive</code>,
-        <em>Timed — Most Laps</em>&nbsp;&rarr;&nbsp;<code>most-laps</code>. For
+        <em>Timed — Most Laps</em>&nbsp;&rarr;&nbsp;<code>most-laps</code> <em>(kept as the
+        round-level seeding mapping, so a round persisted before #472 — or set over the raw API —
+        still ranks by total laps; the picker no longer offers it for a Time Trial)</em>. For
         <code>round_robin</code> <em>(carved to <code>tournaments-snapshot</code>, PR #327)</em>:
         <em>Timed</em>&nbsp;&rarr;&nbsp;<code>total-laps</code>, otherwise
         a <code>points</code> standing. For <code>best-consecutive</code> the span N defaults to 3.</li>

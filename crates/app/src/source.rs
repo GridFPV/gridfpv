@@ -1419,7 +1419,14 @@ fn heat_clock_config(
         Some(r) => HeatClockConfig {
             start_procedure: r.start_procedure,
             win_condition: r.win_condition,
-            grace_window: r.grace_window,
+            // Resolved through the engine rule, not read raw: a first-to-N round has NO grace
+            // window whatever the round stores (#471). Applied once here so both `grace_hold`
+            // call sites below — the criterion hold and the Timed wall-clock fallback — get the
+            // effective window rather than each remembering the exception.
+            grace_window: gridfpv_engine::heat::effective_grace_window(
+                r.win_condition,
+                r.grace_window,
+            ),
             time_limit_secs: r.time_limit_secs,
             protest_window: r.protest_window,
         },
@@ -1430,7 +1437,12 @@ fn heat_clock_config(
         None => HeatClockConfig {
             start_procedure: StartProcedure::default(),
             win_condition: default_sim_win_condition(),
-            grace_window: gridfpv_server::events::default_grace_window(),
+            // Same rule: the sim's condition IS first-to-N, so this resolves to no grace window
+            // and a sim heat closes the moment its last flying pilot banks the target lap.
+            grace_window: gridfpv_engine::heat::effective_grace_window(
+                default_sim_win_condition(),
+                gridfpv_server::events::default_grace_window(),
+            ),
             time_limit_secs: None,
             // A round-less heat (sim/free-text) has no protest window: manual finalize only.
             protest_window: ProtestWindow::Off,

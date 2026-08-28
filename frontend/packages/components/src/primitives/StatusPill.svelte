@@ -52,7 +52,10 @@
     Connecting: 'pending',
     Connected: 'live',
     Disconnected: 'warn',
-    Error: 'danger'
+    Error: 'danger',
+    // Tried, could not reach it, and stopped trying (#462). `warn`, not `danger`: nothing is
+    // failing right now — the Director is resting until the RD connects or an event needs it.
+    Unreachable: 'warn'
   };
 
   const kind = $derived(phase !== undefined ? 'phase' : 'conn');
