@@ -34,6 +34,7 @@ const EVENT: EventMeta = {
 const HEATS: HeatSummary[] = [
   {
     heat: 'heat-1',
+    name: 'heat-1',
     lineup: ['BOB', 'ALICE'],
     round: undefined,
     class: undefined,

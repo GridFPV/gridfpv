@@ -111,6 +111,8 @@ describe('ContextHeader heat name', () => {
   };
   const HEAT: HeatSummary = {
     heat: 'q1-heat',
+    // The server resolves the name onto the summary (#456); the header renders it.
+    name: 'Qualifying R1 Heat 1',
     lineup: [],
     round: 'r1',
     class: 'c1',

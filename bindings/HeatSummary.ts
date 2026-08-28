@@ -17,9 +17,25 @@ import type { RoundId } from "./RoundId";
  */
 export type HeatSummary = { 
 /**
- * The heat's id (its scheduled handle, the same one the live/control path drives).
+ * The heat's id (its scheduled handle, the same one the live/control path drives). A **wire
+ * handle**: [`name`](Self::name) is what a screen shows (repo display rule).
  */
 heat: HeatId, 
+/**
+ * The heat's **friendly display name** — "Qualifying Heat 2", "A-Main", "Practice Heat 2", or
+ * the RD's own typed label.
+ *
+ * Resolved server-side by [`round_engine::heat_name`](crate::round_engine::heat_name), which
+ * is now the ONE place the convention lives (#456): the console consumes this rather than
+ * re-deriving it, because the two derivations had already drifted — the console numbered a
+ * round's extra practice heats and the server did not, so an RD saw "Practice Heat 2" on
+ * screen and a bare "Practice Heat" in every sentence the server wrote.
+ *
+ * Falls back to the raw handle for a heat with **no resolvable round** (a sim / free-text
+ * heat, or one whose round the caller had no meta for) — there is the RD's own typed
+ * identifier, and it is the same last-resort the display rule allows a resolver.
+ */
+name: string, 
 /**
  * The heat's lineup — the competitors from its most recent `HeatScheduled`, in lineup order.
  */

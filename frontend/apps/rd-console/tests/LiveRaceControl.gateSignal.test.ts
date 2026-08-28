@@ -81,6 +81,7 @@ const PILOTS: Pilot[] = [
 /** A roster-seeded competition heat: the competitor ref IS the pilot id, and carries a channel. */
 const HEAT: HeatSummary = {
   heat: 'heat-1',
+  name: 'Qualifying R1 Heat 1',
   lineup: ['alice', 'bob'],
   frequencies: [
     ['alice', 5695],
@@ -416,6 +417,55 @@ describe('Race control gate signal — friendly names only, and nothing that wri
       expect(text).not.toMatch(new RegExp(readout, 'i'));
     }
     h.unmount();
+  });
+});
+
+describe('Race control gate signal — the names follow a RETUNE, not the poll (#460)', () => {
+  it('re-labels a seat when the node reports a new frequency', async () => {
+    // The name resolver is rebuilt only when the signal's TUNING moves (a node's index, seat or
+    // reported frequency) rather than on every poll, which used to invalidate it — and every
+    // derived hanging off it — 4-5 times a second for a snapshot that said the same thing.
+    //
+    // That saving has to be paid for, and this is the payment: a *real* retune must still reach
+    // the screen. Node 2 is the honest subject — it carries no heat assignment, so its label comes
+    // from the live feed alone, and it is deliberately moved to a frequency nobody in the heat is
+    // on so the gate→pilot attribution around it does not move with it.
+    let feed = snapshot();
+    const fetchSignal = vi.fn(async () => structuredClone(feed));
+    const stopSignal = vi.fn(async () => {});
+    const { session } = makeTestSession({
+      live: RUNNING,
+      event: EVENT,
+      listTimersImpl: async () => [TIMER],
+      listChannelsImpl: async () => CATALOG,
+      listPilotsImpl: async () => PILOTS,
+      listHeatsImpl: async () => [HEAT]
+    });
+    const { unmount } = render(LiveRaceControl, {
+      session,
+      fetchSignal,
+      stopSignal,
+      signalPollMs: 15
+    });
+    await waitFor(() => expect(screen.getByTestId('gate-chip-1').textContent).toMatch(/ACRO/));
+    await openStrip(true);
+
+    const heading = () => within(screen.getByTestId('gate-2')).getByRole('heading').textContent;
+    expect(heading()).toBe('Node 3');
+
+    // Several identical polls land first — none of them is what moves the label.
+    await waitFor(() => expect(fetchSignal.mock.calls.length).toBeGreaterThan(3));
+    expect(heading()).toBe('Node 3');
+
+    // Now the node actually reports a channel. Off-catalog on purpose: it proves the seat label is
+    // re-resolved rather than merely re-rendered, and it names no band the heat is flying.
+    feed = snapshot({
+      nodes: snapshot().nodes.map((n) =>
+        n.node === 2 ? { ...n, seen: true, frequency_mhz: 5111 } : n
+      )
+    });
+    await waitFor(() => expect(heading()).toBe('Node 3 · 5111 MHz'));
+    unmount();
   });
 });
 

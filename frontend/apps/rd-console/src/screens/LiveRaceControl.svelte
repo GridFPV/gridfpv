@@ -27,7 +27,8 @@
     LiveRaceState,
     Pilot,
     PilotProgress,
-    RoundDef
+    RoundDef,
+    TimerSignal
   } from '@gridfpv/types';
   import { nodeIndexOf } from '../lib/channels.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
@@ -186,12 +187,49 @@
     pollMs: () => signalPollMs
   });
 
+  // ── The signal, held still for the name resolver (#460) ────────────────────────────────────
+  //
+  // `gateFeed.snapshot` is replaced wholesale ~4-5 times a second, and it is one of the resolver's
+  // inputs — so `seatNames` below was rebuilt at poll cadence: every map in `buildCompetitorNames`
+  // re-assembled, and four fresh closures handed to the deriveds downstream, which then all
+  // invalidated too. Nothing had changed. A poll is not news.
+  //
+  // The fix is to separate the two halves the snapshot serves. The **lookup** half is genuinely
+  // live — `gates` below reads RSSI and crossing state off every snapshot, and must. The half the
+  // resolver wants is only each node's **seat and reported frequency**, which changes when the RD
+  // retunes a node, not when a poll lands.
+  //
+  // So this is the snapshot the resolver sees: the real one, re-read only when that tuning moves.
+  // The key covers exactly what `buildCompetitorNames` reads out of a signal (`nodes[].node`,
+  // `nodes[].seat`, `nodes[].frequency_mhz`), which is what makes holding the older object safe —
+  // it is not stale for this purpose, it is identical for this purpose. Everything else on the
+  // snapshot is read from `gateFeed.snapshot` directly, live, by the consumers that want it.
+  //
+  // Deliberately NOT a second resolver, and not a trimmed-down copy of the builder: CLAUDE.md's
+  // rule is that a shared resolver fed two different input sets is two resolvers. This changes
+  // *when* the one builder is called, never what it is called with.
+  let tunedKey: string | undefined = undefined;
+  let tunedSignal: TimerSignal | undefined = undefined;
+  const nameSignal = $derived.by<TimerSignal | undefined>(() => {
+    const snapshot = gateFeed.snapshot;
+    const key = JSON.stringify(
+      (snapshot?.nodes ?? []).map((n) => [n.node, n.seat, n.frequency_mhz ?? null])
+    );
+    if (key !== tunedKey) {
+      tunedKey = key;
+      tunedSignal = snapshot;
+    }
+    return tunedSignal;
+  });
+
   // ONE assembly of the resolver inputs (#416). Every screen hands `buildCompetitorNames` the
   // sources it has and consumes the result — the three independent constructions this screen, the
   // Rounds & Heats stage and Marshaling each used to do are what put `node-6` on one screen and
   // `Node 7` on another for the same seat. This screen now holds a live signal subscription too,
   // so it can hand over `NodeSignal.frequency_mhz` — what each node is ACTUALLY tuned to, and the
-  // only channel source that works on a Flexible RotorHazard timer (whose pool is empty).
+  // only channel source that works on a Flexible RotorHazard timer (whose pool is empty). It hands
+  // over {@link nameSignal} rather than the raw feed, which is the same signal on a rebuild cadence
+  // that matches the tuning rather than the poll — see above.
   //
   // `progress` carries an **explicit** `pilot` only when a `Register` command bound it (the
   // open-practice / manual-registration path); it is empty for the common roster-seeded heat, where
@@ -202,7 +240,7 @@
       progress: live?.progress,
       heat: heats.find((h) => h.heat === heat),
       catalog,
-      signal: gateFeed.snapshot,
+      signal: nameSignal,
       // The registry's timer, NOT `gateTimer` — the name inputs are needed by every session, and
       // `gateTimer` is deliberately absent for a read-only one (see the subscription above).
       timer: session.primaryTimer,
@@ -239,12 +277,12 @@
   const gateCollapse = $derived(collapse('race-gate-signal', false));
   const gateOthersCollapse = $derived(collapse('race-gate-signal-others', false));
 
-  // `heatName(id)` → the friendly "<Round> Heat N" / "Open Practice Heat" name for a heat id (the
-  // same helper the picker uses), falling back to the bare id for an untagged/free-text heat. Used
-  // for the current-heat title and the on-deck heat.
+  // `heatName(id)` → the friendly "<Round> Heat N" / "Practice Heat" name for a heat id (the same
+  // helper the picker uses). The name is resolved server-side and carried on the summary (#456);
+  // this is the id → summary lookup. Used for the current-heat title and the on-deck heat.
   function heatName(id: HeatId | undefined): string {
     if (!id) return '';
-    return heatNameById(id, heats, session.currentEvent?.rounds ?? []);
+    return heatNameById(id, heats);
   }
 
   // `competitorName(ref)` → the **callsign** (directory pilot), else an open-practice seat's
@@ -277,23 +315,21 @@
   // ── Heat picker (manual current-heat selection) ──────────────────────────────────────────────
   // Filling a new heat no longer steals Live control's focus (the backend's current_heat only moves
   // on a real transition or an explicit selection), so the RD picks which heat to show/control here.
-  // Each option is labelled with the shared "<Round> Heat N" / "Open Practice Heat" name (the same
-  // helper the Rounds & Heats stage uses), derived from the heat's round off `currentEvent.rounds`
-  // and its position within that round's heats. Untagged/free-text heats fall back to the bare id.
+  // Each option is labelled with the shared "<Round> Heat N" / "Practice Heat" name the server
+  // resolved onto the summary (#456) — the same name the Rounds & Heats stage renders, because it
+  // is the same string. Untagged/free-text heats fall back to the bare handle.
   interface HeatOption {
     heat: HeatId;
     label: string;
     isCurrent: boolean;
   }
-  const heatOptions = $derived.by<HeatOption[]>(() => {
-    const rounds = session.currentEvent?.rounds ?? [];
-    return heats.map((h) => {
-      const round = h.round ? rounds.find((r) => r.id === h.round) : undefined;
-      const inRound = round ? heats.filter((x) => x.round === round.id) : [];
-      const label = round ? heatDisplayName(round, h, inRound) : h.heat;
-      return { heat: h.heat, label, isCurrent: h.heat === heat };
-    });
-  });
+  const heatOptions = $derived.by<HeatOption[]>(() =>
+    heats.map((h) => ({
+      heat: h.heat,
+      label: heatDisplayName(h),
+      isCurrent: h.heat === heat
+    }))
+  );
 
   // The picker is **locked** once the current heat is mid-commit — its phase is Staged/Armed/Running.
   // After Stage you're committed to that race; you switch only by aborting it back to Scheduled or

@@ -256,6 +256,7 @@ describe('TimerNodesDialog (#412)', () => {
     const heats: HeatSummary[] = [
       {
         heat: 'h1',
+        name: 'h1',
         lineup: ['p1', 'p2', 'p3', 'p4'],
         phase: 'Scheduled',
         is_current: false

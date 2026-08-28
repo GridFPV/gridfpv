@@ -71,11 +71,7 @@
     winConditionKindsFor,
     type WinConditionKind
   } from '../lib/formats.js';
-  import {
-    heatDisplayName as sharedHeatDisplayName,
-    isDeterministicRound,
-    isOpenPracticeRound
-  } from '../lib/heats.js';
+  import { heatDisplayName, isDeterministicRound, isOpenPracticeRound } from '../lib/heats.js';
   import { enabledNodes, seatNodes, timerSeats, timerWidth } from '../lib/timerNodes.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -270,11 +266,10 @@
   // auto-created on round creation, so the Heats area drops the manual Fill / Standings / Advance
   // controls for it and shows the practice heat as ready to Start. Shared with the Live-control
   // heat picker via `../lib/heats.js`.
-  // The heat-name rule (round + position → "Qualifying Heat 2" / "Open Practice Heat") is shared
-  // with the Live-control heat picker so both render the same label — see `../lib/heats.js`.
-  function heatDisplayName(round: RoundDef, h: HeatSummary): string {
-    return sharedHeatDisplayName(round, h, heatsByRound(round.id));
-  }
+  // The heat's name ("Qualifying Heat 2" / "Practice Heat 2" / "A-Main" / the RD's own label) is
+  // resolved server-side and carried on the summary (#456), so this screen and the Live-control
+  // picker render the same label because it is the same string — see `../lib/heats.js`. The local
+  // round+position wrapper this replaced is gone with the derivation it fed.
 
   // ── The stored rounds that cannot record a lap (#416) ────────────────────────────────────────
   // `GET /events/{id}/round-issues`: every stored round seating a `node-{i}` that does not exist on
@@ -369,7 +364,7 @@
       if (h.phase !== 'Scheduled') return false;
       return someHeatHasRun && (h.is_current || (live !== undefined && h.heat === live));
     });
-    return blocking ? heatDisplayName(round, blocking) : undefined;
+    return blocking ? heatDisplayName(blocking) : undefined;
   }
 
   // Fill a round's heats (#216). Deterministic formats (Time Trials, Round Robin, Multi-Main,
@@ -1796,7 +1791,7 @@
                       <li class="heat-row" class:current={h.is_current}>
                         <div class="heat-main">
                           <div class="heat-head">
-                            <span class="heat-id">{heatDisplayName(round, h)}</span>
+                            <span class="heat-id">{heatDisplayName(h)}</span>
                             {#if h.is_current}<span class="current-pill">Current</span>{/if}
                             <span class={`status-pill ${statusKind(h.phase)}`}
                               >{statusLabel(h)}</span
@@ -1817,7 +1812,7 @@
                                   variant="secondary"
                                   size="sm"
                                   onclick={() => openSeating(round, h)}
-                                  aria-label={`Edit seating for ${heatDisplayName(round, h)}`}
+                                  aria-label={`Edit seating for ${heatDisplayName(h)}`}
                                   >Edit seating</Button
                                 >
                               </span>
@@ -1853,7 +1848,7 @@
                                      is already themed globally in tokens.css. -->
                                 <Select
                                   size="sm"
-                                  aria-label={`Channel layout for ${heatDisplayName(round, h)}`}
+                                  aria-label={`Channel layout for ${heatDisplayName(h)}`}
                                   value={h.layout ?? ''}
                                   onchange={(e: Event) =>
                                     pickHeatLayout(
@@ -2376,7 +2371,7 @@
        plan, and the dialog says so. -->
   <Dialog
     bind:open={seatOpen}
-    title={seatHeat && seatRound ? `Seating — ${heatDisplayName(seatRound, seatHeat)}` : 'Seating'}
+    title={seatHeat ? `Seating — ${heatDisplayName(seatHeat)}` : 'Seating'}
     onclose={cancelSeating}
   >
     <form

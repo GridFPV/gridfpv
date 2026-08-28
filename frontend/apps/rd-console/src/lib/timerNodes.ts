@@ -46,13 +46,22 @@ export function followTimerRequest(): SetTimerNodesRequest {
   return { node_count: null };
 }
 
-/** The **display** name of a node index — always the Director's 1-based label, never the index. */
-export function nodeLabel(view: TimerNodes, node: number): string {
-  return view.nodes.find((n) => n.node === node)?.label ?? `Node ${node + 1}`;
+/**
+ * The **display** name of a node index — always the Director's 1-based label, never the index.
+ *
+ * The view is **optional** because a screen routinely has to name a node before the node read has
+ * landed (the layout editor draws its rows off the timer's allowed set, the Tune page flags a
+ * channel clash on the first poll). The 1-based fallback is what those screens each used to spell
+ * inline; it lives here so the Director's own label wins the moment it arrives, everywhere, and a
+ * timer whose nodes are named `Gate A`…`Gate D` never reads as `Node 1` on one screen and `Gate A`
+ * on the next.
+ */
+export function nodeLabel(view: TimerNodes | undefined, node: number): string {
+  return view?.nodes.find((n) => n.node === node)?.label ?? `Node ${node + 1}`;
 }
 
 /** The display names of a list of node indices, in the order given. */
-export function nodeLabels(view: TimerNodes, nodes: readonly number[]): string[] {
+export function nodeLabels(view: TimerNodes | undefined, nodes: readonly number[]): string[] {
   return nodes.map((node) => nodeLabel(view, node));
 }
 

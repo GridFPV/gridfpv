@@ -185,10 +185,6 @@
     open ? draftBlocker(draft, seeding ? [] : tunableNodes, nodeView, catalog) : undefined
   );
 
-  function label(node: number): string {
-    return nodeView ? nodeLabel(nodeView, node) : `Node ${node + 1}`;
-  }
-
   // ── The live IMD reading (#117 S4) ────────────────────────────────────────
   //
   // The RD asked for this exactly: *"it would be nice to have some live IMD info, support as I am
@@ -427,12 +423,12 @@
             {#each tunableNodes as node (node)}
               {@const chosen = draftChannels.get(node)}
               <Field
-                label={label(node)}
+                label={nodeLabel(nodeView, node)}
                 error={clashing.has(node) ? 'Shared with another node' : undefined}
               >
                 <Select
                   value={chosen === undefined ? '' : String(chosen)}
-                  aria-label={`Channel for ${label(node)}`}
+                  aria-label={`Channel for ${nodeLabel(nodeView, node)}`}
                   onchange={(e: Event) =>
                     setChannel(node, (e.currentTarget as HTMLSelectElement).value)}
                 >

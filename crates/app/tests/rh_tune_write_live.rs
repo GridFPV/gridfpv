@@ -184,7 +184,7 @@ async fn bench(port: u16) -> Bench {
     // the readback has nothing to read, and a passing assertion would only mean "we never looked".
     let streaming = wait_for(READBACK_TIMEOUT, || {
         let signal = bench.registry.timers().signal(&bench.timer);
-        signal.streaming && signal.nodes.iter().any(|n| n.seen)
+        signal.streaming && signal.nodes.iter().any(|n| n.reading.seen)
     })
     .await;
     assert!(
@@ -234,7 +234,7 @@ async fn a_calibration_write_lands_on_rotorhazard_and_reads_back() {
 
     let landed = wait_for(READBACK_TIMEOUT, || {
         bench.signal_node(NODE).is_some_and(|n| {
-            n.enter_at == Some(ENTER_AT as f32) && n.exit_at == Some(EXIT_AT as f32)
+            n.reading.enter_at == Some(ENTER_AT as f32) && n.reading.exit_at == Some(EXIT_AT as f32)
         })
     })
     .await;
@@ -277,7 +277,9 @@ async fn a_channel_write_lands_on_rotorhazard_and_reads_back() {
     // with the write — the exact shape that used to kill RotorHazard's handler.
     const MHZ: u16 = 5880;
 
-    let before = bench.signal_node(NODE).and_then(|n| n.frequency_mhz);
+    let before = bench
+        .signal_node(NODE)
+        .and_then(|n| n.reading.frequency_mhz);
     assert_ne!(
         before,
         Some(MHZ),
@@ -309,7 +311,7 @@ async fn a_channel_write_lands_on_rotorhazard_and_reads_back() {
     let landed = wait_for(READBACK_TIMEOUT, || {
         bench
             .signal_node(NODE)
-            .is_some_and(|n| n.frequency_mhz == Some(MHZ))
+            .is_some_and(|n| n.reading.frequency_mhz == Some(MHZ))
     })
     .await;
     assert!(

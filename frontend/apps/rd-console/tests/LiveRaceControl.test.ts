@@ -45,6 +45,7 @@ const EVENT_WITH_ROUND: EventMeta = {
 };
 const HEAT_IN_ROUND: HeatSummary = {
   heat: 'heat-1',
+  name: 'Qualifying R1 Heat 1',
   lineup: ['ALICE', 'BOB'],
   round: 'r1',
   class: 'c1',
@@ -213,6 +214,7 @@ describe('LiveRaceControl', () => {
     // Two heats in the same round: heat-1 (current) and heat-2 (filled, on deck).
     const HEAT_2: HeatSummary = {
       heat: 'heat-2',
+      name: 'Qualifying R1 Heat 2',
       lineup: ['CARLA', 'DAN'],
       round: 'r1',
       class: 'c1',
@@ -1112,6 +1114,7 @@ const OP_EVENT: EventMeta = {
 // the hardware happens to report to the two screens that hold a signal subscription.
 const OP_HEAT: HeatSummary = {
   heat: 'practice-1',
+  name: 'Practice Heat',
   lineup: ['node-0', 'node-1'],
   round: 'rp',
   class: undefined,
@@ -1365,6 +1368,7 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
   };
   const HEAT_1: HeatSummary = {
     heat: 'p1-939hvr-heat',
+    name: 'Qualifying R1 Heat 1',
     lineup: ['node-0', 'node-1'],
     round: 'r1',
     class: 'c1',
@@ -1374,6 +1378,7 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
   };
   const HEAT_2: HeatSummary = {
     heat: 'p2-deadbeef-heat',
+    name: 'Qualifying R1 Heat 2',
     lineup: ['node-0'],
     round: 'r1',
     class: 'c1',
@@ -1567,6 +1572,7 @@ describe('LiveRaceControl — roster-seeded callsigns (resolve pre-race, no prog
   // assigned, and crucially `progress[].pilot` is ABSENT (no registration event was ever emitted).
   const rsHeat = (phase: HeatSummary['phase']): HeatSummary => ({
     heat: 'qualifying-r1-tj8x88-r1-h1',
+    name: 'Qualifying R1 Heat 1',
     lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
     round: 'r1',
     class: 'c1',
