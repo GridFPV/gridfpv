@@ -5239,7 +5239,8 @@ mod tests {
         );
         let defined: Vec<RoundId> = meta.rounds.iter().map(|r| r.id.clone()).collect();
         assert!(
-            heats_of_defined_rounds(heat_summaries(&events, Some(&defined)), &defined).is_empty(),
+            heats_of_defined_rounds(heat_summaries(&events, Some(&meta.rounds)), &defined)
+                .is_empty(),
             "the removed round's heats are discarded on read"
         );
     }

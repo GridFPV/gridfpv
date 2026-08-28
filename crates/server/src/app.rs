@@ -2070,9 +2070,12 @@ async fn list_heats(
     // it: they have no name, no win condition and no scoring left to resolve through. Only
     // unstarted heats can be in this position — `remove_round` refuses a round with a heat in
     // progress or past `Scheduled` — so nothing with results is ever hidden here.
-    let defined = defined_round_ids(&registry.rounds_of(&event_id).unwrap_or_default());
+    // The rounds also carry each heat's NAME (#456): the server resolves "Qualifying Heat 2" /
+    // "A-Main" / "Practice Heat 2" here, once, and the console renders what it is given.
+    let rounds = registry.rounds_of(&event_id).unwrap_or_default();
+    let defined = defined_round_ids(&rounds);
     Ok(Json(heats_of_defined_rounds(
-        heat_summaries(&events, Some(&defined)),
+        heat_summaries(&events, Some(&rounds)),
         &defined,
     )))
 }

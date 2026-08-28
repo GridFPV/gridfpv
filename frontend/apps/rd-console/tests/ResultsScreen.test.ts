@@ -87,6 +87,7 @@ const BRACKET_FINAL: RoundDef = {
 
 const QUAL_HEAT: HeatSummary = {
   heat: 'r1-h1',
+  name: 'Qualifying Heat 1',
   lineup: ['p1', 'p2'],
   round: 'r1',
   class: 'c1',
@@ -95,6 +96,7 @@ const QUAL_HEAT: HeatSummary = {
 };
 const FINAL_HEAT: HeatSummary = {
   heat: 'b1-h1',
+  name: 'Pro — Final Heat 1',
   lineup: ['p1', 'p2'],
   round: 'b1',
   class: 'c1',
@@ -282,6 +284,7 @@ describe('Results — time-trial round standings (Best lap + win-condition metri
   const TT: RoundDef = { ...QUAL, id: 'tt1', label: 'Time Trials', format: 'timed_qual' };
   const TT_HEAT: HeatSummary = {
     heat: 'tt1-h1',
+    name: 'Time Trials Heat 1',
     lineup: ['p1', 'p2'],
     round: 'tt1',
     class: 'c1',
@@ -388,6 +391,7 @@ describe('Results — durable per-heat name resolution (the raw node-0 fix)', ()
     // fold, which `session.ensureHeatBindings` pulls + caches for the screen's resolver.
     const NODE_HEAT: HeatSummary = {
       heat: 'r1-h1',
+      name: 'Qualifying Heat 1',
       lineup: ['node-0'],
       round: 'r1',
       class: 'c1',

@@ -81,6 +81,7 @@ const PILOTS: Pilot[] = [
 /** A roster-seeded competition heat: the competitor ref IS the pilot id, and carries a channel. */
 const HEAT: HeatSummary = {
   heat: 'heat-1',
+  name: 'Qualifying R1 Heat 1',
   lineup: ['alice', 'bob'],
   frequencies: [
     ['alice', 5695],

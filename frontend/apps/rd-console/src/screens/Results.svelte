@@ -227,7 +227,7 @@
           value: `heat:${heat.heat}`,
           // The FRIENDLY heat name through the shared resolver — "Qualifying Heat 2" / "A-Main" /
           // the RD's custom label, never the raw heat id (CLAUDE.md).
-          label: heatNameById(heat.heat, heats, rounds),
+          label: heatNameById(heat.heat, heats),
           kind: 'heat',
           heatId: heat.heat,
           round

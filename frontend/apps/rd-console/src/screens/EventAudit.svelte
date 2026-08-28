@@ -148,8 +148,7 @@
     })
   );
   const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
-  const heatName = (heat: HeatId): string =>
-    heatNameById(heat, heats, session.currentEvent?.rounds ?? []);
+  const heatName = (heat: HeatId): string => heatNameById(heat, heats);
 
   // The shared #337 line-composition inputs: the by-offset index lets a protest resolution /
   // reversal chase the entry it targeted for its pilot. No lap lists in hand event-wide, so

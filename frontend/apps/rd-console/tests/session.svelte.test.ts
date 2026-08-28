@@ -1084,7 +1084,14 @@ describe('Session', () => {
 
     it('listHeats reads the round-tagged heats open (no token), [] with no event', async () => {
       const heats: HeatSummary[] = [
-        { heat: 'q-1', lineup: ['p1'], round: 'r1', phase: 'Scheduled', is_current: true }
+        {
+          heat: 'q-1',
+          name: 'Qualifying R1 Heat 1',
+          lineup: ['p1'],
+          round: 'r1',
+          phase: 'Scheduled',
+          is_current: true
+        }
       ];
       const listHeatsImpl = vi.fn(async () => heats);
       const { session } = heatSession({ listHeatsImpl });

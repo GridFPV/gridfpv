@@ -1086,8 +1086,22 @@ fn running_order_by_completion(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct HeatSummary {
-    /// The heat's id (its scheduled handle, the same one the live/control path drives).
+    /// The heat's id (its scheduled handle, the same one the live/control path drives). A **wire
+    /// handle**: [`name`](Self::name) is what a screen shows (repo display rule).
     pub heat: HeatId,
+    /// The heat's **friendly display name** — "Qualifying Heat 2", "A-Main", "Practice Heat 2", or
+    /// the RD's own typed label.
+    ///
+    /// Resolved server-side by [`round_engine::heat_name`](crate::round_engine::heat_name), which
+    /// is now the ONE place the convention lives (#456): the console consumes this rather than
+    /// re-deriving it, because the two derivations had already drifted — the console numbered a
+    /// round's extra practice heats and the server did not, so an RD saw "Practice Heat 2" on
+    /// screen and a bare "Practice Heat" in every sentence the server wrote.
+    ///
+    /// Falls back to the raw handle for a heat with **no resolvable round** (a sim / free-text
+    /// heat, or one whose round the caller had no meta for) — there is the RD's own typed
+    /// identifier, and it is the same last-resort the display rule allows a resolver.
+    pub name: String,
     /// The heat's lineup — the competitors from its most recent `HeatScheduled`, in lineup order.
     pub lineup: Vec<CompetitorRef>,
     /// The class this heat was tagged with, when the scheduler assigned one (`None` for the
@@ -1147,10 +1161,18 @@ pub struct HeatSummary {
 /// `phase` is its folded [`HeatState`] and `is_current` marks the one on the timer. The Heats UI
 /// filters this by `round` to render each round's heats.
 ///
-/// `defined` is the event's stored round ids, and it decides only which heat is `is_current` — the
-/// same answer the live fold gives (#439), so the list cannot mark a removed round's heat as the
-/// one on the timer while Live control shows another. Discarding the ghost **rows** is
-/// [`heats_of_defined_rounds`]'s job, applied by the caller over this list.
+/// `rounds` is the event's stored rounds — its registry meta — and it does two jobs. Their ids
+/// decide which heat is `is_current`, the same answer the live fold gives (#439), so the list
+/// cannot mark a removed round's heat as the one on the timer while Live control shows another;
+/// discarding the ghost **rows** is [`heats_of_defined_rounds`]'s job, applied by the caller over
+/// this list. Their labels and formats resolve each heat's
+/// [`name`](HeatSummary::name), through
+/// [`round_engine::heat_name`](crate::round_engine::heat_name) (#456).
+///
+/// `None` means *"the caller has no event meta"* — a pure-log fold (the unit tests) — and is not
+/// the same as an empty list: nothing is discarded, and every heat falls back to its own label or
+/// its raw handle, because with no round list in hand there is no name to derive.
+///
 /// # One pass, not one pass per heat (#460 item 3)
 ///
 /// Each heat's schedule, loop phase and layout bind are last-write-wins folds over the log, and
@@ -1168,14 +1190,24 @@ pub struct HeatSummary {
 /// than incidental: the bind and the schedule change at different moments — a round re-fill
 /// re-emits the schedule, binding a layout re-emits the bind — so folding them into one entry
 /// would make the last write of either silently reset the other.
-pub fn heat_summaries(events: &[Event], defined: Option<&[RoundId]>) -> Vec<HeatSummary> {
-    let current = current_heat(events, defined);
+pub fn heat_summaries(
+    events: &[Event],
+    rounds: Option<&[crate::events::RoundDef]>,
+) -> Vec<HeatSummary> {
+    let all = rounds.unwrap_or(&[]);
+    let defined = rounds.map(defined_round_ids);
+    let current = current_heat(events, defined.as_deref());
 
     // First-scheduled order, deduped, plus every per-heat last-wins fold — in ONE walk of the log.
     let mut order: Vec<HeatId> = Vec::new();
     let mut schedules: BTreeMap<&HeatId, ScheduleFacts> = BTreeMap::new();
     let mut layouts: BTreeMap<&HeatId, Option<LayoutId>> = BTreeMap::new();
     let mut states: BTreeMap<&HeatId, HeatState> = BTreeMap::new();
+    // Each round's heats in first-scheduled order — the same list
+    // [`round_engine::scheduled_round_heats`] builds, for every round at once, so a heat's position
+    // (and so its number) is identical whether it is named from here or from the log-folding
+    // `heat_display_name` (#456).
+    let mut round_heats: BTreeMap<&RoundId, Vec<&HeatId>> = BTreeMap::new();
     for event in events {
         match event {
             Event::HeatScheduled {
@@ -1188,6 +1220,12 @@ pub fn heat_summaries(events: &[Event], defined: Option<&[RoundId]>) -> Vec<Heat
             } => {
                 if !schedules.contains_key(heat) {
                     order.push(heat.clone());
+                }
+                if let Some(round) = round {
+                    let listed = round_heats.entry(round).or_default();
+                    if !listed.contains(&heat) {
+                        listed.push(heat);
+                    }
                 }
                 schedules.insert(
                     heat,
@@ -1230,8 +1268,32 @@ pub fn heat_summaries(events: &[Event], defined: Option<&[RoundId]>) -> Vec<Heat
             // #117 S3: which channel layout this heat flies, folded independently of the schedule
             // so a re-fill that re-emits `HeatScheduled` cannot drop it.
             let layout = layouts.get(heat).cloned().flatten();
+            // The heat's friendly name, resolved HERE rather than by the console (#456), from the
+            // facts this pass already holds — so the wire carries the name and nothing has to
+            // re-derive it. A heat whose round the event does not define (or does not have meta
+            // for) keeps its own label, or falls back to its raw handle.
+            let name = round
+                .as_ref()
+                .and_then(|id| all.iter().find(|def| &def.id == id))
+                .map(|def| {
+                    let listed = round_heats.get(&def.id);
+                    let heats_in_round = listed.map_or(0, |l| l.len());
+                    let position = listed
+                        .and_then(|l| l.iter().position(|h| *h == heat))
+                        .unwrap_or(heats_in_round);
+                    crate::round_engine::heat_name(def, label.as_deref(), position, heats_in_round)
+                })
+                .unwrap_or_else(|| {
+                    let custom = label.as_deref().map(str::trim).unwrap_or_default();
+                    if custom.is_empty() {
+                        heat.0.clone()
+                    } else {
+                        custom.to_string()
+                    }
+                });
             HeatSummary {
                 heat: heat.clone(),
+                name,
                 lineup,
                 class,
                 round,
