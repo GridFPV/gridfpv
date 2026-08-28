@@ -1076,8 +1076,8 @@ async fn calibrate_timer(
         .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
 
-/// `POST /timers/{timer_id}/capture` — have the timer **measure** one node's threshold, RD-gated
-/// (#355).
+/// `POST /timers/{timer_id}/capture` — have the timer **measure** one node's thresholds, RD-gated
+/// (#355, #465).
 ///
 /// The Tune page's third write, and the answer to a gap #411 names in as many words: a fresh RD
 /// with no saved profile and a badly-tuned timer has **no starting point**. GridFPV deliberately
@@ -1094,6 +1094,23 @@ async fn calibrate_timer(
 /// to happen inside the window. That is why [`CaptureDispatch`] carries `window_ms`: the console
 /// counts it down rather than hardcoding a number that could drift from RotorHazard's, and it is
 /// why the control is labelled with what it will do rather than with a bare verb.
+///
+/// # One press, one pass, both thresholds (#465)
+///
+/// The RD used to press Capture twice per node and fly two passes. Now one press runs both of
+/// RotorHazard's captures over the one pass: `cap_enter_at_btn` immediately, covering the pass, and
+/// `cap_exit_at_btn` as that window closes, by which time the craft has flown on.
+///
+/// They are **sequenced, not simultaneous**, and that is forced by RotorHazard rather than chosen:
+/// `BaseHardwareInterface.process_lap_stats` accumulates both capture branches from the same
+/// `node.current_rssi` in the same loop iteration, so a simultaneous pair averages identical
+/// samples over an identical window and returns `exit_at == enter_at` — a gate that never closes.
+/// GridFPV also does **not** derive the pair from its own signal ring: the peak-and-floor fractions
+/// such a derivation needs would be an invented coefficient dressed as a measurement.
+/// [`CAPTURE_EXIT_DELAY_MS`] carries the receipts, including the one real limit (a lap under about
+/// six seconds would put the craft back at the gate inside the exit window).
+///
+/// [`CAPTURE_EXIT_DELAY_MS`]: crate::timers::CAPTURE_EXIT_DELAY_MS
 ///
 /// # This acknowledges a dispatch. It cannot be a readback.
 ///
@@ -1119,8 +1136,9 @@ async fn calibrate_timer(
 ///   pass the capture needs is one a pilot is already flying.
 /// * a timer that is **not connected**, a `node` beyond the timer's width **or one the RD has
 ///   disabled** (#412) → `400` from the registry;
-/// * a capture of that threshold **already running on that node** → `400`. RotorHazard refuses that
-///   one in silence, so accepting it here would show a capture as started that never was.
+/// * a capture **already running on that node** → `400`, naming the half it is in. RotorHazard
+///   refuses that one in silence, so accepting it here would show a capture as started that never
+///   was.
 /// * an unknown id → `404`.
 ///
 /// Every refusal names the timer and the node by their **friendly names** (repo display rule).
@@ -5550,42 +5568,47 @@ mod tests {
     #[tokio::test]
     async fn a_capture_is_queued_with_rotorhazards_own_sampling_window() {
         // #355: the third write. The route parks the capture on the registry — the connection layer
-        // lives above this crate — and the reconciler drains it onto the live socket as
-        // `cap_enter_at_btn`.
+        // lives above this crate — and the reconciler drains it onto the live socket.
         //
         // The dispatch is NOT a readback and could not be: RotorHazard opens a three-second sampling
         // window at the emit and only then has a level. What it carries instead is that window, so
         // the console counts down RotorHazard's own number rather than one the console invented.
+        //
+        // #465: one press, one queue entry, BOTH thresholds. The body carries no threshold at all —
+        // it was the RD's choice and is not one any more.
         let (registry, _state, _) = state_with(vec![]);
         let rh = connected_rh_timer_selected_by_the_event(&registry);
         report_levels(&registry, &rh.id, &[(90.0, 80.0), (95.0, 85.0)]);
 
-        let (status, bytes) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 1, "threshold": "enter" }),
-        )
-        .await;
+        let (status, bytes) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 1 })).await;
         assert_eq!(status, StatusCode::OK);
         let dispatch: crate::timers::CaptureDispatch = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(dispatch.timer, rh.id);
         assert_eq!(dispatch.node, 1);
-        assert_eq!(dispatch.threshold, crate::timers::CaptureThreshold::Enter);
         // `BaseHardwareInterface::CAP_ENTER_EXIT_AT_MILLIS`, verified identical on v4.3.0 and v4.4.0.
         assert_eq!(dispatch.window_ms, crate::timers::CAPTURE_WINDOW_MS);
         assert_eq!(dispatch.settle_ms, crate::timers::CAPTURE_SETTLE_MS);
+        // The exit window opens as the enter one closes. They must not overlap: RotorHazard
+        // averages both branches off the same `current_rssi`, so a simultaneous pair returns
+        // exit == enter, which is a gate that never closes.
+        assert_eq!(dispatch.exit_delay_ms, crate::timers::CAPTURE_EXIT_DELAY_MS);
+        assert_eq!(dispatch.exit_delay_ms, dispatch.window_ms);
         // What the capture is replacing — evidence about the timer, and what "a new level arrived"
-        // will be measured against.
-        assert_eq!(dispatch.previous, Some(95));
+        // will be measured against. Both halves now, because both are being captured.
+        assert_eq!(dispatch.previous_enter, Some(95));
+        assert_eq!(dispatch.previous_exit, Some(85));
 
         // Nothing is recorded as GridFPV's config YET: the level does not exist. Recording one here
         // would be a fabricated success, which is exactly what this control exists to avoid.
         assert!(registry.timers().calibration(&rh.id).is_empty());
 
         let drained = registry.timers().take_capture_requests();
-        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            drained.len(),
+            1,
+            "one entry per PRESS — the driver owns the enter/exit sequencing"
+        );
         assert_eq!(drained[0].node, 1);
-        assert_eq!(drained[0].threshold, crate::timers::CaptureThreshold::Enter);
         assert!(
             registry.timers().take_capture_requests().is_empty(),
             "a second drain is empty — nothing is re-queued"
@@ -5593,43 +5616,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_capture_of_a_threshold_already_capturing_is_refused_not_silently_dropped() {
-        // RotorHazard's `start_capture_enter_at_level` returns False when a capture of that
-        // threshold is already running on that node — and emits NOTHING. Accepting the second press
-        // here would show a capture as started that never was: the fourth silently-ignored write
-        // (#423). The OTHER threshold on the same node is a different capture and must be allowed.
+    async fn a_second_capture_on_a_node_already_capturing_is_refused_not_silently_dropped() {
+        // RotorHazard's `start_capture_enter_at_level` returns False when a capture is already
+        // running on that node — and emits NOTHING. Accepting the second press here would show a
+        // capture as started that never was: the fourth silently-ignored write (#423).
+        //
+        // #465 makes this refusal broader and more useful. A press now arms BOTH thresholds, so a
+        // second press collides with whichever half is in flight — and the refusal names it, because
+        // "wait for that capture to finish" is a different number of seconds depending on which.
         let (registry, _state, _) = state_with(vec![]);
         let rh = connected_rh_timer_selected_by_the_event(&registry);
         report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
 
-        let (status, _) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, _) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::OK);
 
-        let (status, bytes) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, bytes) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let message = refusal(&bytes);
         assert!(
             message.contains("Node 1") && message.contains("already capturing"),
             "the refusal must name the node 1-based and say why: {message}"
         );
+        assert!(
+            message.contains("Enter at"),
+            "…and which half is still running: {message}"
+        );
 
-        // The exit threshold is its own capture — RotorHazard arms them independently.
-        let (status, _) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 0, "threshold": "exit" }),
-        )
-        .await;
+        // A DIFFERENT node is its own capture, and unaffected.
+        let (status, _) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 1 })).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(registry.timers().take_capture_requests().len(), 2);
     }
@@ -5644,12 +5659,7 @@ mod tests {
         let rh = connected_rh_timer_selected_by_the_event(&registry);
         report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
 
-        let (status, _) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, _) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::OK);
 
         // Nothing is credited before RotorHazard's window closes: it has not computed a level yet,
@@ -5661,14 +5671,18 @@ mod tests {
         );
         assert!(registry.timers().calibration(&rh.id).is_empty());
 
-        // …and once it has.
+        // …and once the ENTER window has. The exit half is still sampling at this point — its
+        // window does not open until the enter one closes (#465) — so exactly one settles here.
+        // That separation is the whole design: settling them together would credit the exit
+        // threshold with the level it held *before* the capture.
         std::thread::sleep(std::time::Duration::from_millis(
             u64::from(crate::timers::CAPTURE_WINDOW_MS) + 20,
         ));
         report_levels(&registry, &rh.id, &[(118.0, 80.0)]);
         let settled = registry.timers().resolve_captures();
-        assert_eq!(settled.len(), 1);
+        assert_eq!(settled.len(), 1, "only the enter half is out of its window");
         assert_eq!(settled[0].node, 0);
+        assert_eq!(settled[0].threshold, crate::timers::CaptureThreshold::Enter);
         assert_eq!(settled[0].level, Some(118));
 
         // D27: GridFPV holds the value, not merely the timer.
@@ -5680,7 +5694,29 @@ mod tests {
                 exit_at: None,
             }]
         );
-        // Settled exactly once — a resolved capture is retired, not re-reported every tick.
+
+        // Now the exit half's own window closes, and RotorHazard reports the level it measured with
+        // the craft away from the gate.
+        std::thread::sleep(std::time::Duration::from_millis(
+            u64::from(crate::timers::CAPTURE_EXIT_DELAY_MS) + 20,
+        ));
+        report_levels(&registry, &rh.id, &[(118.0, 64.0)]);
+        let settled = registry.timers().resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].threshold, crate::timers::CaptureThreshold::Exit);
+        assert_eq!(settled[0].level, Some(64));
+
+        // One press, one pass, both thresholds recorded as GridFPV's — and exit below enter, which
+        // is the whole reason the two windows are sequenced rather than fired together.
+        assert_eq!(
+            registry.timers().calibration(&rh.id),
+            vec![crate::timers::NodeCalibration {
+                node: 0,
+                enter_at: Some(118),
+                exit_at: Some(64),
+            }]
+        );
+        // Settled exactly once each — a resolved capture is retired, not re-reported every tick.
         assert!(registry.timers().resolve_captures().is_empty());
     }
 
@@ -5694,38 +5730,35 @@ mod tests {
         let rh = connected_rh_timer_selected_by_the_event(&registry);
         report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
 
-        let (status, _) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, _) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::OK);
 
+        // Long enough for BOTH halves to run out (#465): the exit window opens where the enter one
+        // closes, so the last deadline is delay + window + settle.
         std::thread::sleep(std::time::Duration::from_millis(
-            u64::from(crate::timers::CAPTURE_WINDOW_MS)
+            u64::from(crate::timers::CAPTURE_EXIT_DELAY_MS)
+                + u64::from(crate::timers::CAPTURE_WINDOW_MS)
                 + u64::from(crate::timers::CAPTURE_SETTLE_MS)
                 + 20,
         ));
         report_levels(&registry, &rh.id, &[(90.0, 80.0)]); // unchanged, as RotorHazard left it
         let settled = registry.timers().resolve_captures();
-        assert_eq!(settled.len(), 1);
         assert_eq!(
-            settled[0].level, None,
+            settled.len(),
+            2,
+            "both halves of the one press are answered"
+        );
+        assert!(
+            settled.iter().all(|o| o.level.is_none()),
             "a capture that produced no new level must be reported as such, never as a success"
         );
         assert!(
             registry.timers().calibration(&rh.id).is_empty(),
             "nothing may be recorded for a capture that did not land"
         );
-        // And it is retired, so a later capture on the same threshold is not refused by a ghost.
+        // And both are retired, so a later capture on that node is not refused by a ghost.
         assert!(registry.timers().resolve_captures().is_empty());
-        let (status, _) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, _) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -5776,12 +5809,8 @@ mod tests {
                 }
             }
 
-            let (status, bytes) = post_capture(
-                registry.clone(),
-                &rh.id.0,
-                json!({ "node": 0, "threshold": "enter" }),
-            )
-            .await;
+            let (status, bytes) =
+                post_capture(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
             assert_eq!(
                 status,
                 StatusCode::BAD_REQUEST,
@@ -5873,12 +5902,7 @@ mod tests {
                 }
             }
 
-            let (status, _) = post_capture(
-                registry.clone(),
-                &rh.id.0,
-                json!({ "node": 0, "threshold": "enter" }),
-            )
-            .await;
+            let (status, _) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 0 })).await;
             assert_eq!(
                 status,
                 StatusCode::OK,
@@ -5903,12 +5927,7 @@ mod tests {
         // that looks like it worked and measured nothing.
         let (registry, _state, _) = state_with(vec![]);
 
-        let (status, bytes) = post_capture(
-            registry.clone(),
-            "mock",
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, bytes) = post_capture(registry.clone(), "mock", json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let message = refusal(&bytes);
         assert!(
@@ -5916,12 +5935,8 @@ mod tests {
             "the Mock refusal must name the timer and say why: {message}"
         );
 
-        let (status, _) = post_capture(
-            registry.clone(),
-            "no-such-timer",
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, _) =
+            post_capture(registry.clone(), "no-such-timer", json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
         let disconnected = registry
@@ -5936,23 +5951,15 @@ mod tests {
                 available_channels: None,
             })
             .unwrap();
-        let (status, bytes) = post_capture(
-            registry.clone(),
-            &disconnected.id.0,
-            json!({ "node": 0, "threshold": "enter" }),
-        )
-        .await;
+        let (status, bytes) =
+            post_capture(registry.clone(), &disconnected.id.0, json!({ "node": 0 })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(refusal(&bytes).contains("Bench RH"));
 
         let rh = connected_rh_timer_selected_by_the_event(&registry);
         let width = registry.timers().get(&rh.id).unwrap().node_width();
-        let (status, bytes) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": width, "threshold": "enter" }),
-        )
-        .await;
+        let (status, bytes) =
+            post_capture(registry.clone(), &rh.id.0, json!({ "node": width })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
             refusal(&bytes).contains(&format!("Node {}", width + 1)),
@@ -5969,12 +5976,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let (status, bytes) = post_capture(
-            registry.clone(),
-            &rh.id.0,
-            json!({ "node": 2, "threshold": "enter" }),
-        )
-        .await;
+        let (status, bytes) = post_capture(registry.clone(), &rh.id.0, json!({ "node": 2 })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let message = refusal(&bytes);
         assert!(

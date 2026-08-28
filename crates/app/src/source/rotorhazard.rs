@@ -54,8 +54,8 @@ use gridfpv_adapters::rotorhazard::transport::{
 };
 use gridfpv_events::{AdapterId, CompetitorRef, Event};
 use gridfpv_server::timers::{
-    CONNECT_ATTEMPT_CAP, NodeReading, PluginPresence, SIGNAL_SAMPLE_INTERVAL, TimerId,
-    TimerRegistry, TimerStatus,
+    CAPTURE_EXIT_DELAY_MS, CONNECT_ATTEMPT_CAP, NodeReading, PluginPresence,
+    SIGNAL_SAMPLE_INTERVAL, TimerId, TimerRegistry, TimerStatus,
 };
 use tokio::task::JoinHandle;
 
@@ -210,24 +210,40 @@ pub struct CalibrationWrite {
 /// applies the latest value once rather than replaying a stale one after it.
 type CalibrationSlot = Arc<Mutex<Vec<CalibrationWrite>>>;
 
-/// One queued **capture** the driver fires on its next loop (#355): the RD pressed Capture on one
-/// of a node's two thresholds, and RotorHazard is being asked to *measure* the level rather than
-/// being told it.
+/// One queued **capture** the driver fires on its next loop (#355, #465): the RD pressed Capture on
+/// a node, and RotorHazard is being asked to *measure* both of its thresholds rather than being told
+/// them.
 ///
 /// The app-crate twin of `gridfpv_server::timers::PendingCapture`, restated here for the same
 /// reason [`CalibrationWrite`] is — the connection already knows which timer it is.
+///
+/// **No threshold field** (#465). One arming is both of RotorHazard's captures, fired back to back
+/// over one pass, and the sequencing lives here rather than in the queue: `cap_enter_at_btn` goes
+/// out immediately, `cap_exit_at_btn` `CAPTURE_EXIT_DELAY_MS` later, on
+/// [`PendingExitCapture`]'s schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureWrite {
     /// The node to capture on, 0-based (RotorHazard's `seat_index`).
     pub node: u64,
-    /// Whether this is the **enter** threshold (`cap_enter_at_btn`) or the exit one
-    /// (`cap_exit_at_btn`). A `bool` rather than the server crate's enum because this crate sits
-    /// *above* that one and the driver's only question is which of two emits to make.
-    pub enter: bool,
     /// Whether the route accepted this capture with an **open-practice** heat racing on the timer
     /// (#355, #398) — so the driver's armed-heat backstop lets it through. A capture ends by
     /// *setting* a threshold, so it needs exactly the gate a typed level does.
     pub during_open_practice: bool,
+}
+
+/// The **exit** half of a one-pass capture, waiting for its window to open (#465).
+///
+/// Held in `maintain`'s own loop state rather than on a shared slot: it is a schedule, not a
+/// request, and it exists only for as long as the connection that made the enter emit does. If the
+/// link drops in between, the exit capture is simply never fired — the registry's outstanding entry
+/// then expires and is reported as a threshold that did not land, which is the honest outcome and
+/// exactly what a dropped calibration write does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingExitCapture {
+    /// The node, 0-based.
+    node: u64,
+    /// When `cap_exit_at_btn` should go out — the moment RotorHazard's enter window closes.
+    due: Instant,
 }
 
 /// **Pending captures** the driver fires on its next loop (#355), shared from the async
@@ -246,6 +262,15 @@ type CaptureSlot = Arc<Mutex<Vec<CaptureWrite>>>;
 /// asking for the old value and would report the capture as not landed while it was still running.
 /// The slack covers the sleep and the write.
 const CAPTURE_READBACK_DELAY: Duration = Duration::from_millis(3_400);
+
+/// How long after `cap_enter_at_btn` the driver fires `cap_exit_at_btn` for the same node (#465) —
+/// `gridfpv_server::timers::CAPTURE_EXIT_DELAY_MS`, in the type this loop measures with.
+///
+/// Read from the server crate rather than restated, because the registry stamps its outstanding
+/// exit capture's window from the same number: if the emit and the window it is settled against
+/// drifted apart, GridFPV would decide a capture had not landed while RotorHazard was still
+/// sampling for it.
+const CAPTURE_EXIT_DELAY: Duration = Duration::from_millis(CAPTURE_EXIT_DELAY_MS as u64);
 
 /// One queued **channel write** the driver applies on its next loop (#413): a node, the channel it
 /// should be listening on, and the catalog label to put on RotorHazard's own screen alongside it.
@@ -1141,6 +1166,10 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
     // still running as one that did not land. Set to the latest outstanding capture's deadline, so
     // a batch of presses costs one `load_data` rather than one each. `None` ⇒ nothing outstanding.
     let mut capture_readback_at: Option<Instant> = None;
+    // The **exit** half of each one-pass capture, waiting for its window (#465). One press arms two
+    // of RotorHazard's captures, and they must not overlap — see [`PendingExitCapture`] and
+    // `CAPTURE_EXIT_DELAY`. A `Vec` because several nodes can be capturing at once.
+    let mut pending_exit_captures: Vec<PendingExitCapture> = Vec::new();
 
     while !cancel.load(Ordering::Relaxed) {
         // The source of truth for a drop (#105): `rust_socketio` runs with `.reconnect(false)`, so a
@@ -1240,14 +1269,22 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
             }
         }
 
-        // Fire any pending **captures** (#355): the RD pressed Capture on a node's threshold and
-        // RotorHazard is being asked to measure the level rather than being told it.
+        // Fire any pending **captures** (#355, #465): the RD pressed Capture on a node and
+        // RotorHazard is being asked to measure its thresholds rather than being told them.
         //
         // This is the same write path as the calibration block above — same queue seam, same
-        // armed-heat backstop, same open-practice exemption — with one difference that shapes the
-        // rest of the block: **the emit does not produce a value.** RotorHazard opens a three-second
-        // sampling window at the emit, averages the node's RSSI across it, and only then sets the
-        // threshold. So the readback is *scheduled*, not fired here.
+        // armed-heat backstop, same open-practice exemption — with two differences that shape the
+        // rest of the block:
+        //
+        //  * **The emit does not produce a value.** RotorHazard opens a three-second sampling
+        //    window at the emit, averages the node's RSSI across it, and only then sets the
+        //    threshold. So the readback is *scheduled*, not fired here.
+        //  * **One arming is two emits** (#465). `cap_enter_at_btn` goes out now, over the pass;
+        //    `cap_exit_at_btn` goes out when that window closes, by which time the craft has flown
+        //    on. They cannot go out together: RotorHazard's two branches average the SAME samples
+        //    over the SAME window (`BaseHardwareInterface.process_lap_stats` accumulates both from
+        //    one `node.current_rssi` per iteration), so a simultaneous pair returns exit == enter,
+        //    which is a gate that never closes. See `CAPTURE_EXIT_DELAY_MS`.
         //
         // The armed-heat backstop applies for exactly the reason it does to a typed level: a
         // capture ends by setting a threshold, so it changes what counts as a lap under a scored
@@ -1266,14 +1303,13 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
                     refused += 1;
                     continue;
                 }
-                let emitted = if write.enter {
-                    conn.capture_enter_at_level(write.node)
-                } else {
-                    conn.capture_exit_at_level(write.node)
-                };
-                if emitted.is_err() {
+                if conn.capture_enter_at_level(write.node).is_err() {
                     return true;
                 }
+                pending_exit_captures.push(PendingExitCapture {
+                    node: write.node,
+                    due: Instant::now() + CAPTURE_EXIT_DELAY,
+                });
                 started += 1;
             }
             if refused > 0 {
@@ -1284,21 +1320,34 @@ fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlo
                 );
             }
             if started > 0 {
-                // Schedule the readback past the end of RotorHazard's sampling window. RH also
-                // broadcasts the captured level itself (`node_enter_at_level`, folded by the
-                // transport), so this is the second witness rather than the only one — but a gate's
-                // calibration is not something to stake on one unsolicited frame, and a capture the
-                // RD flew a pass for deserves both.
-                let due = Instant::now() + CAPTURE_READBACK_DELAY;
+                // Schedule the readback past the end of the LAST sampling window — the exit one, so
+                // the delay carries the enter window as well. RH also broadcasts each captured level
+                // itself (`node_enter_at_level` / `node_exit_at_level`, folded by the transport), so
+                // this is the second witness rather than the only one — but a gate's calibration is
+                // not something to stake on one unsolicited frame, and a capture the RD flew a pass
+                // for deserves both.
+                let due = Instant::now() + CAPTURE_EXIT_DELAY + CAPTURE_READBACK_DELAY;
                 capture_readback_at = Some(match capture_readback_at {
                     Some(existing) if existing > due => existing,
                     _ => due,
                 });
             }
         }
-        // …and fire it when it comes due. Deliberately outside the block above: the emit and the
-        // readback are separated by three seconds of RotorHazard sampling, and this loop turns over
-        // every 20 ms in between.
+        // Fire the **exit** half of each armed capture as its window comes due (#465). Deliberately
+        // its own step, three seconds after the enter emit, with this loop turning over every 20 ms
+        // in between: the whole point is that these two windows do not overlap.
+        if !pending_exit_captures.is_empty() {
+            let now = Instant::now();
+            let (due_now, still_waiting): (Vec<PendingExitCapture>, Vec<PendingExitCapture>) =
+                pending_exit_captures.iter().partition(|p| now >= p.due);
+            for exit in &due_now {
+                if conn.capture_exit_at_level(exit.node).is_err() {
+                    return true;
+                }
+            }
+            pending_exit_captures = still_waiting;
+        }
+        // …and fire the readback when it comes due.
         if let Some(due) = capture_readback_at {
             if Instant::now() >= due {
                 capture_readback_at = None;
@@ -1986,7 +2035,6 @@ mod tests {
         }]));
         let capture: CaptureSlot = Arc::new(Mutex::new(vec![CaptureWrite {
             node: 0,
-            enter: true,
             during_open_practice: false,
         }]));
         let channel: ChannelSlot = Arc::new(Mutex::new(vec![ChannelWrite {

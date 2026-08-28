@@ -1164,11 +1164,12 @@ pub struct PendingCalibration {
     pub during_open_practice: bool,
 }
 
-/// Which of a node's two detection thresholds a **capture** is for (#355).
+/// Which of a node's two detection thresholds a captured level belongs to (#355, #465).
 ///
-/// A capture is per threshold because RotorHazard's are: `cap_enter_at_btn` and `cap_exit_at_btn`
-/// are separate handlers arming separate sampling windows, and the enter branch applies a peak
-/// margin the exit branch does not.
+/// RotorHazard's captures are per threshold: `cap_enter_at_btn` and `cap_exit_at_btn` are separate
+/// handlers arming separate sampling windows, and the enter branch applies a peak margin the exit
+/// branch does not. Since #465 this is **not something the RD picks** — one press runs both — so it
+/// names which half of a capture a level, an outcome or a refusal is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "bindings/")]
@@ -1207,21 +1208,66 @@ pub const CAPTURE_WINDOW_MS: u32 = 3_000;
 /// standing at the gate is not left watching a spinner over a capture RotorHazard silently refused.
 pub const CAPTURE_SETTLE_MS: u32 = 4_000;
 
-/// The body of `POST /timers/{timer_id}/capture` (#355) — have the timer **measure** one node's
-/// threshold instead of being told it.
+/// How long after arming a capture GridFPV starts RotorHazard's **exit** sampling window (#465).
+///
+/// One press, one pass, both thresholds — but **sequenced, not simultaneous**, and the reason is in
+/// RotorHazard's own source rather than in taste.
+///
+/// `BaseHardwareInterface.process_lap_stats` runs both capture branches in the **same loop
+/// iteration over the same `node.current_rssi`**, each accumulating into its own total:
+///
+/// ```text
+/// if node.cap_enter_at_flag:   node.cap_enter_at_total += node.current_rssi; …
+/// if node.cap_exit_at_flag:    node.cap_exit_at_total  += node.current_rssi; …
+/// ```
+///
+/// The flags are independent, so RotorHazard happily accepts both `cap_enter_at_btn` and
+/// `cap_exit_at_btn` on one node at once — and then averages *the identical samples* over *the
+/// identical window* and hands back `exit_at == enter_at` (give or take the enter branch's
+/// `node_peak_rssi - ENTER_AT_PEAK_MARGIN` pull, which can only push enter **up**). An exit level at
+/// or above the enter level is not a calibration; it is a gate that never closes.
+///
+/// So the two windows run back to back over the one pass instead. The enter window opens at the
+/// press and covers the pass — the craft at the gate, which is the level a rising signal must clear.
+/// The exit window opens the instant it closes, by which time the craft has flown on — the level a
+/// falling signal drops back past. That is exactly RotorHazard's own two-button workflow ("capture
+/// with the craft at the gate, capture again with it away"), run from one arming, with
+/// RotorHazard's own arithmetic measuring at both ends. **GridFPV invents no coefficient**: it does
+/// not read the signal curve and derive levels from a peak-and-floor formula of its own, because
+/// the fractions such a formula needs would be a guess wearing a calibration's clothes.
+///
+/// Equal to [`CAPTURE_WINDOW_MS`] by construction: the exit window starts the moment the enter one
+/// closes. Named separately because the two mean different things — one is RotorHazard's sampling
+/// length, the other is GridFPV's sequencing — and a later RotorHazard that changed one would not
+/// necessarily change the other.
+///
+/// ⚠️ **The known limit.** The exit window samples the three seconds *after* the enter window, so a
+/// craft back at the gate inside that window makes the exit level too high. That is a lap under
+/// about six seconds from the press, which no real course is; and it is visible rather than silent,
+/// because an exit level at or above the enter level is exactly what the RD sees on the page.
+pub const CAPTURE_EXIT_DELAY_MS: u32 = CAPTURE_WINDOW_MS;
+
+/// The body of `POST /timers/{timer_id}/capture` (#355, #465) — have the timer **measure** one
+/// node's thresholds instead of being told them.
 ///
 /// The answer to the gap #411 names: a fresh RD with no saved profile and a badly-tuned timer has
 /// no starting point, and GridFPV deliberately ships no fabricated default because the right level
 /// depends on craft, VTX power, antenna and gate geometry — none of which GridFPV knows. A capture
 /// measures the RD's actual craft on their actual gate, which is the only honest way to bootstrap.
+///
+/// **One arm, one pass, both thresholds** (#465). The RD used to press Capture twice per node and
+/// fly two passes; a single press now runs both of RotorHazard's captures over the one pass — see
+/// [`CAPTURE_EXIT_DELAY_MS`] for why they are sequenced rather than fired together, and for the
+/// reason GridFPV does not derive the pair from the signal curve itself.
+///
+/// There is deliberately **no threshold field**. It was the RD's choice and is not one any more;
+/// keeping it would let a caller ask for half a capture, which is the thing this issue removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct CaptureRequest {
     /// The node to capture on, `0`-based — RotorHazard's `seat_index`, and the same index
     /// [`NodeSignal::node`] and [`CalibrationRequest::node`] carry.
     pub node: u32,
-    /// Which threshold to capture.
-    pub threshold: CaptureThreshold,
 }
 
 /// The answer to `POST /timers/{timer_id}/capture` (#355): **what was dispatched**, never a
@@ -1242,32 +1288,43 @@ pub struct CaptureDispatch {
     pub timer: TimerId,
     /// The node it addresses, `0`-based.
     pub node: u32,
-    /// Which threshold is being captured.
-    pub threshold: CaptureThreshold,
-    /// How long RotorHazard will sample for, in milliseconds — [`CAPTURE_WINDOW_MS`]. The RD has to
-    /// fly the pass **inside** this window, which starts now.
+    /// How long RotorHazard samples for **each** threshold, in milliseconds —
+    /// [`CAPTURE_WINDOW_MS`]. The RD has to fly the pass inside the *first* one, which starts now.
     pub window_ms: u32,
-    /// How long after the window GridFPV waits for the level before reporting the capture did not
-    /// land — [`CAPTURE_SETTLE_MS`].
+    /// How long after the press the **exit** window opens — [`CAPTURE_EXIT_DELAY_MS`] (#465).
+    ///
+    /// The console needs it to say the true thing while the capture runs: for the first stretch the
+    /// instruction is *fly the pass*, and for the second it is *let it clear the gate*. One
+    /// countdown over the whole thing would send the RD back through the gate during the exit
+    /// window, which is the one way to spoil the measurement.
+    pub exit_delay_ms: u32,
+    /// How long after the **last** window GridFPV waits for the levels before reporting the capture
+    /// did not land — [`CAPTURE_SETTLE_MS`].
     pub settle_ms: u32,
-    /// The level the timer was reporting for this threshold when the capture started, if it was
-    /// reporting one. The console shows it as what the capture is replacing, and GridFPV uses it to
-    /// tell "a new level arrived" from "nothing happened".
+    /// The **enter** level the timer was reporting when the capture started, if it was reporting
+    /// one. Shown as what the capture is replacing, and used to tell "a new level arrived" from
+    /// "nothing happened".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub previous: Option<u32>,
+    pub previous_enter: Option<u32>,
+    /// The **exit** level the timer was reporting when the capture started, if it was reporting one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_exit: Option<u32>,
 }
 
-/// One queued **capture** the connection reconciler drains (#355) — the internal twin of
+/// One queued **capture** the connection reconciler drains (#355, #465) — the internal twin of
 /// [`CaptureDispatch`], and the exact shape [`PendingCalibration`] is for a typed level.
+///
+/// Carries no threshold: one arming is both of RotorHazard's captures, and the *sequencing* of them
+/// (`cap_enter_at_btn` now, `cap_exit_at_btn` at [`CAPTURE_EXIT_DELAY_MS`]) belongs to the driver,
+/// which is the only layer holding a clock against the live socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCapture {
     /// Which timer to capture on.
     pub timer: TimerId,
     /// The node, `0`-based.
     pub node: u32,
-    /// Which threshold.
-    pub threshold: CaptureThreshold,
     /// Whether the route accepted this capture **with an open-practice heat racing on the timer**
     /// (#355, #398) — the same flag [`PendingCalibration::during_open_practice`] carries, and for
     /// the same reason: a capture *ends by setting a threshold*, so the driver's armed-heat backstop
@@ -1294,7 +1351,13 @@ pub struct OutstandingCapture {
     /// The level the timer reported when the capture started, if any — what "changed" is measured
     /// against.
     pub previous: Option<u32>,
-    /// When the capture was accepted. The sampling window runs from here.
+    /// When **this threshold's** sampling window opens. Everything else is measured from here: the
+    /// window, the settle grace, and so expiry.
+    ///
+    /// Not the accept time (#465). One press arms two of these, and the exit one's window does not
+    /// open until [`CAPTURE_EXIT_DELAY_MS`] later — so its `started` is stamped that far ahead.
+    /// Sharing the accept time would settle the exit capture while RotorHazard was still sampling
+    /// for it, and report the level it held *before* the capture as the one the capture produced.
     started: Instant,
 }
 
@@ -2393,12 +2456,24 @@ impl TimerRegistry {
         std::mem::take(&mut self.write().calibration_requests)
     }
 
-    /// **Start a capture** on one node's threshold (#355), returning what was dispatched.
+    /// **Start a capture** on one node — **both** thresholds, from one pass (#355, #465) —
+    /// returning what was dispatched.
     ///
     /// The Tune page's third write, and the only one that does not carry a number. The RD presses
-    /// Capture, RotorHazard samples this node for [`CAPTURE_WINDOW_MS`] and sets the threshold from
-    /// what it saw — so this is GridFPV asking the timer to *measure* a level rather than telling it
-    /// one.
+    /// Capture once; RotorHazard samples this node for [`CAPTURE_WINDOW_MS`] and sets the *enter*
+    /// threshold from what it saw, and [`CAPTURE_EXIT_DELAY_MS`] later does the same again for the
+    /// *exit* threshold, by which time the craft has flown on. So this is GridFPV asking the timer
+    /// to *measure* its levels rather than telling it any.
+    ///
+    /// # Two captures, one arming, and why they cannot be fired together
+    ///
+    /// See [`CAPTURE_EXIT_DELAY_MS`]: RotorHazard's two capture branches average the *same* samples
+    /// over the *same* window, so firing them at once yields `exit_at == enter_at` — a gate that
+    /// never closes. Sequencing them is RotorHazard's own two-button workflow, done from one press.
+    ///
+    /// Both are claimed here, in one lock, so the pair either starts together or not at all: a
+    /// capture that armed enter and was refused exit would leave the node half-measured with no
+    /// way for the RD to tell.
     ///
     /// # Why this exists at all
     ///
@@ -2423,10 +2498,12 @@ impl TimerRegistry {
     /// non-RotorHazard timer, a timer that is not connected, a `node` beyond the timer's width, and
     /// a node the RD has **disabled** (#412) — plus one more:
     ///
-    /// * **A capture of this threshold is already running on this node.** RotorHazard's
+    /// * **A capture is already running on this node.** RotorHazard's
     ///   `start_capture_enter_at_level` returns `False` in exactly that case and emits nothing at
     ///   all, so a second press would be accepted here, ignored there, and shown as started. That is
-    ///   a fourth silent write (#423), and it is refused instead.
+    ///   a fourth silent write (#423), and it is refused instead. The refusal names whichever
+    ///   threshold is still running, because with a sequenced pair (#465) "wait for that capture to
+    ///   finish" means a different number of seconds depending on which half it is in.
     ///
     /// As with the calibration write, the **race-phase refusal** is not here — it needs the event
     /// log, so it lives in the route — and `during_open_practice` is that route's answer carried
@@ -2474,47 +2551,54 @@ impl TimerRegistry {
             }
         }
 
-        // 2. What the timer is reporting for this threshold right now. Read from the signal feed —
+        // 2. What the timer is reporting for BOTH thresholds right now. Read from the signal feed —
         //    evidence about the timer, used only to tell "a new level arrived" from "nothing
         //    happened", never adopted as GridFPV's value.
-        let previous = self.reported_level(id, request.node, request.threshold);
+        let previous_enter = self.reported_level(id, request.node, CaptureThreshold::Enter);
+        let previous_exit = self.reported_level(id, request.node, CaptureThreshold::Exit);
 
-        // 3. Claim the capture. Check-and-insert under one lock so two presses a millisecond apart
-        //    cannot both start a capture RotorHazard would refuse the second of.
+        // 3. Claim the pair. Check-and-insert under one lock so two presses a millisecond apart
+        //    cannot both start a capture RotorHazard would refuse the second of — and so the two
+        //    halves either both start or neither does.
         let now = Instant::now();
+        let exit_delay = Duration::from_millis(u64::from(CAPTURE_EXIT_DELAY_MS));
         {
             let mut captures = self.capture_store();
             let outstanding = captures.entry(id.clone()).or_default();
             // Drop anything that has already run out of time — the resolver prunes these too, but a
             // press arriving between two resolver passes must not be refused by a ghost.
             outstanding.retain(|c| !c.expired(now));
-            if outstanding
-                .iter()
-                .any(|c| c.node == request.node && c.threshold == request.threshold)
-            {
+            if let Some(running) = outstanding.iter().find(|c| c.node == request.node) {
                 return Err(TimerError(format!(
                     "{} is already capturing its {} level — wait for that capture to finish",
                     Timer::node_label(request.node),
-                    request.threshold.label()
+                    running.threshold.label()
                 )));
             }
             outstanding.push(OutstandingCapture {
                 node: request.node,
-                threshold: request.threshold,
-                previous,
+                threshold: CaptureThreshold::Enter,
+                previous: previous_enter,
                 started: now,
+            });
+            outstanding.push(OutstandingCapture {
+                node: request.node,
+                threshold: CaptureThreshold::Exit,
+                previous: previous_exit,
+                // The exit window has not opened yet — see `OutstandingCapture::started`.
+                started: now + exit_delay,
             });
         }
 
-        // 4. Queue the emit. NOT coalesced (see `Registry::capture_requests`): a second capture is a
-        //    second measurement, not a restatement of a value — and step 3 has already refused the
-        //    one case where two would collide.
+        // 4. Queue **one** emit for the pair (#465). NOT coalesced (see `Registry::capture_requests`):
+        //    a second capture is a second measurement, not a restatement of a value — and step 3 has
+        //    already refused the one case where two would collide. The driver owns the sequencing,
+        //    because it is the only layer holding a clock against the live socket.
         {
             let mut reg = self.write();
             reg.capture_requests.push(PendingCapture {
                 timer: id.clone(),
                 node: request.node,
-                threshold: request.threshold,
                 during_open_practice,
             });
         }
@@ -2522,10 +2606,11 @@ impl TimerRegistry {
         Ok(CaptureDispatch {
             timer: id.clone(),
             node: request.node,
-            threshold: request.threshold,
             window_ms: CAPTURE_WINDOW_MS,
+            exit_delay_ms: CAPTURE_EXIT_DELAY_MS,
             settle_ms: CAPTURE_SETTLE_MS,
-            previous,
+            previous_enter,
+            previous_exit,
         })
     }
 

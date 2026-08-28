@@ -37,7 +37,7 @@ use std::time::Duration;
 use gridfpv_events::CompetitorRef;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{CaptureThreshold, TimerId, TimerKind, TimerRegistry, TimerStatus};
+use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry, TimerStatus};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
@@ -629,15 +629,15 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                         );
                     }
                 }
-                // …and any **captures** (#355) the Tune page parked on the registry: the RD pressed
-                // Capture on a node's threshold and RotorHazard is asked to *measure* it. Same seam
-                // and the same drain-exactly-once discipline as the calibration write above.
+                // …and any **captures** (#355, #465) the Tune page parked on the registry: the RD
+                // pressed Capture on a node and RotorHazard is asked to *measure* both its
+                // thresholds from one pass. Same seam and the same drain-exactly-once discipline as
+                // the calibration write above; the driver owns the enter/exit sequencing.
                 for write in timers.take_capture_requests() {
                     let landed = connections.capture(
                         &write.timer,
                         CaptureWrite {
                             node: u64::from(write.node),
-                            enter: matches!(write.threshold, CaptureThreshold::Enter),
                             during_open_practice: write.during_open_practice,
                         },
                     );
@@ -649,10 +649,9 @@ pub fn spawn_rh_reconciler(registry: EventRegistry) -> (RhConnections, JoinHandl
                         // capture that never comes back with a level.
                         let name = timers.get(&write.timer).map(|t| t.name);
                         eprintln!(
-                            "gridfpv: no live RotorHazard connection to capture node {}'s {} level \
+                            "gridfpv: no live RotorHazard connection to capture node {}'s levels \
                              on {:?}",
                             write.node + 1,
-                            write.threshold.label(),
                             name.as_deref().unwrap_or("that timer")
                         );
                     }
@@ -859,7 +858,6 @@ mod tests {
             &rh,
             CaptureWrite {
                 node: 0,
-                enter: true,
                 during_open_practice: false,
             }
         ));
@@ -871,45 +869,24 @@ mod tests {
         // intent (the latest value wins); two captures are two *measurements* the RD asked for, and
         // collapsing them would silently drop a pass they flew.
         //
-        // The one case where two would collide — a second capture of a threshold already capturing,
-        // which RotorHazard refuses in silence — is refused by `request_capture` instead, so the
-        // queue never needs to.
+        // The one case where two would collide — a capture already running on that node, which
+        // RotorHazard refuses in silence — is refused by `request_capture` instead, so the queue
+        // never needs to.
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         timers.set_status(&rh, gridfpv_server::timers::TimerStatus::Connected);
 
         timers
-            .request_capture(
-                &rh,
-                &CaptureRequest {
-                    node: 1,
-                    threshold: CaptureThreshold::Enter,
-                },
-                false,
-            )
+            .request_capture(&rh, &CaptureRequest { node: 1 }, false)
             .expect("connected RH timer");
-        // The same node's OTHER threshold is a separate capture — RotorHazard arms them separately.
+        // A different node captures independently.
         timers
-            .request_capture(
-                &rh,
-                &CaptureRequest {
-                    node: 1,
-                    threshold: CaptureThreshold::Exit,
-                },
-                false,
-            )
-            .expect("the exit capture is independent of the enter one");
-        // …and a repeat of the enter one is refused while it is still running, rather than queued.
+            .request_capture(&rh, &CaptureRequest { node: 2 }, false)
+            .expect("another node is a separate capture");
+        // …and a repeat on node 1 is refused while it is still running, rather than queued.
         assert!(
             timers
-                .request_capture(
-                    &rh,
-                    &CaptureRequest {
-                        node: 1,
-                        threshold: CaptureThreshold::Enter,
-                    },
-                    false,
-                )
+                .request_capture(&rh, &CaptureRequest { node: 1 }, false)
                 .is_err(),
             "RotorHazard refuses a capture already in flight in SILENCE, so the Director must \
              refuse it out loud instead"
@@ -917,8 +894,10 @@ mod tests {
 
         let drained = timers.take_capture_requests();
         assert_eq!(drained.len(), 2, "one entry per capture, never coalesced");
-        assert_eq!(drained[0].threshold, CaptureThreshold::Enter);
-        assert_eq!(drained[1].threshold, CaptureThreshold::Exit);
+        // One entry per PRESS, not per threshold (#465): the driver fires both of RotorHazard's
+        // captures off this one, sequenced so their sampling windows do not overlap.
+        assert_eq!(drained[0].node, 1);
+        assert_eq!(drained[1].node, 2);
         assert!(
             timers.take_capture_requests().is_empty(),
             "drained exactly once — nothing is re-queued"
