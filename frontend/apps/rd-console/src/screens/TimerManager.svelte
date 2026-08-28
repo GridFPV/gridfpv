@@ -407,7 +407,13 @@
    * band box ticks only what that timer can actually tune, never the raw catalog.
    */
   function toggleBand(group: ChannelBand) {
-    formChannels = toggleBandSelection(group.entries, formChannels);
+    // The full offer (every offered band's entries) rides along so clearing a band cannot delete
+    // a frequency another band still holds — Raceband R7 and Fatshark F8 share 5880 (#464).
+    formChannels = toggleBandSelection(
+      group.entries,
+      formChannels,
+      offeredBands.flatMap((b) => b.entries)
+    );
   }
 
   /** How this band's box reads: checked / unchecked / indeterminate. */

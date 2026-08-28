@@ -75,13 +75,33 @@ export function bandSelection(
  */
 export function toggleBandSelection(
   entries: readonly ChannelCatalogEntry[],
-  chosen: ReadonlySet<number>
+  chosen: ReadonlySet<number>,
+  offered: readonly ChannelCatalogEntry[] = entries
 ): Set<number> {
   const next = new Set(chosen);
   const clearing = bandSelection(entries, chosen) === 'all';
+  // #464: bands overlap in frequency (Raceband R7 and Fatshark F8 are both 5880), and the
+  // selection is frequency-keyed — so clearing a band must not delete a frequency another band
+  // is plainly using, or toggling Fatshark off silently turns R7 off. "Plainly using" is the
+  // guard both ways: the sharing band must have some OTHER channel chosen (all-Raceband keeps
+  // 5880; a selection that was only ever Fatshark's clears it — the RD asked for the band off,
+  // and no one else holds the frequency). The cleared band then honestly reads 'some' when a
+  // shared frequency survives — it IS still enabled. Known edge, accepted: a sharing band whose
+  // only chosen channel is the shared one shows no evidence and loses it. `offered` is the
+  // picker's full offer (all bands); the default keeps single-band callers unchanged.
+  const keptByAnotherBand = (mhz: number) =>
+    offered.some(
+      (other) =>
+        other.mhz === mhz &&
+        !entries.includes(other) &&
+        offered.some((peer) => peer.band === other.band && peer.mhz !== mhz && next.has(peer.mhz))
+    );
   for (const entry of entries) {
-    if (clearing) next.delete(entry.mhz);
-    else next.add(entry.mhz);
+    if (clearing) {
+      if (!keptByAnotherBand(entry.mhz)) next.delete(entry.mhz);
+    } else {
+      next.add(entry.mhz);
+    }
   }
   return next;
 }
