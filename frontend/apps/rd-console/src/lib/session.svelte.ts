@@ -236,6 +236,86 @@ function liveStateOf(body: ProjectionBody | undefined): LiveRaceState | undefine
  */
 export type SessionRole = 'rd' | 'readonly';
 
+/**
+ * **The session's outward seams, in one place.** Every protocol-client read/write the console makes
+ * plus the control-client factory — the real implementations, which a {@link Session} inherits
+ * wholesale and a test overrides by key (#459).
+ *
+ * This list *is* the type: {@link SessionApi} is `typeof realApi`, so adding an endpoint here is
+ * the whole change — there is no second declaration to keep in step.
+ */
+const realApi = {
+  connect,
+  createControlClient,
+  listEvents,
+  createEvent,
+  deleteEvent,
+  getActiveEvent,
+  setActiveEvent,
+  listTimers,
+  createTimer,
+  updateTimer,
+  deleteTimer,
+  connectTimer,
+  disconnectTimer,
+  restartTimer,
+  setCalibration,
+  captureLevel,
+  setNodeChannel,
+  timerSignal,
+  stopTimerSignal,
+  timerNodes,
+  setTimerNodes,
+  setEventTimers,
+  setPrimaryTimer,
+  listPilots,
+  createPilot,
+  updatePilot,
+  deletePilot,
+  setEventRoster,
+  addToRoster,
+  removeFromRoster,
+  listClasses,
+  createClass,
+  updateClass,
+  deleteClass,
+  setClassHidden,
+  setEventClasses,
+  setClassMembership,
+  listFormats,
+  listFormatSchemas,
+  listChannels,
+  rateChannels,
+  createRound,
+  updateRound,
+  deleteRound,
+  listChannelLayouts,
+  createChannelLayout,
+  updateChannelLayout,
+  deleteChannelLayout,
+  listHeats,
+  listRoundIssues,
+  eventAudit,
+  roundRanking,
+  roundStandings,
+  classStandings
+};
+
+/** The record of seams a {@link Session} calls outward through — see {@link realApi}. */
+export type SessionApi = typeof realApi;
+
+/**
+ * The overrides a caller actually supplied. A key present but `undefined` is dropped rather than
+ * spread over the real implementation — the same semantics the old `opts?.xImpl ?? x` lines had,
+ * and what lets a test helper forward optional overrides straight through.
+ */
+function definedOnly(overrides: Partial<SessionApi> | undefined): Partial<SessionApi> {
+  if (!overrides) return {};
+  return Object.fromEntries(
+    Object.entries(overrides).filter(([, v]) => v !== undefined)
+  ) as Partial<SessionApi>;
+}
+
 /** The reactive console session — one instance, shared across screens. */
 export class Session {
   /**
@@ -360,174 +440,28 @@ export class Session {
   #tokenProvider: TokenProvider | undefined;
   /** The live-status poll interval while inside an event; cleared on leave/teardown. */
   #timerPoll: ReturnType<typeof setInterval> | undefined;
-  // Injectable for tests so the session never opens a real socket.
-  #connectImpl: typeof connect;
-  #controlFactory: typeof createControlClient;
-  #listEventsImpl: typeof listEvents;
-  #createEventImpl: typeof createEvent;
-  #deleteEventImpl: typeof deleteEvent;
-  #getActiveEventImpl: typeof getActiveEvent;
-  #setActiveEventImpl: typeof setActiveEvent;
-  #listTimersImpl: typeof listTimers;
-  #createTimerImpl: typeof createTimer;
-  #updateTimerImpl: typeof updateTimer;
-  #deleteTimerImpl: typeof deleteTimer;
-  #connectTimerImpl: typeof connectTimer;
-  #disconnectTimerImpl: typeof disconnectTimer;
-  #restartTimerImpl: typeof restartTimer;
-  #setCalibrationImpl: typeof setCalibration;
-  #captureLevelImpl: typeof captureLevel;
-  #setNodeChannelImpl: typeof setNodeChannel;
-  #timerSignalImpl: typeof timerSignal;
-  #stopTimerSignalImpl: typeof stopTimerSignal;
-  #timerNodesImpl: typeof timerNodes;
-  #setTimerNodesImpl: typeof setTimerNodes;
-  #setEventTimersImpl: typeof setEventTimers;
-  #setPrimaryTimerImpl: typeof setPrimaryTimer;
-  #listPilotsImpl: typeof listPilots;
-  #createPilotImpl: typeof createPilot;
-  #updatePilotImpl: typeof updatePilot;
-  #deletePilotImpl: typeof deletePilot;
-  #setEventRosterImpl: typeof setEventRoster;
-  #addToRosterImpl: typeof addToRoster;
-  #removeFromRosterImpl: typeof removeFromRoster;
-  #listClassesImpl: typeof listClasses;
-  #createClassImpl: typeof createClass;
-  #updateClassImpl: typeof updateClass;
-  #deleteClassImpl: typeof deleteClass;
-  #setClassHiddenImpl: typeof setClassHidden;
-  #setEventClassesImpl: typeof setEventClasses;
-  #setClassMembershipImpl: typeof setClassMembership;
-  #listFormatsImpl: typeof listFormats;
-  #listFormatSchemasImpl: typeof listFormatSchemas;
-  #listChannelsImpl: typeof listChannels;
-  #rateChannelsImpl: typeof rateChannels;
-  #createRoundImpl: typeof createRound;
-  #updateRoundImpl: typeof updateRound;
-  #deleteRoundImpl: typeof deleteRound;
-  #listChannelLayoutsImpl: typeof listChannelLayouts;
-  #createChannelLayoutImpl: typeof createChannelLayout;
-  #updateChannelLayoutImpl: typeof updateChannelLayout;
-  #deleteChannelLayoutImpl: typeof deleteChannelLayout;
-  #listHeatsImpl: typeof listHeats;
-  #listRoundIssuesImpl: typeof listRoundIssues;
-  #eventAuditImpl: typeof eventAudit;
-  #roundRankingImpl: typeof roundRanking;
-  #roundStandingsImpl: typeof roundStandings;
-  #classStandingsImpl: typeof classStandings;
+  /**
+   * The protocol-client + control seams, as **one injected record** (#459).
+   *
+   * Every call the session makes outward goes through here. Tests hand `opts.api` the keys they
+   * want to steer and inherit {@link realApi} for the rest — which is what lets a screen test stub
+   * `listHeats` without also naming the fifty seams it does not care about. Before this, each seam
+   * cost a private field, an options entry and a constructor line, and adding an endpoint meant
+   * remembering all three.
+   */
+  #api: SessionApi;
 
   constructor(opts?: {
-    connectImpl?: typeof connect;
-    controlFactory?: typeof createControlClient;
-    listEventsImpl?: typeof listEvents;
-    createEventImpl?: typeof createEvent;
-    deleteEventImpl?: typeof deleteEvent;
-    getActiveEventImpl?: typeof getActiveEvent;
-    setActiveEventImpl?: typeof setActiveEvent;
-    listTimersImpl?: typeof listTimers;
-    createTimerImpl?: typeof createTimer;
-    updateTimerImpl?: typeof updateTimer;
-    deleteTimerImpl?: typeof deleteTimer;
-    connectTimerImpl?: typeof connectTimer;
-    disconnectTimerImpl?: typeof disconnectTimer;
-    restartTimerImpl?: typeof restartTimer;
-    setCalibrationImpl?: typeof setCalibration;
-    captureLevelImpl?: typeof captureLevel;
-    setNodeChannelImpl?: typeof setNodeChannel;
-    timerSignalImpl?: typeof timerSignal;
-    stopTimerSignalImpl?: typeof stopTimerSignal;
-    timerNodesImpl?: typeof timerNodes;
-    setTimerNodesImpl?: typeof setTimerNodes;
-    setEventTimersImpl?: typeof setEventTimers;
-    setPrimaryTimerImpl?: typeof setPrimaryTimer;
-    listPilotsImpl?: typeof listPilots;
-    createPilotImpl?: typeof createPilot;
-    updatePilotImpl?: typeof updatePilot;
-    deletePilotImpl?: typeof deletePilot;
-    setEventRosterImpl?: typeof setEventRoster;
-    addToRosterImpl?: typeof addToRoster;
-    removeFromRosterImpl?: typeof removeFromRoster;
-    listClassesImpl?: typeof listClasses;
-    createClassImpl?: typeof createClass;
-    updateClassImpl?: typeof updateClass;
-    deleteClassImpl?: typeof deleteClass;
-    setClassHiddenImpl?: typeof setClassHidden;
-    setEventClassesImpl?: typeof setEventClasses;
-    setClassMembershipImpl?: typeof setClassMembership;
-    listFormatsImpl?: typeof listFormats;
-    listFormatSchemasImpl?: typeof listFormatSchemas;
-    listChannelsImpl?: typeof listChannels;
-    rateChannelsImpl?: typeof rateChannels;
-    createRoundImpl?: typeof createRound;
-    updateRoundImpl?: typeof updateRound;
-    deleteRoundImpl?: typeof deleteRound;
-    listChannelLayoutsImpl?: typeof listChannelLayouts;
-    createChannelLayoutImpl?: typeof createChannelLayout;
-    updateChannelLayoutImpl?: typeof updateChannelLayout;
-    deleteChannelLayoutImpl?: typeof deleteChannelLayout;
-    listHeatsImpl?: typeof listHeats;
-    listRoundIssuesImpl?: typeof listRoundIssues;
-    eventAuditImpl?: typeof eventAudit;
-    roundRankingImpl?: typeof roundRanking;
-    roundStandingsImpl?: typeof roundStandings;
-    classStandingsImpl?: typeof classStandings;
+    /**
+     * Override any of the outward seams (see {@link SessionApi}); every key left out keeps its
+     * real implementation. A key present but `undefined` is treated as absent, so a test helper
+     * may forward `{ listHeats: overrides?.listHeats }` without blanking the real one.
+     */
+    api?: Partial<SessionApi>;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
-    this.#connectImpl = opts?.connectImpl ?? connect;
-    this.#controlFactory = opts?.controlFactory ?? createControlClient;
-    this.#listEventsImpl = opts?.listEventsImpl ?? listEvents;
-    this.#createEventImpl = opts?.createEventImpl ?? createEvent;
-    this.#deleteEventImpl = opts?.deleteEventImpl ?? deleteEvent;
-    this.#getActiveEventImpl = opts?.getActiveEventImpl ?? getActiveEvent;
-    this.#setActiveEventImpl = opts?.setActiveEventImpl ?? setActiveEvent;
-    this.#listTimersImpl = opts?.listTimersImpl ?? listTimers;
-    this.#createTimerImpl = opts?.createTimerImpl ?? createTimer;
-    this.#updateTimerImpl = opts?.updateTimerImpl ?? updateTimer;
-    this.#deleteTimerImpl = opts?.deleteTimerImpl ?? deleteTimer;
-    this.#connectTimerImpl = opts?.connectTimerImpl ?? connectTimer;
-    this.#disconnectTimerImpl = opts?.disconnectTimerImpl ?? disconnectTimer;
-    this.#restartTimerImpl = opts?.restartTimerImpl ?? restartTimer;
-    this.#setCalibrationImpl = opts?.setCalibrationImpl ?? setCalibration;
-    this.#captureLevelImpl = opts?.captureLevelImpl ?? captureLevel;
-    this.#setNodeChannelImpl = opts?.setNodeChannelImpl ?? setNodeChannel;
-    this.#timerSignalImpl = opts?.timerSignalImpl ?? timerSignal;
-    this.#stopTimerSignalImpl = opts?.stopTimerSignalImpl ?? stopTimerSignal;
-    this.#timerNodesImpl = opts?.timerNodesImpl ?? timerNodes;
-    this.#setTimerNodesImpl = opts?.setTimerNodesImpl ?? setTimerNodes;
-    this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
-    this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
-    this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
-    this.#createPilotImpl = opts?.createPilotImpl ?? createPilot;
-    this.#updatePilotImpl = opts?.updatePilotImpl ?? updatePilot;
-    this.#deletePilotImpl = opts?.deletePilotImpl ?? deletePilot;
-    this.#setEventRosterImpl = opts?.setEventRosterImpl ?? setEventRoster;
-    this.#addToRosterImpl = opts?.addToRosterImpl ?? addToRoster;
-    this.#removeFromRosterImpl = opts?.removeFromRosterImpl ?? removeFromRoster;
-    this.#listClassesImpl = opts?.listClassesImpl ?? listClasses;
-    this.#createClassImpl = opts?.createClassImpl ?? createClass;
-    this.#updateClassImpl = opts?.updateClassImpl ?? updateClass;
-    this.#deleteClassImpl = opts?.deleteClassImpl ?? deleteClass;
-    this.#setClassHiddenImpl = opts?.setClassHiddenImpl ?? setClassHidden;
-    this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
-    this.#setClassMembershipImpl = opts?.setClassMembershipImpl ?? setClassMembership;
-    this.#listFormatsImpl = opts?.listFormatsImpl ?? listFormats;
-    this.#listFormatSchemasImpl = opts?.listFormatSchemasImpl ?? listFormatSchemas;
-    this.#listChannelsImpl = opts?.listChannelsImpl ?? listChannels;
-    this.#rateChannelsImpl = opts?.rateChannelsImpl ?? rateChannels;
-    this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
-    this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
-    this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
-    this.#listChannelLayoutsImpl = opts?.listChannelLayoutsImpl ?? listChannelLayouts;
-    this.#createChannelLayoutImpl = opts?.createChannelLayoutImpl ?? createChannelLayout;
-    this.#updateChannelLayoutImpl = opts?.updateChannelLayoutImpl ?? updateChannelLayout;
-    this.#deleteChannelLayoutImpl = opts?.deleteChannelLayoutImpl ?? deleteChannelLayout;
-    this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
-    this.#listRoundIssuesImpl = opts?.listRoundIssuesImpl ?? listRoundIssues;
-    this.#eventAuditImpl = opts?.eventAuditImpl ?? eventAudit;
-    this.#roundRankingImpl = opts?.roundRankingImpl ?? roundRanking;
-    this.#roundStandingsImpl = opts?.roundStandingsImpl ?? roundStandings;
-    this.#classStandingsImpl = opts?.classStandingsImpl ?? classStandings;
+    this.#api = { ...realApi, ...definedOnly(opts?.api) };
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -552,7 +486,7 @@ export class Session {
     persistToken(trimmed);
     // Re-home the control client so it carries the new token, if inside an event.
     if (this.currentEvent) {
-      this.#control = this.#controlFactory(this.baseUrl, this.#token, {
+      this.#control = this.#api.createControlClient(this.baseUrl, this.#token, {
         eventId: this.currentEvent.id
       });
     }
@@ -564,7 +498,7 @@ export class Session {
     this.hasToken = false;
     persistToken(undefined);
     if (this.currentEvent) {
-      this.#control = this.#controlFactory(this.baseUrl, undefined, {
+      this.#control = this.#api.createControlClient(this.baseUrl, undefined, {
         eventId: this.currentEvent.id
       });
     }
@@ -575,7 +509,7 @@ export class Session {
    * event picker on load. Rejects on a transport/HTTP failure (the picker shows it).
    */
   listEvents(): Promise<EventMeta[]> {
-    return this.#listEventsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listEvents(this.baseUrl, { token: this.#token });
   }
 
   // ── Timer registry (issue #73) ─────────────────────────────────────────────
@@ -592,7 +526,7 @@ export class Session {
    * Used by the app-level Timers management screen. Rejects on a transport/HTTP failure.
    */
   listTimers(): Promise<Timer[]> {
-    return this.#listTimersImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listTimers(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -604,7 +538,7 @@ export class Session {
    * Pilots count and the placeholder page's read-only callsign list.
    */
   listPilots(): Promise<Pilot[]> {
-    return this.#listPilotsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listPilots(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -615,7 +549,7 @@ export class Session {
    * throws on a non-auth failure (a bad hex `color` / `country` is a **400** the form surfaces).
    */
   createPilot(request: CreatePilotRequest): Promise<Pilot | undefined> {
-    return this.#privilegedWrite((token) => this.#createPilotImpl(this.baseUrl, request, token));
+    return this.#privilegedWrite((token) => this.#api.createPilot(this.baseUrl, request, token));
   }
 
   /**
@@ -626,7 +560,7 @@ export class Session {
    */
   updatePilot(id: PilotId, request: UpdatePilotRequest): Promise<Pilot | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#updatePilotImpl(this.baseUrl, id, request, token)
+      this.#api.updatePilot(this.baseUrl, id, request, token)
     );
   }
 
@@ -638,7 +572,7 @@ export class Session {
    */
   deletePilot(id: PilotId): Promise<true | undefined> {
     return this.#privilegedWrite(async (token) => {
-      await this.#deletePilotImpl(this.baseUrl, id, token);
+      await this.#api.deletePilot(this.baseUrl, id, token);
       return true as const;
     });
   }
@@ -657,7 +591,7 @@ export class Session {
    * its count. Rejects on a transport/HTTP failure (the page surfaces it).
    */
   listClasses(): Promise<Class[]> {
-    return this.#listClassesImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listClasses(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -668,7 +602,7 @@ export class Session {
    * on a non-auth failure.
    */
   createClass(request: CreateClassRequest): Promise<Class | undefined> {
-    return this.#privilegedWrite((token) => this.#createClassImpl(this.baseUrl, request, token));
+    return this.#privilegedWrite((token) => this.#api.createClass(this.baseUrl, request, token));
   }
 
   /**
@@ -680,7 +614,7 @@ export class Session {
    */
   updateClass(id: ClassId, request: UpdateClassRequest): Promise<Class | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#updateClassImpl(this.baseUrl, id, request, token)
+      this.#api.updateClass(this.baseUrl, id, request, token)
     );
   }
 
@@ -691,7 +625,7 @@ export class Session {
    */
   deleteClass(id: ClassId): Promise<true | undefined> {
     return this.#privilegedWrite(async (token) => {
-      await this.#deleteClassImpl(this.baseUrl, id, token);
+      await this.#api.deleteClass(this.baseUrl, id, token);
       return true as const;
     });
   }
@@ -707,7 +641,7 @@ export class Session {
    */
   setClassHidden(id: ClassId, hidden: boolean): Promise<Class | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#setClassHiddenImpl(this.baseUrl, id, hidden, token)
+      this.#api.setClassHidden(this.baseUrl, id, hidden, token)
     );
   }
 
@@ -734,7 +668,7 @@ export class Session {
    * Director's token prompt was cancelled, or throws on a non-auth failure.
    */
   createTimer(request: CreateTimerRequest): Promise<Timer | undefined> {
-    return this.#privilegedWrite((token) => this.#createTimerImpl(this.baseUrl, request, token));
+    return this.#privilegedWrite((token) => this.#api.createTimer(this.baseUrl, request, token));
   }
 
   /**
@@ -743,7 +677,7 @@ export class Session {
    */
   updateTimer(id: TimerId, request: UpdateTimerRequest): Promise<Timer | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#updateTimerImpl(this.baseUrl, id, request, token)
+      this.#api.updateTimer(this.baseUrl, id, request, token)
     );
   }
 
@@ -756,7 +690,7 @@ export class Session {
    */
   deleteTimer(id: TimerId): Promise<true | undefined> {
     return this.#privilegedWrite(async (token) => {
-      await this.#deleteTimerImpl(this.baseUrl, id, token);
+      await this.#api.deleteTimer(this.baseUrl, id, token);
       return true as const;
     });
   }
@@ -773,7 +707,7 @@ export class Session {
    * otherwise (the built-in Mock has nothing to dial and answers **400**).
    */
   connectTimer(id: TimerId): Promise<Timer | undefined> {
-    return this.#privilegedWrite((token) => this.#connectTimerImpl(this.baseUrl, id, token));
+    return this.#privilegedWrite((token) => this.#api.connectTimer(this.baseUrl, id, token));
   }
 
   /**
@@ -783,7 +717,7 @@ export class Session {
    * updated {@link Timer}, `undefined` on a cancelled token prompt, or throws otherwise.
    */
   disconnectTimer(id: TimerId): Promise<Timer | undefined> {
-    return this.#privilegedWrite((token) => this.#disconnectTimerImpl(this.baseUrl, id, token));
+    return this.#privilegedWrite((token) => this.#api.disconnectTimer(this.baseUrl, id, token));
   }
 
   /**
@@ -794,7 +728,7 @@ export class Session {
    * (a 400 whose message names the heat), which the caller surfaces verbatim.
    */
   restartTimer(id: TimerId): Promise<Timer | undefined> {
-    return this.#privilegedWrite((token) => this.#restartTimerImpl(this.baseUrl, id, token));
+    return this.#privilegedWrite((token) => this.#api.restartTimer(this.baseUrl, id, token));
   }
 
   /**
@@ -808,7 +742,7 @@ export class Session {
    */
   setCalibration(id: TimerId, request: CalibrationRequest): Promise<void | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#setCalibrationImpl(this.baseUrl, id, request, token)
+      this.#api.setCalibration(this.baseUrl, id, request, token)
     );
   }
 
@@ -830,7 +764,7 @@ export class Session {
    */
   captureLevel(id: TimerId, request: CaptureRequest): Promise<CaptureDispatch | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#captureLevelImpl(this.baseUrl, id, request, token)
+      this.#api.captureLevel(this.baseUrl, id, request, token)
     );
   }
 
@@ -848,7 +782,7 @@ export class Session {
    */
   setNodeChannel(id: TimerId, request: ChannelRequest): Promise<ChannelDispatch | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#setNodeChannelImpl(this.baseUrl, id, request, token)
+      this.#api.setNodeChannel(this.baseUrl, id, request, token)
     );
   }
 
@@ -863,7 +797,7 @@ export class Session {
    * page's cadence is what keeps the timer streaming. See {@link stopTimerSignal}.
    */
   timerSignal(id: TimerId, opts: { signal?: AbortSignal } = {}): Promise<TimerSignal> {
-    return this.#timerSignalImpl(this.baseUrl, id, { token: this.#token, signal: opts.signal });
+    return this.#api.timerSignal(this.baseUrl, id, { token: this.#token, signal: opts.signal });
   }
 
   /**
@@ -874,7 +808,7 @@ export class Session {
    * where a modal dialog would be absurd, and the lease is the backstop if it fails.
    */
   stopTimerSignal(id: TimerId): Promise<void> {
-    return this.#stopTimerSignalImpl(this.baseUrl, id, this.#token);
+    return this.#api.stopTimerSignal(this.baseUrl, id, this.#token);
   }
 
   /**
@@ -886,7 +820,7 @@ export class Session {
    * whatever token the session already holds.
    */
   timerNodes(id: TimerId, opts: { signal?: AbortSignal } = {}): Promise<TimerNodes> {
-    return this.#timerNodesImpl(this.baseUrl, id, { token: this.#token, signal: opts.signal });
+    return this.#api.timerNodes(this.baseUrl, id, { token: this.#token, signal: opts.signal });
   }
 
   /**
@@ -900,7 +834,7 @@ export class Session {
    */
   setTimerNodes(id: TimerId, request: SetTimerNodesRequest): Promise<TimerNodes | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#setTimerNodesImpl(this.baseUrl, id, request, token)
+      this.#api.setTimerNodes(this.baseUrl, id, request, token)
     );
   }
 
@@ -914,7 +848,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setEventTimersImpl(this.baseUrl, event.id, ids, token)
+      this.#api.setEventTimers(this.baseUrl, event.id, ids, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -933,7 +867,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setPrimaryTimerImpl(this.baseUrl, event.id, id, token)
+      this.#api.setPrimaryTimer(this.baseUrl, event.id, id, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -951,7 +885,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setEventRosterImpl(this.baseUrl, event.id, pilotIds, token)
+      this.#api.setEventRoster(this.baseUrl, event.id, pilotIds, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -969,7 +903,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setEventClassesImpl(this.baseUrl, event.id, classIds, token)
+      this.#api.setEventClasses(this.baseUrl, event.id, classIds, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -992,7 +926,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setClassMembershipImpl(this.baseUrl, event.id, classId, members, token)
+      this.#api.setClassMembership(this.baseUrl, event.id, classId, members, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -1009,7 +943,7 @@ export class Session {
    * format dropdown reads, rather than a hard-coded list. Rejects on a transport/HTTP failure.
    */
   listFormats(): Promise<string[]> {
-    return this.#listFormatsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listFormats(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -1020,7 +954,7 @@ export class Session {
    * typed control per knob. Rejects on a transport/HTTP failure.
    */
   listFormatSchemas(): Promise<FormatSchema[]> {
-    return this.#listFormatSchemasImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listFormatSchemas(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -1030,7 +964,7 @@ export class Session {
    * assigned frequencies. Rejects on a transport/HTTP failure.
    */
   listChannels(): Promise<ChannelCatalogEntry[]> {
-    return this.#listChannelsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listChannels(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -1043,7 +977,7 @@ export class Session {
    * a transport/HTTP failure; the caller shows nothing rather than blocking on it.
    */
   rateChannels(channels: readonly number[]): Promise<ImdReading> {
-    return this.#rateChannelsImpl(this.baseUrl, channels, { token: this.#token });
+    return this.#api.rateChannels(this.baseUrl, channels, { token: this.#token });
   }
 
   /**
@@ -1057,7 +991,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const round = await this.#privilegedWrite((token) =>
-      this.#createRoundImpl(this.baseUrl, event.id, request, token)
+      this.#api.createRound(this.baseUrl, event.id, request, token)
     );
     if (round) {
       this.currentEvent = { ...event, rounds: [...(event.rounds ?? []), round] };
@@ -1076,7 +1010,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const round = await this.#privilegedWrite((token) =>
-      this.#updateRoundImpl(this.baseUrl, event.id, roundId, request, token)
+      this.#api.updateRound(this.baseUrl, event.id, roundId, request, token)
     );
     if (round) {
       const rounds = (event.rounds ?? []).map((r) => (r.id === roundId ? round : r));
@@ -1095,7 +1029,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#deleteRoundImpl(this.baseUrl, event.id, roundId, token)
+      this.#api.deleteRound(this.baseUrl, event.id, roundId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -1121,7 +1055,7 @@ export class Session {
   listChannelLayouts(): Promise<ChannelLayouts> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve({ layouts: [], overlaps: [] });
-    return this.#listChannelLayoutsImpl(this.baseUrl, event.id, { token: this.#token });
+    return this.#api.listChannelLayouts(this.baseUrl, event.id, { token: this.#token });
   }
 
   /**
@@ -1138,7 +1072,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const view = await this.#privilegedWrite((token) =>
-      this.#createChannelLayoutImpl(this.baseUrl, event.id, request, token)
+      this.#api.createChannelLayout(this.baseUrl, event.id, request, token)
     );
     if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
     return view;
@@ -1158,7 +1092,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const view = await this.#privilegedWrite((token) =>
-      this.#updateChannelLayoutImpl(this.baseUrl, event.id, layoutId, request, token)
+      this.#api.updateChannelLayout(this.baseUrl, event.id, layoutId, request, token)
     );
     if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
     return view;
@@ -1174,7 +1108,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const view = await this.#privilegedWrite((token) =>
-      this.#deleteChannelLayoutImpl(this.baseUrl, event.id, layoutId, token)
+      this.#api.deleteChannelLayout(this.baseUrl, event.id, layoutId, token)
     );
     if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
     return view;
@@ -1281,7 +1215,7 @@ export class Session {
   listHeats(): Promise<HeatSummary[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#listHeatsImpl(this.baseUrl, event.id, { token: this.#token });
+    return this.#api.listHeats(this.baseUrl, event.id, { token: this.#token });
   }
 
   /**
@@ -1297,7 +1231,7 @@ export class Session {
   listRoundIssues(): Promise<RoundIssue[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#listRoundIssuesImpl(this.baseUrl, event.id, { token: this.#token });
+    return this.#api.listRoundIssues(this.baseUrl, event.id, { token: this.#token });
   }
 
   /**
@@ -1312,7 +1246,7 @@ export class Session {
   eventAudit(): Promise<EventAuditEntry[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#eventAuditImpl(this.baseUrl, event.id, { token: this.#token });
+    return this.#api.eventAudit(this.baseUrl, event.id, { token: this.#token });
   }
 
   // --- Rankings & standings (race redesign Slice 5/6a + 5/6b) -----------------------------------
@@ -1330,7 +1264,7 @@ export class Session {
   roundRanking(roundId: RoundId): Promise<RankEntry[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#roundRankingImpl(this.baseUrl, event.id, roundId, { token: this.#token });
+    return this.#api.roundRanking(this.baseUrl, event.id, roundId, { token: this.#token });
   }
 
   /**
@@ -1344,7 +1278,7 @@ export class Session {
   roundStandings(roundId: RoundId): Promise<RoundStanding[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#roundStandingsImpl(this.baseUrl, event.id, roundId, { token: this.#token });
+    return this.#api.roundStandings(this.baseUrl, event.id, roundId, { token: this.#token });
   }
 
   /**
@@ -1358,7 +1292,7 @@ export class Session {
   classStandings(classId: ClassId): Promise<ClassStandings> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve({ class: classId, standings: [] });
-    return this.#classStandingsImpl(this.baseUrl, event.id, classId, { token: this.#token });
+    return this.#api.classStandings(this.baseUrl, event.id, classId, { token: this.#token });
   }
 
   /**
@@ -1387,7 +1321,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#addToRosterImpl(this.baseUrl, event.id, pilotId, token)
+      this.#api.addToRoster(this.baseUrl, event.id, pilotId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -1403,7 +1337,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#removeFromRosterImpl(this.baseUrl, event.id, pilotId, token)
+      this.#api.removeFromRoster(this.baseUrl, event.id, pilotId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -1419,7 +1353,7 @@ export class Session {
    */
   async getActiveEventId(): Promise<EventMeta['id'] | undefined> {
     try {
-      const { event } = await this.#getActiveEventImpl(this.baseUrl, { token: this.#token });
+      const { event } = await this.#api.getActiveEvent(this.baseUrl, { token: this.#token });
       return event?.id;
     } catch {
       return undefined;
@@ -1441,7 +1375,7 @@ export class Session {
   async resolveActiveEvent(): Promise<void> {
     this.resolvingActiveEvent = true;
     try {
-      const { event } = await this.#getActiveEventImpl(this.baseUrl, { token: this.#token });
+      const { event } = await this.#api.getActiveEvent(this.baseUrl, { token: this.#token });
       if (event) this.selectEvent(event);
     } catch {
       // The Director is unreachable / errored — leave the picker to surface it (it re-lists
@@ -1464,11 +1398,11 @@ export class Session {
    */
   async chooseEvent(meta: EventMeta): Promise<EventMeta | undefined> {
     try {
-      await this.#setActiveEventImpl(this.baseUrl, meta.id, this.#token);
+      await this.#api.setActiveEvent(this.baseUrl, meta.id, this.#token);
     } catch (e) {
       if (this.#token || !isAuthFailure(e)) throw e;
       if (!(await this.#promptForToken())) return undefined;
-      await this.#setActiveEventImpl(this.baseUrl, meta.id, this.#token);
+      await this.#api.setActiveEvent(this.baseUrl, meta.id, this.#token);
     }
     this.selectEvent(meta);
     return meta;
@@ -1488,11 +1422,11 @@ export class Session {
    */
   async deleteEvent(id: EventMeta['id']): Promise<true | undefined> {
     try {
-      await this.#deleteEventImpl(this.baseUrl, id, this.#token);
+      await this.#api.deleteEvent(this.baseUrl, id, this.#token);
     } catch (e) {
       if (this.#token || !isAuthFailure(e)) throw e;
       if (!(await this.#promptForToken())) return undefined;
-      await this.#deleteEventImpl(this.baseUrl, id, this.#token);
+      await this.#api.deleteEvent(this.baseUrl, id, this.#token);
     }
     // If we were inside the just-deleted event, leave it so the workspace doesn't dangle.
     if (this.currentEvent?.id === id) this.leaveEvent();
@@ -1511,11 +1445,11 @@ export class Session {
   selectEvent(meta: EventMeta, scope?: Scope): void {
     this.leaveEvent();
     this.currentEvent = meta;
-    this.#control = this.#controlFactory(this.baseUrl, this.#token, { eventId: meta.id });
+    this.#control = this.#api.createControlClient(this.baseUrl, this.#token, { eventId: meta.id });
 
     const liveScope: Scope = scope ?? { Event: { event: meta.id } };
     this.connectionStatus = 'connecting';
-    this.#client = this.#connectImpl({
+    this.#client = this.#api.connect({
       baseUrl: this.baseUrl,
       eventId: meta.id,
       scope: liveScope,
@@ -1645,7 +1579,7 @@ export class Session {
     this.#unsub?.();
     this.#client?.close();
     this.connectionStatus = 'connecting';
-    this.#client = this.#connectImpl({
+    this.#client = this.#api.connect({
       baseUrl: this.baseUrl,
       eventId: event.id,
       scope,
@@ -1720,7 +1654,7 @@ export class Session {
     fields?: CreateEventFields
   ): Promise<EventMeta | undefined> {
     try {
-      const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      const meta = await this.#api.createEvent(this.baseUrl, name, this.#token, { fields });
       await this.#persistActive(meta.id);
       this.selectEvent(meta);
       return meta;
@@ -1729,7 +1663,7 @@ export class Session {
       if (this.#token || !isAuthFailure(e)) throw e;
       // Open Director would have succeeded; a 401/403 means control is gated — prompt once.
       if (!(await this.#promptForToken())) return undefined;
-      const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      const meta = await this.#api.createEvent(this.baseUrl, name, this.#token, { fields });
       await this.#persistActive(meta.id);
       this.selectEvent(meta);
       return meta;
@@ -1744,7 +1678,7 @@ export class Session {
    */
   async #persistActive(id: EventMeta['id']): Promise<void> {
     try {
-      await this.#setActiveEventImpl(this.baseUrl, id, this.#token);
+      await this.#api.setActiveEvent(this.baseUrl, id, this.#token);
     } catch {
       /* leave the active event unset; entering locally still works */
     }

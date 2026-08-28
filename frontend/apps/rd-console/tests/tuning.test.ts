@@ -788,7 +788,7 @@ describe('duplicateChannelNodes — flagged, never blocked', () => {
   });
 
   it('names the other nodes the way the RD does — 1-based, never a raw index', () => {
-    const note = duplicateChannelNote(0, [0, 2]);
+    const note = duplicateChannelNote(undefined, 0, [0, 2]);
     expect(note).toContain('Node 3');
     expect(note).not.toContain('Node 0');
     // And it says why it matters without forbidding it: a swap looks exactly like this.

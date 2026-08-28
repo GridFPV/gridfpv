@@ -36,7 +36,8 @@ import type {
   TimerNodes
 } from '@gridfpv/types';
 import { channelLabel, nodeSeatLabel } from './channels.js';
-import { nodeLabel } from './timerNodes.js';
+import { joinLabels, nodeLabels } from './timerNodes.js';
+import { duplicateChannelNodes } from './tuning.js';
 
 /**
  * A layout being edited: the same shape as a stored {@link ChannelLayout}, except a node's channel
@@ -113,17 +114,13 @@ export function layerNodes(view: TimerNodes | undefined): number[] {
  * The editor marks these inline and blocks Save; the Director refuses the same thing with a
  * sentence. Mirrored here only so the RD is told while they are still looking at the dropdown they
  * just changed, rather than after a round-trip.
+ *
+ * The clash itself is {@link duplicateChannelNodes}, the Tune page's rule — the same question about
+ * the same `node → channel` map, so it gets the same answer. A draft simply never carries an unset
+ * channel where the Tune page can, which is why the draft's map is the narrower one.
  */
 export function duplicateNodes(draft: LayerDraft): Set<number> {
-  const byChannel = new Map<number, number[]>();
-  for (const [node, channel] of draft.channels) {
-    byChannel.set(channel, [...(byChannel.get(channel) ?? []), node]);
-  }
-  const out = new Set<number>();
-  for (const nodes of byChannel.values()) {
-    if (nodes.length > 1) for (const node of nodes) out.add(node);
-  }
-  return out;
+  return duplicateChannelNodes(draft.channels);
 }
 
 /** The nodes a draft has not tuned yet — a layout is a *complete* tuning, so Save waits for these. */
@@ -149,21 +146,19 @@ export function draftBlocker(
   const dupes = [...duplicateNodes(draft)].sort((a, b) => a - b);
   if (dupes.length > 0) {
     const channel = draft.channels.get(dupes[0]);
-    const names = dupes.map((node) => nodeName(view, node)).join(' and ');
+    const names = joinLabels(nodeLabels(view, dupes));
     const on = channel === undefined ? '' : ` on ${channelLabel(channel, [...catalog])}`;
     return `${names} are both${on} — two nodes cannot share a frequency.`;
   }
   const untuned = untunedNodes(draft, nodes);
   if (untuned.length > 0) {
-    const names = untuned.map((node) => nodeName(view, node));
+    // A plain comma list, not {@link joinLabels}: this is an instruction naming every node still to
+    // be filled in, not a clause about two things that clash, and "Node 2, Node 4 and Node 6" reads
+    // as if the last one were special.
+    const names = nodeLabels(view, untuned);
     return `Set a channel for ${names.join(', ')} — a layout tunes every enabled node.`;
   }
   return undefined;
-}
-
-/** A node's **display** name, through the shared `#412` resolver — `"Node 3"`, never the index. */
-function nodeName(view: TimerNodes | undefined, node: number): string {
-  return view ? nodeLabel(view, node) : `Node ${node + 1}`;
 }
 
 /**
@@ -206,10 +201,7 @@ export function overlapMessage(
   catalog: readonly ChannelCatalogEntry[]
 ): string {
   const names = overlap.channels.map((mhz) => channelLabel(mhz, [...catalog]));
-  const shared =
-    names.length === 1
-      ? names[0]
-      : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  const shared = joinLabels(names);
   const verb = names.length === 1 ? 'uses' : 'use';
   return (
     `${layoutName(layouts, overlap.layout)} and ${layoutName(layouts, overlap.other)} both ${verb} ` +
