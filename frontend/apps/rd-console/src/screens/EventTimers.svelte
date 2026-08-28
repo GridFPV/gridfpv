@@ -249,7 +249,7 @@
 <section class="event-timers" aria-label="Event timers">
   <Card
     title="Timers for this event"
-    subtitle="Add, edit, or remove timers, and tick which ones feed this event's races."
+    help="Add, edit, or remove timers, and tick which ones feed this event's races."
   >
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={() => manager?.openAdd()}>+ Add timer</Button>
@@ -296,7 +296,7 @@
   {#if showRoles}
     <Card
       title="Timer roles"
-      subtitle="Primary feeds the race; alternates are hot standby and take over if the primary drops."
+      help="Primary feeds the race; alternates are hot standby and take over if the primary drops."
     >
       <ul class="roles" aria-label="Timer roles">
         {#each roleTimers as timer (timer.id)}

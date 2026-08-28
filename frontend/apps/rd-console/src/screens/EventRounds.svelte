@@ -1542,7 +1542,7 @@
 <section class="event-rounds" aria-label="Rounds and heats">
   <Card
     title="Rounds"
-    subtitle="Define this event's rounds — eligible classes, format, win condition, and seeding. Rounds are added as you go."
+    help="Define this event's rounds — eligible classes, format, win condition, and seeding. Rounds are added as you go."
   >
     {#snippet actions()}
       <Button
@@ -1644,7 +1644,7 @@
        heat" button any more. One door per room: the RD works down the round they are looking at. -->
   <Card
     title="Heats"
-    subtitle="Fill each round’s heats from its field, or add one by hand. Run them from Race control."
+    help="Fill each round’s heats from its field, or add one by hand. Run them from Race control."
   >
     {#if rounds.length === 0}
       <p class="empty" role="status">

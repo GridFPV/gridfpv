@@ -57,7 +57,7 @@
    * index, a bare MHz, or a layout id (`channels.ts`'s `nodeSeatLabel` / `channelLabel`,
    * `timerNodes.ts`'s `nodeLabel`, and `channelLayouts.ts`'s `layoutName`).
    */
-  import { Banner, Button, Card, Field, Input, Select, toast } from '@gridfpv/components';
+  import { Banner, Button, Card, Field, InfoTip, Input, Select, toast } from '@gridfpv/components';
   import type {
     ChannelCatalogEntry,
     ChannelLayout,
@@ -333,7 +333,7 @@
 
 <Card
   title="Channel layouts"
-  subtitle="What goes on which node in this event. A layout tunes every node; edits here stay in this event."
+  help="What goes on which node in this event. A layout tunes every node; edits here stay in this event."
 >
   {#snippet actions()}
     <Button variant="secondary" size="sm" disabled={!!unconfigured || open} onclick={startAdd}>
@@ -352,9 +352,13 @@
   {:else}
     {#if layouts.length === 0 && !open}
       <p class="empty">
-        No layouts yet. Add one and it starts from the channels {timer?.name} is allowed to use — then
-        change any node you like. A bracket usually needs one layout for the whole tournament; qualifiers
-        that keep each pilot on their own channel need several.
+        No layouts yet.
+        <!-- #466: the two sentences of "how many do I need" guidance are reference material, read
+             once. The fact — that there are none — stays on the page. -->
+        <InfoTip
+          label="About channel layouts"
+          text={`Add one and it starts from the channels ${timer?.name ?? 'the timer'} is allowed to use — then change any node you like. A bracket usually needs one layout for the whole tournament; qualifiers that keep each pilot on their own channel need several.`}
+        />
       </p>
     {/if}
 
@@ -487,16 +491,21 @@
               >Couldn’t read the IMD for these channels. It does not affect saving.</span
             >
           {/if}
-          <span class="imd-note">
-            Higher is cleaner and 100 is the ceiling — the same number RotorHazard shows for these
-            channels. What is achievable falls as you use more nodes, so compare layouts against
-            each other rather than against 100.
-          </span>
+          <!-- #466: this was two permanent sentences under a number. It is a definition of the
+               scale, read once — and `imdToneHint` already tooltips the same widget. -->
+          <InfoTip
+            label="About the IMD rating"
+            align="end"
+            text="Higher is cleaner and 100 is the ceiling — the same number RotorHazard shows for these channels. What is achievable falls as you use more nodes, so compare layouts against each other rather than against 100."
+          />
         </div>
 
         {#if blocker}
           <Banner tone="warn">{blocker}</Banner>
         {:else if seeding}
+          <!-- KEPT on the page (#466): this is not a standing blurb, it is a state explanation — it
+               appears only while the form would otherwise look empty, and tells the RD the layout
+               will still come out populated. -->
           <p class="seed-note">
             Leave the channels unset and this layout starts from the channels {timer?.name} is allowed
             to use, one per node.
@@ -592,12 +601,8 @@
   .imd-line.stale {
     opacity: 0.5;
   }
-  .imd-hint,
-  .imd-note {
+  .imd-hint {
     color: var(--gf-text-muted);
-  }
-  .imd-note {
-    font-size: var(--gf-font-size-xs, var(--gf-font-size-sm));
   }
   .layout-actions {
     display: flex;
