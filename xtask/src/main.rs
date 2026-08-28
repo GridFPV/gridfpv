@@ -348,6 +348,14 @@ const FULL_TARGETS: &[LiveTarget] = &[
     ("gridfpv-app", "rh_connect_live", true),
     // #386 — restarting RH from Grid must really re-exec it, and must be refused mid-heat.
     ("gridfpv-app", "rh_restart_live", true),
+    // #438/#454 — a reconnect's hello must RE-READ RotorHazard's min-lap filter rather than
+    // replaying its load-time report, and the hand-back record must survive. (Added with the
+    // target in Wave 1; it was written but never registered, so the matrix never ran it.)
+    ("gridfpv-app", "rh_min_lap_live", true),
+    // #479 — the Tune page's three write verbs (calibration / channel / capture) end to end:
+    // registry queue → reconciler drain → driver dispatch → RotorHazard → readback. A socket emit
+    // has no failure signal, so only a live readback proves the write landed.
+    ("gridfpv-app", "rh_tune_write_live", true),
 ];
 
 /// The **targeted** subset the secondary *plugin* legs run: the lap-ingestion-critical
