@@ -43,3 +43,4 @@ frontend/e2e-artifacts/
 # Python bytecode from touching the RotorHazard plugin locally
 __pycache__/
 *.pyc
+frontend/**/node_modules
