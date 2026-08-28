@@ -354,89 +354,103 @@ async fn a_channel_write_lands_on_rotorhazard_and_reads_back() {
 async fn a_capture_runs_end_to_end_and_is_observed() {
     let bench = bench(CAPTURE_PORT).await;
 
+    // #465: one press arms BOTH halves — enter's window opens now, exit's a delay later.
     let dispatch = bench
         .registry
         .timers()
-        .request_capture(
-            &bench.timer,
-            &CaptureRequest {
-                node: NODE,
-                threshold: CaptureThreshold::Enter,
-            },
-            false,
-        )
+        .request_capture(&bench.timer, &CaptureRequest { node: NODE }, false)
         .expect("a connected RotorHazard timer accepts a capture");
     assert_eq!(dispatch.node, NODE);
-    assert_eq!(dispatch.threshold, CaptureThreshold::Enter);
+    assert!(
+        dispatch.exit_delay_ms > 0,
+        "the exit window opens after the enter one — back-to-back over a single pass (#465)"
+    );
     assert!(
         bench.registry.timers().capture_in_flight(&bench.timer),
         "the capture is in flight the moment it is accepted — the console shows it as running"
     );
 
-    // The capture's own window plus its settle grace, then resolve. `resolve_captures` returns the
-    // outcome only once the capture is out of time, so poll it rather than sleeping a guessed total.
-    let mut outcome = None;
-    let resolved = wait_for(
-        READBACK_TIMEOUT + Duration::from_millis(dispatch.window_ms as u64),
-        || {
-            if let Some(o) = bench
-                .registry
-                .timers()
-                .resolve_captures()
-                .into_iter()
-                .find(|o| o.timer == bench.timer && o.node == NODE)
-            {
-                outcome = Some(o);
-                return true;
+    // Both halves resolve on their own clocks: enter within its window, exit a delay later.
+    // `resolve_captures` returns an outcome only once that half is out of time, so poll and
+    // collect until both halves have answered rather than sleeping a guessed total.
+    let mut enter = None;
+    let mut exit = None;
+    let both_windows = Duration::from_millis((dispatch.exit_delay_ms + dispatch.window_ms) as u64);
+    let resolved = wait_for(READBACK_TIMEOUT + both_windows, || {
+        for o in bench.registry.timers().resolve_captures() {
+            if o.timer == bench.timer && o.node == NODE {
+                match o.threshold {
+                    CaptureThreshold::Enter => enter = Some(o),
+                    CaptureThreshold::Exit => exit = Some(o),
+                }
             }
-            false
-        },
-    )
+        }
+        enter.is_some() && exit.is_some()
+    })
     .await;
     assert!(
         resolved,
-        "the capture must resolve within its window plus grace — an unresolved capture leaves the \
-         console spinning forever. RotorHazard's log was:\n{}",
+        "both capture halves must resolve within their windows plus grace — an unresolved half \
+         leaves the console spinning forever. enter resolved = {}, exit resolved = {}; \
+         RotorHazard's log was:\n{}",
+        enter.is_some(),
+        exit.is_some(),
         bench.rh.logs()
     );
+    let outcomes = [
+        (
+            CaptureThreshold::Enter,
+            enter.expect("resolved implies enter"),
+        ),
+        (CaptureThreshold::Exit, exit.expect("resolved implies exit")),
+    ];
 
-    let outcome = outcome.expect("resolved implies an outcome");
-    assert_eq!(outcome.threshold, CaptureThreshold::Enter);
-    assert_ne!(
-        outcome.resolution,
-        CaptureResolution::Unobserved,
-        "GridFPV must have been watching the tune feed across the capture. `Unobserved` means the \
-         subscription was never open or the link dropped — it is the one outcome that indicts this \
-         pipeline rather than the gate. outcome = {outcome:?}; RotorHazard's log was:\n{}",
-        bench.rh.logs()
-    );
-    assert!(
-        outcome.reported.is_some(),
-        "…and an observed capture always knows what the timer is now detecting against, whether or \
-         not the level changed (#446): {outcome:?}"
-    );
+    // Each half settles independently through #446's three-way resolution — one may be
+    // `Measured` while the other is `Unchanged`, and both must have been watched.
+    for (half, outcome) in &outcomes {
+        assert_ne!(
+            outcome.resolution,
+            CaptureResolution::Unobserved,
+            "GridFPV must have been watching the tune feed across the {half:?} window. \
+             `Unobserved` means the subscription was never open or the link dropped — it is the \
+             one outcome that indicts this pipeline rather than the gate. outcome = {outcome:?}; \
+             RotorHazard's log was:\n{}",
+            bench.rh.logs()
+        );
+        assert!(
+            outcome.reported.is_some(),
+            "…and an observed capture always knows what the timer is now detecting against, \
+             whether or not the level changed (#446): {outcome:?}"
+        );
+    }
 
     // `Measured` is the only outcome GridFPV may record as its own (D27) — and when it does, the
-    // recorded level must be exactly what it reported seeing.
-    if outcome.resolution == CaptureResolution::Measured {
-        assert_eq!(
-            outcome.level, outcome.reported,
-            "a measured capture records the level it observed, never a different one"
-        );
-        let held = bench.registry.timers().calibration(&bench.timer);
-        assert_eq!(
-            held.iter()
+    // recorded level must be exactly what it reported seeing, filed under its own half.
+    for (half, outcome) in &outcomes {
+        if outcome.resolution == CaptureResolution::Measured {
+            assert_eq!(
+                outcome.level, outcome.reported,
+                "a measured capture records the level it observed, never a different one"
+            );
+            let held = bench.registry.timers().calibration(&bench.timer);
+            let recorded = held
+                .iter()
                 .find(|c| c.node == NODE)
-                .and_then(|c| c.enter_at),
-            outcome.level,
-            "a measured capture becomes GridFPV's own enter threshold (D27)"
-        );
-    } else {
-        assert_eq!(
-            outcome.level, None,
-            "only a measured capture records anything — an unchanged one cannot attribute the \
-             level to the capture, and adopting a readback as config is what D27 forbids"
-        );
+                .and_then(|c| match half {
+                    CaptureThreshold::Enter => c.enter_at,
+                    CaptureThreshold::Exit => c.exit_at,
+                });
+            assert_eq!(
+                recorded, outcome.level,
+                "a measured {half:?} capture becomes GridFPV's own {half:?} threshold (D27)"
+            );
+        } else {
+            assert_eq!(
+                outcome.level, None,
+                "only a measured capture records anything — an unchanged one cannot attribute \
+                 the level to the capture, and adopting a readback as config is what D27 forbids"
+            );
+        }
     }
 
     bench.rh.stop();
