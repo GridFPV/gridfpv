@@ -740,6 +740,18 @@
   // The LIVE preview: re-detect at the tuned levels, diff against the current official passes
   // (lap 1's opening pass + every lap's closing pass, from the marshaling-corrected lap list).
   const tuneValid = $derived(tuneEnter > tuneExit);
+  // The marshaled heat's round's **minimum-lap floor** (D26, `RoundDef.min_lap_secs`) in µs, or 0
+  // when the round sets none / the heat carries no round tag. Re-detection is an AUTOMATED path,
+  // so it is held to the floor (#469): the commit inserts marshal-created passes, which the
+  // corrected-passes fold exempts from the floor, so a sub-floor crossing had to be refused in the
+  // math or nothing downstream could strip it. The RD's own "Add lap" is deliberately NOT held to
+  // it — an explicit ruling still outranks the floor.
+  const minLapMicros = $derived.by<number>(() => {
+    const roundId = heats.find((h) => h.heat === heat)?.round;
+    if (!roundId) return 0;
+    const secs = (session.currentEvent?.rounds ?? []).find((r) => r.id === roundId)?.min_lap_secs;
+    return typeof secs === 'number' && secs > 0 ? secs * 1_000_000 : 0;
+  });
   // Flatten across entries: the shown pilot can hold several lap-list entries (one per
   // adapter after a mid-heat failover) — the tune diff must see ALL their official passes.
   const shownPilotLaps = $derived<Lap[]>((shownLaps?.competitors ?? []).flatMap((c) => c.laps));
@@ -760,7 +772,8 @@
       officialPasses(shownPilotLaps),
       detectedPassTimes,
       DEFAULT_MATCH_TOLERANCE_MICROS,
-      shownVoidedAt
+      shownVoidedAt,
+      minLapMicros
     )
   );
   const redetectDirty = $derived(redetectDiff.added.length > 0 || redetectDiff.removed.length > 0);
@@ -772,7 +785,8 @@
       officialPasses(shownPilotLaps),
       detectedPassTimes,
       DEFAULT_MATCH_TOLERANCE_MICROS,
-      shownVoidedAt
+      shownVoidedAt,
+      minLapMicros
     )
   );
   const previewLapCount = $derived(
@@ -1052,6 +1066,8 @@
               (+{redetectDiff.added.length} added, −{redetectDiff.removed.length} removed{redetectDiff
                 .suppressed.length > 0
                 ? `, ${redetectDiff.suppressed.length} voided by you stay removed`
+                : ''}{redetectDiff.refused.length > 0
+                ? `, ${redetectDiff.refused.length} under the ${minLapMicros / 1_000_000}s min lap refused`
                 : ''})
             </p>
           {/if}
@@ -1094,6 +1110,18 @@
                         <span class="mark" aria-hidden="true">∅</span>
                         <span class="what"
                           >crossing at {formatMicros(row.at)}s — voided by you, stays removed</span
+                        >
+                      </li>
+                    {:else if row.status === 'refused'}
+                      <!-- The floor REFUSED this crossing (#469): re-detection is automated, and
+                           an automated path may not mint a lap under the round's min lap. Shown
+                           rather than hidden — the trace really does see something there, and the
+                           RD can still add the lap by hand if they rule it real. -->
+                      <li class="voided">
+                        <span class="mark" aria-hidden="true">∅</span>
+                        <span class="what"
+                          >crossing at {formatMicros(row.at)}s — under the {minLapMicros /
+                            1_000_000}s min lap, not added</span
                         >
                       </li>
                     {:else}

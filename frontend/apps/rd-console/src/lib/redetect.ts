@@ -46,6 +46,13 @@ export interface PassDiff {
    * record and the tuner share the lap list's `voided` data). Never inserted by a commit.
    */
   suppressed: number[];
+  /**
+   * Re-detected crossings REFUSED by the round's **minimum-lap floor** (D26, #469) — they would
+   * have been `added`, but minting them would put a lap under the floor. Never inserted by a
+   * commit. See {@link diffPasses}'s `minLapMicros` for the rule and why the automated path is
+   * held to it when a hand-added lap is not.
+   */
+  refused: number[];
 }
 
 /** A preview lap derived from consecutive re-detected passes (see {@link previewLaps}). */
@@ -112,12 +119,29 @@ export function detectPasses(trace: CompetitorTrace, enter: number, exit: number
  * match within `toleranceMicros` (inclusive), each official pass matching at most one detected
  * pass and vice versa. Unmatched detected times are `added`; unmatched official passes are
  * `removed` — together, the exact command batch a commit sends.
+ *
+ * `minLapMicros` is the round's **minimum-lap floor** (D26, `RoundDef.min_lap_secs` in µs;
+ * omitted / `0` = off). **An automated path may not mint a lap under the floor** (#469): a
+ * commit inserts each `added` time as a marshal-created pass, and marshal-created passes are
+ * *exempt* from the corrected-passes fold's floor — an explicit ruling outranks the floor. That
+ * exemption is right for a human RD adding a lap by hand (their judgment, their call) and wrong
+ * for threshold-replay math, which was borrowing it to mint sub-floor laps no fold could strip.
+ * So the refusal happens here, in the math, before anything is proposed.
+ *
+ * The rule, evaluated against the chain a commit would actually leave behind (kept official
+ * passes + the candidate adds, in time order): a candidate add is REFUSED when it lands closer
+ * than `minLapMicros` to the previous surviving entry, or closer than `minLapMicros` to the next
+ * *official* entry — the second half stops an add from squeezing in beside an existing pass and
+ * pushing that pass under the floor instead of itself. Refusals land in `refused`, never
+ * `added`. Only adds are ever refused: an official pass already in the record — including a lap
+ * the RD hand-added under the floor — anchors the chain and is left exactly as it is.
  */
 export function diffPasses(
   current: OfficialPass[],
   detected: number[],
   toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS,
-  voidedAt: number[] = []
+  voidedAt: number[] = [],
+  minLapMicros: number = 0
 ): PassDiff {
   // Match FIRST, suppress SECOND. Suppression must only claim crossings that would otherwise
   // become ADDS: running it before the match let a voided instant steal an official pass's
@@ -148,21 +172,81 @@ export function diffPasses(
   // THEN: of the unmatched crossings, suppress those the RD explicitly voided (within
   // tolerance). The trace still shows the crossing — the void must win here, or the tuner
   // keeps offering a removed lap back as an add.
-  const added: number[] = [];
+  const mintable: number[] = [];
   const suppressed: number[] = [];
   for (let di = 0; di < detected.length; di++) {
     if (matchedDetected.has(di)) continue;
     const t = detected[di];
     if (voidedAt.some((v) => Math.abs(v - t) <= toleranceMicros)) suppressed.push(t);
-    else added.push(t);
+    else mintable.push(t);
   }
+
+  // FINALLY: hold the surviving candidates to the round's min-lap floor. A void is the RD's
+  // ruling and outranks the floor, so it is applied first (above) and a voided crossing never
+  // reaches this step at all.
+  const { added, refused } = applyMinLapFloor(
+    kept.map((k) => k.at),
+    mintable,
+    minLapMicros
+  );
 
   return {
     kept,
     added,
     removed: current.filter((_, ci) => !matchedCurrent.has(ci)),
-    suppressed
+    suppressed,
+    refused
   };
+}
+
+/**
+ * Split re-detection's candidate new passes into the ones a commit may `add` and the ones the
+ * round's minimum-lap floor `refused` (#469) — the rule spelled out on {@link diffPasses}.
+ *
+ * `official` are the times of the passes that survive the commit (they anchor the chain and are
+ * never refused — a hand-added sub-floor lap is the RD's ruling, and the floor does not overturn
+ * it). `candidates` are the would-be adds. A floor of `0` (or a non-finite one) is OFF and every
+ * candidate is an add, exactly as before the floor existed.
+ *
+ * Earlier candidates win: walking the merged chain forward means a burst of reflections keeps its
+ * FIRST crossing and refuses the rest, matching how the timer's own min-lap behaves and how the
+ * corrected-passes fold suppresses a raw sub-floor pass rather than the pass before it.
+ */
+export function applyMinLapFloor(
+  official: number[],
+  candidates: number[],
+  minLapMicros: number
+): { added: number[]; refused: number[] } {
+  if (!(minLapMicros > 0)) return { added: [...candidates], refused: [] };
+  const officialSorted = [...official].sort((a, b) => a - b);
+  const merged = [
+    ...officialSorted.map((at) => ({ at, add: false })),
+    ...candidates.map((at) => ({ at, add: true }))
+  ].sort((a, b) => a.at - b.at || Number(a.add) - Number(b.add));
+
+  const added: number[] = [];
+  const refused: number[] = [];
+  let prevSurviving: number | undefined;
+  for (let i = 0; i < merged.length; i++) {
+    const entry = merged[i];
+    if (!entry.add) {
+      // An official pass always survives and always anchors, floor or no floor.
+      prevSurviving = entry.at;
+      continue;
+    }
+    // The next OFFICIAL entry, which is guaranteed to survive — so an add cannot be accepted by
+    // clearing the gap behind it only to shove the pass in front of it under the floor.
+    const nextOfficial = merged.slice(i + 1).find((e) => !e.add)?.at;
+    const tooCloseBehind = prevSurviving !== undefined && entry.at - prevSurviving < minLapMicros;
+    const tooCloseAhead = nextOfficial !== undefined && nextOfficial - entry.at < minLapMicros;
+    if (tooCloseBehind || tooCloseAhead) {
+      refused.push(entry.at);
+      continue;
+    }
+    added.push(entry.at);
+    prevSurviving = entry.at;
+  }
+  return { added, refused };
 }
 
 /**
@@ -210,6 +294,13 @@ export type PreviewRow =
       /** Source-clock time (µs) of a detected crossing the RD already voided — shown so the
        *  story is honest ("the trace sees it; you removed it"), never inserted by a commit. */
       at: number;
+    }
+  | {
+      status: 'refused';
+      /** Source-clock time (µs) of a detected crossing the round's min-lap floor refused
+       *  (#469) — shown, not hidden, so the RD can see the trace found something and why it is
+       *  not being minted. Never inserted by a commit; the RD may still add the lap by hand. */
+      at: number;
     };
 
 /**
@@ -224,14 +315,16 @@ export function previewRows(
   current: OfficialPass[],
   detected: number[],
   toleranceMicros: number = DEFAULT_MATCH_TOLERANCE_MICROS,
-  voidedAt: number[] = []
+  voidedAt: number[] = [],
+  minLapMicros: number = 0
 ): PreviewRow[] {
-  const diff = diffPasses(current, detected, toleranceMicros, voidedAt);
+  const diff = diffPasses(current, detected, toleranceMicros, voidedAt, minLapMicros);
   const keptDetectedAt = new Set(diff.kept.map((k) => k.detectedAt));
-  // The lap chain derives from the detected passes MINUS the RD-suppressed crossings — the
+  // The lap chain derives from the detected passes MINUS the crossings the commit will not
+  // insert — the RD-suppressed ones and the ones the min-lap floor refused (#469). The
   // post-commit record will not contain them, so the previewed laps must not either.
-  const suppressed = new Set(diff.suppressed);
-  const chain = detected.filter((t) => !suppressed.has(t));
+  const dropped = new Set([...diff.suppressed, ...diff.refused]);
+  const chain = detected.filter((t) => !dropped.has(t));
   const rows: PreviewRow[] = previewLaps(chain).map((lap) => ({
     status: keptDetectedAt.has(lap.at) ? 'kept' : 'added',
     number: lap.number,
@@ -240,6 +333,7 @@ export function previewRows(
   }));
   for (const pass of diff.removed) rows.push({ status: 'removed', at: pass.at, ref: pass.ref });
   for (const at of diff.suppressed) rows.push({ status: 'voided', at });
+  for (const at of diff.refused) rows.push({ status: 'refused', at });
   // Chronological (stable, so same-instant rows keep lap-then-removed order).
   rows.sort((a, b) => a.at - b.at);
   return rows;

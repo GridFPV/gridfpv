@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CompetitorTrace, Lap } from '@gridfpv/types';
 import {
+  applyMinLapFloor,
   DEFAULT_MATCH_TOLERANCE_MICROS,
   defaultThresholds,
   detectPasses,
@@ -308,5 +309,115 @@ describe('defaultThresholds (unset-trace fallback)', () => {
 
   it('is undefined for an empty trace', () => {
     expect(defaultThresholds(trace([]))).toBeUndefined();
+  });
+});
+
+describe('the min-lap floor binds the AUTOMATED path (#469)', () => {
+  const FLOOR = 10 * S; // a 10s min lap (RoundDef.min_lap_secs = 10)
+
+  it('refuses a re-detected crossing that would mint a sub-min-lap lap', () => {
+    // The reported bug: lowering `enter` splits one gate pass into two crossings 1s apart. The
+    // commit inserts each add as a MARSHAL-CREATED pass, which the corrected-passes fold exempts
+    // from the floor — so nothing downstream could strip the 1s lap. The math has to refuse it.
+    const t = trace([70, 200, 70, 190, 70, 70, 70, 70, 70, 70, 70, 200, 70]);
+    const detected = detectPasses(t, 150, 100);
+    expect(detected).toEqual([1 * S, 3 * S, 11 * S]);
+
+    const d = diffPasses([], detected, DEFAULT_MATCH_TOLERANCE_MICROS, [], FLOOR);
+    // The 3s crossing is 2s after the 1s one — under the 10s floor, so it is REFUSED, not added.
+    expect(d.refused).toEqual([3 * S]);
+    expect(d.added).toEqual([1 * S, 11 * S]);
+    // …and the previewed record therefore holds ONE lap (1s → 11s), not two.
+    const rows = previewRows([], detected, DEFAULT_MATCH_TOLERANCE_MICROS, [], FLOOR);
+    const laps = rows.filter((r) => r.status === 'kept' || r.status === 'added');
+    expect(laps).toHaveLength(1);
+    expect(laps[0]).toMatchObject({ at: 11 * S, durationMicros: 10 * S });
+  });
+
+  it('with the floor off, the very same re-detection DOES mint the sub-floor lap', () => {
+    // The control: this is the behaviour #469 reported, and it is exactly what a round with no
+    // `min_lap_secs` still gets. Without this the test above could pass for the wrong reason.
+    const detected = [1 * S, 3 * S, 11 * S];
+    for (const floor of [0, undefined]) {
+      const d = diffPasses([], detected, DEFAULT_MATCH_TOLERANCE_MICROS, [], floor);
+      expect(d.added).toEqual(detected);
+      expect(d.refused).toEqual([]);
+    }
+  });
+
+  it('a burst of reflections keeps its FIRST crossing and refuses the rest', () => {
+    // Greedy-forward, like the timer's own min lap and like the corrected-passes fold: the
+    // earliest crossing anchors, everything inside its floor is refused (not the other way round).
+    const d = diffPasses([], [0, 2 * S, 4 * S, 20 * S], DEFAULT_MATCH_TOLERANCE_MICROS, [], FLOOR);
+    expect(d.added).toEqual([0, 20 * S]);
+    expect(d.refused).toEqual([2 * S, 4 * S]);
+  });
+
+  it('refuses an add that would shove a FOLLOWING official pass under the floor', () => {
+    // 0s and 12s are official. A crossing at 11s clears the floor behind it (11 ≥ 10 after 0s)
+    // but leaves the official 12s pass only 1s later — inserting it would push someone else's
+    // real lap under the floor instead of itself. Refused from both sides.
+    const official = [
+      { at: 0, ref: 1 },
+      { at: 12 * S, ref: 2 }
+    ];
+    const d = diffPasses(official, [0, 11 * S, 12 * S], DEFAULT_MATCH_TOLERANCE_MICROS, [], FLOOR);
+    expect(d.refused).toEqual([11 * S]);
+    expect(d.added).toEqual([]);
+    expect(d.removed).toEqual([]);
+  });
+
+  it('a hand-added sub-floor lap survives: the floor never removes or refuses an official pass', () => {
+    // The other half of the rule — an RD adding a lap by hand MAY go under the floor (their
+    // judgment), so an official pass 1s after another anchors the chain and is left alone. Only
+    // the automated candidate beside it is refused.
+    const official = [
+      { at: 0, ref: 1 },
+      { at: 1 * S, ref: 2 }, // the RD's manual sub-floor add
+      { at: 30 * S, ref: 3 }
+    ];
+    const d = diffPasses(
+      official,
+      [0, 1 * S, 2 * S, 30 * S],
+      DEFAULT_MATCH_TOLERANCE_MICROS,
+      [],
+      FLOOR
+    );
+    expect(d.removed).toEqual([]);
+    expect(d.kept.map((k) => k.ref)).toEqual([1, 2, 3]);
+    expect(d.added).toEqual([]);
+    expect(d.refused).toEqual([2 * S]);
+  });
+
+  it("the RD's void outranks the floor as the reason a crossing is dropped", () => {
+    // A crossing that is BOTH voided by the marshal and under the floor reports as suppressed —
+    // the explicit ruling is the truer story, and either way a commit never inserts it.
+    const d = diffPasses([], [0, 2 * S], DEFAULT_MATCH_TOLERANCE_MICROS, [2 * S], FLOOR);
+    expect(d.suppressed).toEqual([2 * S]);
+    expect(d.refused).toEqual([]);
+    expect(d.added).toEqual([0]);
+  });
+
+  it('surfaces a refusal in the preview rather than hiding it', () => {
+    // The trace really does show a crossing there; silently dropping it would leave the RD
+    // wondering why the tuner ignores a visible peak. It is shown, and it is not a lap.
+    const rows = previewRows([], [0, 2 * S, 30 * S], DEFAULT_MATCH_TOLERANCE_MICROS, [], FLOOR);
+    expect(rows.map((r) => r.status)).toEqual(['refused', 'added']);
+    expect(rows[0]).toEqual({ status: 'refused', at: 2 * S });
+  });
+
+  it('applyMinLapFloor: officials anchor, candidates are gated, an off floor is a pass-through', () => {
+    expect(applyMinLapFloor([], [0, 5 * S, 20 * S], FLOOR)).toEqual({
+      added: [0, 20 * S],
+      refused: [5 * S]
+    });
+    // Officials anchor even when they are themselves closer together than the floor.
+    expect(applyMinLapFloor([0, 1 * S], [1.5 * S, 40 * S], FLOOR)).toEqual({
+      added: [40 * S],
+      refused: [1.5 * S]
+    });
+    // Off (0, or a nonsense negative) is an exact pass-through.
+    expect(applyMinLapFloor([], [0, 1 * S], 0)).toEqual({ added: [0, 1 * S], refused: [] });
+    expect(applyMinLapFloor([], [0, 1 * S], -5)).toEqual({ added: [0, 1 * S], refused: [] });
   });
 });
