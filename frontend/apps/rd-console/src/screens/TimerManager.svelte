@@ -1019,7 +1019,10 @@
   /* When the manager is embedded in select mode, the chosen rows read as "on". */
   .timer-row.checked {
     border-color: var(--gf-accent);
-    background: var(--gf-accent-soft);
+    /* Flattened against the row's own surface rather than --gf-accent-soft's translucent wash:
+       the background TRANSITIONS on check, and animating an alpha layer over a large box is the
+       WebKitGTK compositing path #476 implicates. Same idiom as Marshaling's .danger-zone. */
+    background: color-mix(in srgb, var(--gf-accent) 16%, var(--gf-surface));
   }
   .timer-main {
     display: flex;
