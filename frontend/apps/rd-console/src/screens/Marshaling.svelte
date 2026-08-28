@@ -1776,9 +1776,17 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  /* The void-heat box. Its fill is composited against `--gf-elevated` (the base `fieldset` rule)
+     rather than left as a translucent wash over it (#476): `--gf-danger-soft` is
+     `red-400 @ 16% / transparent`, so mixing it into `--gf-elevated` here yields the SAME colour
+     with no alpha channel — nothing about how it looks changes.
+     What changes is that a large box is no longer an alpha layer the compositor re-blends. On
+     Linux/WebKitGTK under a virtualized GPU that re-blend is what flickers, and this is one of the
+     two boxes it was reported on. Matches `.official-lock` just above, which already fills this
+     way. Unverified against the actual VM — see the issue. */
   .danger-zone {
     border-color: color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
-    background: var(--gf-danger-soft);
+    background: color-mix(in srgb, var(--gf-red-400) 16%, var(--gf-elevated));
   }
   /* Tune detection: the live re-detection panel. Big readable summary — the "+A / −R" is what
      the marshal decides on, outdoors on a laptop (the field-readability bar). */
