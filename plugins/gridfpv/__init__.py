@@ -406,6 +406,15 @@ SIGNAL_INTERVAL = 0.5
 # Safety cap on the per-race accumulator length (samples) so a pathological run can't grow
 # memory unbounded — a real heat's peak/nadir history is far smaller. When exceeded, the
 # oldest samples are dropped (the Director keeps what it already folded).
+#
+# Pruning REBASES `acc['sent']`, so every `base` broadcast after the first prune is relative to a
+# pruned accumulator while the Director's fold still holds the whole un-pruned trace (#448). The
+# two are reconciled on the Director's side, by timestamp, and `base` is a fast path rather than a
+# contract — see `signal_trace` in `crates/projection/src/lib.rs`. What this side must guarantee is
+# only that every slice carries its samples' own `history_times`, monotonically, and that a slice
+# never omits a sample it has not sent before; both hold below. Do NOT "fix" this by making `base`
+# absolute without changing the fold to match — a half-migrated offset is exactly the desync that
+# froze the live trace mid-heat for the rest of a long run.
 SIGNAL_WINDOW = 20000
 
 
@@ -941,6 +950,12 @@ def initialize(rhapi):
                 drop = len(acc["t"]) - SIGNAL_WINDOW
                 del acc["t"][:drop]
                 del acc["v"][:drop]
+                # Rebasing the cursor by the same amount keeps `acc["t"][sent:]` meaning "not yet
+                # sent". It also means the broadcast `base` stops matching the Director's trace
+                # length from here on — deliberately tolerated; the fold re-syncs on the sample
+                # timestamps instead (#448, see SIGNAL_WINDOW above). Clamping at 0 can only cause
+                # a slice to RE-send samples, never to skip one, which is the safe direction: the
+                # fold drops the overlap by time.
                 acc["sent"] = max(0, acc["sent"] - drop)
         return idx, acc
 
@@ -948,8 +963,16 @@ def initialize(rhapi):
         """Broadcast each seat's NEW dense samples since the last tick (incremental).
 
         Each node carries ``base`` — the accumulator index this slice starts at — so the Director
-        can append at ``base`` (or REPLACE when ``base == 0``). ``final`` sends the full accumulated
-        trace (base 0) so the Director's end state is complete even if it missed ticks.
+        can append at ``base``. ``final`` sends the full accumulated trace (base 0) so the
+        Director's end state is complete even if it missed ticks.
+
+        ``base`` is a **hint, not a contract**: once :data:`SIGNAL_WINDOW` prunes the accumulator it
+        is relative to a window the Director never saw, and after a long run a ``final`` snapshot is
+        no longer the whole race either. The Director's fold therefore places any slice it cannot
+        site by offset using the samples' own ``history_times``, and treats a ``base == 0`` snapshot
+        as superseding only when it starts no later than what it already holds (#448). Every slice
+        must carry ``history_times`` alongside ``history_values``, monotonically — that is the part
+        this side owes the fold.
         """
         seats = getattr(rhapi.interface, "seats", []) or []
         nodes = []

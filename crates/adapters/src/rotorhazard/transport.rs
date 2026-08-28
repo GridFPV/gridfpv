@@ -370,6 +370,37 @@ fn seating_holds(
         .all(|(node_index, pilot_id, _)| seat_holds(seated, *node_index, *pilot_id))
 }
 
+/// Which pilot in a `pilot_data` roster is the one a preceding `add_pilot` just created — the id
+/// that is in `roster` but not in `known`. `None` when the roster adds nothing we did not have.
+///
+/// **Identity by absence, not by magnitude** (#451). This used to be "the highest id above a
+/// floor", with the floor guessed as `0` whenever the pre-seating roster read timed out — and a
+/// floor of `0` admits the RD's entire roster, so a delayed `pilot_data` listing only pre-existing
+/// pilots handed back the RD's highest pilot as "the one we just made". The caller then renamed a
+/// real pilot to a GridFPV callsign and seated it, and every check downstream agreed, because the
+/// pilot it was asked about genuinely was seated.
+///
+/// Verified against RotorHazard 4.3.0 (`server.py:1363`) and 4.4.0 (`server.py:1320`), which are
+/// identical: `on_add_pilot(*args)` **discards its payload**, calls `RHData.add_pilot()` with no
+/// `init`, and then `emit_pilot_data()` with no `noself` — so the new pilot's broadcast does come
+/// back to us, but it arrives as the *whole* roster with nothing marking which row is new, and
+/// there is no way to name the pilot at creation time (`RHData.add_pilot` accepts
+/// `init={'callsign': …}`, but the socket handler never passes one — `RHData.py:895`). The pilot is
+/// created as `~Callsign <id>`, a name that is itself localised through `self.__`, so matching on
+/// it would be a guess in a different costume. Diffing the roster is the only identification that
+/// depends on nothing but what RotorHazard actually tells us.
+///
+/// When several unknown ids appear at once (the RD adding pilots on their own screen while we
+/// seat) the highest is taken — but every id is then recorded as known, so no id is ever handed
+/// out twice, and the pilots we did not create are simply left alone.
+fn added_pilot(known: &std::collections::BTreeSet<i64>, roster: &[i64]) -> Option<i64> {
+    roster
+        .iter()
+        .copied()
+        .filter(|id| !known.contains(id))
+        .max()
+}
+
 /// Read a RotorHazard crossing flag that may be wired as a bool **or** as a 0/1 number.
 fn truthy(value: &serde_json::Value) -> bool {
     match value {
@@ -1174,6 +1205,70 @@ fn format_selection(owned: &OwnedFormat) -> FormatSelection {
     }
 }
 
+/// Whether a missing Grid-owned race format id is news yet — and if so, which news (#454 finding 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedFormatAlarm {
+    /// Nothing to say: either the plugin named its format row, or there is no plugin to ask.
+    Quiet,
+    /// The plugin tried and named a reason. Announce it wherever we are — it will not fix itself.
+    Failed,
+    /// No id and **no reason**, at the handshake. RotorHazard is still booting: say nothing yet.
+    NotReadyYet,
+    /// No id and no reason, but RotorHazard is demonstrably past startup. The row never appeared
+    /// and nobody said why — which is worth a line precisely because it is inexplicable.
+    NeverAppeared,
+}
+
+/// Decide whether an absent [`CAP_OWNED_FORMAT`] row is a failure or merely a not-yet.
+///
+/// **The distinction is real, and it is RotorHazard's own startup ordering** — verified against
+/// 4.3.0 and 4.4.0 source, which are identical here:
+///
+/// 1. `server.py::start()` calls `Events.trigger(Evt.STARTUP, …)` and only *afterwards* calls
+///    `SOCKET_IO.run(APP, …)` — 4.3.0 `server.py:3570`/`:3600`, 4.4.0 `server.py:3590`/`:3620`.
+/// 2. `eventmanager.py::EventManager.trigger` runs a handler **inline** only when its
+///    `priority < 100`; everything else is `gevent.spawn`ed (`eventmanager.py:94`/`:97`, byte for
+///    byte the same on both versions).
+/// 3. `RHAPI.py::EventsAPI.on` defaults to `priority = 200` for every event except the
+///    `*_INITIALIZE` family (which get 75). `Evt.STARTUP` is not in that family, so **our**
+///    `ready_grid_format` handler is spawned, not run inline.
+/// 4. `gevent.spawn` only *schedules* a greenlet; it runs when the calling greenlet yields — and
+///    the next thing `start()` does is enter `SOCKET_IO.run`, which is what starts accepting
+///    connections in the first place.
+///
+/// So the socket is listening, and answers `gridfpv_hello`, in a window where the plugin's STARTUP
+/// greenlet has not yet run. The plugin's `state["format_id"]` and `state["format_error"]` are both
+/// still `None` then, which is exactly the `grid_format_id: null, grid_format_error: null` shape a
+/// Director sees when it dials an RH that is still coming up. That is "not ready yet" — the row
+/// appears seconds later — and announcing it as "could not create its race format (no reason
+/// given)" cries wolf on every fast reconnect.
+///
+/// Losing the alarm entirely would be the wrong trade, so it is deferred rather than dropped:
+/// `past_startup` is `false` at the handshake and `true` at the `gridfpv_format_ack` seam, which is
+/// only reached because the Director asked the plugin to select the format at a heat's stage —
+/// long after any boot race. A real, permanent failure still surfaces two ways: the plugin sets
+/// `grid_format_error` when its own create raises (→ [`Failed`](Self::Failed), announced at once,
+/// with the reason), and a select that cannot produce the row comes back `ok: false` on the ack,
+/// which has always been announced.
+fn owned_format_alarm(
+    advertised: bool,
+    id: Option<i64>,
+    error: Option<&str>,
+    past_startup: bool,
+) -> OwnedFormatAlarm {
+    if !advertised || id.is_some() {
+        // A plugin that named its row is fine; one that never advertised the capability is a build
+        // that has no opinion, and `format_selection` already routes it to the legacy path.
+        OwnedFormatAlarm::Quiet
+    } else if error.is_some() {
+        OwnedFormatAlarm::Failed
+    } else if past_startup {
+        OwnedFormatAlarm::NeverAppeared
+    } else {
+        OwnedFormatAlarm::NotReadyYet
+    }
+}
+
 /// Announce, once, that a timer's own min-lap filter could not be neutralised (#407).
 ///
 /// Deliberately explicit about the consequence rather than the mechanism. Silence here recreates
@@ -1695,7 +1790,18 @@ impl RotorHazardConnection {
                             owned.id = parsed.grid_format_id;
                             owned.error = parsed.grid_format_error.clone();
                         }
-                        if parsed.advertises(CAP_OWNED_FORMAT) && parsed.grid_format_id.is_none() {
+                        // `past_startup: false` — a hello is answered from inside RotorHazard's
+                        // boot, before the plugin's spawned STARTUP handler has necessarily run
+                        // (see `owned_format_alarm`). "No id, no reason" here means "not ready
+                        // yet", and announcing it as a failure cried wolf on every fast dial
+                        // (#454 finding 3). Only a plugin that named a reason speaks now.
+                        if owned_format_alarm(
+                            parsed.advertises(CAP_OWNED_FORMAT),
+                            parsed.grid_format_id,
+                            parsed.grid_format_error.as_deref(),
+                            false,
+                        ) == OwnedFormatAlarm::Failed
+                        {
                             crate::diag!(
                                 "gridfpv: rotorhazard: the GridFPV plugin (v{}) could not create \
                                  its `{}` race format ({}) — it will retry at each heat's stage, \
@@ -1761,14 +1867,32 @@ impl RotorHazardConnection {
                         .unwrap_or_else(|| "GridFPV".to_string());
                     // Whether this ack is the moment the takeover took effect on this link —
                     // the Director asks at every heat's stage, so only the transition is news.
-                    let first_selection = {
+                    let (first_selection, alarm) = {
                         let mut owned = owned_format.lock().expect("owned-format lock");
                         let first = ack.ok && !owned.selected;
                         owned.id = ack.format_id.or(owned.id);
                         owned.selected = ack.ok;
                         owned.error = ack.error.clone();
-                        first
+                        // The deferred half of #454 finding 3. Reaching this seam at all means the
+                        // Director asked the plugin to select the format at a heat's stage, which
+                        // is long past any boot race — so `past_startup: true`, and an id that is
+                        // still absent is real news rather than a not-yet.
+                        let alarm =
+                            owned_format_alarm(owned.advertised, owned.id, owned.error.as_deref(), true);
+                        (first, alarm)
                     };
+                    // Only the inexplicable case speaks here: a select that reports success yet
+                    // still names no row and gives no reason. A select that *failed* carries its
+                    // reason and is announced by the `!ack.ok` branch below — announcing both
+                    // would say the same thing twice.
+                    if ack.ok && alarm == OwnedFormatAlarm::NeverAppeared {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: the GridFPV plugin reported its `{name}` race \
+                             format selected but has never named the format row, and gave no \
+                             reason — RotorHazard's own race decisions may NOT be neutralised on \
+                             this timer (#403/#404/#454)"
+                        );
+                    }
                     // The per-stage re-assertion (#407): RH's filter can be moved back from its
                     // own settings screen between heats, and the plugin re-checks it every time it
                     // re-checks the format. A regression here IS announced — unlike the handshake
@@ -2012,7 +2136,9 @@ impl RotorHazardConnection {
     ///
     /// `seats` is the heat's `(node_index, callsign)` bind, one entry per **bound** node (unbound
     /// nodes are simply left unseated — RH won't record there, which is correct). For each seat this:
-    ///   1. adds a fresh RH pilot (`add_pilot`) and learns its id (the highest from `pilot_data`),
+    ///   1. adds a fresh RH pilot (`add_pilot`) and learns its id — the id `pilot_data`'s roster
+    ///      gained, never merely its highest, so a pilot the RD already had can never be adopted as
+    ///      ours and renamed out from under them (see [`added_pilot`] and #451),
     ///   2. names it with the GridFPV callsign (`alter_pilot { callsign }`) so RH's own view + its
     ///      "Racing heat … pilots: …" log are right,
     ///   3. assigns it to the heat's slot at that node (`alter_heat { heat, slot_id, pilot }`).
@@ -2049,17 +2175,36 @@ impl RotorHazardConnection {
             return Ok(None);
         };
 
-        // Learn the current highest pilot id BEFORE creating any, so each `add_pilot` can be
-        // identified as "the new id strictly greater than the floor" rather than the bare max —
-        // `on_add_pilot` broadcasts `pilot_data` to every socket (this one included), so the burst
-        // in flight while we seat carries the *whole* pilot list, and a frame listing only existing
-        // (lower-or-equal) ids must not be mistaken for the pilot we just added. (An `alter_pilot`
-        // rename answers `emit_pilot_data(noself=True)` and so never reaches this socket at all —
-        // the floor still holds, and it is `add_pilot`'s own broadcast that makes it necessary.)
+        // Learn **which pilots already exist** BEFORE creating any, so each `add_pilot` can be
+        // identified as "the id the roster gained" — `on_add_pilot` broadcasts `pilot_data` to
+        // every socket (this one included, no `noself`), so the burst in flight while we seat
+        // carries the *whole* pilot list, and a frame listing only pre-existing pilots must not be
+        // mistaken for the pilot we just added. (An `alter_pilot` rename answers
+        // `emit_pilot_data(noself=True)` and so never reaches this socket at all — it is
+        // `add_pilot`'s own broadcast that makes this necessary.)
+        //
+        // Drop any roster already sitting in the adapter first, so what we read back is the answer
+        // to *this* `load_data` and not a frame from before the heat was added.
+        self.adapter.lock().unwrap().take_pilot_roster();
         self.client
             .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
-        // The current highest pilot id (0 if RH has no pilots yet); the next created pilot exceeds it.
-        let mut pilot_floor = self.wait_for_pilot_above(i64::MIN).unwrap_or(0);
+        // **This read may not be guessed at** (#451). It used to fall back to a floor of 0 when it
+        // timed out, and a floor of 0 admits every pilot RotorHazard has: the delayed reply to this
+        // very `load_data` then arrived mid-seat, listing only the RD's pre-existing pilots, and
+        // the highest of them was adopted as "the pilot we just created". `alter_pilot` renamed a
+        // real entry on the RD's roster to a GridFPV callsign, `alter_heat` seated it, and
+        // `confirm_seating` confirmed it — the wrong pilot, successfully, with nothing to surface.
+        //
+        // So: no answer, no seating. Returning `None` here drops to the practice-mode flow, which
+        // still records laps via RH's `current_heat is HEAT_ID_NONE` gate branch and costs only the
+        // dense per-tick RSSI trace. Clobbering the RD's roster is not a degradation, it is damage.
+        // An RH with no pilots at all answers `Some(vec![])`, which is a real answer and seats fine.
+        let Some(roster) = self.wait_for_pilot_roster() else {
+            return Ok(None);
+        };
+        // Every pilot id we must NOT adopt as our own: the RD's existing roster, plus each pilot we
+        // create as we go.
+        let mut known: std::collections::BTreeSet<i64> = roster.into_iter().collect();
 
         // What we *intended* to seat: `(node_index, pilot_id, callsign)` for every seat whose write
         // chain got as far as an `alter_heat`. This is the list the readback below has to find
@@ -2073,15 +2218,17 @@ impl RotorHazardConnection {
                 // deliberately NOT in `intended`: there is no receiver at that seat to lose laps on.
                 continue;
             };
-            // Create a pilot and learn its id (the new id strictly above the running floor).
-            self.adapter.lock().unwrap().take_pilot_ids();
+            // Create a pilot and learn its id — the one id in the roster we did not already know.
+            // A delayed frame carrying only pilots we knew about adds nothing, so it is ignored and
+            // the wait continues rather than adopting somebody else's pilot (#451).
+            self.adapter.lock().unwrap().take_pilot_roster();
             self.client.emit("add_pilot", Payload::Text(vec![]))?;
             self.client
                 .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
-            let Some(pilot_id) = self.wait_for_pilot_above(pilot_floor) else {
+            let Some(pilot_id) = self.wait_for_added_pilot(&known) else {
                 continue;
             };
-            pilot_floor = pilot_id;
+            known.insert(pilot_id);
             // Name it with the GridFPV callsign so RH's own view + its staging log show the callsign.
             self.client.emit(
                 "alter_pilot",
@@ -2267,21 +2414,35 @@ impl RotorHazardConnection {
         }
     }
 
-    /// Wait (bounded) for a `pilot_data` response carrying a pilot id **strictly greater than**
-    /// `floor`, returning that id (the highest such) — used to identify the pilot a preceding
-    /// `add_pilot` just created. Passing `i64::MIN` returns the current highest id (the seating
-    /// floor). `None` on timeout (no id above `floor` arrived).
-    fn wait_for_pilot_above(&self, floor: i64) -> Option<i64> {
+    /// Wait (bounded) for a `pilot_data` response and return the roster it carried — used once, at
+    /// the top of [`seat_heat`](Self::seat_heat), to learn which pilots RotorHazard already has.
+    ///
+    /// `Some(vec![])` is a real answer ("no pilots yet") and `None` means RotorHazard never
+    /// answered. The caller must not conflate them: see the `#451` note at the call site.
+    fn wait_for_pilot_roster(&self) -> Option<Vec<i64>> {
+        let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
+        loop {
+            if let Some(roster) = self.adapter.lock().unwrap().take_pilot_roster() {
+                return Some(roster);
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Wait (bounded) for a `pilot_data` response that reports a pilot **we did not already know
+    /// about** — the one a preceding `add_pilot` just created — and return its id.
+    ///
+    /// Frames listing only `known` pilots are the delayed broadcasts in flight from earlier
+    /// `add_pilot`s and `load_data`s; they are skipped and the wait continues. `None` on timeout.
+    fn wait_for_added_pilot(&self, known: &std::collections::BTreeSet<i64>) -> Option<i64> {
         let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
         loop {
             {
-                let mut a = self.adapter.lock().unwrap();
-                let id = a
-                    .take_pilot_ids()
-                    .into_iter()
-                    .filter(|id| *id > floor)
-                    .max();
-                if let Some(id) = id {
+                let roster = self.adapter.lock().unwrap().take_pilot_roster();
+                if let Some(id) = roster.as_deref().and_then(|r| added_pilot(known, r)) {
                     return Some(id);
                 }
             }
@@ -3147,6 +3308,96 @@ mod tests {
         );
     }
 
+    /// Fold a `pilot_data` frame through the adapter and hand back the roster the transport would
+    /// read — the same seam `seat_heat` waits on, so these tests exercise the real message path
+    /// rather than a hand-built vector.
+    fn folded_roster(adapter: &mut RotorHazardAdapter, pilot_ids: &[i64]) -> Option<Vec<i64>> {
+        adapter.translate(Raw::PilotData(RawPilotData {
+            pilots: pilot_ids
+                .iter()
+                .map(|&pilot_id| crate::rotorhazard::RawPilotEntry { pilot_id })
+                .collect(),
+        }));
+        adapter.take_pilot_roster()
+    }
+
+    /// **The #451 race, at the seam it happens on.**
+    ///
+    /// The pre-seating roster read times out on a congested link; its reply lands *later*, in the
+    /// middle of the seat loop, listing only the RD's own pre-existing pilots. Under the old
+    /// "highest id above a floor of 0" rule that frame answered the wait, and pilot 12 — a real
+    /// entry on the RD's roster — was renamed to `ALPHA` and seated as though we had created it.
+    #[test]
+    fn a_delayed_frame_of_pre_existing_pilots_is_never_mistaken_for_the_pilot_we_added() {
+        let mut adapter = RotorHazardAdapter::new();
+        let known: std::collections::BTreeSet<i64> = [11, 12].into_iter().collect();
+
+        // The delayed reply to the pre-seating `load_data`: the RD's roster, nothing of ours.
+        let roster = folded_roster(&mut adapter, &[11, 12]).expect("a frame did arrive");
+        assert_eq!(
+            added_pilot(&known, &roster),
+            None,
+            "this frame adds nothing we did not already have, so it is not evidence that our \
+             `add_pilot` landed — adopting pilot 12 here renames the RD's own pilot and seats it"
+        );
+
+        // The real `add_pilot` broadcast then arrives, and it is unmistakable: a new id.
+        let roster = folded_roster(&mut adapter, &[11, 12, 13]).expect("a frame did arrive");
+        assert_eq!(
+            added_pilot(&known, &roster),
+            Some(13),
+            "the id the roster GAINED is the pilot we just created"
+        );
+    }
+
+    /// The floor read must be able to say "this timer has no pilots" out loud. `None` means
+    /// RotorHazard never answered, and `seat_heat` refuses to seat on that rather than guessing a
+    /// floor of 0 — which is precisely the guess that made the race above reachable.
+    #[test]
+    fn an_empty_roster_is_an_answer_and_silence_is_not() {
+        let mut adapter = RotorHazardAdapter::new();
+        assert_eq!(
+            adapter.take_pilot_roster(),
+            None,
+            "nothing folded yet: RotorHazard has not answered"
+        );
+
+        let roster =
+            folded_roster(&mut adapter, &[]).expect("an empty pilot list is still a frame");
+        assert!(roster.is_empty());
+        let known: std::collections::BTreeSet<i64> = roster.into_iter().collect();
+
+        // A fresh timer's first seated pilot is then identified perfectly well.
+        let roster = folded_roster(&mut adapter, &[1]).expect("a frame did arrive");
+        assert_eq!(added_pilot(&known, &roster), Some(1));
+    }
+
+    /// Ids are not assumed to be increasing, and a concurrent edit on RotorHazard's own screen
+    /// does not derail the seat loop: the highest unknown id is taken, and the caller records
+    /// every id it is handed, so no pilot is ever adopted twice.
+    #[test]
+    fn identification_is_by_absence_not_by_magnitude() {
+        // A gap re-used below the RD's highest id — "the max" would answer 40 here, forever.
+        let known: std::collections::BTreeSet<i64> = [7, 40].into_iter().collect();
+        assert_eq!(
+            added_pilot(&known, &[7, 40, 8]),
+            Some(8),
+            "the new pilot is the one that was not there before, wherever it sorts"
+        );
+
+        let mut known = known;
+        // Two unknown ids at once (the RD added one while we seated): take one, remember both.
+        let roster = [7, 40, 41, 42];
+        let picked = added_pilot(&known, &roster).expect("something is new");
+        assert_eq!(picked, 42);
+        known.extend(roster.iter().copied());
+        assert_eq!(
+            added_pilot(&known, &roster),
+            None,
+            "once recorded, no id is ever handed out a second time"
+        );
+    }
+
     /// v4.3.0 spells "no pilot" as `0` and v4.4.0 as `null` (`RHUtils.PILOT_ID_NONE`). Both must
     /// read as unseated here, and — the trap worth naming — pilot id `0` must never be something a
     /// seat can legitimately hold, or the 4.3.0 empty slot would confirm itself.
@@ -3906,6 +4157,112 @@ mod tests {
             ..OwnedFormat::default()
         };
         assert_eq!(format_selection(&stock), FormatSelection::Legacy);
+    }
+
+    /// **A Director that dials an RH still inside its own boot must not cry wolf** (#454 finding 3).
+    ///
+    /// RotorHazard triggers `Evt.STARTUP` *before* `SOCKET_IO.run`, and our STARTUP handler is
+    /// `gevent.spawn`ed at priority 200 rather than run inline — so the socket answers
+    /// `gridfpv_hello` in a window where the plugin has neither created its format row nor failed
+    /// to. That is the `grid_format_id: null, grid_format_error: null` shape, and it resolves
+    /// itself seconds later. Calling it "could not create its race format (no reason given)" told
+    /// an RD their timer was un-neutralised when it was merely still coming up.
+    #[test]
+    fn a_hello_with_neither_a_format_id_nor_a_reason_is_still_booting_not_broken() {
+        let booting = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "live_signal", "owned_format"],
+            "node_count": 4,
+            "grid_format_id": null,
+            "grid_format_error": null,
+        }));
+        let parsed = parse_hello(&booting).expect("a pre-STARTUP hello ack must parse");
+        assert!(parsed.advertises(CAP_OWNED_FORMAT));
+        assert_eq!(
+            owned_format_alarm(
+                parsed.advertises(CAP_OWNED_FORMAT),
+                parsed.grid_format_id,
+                parsed.grid_format_error.as_deref(),
+                false,
+            ),
+            OwnedFormatAlarm::NotReadyYet,
+            "no id AND no reason, at the handshake, is RotorHazard still booting — the row \
+             appears once the spawned STARTUP greenlet runs"
+        );
+    }
+
+    /// The alarm is deferred, not deleted: a plugin that *named* a reason is announced at once,
+    /// at the handshake, exactly as before.
+    #[test]
+    fn a_hello_that_names_a_reason_is_announced_at_the_handshake() {
+        let failed = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "owned_format"],
+            "node_count": 4,
+            "grid_format_id": null,
+            "grid_format_error": "OperationalError('no such table: race_format')",
+        }));
+        let parsed = parse_hello(&failed).expect("a failed-create hello ack must parse");
+        assert_eq!(
+            owned_format_alarm(
+                parsed.advertises(CAP_OWNED_FORMAT),
+                parsed.grid_format_id,
+                parsed.grid_format_error.as_deref(),
+                false,
+            ),
+            OwnedFormatAlarm::Failed,
+            "a named reason is a real failure and will not fix itself — say so now"
+        );
+    }
+
+    /// Past startup — the `gridfpv_format_ack` seam, reached only because the Director asked the
+    /// plugin to select the format at a heat's stage — the same silence IS news.
+    #[test]
+    fn a_format_that_never_appeared_past_startup_is_announced() {
+        assert_eq!(
+            owned_format_alarm(true, None, None, true),
+            OwnedFormatAlarm::NeverAppeared,
+            "no boot race can explain this one: the plugin has had a whole stage to create or \
+             fail, and did neither"
+        );
+        // …and the same inputs at the handshake still say nothing. This pair IS the fix.
+        assert_eq!(
+            owned_format_alarm(true, None, None, false),
+            OwnedFormatAlarm::NotReadyYet
+        );
+    }
+
+    /// Nothing to announce when there is nothing wrong: a named row, or a build that never
+    /// advertised the capability (which `format_selection` already routes to the legacy path).
+    #[test]
+    fn a_named_format_row_or_an_unadvertising_plugin_is_quiet() {
+        for past_startup in [false, true] {
+            assert_eq!(
+                owned_format_alarm(true, Some(7), None, past_startup),
+                OwnedFormatAlarm::Quiet,
+                "the plugin named its row"
+            );
+            assert_eq!(
+                owned_format_alarm(false, None, None, past_startup),
+                OwnedFormatAlarm::Quiet,
+                "a plugin that never advertised `owned_format` is not failing at it"
+            );
+            // An id present alongside a stale error is still a working format — the id wins, so a
+            // recovered plugin does not keep being announced as broken.
+            assert_eq!(
+                owned_format_alarm(
+                    true,
+                    Some(7),
+                    Some("an earlier attempt raised"),
+                    past_startup
+                ),
+                OwnedFormatAlarm::Quiet
+            );
+        }
     }
 
     // ── #444: the min-lap confirm must not accept a half-written frame ───────────────────────

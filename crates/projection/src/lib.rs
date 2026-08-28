@@ -1315,17 +1315,39 @@ impl SignalTraceView {
 /// stamped with the sample offset it starts at ([`SignalHistory::base`]), so the per-tick cost does
 /// not grow with heat length. The fold applies each one by that offset:
 ///
-/// - `base == 0` — a **full snapshot**: replaces the competitor's dense trace. The post-race pull
-///   and the plugin's end-of-race flush both send one, so a finished heat's trace is whole however
-///   the live stream went, and a re-pull still supersedes what came before (the old behavior).
 /// - `base ==` the trace's current length — a **contiguous append**: the slice extends the trace.
-/// - anything else — **out of sync**: the slice is *skipped*. It cannot be placed without leaving a
-///   gap or a duplicate in the middle of the marshaling evidence, and a trace with a silent hole in
-///   it is worse than a short one. The next full snapshot resynchronises. (Reachable only from a
-///   truncated window or a log that lost events — the adapter emits a contiguous stream per heat and
-///   warns when the plugin's own slices stop lining up.)
+///   The overwhelmingly common case, and byte-exact: samples are copied verbatim, duplicate
+///   timestamps included.
+/// - `base == 0` **and** the slice starts no later than what we already hold — a **whole-trace
+///   snapshot**: it replaces the competitor's dense trace. The post-race marshal pull sends one, so
+///   a re-pull still supersedes what came before (the old behavior).
+/// - anything else — **re-synchronise by timestamp**: append the part of the slice that is strictly
+///   newer than the last sample held, and drop the overlap.
 ///
-/// An empty history is inert either way: it carries no evidence, so it must not blank out a trace.
+/// ## Why the last rule is not "skip" any more (#448)
+///
+/// It used to be, and that froze the live trace on any long run. The plugin keeps its own
+/// accumulator capped (`SIGNAL_WINDOW`, 20000 samples); past the cap it drops the oldest samples
+/// and **rebases** its `sent` cursor by the number dropped. Every subsequent slice's `base` is
+/// therefore relative to a *pruned* accumulator, while this fold holds the whole un-pruned trace —
+/// so `base` never equalled the trace length again, every live tick was classified out of sync and
+/// skipped, and the RSSI trace froze mid-session with no error for the rest of the heat. The
+/// end-of-race flush "recovered" it only by replacing a complete trace with the plugin's truncated
+/// 20000-sample window, silently discarding the earliest samples of the run.
+///
+/// Timestamps are what make the recovery safe. A dense sample carries its own source-clock instant,
+/// those instants are monotonic within a heat, and the plugin already relies on exactly this to
+/// merge RotorHazard's own front-pruned node history. So a slice that cannot be placed by offset is
+/// placed by time instead: nothing is duplicated, nothing is invented, and the head this fold has
+/// already accumulated is kept rather than thrown away. `base` remains a fast path and a hint, not
+/// a contract the fold breaks when the producer's window moves under it.
+///
+/// The one cost is at a re-sync seam: RotorHazard reports peak/nadir pairs that can share a
+/// timestamp, and "strictly newer than the last held" drops a same-instant sample we had not seen.
+/// That is bounded to the single slice where a prune happened, and is the right trade against
+/// freezing the trace for the rest of the heat.
+///
+/// An empty history is inert throughout: it carries no evidence, so it must not blank out a trace.
 ///
 /// A pre-#392 log carries no offsets at all; they read back as `base = 0`, i.e. whole snapshots that
 /// replace — which is exactly the last-writer-wins rule those logs were written under.
@@ -1403,21 +1425,7 @@ where
                 // append at the current length, skip anything else rather than corrupt the trace.
                 // An empty history is ignored either way (it carries no evidence, so it must not
                 // blank out the coarse trace).
-                if !history.rssi.is_empty() {
-                    match (history.base, acc.dense.as_mut()) {
-                        // A full snapshot replaces whatever the competitor's trace held.
-                        (0, _) => {
-                            acc.dense = Some((history.times.clone(), history.rssi.clone()));
-                        }
-                        // A slice that continues the trace extends it.
-                        (base, Some((times, rssi))) if base == times.len() as u64 => {
-                            times.extend_from_slice(&history.times);
-                            rssi.extend_from_slice(&history.rssi);
-                        }
-                        // Out of sync — see the fold's docs. Skipped, not spliced.
-                        _ => {}
-                    }
-                }
+                splice_dense(&mut acc.dense, history.base, &history.times, &history.rssi);
             }
             Event::SignalThresholds(t) => {
                 let key = CompetitorKey {
@@ -1460,6 +1468,66 @@ where
             })
             .collect(),
     }
+}
+
+/// Place one dense [`Event::SignalHistory`] slice onto a competitor's assembled `(times, rssi)`
+/// trace — the offset fast path, the whole-trace snapshot, and the timestamp re-sync that keeps a
+/// long session's live trace moving after the producer prunes its own window (#448).
+///
+/// Split out from [`signal_trace`] so the placement rule is a unit test over a simulated prune
+/// sequence rather than something only a 20000-sample live run can reach. See `signal_trace`'s
+/// "Dense histories are offset-folded" section for why each branch is what it is.
+///
+/// An empty slice is inert: it carries no evidence, so it never blanks out or replaces a trace.
+/// `times` and `rssi` are zipped to the shorter of the two, so a malformed pair can shorten a
+/// slice but can never leave the two vectors out of step with each other.
+fn splice_dense(dense: &mut Option<(Vec<i64>, Vec<u16>)>, base: u64, times: &[i64], rssi: &[u16]) {
+    let n = times.len().min(rssi.len());
+    if n == 0 {
+        return;
+    }
+    let (times, rssi) = (&times[..n], &rssi[..n]);
+
+    let Some((held_times, held_rssi)) = dense.as_mut() else {
+        // Nothing dense held yet. Only a `base == 0` slice may *establish* the trace: a slice from
+        // the middle of a stream whose opening this window never saw is still unplaceable, and the
+        // competitor's coarse chunks are better evidence than one orphan fragment. (A prune can
+        // never land here — the plugin resets its accumulator at race start, so every heat's
+        // stream does begin at 0.)
+        if base == 0 {
+            *dense = Some((times.to_vec(), rssi.to_vec()));
+        }
+        return;
+    };
+    if held_times.is_empty() {
+        *dense = Some((times.to_vec(), rssi.to_vec()));
+        return;
+    }
+
+    // The contiguous append: the producer's cursor still lines up with what we hold. Verbatim,
+    // duplicate timestamps and all.
+    if base == held_times.len() as u64 {
+        held_times.extend_from_slice(times);
+        held_rssi.extend_from_slice(rssi);
+        return;
+    }
+
+    // A whole-trace snapshot — one that starts no later than what we already hold — supersedes it.
+    // That is the post-race marshal pull. A `base == 0` flush whose first sample is *newer* than
+    // our first is NOT this: it is the plugin's pruned window, and replacing with it would throw
+    // away the head of the run that only we still have.
+    if base == 0 && times[0] <= held_times[0] {
+        *dense = Some((times.to_vec(), rssi.to_vec()));
+        return;
+    }
+
+    // Otherwise re-synchronise by timestamp: keep everything strictly newer than the last sample
+    // held, drop the overlap. This is the branch a producer-side prune lands in, and the branch
+    // that used to skip the slice outright and freeze the trace for the rest of the heat.
+    let last_held = held_times[held_times.len() - 1];
+    let start = times.partition_point(|t| *t <= last_held);
+    held_times.extend_from_slice(&times[start..]);
+    held_rssi.extend_from_slice(&rssi[start..]);
 }
 
 /// Resolve an assembled dense trace's sample `times` into the uniform `(from, period_micros)` grid
@@ -2977,23 +3045,34 @@ mod marshaling_tests {
     }
 
     #[test]
-    fn dense_history_out_of_sync_slice_is_skipped_not_spliced() {
-        // A slice that neither restates the trace (base 0) nor continues it (base == len) cannot be
-        // placed without leaving a gap or a duplicate mid-trace. It is dropped, and the trace stands
-        // exactly as the contiguous slices left it — a short trace, never a corrupt one.
+    fn dense_history_out_of_sync_slice_resyncs_on_time_and_never_duplicates() {
+        // #448 changed this contract deliberately. A slice that neither restates the trace (base 0)
+        // nor continues it (base == len) used to be DROPPED; that is what froze a long session's
+        // live trace, because a producer-side prune rebases every subsequent base and none of them
+        // ever lines up again. Each sample carries its own instant, so such a slice is now placed
+        // by time instead: everything strictly newer than the last sample held is appended.
         let log = vec![
             history_at("rh", "node-0", 0, &[0, 50_000], &[70, 88]),
-            // Gap: samples 2..4 never arrived, so this one starts past the end of the trace.
+            // Gap: samples 2..4 never arrived, so this one starts past the end of the trace. The
+            // sample is real evidence and is kept — `times` records the discontinuity honestly,
+            // which is strictly better than discarding a crossing's signal to hide a gap.
             history_at("rh", "node-0", 4, &[200_000], &[71]),
-            // ...and one that would re-apply samples already held.
+            // ...and one that would re-apply samples already held. Its samples are not newer than
+            // the last held instant, so it contributes nothing: no duplicate, no rewind.
             history_at("rh", "node-0", 1, &[50_000, 100_000], &[88, 150]),
         ];
         let trace = &signal_trace(&log).competitors[0];
-        assert_eq!(trace.samples, vec![70, 88]);
-        assert_eq!(trace.times.as_deref(), Some([0, 50_000].as_slice()));
+        assert_eq!(trace.samples, vec![70, 88, 71]);
+        assert_eq!(
+            trace.times.as_deref(),
+            Some([0, 50_000, 200_000].as_slice()),
+            "the gap is visible in the times rather than papered over by dropping the sample"
+        );
 
-        // A slice arriving with no trace to append to (a window that lost the opening snapshot) is
-        // the same case: skipped, leaving the competitor on its coarse evidence.
+        // A slice arriving with no dense trace to place it against is still skipped: a window that
+        // lost the opening snapshot cannot site an orphan fragment, and the competitor's coarse
+        // chunks are the better evidence. (A prune never lands here — the plugin resets its
+        // accumulator at race start, so every heat's own stream does begin at base 0.)
         let orphan = vec![
             chunk("rh", "node-0", 0, 100_000, &[60, 61]),
             history_at("rh", "node-0", 7, &[350_000], &[71]),
@@ -3021,6 +3100,115 @@ mod marshaling_tests {
         ];
         let trace = &signal_trace(&log).competitors[0];
         assert_eq!(trace.samples, vec![70, 88, 150, 149, 71]);
+    }
+
+    /// Emulate the plugin's incremental broadcaster (`plugins/gridfpv/__init__.py`
+    /// `reconcile` + `broadcast_signal_once`) exactly, including the `SIGNAL_WINDOW` prune that
+    /// rebases `acc['sent']`, and return the slices it would put on the wire plus the true full
+    /// sample stream it saw.
+    ///
+    /// `window` stands in for `SIGNAL_WINDOW` (20000 in the plugin) so a prune is reachable in a
+    /// readable test rather than only after a 20-minute open-practice run.
+    fn plugin_signal_slices(window: usize, ticks: &[usize]) -> (Vec<Event>, Vec<i64>, Vec<u16>) {
+        let (mut acc_t, mut acc_v, mut sent) = (Vec::<i64>::new(), Vec::<u16>::new(), 0usize);
+        let (mut all_t, mut all_v) = (Vec::<i64>::new(), Vec::<u16>::new());
+        let mut events = Vec::new();
+        let mut clock = 0i64;
+
+        for &new_samples in ticks {
+            for _ in 0..new_samples {
+                clock += 50_000;
+                // A value that varies per sample, so a mis-splice shows up as wrong DATA and not
+                // merely a wrong length.
+                let value = (clock / 50_000) as u16 + 100;
+                acc_t.push(clock);
+                acc_v.push(value);
+                all_t.push(clock);
+                all_v.push(value);
+            }
+            // `reconcile`: drop the oldest past the window and REBASE the sent cursor by the same
+            // amount. This is the line that desynchronised the fold (`__init__.py:944`).
+            if acc_t.len() > window {
+                let drop = acc_t.len() - window;
+                acc_t.drain(..drop);
+                acc_v.drain(..drop);
+                sent = sent.saturating_sub(drop);
+            }
+            // `broadcast_signal_once`: the slice starts at the (rebased) cursor.
+            events.push(history_at(
+                "rh",
+                "node-0",
+                sent as u64,
+                &acc_t[sent..],
+                &acc_v[sent..],
+            ));
+            sent = acc_t.len();
+        }
+        (events, all_t, all_v)
+    }
+
+    /// **#448: a long run's live trace must not freeze when the plugin prunes its window.**
+    ///
+    /// Past `SIGNAL_WINDOW` samples the plugin drops its oldest and rebases `acc['sent']`, so every
+    /// following slice's `base` is relative to a pruned accumulator while this fold holds the whole
+    /// un-pruned trace. Under the old `base == len` rule nothing ever lined up again: every live
+    /// tick was "out of sync", and the RSSI trace froze mid-heat with no error.
+    #[test]
+    fn a_producer_side_prune_does_not_freeze_the_live_trace() {
+        // Ticks of 3 samples against a window of 8: the first two ticks fit, everything after
+        // prunes, so most of this run is post-rebase.
+        let (events, all_times, all_values) =
+            plugin_signal_slices(8, &[3, 3, 3, 3, 3, 3, 3, 3, 3, 3]);
+        assert_eq!(all_values.len(), 30, "the run produced 30 dense samples");
+
+        let trace = &signal_trace(&events).competitors[0];
+        assert_eq!(
+            trace.samples, all_values,
+            "every live tick lands: the trace is the whole run, not the two ticks before the \
+             first prune"
+        );
+        assert_eq!(trace.times.as_deref(), Some(all_times.as_slice()));
+    }
+
+    /// The other half of #448: the end-of-race flush must not *shrink* the trace.
+    ///
+    /// That flush sends `base = 0` with the plugin's accumulator — which, after a prune, is only
+    /// the last `SIGNAL_WINDOW` samples. Treating every `base == 0` as a wholesale replace threw
+    /// away the head of the run that the fold alone still had.
+    #[test]
+    fn the_end_of_race_flush_never_truncates_a_longer_trace() {
+        let (mut events, all_times, all_values) = plugin_signal_slices(8, &[3, 3, 3, 3, 3]);
+        assert_eq!(all_values.len(), 15);
+
+        // `broadcast_signal_once(final=True)`: base 0, carrying only the retained window.
+        let tail_times = &all_times[all_values.len() - 8..];
+        let tail_values = &all_values[all_values.len() - 8..];
+        events.push(history_at("rh", "node-0", 0, tail_times, tail_values));
+
+        let trace = &signal_trace(&events).competitors[0];
+        assert_eq!(
+            trace.samples, all_values,
+            "the flush contributes nothing new and takes nothing away — the earliest samples of \
+             the run survive it"
+        );
+        assert_eq!(trace.times.as_deref(), Some(all_times.as_slice()));
+    }
+
+    /// A genuine whole-trace snapshot — the post-race `current_marshal_data` pull, which starts at
+    /// or before everything held — still supersedes, so a re-pull remains authoritative.
+    #[test]
+    fn a_whole_trace_snapshot_still_supersedes_the_live_stream() {
+        let (mut events, all_times, _) = plugin_signal_slices(8, &[3, 3, 3, 3, 3]);
+        // The post-race pull: the full run at full fidelity, re-stated from the start.
+        let pulled: Vec<u16> = (0..all_times.len()).map(|i| 900 + i as u16).collect();
+        events.push(history_at("rh", "node-0", 0, &all_times, &pulled));
+
+        let trace = &signal_trace(&events).competitors[0];
+        assert_eq!(
+            trace.samples, pulled,
+            "a snapshot that starts no later than what we hold replaces it — the marshal pull is \
+             the authority on a finished heat"
+        );
     }
 
     #[test]
