@@ -45,7 +45,12 @@ describe('bandSelection / toggleBandSelection (#429, the per-band tri-state box)
   it('measures against what was OFFERED, not the raw catalog (a Fixed timer is narrowed)', () => {
     // A Fixed timer that declares only R1: ticking R1 fills that timer's Raceband band. Measured
     // against the full catalog it would read 'some' forever and the box would never latch.
-    const offered = offeredCatalog({ Fixed: { channels: [5658] } }, CATALOG);
+    //
+    // `bandSelection` bands catalog ENTRIES, and an offer may have none (#449 — a declared
+    // frequency the catalog cannot name belongs to no band), so the named ones are what it reads.
+    const offered = offeredCatalog({ Fixed: { channels: [5658] } }, CATALOG)
+      .map((o) => o.entry)
+      .filter((e): e is ChannelCatalogEntry => e !== undefined);
     expect(bandSelection(offered, new Set([5658]))).toBe('all');
   });
 
@@ -136,14 +141,43 @@ describe('capabilityTag / fixedAllowed', () => {
 });
 
 describe('offeredCatalog', () => {
-  it('offers the whole catalog for a Flexible timer', () => {
-    expect(offeredCatalog('Flexible', CATALOG)).toHaveLength(CATALOG.length);
+  it('offers the whole catalog for a Flexible timer, each with its entry', () => {
+    const offered = offeredCatalog('Flexible', CATALOG);
+    expect(offered).toHaveLength(CATALOG.length);
+    expect(offered.map((o) => o.entry)).toEqual(CATALOG);
   });
 
   it('limits a Fixed timer to its built-in allowed set, in catalog order', () => {
     const fixed: ChannelCapability = { Fixed: { channels: [5800, 5658] } };
     const offered = offeredCatalog(fixed, CATALOG);
     expect(offered.map((e) => e.mhz)).toEqual([5658, 5800]); // catalog order, not allowed order
+  });
+
+  // #449 — this used to be a plain `catalog.filter`, so a declared frequency the catalog had no
+  // entry for vanished: a timer whose module runs a non-standard grid could never be offered the
+  // channels it actually supports, and a node sitting on one had no option to select.
+  it('offers a declared channel the catalog does not know, with no entry to name it', () => {
+    const fixed: ChannelCapability = { Fixed: { channels: [5800, 5891] } };
+    const offered = offeredCatalog(fixed, CATALOG);
+    expect(offered.map((o) => o.mhz)).toEqual([5800, 5891]);
+    // The catalog-known one carries its entry; the unknown one carries none, which is what tells a
+    // caller to label it from the raw MHz rather than invent a band for it.
+    expect(offered[0].entry).toEqual({ band: 'Fatshark', channel: 'F4', mhz: 5800 });
+    expect(offered[1].entry).toBeUndefined();
+  });
+
+  it('puts the named channels in catalog order first, then the unnamed ones ascending', () => {
+    const fixed: ChannelCapability = { Fixed: { channels: [5921, 5695, 5891, 5658] } };
+    expect(offeredCatalog(fixed, CATALOG).map((o) => o.mhz)).toEqual([5658, 5695, 5891, 5921]);
+  });
+
+  it('offers a Fixed set the catalog knows NONE of, rather than nothing at all', () => {
+    // The degenerate shape of the same bug: every declared channel off-catalog produced an empty
+    // dropdown on a timer that supports two channels perfectly well.
+    const fixed: ChannelCapability = { Fixed: { channels: [5891, 5921] } };
+    const offered = offeredCatalog(fixed, CATALOG);
+    expect(offered.map((o) => o.mhz)).toEqual([5891, 5921]);
+    expect(offered.every((o) => o.entry === undefined)).toBe(true);
   });
 });
 

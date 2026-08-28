@@ -691,6 +691,13 @@ impl Timer {
     /// disabled or non-existent node, and any pilot beyond the enabled set (which the heat-size cap
     /// should already have refused). Dropping seats nobody there, which records nothing; squeezing
     /// would seat somebody on the wrong gate, which records *the wrong pilot*.
+    ///
+    /// **One unplaceable entry drops only itself** (#450). Running out of free gates used to `break`
+    /// the walk, which also skipped every *later* explicit `node-{i}` ref — refs that need no free
+    /// gate at all, because they name their own. A lineup mixing auto-seated pilots with explicit
+    /// seats could therefore fail to seat an explicitly-placed pilot onto a gate that was sitting
+    /// there available, and RotorHazard dismisses every crossing on an unseated node ("Pilot not
+    /// defined"), so that pilot's laps simply never existed.
     pub fn seat_nodes(&self, lineup: &[CompetitorRef]) -> Vec<(u32, CompetitorRef)> {
         let enabled = self.enabled_nodes();
         // Indices the lineup names outright — they are spoken for, so the positional walk below
@@ -711,11 +718,15 @@ impl Timer {
                         seats.push((node, competitor.clone()));
                     }
                 }
-                // A pilot: the next enabled gate that nothing else has claimed.
-                None => match free.next() {
-                    Some(node) => seats.push((node, competitor.clone())),
-                    None => break,
-                },
+                // A pilot: the next enabled gate that nothing else has claimed. With none left this
+                // pilot is dropped — and the walk CONTINUES (#450), because a later `node-{i}` ref
+                // asks for a gate of its own and the free list has nothing to do with whether that
+                // gate is available.
+                None => {
+                    if let Some(node) = free.next() {
+                        seats.push((node, competitor.clone()));
+                    }
+                }
             }
         }
         seats
@@ -1070,7 +1081,7 @@ pub struct CalibrationDispatch {
 ///
 /// The internal twin of [`CalibrationDispatch`] with the timer it belongs to: the queue is a
 /// hand-off across the crate boundary (the live sockets live in `gridfpv-app`, *above* this
-/// crate), exactly like `restart_requests`.
+/// crate), exactly like every other variant of [`PendingTimerWrite`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingCalibration {
     /// Which timer to write to.
@@ -1234,13 +1245,47 @@ impl OutstandingCapture {
     }
 }
 
-/// How one capture ended (#355) — what [`TimerRegistry::resolve_captures`] settled.
+/// **How much GridFPV can honestly say about a finished capture** (#355, #446).
 ///
-/// `level: Some` is a capture that **landed**: the timer came back reporting a threshold it was not
-/// reporting before, and that level is now recorded on [`Timer::calibration`] as GridFPV's own
-/// (D27). `level: None` is a capture that did **not** land, and nothing was recorded — which is the
-/// honest reading of RotorHazard's silence, since it refuses a capture (a node not answering, or one
-/// already capturing) without emitting anything at all.
+/// A capture is confirmed by *watching the level change*, because that is the only signal there is:
+/// RotorHazard refuses a capture (a node that is not answering, or one already capturing) by
+/// returning `False` and emitting nothing at all. That works, but it leaves two states that are not
+/// failures and were being reported as one — which is what #446 is.
+///
+/// Three outcomes, then, because there are three things that actually happen. The boundary between
+/// them is not "did it work" but **"what did GridFPV see"**, and each says exactly that much.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureResolution {
+    /// The timer came back reporting a level it was **not** reporting when the capture started.
+    /// The capture measured something, and that level is now recorded on [`Timer::calibration`] as
+    /// GridFPV's own (D27).
+    Measured,
+    /// The timer is reporting the **same** level it reported before the capture.
+    ///
+    /// Not a failure, and not a success: GridFPV cannot tell a capture that measured the same
+    /// number — an ordinary outcome on a stable gate with an unchanged craft, and the usual result
+    /// of capturing twice in a row — from one RotorHazard refused in silence. Reported as the
+    /// ambiguity it is, which is the whole of #446's first false negative: the RD used to be told
+    /// their capture produced no level and that RotorHazard had refused it, for a threshold that is
+    /// sitting at exactly what they flew for.
+    ///
+    /// **Nothing is recorded.** The level GridFPV would write is one it cannot attribute to the
+    /// capture, and writing it would be adopting a readback as config — the one thing D27 forbids.
+    /// The RD sees the level on the Tune page regardless; it comes off the same feed.
+    Unchanged,
+    /// GridFPV could **not read a level at all** across the capture's window — the tune feed
+    /// carried nothing for this node/threshold.
+    ///
+    /// The other half of #446: this used to be reported identically to a refusal, complete with
+    /// "RotorHazard refuses a capture silently", which is a claim about RotorHazard that GridFPV is
+    /// in no position to make. It means the link dropped, the node never answered, or the tune
+    /// subscription was never open — GridFPV was not watching, so it says so. (A subscription that
+    /// merely *lapses* mid-capture no longer causes this: an outstanding capture holds the tap open
+    /// on its own, so the confirming readback still arrives.) Nothing is recorded.
+    Unobserved,
+}
+
+/// How one capture ended (#355, #446) — what [`TimerRegistry::resolve_captures`] settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureOutcome {
     /// The timer it ran on.
@@ -1249,10 +1294,30 @@ pub struct CaptureOutcome {
     pub node: u32,
     /// Which threshold was being captured.
     pub threshold: CaptureThreshold,
-    /// The level that came back, or `None` if none ever did.
+    /// The level GridFPV **recorded** on [`Timer::calibration`] — `Some` only for
+    /// [`CaptureResolution::Measured`], because that is the only outcome GridFPV can attribute to
+    /// the capture. `None` is never a claim that the capture failed; read
+    /// [`resolution`](CaptureOutcome::resolution) for that.
     pub level: Option<u32>,
+    /// What the timer is **reporting** for this threshold now, whether or not it changed. Evidence
+    /// about the timer (D27), carried so the operator line can say what the gate is actually
+    /// detecting against even when GridFPV recorded nothing.
+    pub reported: Option<u32>,
+    /// How much GridFPV can honestly say happened.
+    pub resolution: CaptureResolution,
 }
 
+impl CaptureOutcome {
+    /// Whether GridFPV **saw the capture take effect** — a level it did not have before.
+    ///
+    /// Deliberately the narrow reading: [`Unchanged`](CaptureResolution::Unchanged) is not `true`
+    /// here (nothing was proven, and nothing was recorded) and it is not a failure either, which is
+    /// why callers should match on [`resolution`](CaptureOutcome::resolution) rather than treat
+    /// this as a boolean verdict.
+    pub fn measured(&self) -> bool {
+        self.resolution == CaptureResolution::Measured
+    }
+}
 /// The lowest raw centre frequency a channel write may carry (#413) — the bottom of the 5.8 GHz
 /// band the catalog lives in, matching the console's own custom-MHz guard.
 ///
@@ -1356,6 +1421,141 @@ pub struct PendingChannel {
     pub during_open_practice: bool,
 }
 
+/// **One pending timer write** the connection reconciler drains (#457) — the single queue every
+/// RD-initiated write to a live timer travels on.
+///
+/// # Why one queue
+///
+/// Restart (#386), calibration (#355), capture (#355) and channel (#413) each grew their own `Vec`
+/// field, their own `take_*_requests()` drain and their own copy-pasted "no live connection →
+/// warn, drop" paragraph in the reconciler. They are the *same* hand-off: a route in this crate
+/// accepts a write, and the live socket that has to carry it lives in `gridfpv-app`, **above** this
+/// crate, so the registry is the one seam both sides already share. Four copies of one pipe meant
+/// any policy fix — #436's clear-on-reconnect, #437's not-landed-while-dialling — had to be made
+/// four times, in four places that could silently diverge.
+///
+/// So: one enum, one queue, one drain ([`TimerRegistry::take_pending_writes`]), and one `match` in
+/// the reconciler. The per-variant *differences* that are real are stated once, as
+/// [`coalesces_with`](PendingTimerWrite::coalesces_with) / [`fold_into`](PendingTimerWrite::fold_into),
+/// instead of being implied by which of four functions a caller happened to reach.
+///
+/// The payloads keep their own types ([`PendingCalibration`], [`PendingCapture`],
+/// [`PendingChannel`]) — those are the shapes the emit needs, and each carries the timer it is for.
+///
+/// **In-memory only, never persisted.** A Director restart must not replay a previous session's
+/// restart, tuning, capture or retune onto whatever timer happens to be plugged in now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingTimerWrite {
+    /// **Restart the RotorHazard server** behind this timer (#386) — the guided plugin install's
+    /// last step, so RH re-imports its `plugins/` directory.
+    Restart {
+        /// Which timer to restart.
+        timer: TimerId,
+    },
+    /// **Set a node's enter/exit detection thresholds** (#355) — the Tune page's typed level.
+    Calibrate(PendingCalibration),
+    /// **Measure** one of a node's thresholds (#355) — the Tune page's Capture button.
+    Capture(PendingCapture),
+    /// **Set a node's channel** (#413) — the Tune page's other write.
+    SetChannel(PendingChannel),
+}
+
+impl PendingTimerWrite {
+    /// Which timer this write is addressed to — the only thing every variant has in common, and
+    /// what the reconciler matches a live connection on.
+    pub fn timer(&self) -> &TimerId {
+        match self {
+            PendingTimerWrite::Restart { timer } => timer,
+            PendingTimerWrite::Calibrate(w) => &w.timer,
+            PendingTimerWrite::Capture(w) => &w.timer,
+            PendingTimerWrite::SetChannel(w) => &w.timer,
+        }
+    }
+
+    /// **Queue this write**, applying its variant's coalescing policy — the one enqueue used by
+    /// *both* queues a write crosses: the registry's hand-off queue
+    /// ([`TimerRegistry::take_pending_writes`]) and the per-connection queue the live driver in
+    /// `gridfpv-app` holds. One function, so the two can never disagree about whether a second
+    /// press replaces the first (#457).
+    ///
+    /// A write that [supersedes](Self::coalesces_with) one already queued is
+    /// [folded into](Self::fold_into) it **in place**, so the queue keeps request order — a
+    /// coalesced write must not jump ahead of writes queued after the one it replaces. A write
+    /// that supersedes nothing (every capture, and the first of anything) is appended.
+    pub fn queue_into(self, queue: &mut Vec<PendingTimerWrite>) {
+        match queue.iter_mut().find(|queued| self.coalesces_with(queued)) {
+            Some(queued) => self.fold_into(queued),
+            None => queue.push(self),
+        }
+    }
+
+    /// Whether this write **supersedes** `queued` — the per-variant coalescing policy, in one
+    /// place (#457). Each rule below is a deliberate decision, and they are deliberately not the
+    /// same rule:
+    ///
+    /// * **Restart** coalesces per **timer**. Pressing Restart twice before a drain is one
+    ///   restart; firing two would take the timing hardware down, bring it up, and take it down
+    ///   again.
+    /// * **Calibrate** coalesces per **(timer, node)**, last value wins per threshold (see
+    ///   [`fold_into`](Self::fold_into)). A slider dragged twice before a drain must apply the
+    ///   *latest* level once — replaying a stale one after a fresh one would leave the detector on
+    ///   a value the page is no longer showing.
+    /// * **SetChannel** coalesces per **(timer, node)**, latest pick wins, for exactly the same
+    ///   reason: a dropdown changed twice before a drain retunes the node once.
+    /// * **Capture NEVER coalesces.** This is the one that is easy to get wrong by symmetry. Two
+    ///   writes of a *value* to one node are one intent; two captures are two **measurements** the
+    ///   RD asked for, each of which needs a pass flown through the gate — collapsing them would
+    ///   silently drop a pass they flew. The single case where two would genuinely collide (a
+    ///   second capture of a threshold already capturing, which RotorHazard refuses in complete
+    ///   silence) is refused by [`TimerRegistry::request_capture`] up front, so the queue never
+    ///   has to.
+    fn coalesces_with(&self, queued: &PendingTimerWrite) -> bool {
+        match (self, queued) {
+            (PendingTimerWrite::Restart { timer: a }, PendingTimerWrite::Restart { timer: b }) => {
+                a == b
+            }
+            (PendingTimerWrite::Calibrate(a), PendingTimerWrite::Calibrate(b)) => {
+                a.timer == b.timer && a.node == b.node
+            }
+            (PendingTimerWrite::SetChannel(a), PendingTimerWrite::SetChannel(b)) => {
+                a.timer == b.timer && a.node == b.node
+            }
+            // A capture is a measurement, not a value. It never folds into anything.
+            _ => false,
+        }
+    }
+
+    /// Fold this write into the `queued` one it [supersedes](Self::coalesces_with). Only ever
+    /// called for a pair `coalesces_with` accepted, so the non-matching arms are unreachable.
+    fn fold_into(self, queued: &mut PendingTimerWrite) {
+        match (self, queued) {
+            // Nothing to carry: one restart is indistinguishable from another.
+            (PendingTimerWrite::Restart { .. }, PendingTimerWrite::Restart { .. }) => {}
+            (PendingTimerWrite::Calibrate(fresh), PendingTimerWrite::Calibrate(queued)) => {
+                // Per threshold: a write that carries only an enter level must not blank the exit
+                // level a previous write in the same tick set.
+                if fresh.enter_at.is_some() {
+                    queued.enter_at = fresh.enter_at;
+                }
+                if fresh.exit_at.is_some() {
+                    queued.exit_at = fresh.exit_at;
+                }
+                // The freshest phase reading wins: a heat that has just gone racing (or just
+                // stopped) must not be judged by a check made several writes ago.
+                queued.during_open_practice = fresh.during_open_practice;
+            }
+            // Wholesale: a channel pick has no independent halves.
+            (PendingTimerWrite::SetChannel(fresh), PendingTimerWrite::SetChannel(queued)) => {
+                *queued = fresh;
+            }
+            (fresh, queued) => {
+                debug_assert!(false, "fold_into called on writes that do not coalesce");
+                *queued = fresh;
+            }
+        }
+    }
+}
+
 /// The application-level registry of all configured timers (issue #73).
 ///
 /// Maps each [`TimerId`] to its [`Timer`]. A built-in **Mock** ([`MOCK_TIMER_ID`]) is always
@@ -1367,7 +1567,7 @@ pub struct PendingChannel {
 pub struct TimerRegistry {
     inner: Arc<RwLock<Registry>>,
     /// Live **tune telemetry** (#355 S2a), keyed by timer — a sibling map beside the timer set,
-    /// exactly like `restart_requests`, and for the same layering reason: the live socket lives in
+    /// exactly like `pending_writes`, and for the same layering reason: the live socket lives in
     /// `gridfpv-app`, above this crate, so the registry is the one seam the route and the
     /// connection driver already share.
     ///
@@ -1398,54 +1598,26 @@ struct Registry {
     timers: BTreeMap<TimerId, Timer>,
     /// Directory `timers.json` is persisted under; `None` ⇒ in-memory only (no data dir).
     data_dir: Option<PathBuf>,
-    /// **Pending RotorHazard restart requests** (issue #386), in request order — the RD asked, from
-    /// the guided plugin install, that these timers re-execute their RotorHazard server so it
-    /// re-imports its `plugins/` directory.
+    /// **Every pending write to a live timer** (#457), in request order — restarts (#386),
+    /// calibration writes (#355), captures (#355) and channel writes (#413), on one queue.
     ///
     /// A hand-off queue, not state: the connection layer that owns the live sockets lives in
-    /// `gridfpv-app`, *above* this crate, so a route here cannot call it. The manual connection hold
-    /// solves the same layering problem with a flag ([`Timer::manual_connect`]); a restart is an
+    /// `gridfpv-app`, *above* this crate, so a route here cannot call it. The manual connection
+    /// hold solves the same layering problem with a flag ([`Timer::manual_connect`]); a write is an
     /// **edge** rather than a level, so it is a drained queue instead — the reconciler takes each
-    /// request exactly once ([`TimerRegistry::take_restart_requests`]) and emits it onto the live
-    /// connection. In-memory only, and never persisted: a Director restart must not re-fire an
-    /// RD's restart from a previous session.
-    restart_requests: Vec<TimerId>,
-    /// **Pending calibration writes** (#355), in request order — enter/exit thresholds the RD set
-    /// on the Tune page that have not yet been emitted onto a live socket.
+    /// write exactly once ([`TimerRegistry::take_pending_writes`]) and dispatches it onto the live
+    /// connection.
     ///
-    /// The same hand-off queue `restart_requests` is, for the same layering reason: the live
-    /// sockets live in `gridfpv-app`, *above* this crate, so the RD-gated route here cannot emit.
-    /// The reconciler drains it exactly once
-    /// ([`TimerRegistry::take_calibration_requests`]) and fires the emits.
+    /// **Enqueued through [`Registry::queue_write`]**, which applies the per-variant coalescing
+    /// policy stated once on [`PendingTimerWrite::coalesces_with`] — so "calibration coalesces per
+    /// node, a capture never does" is a documented rule rather than a difference between two
+    /// copy-pasted `push` sites.
     ///
-    /// **Coalesced per `(timer, node)`, last write wins per threshold.** A slider dragged twice
-    /// before a drain should put the *latest* value on the timer, not replay a stale one after it —
-    /// and a node whose enter and exit both moved in the same tick travels as one entry carrying
-    /// both. This queue is only the in-flight buffer; the durable record of what GridFPV decided is
-    /// [`Timer::calibration`], written at accept time (D27).
-    ///
-    /// In-memory only, and never persisted: a Director restart must not replay an RD's tuning from
-    /// a previous session onto whatever timer happens to be plugged in now.
-    calibration_requests: Vec<PendingCalibration>,
-    /// **Pending channel writes** (#413), in request order — the channel the RD picked for a node
-    /// on the Tune page, not yet emitted onto a live socket.
-    ///
-    /// The same hand-off queue, the same layering reason, and the same discipline as
-    /// [`calibration_requests`](Registry::calibration_requests): coalesced per `(timer, node)` so a
-    /// dropdown changed twice before a drain tunes the node once, drained exactly once
-    /// ([`TimerRegistry::take_channel_requests`]), and never persisted — a Director restart must
-    /// not retune whatever timer happens to be plugged in now.
-    channel_requests: Vec<PendingChannel>,
-    /// **Pending captures** (#355), in request order — the RD pressed Capture on a node and the
-    /// `cap_enter_at_btn` / `cap_exit_at_btn` emit has not reached a live socket yet.
-    ///
-    /// The same hand-off queue as [`calibration_requests`](Registry::calibration_requests), with
-    /// one deliberate difference: it is **not coalesced**. A repeated capture is not a repeated
-    /// value, it is a second measurement the RD asked for; and RotorHazard refuses a capture that
-    /// is already running on that node/threshold, which is what
-    /// [`TimerRegistry::request_capture`] checks before ever queueing a second one. Never
-    /// persisted — a Director restart must not fire a capture at whatever timer is plugged in now.
-    capture_requests: Vec<PendingCapture>,
+    /// In-memory only, and never persisted: a Director restart must not re-fire an RD's restart,
+    /// replay their tuning, or retune whatever timer happens to be plugged in now. The durable
+    /// records of what GridFPV *decided* are [`Timer::calibration`] and [`Timer::node_channels`],
+    /// written at accept time (D27); this is only the in-flight buffer.
+    pending_writes: Vec<PendingTimerWrite>,
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1807,10 +1979,7 @@ impl TimerRegistry {
             inner: Arc::new(RwLock::new(Registry {
                 timers,
                 data_dir,
-                restart_requests: Vec::new(),
-                calibration_requests: Vec::new(),
-                channel_requests: Vec::new(),
-                capture_requests: Vec::new(),
+                pending_writes: Vec::new(),
             })),
             signal: Arc::new(Mutex::new(HashMap::new())),
             captures: Arc::new(Mutex::new(HashMap::new())),
@@ -2081,7 +2250,7 @@ impl TimerRegistry {
     ///
     /// This only **parks the request**: the sockets live in `gridfpv-app`, above this crate, so the
     /// connection reconciler drains the queue on its next tick
-    /// ([`take_restart_requests`](Self::take_restart_requests)) and fires the emit. The queue is
+    /// ([`take_pending_writes`](Self::take_pending_writes)) and fires the emit. The queue is
     /// in-memory and never persisted.
     ///
     /// Refused (a [`TimerError`], which the route reports as a `400`) for an unknown id, for a
@@ -2112,17 +2281,23 @@ impl TimerRegistry {
                 timer.name
             )));
         }
-        if !reg.restart_requests.contains(id) {
-            reg.restart_requests.push(id.clone());
-        }
+        reg.queue_write(PendingTimerWrite::Restart { timer: id.clone() });
         Ok(timer)
     }
 
-    /// Take every pending restart request (issue #386), leaving the queue empty — the connection
-    /// reconciler's drain. Each request is handed out **exactly once**: if no live connection is
-    /// found for it the request is dropped (and logged), never re-queued for a later connection.
-    pub fn take_restart_requests(&self) -> Vec<TimerId> {
-        std::mem::take(&mut self.write().restart_requests)
+    /// Take every pending timer write (#457), leaving the queue empty — the connection
+    /// reconciler's one drain, for restarts (#386), calibration writes (#355), captures (#355) and
+    /// channel writes (#413) alike.
+    ///
+    /// Each write is handed out **exactly once**: if no live connection is found for it the write
+    /// is dropped (and logged), never re-queued for a later connection. That is a policy, not an
+    /// omission, and it is the same one for every variant — a restart, a threshold, a capture or a
+    /// retune arriving minutes later on a reconnect would each act on hardware nobody asked to
+    /// touch, on a timer that may not even be the same physical box. The RD sees it as a value
+    /// that never comes back confirmed; the durable record of what GridFPV decided
+    /// ([`Timer::calibration`], [`Timer::node_channels`]) is unaffected.
+    pub fn take_pending_writes(&self) -> Vec<PendingTimerWrite> {
+        std::mem::take(&mut self.write().pending_writes)
     }
 
     /// **Set a node's enter/exit detection thresholds** on `id` (#355), returning what was
@@ -2245,32 +2420,16 @@ impl TimerRegistry {
             }
         }
 
-        // Then queue the *application* of it. Coalesced per (timer, node): a drag that lands twice
-        // before a drain applies the latest value once, rather than replaying a stale one after it.
-        match reg
-            .calibration_requests
-            .iter_mut()
-            .find(|p| &p.timer == id && p.node == request.node)
-        {
-            Some(pending) => {
-                if enter_at.is_some() {
-                    pending.enter_at = enter_at;
-                }
-                if exit_at.is_some() {
-                    pending.exit_at = exit_at;
-                }
-                // The freshest phase reading wins: a heat that has just gone racing (or just
-                // stopped) must not be judged by a check made several writes ago.
-                pending.during_open_practice = during_open_practice;
-            }
-            None => reg.calibration_requests.push(PendingCalibration {
-                timer: id.clone(),
-                node: request.node,
-                enter_at,
-                exit_at,
-                during_open_practice,
-            }),
-        }
+        // Then queue the *application* of it (#457, one queue). Coalesced per (timer, node) by
+        // `PendingTimerWrite`'s own policy: a drag that lands twice before a drain applies the
+        // latest value once, rather than replaying a stale one after it.
+        reg.queue_write(PendingTimerWrite::Calibrate(PendingCalibration {
+            timer: id.clone(),
+            node: request.node,
+            enter_at,
+            exit_at,
+            during_open_practice,
+        }));
         reg.persist()?;
 
         Ok(CalibrationDispatch {
@@ -2279,17 +2438,6 @@ impl TimerRegistry {
             enter_at,
             exit_at,
         })
-    }
-
-    /// Take every pending calibration write (#355), leaving the queue empty — the connection
-    /// reconciler's drain, and the twin of [`take_restart_requests`](Self::take_restart_requests).
-    ///
-    /// Each write is handed out **exactly once**: if no live connection is found for it the write
-    /// is dropped (and logged), never re-queued. The RD sees that on the page as a threshold that
-    /// never comes back confirmed, which is the honest outcome — the durable record of the value
-    /// stays on [`Timer::calibration`] regardless.
-    pub fn take_calibration_requests(&self) -> Vec<PendingCalibration> {
-        std::mem::take(&mut self.write().calibration_requests)
     }
 
     /// **Start a capture** on one node's threshold (#355), returning what was dispatched.
@@ -2405,17 +2553,18 @@ impl TimerRegistry {
             });
         }
 
-        // 4. Queue the emit. NOT coalesced (see `Registry::capture_requests`): a second capture is a
-        //    second measurement, not a restatement of a value — and step 3 has already refused the
-        //    one case where two would collide.
+        // 4. Queue the emit (#457, one queue). **Never coalesced** — see
+        //    `PendingTimerWrite::coalesces_with`, where that is stated as the policy it is: a
+        //    second capture is a second *measurement*, not a restatement of a value, and step 3
+        //    has already refused the one case where two would collide.
         {
             let mut reg = self.write();
-            reg.capture_requests.push(PendingCapture {
+            reg.queue_write(PendingTimerWrite::Capture(PendingCapture {
                 timer: id.clone(),
                 node: request.node,
                 threshold: request.threshold,
                 during_open_practice,
-            });
+            }));
         }
 
         Ok(CaptureDispatch {
@@ -2428,17 +2577,6 @@ impl TimerRegistry {
         })
     }
 
-    /// Take every pending capture (#355), leaving the queue empty — the connection reconciler's
-    /// drain, and the twin of [`take_calibration_requests`](Self::take_calibration_requests).
-    ///
-    /// Handed out **exactly once**. If no live connection is found the capture is dropped and
-    /// logged, never re-queued: a capture that fires minutes later would sample an empty gate and
-    /// set a threshold off the noise floor, which is worse than not capturing at all. The RD sees it
-    /// as a capture that never comes back with a level, which is the honest outcome.
-    pub fn take_capture_requests(&self) -> Vec<PendingCapture> {
-        std::mem::take(&mut self.write().capture_requests)
-    }
-
     /// Whether a capture is running on `id` right now (#355) — read by the driver so it knows to
     /// fire the post-window threshold readback.
     pub fn capture_in_flight(&self, id: &TimerId) -> bool {
@@ -2448,19 +2586,26 @@ impl TimerRegistry {
             .is_some_and(|list| list.iter().any(|c| !c.expired(now)))
     }
 
-    /// **Settle every capture that has run its course** (#355) — called on the reconciler's tick.
+    /// **Settle every capture that has run its course** (#355, #446) — called on the reconciler's
+    /// tick.
     ///
     /// This is the half of a capture that makes it a *GridFPV* value rather than an observation.
-    /// For each outstanding capture whose sampling window has closed:
+    /// For each outstanding capture whose sampling window has closed, GridFPV says exactly what it
+    /// saw — [`CaptureResolution`] has the three cases and the reasoning; in short:
     ///
-    /// * the timer is reporting a level, and it **differs** from what it was reporting when the
-    ///   capture started ⇒ the capture landed. The level is recorded on [`Timer::calibration`]
+    /// * a level that **differs** from what the timer reported when the capture started ⇒
+    ///   [`Measured`](CaptureResolution::Measured). It is recorded on [`Timer::calibration`]
     ///   (D27 — written the same way a typed one is, and persisted), and the capture is done.
-    /// * the settle window has also elapsed and the level has **not** changed ⇒ the capture did not
-    ///   land. Nothing is recorded, and the capture is dropped. RotorHazard refuses a capture
-    ///   silently — a node that is not answering, or one already capturing — so "no new level" is
-    ///   the only evidence of that refusal there is, and inventing a success here would be the
-    ///   fourth silently-ignored write (#423).
+    /// * the settle window has also elapsed and the level is the **same** ⇒
+    ///   [`Unchanged`](CaptureResolution::Unchanged). Nothing is recorded, and — this is #446 —
+    ///   nothing is *claimed*: an unchanged level is what a capture that re-measured the same
+    ///   number looks like, and also what a capture RotorHazard refused in silence looks like, and
+    ///   GridFPV cannot tell them apart. It used to report the second, which is a claim about
+    ///   RotorHazard it is in no position to make.
+    /// * the settle window elapsed with **no level readable at all** ⇒
+    ///   [`Unobserved`](CaptureResolution::Unobserved). GridFPV was not watching (the link dropped,
+    ///   the node never answered, no tune subscription was ever open) — the other #446 false
+    ///   failure, and again nothing is recorded.
     ///
     /// A capture is deliberately **not** resolved before its window closes, even if a level changes
     /// during it: a threshold that moved in those three seconds moved for some other reason, and
@@ -2492,28 +2637,43 @@ impl TimerRegistry {
                 continue; // still sampling — the RD is mid-pass.
             }
             let reported = self.reported_level(&timer, capture.node, capture.threshold);
-            match reported {
-                Some(level) if Some(level) != capture.previous => settled.push(CaptureOutcome {
-                    timer,
-                    node: capture.node,
-                    threshold: capture.threshold,
-                    level: Some(level),
-                }),
-                _ if capture.expired(now) => settled.push(CaptureOutcome {
-                    timer,
-                    node: capture.node,
-                    threshold: capture.threshold,
-                    level: None,
-                }),
-                _ => {}
-            }
+            let resolution = match reported {
+                // A level GridFPV did not have before: the capture measured something.
+                Some(level) if Some(level) != capture.previous => {
+                    settled.push(CaptureOutcome {
+                        timer,
+                        node: capture.node,
+                        threshold: capture.threshold,
+                        level: Some(level),
+                        reported,
+                        resolution: CaptureResolution::Measured,
+                    });
+                    continue;
+                }
+                // Everything else waits out the settle grace first — the level may still arrive.
+                _ if !capture.expired(now) => continue,
+                // Out of time with the level unchanged, or with nothing readable at all. Both are
+                // "GridFPV cannot say", and they are different kinds of cannot-say (#446).
+                Some(_) => CaptureResolution::Unchanged,
+                None => CaptureResolution::Unobserved,
+            };
+            settled.push(CaptureOutcome {
+                timer,
+                node: capture.node,
+                threshold: capture.threshold,
+                // Recorded: nothing. Neither of these outcomes is attributable to the capture, and
+                // writing the level anyway would be adopting a readback as GridFPV's config (D27).
+                level: None,
+                reported,
+                resolution,
+            });
         }
         if settled.is_empty() {
             return Vec::new();
         }
 
-        // 3. Record the ones that landed (D27), then persist once for the whole batch.
-        let landed: Vec<&CaptureOutcome> = settled.iter().filter(|o| o.level.is_some()).collect();
+        // 3. Record the ones GridFPV actually measured (D27), then persist once for the batch.
+        let landed: Vec<&CaptureOutcome> = settled.iter().filter(|o| o.measured()).collect();
         if !landed.is_empty() {
             let mut reg = self.write();
             for outcome in &landed {
@@ -2735,28 +2895,17 @@ impl TimerRegistry {
             }
         }
 
-        // Then queue the *application* of it, coalesced per (timer, node): a dropdown changed twice
-        // before a drain tunes the node once, to the latest value.
-        match reg
-            .channel_requests
-            .iter_mut()
-            .find(|p| &p.timer == id && p.node == request.node)
-        {
-            Some(pending) => {
-                pending.mhz = request.mhz;
-                pending.band = band.clone();
-                pending.channel = channel.clone();
-                pending.during_open_practice = during_open_practice;
-            }
-            None => reg.channel_requests.push(PendingChannel {
-                timer: id.clone(),
-                node: request.node,
-                mhz: request.mhz,
-                band: band.clone(),
-                channel: channel.clone(),
-                during_open_practice,
-            }),
-        }
+        // Then queue the *application* of it (#457, one queue), coalesced per (timer, node) by
+        // `PendingTimerWrite`'s own policy: a dropdown changed twice before a drain tunes the node
+        // once, to the latest value.
+        reg.queue_write(PendingTimerWrite::SetChannel(PendingChannel {
+            timer: id.clone(),
+            node: request.node,
+            mhz: request.mhz,
+            band: band.clone(),
+            channel: channel.clone(),
+            during_open_practice,
+        }));
         reg.persist()?;
 
         Ok(ChannelDispatch {
@@ -2768,16 +2917,6 @@ impl TimerRegistry {
             previous_mhz,
             thresholds_tuned_on_another_channel,
         })
-    }
-
-    /// Take every pending channel write (#413), leaving the queue empty — the reconciler's drain,
-    /// and the twin of [`take_calibration_requests`](Self::take_calibration_requests).
-    ///
-    /// Handed out **exactly once**: with no live connection the write is dropped (and logged),
-    /// never re-queued — a node retuned minutes later on a reconnect would move a receiver nobody
-    /// asked to move. The RD sees that on the page as a channel that never comes back confirmed.
-    pub fn take_channel_requests(&self) -> Vec<PendingChannel> {
-        std::mem::take(&mut self.write().channel_requests)
     }
 
     /// The per-node channels GridFPV holds for `id` (#413, D27) — its own record, never a readback.
@@ -2843,15 +2982,35 @@ impl TimerRegistry {
     ///
     /// **Prunes as it reads**: a lapsed subscription's state is dropped here, so a Tune page that
     /// went away leaves nothing behind at all.
+    ///
+    /// # An outstanding capture holds it open (#446)
+    ///
+    /// A capture is a promise GridFPV made to *watch* — it accepted the RD's press, told
+    /// RotorHazard to measure, and owes them an answer about what came back. The tune feed is the
+    /// only place that answer can arrive, so a lease lapsing inside the capture's own window used
+    /// to shut the gate on the confirming readback and leave [`resolve_captures`](
+    /// Self::resolve_captures) reporting a capture that had every chance of landing as one that
+    /// produced no level at all.
+    ///
+    /// That window is short (three seconds of sampling plus the settle) and the lease is five, so
+    /// it takes a page that stops polling at exactly the wrong moment — a tab switched away, a
+    /// laptop that dozed, a hiccup on venue Wi-Fi — which is precisely the moment an RD standing at
+    /// a gate would least understand the answer. The state survives only while the capture does;
+    /// once it settles, the ordinary lease takes over and prunes as before.
     pub fn signal_wanted(&self, id: &TimerId) -> bool {
         let now = Instant::now();
+        // Read the capture store BEFORE the signal store — no lock here is ever held across
+        // another (see `TimerRegistry::captures`).
+        let capturing = self.capture_in_flight(id);
         let mut store = self.signal_store();
         match store.get(id) {
-            Some(state) if state.leased(now) => true,
+            Some(state) if state.leased(now) || capturing => true,
             Some(_) => {
                 store.remove(id);
                 false
             }
+            // Never subscribed (or already pruned): there is nothing to keep open, and a capture
+            // running against no subscription at all resolves as `Unobserved` — which is the truth.
             None => false,
         }
     }
@@ -2864,20 +3023,22 @@ impl TimerRegistry {
     ///
     /// A push with **no live lease is dropped**, and takes the state with it. The gate should
     /// already be shut by then; this is the second lock on the same door, so a driver that is a
-    /// tick behind can never resurrect a stream nobody is watching.
+    /// tick behind can never resurrect a stream nobody is watching. An outstanding capture holds it
+    /// open for exactly as long as [`signal_wanted`](Self::signal_wanted) does — the two doors have
+    /// to agree, or the gate the driver opens is one the store then refuses to write to (#446).
     pub fn push_signal(&self, id: &TimerId, readings: &[NodeReading]) {
         let now = Instant::now();
+        let capturing = self.capture_in_flight(id);
         let mut store = self.signal_store();
         let Some(state) = store.get_mut(id) else {
             return;
         };
-        if !state.leased(now) {
+        if !state.leased(now) && !capturing {
             store.remove(id);
             return;
         }
         state.push(readings, now);
     }
-
     fn signal_store(&self) -> std::sync::MutexGuard<'_, HashMap<TimerId, TimerSignalState>> {
         self.signal.lock().expect("timer signal lock poisoned")
     }
@@ -2911,6 +3072,13 @@ impl TimerRegistry {
 }
 
 impl Registry {
+    /// Queue one write for the connection reconciler (#457) through
+    /// [`PendingTimerWrite::queue_into`], so the registry's queue and the live driver's own queue
+    /// apply the *same* coalescing policy.
+    fn queue_write(&mut self, write: PendingTimerWrite) {
+        write.queue_into(&mut self.pending_writes);
+    }
+
     /// Persist the timer set to `<data_dir>/timers.json` (issue #73), a no-op with no data dir.
     /// The Mock is persisted too so a retune survives a restart.
     fn persist(&self) -> Result<(), TimerError> {
@@ -3216,6 +3384,212 @@ mod tests {
                 "a persisted Timer must carry no telemetry ({leaked} leaked into {json})"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #446 — a capture that landed must not be reported as a failure.
+    // ---------------------------------------------------------------------------------------
+
+    /// One tick of readings carrying a node-0 **threshold pair**, which is what a capture is
+    /// settled against (the RSSI samples are irrelevant here).
+    fn levels(enter: f32, exit: f32) -> Vec<NodeReading> {
+        vec![NodeReading {
+            seen: true,
+            rssi: Some(50.0),
+            enter_at: Some(enter),
+            exit_at: Some(exit),
+            ..Default::default()
+        }]
+    }
+
+    /// Back-date every outstanding capture on `id` by `elapsed`, so the far side of RotorHazard's
+    /// three-second sampling window — and the settle grace behind it — is reachable without
+    /// sleeping seven seconds per case.
+    fn age_captures(timers: &TimerRegistry, id: &TimerId, elapsed: Duration) {
+        let mut store = timers.capture_store();
+        for capture in store.get_mut(id).into_iter().flatten() {
+            capture.started = capture
+                .started
+                .checked_sub(elapsed)
+                .expect("the test clock has room behind it");
+        }
+    }
+
+    /// A connected RH timer with a live Tune subscription reporting `enter`/`exit` on node 0 —
+    /// the state an RD is in when they press Capture.
+    fn tuning_rh(enter: f32, exit: f32) -> (TimerRegistry, TimerId) {
+        let (timers, rh) = registry_with_rh();
+        timers.set_status(&rh, TimerStatus::Connected);
+        timers.signal(&rh);
+        timers.push_signal(&rh, &levels(enter, exit));
+        (timers, rh)
+    }
+
+    /// Start a capture of node 0's enter threshold.
+    fn start_capture(timers: &TimerRegistry, rh: &TimerId) {
+        timers
+            .request_capture(
+                rh,
+                &CaptureRequest {
+                    node: 0,
+                    threshold: CaptureThreshold::Enter,
+                },
+                false,
+            )
+            .expect("a connected RH timer with an enabled node 0");
+    }
+
+    /// **A capture that re-measures the same level is not a failure (#446).**
+    ///
+    /// RotorHazard sets the threshold to the mean RSSI it saw across its window. On a stable gate
+    /// with an unchanged craft — and always when the RD captures twice in a row — that can land on
+    /// exactly the number the node was already detecting against. GridFPV saw no change, and
+    /// reported "produced no new level ... RotorHazard refuses a capture silently, so nothing was
+    /// recorded": a flat claim that RotorHazard refused, made about a capture that may well have
+    /// run perfectly.
+    ///
+    /// It is now reported as the ambiguity it is. Still nothing recorded — a level GridFPV cannot
+    /// attribute to the capture is a readback, and adopting a readback as config is what D27
+    /// forbids — but nothing *claimed* either.
+    #[test]
+    fn a_capture_that_re_measures_the_same_level_is_unchanged_not_refused() {
+        let (timers, rh) = tuning_rh(96.0, 80.0);
+        start_capture(&timers, &rh);
+
+        // The window closes and the settle grace runs out with the level exactly where it was.
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + u64::from(CAPTURE_SETTLE_MS) + 1),
+        );
+        timers.push_signal(&rh, &levels(96.0, 80.0));
+
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(
+            settled[0].resolution,
+            CaptureResolution::Unchanged,
+            "an unchanged level is consistent with a refusal AND with a capture that measured the \
+             same number; reporting the first is a claim about RotorHazard GridFPV cannot make"
+        );
+        assert_eq!(
+            settled[0].reported,
+            Some(96),
+            "the level the gate is actually detecting against still travels, so the operator line \
+             can say what it is"
+        );
+        assert_eq!(settled[0].level, None, "and nothing was recorded");
+        assert!(!settled[0].measured());
+        assert!(
+            timers.calibration(&rh).is_empty(),
+            "recording a level GridFPV cannot attribute to the capture would be adopting a \
+             readback as config (D27)"
+        );
+        // Retired, so a later capture on the same threshold is not refused by a ghost.
+        assert!(timers.resolve_captures().is_empty());
+    }
+
+    /// **A capture GridFPV could not watch is not a failure either (#446).**
+    ///
+    /// With no level readable at all — the link dropped, the node never answered, no Tune
+    /// subscription was ever open — the old code reported the same "RotorHazard refuses a capture
+    /// silently" line as an unchanged level did. That is a statement about a foreign server made
+    /// from no evidence whatsoever.
+    #[test]
+    fn a_capture_with_no_readable_level_is_unobserved_not_refused() {
+        let (timers, rh) = registry_with_rh();
+        timers.set_status(&rh, TimerStatus::Connected);
+        // No subscription, so nothing is ever reported for this node's thresholds.
+        start_capture(&timers, &rh);
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + u64::from(CAPTURE_SETTLE_MS) + 1),
+        );
+
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].resolution, CaptureResolution::Unobserved);
+        assert_eq!(settled[0].reported, None);
+        assert_eq!(settled[0].level, None);
+        assert!(timers.calibration(&rh).is_empty());
+    }
+
+    /// **A level that genuinely changed still lands, and is still recorded (D27).**
+    ///
+    /// The guard on the fix above: three outcomes are only an improvement if the one that means
+    /// "it worked" still means it. A resolution enum that never returned `Measured` would pass
+    /// both tests above and quietly stop recording every capture an RD ever flies.
+    #[test]
+    fn a_capture_that_moves_the_level_is_measured_and_recorded() {
+        let (timers, rh) = tuning_rh(96.0, 80.0);
+        start_capture(&timers, &rh);
+
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + 1),
+        );
+        timers.push_signal(&rh, &levels(118.0, 80.0));
+
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].resolution, CaptureResolution::Measured);
+        assert!(settled[0].measured());
+        assert_eq!(settled[0].level, Some(118));
+        assert_eq!(
+            timers.calibration(&rh),
+            vec![NodeCalibration {
+                node: 0,
+                enter_at: Some(118),
+                exit_at: None,
+            }],
+            "D27: GridFPV holds the value, not merely the timer"
+        );
+    }
+
+    /// **A lapsed Tune lease no longer costs a capture its answer (#446).**
+    ///
+    /// The lease is the subscription, and shutting the tap when a page stops polling is right —
+    /// except inside a capture's own window, where the tap is the only route the confirming
+    /// readback has. A tab switched away at the wrong moment used to shut the gate, so the level
+    /// never arrived, so the capture resolved as producing nothing. An outstanding capture holds
+    /// the tap open until it settles; after that the ordinary lease prunes as before.
+    #[test]
+    fn an_outstanding_capture_holds_the_tune_tap_open_across_a_lapsed_lease() {
+        let (timers, rh) = tuning_rh(96.0, 80.0);
+        start_capture(&timers, &rh);
+        expire(&timers, &rh);
+
+        assert!(
+            timers.signal_wanted(&rh),
+            "the capture GridFPV accepted is a promise to watch; the gate stays open for it"
+        );
+        // …and the driver's push still lands, or the open gate would write to nothing.
+        timers.push_signal(&rh, &levels(118.0, 80.0));
+        assert!(
+            timers.signal_store().contains_key(&rh),
+            "the two doors have to agree: `signal_wanted` opening one the push shuts is no fix"
+        );
+
+        // So the capture resolves on the level that arrived, rather than on silence.
+        age_captures(
+            &timers,
+            &rh,
+            Duration::from_millis(u64::from(CAPTURE_WINDOW_MS) + 1),
+        );
+        let settled = timers.resolve_captures();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].resolution, CaptureResolution::Measured);
+        assert_eq!(settled[0].level, Some(118));
+
+        // Once it has settled the hold is gone, and the lapsed lease prunes exactly as it did.
+        expire(&timers, &rh);
+        assert!(
+            !timers.signal_wanted(&rh),
+            "a capture holds the tap open only while it is outstanding — not for ever after"
+        );
+        assert!(!timers.signal_store().contains_key(&rh));
     }
 
     #[test]
@@ -3817,6 +4191,89 @@ mod tests {
         // silently slid onto a working one.
         let stale = vec![CompetitorRef("node-2".into())];
         assert!(rh.seat_nodes(&stale).is_empty());
+    }
+
+    #[test]
+    fn running_out_of_free_gates_does_not_skip_a_later_explicit_node_ref() {
+        // #450. A mixed lineup: auto-seated pilots take free gates in order, and an explicit
+        // `node-{i}` ref names its own. The walk used to `break` the moment the free list ran dry
+        // — which also skipped every explicit ref AFTER that point, even though such a ref needs
+        // no free gate at all, because it names one that was deliberately held back for it.
+        //
+        // RotorHazard dismisses every crossing on a node with no seated pilot ("Pilot not
+        // defined"), so a pilot dropped here does not fly badly: their laps never exist.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 3);
+        reg.set_nodes(
+            &rh.id,
+            &SetTimerNodesRequest {
+                node_count: None,
+                enabled: Some(vec![0, 1, 2]),
+            },
+        )
+        .unwrap();
+        let rh = reg.get(&rh.id).unwrap();
+
+        // Node 2 is claimed outright, so the free list is [0, 1] — and the THIRD pilot exhausts it.
+        let lineup = vec![
+            CompetitorRef("ace".into()),
+            CompetitorRef("bolt".into()),
+            CompetitorRef("cyan".into()),
+            CompetitorRef("node-2".into()),
+        ];
+        let seats = rh.seat_nodes(&lineup);
+
+        assert_eq!(
+            seats,
+            vec![
+                (0, CompetitorRef("ace".into())),
+                (1, CompetitorRef("bolt".into())),
+                // `cyan` has nowhere to go and is dropped — never squeezed onto node 2, which is
+                // spoken for.
+                (2, CompetitorRef("node-2".into())),
+            ],
+            "the explicit node-2 ref must still be seated: its own gate was free the whole time"
+        );
+    }
+
+    #[test]
+    fn an_unseatable_pilot_drops_only_itself() {
+        // The same rule from the other side, and the reason `break` was wrong rather than merely
+        // unlucky: one entry that cannot be placed must cost exactly one entry. Two pilots past the
+        // end of the free list must not take the explicit refs between and after them with them.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        reg.set_reported_nodes(&rh.id, 4);
+        reg.set_nodes(
+            &rh.id,
+            &SetTimerNodesRequest {
+                node_count: None,
+                enabled: Some(vec![0, 1, 2, 3]),
+            },
+        )
+        .unwrap();
+        let rh = reg.get(&rh.id).unwrap();
+
+        // Nodes 1, 2 and 3 are claimed by name, leaving exactly one free gate (0) for two pilots.
+        let lineup = vec![
+            CompetitorRef("node-3".into()),
+            CompetitorRef("ace".into()),
+            CompetitorRef("bolt".into()),
+            CompetitorRef("node-1".into()),
+            CompetitorRef("cyan".into()),
+            CompetitorRef("node-2".into()),
+        ];
+        assert_eq!(
+            rh.seat_nodes(&lineup),
+            vec![
+                (3, CompetitorRef("node-3".into())),
+                (0, CompetitorRef("ace".into())),
+                // `bolt` and `cyan` are dropped — the free list held one gate.
+                (1, CompetitorRef("node-1".into())),
+                (2, CompetitorRef("node-2".into())),
+            ]
+        );
     }
 
     #[test]

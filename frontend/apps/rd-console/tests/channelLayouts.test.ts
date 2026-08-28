@@ -23,10 +23,14 @@ import {
   draftChannelSet,
   draftNodes,
   duplicateNodes,
-  imdMessage,
+  IMD_BANDS,
   imdOffenderMessage,
   imdRatingLabel,
+  imdTail,
+  imdTone,
+  imdToneHint,
   layoutName,
+  layoutPilotCount,
   layoutRating,
   layerNodes,
   layerNodeLabel,
@@ -261,6 +265,14 @@ describe('the IMD reading (#117 S4)', () => {
   /** Racebnd4 — nothing within 35 MHz, so there is no offender to name. */
   const CLEAN: ImdReading = { rating: 100 };
 
+  /**
+   * The whole reading as the screen renders it. The two halves are separate functions since #474
+   * (the rating is coloured, the offender is not), and this is the sentence they compose into —
+   * asserted here so the split cannot quietly change the text a person reads.
+   */
+  const imdLine = (reading: ImdReading, catalog: ChannelCatalogEntry[]) =>
+    `${imdRatingLabel(reading)} · ${imdTail(reading, catalog)}`;
+
   it('shows the rating the way IMDTabler states it, minus sign and all', () => {
     expect(imdRatingLabel(CLEAN)).toBe('IMD 100');
     expect(imdRatingLabel(IMD6C)).toBe('IMD 29');
@@ -278,7 +290,7 @@ describe('the IMD reading (#117 S4)', () => {
   });
 
   it('names every channel and never leaves one as a bare frequency', () => {
-    const message = imdMessage(IMD6C, BAND);
+    const message = imdLine(IMD6C, BAND);
     // The two that mix and the one they land near are all named.
     expect(message).toContain('Fatshark F4');
     expect(message).toContain('Raceband R2');
@@ -292,7 +304,7 @@ describe('the IMD reading (#117 S4)', () => {
   });
 
   it('says a clean set is clean rather than inventing a nearest miss', () => {
-    const message = imdMessage(CLEAN, BAND);
+    const message = imdLine(CLEAN, BAND);
     expect(message).toBe('IMD 100 · nothing mixes within 35 MHz of a channel this layout uses');
     expect(message).not.toContain('worst offender');
   });
@@ -301,11 +313,126 @@ describe('the IMD reading (#117 S4)', () => {
     // The RD rejected a verdict chip outright: the ceiling collapses with pilot count, so any flat
     // band would call every six-pilot layout dirty. The sentence must state, never judge.
     for (const reading of [CLEAN, IMD6C, RACEBAND8]) {
-      const message = imdMessage(reading, BAND).toLowerCase();
+      const message = imdLine(reading, BAND).toLowerCase();
       for (const verdict of ['marginal', 'poor', 'bad', 'good', 'warning', 'dirty', 'unusable']) {
         expect(message).not.toContain(verdict);
       }
     }
+  });
+
+  // ── The green/amber/red scale (#474) ───────────────────────────────────────────────────────
+  //
+  // The colour is judged against what is ACHIEVABLE at the layout's own pilot count, which is the
+  // whole reason a flat band was refused in the first place. These pin the calibration to the
+  // hobby's own reference sets, so a well-meant tweak to `IMD_BANDS` that quietly demotes MultiGP's
+  // official six-pilot layout to amber turns this file red.
+  const at = (rating: number): ImdReading => ({ rating });
+
+  it('greens the layout the hobby recommends, at every pilot count it names one for', () => {
+    // Racebnd4 = 100, ET6minus1 = 98, ETBest6 (MultiGP's official six) = 67 — the engine's own
+    // validation table (`crates/engine/src/imd.rs::canonical_sets_rate_as_imdtabler_does`).
+    expect(imdTone(at(100), 4)).toBe('success');
+    expect(imdTone(at(98), 5)).toBe('success');
+    expect(imdTone(at(67), 6)).toBe('success');
+    // And the best eight-pilot set there is (−203 from the full catalog) — at eight pilots a deeply
+    // negative number IS as good as it gets, and calling it red would be calling 5.8 GHz red.
+    expect(imdTone(at(-203), 8)).toBe('success');
+  });
+
+  it('ambers RotorHazard’s own IMD6C at six pilots — workable, and beatable by 38', () => {
+    // The single most important row to get right: IMD6C is the default an RD lands on by doing
+    // nothing, and MultiGP's set really is meaningfully cleaner. Red would be wrong (it flies), and
+    // green would be wrong (there is something to win here).
+    expect(imdTone(at(29), 6)).toBe('warn');
+  });
+
+  it('reds a set that is worse than one wrong channel could explain', () => {
+    // All eight of Raceband — the worst set in common use.
+    expect(imdTone(at(-635), 8)).toBe('danger');
+    // Alternating Raceband at four pilots (−145): every other channel, which sounds tidy and is
+    // the classic mistake — 2×R3 − R1 lands exactly on R5.
+    expect(imdTone(at(-145), 4)).toBe('danger');
+  });
+
+  it('is scaled by pilot count — the SAME rating reads differently at four and at eight', () => {
+    // The point of the table. −203 is the ceiling at eight pilots and a disaster at four.
+    expect(imdTone(at(-203), 4)).toBe('danger');
+    expect(imdTone(at(-203), 8)).toBe('success');
+    // 29 is amber at six and red at four, where 100 is reachable.
+    expect(imdTone(at(29), 6)).toBe('warn');
+    expect(imdTone(at(29), 4)).toBe('danger');
+  });
+
+  it('clamps at both ends of the table rather than inventing a row', () => {
+    // Under two channels nothing can interfere with anything and the engine returns the ceiling.
+    expect(imdTone(at(100), 1)).toBe('success');
+    expect(imdTone(at(100), 0)).toBe('success');
+    // Beyond eight the last row holds: nine simultaneous pilots on 5.8 GHz is off the edge of the
+    // map, and a fabricated ninth row would be a guess wearing a constant's clothes.
+    expect(imdTone(at(-203), 9)).toBe(imdTone(at(-203), 8));
+    expect(imdTone(at(-635), 12)).toBe('danger');
+  });
+
+  it('keeps every band ordered and monotonically easier as pilots are added', () => {
+    // Two structural invariants a field-tune must not break: green is never below amber (which
+    // would make amber unreachable), and neither floor ever RISES with pilot count — the achievable
+    // ceiling only falls, so demanding more of a bigger heat is backwards.
+    let previous: { green: number; amber: number } | undefined;
+    for (const band of IMD_BANDS) {
+      expect(band.green).toBeGreaterThan(band.amber);
+      if (previous) {
+        expect(band.green).toBeLessThanOrEqual(previous.green);
+        expect(band.amber).toBeLessThanOrEqual(previous.amber);
+      }
+      previous = band;
+    }
+    // One row per pilot count, ascending and with no gaps — the lookup indexes by equality.
+    expect(IMD_BANDS.map((b) => b.pilots)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it('frames the colour as guidance, names the pilot count, and never claims a refusal', () => {
+    for (const [reading, pilots] of [
+      [at(67), 6],
+      [at(29), 6],
+      [at(-635), 8]
+    ] as const) {
+      const hint = imdToneHint(reading, pilots);
+      // Guidance, and it says so — the reading has never blocked anything and must not start
+      // reading as though it does.
+      expect(hint).toMatch(/guidance only/i);
+      expect(hint).toMatch(/blocks saving/i);
+      // Judged against a pilot count, because "is 29 good?" has no answer without one.
+      expect(hint).toContain(`${pilots} channels flying at once`);
+      // Still no verdict word on the layout itself.
+      for (const verdict of ['broken', 'unusable', 'invalid', 'illegal', 'refuse']) {
+        expect(hint.toLowerCase()).not.toContain(verdict);
+      }
+    }
+  });
+
+  it('counts a layout’s pilots as its distinct CHANNELS', () => {
+    const layout: ChannelLayout = {
+      id: 'bracket-a-k3f9',
+      name: 'Bracket A',
+      nodes: [
+        { node: 0, channel: 5658 },
+        { node: 1, channel: 5695 },
+        { node: 2, channel: 5732 },
+        { node: 3, channel: 5917 }
+      ]
+    };
+    expect(layoutPilotCount(layout)).toBe(4);
+  });
+
+  it('splits the rating from the offender without changing the sentence', () => {
+    // #474 colours the rating and leaves the offender sentence alone. The two halves still compose
+    // into exactly the line the screen has always shown, which is what `imdLine` above asserts
+    // against — and the offender half is the part that must be identical.
+    expect(imdLine(RACEBAND8, BAND)).toBe(
+      'IMD \u2212635 · worst offender: 2 × Raceband R2 − Raceband R1 = 5732 MHz — lands on Raceband R3'
+    );
+    expect(imdTail(IMD6C, BAND)).toMatch(/^worst offender: /);
+    expect(imdTail(CLEAN, BAND)).not.toContain('worst offender');
   });
 
   it('resolves a rating by layout id, not by position', () => {

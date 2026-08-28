@@ -107,8 +107,8 @@ use crate::events::{
     SetClassMembershipRequest, SetEventClassesRequest, SetEventRosterRequest, UpdateRoundReq,
 };
 use crate::live_state::{
-    HeatSummary, heat_summaries, heats_of_defined_rounds, live_state_over_with_floor,
-    live_state_with_floor, with_heat_timing,
+    HeatSummary, defined_round_ids, heat_summaries, heats_of_defined_rounds,
+    live_state_over_with_floor, live_state_with_floor, with_heat_timing,
 };
 use crate::pilots::{CreatePilotRequest, Pilot, PilotError, PilotErrorKind, UpdatePilotRequest};
 use crate::round_engine;
@@ -2063,14 +2063,9 @@ async fn list_heats(
     // it: they have no name, no win condition and no scoring left to resolve through. Only
     // unstarted heats can be in this position — `remove_round` refuses a round with a heat in
     // progress or past `Scheduled` — so nothing with results is ever hidden here.
-    let defined: Vec<gridfpv_events::RoundId> = registry
-        .rounds_of(&event_id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|round| round.id)
-        .collect();
+    let defined = defined_round_ids(&registry.rounds_of(&event_id).unwrap_or_default());
     Ok(Json(heats_of_defined_rounds(
-        heat_summaries(&events),
+        heat_summaries(&events, Some(&defined)),
         &defined,
     )))
 }
@@ -2471,9 +2466,16 @@ async fn snapshot_event(
     // The D26 min-lap floor is resolved from registry meta for the heat this fold reports as
     // current (#409). It is NOT in the log, so a pure-log fold cannot see it — and without it the
     // event scope counted an echo pass the heat scope's lap list suppressed.
+    //
+    // The rounds the event still defines go in with it (#439): a heat of a round the RD removed is
+    // no more selectable here than it is listable at `GET /events/{id}/heats`.
     let rounds = registry.rounds_of(&event_id).unwrap_or_default();
     let floor = live_fold_floor(&events, &rounds);
-    let body = with_heat_timing(live_state_with_floor(&events, floor), &stored);
+    let defined = defined_round_ids(&rounds);
+    let body = with_heat_timing(
+        live_state_with_floor(&events, floor, Some(&defined)),
+        &stored,
+    );
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(body),
@@ -2503,10 +2505,11 @@ async fn snapshot_class(
     let window_events: Vec<Event> = class_offsets.iter().map(|(_, e)| e.clone()).collect();
     let rounds = registry.rounds_of(&event_id).unwrap_or_default();
     let floor = live_fold_floor(&window_events, &rounds);
+    let defined = defined_round_ids(&rounds);
     Ok(Json(Snapshot {
         cursor,
         body: ProjectionBody::LiveRaceState(with_heat_timing(
-            live_state_over_with_floor(&class_offsets, floor),
+            live_state_over_with_floor(&class_offsets, floor, Some(&defined)),
             &stored,
         )),
     }))
@@ -2618,8 +2621,10 @@ async fn snapshot_heat(
         HeatProjection::Live => {
             // A pure fold of the heat's log window — every format, open practice included (D5,
             // reversed 2026-08-24): practice passes are logged like anyone else's, no overlay.
+            // No defined-round filter (#439): this scope NAMES its heat, so there is no "which
+            // heat is up" for a removed round's ghost to win. A heat asked for by id is served.
             ProjectionBody::LiveRaceState(with_heat_timing(
-                live_state_over_with_floor(&heat_offsets, min_lap_micros),
+                live_state_over_with_floor(&heat_offsets, min_lap_micros, None),
                 &stored,
             ))
         }
@@ -2920,7 +2925,11 @@ pub(crate) fn round_def_of_heat(
 /// A heat with no round, or a round with no `min_lap_secs`, yields `None` — D26's "0/absent =
 /// off, so pre-existing rounds keep bit-identical results".
 pub(crate) fn live_fold_floor(events: &[Event], rounds: &[crate::events::RoundDef]) -> Option<i64> {
-    let heat = crate::live_state::current_heat(events)?;
+    // Under the SAME defined-round filter the fold applies (#439) — a removed round's heat is not
+    // the current heat there, so resolving the floor from it here would floor the fold against a
+    // heat it is not reporting, which is the drift this helper exists to prevent.
+    let defined = crate::live_state::defined_round_ids(rounds);
+    let heat = crate::live_state::current_heat(events, Some(&defined))?;
     min_lap_micros_of(round_def_of_heat(events, &heat, rounds).as_ref())
 }
 
@@ -2958,6 +2967,66 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::snapshot::HeatPhase;
+
+    // ── #457: the four per-feature drains became one `take_pending_writes` ───────────────────
+    //
+    // These route tests each queue exactly ONE kind of write and then assert on it, so they read
+    // the one queue and keep the variant under test. Kept as four small readers rather than
+    // rewritten into matches at ~30 call sites: what each test is asserting is unchanged.
+
+    /// Drain the pending-write queue and keep the **restart** requests (#386).
+    fn drained_restarts(timers: &crate::timers::TimerRegistry) -> Vec<TimerId> {
+        timers
+            .take_pending_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                crate::timers::PendingTimerWrite::Restart { timer } => Some(timer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Drain the pending-write queue and keep the **calibration** writes (#355).
+    fn drained_calibrations(
+        timers: &crate::timers::TimerRegistry,
+    ) -> Vec<crate::timers::PendingCalibration> {
+        timers
+            .take_pending_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                crate::timers::PendingTimerWrite::Calibrate(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Drain the pending-write queue and keep the **captures** (#355).
+    fn drained_captures(
+        timers: &crate::timers::TimerRegistry,
+    ) -> Vec<crate::timers::PendingCapture> {
+        timers
+            .take_pending_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                crate::timers::PendingTimerWrite::Capture(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Drain the pending-write queue and keep the **channel** writes (#413).
+    fn drained_channels(
+        timers: &crate::timers::TimerRegistry,
+    ) -> Vec<crate::timers::PendingChannel> {
+        timers
+            .take_pending_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                crate::timers::PendingTimerWrite::SetChannel(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
 
     fn pass(competitor: &str, at: i64, seq: u64) -> Event {
         Event::Pass(Pass {
@@ -3802,12 +3871,17 @@ mod tests {
     async fn class_scope_filters_to_the_class_heats() {
         // Two heats in different classes; the class scope folds only its own class's heat.
         // `open`'s heat ran A; `sport`'s heat ran B. The open class scope sees only A's racing.
+        //
+        // The heats carry no round tag: this registry's event defines no rounds, and a heat tagged
+        // to a round the event does not define is a **removed round's** heat, which the live fold
+        // discards (#439). That is a state this fixture cannot reach in production — the tag comes
+        // from a round that existed at fill time — and it is not what this test is about.
         let events = vec![
             Event::HeatScheduled {
                 heat: HeatId("o-1".into()),
                 lineup: vec![CompetitorRef("A".into())],
                 class: Some(ClassId("open".into())),
-                round: Some(RoundId("q1".into())),
+                round: None,
                 frequencies: vec![],
                 label: None,
             },
@@ -3821,7 +3895,7 @@ mod tests {
                 heat: HeatId("s-1".into()),
                 lineup: vec![CompetitorRef("B".into())],
                 class: Some(ClassId("sport".into())),
-                round: Some(RoundId("q2".into())),
+                round: None,
                 frequencies: vec![],
                 label: None,
             },
@@ -4005,7 +4079,6 @@ mod tests {
     /// The right answer here is `q-2`: the next still-`Scheduled` heat of a round the event
     /// **does** define.
     #[tokio::test]
-    #[ignore = "known bug #439: on_deck scans raw HeatScheduled with no defined-round filter — un-ignore with the fix"]
     async fn on_deck_skips_a_removed_rounds_heat() {
         let registry = registry_with_a_removed_rounds_heat();
         let (status, snap) = get_snapshot(registry, "/snapshot/event/spring-cup").await;
@@ -4765,12 +4838,9 @@ mod tests {
         // Asking twice before the drain coalesces into ONE restart, not two.
         let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            registry.timers().take_restart_requests(),
-            vec![rh.id.clone()]
-        );
+        assert_eq!(drained_restarts(&registry.timers()), vec![rh.id.clone()]);
         // Drained exactly once: a second drain is empty (nothing is re-queued).
-        assert!(registry.timers().take_restart_requests().is_empty());
+        assert!(drained_restarts(&registry.timers()).is_empty());
     }
 
     #[tokio::test]
@@ -4853,7 +4923,7 @@ mod tests {
                 err.message
             );
             // Nothing was queued: the refusal is a real refusal, not a confirm-and-fire.
-            assert!(registry.timers().take_restart_requests().is_empty());
+            assert!(drained_restarts(&registry.timers()).is_empty());
         }
     }
 
@@ -4878,7 +4948,7 @@ mod tests {
             .unwrap();
         let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
         assert_eq!(status, StatusCode::OK, "a Scheduled heat has not begun");
-        let _ = registry.timers().take_restart_requests();
+        let _ = drained_restarts(&registry.timers());
 
         for t in [
             HeatTransition::Staged,
@@ -4926,7 +4996,7 @@ mod tests {
             .unwrap();
         let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(registry.timers().take_restart_requests().is_empty());
+        assert!(drained_restarts(&registry.timers()).is_empty());
     }
 
     /// `GET`/`PUT` `/timers/{id}/nodes` with an optional JSON body → status + raw bytes.
@@ -5088,13 +5158,13 @@ mod tests {
         );
 
         // The queue drains EXACTLY ONCE.
-        let drained = registry.timers().take_calibration_requests();
+        let drained = drained_calibrations(&registry.timers());
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].timer, rh.id);
         assert_eq!(drained[0].node, 2);
         assert_eq!(drained[0].enter_at, Some(96));
         assert!(
-            registry.timers().take_calibration_requests().is_empty(),
+            drained_calibrations(&registry.timers()).is_empty(),
             "a second drain is empty — nothing is re-queued"
         );
     }
@@ -5132,7 +5202,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let drained = registry.timers().take_calibration_requests();
+        let drained = drained_calibrations(&registry.timers());
         assert_eq!(drained.len(), 2, "one entry per node, not one per write");
         assert_eq!(drained[0].node, 0);
         assert_eq!(drained[0].enter_at, Some(101), "the latest enter wins");
@@ -5142,7 +5212,7 @@ mod tests {
             "the exit is carried alongside"
         );
         assert_eq!(drained[1].node, 3);
-        assert!(registry.timers().take_calibration_requests().is_empty());
+        assert!(drained_calibrations(&registry.timers()).is_empty());
     }
 
     #[tokio::test]
@@ -5166,7 +5236,7 @@ mod tests {
 
         // The clamp happens ONCE, before both the record and the queue — so neither can hold a
         // value the other does not.
-        let drained = registry.timers().take_calibration_requests();
+        let drained = drained_calibrations(&registry.timers());
         assert_eq!(drained[0].enter_at, Some(crate::timers::RSSI_MIN));
         assert_eq!(drained[0].exit_at, Some(crate::timers::RSSI_MAX));
         assert_eq!(
@@ -5256,7 +5326,7 @@ mod tests {
                 "the refusal must not leak the raw timer id: {message}"
             );
             // A real refusal, not a confirm-and-fire — and nothing was recorded as config either.
-            assert!(registry.timers().take_calibration_requests().is_empty());
+            assert!(drained_calibrations(&registry.timers()).is_empty());
             assert!(registry.timers().calibration(&rh.id).is_empty());
         }
     }
@@ -5358,7 +5428,7 @@ mod tests {
             // practice heat is racing, so the driver's own armed-heat backstop lets it through —
             // without that flag the route would accept a write the driver silently dropped, which is
             // "dispatched but never landed", the failure this page exists to catch.
-            let drained = registry.timers().take_calibration_requests();
+            let drained = drained_calibrations(&registry.timers());
             assert_eq!(drained.len(), 1);
             assert!(
                 drained[0].during_open_practice,
@@ -5420,7 +5490,7 @@ mod tests {
             message.contains("Field RH") && message.contains("not connected"),
             "the disconnected refusal must name the timer: {message}"
         );
-        assert!(registry.timers().take_calibration_requests().is_empty());
+        assert!(drained_calibrations(&registry.timers()).is_empty());
         assert!(registry.timers().calibration(&rh.id).is_empty());
     }
 
@@ -5484,7 +5554,7 @@ mod tests {
             message.contains("Node 3") && message.contains("disabled"),
             "the disabled-node refusal must name the node 1-based and say why: {message}"
         );
-        assert!(registry.timers().take_calibration_requests().is_empty());
+        assert!(drained_calibrations(&registry.timers()).is_empty());
     }
 
     /// `POST /timers/{id}/capture` with a raw JSON body → status + raw bytes (#355).
@@ -5567,12 +5637,12 @@ mod tests {
         // would be a fabricated success, which is exactly what this control exists to avoid.
         assert!(registry.timers().calibration(&rh.id).is_empty());
 
-        let drained = registry.timers().take_capture_requests();
+        let drained = drained_captures(&registry.timers());
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].node, 1);
         assert_eq!(drained[0].threshold, crate::timers::CaptureThreshold::Enter);
         assert!(
-            registry.timers().take_capture_requests().is_empty(),
+            drained_captures(&registry.timers()).is_empty(),
             "a second drain is empty — nothing is re-queued"
         );
     }
@@ -5616,7 +5686,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(registry.timers().take_capture_requests().len(), 2);
+        assert_eq!(drained_captures(&registry.timers()).len(), 2);
     }
 
     #[tokio::test]
@@ -5670,11 +5740,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_capture_that_does_not_land_is_reported_and_records_nothing() {
-        // RotorHazard refuses a capture — a node that is not answering, or one already capturing —
-        // by returning False and emitting nothing at all. So an unchanged level is the ONLY evidence
-        // of that refusal there is, and inventing a recorded level to fill the gap would be the
-        // fabricated success this whole control exists to avoid.
+    async fn a_capture_that_changes_nothing_records_nothing_and_claims_nothing() {
+        // Inventing a recorded level to fill the gap would be the fabricated success this whole
+        // control exists to avoid — so nothing is recorded, and that half is unchanged.
+        //
+        // What #446 changed is the *claim*. RotorHazard refuses a capture — a node that is not
+        // answering, or one already capturing — by returning False and emitting nothing at all, so
+        // this was reported as a refusal. But a capture that measured the same number looks exactly
+        // the same from here, and on a stable gate (or a second press) that is an ordinary result.
+        // GridFPV cannot tell them apart, so it says so instead of picking one.
         let (registry, _state, _) = state_with(vec![]);
         let rh = connected_rh_timer_selected_by_the_event(&registry);
         report_levels(&registry, &rh.id, &[(90.0, 80.0)]);
@@ -5697,11 +5771,23 @@ mod tests {
         assert_eq!(settled.len(), 1);
         assert_eq!(
             settled[0].level, None,
-            "a capture that produced no new level must be reported as such, never as a success"
+            "a capture that produced no new level must never be reported as a success"
+        );
+        assert_eq!(
+            settled[0].resolution,
+            crate::timers::CaptureResolution::Unchanged,
+            "…and must not be reported as a REFUSAL either (#446): that is a claim about \
+             RotorHazard GridFPV has no evidence for"
+        );
+        assert_eq!(
+            settled[0].reported,
+            Some(90),
+            "the level the gate is detecting against travels with the outcome, so the operator \
+             line can say what it is"
         );
         assert!(
             registry.timers().calibration(&rh.id).is_empty(),
-            "nothing may be recorded for a capture that did not land"
+            "nothing may be recorded for a level GridFPV cannot attribute to the capture"
         );
         // And it is retired, so a later capture on the same threshold is not refused by a ghost.
         assert!(registry.timers().resolve_captures().is_empty());
@@ -5786,7 +5872,7 @@ mod tests {
                 "the refusal must not leak the raw timer id: {message}"
             );
             // A real refusal: nothing queued, and no capture left outstanding to block the next one.
-            assert!(registry.timers().take_capture_requests().is_empty());
+            assert!(drained_captures(&registry.timers()).is_empty());
             assert!(!registry.timers().capture_in_flight(&rh.id));
         }
     }
@@ -5871,7 +5957,7 @@ mod tests {
             );
             // …and it must actually reach the wire: without the stamp the driver's armed-heat
             // backstop would drop a capture the route deliberately allowed.
-            let drained = registry.timers().take_capture_requests();
+            let drained = drained_captures(&registry.timers());
             assert_eq!(drained.len(), 1);
             assert!(
                 drained[0].during_open_practice,
@@ -5966,7 +6052,7 @@ mod tests {
             message.contains("Node 3") && message.contains("disabled"),
             "the disabled-node refusal must name the node 1-based and say why: {message}"
         );
-        assert!(registry.timers().take_capture_requests().is_empty());
+        assert!(drained_captures(&registry.timers()).is_empty());
     }
 
     /// `POST /timers/{id}/channel` with a raw JSON body → status + raw bytes (#413).
@@ -6034,7 +6120,7 @@ mod tests {
         );
 
         // The queue drains EXACTLY ONCE, carrying the label onto the wire.
-        let drained = registry.timers().take_channel_requests();
+        let drained = drained_channels(&registry.timers());
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].timer, rh.id);
         assert_eq!(drained[0].node, 1);
@@ -6042,7 +6128,7 @@ mod tests {
         assert_eq!(drained[0].band.as_deref(), Some("Raceband"));
         assert_eq!(drained[0].channel.as_deref(), Some("R7"));
         assert!(
-            registry.timers().take_channel_requests().is_empty(),
+            drained_channels(&registry.timers()).is_empty(),
             "a second drain is empty — nothing is re-queued"
         );
     }
@@ -6305,7 +6391,7 @@ mod tests {
                  {message}"
             );
             // Nothing queued and nothing recorded: a refusal is a refusal on both halves.
-            assert!(registry.timers().take_channel_requests().is_empty());
+            assert!(drained_channels(&registry.timers()).is_empty());
             assert!(registry.timers().node_channels(&rh.id).is_empty());
         }
     }
@@ -6390,7 +6476,7 @@ mod tests {
             );
             // …and it must reach the wire: the write carries the route's finding, so the driver's
             // own armed-heat backstop lets it through rather than silently dropping it.
-            let drained = registry.timers().take_channel_requests();
+            let drained = drained_channels(&registry.timers());
             assert_eq!(drained.len(), 1);
             assert!(
                 drained[0].during_open_practice,
@@ -6471,7 +6557,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(refusal(&bytes).contains("5.8 GHz"));
 
-        assert!(registry.timers().take_channel_requests().is_empty());
+        assert!(drained_channels(&registry.timers()).is_empty());
         assert!(registry.timers().node_channels(&rh.id).is_empty());
     }
 
@@ -6493,7 +6579,7 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
         }
-        assert_eq!(registry.timers().take_channel_requests().len(), 2);
+        assert_eq!(drained_channels(&registry.timers()).len(), 2);
     }
 
     #[tokio::test]

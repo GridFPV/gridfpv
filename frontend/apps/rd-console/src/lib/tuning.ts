@@ -56,6 +56,7 @@ import type {
 } from '@gridfpv/types';
 
 import {
+  capabilityTag,
   channelLabel,
   channelOptionLabel,
   entryOptionLabel,
@@ -401,8 +402,27 @@ export function adoptReported(state: ThresholdState, level: number): ThresholdSt
  * Mark a threshold as written: the Director accepted the level, and the page is now waiting for a
  * **poll** to show the timer holding it. `sent`/`sentAt` are the two things {@link foldPolled}
  * needs to answer "did it take?" — what was asked for, and how long ago.
+ *
+ * ## A write may only mark the state it actually wrote (#442)
+ *
+ * The answer to a write arrives a round trip late, and the RD keeps typing inside that round trip.
+ * Commit `enter = 100`, type `120` before it comes back, and the page has two claims about the
+ * threshold: the write's ("I sent 100") and the RD's ("I want 120"). The RD's is newer and it is
+ * the one that has to survive — so a resolve that finds the state already moved on leaves it
+ * **exactly** as it is, still `pending`, and the typing-idle commit writes the newer value.
+ *
+ * `pending` is load-bearing there, not incidental: it is the only phase {@link ThresholdState}
+ * has that a follow-up commit will write from. Stamping `sent` over a moved-on value loses the
+ * value *and* wedges the state that would have recovered it, and the badge then reads `On timer`
+ * over a number the RD never chose — #403's sent-vs-landed lie, one layer up.
+ *
+ * Deliberately **not** "never overwrite": the ordinary, unraced write still has to record its
+ * receipt here, or {@link foldPolled} has nothing to confirm against. The discriminator is whether
+ * the state still holds the value this write carried.
  */
 export function markSent(state: ThresholdState, sent: number, now: number): ThresholdState {
+  // The state moved on between issuing this write and it resolving — the newer value wins.
+  if (state.value !== sent) return state;
   return { ...state, value: sent, phase: 'sent', detail: undefined, sent, sentAt: now };
 }
 
@@ -819,9 +839,14 @@ export interface ChannelOption {
  * contributes, and only for the entries the catalog does not already know. Custom channels are a
  * Flexible-only idea (a Fixed timer supports what it supports), so they are ignored for a Fixed one.
  *
+ * A Fixed timer's declared set is offered **whole**, including any frequency the catalog has no
+ * entry for (#449) — the declared set is the timer's statement about itself, and a missing name is
+ * not a missing channel. Those are labelled from their raw MHz through `channels.ts`.
+ *
  * `current` is what the node is tuned to right now: it is appended if nothing above already offers
  * it, so the dropdown can always show the node's actual channel rather than silently selecting some
- * other option. Catalog order is preserved; custom entries follow, ascending.
+ * other option — **unconditionally**, capability included (#449; see the branch below for why).
+ * Catalog order is preserved; custom entries follow, ascending.
  */
 export function channelOptions(
   capability: ChannelCapability | undefined,
@@ -836,20 +861,27 @@ export function channelOptions(
   // knows their VTX as F8 still finds it.
   const seenMhz = new Set<number>();
   const options: ChannelOption[] = [];
-  for (const entry of offeredCatalog(capability, catalog)) {
-    if (seenMhz.has(entry.mhz)) continue;
-    seenMhz.add(entry.mhz);
+  for (const offer of offeredCatalog(capability, catalog)) {
+    if (seenMhz.has(offer.mhz)) continue;
+    seenMhz.add(offer.mhz);
+    // A Fixed timer may declare a frequency the catalog has no entry for (#449). It is still a
+    // channel the timer supports, so it is still offered — named from its raw MHz through the
+    // shared helper, which says `Custom — 5891` rather than inventing a band for it.
+    if (!offer.entry) {
+      options.push({ mhz: offer.mhz, label: channelOptionLabel(offer.mhz, catalog), custom: true });
+      continue;
+    }
     options.push({
-      mhz: entry.mhz,
-      band: entry.band,
-      channel: entry.channel,
-      label: entryOptionLabel(entry, catalog),
+      mhz: offer.entry.mhz,
+      band: offer.entry.band,
+      channel: offer.entry.channel,
+      label: entryOptionLabel(offer.entry, catalog),
       custom: false
     });
   }
   // A Fixed timer offers its declared set and nothing else — a custom MHz it cannot tune to is not
   // an option, it is a refusal waiting to happen.
-  const flexible = capabilityIsFlexible(capability);
+  const flexible = capabilityTag(capability) === 'Flexible';
   const extras = new Set<number>();
   if (flexible) {
     for (const mhz of custom) {
@@ -858,8 +890,19 @@ export function channelOptions(
   }
   // What the node is ON always appears, even if it is off-catalog and off-pool: a dropdown that
   // cannot show the current value would quietly display some other channel as if it were selected.
+  //
+  // ALWAYS — the capability has no say here (#449). This used to gate the append on
+  // `capabilityAllows`, which is false exactly when it matters: a Fixed timer whose node is tuned
+  // outside its declared set (a heat retuned it before the RD narrowed that set, or RotorHazard
+  // came back on a stale profile). The `<select value={chan.mhz}>` then matched no option and the
+  // browser fell back to showing the FIRST one — so the page displayed a channel the node was not
+  // on, as though the RD had chosen it, which is the exact failure this branch exists to prevent.
+  //
+  // The capability describes what the timer may be *sent*, not what it is. Refusing to show where
+  // a node actually is does not make the node move; it only hides the thing the RD needs to see in
+  // order to fix it, and this is the page they would fix it from.
   if (current !== undefined && !options.some((o) => o.mhz === current) && !extras.has(current)) {
-    if (flexible || capabilityAllows(capability, current)) extras.add(current);
+    extras.add(current);
   }
   for (const mhz of [...extras].sort((a, b) => a - b)) {
     options.push({
@@ -869,18 +912,6 @@ export function channelOptions(
     });
   }
   return options;
-}
-
-/** Whether a capability is the permissive `Flexible` one (the default for an undeclared timer). */
-function capabilityIsFlexible(capability: ChannelCapability | undefined): boolean {
-  return !(capability && typeof capability === 'object' && 'Fixed' in capability);
-}
-
-/** Whether a capability permits `mhz` — anything for Flexible, the declared set for Fixed. */
-function capabilityAllows(capability: ChannelCapability | undefined, mhz: number): boolean {
-  if (capabilityIsFlexible(capability)) return true;
-  const cap = capability as { Fixed: { channels: number[] } };
-  return cap.Fixed.channels.includes(mhz);
 }
 
 /**

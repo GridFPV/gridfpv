@@ -6,7 +6,14 @@
    * app-level directory pages (Pilots / Classes / Events / Timers) all mount this, so leaving
    * for the home hub looks and behaves identically everywhere. The markup/styles were lifted
    * verbatim from the workspace sidebar (App.svelte) when the directory pages gained the brand.
+   *
+   * It also carries the **Director's version** (#467), which used to be a fixed watermark in the
+   * bottom-right corner of every screen — a page-corner overlay that floated over content and read
+   * as chrome rather than as part of the app's identity. It belongs here, third line of the brand
+   * block, where the RD reading a version out on a support call already knows to look.
    */
+  import { directorVersion } from './lib/buildVersion.svelte.js';
+
   let {
     onclick,
     sub = 'RD Console'
@@ -16,6 +23,10 @@
     /** The small caps sub-line under the wordmark. */
     sub?: string;
   } = $props();
+
+  // Read from the shared module rather than taken as a prop: the brand mounts on six screens, only
+  // one of which would have had anywhere to fetch it from.
+  const version = $derived(directorVersion());
 </script>
 
 <button type="button" class="brand" {onclick} title="Home — GridFPV hub">
@@ -32,6 +43,9 @@
   <span class="wordmark">
     <span class="name">Grid<span class="brand-fpv">FPV</span></span>
     <span class="sub">{sub}</span>
+    {#if version}
+      <span class="version" aria-label="Director version">v{version}</span>
+    {/if}
   </span>
 </button>
 
@@ -82,6 +96,13 @@
     text-transform: uppercase;
     letter-spacing: var(--gf-tracking-caps);
     color: var(--gf-text-muted);
+  }
+  /* Third line, quieter than the sub-line: it is a reference number, not part of the name. */
+  .wordmark .version {
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-regular);
+    letter-spacing: normal;
+    color: var(--gf-text-faint);
   }
 
   /* Collapse with the workspace sidebar on narrow viewports: mark only, centered (the same

@@ -12,6 +12,54 @@
 //! Read-only in production (drain [`RotorHazardConnection::events`]); the
 //! `stage_race` / `simulate_lap` / `stop_race` helpers exist to **drive** a
 //! dockerized RH from the live integration test.
+//!
+//! # Receipts: `current_laps`, lap deletion, and who runs first
+//!
+//! Read out of RotorHazard's own source at **v4.3.0 and v4.4.0** (`RHRace.py`, `RHUI.py`,
+//! `server.py`, `eventmanager.py`, `RHAPI.py`). Everything below is identical on both versions
+//! unless it says otherwise. Recorded here because two shipped bugs (#434, #447) rested on
+//! plausible guesses about exactly these behaviours.
+//!
+//! **`build_laps_list` — what reaches the wire.** It walks `race.node_laps[node]` and emits a lap
+//! only `if (not lap.invalid) and ((not lap.deleted) or lap.late_lap)`. Consequences:
+//!
+//! - A crossing the RD deletes is marked `invalid = True` and is **absent from the payload
+//!   entirely** — it is not flagged, it is gone. There is no "deleted lap" frame to react to.
+//! - `deleted: true` therefore only ever rides on a `late_lap` (`_add_lap` records a post-finish
+//!   crossing as `deleted = late_lap = True`), and the builder numbers **every** late lap `-1`. So
+//!   a lap that is both *numbered* and `deleted` is a shape neither version can produce.
+//! - v4.3.0's per-lap dict has **no `deleted` key and no `source` key** (and calls the raw time
+//!   `lap_raw`); v4.4.0 added `deleted`, `source`, and renamed to `lap_time` /
+//!   `lap_time_formatted`. `lap_index`, `lap_number`, `lap_time_stamp`, `splits`, `late_lap` are
+//!   common to both.
+//!
+//! **`delete_lap` renumbers.** `RHRace.delete_lap` sets `invalid`/`deleted` and `lap_number = None`
+//! on the target, then walks the seat's whole list assigning `lap.lap_number = 0, 1, 2, …` to every
+//! survivor. `restore_deleted_lap` and `replace_laps` (the `replace_current_laps` handler) renumber
+//! the same way. **A `lap_number` is a position in the current table, not a crossing id.** All
+//! three paths leave `lap_time_stamp` untouched — only `lap_time` (the pass-to-pass delta of the
+//! lap *following* the edit) is recomputed — so the stamp is the stable per-crossing identity, and
+//! it is what the adapter's dedup keys on (#434). Each of these ends with `emit_current_laps()`.
+//!
+//! **Emission cadence.** Mid-race, `emit_current_laps()` lands **once per recorded crossing**:
+//! `RHRace._add_lap` calls it inline right after appending the lap. The other call sites are
+//! staging, race-status edges, node-count changes, the marshaling edits above, and a client's own
+//! `load_data('current_laps')`. There is no periodic re-send.
+//!
+//! **Plugin handlers are asynchronous; `current_laps` is not.** `eventmanager.trigger` runs a
+//! handler **inline** when its `priority < 100` and `gevent.spawn`s it otherwise;
+//! `RHAPI.EventsAPI.on` defaults `priority = 200` for everything except the `*_INITIALIZE` events.
+//! The GridFPV plugin registers `RACE_LAP_RECORDED` through that default, so its `gridfpv_pass`
+//! broadcast is spawned — while `_add_lap` reaches `emit_current_laps()` on the very next
+//! statement. **The snapshot for a lap normally arrives before the plugin's pass for it**, and a
+//! whole field crossing inside one scheduling window yields up to one snapshot per seat before any
+//! spawned handler runs. That is what sets `PLUGIN_GRACE_SNAPSHOTS` (#447).
+//!
+//! **Every socket event gets its own greenlet.** `SOCKET_IO = SocketIO(APP, async_mode='gevent',
+//! …)` on both versions, with no `async_handlers=False`, so Flask-SocketIO's default applies. A
+//! read issued after a write can be served before that write commits — which is why every readback
+//! in this file re-asks rather than trusting its first answer (`confirm_seating`,
+//! [`RotorHazardConnection::confirm_min_lap_neutral`]).
 
 // `rust_socketio::Error` is a large external enum; we thread it through unchanged
 // rather than box every signature in this thin wrapper.
@@ -468,49 +516,93 @@ pub struct NodeTick {
 /// Nothing in this type produces an [`Event`]. See [`RawHeartbeat`] for why that is structural.
 #[derive(Clone, Default)]
 pub struct SignalTap {
-    /// The pre-parse subscription gate. Relaxed throughout: it guards no other memory, and a frame
-    /// landing on either side of the flip is equally correct.
+    /// The pre-parse subscription gate — a **hint**, not the authority. Relaxed throughout: it
+    /// guards no other memory, and a frame landing on either side of the flip is equally correct
+    /// *as far as the parse is concerned*. Whether the resulting fold may be **stored** is decided
+    /// separately, by [`TapStore::open`] under the store lock (#452).
     capture: Arc<AtomicBool>,
+    /// The subscription flag and the readings, behind one lock — see [`TapStore`].
+    store: Arc<Mutex<TapStore>>,
+}
+
+/// The tap's mutable state: the authoritative subscription flag **and** the readings it guards,
+/// behind a single lock (#452).
+///
+/// They are one datum, not two. Before this, `capturing()` was an atomic checked outside the lock
+/// and the readings were a `Mutex<Vec<NodeTick>>` cleared inside it, so a socket-callback thread
+/// could pass the gate, get descheduled, and have the driver tick close the subscription and empty
+/// the store underneath it — then wake up and write its frame into the supposedly-empty store. The
+/// next `set_signal_capture(true)` session's first `take()` then reported the *previous* session's
+/// RSSI, crossing and `crossed` flags as current. Deciding "is the subscription open?" and writing
+/// the frame under one lock is what makes "a lapsed Tune page leaves nothing behind" an invariant
+/// rather than a likelihood.
+#[derive(Debug, Default)]
+struct TapStore {
+    /// Whether the subscription is open, as decided **under this lock**. Kept in lockstep with
+    /// [`SignalTap::capture`], which exists only to answer the pre-parse gate without locking.
+    open: bool,
     /// Latest reading per node index. Grows to the widest array a frame has reported, capped at
     /// [`MAX_TUNE_NODES`].
-    nodes: Arc<Mutex<Vec<NodeTick>>>,
+    nodes: Vec<NodeTick>,
 }
 
 impl SignalTap {
     /// Whether a subscription is currently open — the check every gated handler makes **first**.
+    ///
+    /// A lock-free *hint*, deliberately: its job is to skip the deserialization of a frame nobody
+    /// wants (the #392 hazard), and being one instant stale there costs nothing. It is **not** the
+    /// permission to write — [`widen`](Self::widen) re-checks under the store lock (#452).
     pub fn capturing(&self) -> bool {
         self.capture.load(Ordering::Relaxed)
     }
 
     /// Open or close the subscription, returning the **previous** state so a caller can act on the
     /// edge. Closing empties the store: a lapsed Tune page must leave nothing behind.
+    ///
+    /// The flag flip and the clear happen under **one** acquisition of the store lock, so a
+    /// concurrent fold either completes entirely before the close (and is then cleared) or observes
+    /// `open == false` in [`widen`](Self::widen) and writes nothing. There is no window between
+    /// them for an in-flight frame to land in (#452).
     fn set_capturing(&self, on: bool) -> bool {
-        let was = self.capture.swap(on, Ordering::Relaxed);
+        let mut store = self.store.lock().expect("signal-tap lock");
+        let was = store.open;
+        store.open = on;
         if was && !on {
-            self.nodes.lock().expect("signal-tap lock").clear();
+            store.nodes.clear();
         }
+        // Publish the hint while still holding the lock, so it can never advertise "open" for a
+        // store this call is about to empty.
+        self.capture.store(on, Ordering::Relaxed);
         was
     }
 
     /// The current per-node readings, clearing the sticky [`NodeTick::crossed`] flags so the next
     /// read reports only crossings seen since this one.
     fn take(&self) -> Vec<NodeTick> {
-        let mut nodes = self.nodes.lock().expect("signal-tap lock");
-        let snapshot = nodes.clone();
-        for node in nodes.iter_mut() {
+        let mut store = self.store.lock().expect("signal-tap lock");
+        let snapshot = store.nodes.clone();
+        for node in store.nodes.iter_mut() {
             node.crossed = false;
         }
         snapshot
     }
 
-    /// Widen the store to `len` nodes (capped), returning the guard to write through.
-    fn widen(&self, len: usize) -> std::sync::MutexGuard<'_, Vec<NodeTick>> {
-        let mut nodes = self.nodes.lock().expect("signal-tap lock");
-        let want = len.min(MAX_TUNE_NODES);
-        if nodes.len() < want {
-            nodes.resize(want, NodeTick::default());
+    /// Widen the store to `len` nodes (capped) and return the guard to write through — or `None`
+    /// when the subscription has closed since the caller passed the pre-parse gate.
+    ///
+    /// This `None` is the whole of the #452 fix: the fold is abandoned rather than resurrecting a
+    /// closed session's readings. Every `note_*` fold goes through here, so none of them can write
+    /// to a closed tap.
+    fn widen(&self, len: usize) -> Option<std::sync::MutexGuard<'_, TapStore>> {
+        let mut store = self.store.lock().expect("signal-tap lock");
+        if !store.open {
+            return None;
         }
-        nodes
+        let want = len.min(MAX_TUNE_NODES);
+        if store.nodes.len() < want {
+            store.nodes.resize(want, NodeTick::default());
+        }
+        Some(store)
     }
 
     /// Fold a `heartbeat` frame in. Called **only** when [`capturing`](Self::capturing) is true.
@@ -521,8 +613,10 @@ impl SignalTap {
             .max(hb.frequency.len())
             .max(hb.loop_time.len())
             .max(hb.crossing_flag.len());
-        let mut nodes = self.widen(len);
-        for (index, node) in nodes.iter_mut().enumerate() {
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
             let mut touched = false;
             if let Some(&rssi) = hb.current_rssi.get(index) {
                 node.rssi = Some(rssi);
@@ -553,8 +647,10 @@ impl SignalTap {
         if change.node_index >= MAX_TUNE_NODES {
             return;
         }
-        let mut nodes = self.widen(change.node_index + 1);
-        if let Some(node) = nodes.get_mut(change.node_index) {
+        let Some(mut store) = self.widen(change.node_index + 1) else {
+            return;
+        };
+        if let Some(node) = store.nodes.get_mut(change.node_index) {
             let crossing = truthy(&change.crossing_flag);
             node.crossing = crossing;
             node.crossed |= crossing;
@@ -576,8 +672,10 @@ impl SignalTap {
             .max(data.pass_peak_rssi.len())
             .max(data.pass_nadir_rssi.len())
             .max(data.debug_pass_count.len());
-        let mut nodes = self.widen(len);
-        for (index, node) in nodes.iter_mut().enumerate() {
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
             let mut touched = false;
             for (slot, source) in [
                 (&mut node.node_peak_rssi, &data.node_peak_rssi),
@@ -608,8 +706,10 @@ impl SignalTap {
             .enter_at_levels
             .len()
             .max(levels.exit_at_levels.len());
-        let mut nodes = self.widen(len);
-        for (index, node) in nodes.iter_mut().enumerate() {
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
             if let Some(&enter) = levels.enter_at_levels.get(index) {
                 node.enter_at = Some(enter);
             }
@@ -625,8 +725,10 @@ impl SignalTap {
     /// Widens the store the same way the array-shaped frames do, so a capture on a node the tap has
     /// not otherwise heard from still lands rather than being dropped for being out of range.
     fn note_level(&self, index: usize, level: f32, enter: bool) {
-        let mut nodes = self.widen(index + 1);
-        let Some(node) = nodes.get_mut(index) else {
+        let Some(mut store) = self.widen(index + 1) else {
+            return;
+        };
+        let Some(node) = store.nodes.get_mut(index) else {
             return;
         };
         if enter {
@@ -964,7 +1066,27 @@ struct OwnedFormat {
     error: Option<String>,
     /// One-shot latch: the fallback to mutating the RD's own format has already been announced on
     /// this connection. Announced once, not once per heat — a per-stage repeat would bury it.
+    ///
+    /// **Diagnostics only.** Both fallback announcements (the owned-format confirm giving up, and
+    /// [`RotorHazardConnection::neutralize_active_format`] engaging the legacy path) latch it, so an
+    /// operator hears "this timer is on the weaker guarantee" once and not twice. It says nothing
+    /// about whether the confirm has run — see [`gave_up`](Self::gave_up).
     announced: bool,
+    /// One-shot latch: the **owned-format confirm** has already run to its
+    /// [`FORMAT_ACK_TIMEOUT`] deadline (or a failed ack) on this connection, so later selections
+    /// must not block on it again.
+    ///
+    /// Separate from [`announced`](Self::announced) because they answer different questions, and
+    /// conflating them lost the confirm entirely (#453): `prepare_instant_start` running once
+    /// *before* the plugin's `gridfpv_hello_ack` was folded sees `advertised == false`, takes the
+    /// legacy path, and `neutralize_active_format` latches `announced`. When the hello then arrives
+    /// advertising [`CAP_OWNED_FORMAT`], every later `select_owned_format` read that same latch as
+    /// "already gave up" and returned `Ok(false)` **without ever waiting** — so the connection kept
+    /// racing on the RD's own format, with RotorHazard's stopping and counting decisions intact
+    /// (#403), even though the plugin would have confirmed within
+    /// [`FORMAT_ACK_TIMEOUT`]. Only `select_owned_format` sets this, and only after actually
+    /// waiting.
+    gave_up: bool,
 }
 
 /// Fold a plugin [`MinLapReport`] into GridFPV's [`MinLapRecord`]; returns whether the record was
@@ -983,6 +1105,73 @@ fn fold_plugin_min_lap(slot: &Arc<Mutex<MinLapState>>, report: Option<&MinLapRep
     state.record.neutral = report.ok;
     state.record.error = report.error.clone();
     was_neutral
+}
+
+/// Re-ask `read` for RotorHazard's `(min_lap, behavior)` pair until one reads **neutral** or
+/// `expired` says the budget is spent; returns the neutral pair, else the last pair observed, else
+/// `None` if RH never answered at all (#444).
+///
+/// Split out from [`RotorHazardConnection::confirm_min_lap_neutral`] as the part that carries the
+/// judgement, so the frame sequence that caused the false alarm is a unit test rather than a
+/// docker leg. `expired` is checked **after** a read, so the confirm always gets at least one ask.
+fn confirm_neutral_by_reasking(
+    mut read: impl FnMut() -> Option<(i64, i64)>,
+    mut expired: impl FnMut() -> bool,
+) -> Option<(i64, i64)> {
+    // The last pair RH reported, so a genuine failure names the values rather than only timing
+    // out — and so a non-neutral last answer still reaches the record.
+    let mut last: Option<(i64, i64)> = None;
+    loop {
+        if let Some((secs, behavior)) = read() {
+            if min_lap_is_neutral(Some(secs), Some(behavior)) {
+                return Some((secs, behavior));
+            }
+            last = Some((secs, behavior));
+        }
+        if expired() {
+            return last;
+        }
+    }
+}
+
+/// What [`RotorHazardConnection::select_owned_format`] should do, given what this connection knows
+/// about the plugin's Grid-owned race format.
+///
+/// A named decision rather than a chain of early returns because getting it wrong is invisible:
+/// #453 was one latch read in place of another, and the symptom — a connection quietly racing on
+/// the RD's own format for a whole heat — looks identical to working correctly from every layer
+/// above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatSelection {
+    /// No plugin, or a plugin build predating the owned format: don't ask, take the legacy path.
+    Legacy,
+    /// Already confirmed selected on this connection: ask again (seating can change the effective
+    /// format) but don't block on the ack.
+    AlreadySelected,
+    /// The confirm has already run its full deadline once and lost: ask again so a recovered
+    /// plugin is picked up, but don't re-block every stage waiting for one that will not answer.
+    AlreadyGaveUp,
+    /// The first selection on this connection: ask, then wait for the ack before racing on it.
+    Confirm,
+}
+
+/// Decide from an [`OwnedFormat`] snapshot. Order matters: `advertised` gates everything (there is
+/// nothing to ask), then a confirmed selection short-circuits, then a spent confirm.
+///
+/// Note what is **not** consulted: [`OwnedFormat::announced`]. That latch is set by the legacy
+/// announcement too, so reading it here made one pre-hello `prepare_instant_start` suppress the
+/// confirm for the entire connection (#453). "Have we said this out loud yet" and "has the confirm
+/// run" are different questions.
+fn format_selection(owned: &OwnedFormat) -> FormatSelection {
+    if !owned.advertised {
+        FormatSelection::Legacy
+    } else if owned.selected {
+        FormatSelection::AlreadySelected
+    } else if owned.gave_up {
+        FormatSelection::AlreadyGaveUp
+    } else {
+        FormatSelection::Confirm
+    }
 }
 
 /// Announce, once, that a timer's own min-lap filter could not be neutralised (#407).
@@ -1134,7 +1323,31 @@ fn rh_band_channel(code: &str) -> Option<(String, u16)> {
 impl RotorHazardConnection {
     /// Connect to `url` (e.g. `http://localhost:5000`) and start translating the
     /// RotorHazard socket stream through `adapter`.
-    pub fn connect(url: &str, adapter: RotorHazardAdapter) -> Result<Self, rust_socketio::Error> {
+    ///
+    /// # The adapter comes back if the connect fails (#435)
+    ///
+    /// The `Err` carries the adapter alongside the error, and it has to: this consumes the adapter
+    /// by value, and on a **mid-race reconnect** that adapter is the only thing suppressing the
+    /// in-progress `current_laps` snapshot RotorHazard re-sends on every new socket. An attempt
+    /// that fails — RH momentarily unreachable, the common case right after the blip that dropped
+    /// the socket — used to drop it, so the next attempt started from an empty deduplicator and
+    /// re-minted every lap of the running heat as a fresh `Pass`. The lap projection does not dedup
+    /// by sequence, so one Wi-Fi blip plus one failed retry doubled a heat's lap log.
+    ///
+    /// `rust_socketio::Error` carries nothing back on its own, which is why the recovery is in the
+    /// signature rather than left to the caller to arrange.
+    ///
+    /// ⚠️ **One thing is still lost on a failed attempt**, and it is not the dedup state: the
+    /// `set_plugin_live_pass(false)` reset below runs *before* the socket is dialled, and any laps
+    /// it mints go into this attempt's event sink, which the `Err` path drops. That is a
+    /// pre-existing narrowing of #400 (it can only bite on the first attempt after a `live_pass`
+    /// link dropped, since the reset is idempotent), and it is left alone here deliberately —
+    /// re-ordering the reset around `.connect()` changes where those laps land relative to the
+    /// socket's own first frames, which is a separate question from this one.
+    pub fn connect(
+        url: &str,
+        adapter: RotorHazardAdapter,
+    ) -> Result<Self, (rust_socketio::Error, RotorHazardAdapter)> {
         let adapter = Arc::new(Mutex::new(adapter));
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         // Fresh link, fresh pass-source decision (#389). The adapter is REUSED across reconnects
@@ -1618,7 +1831,25 @@ impl RotorHazardConnection {
                     }
                 }
             })
-            .connect()?;
+            .connect();
+        // Hand the adapter back rather than dropping it with the failed attempt (#435). It is only
+        // ever shared with this attempt's own handlers, none of which can outlive a connect that
+        // never succeeded, so the `Arc` is uncontended here — but recover defensively rather than
+        // unwrapping it, because losing the dedup state to a panic on a mid-race reconnect is the
+        // very outcome this exists to prevent.
+        let client = match client {
+            Ok(client) => client,
+            Err(error) => {
+                let recovered = match Arc::try_unwrap(adapter) {
+                    Ok(cell) => cell.into_inner().unwrap_or_else(|e| e.into_inner()),
+                    Err(shared) => shared
+                        .lock()
+                        .map(|a| a.clone())
+                        .unwrap_or_else(|e| e.into_inner().clone()),
+                };
+                return Err((error, recovered));
+            }
+        };
 
         // Warm initial state on (re)connect: ask RH to send current per-node RSSI, the enter/exit
         // detection thresholds, the current race status (so the **current format id** is learned
@@ -2132,27 +2363,26 @@ impl RotorHazardConnection {
     /// against an already-proven format. A later failure still surfaces — the `gridfpv_format_ack`
     /// handler announces any `ok: false` whenever it arrives.
     fn select_owned_format(&self) -> Result<bool, rust_socketio::Error> {
-        let (advertised, selected, gave_up) = {
+        let decision = {
             // Clear any stale failure — the plugin's load-time error, or a previous stage's — so
             // only an ack for the request we are about to send can end the confirm below. The
             // plugin retries the create on every request, so yesterday's reason is not evidence.
             let mut owned = self.owned_format.lock().expect("owned-format lock");
             owned.error = None;
-            (owned.advertised, owned.selected, owned.announced)
+            // Reads `gave_up`, NOT `announced` (#453) — see `format_selection`.
+            format_selection(&owned)
         };
         // No plugin, or a plugin build predating the owned format: the legacy path, announced once.
-        if !advertised {
+        if decision == FormatSelection::Legacy {
             return Ok(false);
         }
         self.client.emit("gridfpv_select_format", json!({}))?;
-        if selected {
-            return Ok(true);
-        }
-        // Already gave up (and said so) on this connection: the request above still went out, so a
-        // plugin that recovers is picked up at the next stage — but don't re-block every stage
-        // waiting for one that won't.
-        if gave_up {
-            return Ok(false);
+        match decision {
+            FormatSelection::AlreadySelected => return Ok(true),
+            // The request above still went out, so a plugin that recovers is picked up at the next
+            // stage — but don't re-block every stage waiting for one that will not answer.
+            FormatSelection::AlreadyGaveUp => return Ok(false),
+            FormatSelection::Legacy | FormatSelection::Confirm => {}
         }
         // First selection on this link: confirm before racing on it.
         let deadline = Instant::now() + FORMAT_ACK_TIMEOUT;
@@ -2173,6 +2403,9 @@ impl RotorHazardConnection {
             std::thread::sleep(Duration::from_millis(50));
         }
         let mut owned = self.owned_format.lock().expect("owned-format lock");
+        // The confirm has now actually run its course on this connection: don't block a later
+        // stage on it again. Latched here and nowhere else (#453).
+        owned.gave_up = true;
         if !owned.announced {
             owned.announced = true;
             let why = match owned.error.as_ref() {
@@ -2528,7 +2761,10 @@ impl RotorHazardConnection {
     ///    **re-asserts it at every stage** so a setting moved back between heats is caught. When
     ///    the handshake already carried a confirmed-neutral report there is nothing to do here.
     /// 2. **This socket**, otherwise: `load_data(min_lap)` to read, `set_min_lap` +
-    ///    `set_min_lap_behavior` to write, `load_data(min_lap)` again to confirm. Its limitation
+    ///    `set_min_lap_behavior` to write, then `load_data(min_lap)` **re-asked until the pair
+    ///    reads neutral or the readback budget runs out** — one ask accepts a half-written frame
+    ///    and raises a false alarm, see [`confirm_min_lap_neutral`](Self::confirm_min_lap_neutral)
+    ///    (#444). Its limitation
     ///    against the plugin route is that it runs **once, at handshake** — GridFPV has no reason
     ///    to re-read it per heat on a link where nothing reports the change, so a filter the RD
     ///    restores mid-event goes unnoticed until the next connect. That is the concrete cost of
@@ -2582,8 +2818,9 @@ impl RotorHazardConnection {
         }
 
         // Confirm by re-reading, never by trusting the write — the discipline `request_thresholds`
-        // applies to calibration, and for the same reason.
-        let confirmed = self.read_min_lap();
+        // applies to calibration, and for the same reason. Re-asked rather than asked once: see
+        // `confirm_min_lap_neutral` (#444).
+        let confirmed = self.confirm_min_lap_neutral();
         let neutral = match confirmed {
             Some((s, b)) => min_lap_is_neutral(Some(s), Some(b)),
             None => false,
@@ -2628,6 +2865,41 @@ impl RotorHazardConnection {
     /// until [`ensure_min_lap_neutral`](Self::ensure_min_lap_neutral) or a plugin handshake has run.
     pub fn min_lap_record(&self) -> MinLapRecord {
         self.min_lap.lock().expect("min-lap lock").record.clone()
+    }
+
+    /// Confirm the min-lap write by **re-asking** until RotorHazard reports a neutral pair or
+    /// [`MIN_LAP_READBACK_TIMEOUT`] elapses; returns the **last** pair observed (or `None` if it
+    /// never answered at all), so the failure line can say what RH actually reported.
+    ///
+    /// ## Why it asks repeatedly rather than once
+    ///
+    /// The same reason [`confirm_seating`](Self::confirm_seating) does, plus one specific to this
+    /// pair — and taking the first frame that lands was a false-alarm generator (#444):
+    ///
+    /// * **Neutralising takes two writes to two different stores.** `set_min_lap` writes the
+    ///   `MinLapSec` *database option*; `set_min_lap_behavior` writes `serverconfig`'s
+    ///   `TIMING`/`MinLapBehavior`. Between them the timer is legitimately half-written.
+    /// * **Each write re-broadcasts `min_lap` to us.** `server.py::on_set_min_lap` and
+    ///   `on_set_min_lap_behavior` both end in `RHUI.emit_min_lap(noself=True)` — and
+    ///   `RHUI.emit_min_lap` only ever branches on `nobroadcast`, so **`noself` is silently
+    ///   ignored** and the frame goes out on `self._socket.emit`, i.e. to every client *including
+    ///   the writer*. Verified identical on v4.3.0 and v4.4.0. So the first write's broadcast
+    ///   carries `(0, <old behavior>)` — not neutral — and is indistinguishable, at the socket,
+    ///   from an answer to our `load_data`.
+    /// * **Every event gets its own greenlet.** RH builds `SocketIO(...)` without
+    ///   `async_handlers=False` on both versions, so a `load_data(min_lap)` can be served from a
+    ///   pre-commit read while the writes ahead of it are still landing.
+    ///
+    /// Taking the first frame therefore latched `record.neutral = false` for the whole connection —
+    /// the socket route never re-checks — and told the RD the timer's min-lap filter could not be
+    /// neutralised when both writes had in fact landed. Re-asking is free: `load_data` is a pure
+    /// read.
+    fn confirm_min_lap_neutral(&self) -> Option<(i64, i64)> {
+        let deadline = Instant::now() + MIN_LAP_READBACK_TIMEOUT;
+        confirm_neutral_by_reasking(
+            || self.read_min_lap(),
+            || Instant::now() >= deadline || !self.is_alive(),
+        )
     }
 
     /// Ask for, and wait (bounded) for, RotorHazard's `min_lap` frame — `(min_lap, behavior)`, or
@@ -2951,6 +3223,82 @@ mod tests {
             "and reports the rising edge as such"
         );
         assert!(tap.take().is_empty(), "a reopened tap starts from nothing");
+    }
+
+    /// **A frame already past the gate when the subscription closes must not survive the close**
+    /// (#452).
+    ///
+    /// This is the socket-callback thread's exact interleaving, replayed deterministically. A
+    /// handler checks [`SignalTap::capturing`] (true), is descheduled while it deserializes, and
+    /// the driver tick meanwhile calls `set_capturing(false)` — which empties the store. The
+    /// handler then wakes and performs its fold. Before the fix the fold took the `nodes` lock and
+    /// wrote unconditionally, so the closed session's RSSI, crossing state and sticky `crossed`
+    /// flags were sitting in the store for the *next* Tune session's first `take()` to report as
+    /// current readings. Now the fold re-checks under the same lock and abandons the frame.
+    ///
+    /// The gated `note_*` folds are called directly here on purpose: `tap_heartbeat` re-reads the
+    /// gate itself, so going through it would test the gate rather than the race behind it.
+    #[test]
+    fn a_fold_in_flight_when_the_subscription_closes_leaves_nothing_behind() {
+        for (name, fold) in [
+            (
+                "heartbeat",
+                Box::new(|tap: &SignalTap| {
+                    let hb: RawHeartbeat = serde_json::from_value(json!({
+                        "current_rssi": [40.0, 41.0, 42.0, 43.0],
+                        "frequency": [5658, 5695, 5760, 5800],
+                        "loop_time": [1200, 1180, 1210, 1195],
+                        "crossing_flag": [true, true, true, true],
+                    }))
+                    .unwrap();
+                    tap.note_heartbeat(&hb);
+                }) as Box<dyn Fn(&SignalTap)>,
+            ),
+            (
+                "node_data",
+                Box::new(|tap: &SignalTap| {
+                    let data: RawNodeData = serde_json::from_value(json!({
+                        "node_peak_rssi": [90.0, 91.0, 92.0, 93.0],
+                        "pass_peak_rssi": [88.0, 89.0, 90.0, 91.0],
+                        "debug_pass_count": [3, 3, 3, 3],
+                    }))
+                    .unwrap();
+                    tap.note_node_data(&data);
+                }),
+            ),
+            (
+                "node_crossing_change",
+                Box::new(|tap: &SignalTap| {
+                    let change: RawNodeCrossing =
+                        serde_json::from_value(json!({ "node_index": 2, "crossing_flag": true }))
+                            .unwrap();
+                    tap.note_crossing(&change);
+                }),
+            ),
+        ] {
+            let tap = SignalTap::default();
+            tap.set_capturing(true);
+
+            // The handler passes the pre-parse gate...
+            assert!(tap.capturing(), "{name}: the gate is open when it is read");
+            // ...the driver tick closes the subscription and empties the store...
+            assert!(tap.set_capturing(false), "{name}: the tap was open");
+            // ...and only now does the descheduled handler's fold reach the store.
+            fold(&tap);
+
+            assert!(
+                tap.take().is_empty(),
+                "{name}: a fold that lost the race to the close must write nothing — the store \
+                 belongs to a subscription that is gone"
+            );
+
+            // The proof this matters: the next Tune session must start from nothing.
+            tap.set_capturing(true);
+            assert!(
+                tap.take().is_empty(),
+                "{name}: the next session's first take() reported the previous session's readings"
+            );
+        }
     }
 
     /// **Both feeds surface.** `get_heartbeat_json` carries only rssi / frequency / loop-time /
@@ -3499,6 +3847,125 @@ mod tests {
             payload.get("node").is_none(),
             "the capture handlers read `node_index`; sending `node` is a swallowed KeyError"
         );
+    }
+
+    // ── #453: the owned-format confirm must not be suppressed by the legacy announcement ─────
+
+    /// **A pre-hello legacy announcement must not cost this connection its format confirm** (#453).
+    ///
+    /// The Director can call `prepare_instant_start` before the plugin's `gridfpv_hello_ack` has
+    /// been folded — the handshake and the first Stage race each other, and RH dispatches every
+    /// event on its own greenlet. With `advertised == false` that call takes the legacy path, and
+    /// `neutralize_active_format` latches `announced`. When the hello then lands advertising
+    /// `CAP_OWNED_FORMAT`, the confirm must still run: it is the only thing standing between the
+    /// heat and racing on the RD's own format with RotorHazard's stopping and counting decisions
+    /// intact (#403).
+    #[test]
+    fn a_pre_hello_legacy_announcement_does_not_suppress_the_first_format_confirm() {
+        let mut owned = OwnedFormat::default();
+        // The Stage that beat the handshake: nothing is advertised yet.
+        assert_eq!(format_selection(&owned), FormatSelection::Legacy);
+        // …so `neutralize_active_format` ran and announced itself.
+        owned.announced = true;
+        // The hello_ack now arrives, advertising the owned format.
+        owned.advertised = true;
+
+        assert_eq!(
+            format_selection(&owned),
+            FormatSelection::Confirm,
+            "the confirm has never run on this connection — the legacy announcement is not \
+             evidence that it did, and skipping it leaves the timer refereeing the race (#403)"
+        );
+    }
+
+    /// The three states that legitimately skip the wait, and the one that does not.
+    #[test]
+    fn only_a_spent_confirm_skips_the_format_ack_wait() {
+        let spent = OwnedFormat {
+            advertised: true,
+            gave_up: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(format_selection(&spent), FormatSelection::AlreadyGaveUp);
+
+        // A confirmed selection short-circuits ahead of everything else: nothing left to wait for.
+        let selected = OwnedFormat {
+            advertised: true,
+            selected: true,
+            gave_up: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(
+            format_selection(&selected),
+            FormatSelection::AlreadySelected
+        );
+
+        // No plugin owned format at all: never ask, never wait.
+        let stock = OwnedFormat {
+            announced: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(format_selection(&stock), FormatSelection::Legacy);
+    }
+
+    // ── #444: the min-lap confirm must not accept a half-written frame ───────────────────────
+
+    /// **The confirm must survive the broadcast its own first write triggers** (#444).
+    ///
+    /// Neutralising takes two writes to two different stores, and each one re-broadcasts `min_lap`
+    /// to us — `on_set_min_lap` / `on_set_min_lap_behavior` both end in `emit_min_lap(noself=True)`,
+    /// and `RHUI.emit_min_lap` only branches on `nobroadcast`, so `noself` is silently ignored and
+    /// the frame reaches the writer. The first of those carries `(0, <old behavior>)`: both writes
+    /// are landing, but the pair is not neutral *yet*. Taking that frame as the answer latched
+    /// `record.neutral = false` for the whole connection and told the RD the filter could not be
+    /// neutralised.
+    #[test]
+    fn the_min_lap_confirm_reasks_past_the_writes_own_broadcast() {
+        // Frame order at the socket: set_min_lap's broadcast, then set_min_lap_behavior's.
+        let frames = std::cell::RefCell::new(vec![Some((0, 0)), Some((0, 1))]);
+        let confirmed = confirm_neutral_by_reasking(
+            || frames.borrow_mut().pop().flatten(),
+            || frames.borrow().is_empty(),
+        );
+        assert_eq!(
+            confirmed,
+            Some((0, 0)),
+            "the half-written (0, 1) frame is not the answer to the confirm — both writes landed"
+        );
+    }
+
+    /// A genuinely un-neutral timer still fails, and names what RotorHazard actually reported
+    /// rather than only that the budget ran out.
+    #[test]
+    fn the_min_lap_confirm_reports_the_last_pair_when_it_never_goes_neutral() {
+        let asks = std::cell::Cell::new(0);
+        let observed = confirm_neutral_by_reasking(
+            || {
+                asks.set(asks.get() + 1);
+                Some((10, 1))
+            },
+            || asks.get() >= 3,
+        );
+        assert_eq!(observed, Some((10, 1)));
+        assert_eq!(asks.get(), 3, "it keeps asking until the budget is spent");
+
+        // And RH answering nothing at all stays distinguishable from RH answering badly.
+        assert_eq!(confirm_neutral_by_reasking(|| None, || true), None);
+    }
+
+    /// One ask always happens, even against an already-expired budget — the confirm is not
+    /// optional.
+    #[test]
+    fn the_min_lap_confirm_always_asks_at_least_once() {
+        let asks = std::cell::Cell::new(0);
+        let confirmed = confirm_neutral_by_reasking(
+            || {
+                asks.set(asks.get() + 1);
+                Some((0, 0))
+            },
+            || true,
+        );
+        assert_eq!((confirmed, asks.get()), (Some((0, 0)), 1));
     }
 
     /// A finished capture's **echo** reaches the tune tap as that node's threshold — the thing that

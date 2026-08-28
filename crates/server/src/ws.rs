@@ -235,8 +235,11 @@ impl ScopeProjection {
             Scope::Event { .. } => {
                 // `with_heat_timing` anchors the clock to the current heat's race-go (#62 follow-up).
                 let floor = crate::app::live_fold_floor(events, rounds);
+                // …and the rounds the event still defines decide which heats it may report as
+                // current / on deck (#439), exactly as they do for the snapshot.
+                let defined = crate::live_state::defined_round_ids(rounds);
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state_with_floor(events, floor),
+                    live_state_with_floor(events, floor, Some(&defined)),
                     stored,
                 )))
             }
@@ -250,8 +253,9 @@ impl ScopeProjection {
                 // from the filtered slice, so that is the heat whose round owns the floor.
                 let window_events: Vec<Event> = window.iter().map(|(_, e)| e.clone()).collect();
                 let floor = crate::app::live_fold_floor(&window_events, rounds);
+                let defined = crate::live_state::defined_round_ids(rounds);
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state_over_with_floor(&window, floor),
+                    live_state_over_with_floor(&window, floor, Some(&defined)),
                     stored,
                 )))
             }
@@ -272,8 +276,9 @@ impl ScopeProjection {
                 let floor = crate::app::min_lap_micros_of(
                     crate::app::round_def_of_heat(events, heat, rounds).as_ref(),
                 );
+                // No defined-round filter: the scope names its heat (#439).
                 Some(ProjectionBody::LiveRaceState(with_heat_timing(
-                    live_state_over_with_floor(&window, floor),
+                    live_state_over_with_floor(&window, floor, None),
                     stored,
                 )))
             }
