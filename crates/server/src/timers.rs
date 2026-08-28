@@ -1796,20 +1796,23 @@ pub const SIGNAL_RING: usize = 150;
 /// the page flicker between "live" and "stalled".
 const SIGNAL_STREAMING_WITHIN: Duration = Duration::from_millis(1500);
 
-/// One node's live signal, as a Tune page reads it (#355).
+/// One node's latest readings — the thirteen per-node values the timer reports, and **the** wire
+/// definition of them.
+///
+/// This is both the crate-boundary twin of the adapter's `NodeTick` (the live socket lives in
+/// `gridfpv-app`, *above* this crate, so the registry cannot name the adapter's type — restating
+/// the fields here keeps the dependency arrow pointing the right way, and the app crate does the
+/// trivial mapping) **and** the flattened body of [`NodeSignal`] on the wire. It is one struct for
+/// both jobs on purpose (#461): the two used to be hand-mirrored field lists joined by a
+/// field-by-field copy, which is a shape that can silently drift. Now the ingest type and the
+/// published type are the same type, so a field added here reaches the console or fails to compile.
 ///
 /// Everything is `Option` because everything is genuinely optional: a node RotorHazard has not
 /// reported yet, a timer whose thresholds have not arrived, a build that omits a readout. A
 /// missing value renders as "—", which is information; a zero would be a lie.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub struct NodeSignal {
-    /// The node's index on the timer, `0`-based. The **display** name is built from this plus the
-    /// channel (`Node 1 · Raceband R7`) — see the repo display rule.
-    pub node: u32,
-    /// The stable per-node competitor handle (`node-0`, `node-1`, …) the rest of GridFPV uses for
-    /// a seat. A wire handle, not a label.
-    pub seat: CompetitorRef,
+pub struct NodeReading {
     /// Whether RotorHazard has reported anything at all for this node.
     ///
     /// **Unseated nodes are included, and this is why.** "Is this node even alive?" is half the
@@ -1861,6 +1864,26 @@ pub struct NodeSignal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exit_at: Option<f32>,
+}
+
+/// One node's live signal, as a Tune page reads it (#355): its seat, its
+/// [readings](NodeReading), and its rolling RSSI window.
+///
+/// The readings are `#[serde(flatten)]`ed, so on the wire this is one flat object —
+/// `node`/`seat`, then [`NodeReading`]'s thirteen fields, then `samples` — byte-identical to the
+/// shape that was hand-mirrored before #461.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NodeSignal {
+    /// The node's index on the timer, `0`-based. The **display** name is built from this plus the
+    /// channel (`Node 1 · Raceband R7`) — see the repo display rule.
+    pub node: u32,
+    /// The stable per-node competitor handle (`node-0`, `node-1`, …) the rest of GridFPV uses for
+    /// a seat. A wire handle, not a label.
+    pub seat: CompetitorRef,
+    /// The node's latest readings, flattened onto this object.
+    #[serde(flatten)]
+    pub reading: NodeReading,
     /// The rolling RSSI window, **oldest first**, one value per entry in
     /// [`TimerSignal::sample_micros`]. At most [`SIGNAL_RING`] long, always.
     pub samples: Vec<f32>,
@@ -1902,42 +1925,6 @@ pub struct TimerSignal {
     /// Every node the timer reports, **including unseated ones** (see [`NodeSignal::seen`]), in
     /// node order.
     pub nodes: Vec<NodeSignal>,
-}
-
-/// One node's latest readings as the connection layer hands them over — the crate-boundary twin of
-/// the adapter's `NodeTick`.
-///
-/// It exists because the live socket lives in `gridfpv-app`, *above* this crate, so the registry
-/// cannot name the adapter's type. Restating the fields here keeps the dependency arrow pointing
-/// the right way; the app crate does the (trivial) mapping.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct NodeReading {
-    /// Whether the timer has reported this node at all.
-    pub seen: bool,
-    /// Live RSSI.
-    pub rssi: Option<f32>,
-    /// Tuned frequency in MHz, `None` when untuned.
-    pub frequency_mhz: Option<u16>,
-    /// Detector loop time in microseconds.
-    pub loop_time_micros: Option<u32>,
-    /// Crossing state as of the newest frame.
-    pub crossing: bool,
-    /// Any crossing seen since the previous reading was taken.
-    pub crossed: bool,
-    /// Running peak RSSI.
-    pub node_peak_rssi: Option<f32>,
-    /// Running nadir RSSI.
-    pub node_nadir_rssi: Option<f32>,
-    /// Most recent pass's peak RSSI.
-    pub pass_peak_rssi: Option<f32>,
-    /// Most recent pass's nadir RSSI.
-    pub pass_nadir_rssi: Option<f32>,
-    /// Passes detected.
-    pub pass_count: Option<u32>,
-    /// Enter threshold.
-    pub enter_at: Option<f32>,
-    /// Exit threshold.
-    pub exit_at: Option<f32>,
 }
 
 /// The live tune-telemetry state for **one** timer: the lease, the shared time base and the
@@ -2030,19 +2017,7 @@ impl TimerSignalState {
                 .map(|(index, ring)| NodeSignal {
                     node: index as u32,
                     seat: CompetitorRef(format!("node-{index}")),
-                    seen: ring.latest.seen,
-                    rssi: ring.latest.rssi,
-                    frequency_mhz: ring.latest.frequency_mhz,
-                    loop_time_micros: ring.latest.loop_time_micros,
-                    crossing: ring.latest.crossing,
-                    crossed_recently: ring.latest.crossed,
-                    node_peak_rssi: ring.latest.node_peak_rssi,
-                    node_nadir_rssi: ring.latest.node_nadir_rssi,
-                    pass_peak_rssi: ring.latest.pass_peak_rssi,
-                    pass_nadir_rssi: ring.latest.pass_nadir_rssi,
-                    pass_count: ring.latest.pass_count,
-                    enter_at: ring.latest.enter_at,
-                    exit_at: ring.latest.exit_at,
+                    reading: ring.latest.clone(),
                     samples: ring.samples.iter().copied().collect(),
                 })
                 .collect(),
@@ -3429,6 +3404,67 @@ mod tests {
             .lease_until = Instant::now() - Duration::from_millis(1);
     }
 
+    /// **The flattened `NodeReading` is byte-identical to the field list it replaced (#461).**
+    ///
+    /// `NodeSignal` used to re-declare thirteen of `NodeReading`'s fields and copy them across one
+    /// by one; it now embeds the reading with `#[serde(flatten)]`, which is only a safe swap if the
+    /// JSON is *exactly* the same. So this pins the literal wire text rather than a field-by-field
+    /// comparison: key spelling, key ORDER, the `crossed_recently` name for what the ingest side
+    /// calls a crossing, and the fact that `flatten` still honours `skip_serializing_if` — a `None`
+    /// reading is an absent key, never `null`.
+    #[test]
+    fn a_node_signals_wire_shape_survives_the_flatten() {
+        let full = NodeSignal {
+            node: 2,
+            seat: CompetitorRef("node-2".to_string()),
+            reading: NodeReading {
+                seen: true,
+                rssi: Some(120.0),
+                frequency_mhz: Some(5917),
+                loop_time_micros: Some(1200),
+                crossing: true,
+                crossed_recently: true,
+                node_peak_rssi: Some(180.0),
+                node_nadir_rssi: Some(30.0),
+                pass_peak_rssi: Some(175.0),
+                pass_nadir_rssi: Some(40.0),
+                pass_count: Some(7),
+                enter_at: Some(90.0),
+                exit_at: Some(80.0),
+            },
+            samples: vec![10.0, 20.5],
+        };
+        assert_eq!(
+            serde_json::to_string(&full).expect("serializable"),
+            concat!(
+                r#"{"node":2,"seat":"node-2","seen":true,"rssi":120.0,"frequency_mhz":5917,"#,
+                r#""loop_time_micros":1200,"crossing":true,"crossed_recently":true,"#,
+                r#""node_peak_rssi":180.0,"node_nadir_rssi":30.0,"pass_peak_rssi":175.0,"#,
+                r#""pass_nadir_rssi":40.0,"pass_count":7,"enter_at":90.0,"exit_at":80.0,"#,
+                r#""samples":[10.0,20.5]}"#,
+            ),
+        );
+
+        // A node the timer has told us nothing about: every optional reading is omitted, so the
+        // console renders "—" rather than reading a zero as a measurement.
+        let empty = NodeSignal {
+            node: 0,
+            seat: CompetitorRef("node-0".to_string()),
+            reading: NodeReading::default(),
+            samples: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).expect("serializable"),
+            r#"{"node":0,"seat":"node-0","seen":false,"crossing":false,"crossed_recently":false,"samples":[]}"#,
+        );
+
+        // And the flat form reads back into the nested one, so the console's shape is our shape.
+        let round_tripped: NodeSignal =
+            serde_json::from_str(&serde_json::to_string(&full).expect("serializable"))
+                .expect("deserializable");
+        assert_eq!(round_tripped, full);
+    }
+
     /// **The first GET starts the stream; nothing else does.** Before anyone asks, the connection
     /// driver is told not to capture — an idle Director must not be paying for a heartbeat parse.
     #[test]
@@ -3505,7 +3541,7 @@ mod tests {
         // Oldest-first, last-value-wins: the window holds the MOST RECENT `SIGNAL_RING` samples.
         let first = &snapshot.nodes[0];
         assert_eq!(first.samples[SIGNAL_RING - 1], (SIGNAL_RING * 3 - 1) as f32);
-        assert_eq!(first.rssi, Some((SIGNAL_RING * 3 - 1) as f32));
+        assert_eq!(first.reading.rssi, Some((SIGNAL_RING * 3 - 1) as f32));
         // And the shared time base stays parallel to every node's window.
         assert!(snapshot.sample_micros.windows(2).all(|w| w[0] <= w[1]));
     }
@@ -3528,8 +3564,8 @@ mod tests {
         let snapshot = timers.signal(&rh);
         assert_eq!(snapshot.nodes.len(), 8);
         assert_eq!(snapshot.nodes[7].seat, CompetitorRef("node-7".to_string()));
-        assert!(snapshot.nodes[7].seen);
-        assert_eq!(snapshot.nodes[7].rssi, Some(9.0));
+        assert!(snapshot.nodes[7].reading.seen);
+        assert_eq!(snapshot.nodes[7].reading.rssi, Some(9.0));
     }
 
     /// A timer that comes back a different width restarts the window rather than shifting every

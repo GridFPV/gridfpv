@@ -4777,7 +4777,7 @@ mod tests {
         assert_eq!(signal.nodes.len(), 8);
         assert_eq!(signal.sample_micros.len(), 1);
         assert_eq!(signal.nodes[7].samples, vec![47.0]);
-        assert_eq!(signal.nodes[7].enter_at, Some(90.0));
+        assert_eq!(signal.nodes[7].reading.enter_at, Some(90.0));
     }
 
     #[tokio::test]
