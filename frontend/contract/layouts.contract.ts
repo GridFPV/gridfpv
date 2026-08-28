@@ -368,21 +368,26 @@ describe('#117 S3 — a round names layouts, a heat flies one', () => {
     const heats = await listHeats(director.baseUrl, director.event);
     const heat = heats.find((h) => h.round === round.id);
     expect(heat).toBeDefined();
-    // #402 closes here: every practice seat is on the channel its layout puts that node on, and the
-    // heat records WHICH layout it flew.
+    // #402 closes here: every practice seat is on the channel its layout puts that node on.
     expect(heat?.frequencies).toEqual([
       ['node-0', 5769],
       ['node-1', 5732],
       ['node-2', 5695]
     ]);
-    expect(heat?.layout).toBe(layout);
+    // #441: the fill records NO explicit bind. `layout` on the wire is the RD's own bind, and a
+    // generated heat follows its round's default — that is what lets a later round-layout edit
+    // re-tune it instead of flagging every generated heat as orphaned.
+    expect(heat?.layout).toBeUndefined();
   });
 
   it('re-tunes a scheduled heat when its layout is edited, without rebuilding it', async () => {
     const heats = await listHeats(director.baseUrl, director.event);
     const before = heats.find((h) => h.round?.startsWith('practice'));
     expect(before).toBeDefined();
-    const layout = before!.layout!;
+    // #441: generated heats carry no bind — the layout under edit is found by its own name.
+    const layout = (await listChannelLayouts(director.baseUrl, director.event)).layouts.find(
+      (l) => l.name === 'Bracket A'
+    )!.id;
 
     await updateChannelLayout(
       director.baseUrl,
@@ -414,7 +419,7 @@ describe('#117 S3 — a round names layouts, a heat flies one', () => {
 
   it('keeps a manual seating override across a re-fill', async () => {
     const heats = await listHeats(director.baseUrl, director.event);
-    const heat = heats.find((h) => h.layout !== undefined)!;
+    const heat = heats.find((h) => h.round?.startsWith('practice'))!;
 
     const set = await postControl(
       director,
@@ -451,8 +456,8 @@ describe('#117 S3 — a round names layouts, a heat flies one', () => {
       TOKEN
     );
     const whoops = other.layouts.find((l) => l.name === 'Whoop pack')!.id;
-    const heat = (await listHeats(director.baseUrl, director.event)).find(
-      (h) => h.layout !== undefined
+    const heat = (await listHeats(director.baseUrl, director.event)).find((h) =>
+      h.round?.startsWith('practice')
     )!;
 
     const refused = await postControl(
@@ -497,10 +502,22 @@ describe('#117 S3 — a round names layouts, a heat flies one', () => {
     // the layout channels?"* — yes, because the bind is a logged event that outlives a round edit.
     // The edit is NOT refused (there are two valid repairs and blocking would prevent both); it is
     // reported on the same round-issues read #412/#416 already landed on.
-    const heat = (await listHeats(director.baseUrl, director.event)).find(
-      (h) => h.layout !== undefined
+    // #441: fills write no bind, so the bind this scenario needs is the RD's own act — make it.
+    const bracketA = (await listChannelLayouts(director.baseUrl, director.event)).layouts.find(
+      (l) => l.name === 'Bracket A'
+    )!.id;
+    let heat = (await listHeats(director.baseUrl, director.event)).find((h) =>
+      h.round?.startsWith('practice')
     )!;
     expect(heat.round).toBeDefined();
+    const bound = await postControl(
+      director,
+      { SetHeatLayout: { heat: heat.heat, layout: bracketA } },
+      { token: TOKEN }
+    );
+    expect(bound.status).toBe(200);
+    heat = (await listHeats(director.baseUrl, director.event)).find((h) => h.heat === heat.heat)!;
+    expect(heat.layout).toBe(bracketA);
 
     await updateRound(
       director.baseUrl,
