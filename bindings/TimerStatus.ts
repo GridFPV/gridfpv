@@ -10,13 +10,14 @@
  * **dynamic** connection states the Director drives on a live (`live`-feature) RotorHazard timer
  * as its connection comes and goes: [`Connecting`](TimerStatus::Connecting) while the socket is
  * being established, [`Connected`](TimerStatus::Connected) once it is up,
- * [`Disconnected`](TimerStatus::Disconnected) when it drops, and [`Error`](TimerStatus::Error)
- * when the connection attempt fails. They are **additive on the wire** — a console that only knows
- * `Ready`/`Configured` still parses the type; new variants surface richer status.
+ * [`Disconnected`](TimerStatus::Disconnected) when it drops, [`Error`](TimerStatus::Error) when a
+ * connection attempt fails, and [`Unreachable`](TimerStatus::Unreachable) once the Director has
+ * **stopped** trying on its own (#462). They are **additive on the wire** — a console that only
+ * knows `Ready`/`Configured` still parses the type; new variants surface richer status.
  *
  * These dynamic states are **not persisted** (`timers.json` always restores a timer's resting
  * status from its kind — see [`Timer::status_for`]); they are live, in-memory, and reset to
  * `Configured` whenever the RH timer's kind/config **actually changes** (a no-op edit leaves the
  * live state alone — see [`TimerRegistry::update`] and #382).
  */
-export type TimerStatus = "Ready" | "Configured" | "Connecting" | "Connected" | "Disconnected" | "Error";
+export type TimerStatus = "Ready" | "Configured" | "Connecting" | "Connected" | "Disconnected" | "Error" | "Unreachable";

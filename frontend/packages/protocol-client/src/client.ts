@@ -660,29 +660,36 @@ export async function setCalibration(
 }
 
 /**
- * Start a **capture** of one node's threshold (`POST /timers/{id}/capture`) — issue #355.
+ * Start a **capture** of one node's thresholds (`POST /timers/{id}/capture`) — issues #355, #465.
  *
  * The Tune page's third write, and the only one that does not carry a number: RotorHazard measures
- * the level instead of being told it. That is the honest bootstrap for a timer nobody has ever
+ * the levels instead of being told them. That is the honest bootstrap for a timer nobody has ever
  * tuned — GridFPV ships no fabricated default because the right level depends on craft, VTX power,
  * antenna and gate geometry (#411), so the only non-guessing starting point is the RD's own craft
  * flown through their own gate.
  *
+ * **One request, one pass, both thresholds** (#465). The body names only the node. The Director runs
+ * both of RotorHazard's captures over the single pass — enter while the craft is at the gate, exit
+ * once it has cleared — sequenced `exit_delay_ms` apart, because RotorHazard averages both capture
+ * branches off the same samples and a simultaneous pair returns exit == enter.
+ *
  * **The window starts now.** RotorHazard samples for `window_ms` (3000 on every version we support)
- * from the moment the emit lands and averages what it sees — it does not look back at a lap already
+ * from the moment each emit lands and averages what it sees — it does not look back at a lap already
  * flown, and it does not take the peak. The dispatch is returned (unlike {@link setCalibration}'s)
- * precisely so the caller can count that window down and tell the RD to fly *now*.
+ * precisely so the caller can count those windows down and tell the RD to fly *now*, and then to
+ * stay clear.
  *
  * **The response is a dispatch, not a readback** — one step stronger than {@link setCalibration}'s,
- * because the level does not exist yet when this resolves. The captured level arrives as
- * `NodeSignal.enter_at` / `exit_at` on a later `GET /timers/{id}/signal`. A capture whose level
- * never comes back did not land, and must be reported as such rather than shown as a success:
- * RotorHazard refuses a capture (a node not answering, one already capturing) in complete silence.
+ * because neither level exists yet when this resolves. The captured levels arrive as
+ * `NodeSignal.enter_at` / `exit_at` on a later `GET /timers/{id}/signal`, each after its own window.
+ * A level that never comes back did not land, and must be reported as such rather than shown as a
+ * success: RotorHazard refuses a capture (a node not answering, one already capturing) in complete
+ * silence. The two halves settle independently, so one can land and the other not.
  *
  * RD-gated exactly like {@link setCalibration}, so a token-gated Director answers **401** without
  * one. The Director **refuses** (a **400**) for a Mock, a timer that is not connected, a node the
- * timer does not have or the RD has disabled, a scored heat in progress, or a capture of that
- * threshold already running on that node; an unknown id answers **404**.
+ * timer does not have or the RD has disabled, a scored heat in progress, or a capture already
+ * running on that node; an unknown id answers **404**.
  */
 export async function captureLevel(
   baseUrl: string,

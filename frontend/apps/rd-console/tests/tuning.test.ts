@@ -23,13 +23,17 @@ import type {
   TimerSignal
 } from '@gridfpv/types';
 import {
+  CAPTURE_EXPLAINER,
   CONFIRM_TIMEOUT_MS,
   RSSI_MAX,
   RSSI_MIN,
   SIGNAL_LEASE_MS,
   SIGNAL_POLL_MS,
   adoptReported,
+  captureButtonHint,
+  captureButtonLabel,
   captureLabel,
+  captureResultLabel,
   captureSecondsLeft,
   channelGate,
   channelOptions,
@@ -40,6 +44,7 @@ import {
   foldPolled,
   foldPolledChannel,
   holdsLease,
+  idleCapture,
   isParsableLevel,
   markChannelSent,
   markSent,
@@ -50,9 +55,11 @@ import {
   phaseTone,
   plottable,
   readoutsOf,
+  samplingCapture,
   seedChannel,
   seedThreshold,
   staleThresholdNote,
+  startingCapture,
   writeGate,
   type CaptureState,
   type ThresholdState
@@ -812,75 +819,145 @@ describe('channelGate — ONE rule for a Tune-page write, two ways of saying it'
   });
 });
 
-describe('Capture — the timer measures the level (#355)', () => {
-  /** A capture that started at t=0 with the timer holding 90, sampling for 3 s then 4 s of grace. */
+describe('Capture — the timer measures BOTH levels from one pass (#355, #465)', () => {
+  /**
+   * A capture that started at t=0 with the timer holding Enter at 90 / Exit at 80.
+   *
+   * The shape of the run, and the whole of #465's design: RotorHazard samples for 3 s for the enter
+   * level while the RD flies the pass, then GridFPV arms the exit capture and it samples 3 s more
+   * with the craft away from the gate, then 4 s of grace for the levels to come back. They cannot
+   * be fired together — RotorHazard averages both branches off the same `current_rssi`, so a
+   * simultaneous pair returns exit == enter, which is a gate that never closes.
+   *
+   *   t=0 ─── enter window ─── 3000 ─── exit window ─── 6000 ─── grace ─── 10000
+   */
   const started = (): CaptureState => ({
-    phase: 'sampling',
+    phase: 'pass',
     startedAt: 0,
     windowMs: 3_000,
+    exitDelayMs: 3_000,
     settleMs: 4_000,
-    previous: 90
+    enter: { previous: 90 },
+    exit: { previous: 80 }
   });
 
-  it('credits NOTHING to the capture while RotorHazard is still sampling', () => {
-    // The window is three seconds long and RotorHazard has not computed a level until it closes —
-    // it accumulates `current_rssi` and only divides at the deadline. A threshold that moved during
+  it('credits NOTHING to either half while RotorHazard is still sampling for it', () => {
+    // A window is three seconds long and RotorHazard has not computed a level until it closes — it
+    // accumulates `current_rssi` and only divides at the deadline. A threshold that moved during
     // those seconds moved for some other reason, and crediting it would report a number that was
-    // never measured.
-    expect(foldCapture(started(), 118, 1_500).phase).toBe('sampling');
-    expect(foldCapture(started(), 118, 2_999).phase).toBe('sampling');
+    // never measured. Each half is judged against its OWN window, which is the point: the exit
+    // window has not even opened while the RD is still flying the pass.
+    expect(foldCapture(started(), 118, 64, 1_500).phase).toBe('pass');
+    expect(foldCapture(started(), 118, 64, 2_999).enter.outcome).toBeUndefined();
+    const midRun = foldCapture(started(), 118, 64, 4_000);
+    expect(midRun.phase).toBe('clearing');
+    expect(midRun.enter.outcome).toBe('measured');
+    expect(midRun.exit.outcome).toBeUndefined();
   });
 
-  it('takes a level that CHANGED after the window as the captured one', () => {
-    const next = foldCapture(started(), 118, 3_100);
+  it('takes each level that CHANGED after its own window as that half’s captured one', () => {
+    const next = foldCapture(started(), 118, 64, 6_100);
     expect(next.phase).toBe('captured');
-    expect(next.level).toBe(118);
+    expect(next.enter.level).toBe(118);
+    expect(next.exit.level).toBe(64);
+    // The pair reads back in one line — the point of the feature.
+    expect(captureResultLabel(next)).toBe('Captured Enter at 118, Exit at 64');
   });
 
   it('keeps waiting through the grace before giving a verdict', () => {
-    // The level has to survive RotorHazard's own write, the Director's decimation and a poll. A
+    // The levels have to survive RotorHazard's own write, the Director's decimation and a poll. A
     // verdict declared one poll too early is a false alarm on a capture that did land.
-    expect(foldCapture(started(), 90, 3_100).phase).toBe('waiting');
-    expect(foldCapture(started(), 90, 6_900).phase).toBe('waiting');
+    expect(foldCapture(started(), 90, 80, 6_100).phase).toBe('waiting');
+    expect(foldCapture(started(), 90, 80, 9_900).phase).toBe('waiting');
   });
 
   it('reports a capture that produced NO new level, rather than showing a success', () => {
     // This is the #423 failure class in its capture costume. RotorHazard refuses a capture — a node
     // whose `api_valid_flag` is clear, or one already capturing — by returning False and emitting
     // absolutely nothing, so an unchanged level is the only evidence of that refusal there is.
-    const next = foldCapture(started(), 90, 7_100);
+    const next = foldCapture(started(), 90, 80, 10_100);
     expect(next.phase).toBe('unchanged');
-    expect(next.level).toBeUndefined();
-    expect(next.detail).toContain('still reporting 90');
+    expect(next.enter.level).toBeUndefined();
+    expect(next.exit.level).toBeUndefined();
+    expect(next.detail).toContain('still reporting Enter at 90 and Exit at 80');
     expect(next.detail).toContain('nothing was recorded');
+    // #446's vocabulary, per half: this is `unchanged`, not a refusal GridFPV cannot evidence.
+    expect(next.enter.outcome).toBe('unchanged');
+    expect(next.exit.outcome).toBe('unchanged');
+    expect(next.detail).not.toMatch(/did not take the capture/i);
   });
 
-  it('says so plainly when the timer never reported the threshold at all', () => {
-    const next = foldCapture(started(), undefined, 7_100);
+  it('says which half did not land when only one did', () => {
+    // The half-landed case is real and specific to #465: the pass can fall inside the first window
+    // and the craft still be near the gate for the second, or the other way round. Saying
+    // "captured" and quietly showing one number would hide a threshold that was never measured.
+    const enterOnly = foldCapture(started(), 118, 80, 10_100);
+    expect(enterOnly.phase).toBe('captured');
+    expect(enterOnly.enter.outcome).toBe('measured');
+    expect(enterOnly.exit.outcome).toBe('unchanged');
+    expect(enterOnly.detail).toContain('Exit at did not change');
+    expect(enterOnly.detail).toContain('cleared the gate');
+    expect(captureResultLabel(enterOnly)).toBe('Captured Enter at 118, Exit at unchanged');
+
+    const exitOnly = foldCapture(started(), 90, 64, 10_100);
+    expect(exitOnly.detail).toContain('Enter at did not change');
+    expect(exitOnly.detail).toContain('outside the first window');
+  });
+
+  it('says GridFPV was not WATCHING, when that is the true thing to say (#446)', () => {
+    // `unobserved` is a different kind of cannot-say from `unchanged`, and the Director keeps them
+    // apart: one is a statement about the timer's level, the other about GridFPV's own watching.
+    // Reporting "the timer is still reporting …" when nothing was read at all would be inventing
+    // an observation.
+    const next = foldCapture({ ...started(), enter: {}, exit: {} }, undefined, undefined, 10_100);
     expect(next.phase).toBe('unchanged');
-    expect(next.detail).toContain('never reported a level');
+    expect(next.enter.outcome).toBe('unobserved');
+    expect(next.exit.outcome).toBe('unobserved');
+    expect(next.detail).toContain('did not read a level');
+    expect(next.detail).toContain('still connected');
+    expect(next.detail).not.toContain('still reporting');
+  });
+
+  it('names the unobserved half when only one of them went unread', () => {
+    const enterOnly = foldCapture({ ...started(), exit: {} }, 118, undefined, 10_100);
+    expect(enterOnly.enter.outcome).toBe('measured');
+    expect(enterOnly.exit.outcome).toBe('unobserved');
+    expect(enterOnly.detail).toContain('Exit at did not change');
+    expect(enterOnly.detail).toContain('did not read a level for it');
   });
 
   it('claims no diagnosis it cannot support', () => {
-    // A capture CAN legitimately measure the same level it started from. "Nothing changed" is the
-    // whole of what is known, and the copy has to stop there rather than assert a cause.
-    const next = foldCapture(started(), 90, 7_100);
-    expect(next.detail).toContain('either the pass fell outside the window');
+    // A capture CAN legitimately measure the same level it started from — an ordinary result on a
+    // stable gate, and the usual one when the RD captures twice. "GridFPV cannot tell them apart"
+    // is the whole of what is known, and the copy has to stop there rather than assert a cause.
+    const next = foldCapture(started(), 90, 80, 10_100);
+    expect(next.detail).toContain('cannot tell a capture that measured the same level');
     expect(next.detail).not.toMatch(/RotorHazard is not responding|the node is dead/i);
+    expect(next.detail).not.toMatch(/the timer did not take the capture\b/i);
   });
 
-  it('counts the window down in whole seconds, and stops at zero', () => {
-    // The countdown IS the instruction: RotorHazard's window opens at the press, so an RD who does
-    // not know how long they have is an RD whose pass lands outside it.
+  it('counts the CURRENT stretch down in whole seconds, and stops at zero', () => {
+    // The countdown IS the instruction, and it restarts at the hand-over: the first three seconds
+    // are "fly the pass", the next three are "stay clear". One countdown across the whole run would
+    // leave the RD believing they still had time to fly — during the window that measures the gate
+    // with nothing at it.
     expect(captureSecondsLeft(started(), 0)).toBe(3);
     expect(captureSecondsLeft(started(), 1_200)).toBe(2);
     expect(captureSecondsLeft(started(), 2_900)).toBe(1);
-    expect(captureSecondsLeft(started(), 3_500)).toBe(0);
+    const clearing: CaptureState = { ...started(), phase: 'clearing' };
+    expect(captureSecondsLeft(clearing, 3_100)).toBe(3);
+    expect(captureSecondsLeft(clearing, 5_900)).toBe(1);
+    expect(captureSecondsLeft(clearing, 6_500)).toBe(0);
+    expect(captureSecondsLeft({ ...started(), phase: 'captured' }, 0)).toBe(0);
   });
 
-  it('labels the sampling state as an instruction, not a status', () => {
+  it('labels each stretch as the instruction for that stretch, not as a status', () => {
     expect(captureLabel(started(), 500)).toMatch(/Fly the pass now/);
-    expect(captureLabel({ ...started(), phase: 'captured', level: 118 }, 0)).toBe('Captured 118');
+    // The one that stops the RD spoiling their own measurement.
+    expect(captureLabel({ ...started(), phase: 'clearing' }, 3_500)).toMatch(
+      /Stay clear of the gate/
+    );
+    expect(captureLabel({ ...started(), phase: 'waiting' }, 0)).toBe('Reading the levels…');
     expect(captureLabel({ ...started(), phase: 'unchanged' }, 0)).toBe('Nothing captured');
   });
 
@@ -889,16 +966,67 @@ describe('Capture — the timer measures the level (#355)', () => {
     // clamping. Clamping only this side would read a timer sitting on 255 as 254 and call an
     // unchanged level a capture — a fabricated success, which is the one outcome this must never
     // produce. (`clampLevel` is the rule for a value an EDITOR produces; this is the timer's own.)
-    const at255: CaptureState = { ...started(), previous: 255 };
-    expect(foldCapture(at255, 255, 7_100).phase).toBe('unchanged');
+    const at255: CaptureState = { ...started(), enter: { previous: 255 } };
+    expect(foldCapture(at255, 255, 80, 10_100).enter.outcome).toBe('unchanged');
+    expect(foldCapture(at255, 255.4, 80, 10_100).enter.outcome).toBe('unchanged');
     // …and a genuine change is still a capture, reported at the level the timer actually holds.
-    expect(foldCapture(at255, 255.4, 7_100).phase).toBe('unchanged');
-    expect(foldCapture(at255, 200, 3_100).level).toBe(200);
+    expect(foldCapture(at255, 200, 64, 6_100).enter.level).toBe(200);
   });
 
   it('leaves a settled capture alone on every later poll', () => {
-    const done = foldCapture(started(), 118, 3_100);
-    expect(foldCapture(done, 118, 9_000)).toBe(done);
-    expect(foldCapture(done, 90, 9_000)).toBe(done);
+    const done = foldCapture(started(), 118, 64, 6_100);
+    expect(foldCapture(done, 118, 64, 12_000)).toBe(done);
+    expect(foldCapture(done, 90, 80, 12_000)).toBe(done);
+  });
+
+  it('explains the second stretch in the copy, because that is the new way to get it wrong', () => {
+    // The RD had never seen capture in RotorHazard at all, and #465 adds a rule that did not exist
+    // before: after the pass, stay off the gate. If the explainer does not say it, nothing does
+    // until the countdown is already running.
+    expect(CAPTURE_EXPLAINER).toContain('one pass');
+    expect(CAPTURE_EXPLAINER).toContain('stay clear of the gate');
+    expect(CAPTURE_EXPLAINER).toContain('both levels');
+    // Still says the two things read off RotorHazard's source that #355 established.
+    expect(CAPTURE_EXPLAINER).toContain('three seconds');
+    expect(CAPTURE_EXPLAINER).toContain('Nothing is recorded');
+
+    // One button, and its name says what it does rather than naming a threshold.
+    expect(captureButtonLabel()).toBe('Capture both levels from a pass');
+    const hint = captureButtonHint('Node 3');
+    expect(hint).toContain('Node 3');
+    expect(hint).toContain('Enter at and Exit at');
+    expect(hint).toContain('one pass');
+  });
+
+  it('starts from a resting state that carries both windows', () => {
+    const idle = idleCapture();
+    expect(idle.phase).toBe('idle');
+    expect(idle.exitDelayMs).toBe(idle.windowMs);
+    expect(idle.enter).toEqual({});
+    expect(idle.exit).toEqual({});
+    // The dispatch's numbers win over the fallbacks — they are RotorHazard's, read by the Director.
+    const armed = samplingCapture(
+      idle,
+      {
+        timer: 't',
+        node: 0,
+        window_ms: 2_500,
+        exit_delay_ms: 2_500,
+        settle_ms: 5_000,
+        previous_enter: 91,
+        previous_exit: 81
+      },
+      1_000
+    );
+    expect(armed.phase).toBe('pass');
+    expect(armed.startedAt).toBe(1_000);
+    expect(armed.windowMs).toBe(2_500);
+    expect(armed.exitDelayMs).toBe(2_500);
+    expect(armed.settleMs).toBe(5_000);
+    expect(armed.enter.previous).toBe(91);
+    expect(armed.exit.previous).toBe(81);
+    // …and a press clears the previous run's results rather than leaving them to be misread.
+    const stale = { ...armed, enter: { previous: 91, level: 118, outcome: 'measured' as const } };
+    expect(startingCapture(stale).enter).toEqual({});
   });
 });

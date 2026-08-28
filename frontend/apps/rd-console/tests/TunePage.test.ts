@@ -244,12 +244,12 @@ async function renderTune(
     /** Override the timer under test (its capability / channel pool). */
     timer?: Timer;
     /**
-     * What a **capture** (#355) ends up measuring, per threshold — the level the timer starts
-     * reporting once its sampling window closes. `undefined` (the default) models a capture that
-     * produced nothing: RotorHazard refuses one in complete silence, so "the level never changed"
-     * is the only evidence of that there is.
+     * What a **capture** (#355, #465) ends up measuring — the levels the timer starts reporting as
+     * each of its two sampling windows closes. `undefined` for a half (and `undefined` by default
+     * for both) models a capture that produced nothing: RotorHazard refuses one in complete
+     * silence, so "the level never changed" is the only evidence of that there is.
      */
-    captures?: (body: CaptureRequest) => number | undefined;
+    captures?: (body: CaptureRequest) => { enter?: number; exit?: number } | undefined;
     /** The capture request itself is refused by the Director. */
     captureRejects?: Error;
   } = {}
@@ -279,35 +279,39 @@ async function renderTune(
     }
   });
   const stopSignal = vi.fn(async () => {});
-  // The capture behaves like the real one: the Director answers with a DISPATCH carrying the window
-  // it just opened, and the measured level (if there is one) only appears on a LATER poll — fed in
-  // reality by RotorHazard's end-of-capture `node_enter_at_level` broadcast and the readback behind
-  // it. The window/grace are milliseconds here for the same reason `confirmMs` is: the behaviour
-  // under test is the sequence, not RotorHazard's three seconds.
+  // The capture behaves like the real one: the Director answers with a DISPATCH carrying the two
+  // windows it just opened, and each measured level (if there is one) only appears on a LATER poll —
+  // fed in reality by RotorHazard's end-of-capture `node_enter_at_level` / `node_exit_at_level`
+  // broadcasts and the readback behind them. The windows/grace are milliseconds here for the same
+  // reason `confirmMs` is: the behaviour under test is the sequence, not RotorHazard's three
+  // seconds. What is faithfully modelled is the ORDER (#465): the enter level lands while the exit
+  // window is still open, and the exit level only after it closes.
+  const captureWindowMs = 40;
   const startCapture = vi.fn(async (_timer: string, body: CaptureRequest) => {
     if (opts.captureRejects) throw opts.captureRejects;
     const target = feed.nodes.find((n) => n.node === body.node);
-    const previous = target
-      ? body.threshold === 'enter'
-        ? target.enter_at
-        : target.exit_at
-      : undefined;
     const measured = opts.captures?.(body);
-    if (target && measured !== undefined) {
+    if (target && measured?.enter !== undefined) {
       // Applied on a delay so the window is genuinely open for a moment — a capture that resolved
       // the instant it was pressed would never exercise the "fly the pass now" state at all.
       setTimeout(() => {
-        if (body.threshold === 'enter') target.enter_at = measured;
-        else target.exit_at = measured;
+        target.enter_at = measured.enter;
       }, 20);
+    }
+    if (target && measured?.exit !== undefined) {
+      // The exit level cannot exist until its own window has closed, which is a whole window later.
+      setTimeout(() => {
+        target.exit_at = measured.exit;
+      }, captureWindowMs + 20);
     }
     return {
       timer: 'rh-1',
       node: body.node,
-      threshold: body.threshold,
-      window_ms: 40,
+      window_ms: captureWindowMs,
+      exit_delay_ms: captureWindowMs,
       settle_ms: 60,
-      previous
+      previous_enter: target?.enter_at,
+      previous_exit: target?.exit_at
     } satisfies CaptureDispatch;
   });
   // The channel write behaves like the real one: the Director answers with a DISPATCH, and the
@@ -1459,100 +1463,140 @@ describe('TunePage — a fresh subscription fills in without a manual refresh', 
   });
 });
 
-describe('TunePage — Capture: let the timer MEASURE the level (#355)', () => {
-  const captureBtn = (node = 0, th: 'enter' | 'exit' = 'enter') =>
-    within(screen.getByTestId(`capture-${node}-${th}`)).getByRole('button');
+describe('TunePage — Capture: one button, one pass, BOTH levels (#355, #465)', () => {
+  const captureBtn = (node = 0) =>
+    within(screen.getByTestId(`capture-${node}`)).getByRole('button');
 
   it('says what it will do BEFORE it is pressed — not a bare verb, and not an icon', async () => {
     // The RD's own requirement, verbatim: *"the RD had never seen this in RH and did not know it
-    // existed, so it cannot be a bare icon or an unexplained verb."* Three facts have to be on
-    // screen before the press, and each of them was read off RotorHazard's source rather than
-    // assumed: the timer does the measuring, the window starts at the press, and the RD flies the
-    // pass INTO it. "Fly a lap, then capture" would send them to the gate three seconds too late.
+    // existed, so it cannot be a bare icon or an unexplained verb."* Four facts have to be on
+    // screen before the press, and each was read off RotorHazard's source rather than assumed: the
+    // timer does the measuring, the window starts at the press, the RD flies the pass INTO it, and
+    // then they stay OFF the gate while the second window measures the exit level (#465).
     const h = await renderTune();
     const btn = captureBtn();
-    expect(btn).toHaveTextContent(/Capture Enter at from a pass/i);
+    expect(btn).toHaveTextContent(/Capture both levels from a pass/i);
     // The accessible name carries the same explanation, and names the node by its FRIENDLY name.
     expect(btn.getAttribute('aria-label')).toMatch(/Node 1 · Raceband R7/);
-    expect(btn.getAttribute('aria-label')).toMatch(/three seconds from the moment you press/i);
+    expect(btn.getAttribute('aria-label')).toMatch(/Enter at and Exit at/);
+    expect(btn.getAttribute('aria-label')).toMatch(/stay clear of it for three more/i);
     // And the explainer beside it says the mechanism plainly, including the honest ending.
-    expect(
-      screen.getAllByText(/watches this gate for three seconds starting the moment you press/i)
-        .length
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/fly one pass through this gate/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/stay clear of the gate for three more/i).length).toBeGreaterThan(0);
     expect(
       screen.getAllByText(/Nothing is recorded unless a new level comes back/i).length
     ).toBeGreaterThan(0);
     h.unmount();
   });
 
-  it('tells the RD to fly the pass NOW, and counts the window down', async () => {
-    // The countdown is the instruction. RotorHazard's window opens at the emit, so an RD who does
-    // not know how long they have is an RD whose pass lands outside it.
-    const h = await renderTune({ pollMs: 15 });
+  it('has exactly ONE capture control per node, not one per threshold', async () => {
+    // The whole of #465 in one assertion. Two buttons asked the RD to fly two passes for a pair the
+    // hardware gives from one lap — and let them arm the exit half on its own, which measures the
+    // gate at whatever moment they happened to press.
+    const h = await renderTune();
+    expect(screen.getAllByRole('button', { name: /Capture Enter at and Exit at/i })).toHaveLength(
+      2 // one per offered node, not per threshold
+    );
+    expect(screen.queryByTestId('capture-0-enter')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('capture-0-exit')).not.toBeInTheDocument();
+    h.unmount();
+  });
+
+  it('tells the RD to fly the pass, THEN to stay clear, and counts each stretch down', async () => {
+    // The countdown is the instruction, and it changes half way through. RotorHazard's window opens
+    // at the emit, so an RD who does not know how long they have is an RD whose pass lands outside
+    // it — and an RD who does not know the second window exists flies back through the gate during
+    // the one stretch that must see the signal WITHOUT them, which is the only way to spoil the
+    // pair from a good pass.
+    const h = await renderTune({ pollMs: 15, captures: () => ({ enter: 118, exit: 64 }) });
     await fireEvent.click(captureBtn());
-    await waitFor(() =>
-      expect(h.startCapture).toHaveBeenCalledWith('rh-1', { node: 0, threshold: 'enter' })
-    );
-    await waitFor(() =>
-      expect(
-        within(screen.getByTestId('capture-0-enter')).getByText(/Fly the pass now/)
-      ).toBeInTheDocument()
-    );
+    await waitFor(() => expect(h.startCapture).toHaveBeenCalledWith('rh-1', { node: 0 }));
+    const panel = () => screen.getByTestId('capture-0');
+    await waitFor(() => expect(within(panel()).getByText(/Fly the pass now/)).toBeInTheDocument());
     // While the timer is watching, pressing again must not start a second capture — RotorHazard
     // refuses that in silence, so a second press would look started and do nothing.
     await fireEvent.click(captureBtn());
     expect(h.startCapture).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(within(panel()).getByText(/Stay clear of the gate/)).toBeInTheDocument()
+    );
     h.unmount();
   });
 
-  it('confirms the captured level BY POLL, and it lands in all three editors', async () => {
-    // Same evidence a typed level is confirmed by, and it has to be: the RD cannot know the number
-    // in advance, so the only proof the capture landed is the timer reporting a level it was not
-    // reporting before.
-    const h = await renderTune({ pollMs: 15, captures: () => 118 });
+  it('confirms BOTH captured levels BY POLL, and they land in all three editors', async () => {
+    // Same evidence a typed level is confirmed by, and it has to be: the RD cannot know the numbers
+    // in advance, so the only proof a capture landed is the timer reporting a level it was not
+    // reporting before. Both halves are confirmed the same way, each against its own window.
+    const h = await renderTune({ pollMs: 15, captures: () => ({ enter: 118, exit: 64 }) });
     await fireEvent.click(captureBtn());
     await waitFor(() =>
       expect(
-        within(screen.getByTestId('capture-0-enter')).getByText('Captured 118')
+        within(screen.getByTestId('capture-0')).getByText('Captured Enter at 118, Exit at 64')
       ).toBeInTheDocument()
     );
-    // The captured level is now THE value — every editor shows it, exactly as if the RD had typed
-    // it, because from here on it is GridFPV's value (D27) and the Director has recorded it.
+    // The captured levels are now THE values — every editor shows them, exactly as if the RD had
+    // typed them, because from here on they are GridFPV's values (D27) and the Director recorded them.
     expect(box().value).toBe('118');
     expect(slider().value).toBe('118');
     expect(graphValue('Enter')).toBe(118);
-    // And it did NOT write the level back at the timer: the timer already has it, and a second
+    expect(graphValue('Exit')).toBe(64);
+    // …and exit came out BELOW enter, which is the whole reason the two windows are sequenced.
+    expect(graphValue('Exit')).toBeLessThan(graphValue('Enter') as number);
+    // And it did NOT write the levels back at the timer: the timer already has them, and a second
     // write would be GridFPV changing something nobody asked it to change.
     expect(h.applyLevels).not.toHaveBeenCalled();
     h.unmount();
   });
 
-  it('reports a capture that did not land, rather than showing it as a success', async () => {
-    // RotorHazard refuses a capture — a node that is not answering, or one already capturing — with
-    // no reply of any kind: `start_capture_enter_at_level` returns False and the handler emits
-    // nothing. So "the level never changed" is the ONLY evidence of that refusal, and it must read
-    // as a failure. This is the #423 failure class (a write that returns success and does nothing).
+  it('names the half that did not land instead of calling the pair a success', async () => {
+    // Specific to #465: the pass can fall inside the first window and the craft still be near the
+    // gate for the second. Showing one number under a plain "Captured" would hide a threshold that
+    // was never measured.
+    const h = await renderTune({ pollMs: 15, captures: () => ({ enter: 118 }) });
+    await fireEvent.click(captureBtn());
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('capture-0')).getByText(
+          'Captured Enter at 118, Exit at unchanged'
+        )
+      ).toBeInTheDocument()
+    );
+    expect(screen.getByTestId('capture-detail-0')).toHaveTextContent(/Exit at did not change/);
+    h.unmount();
+  });
+
+  it('reports a capture that changed nothing, without claiming it was refused', async () => {
+    // Nothing is recorded and nothing is invented — that half is the #423 rule and is unchanged.
+    //
+    // What #446 changed is the *claim*. RotorHazard refuses a capture — a node not answering, or
+    // one already capturing — by returning False and emitting nothing, so this used to read as a
+    // refusal. But a capture that measured the same number looks identical from here, and on a
+    // stable gate (or a second press) that is an ordinary result. The console says what it knows
+    // and stops, in the Director's own `Unchanged` vocabulary.
     const h = await renderTune({ pollMs: 15 });
     await fireEvent.click(captureBtn());
-    const panel = () => screen.getByTestId('capture-0-enter');
+    const panel = () => screen.getByTestId('capture-0');
     await waitFor(() => expect(within(panel()).getByText('Nothing captured')).toBeInTheDocument());
-    expect(screen.getByTestId('capture-detail-0-enter')).toHaveTextContent(
-      /still reporting 90.*Nothing was captured and nothing was recorded/s
+    const detail = screen.getByTestId('capture-detail-0');
+    expect(detail).toHaveTextContent(
+      /still reporting Enter at 90 and Exit at 80.*nothing was recorded/s
     );
-    // The threshold itself is untouched — nothing was invented to fill the gap.
+    expect(detail).not.toHaveTextContent(/did not take the capture/i);
+    // The thresholds themselves are untouched — nothing was invented to fill the gap.
     expect(box().value).toBe('90');
     h.unmount();
   });
 
   it('gives a verdict even when the poll itself has stopped answering', async () => {
     // The backstop, exactly as for a write: with no further polls no confirmation is coming, and a
-    // capture left reading "Reading the level…" for ever is the silent failure in another costume.
+    // capture left reading "Reading the levels…" for ever is the silent failure in another costume.
+    // It has to be armed past the SECOND window, or it would call the exit half unchanged while
+    // RotorHazard was still sampling for it.
     const h = await renderTune({ pollMs: 10 * 60 * 1000 });
     await fireEvent.click(captureBtn());
     await waitFor(() =>
       expect(
-        within(screen.getByTestId('capture-0-enter')).getByText('Nothing captured')
+        within(screen.getByTestId('capture-0')).getByText('Nothing captured')
       ).toBeInTheDocument()
     );
     expect(h.fetchSignal).toHaveBeenCalledTimes(1);
@@ -1568,10 +1612,10 @@ describe('TunePage — Capture: let the timer MEASURE the level (#355)', () => {
     await fireEvent.click(captureBtn());
     await waitFor(() =>
       expect(
-        within(screen.getByTestId('capture-0-enter')).getByText('Capture failed')
+        within(screen.getByTestId('capture-0')).getByText('Capture failed')
       ).toBeInTheDocument()
     );
-    expect(screen.getByTestId('capture-detail-0-enter')).toHaveTextContent(/already capturing/);
+    expect(screen.getByTestId('capture-detail-0')).toHaveTextContent(/already capturing/);
     h.unmount();
   });
 
@@ -1580,14 +1624,13 @@ describe('TunePage — Capture: let the timer MEASURE the level (#355)', () => {
     // drops an out-of-range seat index with nothing but a log line. Same rule, same reason, as the
     // channel dropdown's.
     const h = await renderTune({ nodes: nodeView([0]) });
-    expect(screen.queryByTestId('capture-0-enter')).toBeInTheDocument();
-    expect(screen.queryByTestId('capture-1-enter')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('capture-1-exit')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('capture-0')).toBeInTheDocument();
+    expect(screen.queryByTestId('capture-1')).not.toBeInTheDocument();
     h.unmount();
   });
 
   it('is refused while a SCORED heat is running, and says why', async () => {
-    // A capture ends by SETTING the threshold, so it changes what counts as a lap under a scored
+    // A capture ends by SETTING the thresholds, so it changes what counts as a lap under a scored
     // heat just as surely as a typed level does. Same gate, checked per press.
     const h = await renderTune({
       live: RUNNING,
@@ -1605,7 +1648,7 @@ describe('TunePage — Capture: let the timer MEASURE the level (#355)', () => {
       live: RUNNING,
       event: eventWith([PRACTICE_ROUND]),
       heats: heatOn(PRACTICE_ROUND),
-      captures: () => 118
+      captures: () => ({ enter: 118, exit: 64 })
     });
     expect(captureBtn()).not.toBeDisabled();
     await fireEvent.click(captureBtn());
