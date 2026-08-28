@@ -1174,6 +1174,70 @@ fn format_selection(owned: &OwnedFormat) -> FormatSelection {
     }
 }
 
+/// Whether a missing Grid-owned race format id is news yet — and if so, which news (#454 finding 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedFormatAlarm {
+    /// Nothing to say: either the plugin named its format row, or there is no plugin to ask.
+    Quiet,
+    /// The plugin tried and named a reason. Announce it wherever we are — it will not fix itself.
+    Failed,
+    /// No id and **no reason**, at the handshake. RotorHazard is still booting: say nothing yet.
+    NotReadyYet,
+    /// No id and no reason, but RotorHazard is demonstrably past startup. The row never appeared
+    /// and nobody said why — which is worth a line precisely because it is inexplicable.
+    NeverAppeared,
+}
+
+/// Decide whether an absent [`CAP_OWNED_FORMAT`] row is a failure or merely a not-yet.
+///
+/// **The distinction is real, and it is RotorHazard's own startup ordering** — verified against
+/// 4.3.0 and 4.4.0 source, which are identical here:
+///
+/// 1. `server.py::start()` calls `Events.trigger(Evt.STARTUP, …)` and only *afterwards* calls
+///    `SOCKET_IO.run(APP, …)` — 4.3.0 `server.py:3570`/`:3600`, 4.4.0 `server.py:3590`/`:3620`.
+/// 2. `eventmanager.py::EventManager.trigger` runs a handler **inline** only when its
+///    `priority < 100`; everything else is `gevent.spawn`ed (`eventmanager.py:94`/`:97`, byte for
+///    byte the same on both versions).
+/// 3. `RHAPI.py::EventsAPI.on` defaults to `priority = 200` for every event except the
+///    `*_INITIALIZE` family (which get 75). `Evt.STARTUP` is not in that family, so **our**
+///    `ready_grid_format` handler is spawned, not run inline.
+/// 4. `gevent.spawn` only *schedules* a greenlet; it runs when the calling greenlet yields — and
+///    the next thing `start()` does is enter `SOCKET_IO.run`, which is what starts accepting
+///    connections in the first place.
+///
+/// So the socket is listening, and answers `gridfpv_hello`, in a window where the plugin's STARTUP
+/// greenlet has not yet run. The plugin's `state["format_id"]` and `state["format_error"]` are both
+/// still `None` then, which is exactly the `grid_format_id: null, grid_format_error: null` shape a
+/// Director sees when it dials an RH that is still coming up. That is "not ready yet" — the row
+/// appears seconds later — and announcing it as "could not create its race format (no reason
+/// given)" cries wolf on every fast reconnect.
+///
+/// Losing the alarm entirely would be the wrong trade, so it is deferred rather than dropped:
+/// `past_startup` is `false` at the handshake and `true` at the `gridfpv_format_ack` seam, which is
+/// only reached because the Director asked the plugin to select the format at a heat's stage —
+/// long after any boot race. A real, permanent failure still surfaces two ways: the plugin sets
+/// `grid_format_error` when its own create raises (→ [`Failed`](Self::Failed), announced at once,
+/// with the reason), and a select that cannot produce the row comes back `ok: false` on the ack,
+/// which has always been announced.
+fn owned_format_alarm(
+    advertised: bool,
+    id: Option<i64>,
+    error: Option<&str>,
+    past_startup: bool,
+) -> OwnedFormatAlarm {
+    if !advertised || id.is_some() {
+        // A plugin that named its row is fine; one that never advertised the capability is a build
+        // that has no opinion, and `format_selection` already routes it to the legacy path.
+        OwnedFormatAlarm::Quiet
+    } else if error.is_some() {
+        OwnedFormatAlarm::Failed
+    } else if past_startup {
+        OwnedFormatAlarm::NeverAppeared
+    } else {
+        OwnedFormatAlarm::NotReadyYet
+    }
+}
+
 /// Announce, once, that a timer's own min-lap filter could not be neutralised (#407).
 ///
 /// Deliberately explicit about the consequence rather than the mechanism. Silence here recreates
@@ -1695,7 +1759,18 @@ impl RotorHazardConnection {
                             owned.id = parsed.grid_format_id;
                             owned.error = parsed.grid_format_error.clone();
                         }
-                        if parsed.advertises(CAP_OWNED_FORMAT) && parsed.grid_format_id.is_none() {
+                        // `past_startup: false` — a hello is answered from inside RotorHazard's
+                        // boot, before the plugin's spawned STARTUP handler has necessarily run
+                        // (see `owned_format_alarm`). "No id, no reason" here means "not ready
+                        // yet", and announcing it as a failure cried wolf on every fast dial
+                        // (#454 finding 3). Only a plugin that named a reason speaks now.
+                        if owned_format_alarm(
+                            parsed.advertises(CAP_OWNED_FORMAT),
+                            parsed.grid_format_id,
+                            parsed.grid_format_error.as_deref(),
+                            false,
+                        ) == OwnedFormatAlarm::Failed
+                        {
                             crate::diag!(
                                 "gridfpv: rotorhazard: the GridFPV plugin (v{}) could not create \
                                  its `{}` race format ({}) — it will retry at each heat's stage, \
@@ -1761,14 +1836,32 @@ impl RotorHazardConnection {
                         .unwrap_or_else(|| "GridFPV".to_string());
                     // Whether this ack is the moment the takeover took effect on this link —
                     // the Director asks at every heat's stage, so only the transition is news.
-                    let first_selection = {
+                    let (first_selection, alarm) = {
                         let mut owned = owned_format.lock().expect("owned-format lock");
                         let first = ack.ok && !owned.selected;
                         owned.id = ack.format_id.or(owned.id);
                         owned.selected = ack.ok;
                         owned.error = ack.error.clone();
-                        first
+                        // The deferred half of #454 finding 3. Reaching this seam at all means the
+                        // Director asked the plugin to select the format at a heat's stage, which
+                        // is long past any boot race — so `past_startup: true`, and an id that is
+                        // still absent is real news rather than a not-yet.
+                        let alarm =
+                            owned_format_alarm(owned.advertised, owned.id, owned.error.as_deref(), true);
+                        (first, alarm)
                     };
+                    // Only the inexplicable case speaks here: a select that reports success yet
+                    // still names no row and gives no reason. A select that *failed* carries its
+                    // reason and is announced by the `!ack.ok` branch below — announcing both
+                    // would say the same thing twice.
+                    if ack.ok && alarm == OwnedFormatAlarm::NeverAppeared {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: the GridFPV plugin reported its `{name}` race \
+                             format selected but has never named the format row, and gave no \
+                             reason — RotorHazard's own race decisions may NOT be neutralised on \
+                             this timer (#403/#404/#454)"
+                        );
+                    }
                     // The per-stage re-assertion (#407): RH's filter can be moved back from its
                     // own settings screen between heats, and the plugin re-checks it every time it
                     // re-checks the format. A regression here IS announced — unlike the handshake
@@ -3906,6 +3999,112 @@ mod tests {
             ..OwnedFormat::default()
         };
         assert_eq!(format_selection(&stock), FormatSelection::Legacy);
+    }
+
+    /// **A Director that dials an RH still inside its own boot must not cry wolf** (#454 finding 3).
+    ///
+    /// RotorHazard triggers `Evt.STARTUP` *before* `SOCKET_IO.run`, and our STARTUP handler is
+    /// `gevent.spawn`ed at priority 200 rather than run inline — so the socket answers
+    /// `gridfpv_hello` in a window where the plugin has neither created its format row nor failed
+    /// to. That is the `grid_format_id: null, grid_format_error: null` shape, and it resolves
+    /// itself seconds later. Calling it "could not create its race format (no reason given)" told
+    /// an RD their timer was un-neutralised when it was merely still coming up.
+    #[test]
+    fn a_hello_with_neither_a_format_id_nor_a_reason_is_still_booting_not_broken() {
+        let booting = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "live_signal", "owned_format"],
+            "node_count": 4,
+            "grid_format_id": null,
+            "grid_format_error": null,
+        }));
+        let parsed = parse_hello(&booting).expect("a pre-STARTUP hello ack must parse");
+        assert!(parsed.advertises(CAP_OWNED_FORMAT));
+        assert_eq!(
+            owned_format_alarm(
+                parsed.advertises(CAP_OWNED_FORMAT),
+                parsed.grid_format_id,
+                parsed.grid_format_error.as_deref(),
+                false,
+            ),
+            OwnedFormatAlarm::NotReadyYet,
+            "no id AND no reason, at the handshake, is RotorHazard still booting — the row \
+             appears once the spawned STARTUP greenlet runs"
+        );
+    }
+
+    /// The alarm is deferred, not deleted: a plugin that *named* a reason is announced at once,
+    /// at the handshake, exactly as before.
+    #[test]
+    fn a_hello_that_names_a_reason_is_announced_at_the_handshake() {
+        let failed = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "owned_format"],
+            "node_count": 4,
+            "grid_format_id": null,
+            "grid_format_error": "OperationalError('no such table: race_format')",
+        }));
+        let parsed = parse_hello(&failed).expect("a failed-create hello ack must parse");
+        assert_eq!(
+            owned_format_alarm(
+                parsed.advertises(CAP_OWNED_FORMAT),
+                parsed.grid_format_id,
+                parsed.grid_format_error.as_deref(),
+                false,
+            ),
+            OwnedFormatAlarm::Failed,
+            "a named reason is a real failure and will not fix itself — say so now"
+        );
+    }
+
+    /// Past startup — the `gridfpv_format_ack` seam, reached only because the Director asked the
+    /// plugin to select the format at a heat's stage — the same silence IS news.
+    #[test]
+    fn a_format_that_never_appeared_past_startup_is_announced() {
+        assert_eq!(
+            owned_format_alarm(true, None, None, true),
+            OwnedFormatAlarm::NeverAppeared,
+            "no boot race can explain this one: the plugin has had a whole stage to create or \
+             fail, and did neither"
+        );
+        // …and the same inputs at the handshake still say nothing. This pair IS the fix.
+        assert_eq!(
+            owned_format_alarm(true, None, None, false),
+            OwnedFormatAlarm::NotReadyYet
+        );
+    }
+
+    /// Nothing to announce when there is nothing wrong: a named row, or a build that never
+    /// advertised the capability (which `format_selection` already routes to the legacy path).
+    #[test]
+    fn a_named_format_row_or_an_unadvertising_plugin_is_quiet() {
+        for past_startup in [false, true] {
+            assert_eq!(
+                owned_format_alarm(true, Some(7), None, past_startup),
+                OwnedFormatAlarm::Quiet,
+                "the plugin named its row"
+            );
+            assert_eq!(
+                owned_format_alarm(false, None, None, past_startup),
+                OwnedFormatAlarm::Quiet,
+                "a plugin that never advertised `owned_format` is not failing at it"
+            );
+            // An id present alongside a stale error is still a working format — the id wins, so a
+            // recovered plugin does not keep being announced as broken.
+            assert_eq!(
+                owned_format_alarm(
+                    true,
+                    Some(7),
+                    Some("an earlier attempt raised"),
+                    past_startup
+                ),
+                OwnedFormatAlarm::Quiet
+            );
+        }
     }
 
     // ── #444: the min-lap confirm must not accept a half-written frame ───────────────────────
