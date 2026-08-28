@@ -10,7 +10,11 @@ import { describe, expect, it } from 'vitest';
 import type { Timer, TimerNode, TimerNodes } from '@gridfpv/types';
 import {
   DEFAULT_NODE_COUNT,
+  clampExplanation,
+  clampNodeCount,
   driftReading,
+  maxNodeCount,
+  nodeCountHint,
   followTimerRequest,
   heatOverflow,
   heatOverflowMessage,
@@ -323,5 +327,70 @@ describe('seatNodes / enabledNodes — laying a lineup onto real gates', () => {
       { node: 0, ref: 'node-0' },
       { node: 3, ref: 'node-3' }
     ]);
+  });
+});
+
+describe('the width override is clamped at what the timer reported (#463)', () => {
+  const rh = (over: Partial<Timer> = {}): Timer =>
+    ({
+      id: 'rh-1',
+      name: 'Field RH',
+      kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
+      status: 'Connected',
+      channel_capability: 'Flexible',
+      available_channels: [],
+      manual_connect: false,
+      calibration: [],
+      disabled_nodes: [],
+      node_count: null,
+      reported_nodes: 4,
+      ...over
+    }) as unknown as Timer;
+
+  it('takes the ceiling from what the timer reported', () => {
+    expect(maxNodeCount(rh())).toBe(4);
+    expect(clampNodeCount(rh(), 8)).toEqual({ value: 4, clamped: true });
+  });
+
+  it('leaves a width at or below the report exactly as typed', () => {
+    // Fewer than reported is deliberate node disabling, and the report itself is the boundary.
+    expect(clampNodeCount(rh(), 4)).toEqual({ value: 4, clamped: false });
+    expect(clampNodeCount(rh(), 2)).toEqual({ value: 2, clamped: false });
+  });
+
+  it('leaves a never-reported timer a free override, spelled the way the WIRE spells it', () => {
+    // `reported_nodes` is `Option<u32>` with `#[serde(default)]` and no `skip_serializing_if`, so
+    // a Mock — or a RotorHazard nobody has dialed — arrives as `null`, not as an absent key. A
+    // `!== undefined` guard would read that as a ceiling and clamp offline setup to nothing; this
+    // is the #445 null-vs-undefined slip, guarded here from the start.
+    const neverAsked = { ...rh(), reported_nodes: null } as unknown as Timer;
+    expect(maxNodeCount(neverAsked)).toBeUndefined();
+    expect(clampNodeCount(neverAsked, 12)).toEqual({ value: 12, clamped: false });
+    expect(clampExplanation(neverAsked, 12)).toBe('');
+    // And the omitted-key shape, which must give the same answer.
+    const omitted = { ...rh() } as Record<string, unknown>;
+    delete omitted.reported_nodes;
+    expect(maxNodeCount(omitted as unknown as Timer)).toBeUndefined();
+  });
+
+  it('explains the clamp in the RD’s words, naming the timer and never an id', () => {
+    const message = clampExplanation(rh(), 8);
+    expect(message).toContain('Field RH');
+    expect(message).toContain('reports 4 nodes');
+    expect(message).toContain('8 is more than it has');
+    expect(message).not.toContain('rh-1');
+    // Singular reads properly too — a one-node timer is a real (if sad) thing.
+    expect(clampExplanation({ ...rh(), reported_nodes: 1 } as unknown as Timer, 4)).toContain(
+      'reports 1 node,'
+    );
+  });
+
+  it('says the ceiling in the field hint, and says nothing extra when there is none', () => {
+    expect(nodeCountHint(rh())).toContain('reports 4 nodes, which is the most it can be set to');
+    expect(nodeCountHint({ ...rh(), reported_nodes: null } as unknown as Timer)).not.toContain(
+      'the most it can be set to'
+    );
+    // The add form has no timer at all: no ceiling, and no ceiling sentence.
+    expect(nodeCountHint(undefined)).not.toContain('the most it can be set to');
   });
 });

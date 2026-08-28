@@ -929,8 +929,9 @@ async fn timer_nodes(
 /// is persisted and survives a reconnect: a timer that keeps reporting four working nodes does not
 /// get to switch one back on.
 ///
-/// Refused as a `400` for a `node_count` of `0` and for an edit that would leave **no** node
-/// enabled (both cap every heat to no pilots); an unknown id is a 404.
+/// Refused as a `400` for a `node_count` of `0`, for an edit that would leave **no** node enabled
+/// (both cap every heat to no pilots), and for a `node_count` **above what the timer reported**
+/// (#463 — seats the hardware does not have record nothing); an unknown id is a 404.
 async fn set_timer_nodes(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
@@ -4996,14 +4997,28 @@ mod tests {
             gridfpv_events::CompetitorRef("node-2".into())
         );
 
-        // Pinning the width above what the hardware has surfaces the drift — the bench bug, made
-        // visible instead of silently building an oversized heat.
-        let (_, bytes) =
+        // Pinning the width **above** what the hardware has is refused outright now (#463), in the
+        // Director's own words — the bench bug is prevented rather than surfaced after the fact.
+        let (status, bytes) =
             timer_nodes_call(registry.clone(), &rh.id.0, Some(json!({ "node_count": 8 }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = refusal(&bytes);
+        assert!(message.contains("Field RH"), "names the timer: {message}");
+        assert!(
+            message.contains("reports 4 nodes"),
+            "and the reported width: {message}"
+        );
+        assert!(!message.contains(&rh.id.0), "never the raw id: {message}");
+        let (_, bytes) = timer_nodes_call(registry.clone(), &rh.id.0, None).await;
         let view: TimerNodes = serde_json::from_slice(&bytes).unwrap();
-        let drift = view.drift.expect("reported 4 vs configured 8 is drift");
-        assert_eq!((drift.reported, drift.configured), (4, 8));
-        assert_eq!(drift.enabled_beyond_reported, vec![4, 5, 6, 7]);
+        assert_eq!(view.configured, None, "the refused width never landed");
+
+        // Narrower than the report stays allowed — that is deliberate node disabling by count.
+        let (status, bytes) =
+            timer_nodes_call(registry.clone(), &rh.id.0, Some(json!({ "node_count": 3 }))).await;
+        assert_eq!(status, StatusCode::OK);
+        let view: TimerNodes = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view.width, 3);
 
         // …and `null` puts it back on the hardware's word.
         let (_, bytes) = timer_nodes_call(

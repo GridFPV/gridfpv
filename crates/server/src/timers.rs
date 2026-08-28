@@ -757,6 +757,43 @@ impl Timer {
         }
     }
 
+    /// Why an explicit **width override** of `node_count` cannot be accepted on this timer (#463),
+    /// or `None` when it can.
+    ///
+    /// **The rule: never wider than the hardware said it is.** A width above
+    /// [`reported_nodes`](Timer::reported_nodes) manufactures seats that do not exist — a pilot
+    /// seated on one flies a heat that records nothing, which is exactly the bench failure #412 was
+    /// filed for. #412 could only *surface* that as a [`NodeDrift`] after the fact; this refuses to
+    /// create it in the first place.
+    ///
+    /// Two cases are deliberately **allowed**, and both are decisions an RD really makes:
+    ///
+    /// - **Never reported** (`reported_nodes: None`) — a Mock, an adapter that cannot report, or a
+    ///   RotorHazard nobody has dialed yet. Offline configuration at a kitchen table has to work,
+    ///   and there is no observation to contradict. The clamp appears the moment the timer reports.
+    /// - **Fewer than reported** — deliberate node disabling by count ("this 8-node timer is a
+    ///   4-node timer today"). Narrower than the hardware costs a seat, never a lap.
+    ///
+    /// The single source of the rule, shared by both write paths ([`TimerRegistry::update`]'s
+    /// `node_count` and [`TimerRegistry::set_nodes`]), so the two cannot drift on what an
+    /// over-report means. [`TimerRegistry::create`] does not consult it: a timer being created has
+    /// reported nothing yet, by construction.
+    ///
+    /// The message is the refusal the Race Director reads (#433), so it names the timer by its
+    /// **display name** and the width as a count — never an id, never a raw node index.
+    pub fn width_override_refusal(&self, node_count: u32) -> Option<String> {
+        let reported = self.reported_nodes?;
+        if node_count <= reported {
+            return None;
+        }
+        let node_word = if reported == 1 { "node" } else { "nodes" };
+        Some(format!(
+            "{:?} reports {reported} {node_word} — GridFPV cannot be set to {node_count}. \
+             Set {reported} or fewer, or clear the width so GridFPV follows the timer.",
+            self.name
+        ))
+    }
+
     /// Why this timer cannot be **selected by an event** (#405), or `None` when it can.
     ///
     /// The single source of the rule, so the API route, the arm-time backstop and any future
@@ -1880,7 +1917,8 @@ impl TimerRegistry {
     /// Edit a timer's name and/or kind (issue #73), returning the updated [`Timer`].
     ///
     /// The built-in Mock may be retuned (e.g. a new `lap_ms`) but not renamed away — any
-    /// timer's name/kind is editable. An unknown id is a [`TimerError`]. The registry is
+    /// timer's name/kind is editable. An unknown id is a [`TimerError`], and so is a `node_count`
+    /// **above what the timer reported** ([`Timer::width_override_refusal`], #463). The registry is
     /// **persisted** on success.
     pub fn update(&self, id: &TimerId, request: &UpdateTimerRequest) -> Result<Timer, TimerError> {
         let mut reg = self.write();
@@ -1888,6 +1926,15 @@ impl TimerRegistry {
             .timers
             .get_mut(id)
             .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+        // Every refusal is decided **before** the first field is written: this edits the live
+        // registry in place, so a check made half-way through would leave a partially-applied timer
+        // behind an error the caller was told nothing landed for.
+        if let Some(node_count) = request.node_count {
+            // #463: a width above what the timer reported is refused, not surfaced as drift.
+            if let Some(refusal) = timer.width_override_refusal(node_count) {
+                return Err(TimerError(refusal));
+            }
+        }
         if let Some(name) = &request.name {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
@@ -1974,9 +2021,10 @@ impl TimerRegistry {
     /// a width change should not lose the edit — and the stored disabled set keeps any index the RD
     /// turned off earlier, so a timer that comes back *wider* does not silently un-disable a node.
     ///
-    /// Refused (a [`TimerError`], reported as a `400`) for an unknown id, and for an edit that would
+    /// Refused (a [`TimerError`], reported as a `400`) for an unknown id, for an edit that would
     /// leave the timer with **no enabled node at all** — that caps every heat to no pilots, which is
-    /// the same refusal [`validate_timer_config`] makes for a zero `node_count`.
+    /// the same refusal [`validate_timer_config`] makes for a zero `node_count` — and for a width
+    /// **above what the timer reported** ([`Timer::width_override_refusal`], #463).
     pub fn set_nodes(
         &self,
         id: &TimerId,
@@ -1993,6 +2041,13 @@ impl TimerRegistry {
                     "node_count must be at least 1 (a 0-node timer caps every heat to no pilots)"
                         .to_string(),
                 ));
+            }
+            // #463: a width above what the timer reported is refused, not surfaced as drift. Both
+            // refusals are decided before anything is written — `enabled` below is applied against
+            // the width, so a half-applied edit here would disable nodes for a width that never
+            // took. Clearing the override (`null`) is always allowed: it goes back to the report.
+            if let Some(refusal) = node_count.and_then(|n| timer.width_override_refusal(n)) {
+                return Err(TimerError(refusal));
             }
             timer.node_count = node_count;
         }
@@ -3719,6 +3774,182 @@ mod tests {
         );
     }
 
+    // ── #463: a width override may never exceed what the timer reported ───────────
+
+    /// An RH timer that has reported `reported` nodes — the state the clamp exists for.
+    fn reporting_rh(reg: &TimerRegistry, name: &str, reported: u32) -> Timer {
+        let rh = discoverable_rh(reg, name);
+        reg.set_reported_nodes(&rh.id, reported);
+        reg.get(&rh.id).unwrap()
+    }
+
+    #[test]
+    fn an_over_report_width_is_refused_by_both_write_paths_and_the_timer_is_untouched() {
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reporting_rh(&reg, "Field RH", 4);
+
+        for refusal in [
+            reg.set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(Some(8)),
+                    enabled: None,
+                },
+            )
+            .expect_err("PUT /nodes must refuse a width above the report")
+            .0,
+            reg.update(
+                &rh.id,
+                &UpdateTimerRequest {
+                    node_count: Some(8),
+                    ..Default::default()
+                },
+            )
+            .expect_err("PUT /timers/{id} must refuse it too")
+            .0,
+        ] {
+            // #433: this is prose an RD reads. It names the timer and the width in words.
+            assert!(
+                refusal.contains("Field RH"),
+                "the refusal names the timer: {refusal}"
+            );
+            assert!(
+                refusal.contains("reports 4 nodes"),
+                "…and the width the hardware reported: {refusal}"
+            );
+            assert!(
+                refusal.contains('8'),
+                "…and the width that was refused: {refusal}"
+            );
+            // Friendly names only — no id, no route, no raw node index.
+            assert!(
+                !refusal.contains(&rh.id.0),
+                "the raw id must never reach the RD: {refusal}"
+            );
+            assert!(!refusal.contains('/'), "no route line: {refusal}");
+        }
+
+        let after = reg.get(&rh.id).unwrap();
+        assert_eq!(after.node_count, None, "nothing was pinned");
+        assert_eq!(after.node_width(), 4, "the width still follows the report");
+    }
+
+    #[test]
+    fn a_refused_width_does_not_half_apply_the_rest_of_the_edit() {
+        // `update` edits the live registry in place, so the refusal has to be decided BEFORE the
+        // first field is written — otherwise a rejected width leaves a renamed timer behind an
+        // error that said nothing landed.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reporting_rh(&reg, "Field RH", 4);
+
+        reg.update(
+            &rh.id,
+            &UpdateTimerRequest {
+                name: Some("Renamed RH".into()),
+                channel_capability: Some(ChannelCapability::Fixed {
+                    channels: vec![5800],
+                }),
+                node_count: Some(8),
+                ..Default::default()
+            },
+        )
+        .expect_err("refused");
+
+        let after = reg.get(&rh.id).unwrap();
+        assert_eq!(after.name, "Field RH", "the rename did not land either");
+        assert_eq!(after.channel_capability, ChannelCapability::default());
+    }
+
+    #[test]
+    fn fewer_than_reported_stays_allowed_because_it_is_deliberate_node_disabling() {
+        // "This 8-node timer is a 4-node timer today." Narrower than the hardware costs a seat,
+        // never a lap — the failure the clamp guards against runs the other way.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reporting_rh(&reg, "Field RH", 8);
+
+        let view = reg
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(Some(4)),
+                    enabled: None,
+                },
+            )
+            .expect("fewer than reported is a decision, not an error");
+        assert_eq!(view.width, 4);
+
+        // Exactly the reported width is the boundary, and it is allowed.
+        let updated = reg
+            .update(
+                &rh.id,
+                &UpdateTimerRequest {
+                    node_count: Some(8),
+                    ..Default::default()
+                },
+            )
+            .expect("the reported width itself is not an over-report");
+        assert_eq!(updated.node_count, Some(8));
+    }
+
+    #[test]
+    fn a_never_reported_timer_keeps_a_free_override_so_offline_setup_works() {
+        // A RotorHazard nobody has dialed yet, at a kitchen table the night before. There is no
+        // observation to contradict, so there is nothing to clamp to — the clamp appears the
+        // moment the timer reports.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = discoverable_rh(&reg, "Field RH");
+        assert_eq!(rh.reported_nodes, None);
+
+        let view = reg
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(Some(12)),
+                    enabled: None,
+                },
+            )
+            .expect("no report ⇒ no clamp");
+        assert_eq!(view.width, 12);
+        assert_eq!(rh.width_override_refusal(12), None);
+
+        // The Mock has nothing to ask either, and is configured the same way.
+        let mock = reg.get(&TimerId(MOCK_TIMER_ID.into())).unwrap();
+        assert_eq!(mock.reported_nodes, None);
+        assert_eq!(mock.width_override_refusal(99), None);
+    }
+
+    #[test]
+    fn following_the_timer_is_always_allowed_even_from_a_stale_over_report_width() {
+        // A `timers.json` written before this rule can hold 8 against a timer that reports 4.
+        // Clearing the override is the repair, so `null` must never be refused.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: Some(8),
+                available_channels: None,
+            })
+            .unwrap();
+        reg.set_reported_nodes(&rh.id, 4);
+
+        let view = reg
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: Some(None),
+                    enabled: None,
+                },
+            )
+            .expect("follow-the-timer clears the override rather than raising it");
+        assert_eq!(view.configured, None);
+        assert_eq!(view.width, 4);
+        assert_eq!(view.drift, None, "and the drift is resolved by clearing it");
+    }
+
     #[test]
     fn a_disabled_node_leaves_a_hole_in_the_enabled_set() {
         // The RD's words: "reported is 4 but node 3 is busted, I need to use nodes 1, 2 and 4."
@@ -3927,9 +4158,13 @@ mod tests {
     fn setting_nodes_is_three_valued_on_the_width_override() {
         // "Go back to trusting the hardware" is a real thing an RD does after a drift notice, so
         // `null` must be distinguishable from absent.
+        //
+        // The timer reports **8** and the pin is **6** — a narrowing, which is the only kind of pin
+        // #463 still accepts. This test is about the three-valued field, not the clamp; pinning a
+        // width above the report here would be exercising the refusal by accident.
         let reg = TimerRegistry::new(None, 5, 2500).unwrap();
         let rh = discoverable_rh(&reg, "Field RH");
-        reg.set_reported_nodes(&rh.id, 4);
+        reg.set_reported_nodes(&rh.id, 8);
 
         let pin: SetTimerNodesRequest = serde_json::from_str(r#"{"node_count": 6}"#).unwrap();
         assert_eq!(reg.set_nodes(&rh.id, &pin).unwrap().width, 6);
@@ -3942,7 +4177,7 @@ mod tests {
         assert_eq!(clear.node_count, Some(None), "null is not absent");
         let view = reg.set_nodes(&rh.id, &clear).unwrap();
         assert_eq!(view.configured, None);
-        assert_eq!(view.width, 4, "back to what the timer reports");
+        assert_eq!(view.width, 8, "back to what the timer reports");
     }
 
     #[test]
