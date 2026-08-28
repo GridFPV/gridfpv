@@ -47,7 +47,7 @@
     type AuditRenderInputs
   } from '../lib/auditRender.js';
   import { buildCompetitorNames } from '../lib/competitorName.js';
-  import { heatNameById } from '../lib/heats.js';
+  import { heatNameById, isOpenPracticeRound } from '../lib/heats.js';
   import {
     adjustLapCommand,
     applyPenaltyCommand,
@@ -73,6 +73,14 @@
     officialPasses,
     previewRows
   } from '../lib/redetect.js';
+  import {
+    applySummary,
+    applyTuneGate,
+    calibrationFor,
+    confirmCalibration,
+    type ApplyOutcome
+  } from '../lib/applyTune.js';
+  import { phaseLabel, phaseTone } from '../lib/tuning.js';
   import { commandForAction } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
@@ -685,9 +693,9 @@
   // previewing the resulting lap list + the diff against the current official passes. NOTHING is
   // sent while adjusting: an explicit Commit turns the diff into the existing marshaling primitives
   // (a `VoidDetection` per removed pass, a heat-tagged `InsertLap` per added one). The thresholds
-  // themselves are a UI/preview concern only — they are NEVER written back to the timer; pushing
-  // calibration to RotorHazard via the plugin is a separate future feature. Scoped to the shown
-  // pilot (the "Marshal pilot" picker already selects exactly one).
+  // themselves stay a preview concern *here*; writing them to the gate is the separate, explicit
+  // "Apply to timer" action below (#470), which never rides along with a commit. Scoped to the
+  // shown pilot (the "Marshal pilot" picker already selects exactly one).
   const tuneTrace = $derived<CompetitorTrace | undefined>(
     signalTrace?.competitors.find((c) => c.competitor.competitor === shownPilot)
   );
@@ -858,6 +866,98 @@
     }
   }
 
+  // ── Apply a discovered tune to the timer (#470) ───────────────────────────────────────────────
+  // Committing the re-detection fixes THIS heat's laps. It does nothing about the gate, which will
+  // get the next heat wrong the same way — the RD used to have to memorise the levels and retype
+  // them on the Tune page. This writes them straight to the node the competitor flew, through the
+  // same `POST /timers/{id}/calibration` path the Tune page uses, and confirms them the same way:
+  // by a READBACK on the signal feed, because RotorHazard never acknowledges a level set
+  // (CLAUDE.md). The gate and the confirmation both live in `applyTune.ts`.
+
+  /** Whether the heat currently ON THE TIMER is open practice or a scored one (the write gate). */
+  const liveHeatKind = $derived.by<'practice' | 'competition' | undefined>(() => {
+    const current = session.liveState?.current_heat;
+    if (!current) return undefined;
+    const summary = heats.find((h) => h.heat === current);
+    const round = summary?.round
+      ? session.currentEvent?.rounds?.find((r) => r.id === summary.round)
+      : undefined;
+    if (!round) return 'competition';
+    return isOpenPracticeRound(round) ? 'practice' : 'competition';
+  });
+
+  /** The marshaled heat's lineup — the seat order the node index is read out of (see applyTune.ts). */
+  const marshalLineup = $derived<CompetitorRef[] | undefined>(
+    heats.find((h) => h.heat === heat)?.lineup
+  );
+
+  /** May these levels be written, and to which node? Re-evaluated as the RD drags. */
+  const applyGate = $derived(
+    shownPilot === undefined
+      ? undefined
+      : applyTuneGate({
+          canControl,
+          timer: session.primaryTimer,
+          lineup: marshalLineup,
+          competitor: shownPilot,
+          enter: tuneEnter,
+          exit: tuneExit,
+          livePhase: session.liveState?.phase,
+          liveHeatKind,
+          catalog,
+          // The node's channel through the SHARED resolver — never re-derived here (CLAUDE.md).
+          nodeMhz: names.mhzFor(shownPilot)
+        })
+  );
+
+  /** Where the last apply got to, or `undefined` before one is tried. Mirrors the Tune page's phases. */
+  let applyState = $state<ApplyOutcome | undefined>(undefined);
+  let applying = $state(false);
+
+  async function doApplyTune(): Promise<void> {
+    const gate = applyGate;
+    if (applying || !gate?.allowed || shownPilot === undefined) return;
+    const { timer, node, nodeName } = gate.target;
+    const body = calibrationFor(node, tuneEnter, tuneExit);
+    const who = competitorName(shownPilot);
+
+    applying = true;
+    applyState = { phase: 'sent' };
+    try {
+      // Accepted, not applied — the Director answers for the dispatch, never for the hardware.
+      // The resolved value is deliberately ignored: this is a VOID write, so a success and a
+      // cancelled token prompt both resolve `undefined` and cannot be told apart here. That is
+      // fine, because the readback below is what decides either way — a cancelled prompt wrote
+      // nothing, so the levels never come back and it reports "Not taken", which is true.
+      await session.setCalibration(timer, body);
+      // THE READBACK. Marshaling holds no signal subscription of its own, so this opens one for the
+      // few polls it needs and stops it after (the lease is the backstop if the stop is lost).
+      try {
+        applyState = await confirmCalibration(
+          {
+            fetchSignal: () => session.timerSignal(timer),
+            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+            now: () => Date.now()
+          },
+          node,
+          body.enter_at!,
+          body.exit_at!
+        );
+      } finally {
+        await session.stopTimerSignal(timer).catch(() => {});
+      }
+      const summary = applySummary(applyState, nodeName, who);
+      if (applyState.phase === 'confirmed') toast.success(summary);
+      else toast.error(summary);
+    } catch (e) {
+      // The Director's refusals are already phrased for the RD, so they are surfaced verbatim.
+      applyState = { phase: 'failed', detail: e instanceof Error ? e.message : String(e) };
+      toast.error(applySummary(applyState, nodeName, who));
+    } finally {
+      applying = false;
+    }
+  }
+
   // ── Audit rendering (the SHARED #337 recomposition — `lib/auditRender.ts`) ──
   // The line composition (resolved callsign first, the server-baked "(ref N)" stripped, the target
   // offset only trailing) is shared with the event-wide Audit page so the two never drift. This
@@ -1008,8 +1108,7 @@
 
       {#if canControl && hasShownTrace && tuneTrace && shownPilot !== undefined}
         <!-- Tune detection (RH-style re-detection): move the levels, watch the preview, COMMIT to
-             make it official. The levels are a preview concern only — never written to the timer
-             (pushing calibration to RotorHazard via the plugin is a separate future feature). -->
+             make it official — and, separately, APPLY the levels to the gate itself (#470). -->
         <fieldset class="tune-detection">
           <legend>Tune detection — {competitorName(shownPilot)}</legend>
           <p class="muted hint">
@@ -1053,7 +1152,43 @@
                     ? 'No change to commit — the re-detection matches the official passes'
                     : undefined}>Commit re-detection</button
             >
+            <!-- Apply to timer (#470): the LEVELS themselves, written to the gate this competitor
+                 flew. Deliberately independent of Commit — correcting this heat's laps and stopping
+                 the gate getting the NEXT heat wrong are two different jobs, and an RD often wants
+                 the second without the first. A disabled state always carries its reason (#405). -->
+            <button
+              type="button"
+              class="apply-tune"
+              data-testid="apply-tune"
+              onclick={doApplyTune}
+              disabled={!applyGate?.allowed || applying}
+              title={applyGate?.allowed
+                ? `Write enter ${tuneEnter} / exit ${tuneExit} to ${applyGate.target.nodeName}`
+                : applyGate?.reason}>{applying ? 'Applying…' : 'Apply to timer'}</button
+            >
           </div>
+          <!-- Where the write stands, in the Tune page's own vocabulary (`phaseLabel`/`phaseTone`):
+               "Sending…" while the readback is outstanding, "On timer" only once the timer has
+               actually reported the levels back, "Not taken" when it never did. Accepted is not
+               applied, and this must never claim otherwise (#403). -->
+          {#if applyState}
+            <p class="apply-state" role="status" data-testid="apply-tune-state">
+              <span class="apply-badge" data-tone={phaseTone(applyState.phase)}
+                >{phaseLabel(applyState.phase)}</span
+              >
+              {#if applyGate?.allowed}<span class="apply-where">{applyGate.target.nodeName}</span
+                >{/if}
+              {#if applyState.detail}<span class="apply-detail">{applyState.detail}</span>{/if}
+            </p>
+          {:else if applyGate && !applyGate.allowed && tuneValid}
+            <!-- The refusal is said on the panel, not only in a tooltip: a disabled control with no
+                 visible explanation is exactly the dead end #405 exists to prevent.
+                 Suppressed while the levels are invalid, because `.tune-invalid` below already says
+                 that — and saying it twice on one panel is noise, not emphasis. -->
+            <p class="apply-blocked" role="status" data-testid="apply-tune-blocked">
+              {applyGate.reason}
+            </p>
+          {/if}
           {#if !tuneValid}
             <p class="tune-invalid" role="status">
               Enter must be above exit — these levels detect nothing.
@@ -1804,9 +1939,17 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  /* The void-heat box. Its fill is composited against `--gf-elevated` (the base `fieldset` rule)
+     rather than left as a translucent wash over it (#476): `--gf-danger-soft` is
+     `red-400 @ 16% / transparent`, so mixing it into `--gf-elevated` here yields the SAME colour
+     with no alpha channel — nothing about how it looks changes.
+     What changes is that a large box is no longer an alpha layer the compositor re-blends. On
+     Linux/WebKitGTK under a virtualized GPU that re-blend is what flickers, and this is one of the
+     two boxes it was reported on. Matches `.official-lock` just above, which already fills this
+     way. Unverified against the actual VM — see the issue. */
   .danger-zone {
     border-color: color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
-    background: var(--gf-danger-soft);
+    background: color-mix(in srgb, var(--gf-red-400) 16%, var(--gf-elevated));
   }
   /* Tune detection: the live re-detection panel. Big readable summary — the "+A / −R" is what
      the marshal decides on, outdoors on a laptop (the field-readability bar). */
@@ -1834,6 +1977,54 @@
   .commit {
     border: 1px solid var(--gf-accent);
     background: var(--gf-accent-soft);
+  }
+  /* Apply to timer (#470). Deliberately NOT styled as the primary action: Commit is what the
+     marshal came here to do; writing the gate is the useful extra. */
+  .apply-tune {
+    border: 1px solid var(--gf-border-strong);
+  }
+  .apply-state,
+  .apply-blocked {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--gf-space-2);
+    margin: var(--gf-space-2) 0 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  .apply-blocked {
+    color: var(--gf-text-muted);
+  }
+  .apply-badge {
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    padding: 0.05rem var(--gf-space-2);
+    border-radius: var(--gf-radius-sm);
+    border: 1px solid currentColor;
+  }
+  .apply-badge[data-tone='success'] {
+    color: var(--gf-success);
+  }
+  .apply-badge[data-tone='info'] {
+    color: var(--gf-accent);
+  }
+  .apply-badge[data-tone='warn'] {
+    color: var(--gf-warn);
+  }
+  .apply-badge[data-tone='danger'] {
+    color: var(--gf-danger);
+  }
+  .apply-where {
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+  }
+  .apply-detail {
+    flex-basis: 100%;
+    color: var(--gf-text-muted);
   }
   .commit:hover:not(:disabled) {
     background: var(--gf-accent);

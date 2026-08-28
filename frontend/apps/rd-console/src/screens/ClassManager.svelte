@@ -340,11 +340,11 @@
       />
     </Field>
 
-    <Field label="Reference" hint="An optional source id/handle or URL.">
+    <Field label="Reference">
       <Input bind:value={form.reference} aria-label="Reference" autocomplete="off" />
     </Field>
 
-    <Field label="Description" hint="Optional notes for this class.">
+    <Field label="Description">
       <textarea
         class="description-input"
         bind:value={form.description}

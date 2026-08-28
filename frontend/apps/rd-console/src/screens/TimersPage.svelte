@@ -11,7 +11,7 @@
    * (The in-event Timers screen — {@link EventTimers}, which layers per-event selection on top of
    * the same manager — is untouched; this is the no-event, registry-wide surface.)
    */
-  import { Button, Card } from '@gridfpv/components';
+  import { Button, Card, InfoTip } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
@@ -45,11 +45,14 @@
 
     <header class="page-head">
       <div class="page-titles">
-        <h1 class="page-title">Timers</h1>
-        <p class="lead">
-          Timers are configured once and reused across events. Each event picks which timers it
-          uses; the built-in <strong>Mock</strong> source flies a synthetic race with no hardware.
-        </p>
+        <div class="page-titleline">
+          <h1 class="page-title">Timers</h1>
+          <!-- #466: moved off the page — reference material about how timers are scoped. -->
+          <InfoTip
+            label="About timers"
+            text="Timers are configured once and reused across events. Each event picks which timers it uses; the built-in Mock source flies a synthetic race with no hardware."
+          />
+        </div>
       </div>
       <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add timer</Button>
     </header>
@@ -97,20 +100,14 @@
     gap: var(--gf-space-2);
     min-width: 0;
   }
+  .page-titleline {
+    display: flex;
+    align-items: center;
+  }
   .page-title {
     margin: 0;
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
-  }
-  .lead {
-    margin: 0;
-    max-width: 38rem;
-    color: var(--gf-text-muted);
-    font-size: var(--gf-font-size-sm);
-  }
-  .lead strong {
-    color: var(--gf-text-secondary);
-    font-weight: var(--gf-font-weight-semibold);
   }
   .manager-wrap {
     padding: var(--gf-space-2);

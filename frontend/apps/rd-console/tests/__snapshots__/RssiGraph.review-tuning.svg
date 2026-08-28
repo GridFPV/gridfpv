@@ -12,6 +12,8 @@
 </span> Lap pass 
 <span class="swatch preview svelte-yswcj0">
 </span> Preview pass (uncommitted) 
+<button aria-pressed="false" class="smooth-toggle svelte-yswcj0" title="Smoothing off — the raw samples only. Click to draw a smooth curve through them." type="button">Smoothing: off
+</button> 
 <span class="cadence-note svelte-yswcj0">Streaming-cadence trace — one sample per timer emit, not RotorHazard's dense marshal history.
 </span>
 </div> 

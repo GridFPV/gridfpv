@@ -40,6 +40,9 @@ import type {
   setNodeChannel,
   timerNodes,
   setTimerNodes,
+  setCalibration,
+  timerSignal,
+  stopTimerSignal,
   createRound,
   updateRound,
   deleteRound,
@@ -135,6 +138,17 @@ export interface TimerImpls {
   setNodeChannelImpl?: typeof setNodeChannel;
   /** The node-set read (#412) — backs the Tune page's "never offer a disabled node" tests. */
   timerNodesImpl?: typeof timerNodes;
+  /**
+   * The calibration write and the signal read/stop it is confirmed by (#355, #470).
+   *
+   * Marshaling's "Apply to timer" drives all three: `setCalibration` sends the re-detected levels,
+   * and the readback then polls `timerSignal` until the node reports them (RotorHazard never
+   * acknowledges a level set, so the poll is the only proof) before `stopTimerSignal` releases the
+   * lease. Inert unless a test overrides them.
+   */
+  setCalibrationImpl?: typeof setCalibration;
+  timerSignalImpl?: typeof timerSignal;
+  stopTimerSignalImpl?: typeof stopTimerSignal;
   /** The per-event round write seams (race redesign Slice 2b) — back the EventRounds tests. */
   createRoundImpl?: typeof createRound;
   updateRoundImpl?: typeof updateRound;
@@ -283,6 +297,10 @@ export function makeTestSession(
     // IMD reading seam (#117 S4): inert unless a test overrides it.
     rateChannelsImpl: opts?.rateChannelsImpl,
     setNodeChannelImpl: opts?.setNodeChannelImpl,
+    // The calibration write + its readback seams (#470): inert unless a test overrides them.
+    setCalibrationImpl: opts?.setCalibrationImpl,
+    timerSignalImpl: opts?.timerSignalImpl,
+    stopTimerSignalImpl: opts?.stopTimerSignalImpl,
     createRoundImpl: opts?.createRoundImpl,
     updateRoundImpl: opts?.updateRoundImpl,
     deleteRoundImpl: opts?.deleteRoundImpl,

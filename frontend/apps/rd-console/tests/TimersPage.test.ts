@@ -45,7 +45,9 @@ describe('TimersPage (app-level timer registry)', () => {
     const { session } = makeTestSession({ listTimersImpl });
     render(TimersPage, { session, onhome: noop });
 
-    await screen.findByText('Mock');
+    // Wait for the registry read to land. Deliberately the LIST, not the text "Mock": that used
+    // to resolve against the page's standing blurb, which #466 moved into a tooltip.
+    await screen.findByRole('list', { name: 'Configured timers' });
     expect(screen.getByText('Track RH')).toBeInTheDocument();
 
     const list = screen.getByRole('list', { name: 'Configured timers' });
@@ -90,7 +92,9 @@ describe('TimersPage (app-level timer registry)', () => {
     const { session } = makeTestSession({ listTimersImpl, createTimerImpl });
     render(TimersPage, { session, onhome: noop });
 
-    await screen.findByText('Mock');
+    // Wait for the registry read to land. Deliberately the LIST, not the text "Mock": that used
+    // to resolve against the page's standing blurb, which #466 moved into a tooltip.
+    await screen.findByRole('list', { name: 'Configured timers' });
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
 
     const name = (await screen.findByLabelText('Timer name')) as HTMLInputElement;
@@ -171,7 +175,9 @@ describe('TimersPage (app-level timer registry)', () => {
     const { session } = makeTestSession({ listTimersImpl, createTimerImpl, listChannelsImpl });
     render(TimersPage, { session, onhome: noop });
 
-    await screen.findByText('Mock');
+    // Wait for the registry read to land. Deliberately the LIST, not the text "Mock": that used
+    // to resolve against the page's standing blurb, which #466 moved into a tooltip.
+    await screen.findByRole('list', { name: 'Configured timers' });
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
 
     const name = (await screen.findByLabelText('Timer name')) as HTMLInputElement;
@@ -280,7 +286,9 @@ describe('TimersPage (app-level timer registry)', () => {
     const { session } = makeTestSession({ listTimersImpl, createTimerImpl, listChannelsImpl });
     render(TimersPage, { session, onhome: noop });
 
-    await screen.findByText('Mock');
+    // Wait for the registry read to land. Deliberately the LIST, not the text "Mock": that used
+    // to resolve against the page's standing blurb, which #466 moved into a tooltip.
+    await screen.findByRole('list', { name: 'Configured timers' });
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
     const name = (await screen.findByLabelText('Timer name')) as HTMLInputElement;
     await fireEvent.input(name, { target: { value: 'Band' } });
@@ -379,7 +387,9 @@ describe('TimersPage (app-level timer registry)', () => {
     const { session } = makeTestSession({ listTimersImpl, listChannelsImpl });
     render(TimersPage, { session, onhome: noop });
 
-    await screen.findByText('Mock');
+    // Wait for the registry read to land. Deliberately the LIST, not the text "Mock": that used
+    // to resolve against the page's standing blurb, which #466 moved into a tooltip.
+    await screen.findByRole('list', { name: 'Configured timers' });
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
     await screen.findByLabelText('All Raceband channels');
 
@@ -450,7 +460,9 @@ describe('Timers screen — manual connect / disconnect (#383, no active event)'
     const { session } = makeTestSession({ noEnter: true, listTimersImpl });
     render(TimersPage, { session, onhome: noop });
 
-    await screen.findByText('Mock');
+    // Wait for the registry read to land. Deliberately the LIST, not the text "Mock": that used
+    // to resolve against the page's standing blurb, which #466 moved into a tooltip.
+    await screen.findByRole('list', { name: 'Configured timers' });
     const list = screen.getByRole('list', { name: 'Configured timers' });
     const [mockRow, rhRow] = within(list).getAllByRole('listitem');
     // The Director answers a Mock's connect with a 400; better to not offer it than to be rejected.
