@@ -122,6 +122,10 @@ export function connectionHint(timer: Timer): string | undefined {
       return 'Reachable — this timer is answering.';
     case 'Error':
       return 'Could not reach this timer. Check the URL, and that RotorHazard is running.';
+    // #462: the Director has spent its automatic attempts and stopped. Say that plainly — the
+    // sentence has to end in the thing to press, because nothing else is going to happen.
+    case 'Unreachable':
+      return 'Could not reach this timer, and GridFPV has stopped trying. Check the URL, and that RotorHazard is running, then press Connect to try again.';
     case 'Disconnected':
       return 'The connection dropped. Retrying…';
     default:

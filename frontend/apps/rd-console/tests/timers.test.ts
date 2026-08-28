@@ -94,6 +94,23 @@ describe('manual connect hold (#383)', () => {
     expect(connectionHint(rh(true, 'Disconnected'))).toContain('dropped');
   });
 
+  it('tells the truth about a timer GridFPV has stopped dialling (#462)', () => {
+    // `Unreachable` is a RESTING state, not a failing one: nothing is in flight and nothing will
+    // be. Reading it as "retrying" (the `Disconnected` sentence) or leaving it with no sentence at
+    // all would both promise an attempt that is not happening — so it has to end in the thing to
+    // press, because pressing it is the only thing that will change anything.
+    const hint = connectionHint(rh(true, 'Unreachable'));
+    expect(hint).toContain('stopped trying');
+    expect(hint).toContain('Connect');
+    expect(hint).not.toContain('Retrying');
+  });
+
+  it('keeps the button on Disconnect while a timer rests, like every other status', () => {
+    // The hold is the RD's intent and it has not changed just because GridFPV gave up dialling.
+    expect(connectActionLabel(rh(true, 'Unreachable'))).toBe('Disconnect');
+    expect(isTimerConnected(rh(true, 'Unreachable'))).toBe(false);
+  });
+
   it('says nothing when there is no hold — the pill already carries the state', () => {
     expect(connectionHint(rh(false, 'Error'))).toBeUndefined();
     expect(connectionHint({ ...mock, manual_connect: true })).toBeUndefined();

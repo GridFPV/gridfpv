@@ -37,7 +37,7 @@ use std::time::Duration;
 use gridfpv_events::CompetitorRef;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{CaptureThreshold, TimerId, TimerKind, TimerRegistry};
+use gridfpv_server::timers::{CaptureThreshold, TimerId, TimerKind, TimerRegistry, TimerStatus};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
@@ -56,6 +56,18 @@ pub const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Clone, Default)]
 pub struct RhConnections {
     inner: Arc<Mutex<HashMap<ConnKey, LiveConnection>>>,
+    /// The keys whose driver **spent its automatic connect attempts and rested** (#462).
+    ///
+    /// Kept beside the live map rather than derived from it, because the whole point of a rest is
+    /// that there is no live connection to read it off: the driver thread has exited and its map
+    /// entry has been reaped. Without this the next tick would see "wanted, nothing live" and dial
+    /// again, every 500 ms, forever — the loop the cap exists to stop.
+    ///
+    /// **Keyed by [`ConnKey`], not by timer**, so a rest is scoped to the *claim* that failed. A
+    /// timer that rested under a manual hold is dialled again the moment an active event selects it
+    /// (a different key), which is one half of "rest until the RD connects or an event needs it";
+    /// the other half is [`clear_rest`](Self::clear_rest)'s pruning.
+    rested: Arc<Mutex<HashSet<ConnKey>>>,
 }
 
 /// What identifies one live connection: **who wants it** plus the RH timer.
@@ -90,6 +102,22 @@ impl RhConnections {
         Self::default()
     }
 
+    /// End every rest held on `timer` (#462) — *"an event needs this timer"*, said by the one layer
+    /// that knows it.
+    ///
+    /// Called from the stage/go paths ([`prepare`](Self::prepare), [`arm_heat`](Self::arm_heat))
+    /// when they find **no live connection**. A timer that rested at startup — a venue where
+    /// RotorHazard was not up yet — and is then staged into a heat must dial again rather than let
+    /// the heat race blind; the reconciler picks the cleared rest up on its next tick.
+    ///
+    /// Clearing the *reconciler's* rest is enough on its own: the driver's own attempt count lives
+    /// in the thread it exited with, so the reopened connection starts fresh, and once the heat is
+    /// armed on it the cap is lifted entirely.
+    fn clear_rest(&self, timer: &TimerId) {
+        let mut rested = self.rested.lock().expect("rh-rested lock poisoned");
+        rested.retain(|key| &key.1 != timer);
+    }
+
     /// Arm a running heat onto the live connection for `(event, timer)`, if one exists: the driver
     /// stages the RH race and routes its passes (remapped onto `lineup`) into `sink`'s log. Returns
     /// whether a live connection was found to arm (a non-active event, or a timer not yet connected,
@@ -106,6 +134,10 @@ impl RhConnections {
             live.conn.arm_heat(lineup, sink);
             true
         } else {
+            // Nothing live. If the timer is resting (#462) this is exactly the case the rest is
+            // meant to end for — an event needs it — so drop the rest and let the reconciler dial.
+            drop(map);
+            self.clear_rest(timer);
             false
         }
     }
@@ -139,6 +171,10 @@ impl RhConnections {
             live.conn.prepare();
             true
         } else {
+            // Staging is the earliest moment an event says it needs this timer, so a rest ends here
+            // (#462) — half a second before the arm would have ended it anyway.
+            drop(map);
+            self.clear_rest(timer);
             false
         }
     }
@@ -284,11 +320,17 @@ impl RhConnections {
     /// without dialling a real RotorHazard.
     fn reconcile(&self, wanted: &[Wanted], timers: &TimerRegistry) {
         let mut map = self.inner.lock().expect("rh-connections lock poisoned");
-        let live: Vec<(ConnKey, String)> = map
+        let mut rested = self.rested.lock().expect("rh-rested lock poisoned");
+        // Drop every rest whose reason has gone (#462) — this is what "until the RD connects, or an
+        // event needs the timer" is made of. See [`still_resting`].
+        rested.retain(|key| still_resting(key, wanted, timers));
+        let live: Vec<(ConnKey, String, bool)> = map
             .iter()
-            .map(|(key, live)| (key.clone(), live.url.clone()))
+            .map(|(key, live)| (key.clone(), live.url.clone(), live.conn.driver_finished()))
             .collect();
-        for step in plan(&live, wanted, timers) {
+        let (steps, newly_rested) = plan(&live, wanted, timers, &rested);
+        rested.extend(newly_rested);
+        for step in steps {
             match step {
                 Step::Close(key) => {
                     if let Some(live) = map.remove(&key) {
@@ -351,7 +393,24 @@ enum Step {
 ///   new resting status (`Ready`); a parting `Disconnected` would overwrite that with a lie.
 /// - **Not wanted, still an RH timer** → `Close`: genuinely deselected (or the hold was released),
 ///   so `Disconnected` is true.
-fn plan(live: &[(ConnKey, String)], wanted: &[Wanted], timers: &TimerRegistry) -> Vec<Step> {
+/// - **Wanted, same URL, but the timer has gone [`Unreachable`]** (#462) → `Supersede` and record
+///   the key as **rested**. The driver spent its automatic connect attempts and exited on its own,
+///   so the map entry is a corpse: it must be reaped (nothing else ever removes it), and the key
+///   must be remembered, because the very next tick would otherwise see "wanted, nothing live" and
+///   dial again. `Supersede` rather than `Close` so the teardown cannot publish a parting
+///   `Disconnected` over the `Unreachable` the driver just wrote.
+/// - **A key already at rest** → never `Open`ed. That is what resting *is*.
+///
+/// Returns the steps plus the keys that went to rest this tick, which the caller folds into its
+/// standing rest set.
+///
+/// [`Unreachable`]: gridfpv_server::timers::TimerStatus::Unreachable
+fn plan(
+    live: &[(ConnKey, String, bool)],
+    wanted: &[Wanted],
+    timers: &TimerRegistry,
+    rested: &HashSet<ConnKey>,
+) -> (Vec<Step>, Vec<ConnKey>) {
     let wanted_urls: HashMap<ConnKey, &str> = wanted
         .iter()
         .map(|(e, t, url)| ((e.clone(), t.clone()), url.as_str()))
@@ -359,15 +418,29 @@ fn plan(live: &[(ConnKey, String)], wanted: &[Wanted], timers: &TimerRegistry) -
     // Timer ids that stay wanted under ANY key — a live connection for one of them is being
     // REPLACED rather than retired.
     let wanted_timers: HashSet<&TimerId> = wanted.iter().map(|(_, t, _)| t).collect();
-    let live_keys: HashSet<&ConnKey> = live.iter().map(|(key, _)| key).collect();
+    let live_keys: HashSet<&ConnKey> = live.iter().map(|(key, _, _)| key).collect();
 
     let mut steps = Vec::new();
+    let mut newly_rested = Vec::new();
     // Keys whose live connection is going away this tick (and so must be reopened if still wanted).
     let mut retired: HashSet<ConnKey> = HashSet::new();
-    for (key, url) in live {
+    for (key, url, finished) in live {
         match wanted_urls.get(key) {
-            // Still wanted at exactly the URL it was dialled with — nothing to do.
-            Some(wanted_url) if *wanted_url == url.as_str() => {}
+            // Still wanted at exactly the URL it was dialled with — nothing to do, UNLESS its
+            // driver has exited (#462), in which case the dead entry is reaped. `finished` is the
+            // fact (the thread is gone, so nothing can ever reopen this entry); `at_rest` is why
+            // (it gave up rather than being torn down), and only that pairing goes to rest. A
+            // driver that finished for any other reason is retired and dialled again, which is the
+            // safe repair.
+            Some(wanted_url) if *wanted_url == url.as_str() => {
+                if *finished {
+                    steps.push(Step::Supersede(key.clone()));
+                    retired.insert(key.clone());
+                    if at_rest(&key.1, timers) {
+                        newly_rested.push(key.clone());
+                    }
+                }
+            }
             // Still wanted, but the RD edited the URL: supersede + reopen (#382).
             Some(_) => {
                 steps.push(Step::Supersede(key.clone()));
@@ -383,13 +456,50 @@ fn plan(live: &[(ConnKey, String)], wanted: &[Wanted], timers: &TimerRegistry) -
             }
         }
     }
+    let resting_now: HashSet<&ConnKey> = rested.iter().chain(newly_rested.iter()).collect();
     for (event, timer, url) in wanted {
         let key = (event.clone(), timer.clone());
+        // A rested key is wanted but not dialled — that is the whole of #462. Every way out of the
+        // rest goes through `still_resting`, which prunes the key before this loop runs.
+        if resting_now.contains(&key) {
+            continue;
+        }
         if retired.contains(&key) || !live_keys.contains(&key) {
             steps.push(Step::Open(key, url.clone()));
         }
     }
-    steps
+    (steps, newly_rested)
+}
+
+/// Whether `timer` has **stopped being dialled on its own** (#462) — the driver spent
+/// [`CONNECT_ATTEMPT_CAP`](gridfpv_server::timers::CONNECT_ATTEMPT_CAP) attempts, published
+/// `Unreachable` and exited.
+///
+/// Read off the published status rather than a flag of the reconciler's own, because the status is
+/// the thing the RD is looking at: the screen and the reconciler cannot disagree about whether a
+/// timer is being retried.
+fn at_rest(timer: &TimerId, timers: &TimerRegistry) -> bool {
+    timers.get(timer).map(|t| t.status) == Some(TimerStatus::Unreachable)
+}
+
+/// Whether a rested key is **still** resting, or whether something has asked for the timer again
+/// (#462). The rest ends — and the next tick dials — when any of these stops holding:
+///
+/// - **The claim still wants it at the same URL.** A released hold, a deselected timer, an event
+///   that is no longer active, or an edited URL (#382) all drop the key here, so the timer dials
+///   again on its own terms rather than staying dark because of an attempt it made an hour ago.
+/// - **The timer is still published `Unreachable`.** This is the RD's *"try again"*:
+///   `POST /timers/{id}/connect` clears the resting status back to `Configured`
+///   (`TimerRegistry::set_manual_connect`), and so does a real kind/URL edit — either way the rest
+///   is dropped on the next tick and the connection is reopened.
+///
+/// The third way out needs nothing here: an event needing the timer claims it under a **different**
+/// key (`Some(event)` rather than `None`), which was never rested, so it opens normally.
+fn still_resting(key: &ConnKey, wanted: &[Wanted], timers: &TimerRegistry) -> bool {
+    let wanted_here = wanted
+        .iter()
+        .any(|(event, timer, _)| (event, timer) == (&key.0, &key.1));
+    wanted_here && at_rest(&key.1, timers)
 }
 
 /// Whether tearing `timer`'s connection down must **yield** the shared status cell rather than
@@ -649,6 +759,16 @@ mod tests {
     /// The **manual** half of a [`ConnKey`]: the RD holds the timer with no event at all (#383).
     const MANUAL: Option<EventId> = None;
 
+    /// [`plan`]'s steps for a set of live connections whose drivers are all **alive** and with no
+    /// key at rest — the ordinary case every pre-#462 test is about.
+    fn steps(
+        live: &[(ConnKey, String, bool)],
+        wanted: &[Wanted],
+        timers: &TimerRegistry,
+    ) -> Vec<Step> {
+        plan(live, wanted, timers, &HashSet::new()).0
+    }
+
     #[test]
     fn a_restart_request_with_no_live_connection_is_reported_not_swallowed() {
         // #386: the RD asked to restart a timer that has since gone away (deselected, URL edited,
@@ -885,9 +1005,9 @@ mod tests {
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let key = (event("e1"), rh.clone());
-        let live = vec![(key.clone(), OLD_URL.to_string())];
+        let live = vec![(key.clone(), OLD_URL.to_string(), false)];
         let wanted = vec![(event("e1"), rh, OLD_URL.to_string())];
-        assert_eq!(plan(&live, &wanted, &timers), Vec::new());
+        assert_eq!(steps(&live, &wanted, &timers), Vec::new());
     }
 
     #[test]
@@ -908,10 +1028,10 @@ mod tests {
             )
             .expect("url edited");
         let key = (event("e1"), rh.clone());
-        let live = vec![(key.clone(), OLD_URL.to_string())];
+        let live = vec![(key.clone(), OLD_URL.to_string(), false)];
         let wanted = vec![(event("e1"), rh, NEW_URL.to_string())];
         assert_eq!(
-            plan(&live, &wanted, &timers),
+            steps(&live, &wanted, &timers),
             vec![
                 // Superseded, NOT closed: the status cell is handed to the successor, so the timer
                 // does not flash `Disconnected` on its way back up.
@@ -942,8 +1062,8 @@ mod tests {
             )
             .expect("kind edited");
         let key = (event("e1"), rh);
-        let live = vec![(key.clone(), OLD_URL.to_string())];
-        assert_eq!(plan(&live, &[], &timers), vec![Step::Supersede(key)]);
+        let live = vec![(key.clone(), OLD_URL.to_string(), false)];
+        assert_eq!(steps(&live, &[], &timers), vec![Step::Supersede(key)]);
     }
 
     #[test]
@@ -977,7 +1097,7 @@ mod tests {
             .expect("kind edited");
         let wanted = vec![(event("e1"), mock.clone(), NEW_URL.to_string())];
         assert_eq!(
-            plan(&[], &wanted, &timers),
+            steps(&[], &wanted, &timers),
             vec![Step::Open((event("e1"), mock), NEW_URL.to_string())]
         );
     }
@@ -989,8 +1109,8 @@ mod tests {
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let key = (event("e1"), rh);
-        let live = vec![(key.clone(), OLD_URL.to_string())];
-        assert_eq!(plan(&live, &[], &timers), vec![Step::Close(key)]);
+        let live = vec![(key.clone(), OLD_URL.to_string(), false)];
+        assert_eq!(steps(&live, &[], &timers), vec![Step::Close(key)]);
     }
 
     #[test]
@@ -1001,10 +1121,10 @@ mod tests {
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let old_key = (event("e1"), rh.clone());
         let new_key = (event("e2"), rh.clone());
-        let live = vec![(old_key.clone(), OLD_URL.to_string())];
+        let live = vec![(old_key.clone(), OLD_URL.to_string(), false)];
         let wanted = vec![(event("e2"), rh, OLD_URL.to_string())];
         assert_eq!(
-            plan(&live, &wanted, &timers),
+            steps(&live, &wanted, &timers),
             vec![
                 Step::Supersede(old_key),
                 Step::Open(new_key, OLD_URL.to_string()),
@@ -1024,7 +1144,7 @@ mod tests {
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let event_registry_is_idle: Vec<Wanted> = vec![(MANUAL, rh.clone(), OLD_URL.to_string())];
         assert_eq!(
-            plan(&[], &event_registry_is_idle, &timers),
+            steps(&[], &event_registry_is_idle, &timers),
             vec![Step::Open((MANUAL, rh), OLD_URL.to_string())]
         );
     }
@@ -1036,9 +1156,9 @@ mod tests {
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let key = (MANUAL, rh.clone());
-        let live = vec![(key, OLD_URL.to_string())];
+        let live = vec![(key, OLD_URL.to_string(), false)];
         let wanted = vec![(MANUAL, rh, OLD_URL.to_string())];
-        assert_eq!(plan(&live, &wanted, &timers), Vec::new());
+        assert_eq!(steps(&live, &wanted, &timers), Vec::new());
     }
 
     #[test]
@@ -1050,9 +1170,9 @@ mod tests {
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let manual_key = (MANUAL, rh.clone());
         let event_key = (event("e1"), rh.clone());
-        let live = vec![(manual_key.clone(), OLD_URL.to_string())];
+        let live = vec![(manual_key.clone(), OLD_URL.to_string(), false)];
         let wanted = vec![(event("e1"), rh, OLD_URL.to_string())];
-        let steps = plan(&live, &wanted, &timers);
+        let steps = steps(&live, &wanted, &timers);
         assert_eq!(
             steps,
             vec![
@@ -1077,15 +1197,151 @@ mod tests {
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let event_key = (event("e1"), rh.clone());
         let manual_key = (MANUAL, rh.clone());
-        let live = vec![(event_key.clone(), OLD_URL.to_string())];
+        let live = vec![(event_key.clone(), OLD_URL.to_string(), false)];
         let wanted = vec![(MANUAL, rh, OLD_URL.to_string())];
         assert_eq!(
-            plan(&live, &wanted, &timers),
+            steps(&live, &wanted, &timers),
             vec![
                 Step::Supersede(event_key),
                 Step::Open(manual_key, OLD_URL.to_string()),
             ]
         );
+    }
+
+    // ── #462: the automatic connect attempts are capped, and then the timer rests ─────
+
+    /// A timer that has been dialled its three times and given up: the driver published
+    /// `Unreachable` and exited, so its map entry is a corpse (`finished == true`).
+    fn rested_rh(timers: &TimerRegistry, name: &str, url: &str) -> TimerId {
+        let rh = rh_timer(timers, name, url);
+        timers.set_status(&rh, TimerStatus::Unreachable);
+        rh
+    }
+
+    #[test]
+    fn a_driver_that_gave_up_is_reaped_and_the_key_is_not_dialled_again() {
+        // The failure this exists to prevent: nothing in the map removes an entry because its
+        // thread ended, so a rested driver would sit there looking healthy — wanted, same URL,
+        // "leave it alone" — and the timer would never reconnect, not even when the RD asked.
+        // It is reaped, and the key is remembered so the NEXT tick does not simply redial it.
+        let timers = registry();
+        let rh = rested_rh(&timers, "Field RH", OLD_URL);
+        let key = (MANUAL, rh.clone());
+        let live = vec![(key.clone(), OLD_URL.to_string(), true)];
+        let wanted = vec![(MANUAL, rh, OLD_URL.to_string())];
+
+        let (steps, newly_rested) = plan(&live, &wanted, &timers, &HashSet::new());
+        assert_eq!(
+            steps,
+            vec![Step::Supersede(key.clone())],
+            "reaped, and superseded rather than closed — a parting Disconnected would promise a \
+             retry that is not coming"
+        );
+        assert_eq!(newly_rested, vec![key.clone()]);
+
+        // The next tick: the entry is gone, the key is at rest, and nothing is opened.
+        let (steps, _) = plan(&[], &wanted, &timers, &HashSet::from([key]));
+        assert_eq!(steps, Vec::new(), "resting is not dialling");
+    }
+
+    #[test]
+    fn a_live_driver_is_never_mistaken_for_a_rested_one() {
+        // The reap turns on the thread having EXITED, not on the status alone: a connection opened
+        // a moment ago still reads `Unreachable` until its driver's first `Connecting` lands, and
+        // reaping it there would tear down the very attempt that was asked for.
+        let timers = registry();
+        let rh = rested_rh(&timers, "Field RH", OLD_URL);
+        let key = (MANUAL, rh.clone());
+        let live = vec![(key, OLD_URL.to_string(), false)];
+        let wanted = vec![(MANUAL, rh, OLD_URL.to_string())];
+        assert_eq!(steps(&live, &wanted, &timers), Vec::new());
+    }
+
+    #[test]
+    fn the_rds_connect_ends_the_rest_and_dials_again() {
+        // The RD's "try again" (#383). Pressing Connect on an already-held timer changes no key, so
+        // nothing here would move — except that `set_manual_connect` clears the resting status, and
+        // that is what `still_resting` reads.
+        let timers = registry();
+        let rh = rested_rh(&timers, "Field RH", OLD_URL);
+        let key = (MANUAL, rh.clone());
+        let wanted = vec![(MANUAL, rh.clone(), OLD_URL.to_string())];
+        assert!(
+            still_resting(&key, &wanted, &timers),
+            "still resting while nothing has asked"
+        );
+
+        timers.set_manual_connect(&rh, true).expect("held");
+        assert_eq!(
+            timers.get(&rh).unwrap().status,
+            TimerStatus::Configured,
+            "Connect clears the rest rather than being a no-op on an already-held timer"
+        );
+        assert!(!still_resting(&key, &wanted, &timers));
+        // With the rest pruned, the reconciler opens on the very next tick.
+        assert_eq!(
+            steps(&[], &wanted, &timers),
+            vec![Step::Open(key, OLD_URL.to_string())]
+        );
+    }
+
+    #[test]
+    fn an_event_needing_the_timer_dials_it_under_its_own_key() {
+        // The other way out: a timer that rested on a manual hold is claimed by the active event.
+        // That is a DIFFERENT key, which was never rested, so it opens with nothing special done —
+        // which is exactly why the rest is scoped to the claim rather than to the timer.
+        let timers = registry();
+        let rh = rested_rh(&timers, "Field RH", OLD_URL);
+        let manual_key = (MANUAL, rh.clone());
+        let event_key = (event("e1"), rh.clone());
+        let wanted = vec![(event("e1"), rh, OLD_URL.to_string())];
+
+        // The manual key stops being wanted, so its rest is pruned too.
+        assert!(!still_resting(&manual_key, &wanted, &timers));
+        let (steps, newly_rested) = plan(&[], &wanted, &timers, &HashSet::from([manual_key]));
+        assert_eq!(steps, vec![Step::Open(event_key, OLD_URL.to_string())]);
+        assert!(newly_rested.is_empty());
+    }
+
+    #[test]
+    fn a_released_hold_or_an_edited_url_ends_the_rest_too() {
+        let timers = registry();
+        let rh = rested_rh(&timers, "Field RH", OLD_URL);
+        let key = (MANUAL, rh.clone());
+
+        // Disconnect: nothing wants the key, so the rest is dropped — a later Connect starts clean
+        // rather than inheriting an attempt made an hour ago.
+        assert!(!still_resting(&key, &[], &timers));
+
+        // A real URL edit re-derives the resting status (`Timer::status_for`), which ends the rest
+        // by the same route the RD's Connect does (#382).
+        timers
+            .update(
+                &rh,
+                &UpdateTimerRequest {
+                    kind: Some(TimerKind::Rotorhazard {
+                        url: NEW_URL.to_string(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("url edited");
+        let wanted = vec![(MANUAL, rh, NEW_URL.to_string())];
+        assert!(!still_resting(&key, &wanted, &timers));
+    }
+
+    #[test]
+    fn a_rest_that_nothing_has_asked_about_survives_every_tick() {
+        // The point of the whole feature: no churn, no log line, no dialling — indefinitely.
+        let timers = registry();
+        let rh = rested_rh(&timers, "Field RH", OLD_URL);
+        let key = (MANUAL, rh.clone());
+        let wanted = vec![(MANUAL, rh, OLD_URL.to_string())];
+        let rested = HashSet::from([key.clone()]);
+        for _ in 0..5 {
+            assert!(still_resting(&key, &wanted, &timers));
+            assert_eq!(plan(&[], &wanted, &timers, &rested).0, Vec::new());
+        }
     }
 
     #[test]
@@ -1095,8 +1351,8 @@ mod tests {
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let key = (MANUAL, rh);
-        let live = vec![(key.clone(), OLD_URL.to_string())];
-        assert_eq!(plan(&live, &[], &timers), vec![Step::Close(key)]);
+        let live = vec![(key.clone(), OLD_URL.to_string(), false)];
+        assert_eq!(steps(&live, &[], &timers), vec![Step::Close(key)]);
     }
 
     #[test]
@@ -1107,10 +1363,10 @@ mod tests {
         let timers = registry();
         let rh = rh_timer(&timers, "Field RH", OLD_URL);
         let key = (MANUAL, rh.clone());
-        let live = vec![(key.clone(), OLD_URL.to_string())];
+        let live = vec![(key.clone(), OLD_URL.to_string(), false)];
         let wanted = vec![(MANUAL, rh, NEW_URL.to_string())];
         assert_eq!(
-            plan(&live, &wanted, &timers),
+            steps(&live, &wanted, &timers),
             vec![
                 Step::Supersede(key.clone()),
                 Step::Open(key, NEW_URL.to_string()),

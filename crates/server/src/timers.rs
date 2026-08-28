@@ -55,6 +55,23 @@ pub const MOCK_TIMER_NAME: &str = "Mock";
 /// — reads back as an 8-node timer, the same heat-size cap a real 8-seat timer enforces.
 pub const DEFAULT_NODE_COUNT: u32 = 8;
 
+/// How many times the Director dials a RotorHazard timer **on its own** before resting (#462).
+///
+/// Adding a timer and starting the Director both open a connection nobody has asked to keep alive
+/// yet; against a wrong URL — a typo, the wrong subnet, RotorHazard not running — the driver used
+/// to alternate [`Connecting`](TimerStatus::Connecting) and [`Error`](TimerStatus::Error) at a dead
+/// address for as long as the Director ran, logging a line every ten seconds.
+///
+/// Three attempts is enough to ride out a timer that is still booting and short enough that a wrong
+/// address stops shouting. After them the timer rests at
+/// [`Unreachable`](TimerStatus::Unreachable) until something **asks**: the RD's Connect in the
+/// Timers menu (#383), or an event that needs it.
+///
+/// **It caps establishing a link, never keeping one.** A heat armed on the connection lifts the cap
+/// entirely — a race that has started must reconnect for as long as it takes — and every successful
+/// connect spends the count back to zero.
+pub const CONNECT_ATTEMPT_CAP: u32 = 3;
+
 /// The file name (under the data dir) the timer registry is persisted to (issue #73).
 pub const TIMERS_FILE: &str = "timers.json";
 
@@ -158,9 +175,10 @@ impl ChannelCapability {
 /// **dynamic** connection states the Director drives on a live (`live`-feature) RotorHazard timer
 /// as its connection comes and goes: [`Connecting`](TimerStatus::Connecting) while the socket is
 /// being established, [`Connected`](TimerStatus::Connected) once it is up,
-/// [`Disconnected`](TimerStatus::Disconnected) when it drops, and [`Error`](TimerStatus::Error)
-/// when the connection attempt fails. They are **additive on the wire** — a console that only knows
-/// `Ready`/`Configured` still parses the type; new variants surface richer status.
+/// [`Disconnected`](TimerStatus::Disconnected) when it drops, [`Error`](TimerStatus::Error) when a
+/// connection attempt fails, and [`Unreachable`](TimerStatus::Unreachable) once the Director has
+/// **stopped** trying on its own (#462). They are **additive on the wire** — a console that only
+/// knows `Ready`/`Configured` still parses the type; new variants surface richer status.
 ///
 /// These dynamic states are **not persisted** (`timers.json` always restores a timer's resting
 /// status from its kind — see [`Timer::status_for`]); they are live, in-memory, and reset to
@@ -180,7 +198,24 @@ pub enum TimerStatus {
     /// A live RotorHazard timer whose connection has dropped (was up, now down).
     Disconnected,
     /// A live RotorHazard timer whose connection attempt failed (could not reach the server).
+    ///
+    /// **Transient**: another attempt is coming. The Director publishes this between tries, and
+    /// [`Unreachable`](TimerStatus::Unreachable) once it has given up on its own.
     Error,
+    /// A live RotorHazard timer the Director tried to reach, could not, and has **stopped trying**
+    /// (#462).
+    ///
+    /// The automatic connect attempts made on add and at startup are capped
+    /// ([`CONNECT_ATTEMPT_CAP`](crate::timers::CONNECT_ATTEMPT_CAP)); once they are spent the timer
+    /// rests here rather than pulsing `Connecting`/`Error` at a dead address forever. It is a
+    /// **resting** state, not a failing one: nothing is in flight, and nothing will be until
+    /// something asks. The RD's Connect in the Timers menu (#383) asks, and so does an event that
+    /// needs the timer.
+    ///
+    /// It exists so the console can say the true thing. Leaving a timer on `Connecting` would
+    /// promise an attempt that is not happening, and leaving it on `Error` would promise a retry
+    /// that is not coming.
+    Unreachable,
 }
 
 /// Whether a connected RotorHazard timer carries the **GridFPV plugin** (RH plugin design D16,
@@ -2097,6 +2132,14 @@ impl TimerRegistry {
     /// dial (that is a [`TimerError`], which the route reports as a `400`), as is an unknown id.
     /// The hold is **in-memory only**, like [`set_status`](Self::set_status): nothing is persisted,
     /// so it does not survive a restart and does not dirty `timers.json`.
+    ///
+    /// **Connect is also the "try again" button** (#462). A timer that spent its automatic connect
+    /// attempts rests at [`Unreachable`](TimerStatus::Unreachable), and the reconciler leaves a
+    /// resting timer alone; holding it clears that back to the kind's resting status, which is the
+    /// signal the reconciler reads to dial once more. Without this a re-press of Connect on an
+    /// already-held timer would change nothing at all — the hold is already set, so no key changes
+    /// and nothing would re-dial — and the one control the RD has for "try again" would be dead
+    /// exactly when they needed it.
     pub fn set_manual_connect(&self, id: &TimerId, held: bool) -> Result<Timer, TimerError> {
         let mut reg = self.write();
         let timer = reg
@@ -2110,6 +2153,9 @@ impl TimerRegistry {
             )));
         }
         timer.manual_connect = held;
+        if held && timer.status == TimerStatus::Unreachable {
+            timer.status = Timer::status_for(&timer.kind);
+        }
         Ok(timer.clone())
     }
 
@@ -3518,6 +3564,39 @@ mod tests {
 
         // An unknown id is a no-op (no panic).
         reg.set_status(&TimerId("nope".into()), TimerStatus::Connected);
+    }
+
+    #[test]
+    fn connect_is_also_the_try_again_button_for_a_timer_that_gave_up() {
+        // #462. A timer that spent its automatic connect attempts rests at `Unreachable`, and the
+        // reconciler leaves a resting timer alone — so Connect on an ALREADY-held timer has to do
+        // something, or the one control the RD has for "try again" is dead exactly when they need
+        // it. It clears the rest back to the kind's resting status, which is the signal the
+        // reconciler reads.
+        let reg = TimerRegistry::new(None, 5, 2500).unwrap();
+        let rh = reg
+            .create(&rh_req("Field RH", "http://rh.local:5000"))
+            .unwrap();
+        reg.set_manual_connect(&rh.id, true).unwrap();
+        reg.set_status(&rh.id, TimerStatus::Unreachable);
+
+        let held = reg.set_manual_connect(&rh.id, true).unwrap();
+        assert!(held.manual_connect, "the hold is untouched");
+        assert_eq!(
+            held.status,
+            TimerStatus::Configured,
+            "…and the rest is over"
+        );
+
+        // Disconnect never resurrects a status — the rest is ended by asking, not by letting go.
+        reg.set_status(&rh.id, TimerStatus::Unreachable);
+        let released = reg.set_manual_connect(&rh.id, false).unwrap();
+        assert_eq!(released.status, TimerStatus::Unreachable);
+
+        // And a status that is not a rest is left exactly where it is.
+        reg.set_status(&rh.id, TimerStatus::Connected);
+        let held = reg.set_manual_connect(&rh.id, true).unwrap();
+        assert_eq!(held.status, TimerStatus::Connected);
     }
 
     #[test]

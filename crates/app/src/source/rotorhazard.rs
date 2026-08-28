@@ -54,7 +54,8 @@ use gridfpv_adapters::rotorhazard::transport::{
 };
 use gridfpv_events::{AdapterId, CompetitorRef, Event};
 use gridfpv_server::timers::{
-    NodeReading, PluginPresence, SIGNAL_SAMPLE_INTERVAL, TimerId, TimerRegistry, TimerStatus,
+    CONNECT_ATTEMPT_CAP, NodeReading, PluginPresence, SIGNAL_SAMPLE_INTERVAL, TimerId,
+    TimerRegistry, TimerStatus,
 };
 use tokio::task::JoinHandle;
 
@@ -402,7 +403,10 @@ pub struct RhConnection {
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
-    _driver: JoinHandle<()>,
+    ///
+    /// Also **read**, by [`driver_finished`](Self::driver_finished): a driver that rested (#462) has
+    /// exited without anyone cancelling it, and the reconciler has no other way to notice.
+    driver: JoinHandle<()>,
 }
 
 impl RhConnection {
@@ -462,7 +466,7 @@ impl RhConnection {
             calibration,
             capture,
             channel,
-            _driver: driver,
+            driver,
         }
     }
 
@@ -652,6 +656,20 @@ impl RhConnection {
         self.yield_status.store(true, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
+
+    /// Whether the driver thread has **exited** (#462).
+    ///
+    /// Nothing in the reconciler's map removes an entry because its thread ended, so a driver that
+    /// gave up dialling (`CONNECT_ATTEMPT_CAP` attempts spent, timer left `Unreachable`) would
+    /// otherwise sit in the live map forever, looking healthy: still wanted, same URL, left alone —
+    /// and never reopened, not even when the RD pressed Connect. This is how the reconciler tells a
+    /// corpse from a live link.
+    ///
+    /// A cancelled or superseded driver also finishes, but those entries are removed from the map in
+    /// the same breath as the cancel, so the only entry this is ever asked about is a rested one.
+    pub fn driver_finished(&self) -> bool {
+        self.driver.is_finished()
+    }
 }
 
 impl Drop for RhConnection {
@@ -786,6 +804,13 @@ fn drive(
     channel: ChannelSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
+    // How many times in a row we have failed to **establish** this link (#462).
+    //
+    // Spent attempts rest the timer at `Unreachable` rather than pulsing `Connecting`/`Error` at a
+    // dead address forever. Declared beside `backoff`, and reset beside it at the one place that
+    // matters — the `Connected` line below. That reset is the whole boundary: a link that ever came
+    // up gets its full count back, so a mid-race drop is not rationed by an add-time cap.
+    let mut attempts: u32 = 0;
     // The RH heat id **seated** for the current arming (the laps-attribute fix), if seating
     // succeeded: a fresh RH heat built at Stage with the bound pilots assigned + made current. Lives
     // here in `drive` — **outside** the reconnect loop — so it **survives a mid-race reconnect**: the
@@ -834,6 +859,26 @@ fn drive(
                     timer_name(&timers, &timer_id),
                     error_chain(&e)
                 );
+                attempts += 1;
+                // #462: stop dialling on our own once the cap is spent — UNLESS a heat is armed on
+                // this connection. That is the boundary between the two retries that live in this
+                // one loop. Establishing a link nobody is waiting on (a timer just added, a
+                // Director just started) is capped; keeping alive the link a *running race* needs
+                // is not, and never will be — a heat that has started must reconnect for as long as
+                // it takes. The check is made here, on every failure, so a heat armed while the
+                // driver is already retrying lifts the cap on the spot.
+                let racing = armed.lock().expect("armed lock poisoned").is_some();
+                if attempts >= CONNECT_ATTEMPT_CAP && !racing {
+                    eprintln!(
+                        "gridfpv: RotorHazard {:?} unreachable after {attempts} attempts; resting \
+                         until it is connected from the Timers menu or an event needs it",
+                        timer_name(&timers, &timer_id)
+                    );
+                    // Publish the rest and leave. `return`, not `break`: the tail below would
+                    // overwrite this with `Disconnected`, which promises a retry that is not coming.
+                    timers.set_status(&timer_id, TimerStatus::Unreachable);
+                    return;
+                }
                 timers.set_status(&timer_id, TimerStatus::Error);
                 if sleep_unless_cancelled(backoff, &cancel) {
                     break;
@@ -844,6 +889,9 @@ fn drive(
         };
         timers.set_status(&timer_id, TimerStatus::Connected);
         backoff = RECONNECT_BACKOFF_MIN;
+        // The boundary (#462): a link that came up gets its full attempt count back, so the
+        // reconnect after a mid-race drop is never rationed by an add-time cap.
+        attempts = 0;
         clear_writes_that_outlived_the_previous_connection(
             &restart,
             &calibration,
