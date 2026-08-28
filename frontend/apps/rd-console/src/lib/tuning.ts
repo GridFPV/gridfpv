@@ -63,6 +63,7 @@ import {
   isCatalogChannel,
   offeredCatalog
 } from './channels.js';
+import { joinLabels, nodeLabels } from './timerNodes.js';
 
 // ── The value domain ────────────────────────────────────────────────────────────────────────────
 
@@ -1260,12 +1261,26 @@ export function duplicateChannelNodes(byNode: Map<number, number | undefined>): 
   return clashing;
 }
 
-/** What a node says when it shares its channel with others — by their friendly, 1-based names. */
-export function duplicateChannelNote(node: number, sharing: number[]): string {
-  const others = sharing
-    .filter((n) => n !== node)
-    .map((n) => `Node ${n + 1}`)
-    .join(', ');
+/**
+ * What a node says when it shares its channel with others — by their **friendly** names.
+ *
+ * Named through the shared `#412` resolver, so a timer whose nodes the Director calls `Gate A`…
+ * `Gate D` says `Gate C is on this channel too`. The 1-based `Node N` this used to build inline is
+ * still what an un-read node view falls back to, but it is now the fallback rather than the answer:
+ * a resolver that is re-derived at the call site is how a screen ends up disagreeing with the one
+ * beside it, which is exactly what CLAUDE.md's display rule forbids.
+ */
+export function duplicateChannelNote(
+  view: TimerNodes | undefined,
+  node: number,
+  sharing: number[]
+): string {
+  const others = joinLabels(
+    nodeLabels(
+      view,
+      sharing.filter((n) => n !== node)
+    )
+  );
   return (
     `${others} ${sharing.length > 2 ? 'are' : 'is'} on this channel too. ` +
     `Two gates on one frequency both see the same craft — fine while you are swapping, wrong for a race.`

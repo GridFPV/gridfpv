@@ -1318,7 +1318,7 @@
                   <!-- Flagged, never blocked: two gates on one frequency is a real mistake, and also
                        exactly what a bench swap looks like halfway through. -->
                   <p class="channel-clash" data-testid={`channel-clash-${node}`} role="status">
-                    {duplicateChannelNote(node, sharingWith(node))}
+                    {duplicateChannelNote(nodeView, node, sharingWith(node))}
                   </p>
                 {/if}
                 <p class="channel-note">{HEAT_OVERWRITES_CHANNEL}</p>
