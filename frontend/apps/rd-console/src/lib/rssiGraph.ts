@@ -109,6 +109,39 @@ export function xOf(time: number, span: Span): number {
   return PAD_L + ((time - span.from) / w) * plotW;
 }
 
+/**
+ * #473 (live glide): how far past the newest sample the live plot may extrapolate, in µs.
+ *
+ * Between polls the plot glides left on the wall clock so the trace scrolls smoothly instead of
+ * stepping at poll cadence. The cap is what keeps that honest: a healthy feed delivers every
+ * ~200-250 ms, so the glide normally spans well under a second — but a stalled feed must FREEZE
+ * (trace visibly stops, gap opens at the live edge) rather than scroll the last real samples off
+ * the screen. 1.5 s is several missed polls: unmistakably a stall, not jitter.
+ */
+export const LIVE_GLIDE_CAP_MICROS = 1_500_000;
+
+/**
+ * The live plot's wall-clock extrapolation past its newest sample (µs): how long ago the current
+ * trace prop was received, clamped to {@link LIVE_GLIDE_CAP_MICROS}. Pure — the component feeds it
+ * `performance.now()` pairs; a fresh poll resets `latestSeenAtMs` and the glide restarts near 0.
+ */
+export function liveGlideMicros(
+  latestSeenAtMs: number,
+  nowMs: number,
+  cap: number = LIVE_GLIDE_CAP_MICROS
+): number {
+  return Math.min(Math.max(0, (nowMs - latestSeenAtMs) * 1000), cap);
+}
+
+/**
+ * The x-shift (user units, leftward-positive) for a live glide of `micros` within a rolling window
+ * of `windowMicros` — the same time→px scale {@link xOf} draws with, so glided geometry lands
+ * exactly where the next poll's re-render will put it.
+ */
+export function glideShiftPx(micros: number, windowMicros: number): number {
+  return (micros / (windowMicros || 1)) * plotW;
+}
+
 /** Project an RSSI value onto the plot's Y (user units; higher value = higher on screen). */
 export function yOf(value: number, range: Range): number {
   const h = range.hi - range.lo || 1;

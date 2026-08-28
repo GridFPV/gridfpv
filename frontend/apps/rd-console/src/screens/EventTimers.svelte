@@ -228,6 +228,10 @@
   // timer is primary.
   const layerTimer = $derived(timers.find((t) => t.id === effectivePrimary));
 
+  // #491: a selected Simulator means started heats race themselves — the banner tracks the
+  // SELECTION (a Simulator merely existing in the registry warns nobody).
+  const simSelected = $derived(timers.some((t) => 'Mock' in t.kind && selected.has(t.id)));
+
   async function choosePrimary(id: TimerId) {
     if (settingPrimary || id === effectivePrimary) return;
     settingPrimary = true;
@@ -254,6 +258,16 @@
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={() => manager?.openAdd()}>+ Add timer</Button>
     {/snippet}
+
+    <!-- #491: a selected Simulator means every started heat races ITSELF — synthetic laps and
+         RSSI, races that auto-complete. A field session read exactly that as phantom control of
+         the Director, so the state gets a standing banner, not just a row badge. -->
+    {#if simSelected}
+      <p class="sim-selected" role="status">
+        A <strong>Simulator</strong> timer is selected for this event: started heats will fly themselves
+        with synthetic laps and RSSI. Untick it before racing on real hardware.
+      </p>
+    {/if}
 
     <TimerManager
       bind:this={manager}
@@ -412,6 +426,15 @@
     margin-top: 2px;
     font-size: var(--gf-font-size-sm);
     color: var(--gf-warn);
+  }
+  .sim-selected {
+    margin: 0 0 var(--gf-space-3);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border-left: 3px solid var(--gf-warn);
+    border-radius: 0 var(--gf-radius-sm) var(--gf-radius-sm) 0;
+    /* Flattened against the surface, not a translucent wash — the #476 rule for large fills. */
+    background: color-mix(in srgb, var(--gf-warn) 14%, var(--gf-surface));
+    font-size: var(--gf-font-size-sm);
   }
   .foot {
     display: flex;

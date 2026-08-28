@@ -131,3 +131,14 @@ describe('version skew: an unmodeled timer kind renders labeled, never crashes',
     expect(kindSummary(future)).toContain('update the console');
   });
 });
+
+describe('the Simulator identity (#491)', () => {
+  const SIM: Timer['kind'] = { Mock: { laps: 3, lap_ms: 2500 } };
+  it('labels a Mock as Simulator with a warn tone, and the summary says what selecting it does', () => {
+    expect(kindLabel(SIM)).toBe('Simulator');
+    expect(kindTone(SIM)).toBe('warn');
+    // The behavior IS the summary: an RD scanning the row must learn heats will race themselves.
+    expect(kindSummary(SIM)).toMatch(/fly themselves/);
+    expect(kindSummary(SIM)).toContain('3 laps');
+  });
+});

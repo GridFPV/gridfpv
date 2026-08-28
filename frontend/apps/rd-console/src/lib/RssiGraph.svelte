@@ -57,6 +57,8 @@
     plotH,
     crossingWindows,
     pointerX,
+    glideShiftPx,
+    liveGlideMicros,
     polyline,
     rollingSpanOf,
     rssiAt,
@@ -154,6 +156,41 @@
     added: [],
     removedRefs: new Set()
   };
+
+  // ── Live glide (#473) ─────────────────────────────────────────────────────────────────────────
+  // The live window is pinned to the newest SAMPLE, so without help the whole plot steps at poll
+  // cadence — the jitter the field complaint named. Between polls the time-anchored content (trace
+  // + crossing bands) glides left on the wall clock via ONE transform per frame; geometry itself
+  // re-renders only when real data arrives, and the glide resets to ~0 at that instant, so the
+  // stepped re-render and the glided position coincide. Capped (see LIVE_GLIDE_CAP_MICROS): a
+  // stalled feed freezes with a visible gap at the live edge rather than scrolling data away.
+  // The relative time ticks stay stepped — a label may read up to one poll-interval stale, which
+  // at the axis's 0.1 s precision is the honest trade for not re-rendering text every frame.
+  let liveNowMs = $state(0);
+  let latestSeenAtMs = 0;
+  $effect(() => {
+    // A new trace prop is the "newest sample observed" instant the glide measures from (the read
+    // of `trace` is what registers the dependency).
+    if (trace) latestSeenAtMs = typeof performance !== 'undefined' ? performance.now() : 0;
+  });
+  $effect(() => {
+    if (mode !== 'live') return;
+    // Reduced motion: the stepped poll-cadence update IS the reduced-motion rendering.
+    if (typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches)
+      return;
+    let raf = 0;
+    const tick = () => {
+      liveNowMs = performance.now();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  });
+  const glideTransform = $derived(
+    mode === 'live'
+      ? `translate(${-glideShiftPx(liveGlideMicros(latestSeenAtMs, liveNowMs), windowMicros)} 0)`
+      : undefined
+  );
 
   /** The laps for a given competitor, in order (empty if none / no lap list). */
   function lapsFor(ref: CompetitorRef): Lap[] {
@@ -605,11 +642,22 @@
                lap-detection engine registered as a pass; live, it is the band that opens as the
                craft arrives and closes as it leaves — the direct answer to "do my thresholds
                actually bracket the pass?". -->
-            {#each v.windows as cw (cw.from)}
-              {@const x1 = xOf(cw.from, v.span)}
-              {@const x2 = xOf(cw.to, v.span)}
-              <rect class="crossing" x={x1} y={PAD_T} width={Math.max(1, x2 - x1)} height={plotH} />
-            {/each}
+            <!-- Time-anchored content glides between polls in live mode (#473); everything with a
+                 fixed x (thresholds, frame) stays outside this group. In review the transform is
+                 absent and this group is inert. -->
+            <g transform={glideTransform}>
+              {#each v.windows as cw (cw.from)}
+                {@const x1 = xOf(cw.from, v.span)}
+                {@const x2 = xOf(cw.to, v.span)}
+                <rect
+                  class="crossing"
+                  x={x1}
+                  y={PAD_T}
+                  width={Math.max(1, x2 - x1)}
+                  height={plotH}
+                />
+              {/each}
+            </g>
 
             <!-- Threshold lines (horizontal). Display-only strokes here; the draggable handles
                render at the END of the svg (painted last = TOPMOST) so a dense heat's lap
@@ -627,12 +675,14 @@
             <!-- The sample line. Smoothed (#473) it is a monotone cubic curve through exactly these
                  points, with the raw polyline kept underneath as a ghost so the recorded samples are
                  never hidden; unsmoothed it is the raw polyline alone, unchanged. -->
-            {#if smooth}
-              <polyline class="signal-raw" points={polyline(ct, v.span, v.range)} />
-              <path class="signal" d={smoothPath(samplePoints(ct, v.span, v.range))} />
-            {:else}
-              <polyline class="signal" points={polyline(ct, v.span, v.range)} />
-            {/if}
+            <g transform={glideTransform}>
+              {#if smooth}
+                <polyline class="signal-raw" points={polyline(ct, v.span, v.range)} />
+                <path class="signal" d={smoothPath(samplePoints(ct, v.span, v.range))} />
+              {:else}
+                <polyline class="signal" points={polyline(ct, v.span, v.range)} />
+              {/if}
+            </g>
 
             <!-- Lap markers (vertical) at each lap's gate-pass time. Review only — `v.laps` is
                empty in live, so the whole block disappears without a mode check. -->
