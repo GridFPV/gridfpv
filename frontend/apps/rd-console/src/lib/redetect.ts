@@ -7,9 +7,9 @@
  * competitor's current official ones ({@link diffPasses}), and derive the preview lap list
  * ({@link previewLaps}) — all **preview-only**. Nothing here talks to the Director: committing
  * the diff is the screen's job (a `VoidDetection` per removed pass + an `InsertLap` per added
- * one, the existing marshaling primitives), and the tuned thresholds themselves are never
- * written anywhere — pushing calibration back to RotorHazard via the plugin is a separate,
- * future feature.
+ * one, the existing marshaling primitives), and pushing the tuned thresholds themselves back to
+ * the timer is a separate, explicit action the screen offers alongside it (`applyTune.ts`, #470)
+ * — never a side effect of a commit.
  *
  * Everything is a pure function of its inputs so the semantics are unit-testable without a DOM.
  */
