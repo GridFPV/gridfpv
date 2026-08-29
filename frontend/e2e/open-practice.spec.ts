@@ -205,7 +205,10 @@ test('RD defines an open-practice round, picks active channels, and runs a per-c
   // client's own tests assert it is surfaced verbatim and carries no raw id.
   await openTab(page, 'Rounds & Heats');
   const cleanupRow = page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL });
+  // Two-step confirm since #499 — WITHOUT the confirm this spec would pass vacuously (nothing
+  // attempted, so of course the round is still listed) instead of proving the Director refuses.
   await cleanupRow.getByRole('button', { name: 'Remove' }).click();
+  await cleanupRow.getByRole('button', { name: /Confirm/ }).click();
   // The refusal held: the round is still listed.
   await expect(cleanupRow).toHaveCount(1);
   await expect(cleanupRow).toBeVisible();

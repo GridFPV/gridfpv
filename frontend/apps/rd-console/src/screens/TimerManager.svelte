@@ -226,6 +226,13 @@
   const HOLD_POLL_MS = 1500;
 
   /**
+   * How long after a create/edit to take the second look that catches the reconciler's automatic
+   * dial (#462): comfortably past its 1.5s sweep interval, short enough that the RD watching the
+   * fresh row sees it move.
+   */
+  const AUTO_DIAL_REFRESH_MS = 2500;
+
+  /**
    * Whether any timer is currently manually held — the screen self-polls while one is.
    *
    * Reads the loaded list (kept fresh by the poll below and by {@link applyTimer}) **and** the
@@ -233,7 +240,10 @@
    */
   const anyHeld = $derived(
     (loadState.kind === 'ready' && loadState.timers.some(isManuallyHeld)) ||
-      session.timers.some(isManuallyHeld)
+      session.timers.some(isManuallyHeld) ||
+      // A row mid-dial keeps the poll alive even before any hold is visible in the snapshot —
+      // "Connecting" is exactly the status an RD is standing there waiting to see move (#462).
+      (loadState.kind === 'ready' && loadState.timers.some((t) => t.status === 'Connecting'))
   );
 
   $effect(() => {
@@ -569,6 +579,12 @@
       }
       formOpen = false;
       await reload();
+      // #462 follow-up (field, 2026-08-28): the reconciler grants a new RotorHazard timer its
+      // automatic dial on its NEXT sweep — AFTER this reload's snapshot. Without a second look
+      // the screen shows no hold, so the hold-poll below never starts and the row sits stale on
+      // its pre-dial status until the RD navigates away and back. One delayed quiet refresh sees
+      // the auto-hold land; the ordinary hold-poll takes over from there.
+      setTimeout(() => void refreshQuietly(), AUTO_DIAL_REFRESH_MS);
     } catch (err) {
       formError = err instanceof Error ? err.message : String(err);
     } finally {

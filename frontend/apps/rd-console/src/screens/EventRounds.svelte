@@ -71,6 +71,7 @@
     winConditionKindsFor,
     type WinConditionKind
   } from '../lib/formats.js';
+  import ConfirmButton from '../lib/ConfirmButton.svelte';
   import { heatDisplayName, isDeterministicRound, isOpenPracticeRound } from '../lib/heats.js';
   import { enabledNodes, seatNodes, timerSeats, timerWidth } from '../lib/timerNodes.js';
   import type { Session } from '../lib/session.svelte.js';
@@ -1637,7 +1638,9 @@
                   : undefined}
                 onclick={() => openEdit(round)}>Edit</Button
               >
-              <Button variant="ghost" size="sm" onclick={() => remove(round)}>Remove</Button>
+              <!-- Destructive since #439: removing a round DISCARDS its still-Scheduled heats
+                   (that is the feature), so one stray click must not do it (field, 2026-08-28). -->
+              <ConfirmButton variant="danger" onconfirm={() => remove(round)}>Remove</ConfirmButton>
             </div>
           </li>
         {/each}

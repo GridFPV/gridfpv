@@ -129,9 +129,10 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
     page.getByRole('list').getByRole('listitem').filter({ hasText: newLabel })
   ).toBeVisible({ timeout: 15_000 });
 
-  // ── Remove the round ────────────────────────────────────────────────────────────────────────
+  // ── Remove the round (two-step confirm since #499 — removal discards Scheduled heats) ───────
   const editedRow = page.getByRole('list').getByRole('listitem').filter({ hasText: newLabel });
   await editedRow.getByRole('button', { name: 'Remove' }).click();
+  await editedRow.getByRole('button', { name: /Confirm/ }).click();
   await expect(
     page.getByRole('list').getByRole('listitem').filter({ hasText: newLabel })
   ).toHaveCount(0, { timeout: 15_000 });
