@@ -824,14 +824,25 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(editMode.value).toBe('Static');
   });
 
-  it('removes a round via deleteRound', async () => {
+  it('removes a round only through the explicit confirm — one click arms, never deletes', async () => {
+    // Removing a round DISCARDS its still-Scheduled heats since #439, so the button is a
+    // two-step ConfirmButton (field, 2026-08-28): first click arms, Cancel disarms, and only
+    // the explicit Confirm fires deleteRound.
     const impls = baseImpls();
     const deleteRoundImpl = vi.fn(async (_b, _e, _id) => ({ ...EVENT, rounds: [] }));
     const { session } = makeTestSession({ ...impls, deleteRoundImpl, event: EVENT });
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    expect(deleteRoundImpl).not.toHaveBeenCalled();
 
+    // Cancel disarms without deleting.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(deleteRoundImpl).not.toHaveBeenCalled();
+
+    // Arm again and confirm — now, and only now, the round goes.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Confirm/ }));
     await waitFor(() => expect(deleteRoundImpl).toHaveBeenCalledTimes(1));
     expect(deleteRoundImpl.mock.calls[0][2]).toBe('r1');
     await waitFor(() => expect(session.currentEvent?.rounds).toEqual([]));

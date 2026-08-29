@@ -551,3 +551,55 @@ describe('TimerManager — a coincident frequency keeps its own catalog position
     expect(order.get(5880)).toBe(1); // Raceband's — the one the label uses
   });
 });
+
+describe('the post-add second look (#462, field 2026-08-28)', () => {
+  it('re-reads the registry after the reconciler sweep so a fresh RH timer is never stale', async () => {
+    // The bug: the reconciler grants a new RH timer its automatic dial AFTER the add's reload
+    // snapshot, so the screen saw no hold, never started its hold-poll, and the row sat stale on
+    // its pre-dial status until the RD navigated away and back. The fix takes one delayed quiet
+    // refresh; this drives the real dialog and asserts the second look happens and picks up the
+    // dialling state.
+    const added: Timer = {
+      id: 'rh-new',
+      name: 'Gate RH',
+      kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
+      status: 'Configured',
+      channel_capability: 'Flexible',
+      node_count: null,
+      available_channels: [],
+      manual_connect: false,
+      calibration: [],
+      disabled_nodes: []
+    } as unknown as Timer;
+    // Read 1: initial load. Read 2: the post-create reload (still pre-dial, unheld). Read 3+:
+    // the delayed second look — by now the reconciler has auto-held it and it is Connecting.
+    let reads = 0;
+    const listTimersImpl = vi.fn(async () => {
+      reads += 1;
+      if (reads <= 1) return [];
+      if (reads === 2) return [added];
+      return [{ ...added, manual_connect: true, status: 'Connecting' as Timer['status'] }];
+    });
+    const createTimerImpl = vi.fn(async () => added);
+    const { session } = makeTestSession({ listTimersImpl, createTimerImpl });
+    render(TimersPage, { session, onhome: noop });
+    await screen.findByRole('list', { name: 'Configured timers' });
+
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
+    const name = (await screen.findByLabelText('Timer name')) as HTMLInputElement;
+    await fireEvent.input(name, { target: { value: 'Gate RH' } });
+    const kind = (await screen.findByLabelText('Timer kind')) as HTMLSelectElement;
+    await fireEvent.change(kind, { target: { value: 'Rotorhazard' } });
+    const url = (await screen.findByLabelText('RotorHazard URL')) as HTMLInputElement;
+    await fireEvent.input(url, { target: { value: 'http://rh.local:5000' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add timer' }));
+    await waitFor(() => expect(createTimerImpl).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listTimersImpl.mock.calls.length).toBeGreaterThanOrEqual(2));
+
+    // The second look lands on its own — no navigation — and the row reads the live dial state.
+    await waitFor(() => expect(listTimersImpl.mock.calls.length).toBeGreaterThanOrEqual(3), {
+      timeout: 5000
+    });
+    await screen.findByText('Connecting', undefined, { timeout: 5000 });
+  });
+});
