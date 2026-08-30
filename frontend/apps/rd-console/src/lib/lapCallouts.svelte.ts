@@ -148,6 +148,14 @@ export function useLapCallouts(
 }
 
 /**
+ * How long after a competitor's SOUNDED tone their further crossings are absorbed (#503), in
+ * source-clock µs. Well under any real lap (the min-lap floor's field default is 10s) and well
+ * over a reflection burst's spread (tens to hundreds of ms), so it can only ever collapse a
+ * multi-detection of one physical pass, never silence a genuine next lap.
+ */
+export const CROSSING_TONE_COOLDOWN_MICROS = 1_000_000;
+
+/**
  * **New-crossing detection** for the per-crossing tone (#397) — the sibling of
  * {@link useLapCallouts} above, and the reason this module is no longer only about laps.
  *
@@ -161,7 +169,20 @@ export function useLapCallouts(
  * crossing whatever became of it — including a phantom on a seat nobody is flying. **That is the
  * feature**: a tone for a crossing that should not have happened is how an RD notices a
  * too-sensitive gate, and it is exactly what a table of laps will never show them. Nothing here
- * filters toward "meaningful" crossings.
+ * filters toward "meaningful" crossings — but repeats are rate-limited, see the cooldown below.
+ *
+ * ── The cooldown: one physical pass is ONE tone (#503) ───────────────────────────────────────
+ * A quad sitting in the gate's near field fires the detector several times per pass (antenna
+ * reflections milliseconds apart), and on the field that rendered as a pip storm per lap — the
+ * tone stopped answering "did the gate see me?" and started drowning the RD. So: a crossing by
+ * the SAME competitor within {@link CROSSING_TONE_COOLDOWN_MICROS} of the last one *sounded* for
+ * them is absorbed. Measured from the last sounded tone (an absorbed crossing does not extend
+ * the window), keyed **per competitor** — two pilots crossing near-simultaneously must both
+ * tone, that is the gate telling the RD it saw both. The window is source-clock (`at`), the axis
+ * bursts are adjacent on; a crossing carrying an *older* source time than the last sounded one
+ * (a marshal insert) is never absorbed. Absorbed crossings still advance the watermark — they
+ * are seen, just not sounded — and the min-lap floor still voids them on its own axis; this
+ * cooldown only de-duplicates the NOISE of them.
  *
  * ── The watermark: fire on IDENTITY, never on a frame arriving ───────────────────────────────
  * Every `LiveCrossing` carries `pass_ref` — its **global append offset**, stable across every
@@ -211,6 +232,9 @@ export function useCrossingTones(
   let scopeKey: string | undefined;
   let baselined = false;
   let watermark = -1;
+  // The source time (µs) of the last crossing SOUNDED per competitor — the cooldown's anchor
+  // (#503). Absorbed crossings never land here, so the window measures from the last tone.
+  const lastTonedAt = new Map<CompetitorRef, number>();
 
   $effect(() => {
     const scope = getScope();
@@ -224,6 +248,7 @@ export function useCrossingTones(
       scopeKey = scope;
       baselined = false;
       watermark = -1;
+      lastTonedAt.clear();
     }
     // First sight of this scope BASELINES: retire everything on offer, announce none of it.
     const announce = baselined && audible;
@@ -235,7 +260,17 @@ export function useCrossingTones(
     for (const crossing of crossings) {
       if (crossing.pass_ref <= previous) continue;
       if (crossing.pass_ref > next) next = crossing.pass_ref;
-      if (announce) onCrossing(crossing);
+      if (!announce) continue;
+      // The cooldown (#503): absorb a same-competitor crossing inside the window of their last
+      // SOUNDED tone. A negative delta (a marshal insert carrying an older source time) is a
+      // different case entirely and always tones; exactly-at-the-boundary tones too.
+      const last = lastTonedAt.get(crossing.competitor);
+      if (last !== undefined) {
+        const since = crossing.at - last;
+        if (since >= 0 && since < CROSSING_TONE_COOLDOWN_MICROS) continue;
+      }
+      lastTonedAt.set(crossing.competitor, crossing.at);
+      onCrossing(crossing);
     }
     watermark = next;
     baselined = true;

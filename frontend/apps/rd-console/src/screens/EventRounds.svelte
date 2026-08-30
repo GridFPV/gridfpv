@@ -59,6 +59,7 @@
   import { buildCompetitorNames } from '../lib/competitorName.js';
   import { collapseStore } from '../lib/collapse.svelte.js';
   import {
+    defaultChannelModeFor,
     defaultWinConditionKindFor,
     fieldsForFormat,
     formatLabel,
@@ -922,8 +923,20 @@
   const DEFAULT_POINTS_TABLE = [10, 6, 4, 3, 2, 1];
   let pointsTable = $state<number[]>([...DEFAULT_POINTS_TABLE]);
   // The round's channel mode (Static = fixed channels / channel-balanced heats; Per-heat = assigned
-  // per heat, for brackets). Defaulted by format on the backend; the toggle overrides it.
+  // per heat, for brackets). Seeded from the format's default (`defaultChannelModeFor`, #506) — the
+  // form always sends the field explicitly, so the backend's by-format default never applies and a
+  // flat 'PerHeat' seed silently overrode it; the toggle overrides the default per round.
   let channelMode = $state<ChannelMode>('PerHeat');
+  // The format whose channel-mode default is currently seeded — so a REAL format switch in the
+  // form re-seeds the picker to the new format's default (like the params re-seed above), while
+  // open/edit (which set this alongside `channelMode`) never clobbers a stored choice.
+  let channelModeFormat = $state('');
+  $effect(() => {
+    if (format !== channelModeFormat) {
+      channelModeFormat = format;
+      channelMode = defaultChannelModeFor(format);
+    }
+  });
   // ── Channel layouts this round may fly (#117 S3) ─────────────────────────────
   // A layout is one complete `node → channel` tuning of the event's timer, defined on the Channel
   // layouts page. A round NAMES the ones its heats may choose from, and the RD's strategy falls out
@@ -955,9 +968,11 @@
   let startMaxSeconds = $state(5); // randomized start hold: longest, in seconds (→ max_delay_ms)
   let graceSeconds = $state(30); // grace window after the win condition, in seconds
   // Min lap time (D26): raw crossings that would close a shorter lap are auto-removed (a gate
-  // reflection / double-detection), marshal-restorable. 0 = off; NEW rounds seed the
-  // field-standard 5s so a double-fire never fabricates a 0.004s best lap out of the box.
-  let minLapSeconds = $state(5);
+  // reflection / double-detection), marshal-restorable. 0 = off; NEW rounds seed 10s — matching
+  // RotorHazard's own default, which GridFPV deliberately neutralizes (#407) so this floor is the
+  // ONLY filter standing between a reflection burst and a 0.009s "lap" (#502; 5s let real bursts
+  // through in the field). The form flags a 0 loudly below, since off = completely unfiltered.
+  let minLapSeconds = $state(10);
   // ── Protest window (marshaling Slice 5) ──────────────────────────────────────
   // The **auto-official timer**, in seconds. 0 (the default) = OFF: the result stays provisional
   // (Unofficial) until the RD finalizes manually — today's behaviour. A positive value arms the
@@ -1120,7 +1135,11 @@
     paramValues = {};
     pointsTable = [...DEFAULT_POINTS_TABLE];
     lastParamFormat = ''; // force the format effect to re-seed the new format's params
-    channelMode = 'PerHeat';
+    // The format's own default (#506): Static for a Time Trial (whole-round channel-balanced
+    // generation), Per-heat for brackets. Seeded together with `channelModeFormat` so the format
+    // effect treats this as the current seed, not a switch.
+    channelMode = defaultChannelModeFor(format);
+    channelModeFormat = format;
     roundLayouts = [];
     // Heat-lifecycle config defaults — match the engine (5:00 staging, 2.0–5.0s start, 30s grace).
     stagingMinutes = 5;
@@ -1128,7 +1147,7 @@
     startMinSeconds = 2;
     startMaxSeconds = 5;
     graceSeconds = 30;
-    minLapSeconds = 5;
+    minLapSeconds = 10;
     protestSeconds = 0; // off by default — manual finalize only
     timeLimitMinutes = ''; // blank = no limit
   }
@@ -1151,7 +1170,11 @@
     paramValues = { ...(round.params ?? {}) };
     pointsTable = parsePointsTable(round.params?.points);
     lastParamFormat = ''; // force the format effect to re-seed against this round's format
-    channelMode = round.channel_mode ?? 'PerHeat';
+    // The stored mode, verbatim; a round persisted without one falls to its format's default —
+    // exactly what the backend applied at creation. `channelModeFormat` is set alongside so the
+    // format effect doesn't count this open as a switch and clobber the stored choice.
+    channelMode = round.channel_mode ?? defaultChannelModeFor(round.format);
+    channelModeFormat = round.format;
     roundLayouts = [...(round.layouts ?? [])];
 
     const wc = round.win_condition;
@@ -1210,6 +1233,9 @@
     const grace = round.grace_window;
     graceSeconds =
       grace && typeof grace !== 'string' ? Math.round(grace.Duration.micros / 1_000_000) : 30;
+    // A round stored without a floor (`None`, the wire's normalization of 0) reads back as 0 —
+    // that IS its state, so reflect it honestly rather than silently re-seeding a default the
+    // round doesn't have; the field's floor-off warning below is what makes it loud (#502).
     minLapSeconds = round.min_lap_secs ?? 0;
 
     // Protest window (marshaling Slice 5): reflect an `After { micros }` back as seconds; `Off` (or a
@@ -2120,8 +2146,8 @@
         <Field
           label="Channel mode"
           hint={channelMode === 'Static'
-            ? 'Static = each pilot’s fixed channel; heats are channel-balanced (time-trial / qualifying).'
-            : 'Per-heat = channels assigned per heat from the timer’s pool.'}
+            ? 'Static = each pilot’s fixed channel; the whole round’s heats generate up front, channel-balanced (time-trial / qualifying). Every pilot in the class needs an assigned channel.'
+            : 'Per-heat = channels assigned per heat from the timer’s pool; heats generate one at a time as results land.'}
         >
           <Select bind:value={channelMode} aria-label="Channel mode">
             <option value="Static">Static</option>
@@ -2312,6 +2338,9 @@
           <Field
             label="Min lap time (seconds)"
             hint="Crossings closing a shorter lap are auto-removed (marshal-restorable). 0 = off."
+            error={Number(minLapSeconds) > 0
+              ? undefined
+              : 'Floor OFF — every crossing counts as a lap, gate reflections included.'}
           >
             <Input type="number" min="0" bind:value={minLapSeconds} aria-label="Min lap seconds" />
           </Field>
