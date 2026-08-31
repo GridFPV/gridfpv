@@ -194,6 +194,50 @@ fn gen_check() -> bool {
     clean
 }
 
+/// Drift check for `ci`: the **src-tauri lockfile** must be current (#513 follow-up). The
+/// desktop app is a standalone workspace whose lock covers the main workspace's crates as path
+/// deps — and this dev box never *builds* Tauri (headless), so the lock only ever re-resolved
+/// on the CI runners, where cargo rewrote the tracked file mid-build ("Locking 55 packages"),
+/// dirtied the tree, and the build stamp truthfully — uselessly — reported every portable as
+/// `-dirty`. A stale lock would also demote a *tagged release* build to dev naming. Resolution
+/// needs no system deps (`cargo metadata` never compiles), so it runs on every `ci` like the
+/// gen/barrel drift twins: refresh, then fail if the tracked lock moved.
+fn tauri_lock_check() -> bool {
+    let root = workspace_root();
+    let root_str = root.to_str().expect("workspace root path is valid UTF-8");
+    let src_tauri = root.join("src-tauri");
+    let resolved = std::process::Command::new("cargo")
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(&src_tauri)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !resolved {
+        eprintln!("tauri-lock: `cargo metadata` failed in src-tauri/");
+        return false;
+    }
+    let clean = run(
+        "git",
+        &[
+            "-C",
+            root_str,
+            "diff",
+            "--exit-code",
+            "--",
+            "src-tauri/Cargo.lock",
+        ],
+    );
+    if !clean {
+        eprintln!(
+            "\n\x1b[31mtauri-lock drift: src-tauri/Cargo.lock is out of date with the workspace \
+             crates.\x1b[0m\nCommit the refreshed lock (this check just rewrote it), or the CI \
+             release build re-locks mid-build and stamps the portable -dirty."
+        );
+    }
+    clean
+}
+
 /// The frontend barrel that must re-export **every** generated binding (#410).
 const BARREL: &str = "frontend/packages/types/src/generated.ts";
 
@@ -884,7 +928,18 @@ fn main() {
         "barrel" => barrel_check(),
         // Type-check the Docker-gated live targets without running them (see `live_check`).
         "live-check" => live_check(),
-        "ci" => fmt() && lint() && test() && live_check() && gen_check() && barrel_check(),
+        // The src-tauri lock drift twin (#513): a stale lock re-resolves mid-CI-build and
+        // stamps every portable -dirty. See [`tauri_lock_check`].
+        "tauri-lock" => tauri_lock_check(),
+        "ci" => {
+            fmt()
+                && lint()
+                && test()
+                && live_check()
+                && gen_check()
+                && barrel_check()
+                && tauri_lock_check()
+        }
         // The RotorHazard version × plugin live matrix; bare `live` runs all four legs.
         "live" => live(&args[1..]),
         // The browser e2e suite, in Microsoft's Playwright image (#426). See `docker/playwright/`.
