@@ -145,8 +145,11 @@ fn counted_crossings_carry_the_lap_number_the_lap_list_gives_them() {
 
     // Cross-check against the lap projection: a counted crossing's `pass_ref` is the `end_ref` of
     // the lap it is labelled with.
-    let laps =
-        lap_list_marshaled_with_floor(with_offsets(&events).iter().map(|(o, e)| (*o, e)), None);
+    let laps = lap_list_marshaled_with_floor(
+        with_offsets(&events).iter().map(|(o, e)| (*o, e)),
+        None,
+        None,
+    );
     let a = laps
         .competitors
         .iter()

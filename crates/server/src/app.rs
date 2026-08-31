@@ -2636,6 +2636,13 @@ async fn snapshot_heat(
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled_with_floor(
             heat_offsets.iter().map(|(o, e)| (*o, e)),
             min_lap_micros,
+            // The grace rule's boundary (#505): the heat's standing RaceExpired marker,
+            // resolved from the same window the fold reads — like the floor, it must reach
+            // the laps, live, and result folds identically or the surfaces disagree.
+            gridfpv_projection::race_expired_offset(
+                heat_offsets.iter().map(|(o, e)| (*o, e)),
+                &heat,
+            ),
         )),
         HeatProjection::Audit => {
             // The defensible-results audit panel: fold the heat's rulings into a reverse-chrono
@@ -2877,6 +2884,9 @@ pub(crate) fn score_heat_window(
     let corrected = gridfpv_projection::corrected_passes_with_floor(
         heat_offsets.iter().map(|(o, e)| (*o, e)),
         min_lap_micros,
+        // The grace rule (#505) applies to the SCORE exactly as to the lap list: the pass
+        // chain the scorer ranks is the one the marshaling view shows, marker rule included.
+        gridfpv_projection::race_expired_offset(heat_offsets.iter().map(|(o, e)| (*o, e)), heat),
     );
     let race_start = corrected
         .iter()

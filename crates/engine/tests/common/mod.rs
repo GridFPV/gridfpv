@@ -103,8 +103,8 @@ fn wait_until(
 ///    events such as lifecycle/`CompetitorSeen` are dropped — only `Pass`es are kept).
 ///
 /// Folding the result with [`gridfpv_engine::heat::heat_state`] yields
-/// [`HeatState::Final`]; the passes all fall in the live window, so cross-checking
-/// each pass's surrounding state with [`gridfpv_engine::heat::consumes_pass`] holds.
+/// [`HeatState::Final`], and the passes all fall inside the `Running` window (the
+/// bridge's emission rule — a heat off `Running` emits no passes).
 ///
 /// Timing is tolerant: it waits for RH to reach `RACING` and for at least one pass,
 /// but never asserts exact lap times. The [`RhContainer`] is torn down on return.

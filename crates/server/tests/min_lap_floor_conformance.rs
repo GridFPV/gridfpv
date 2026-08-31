@@ -588,3 +588,229 @@ async fn the_event_scope_stream_labels_the_sub_floor_echo_rejected() {
     assert_eq!(rejected[0].competitor, rig.echoing);
     assert_eq!(rejected[0].at, SourceTime::from_micros(SECOND));
 }
+
+// ---------------------------------------------------------------------------------------
+// The grace rule (#505), executed the same way.
+// ---------------------------------------------------------------------------------------
+
+/// What every surface must report once the grace rule bites: each pilot's one allowed
+/// post-marker crossing lands (the grace lap), and the echoing pilot's SECOND post-marker
+/// crossing does not.
+const ECHO_GRACE_LAPS: u32 = FLOORED_LAPS + 1;
+const CLEAN_GRACE_LAPS: u32 = CLEAN_LAPS + 1;
+/// What a fold WITHOUT the grace rule would report for the echoing pilot (both post-marker
+/// crossings counted) — the divergent value that keeps this test from being a tautology.
+const ECHO_LAWLESS_LAPS: u32 = FLOORED_LAPS + 2;
+
+/// **#505** — the `RaceExpired` marker's grace rule is *"applied identically in the lap list,
+/// the live view, and every scoring path"*, exactly as D26's floor is: one marker, one allowed
+/// crossing per pilot, nine readings of the same number. The marker offset is resolved per call
+/// site (`race_expired_offset`, the floor's `min_lap_micros_of` pattern), so this is the test
+/// that fails the day any surface folds without it.
+#[tokio::test]
+async fn the_grace_rule_is_identical_on_every_surface_that_reports_a_lap_count() {
+    use gridfpv_projection::CrossingDisposition;
+
+    let rig = rig();
+
+    // The race window expires (the driver would append this at the buzzer; the conformance
+    // property does not care about the instant, only the ordering), then each pilot takes the
+    // one crossing the grace allows — and the echoing pilot takes one more, which must not
+    // count anywhere.
+    let pass = |competitor: &CompetitorRef, at: i64, sequence: u64| {
+        Event::Pass(Pass {
+            adapter: AdapterId("sim".into()),
+            competitor: competitor.clone(),
+            at: SourceTime::from_micros(at),
+            sequence: Some(sequence),
+            gate: GateIndex::LAP,
+            signal: None,
+            heat: Some(rig.heat.clone()),
+        })
+    };
+    let appends = vec![
+        Event::RaceExpired {
+            heat: rig.heat.clone(),
+            deadline: Some(1),
+        },
+        pass(&rig.echoing, 55 * SECOND, 6), // the echoing pilot's grace lap: counts
+        pass(&rig.clean, 56 * SECOND, 7),   // the clean pilot's grace lap: counts
+        pass(&rig.echoing, 70 * SECOND, 8), // one crossing past the allowance: void
+    ];
+    let mut tail = rig.tail;
+    for event in appends {
+        rig.state.append(event, None).expect("append");
+        tail += 1;
+    }
+
+    let (base, _server) = serve(&rig.registry).await;
+    let mut event_ws = subscribe(
+        &base,
+        &rig.event,
+        Scope::Event {
+            event: rig.event.clone(),
+        },
+        tail,
+    )
+    .await;
+    let mut class_ws = subscribe(
+        &base,
+        &rig.event,
+        Scope::Class {
+            event: rig.event.clone(),
+            class: rig.class.clone(),
+        },
+        tail,
+    )
+    .await;
+    let mut heat_ws = subscribe(
+        &base,
+        &rig.event,
+        Scope::Heat {
+            heat: rig.heat.clone(),
+        },
+        tail,
+    )
+    .await;
+
+    finish_heat(&rig);
+
+    let stream_event = settled_live_of(&mut event_ws).await;
+    let stream_class = settled_live_of(&mut class_ws).await;
+    let stream_heat = settled_live_of(&mut heat_ws).await;
+
+    // The lap list: the reference surface.
+    let laps: Snapshot = get_json(
+        &rig.registry,
+        &format!(
+            "/events/{}/snapshot/heat/{}?projection=laps",
+            rig.event.0, rig.heat.0
+        ),
+    )
+    .await;
+    let lap_list = match laps.body {
+        ProjectionBody::LapList(list) => list,
+        other => panic!("expected a LapList, got {other:?}"),
+    };
+    let mut from_lap_list: Counts = Counts::new();
+    for competitor in &lap_list.competitors {
+        *from_lap_list
+            .entry(competitor.competitor.competitor.clone())
+            .or_insert(0) += competitor.lap_count() as u32;
+    }
+    assert_eq!(
+        from_lap_list.get(&rig.echoing).copied(),
+        Some(ECHO_GRACE_LAPS),
+        "the grace lap counts; the crossing past the allowance does not (#505)"
+    );
+    assert_ne!(
+        ECHO_GRACE_LAPS, ECHO_LAWLESS_LAPS,
+        "the fixture must contain a post-allowance crossing the rule actually removes"
+    );
+
+    let result: Snapshot = get_json(
+        &rig.registry,
+        &format!(
+            "/events/{}/snapshot/heat/{}?projection=result",
+            rig.event.0, rig.heat.0
+        ),
+    )
+    .await;
+    let from_heat_result: Counts = match result.body {
+        ProjectionBody::HeatResult(result) => result
+            .places
+            .iter()
+            .map(|p| (p.competitor.competitor.clone(), p.laps))
+            .collect(),
+        other => panic!("expected a HeatResult, got {other:?}"),
+    };
+    let standings: Vec<RoundStanding> = get_json(
+        &rig.registry,
+        &format!(
+            "/events/{}/rounds/{}/standings",
+            rig.event.0, rig.round.id.0
+        ),
+    )
+    .await;
+    let from_round_standings: Counts = standings
+        .iter()
+        .map(|s| (s.competitor.clone(), s.laps))
+        .collect();
+
+    let snapshot_of = |uri: String| {
+        let registry = rig.registry.clone();
+        async move { snapshot_live(get_json::<Snapshot>(&registry, &uri).await) }
+    };
+    let snapshot_event = snapshot_of(format!("/events/{0}/snapshot/event/{0}", rig.event.0)).await;
+    let snapshot_class = snapshot_of(format!(
+        "/events/{0}/snapshot/class/{0}/{1}",
+        rig.event.0, rig.class.0
+    ))
+    .await;
+    let snapshot_heat = snapshot_of(format!(
+        "/events/{}/snapshot/heat/{}",
+        rig.event.0, rig.heat.0
+    ))
+    .await;
+
+    let surfaces: Vec<(&str, Counts)> = vec![
+        ("lap list (heat snapshot, ?projection=laps)", from_lap_list),
+        (
+            "scoring — heat result (?projection=result)",
+            from_heat_result,
+        ),
+        ("scoring — round standings", from_round_standings),
+        (
+            "live — event scope, HTTP snapshot",
+            counts_of_live(&snapshot_event),
+        ),
+        (
+            "live — class scope, HTTP snapshot",
+            counts_of_live(&snapshot_class),
+        ),
+        (
+            "live — heat scope, HTTP snapshot",
+            counts_of_live(&snapshot_heat),
+        ),
+        (
+            "live — event scope, change stream",
+            counts_of_live(&stream_event),
+        ),
+        (
+            "live — class scope, change stream",
+            counts_of_live(&stream_class),
+        ),
+        (
+            "live — heat scope, change stream",
+            counts_of_live(&stream_heat),
+        ),
+    ];
+    let expected: Counts = Counts::from([
+        (rig.echoing.clone(), ECHO_GRACE_LAPS),
+        (rig.clean.clone(), CLEAN_GRACE_LAPS),
+    ]);
+    for (name, counts) in &surfaces {
+        assert_eq!(
+            counts, &expected,
+            "#505: {name} disagrees about the lap count under the grace rule. The RaceExpired \
+             marker must be applied identically in the lap list, the live view, and every \
+             scoring path — a lawless fold would count the echoing pilot's post-allowance \
+             crossing as a {ECHO_LAWLESS_LAPS}th lap."
+        );
+    }
+
+    // And the push path labels the post-allowance crossing for what it is: the gate fired,
+    // the RD hears it, and the disposition says it no longer scores (#397's rule, extended).
+    let after: Vec<_> = stream_event
+        .crossings
+        .iter()
+        .filter(|c| c.disposition == CrossingDisposition::RejectedAfterRaceEnd)
+        .collect();
+    assert_eq!(
+        after.len(),
+        1,
+        "the stream must label the post-allowance crossing RejectedAfterRaceEnd"
+    );
+    assert_eq!(after[0].competitor, rig.echoing);
+    assert_eq!(after[0].at, SourceTime::from_micros(70 * SECOND));
+}

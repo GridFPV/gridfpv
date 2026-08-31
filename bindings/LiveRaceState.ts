@@ -89,6 +89,17 @@ staged_at?: number,
  */
 tone_at?: number, 
 /**
+ * The current heat's **grace deadline** while its race window has expired but the heat is
+ * still `Running` (#505): the logged `deadline` of its latest
+ * [`RaceExpired`](gridfpv_events::Event::RaceExpired) marker — the server wall-clock instant
+ * (microseconds since the Unix epoch) at which the runtime closes the heat if pilots are
+ * still out. The console's "grace" countdown anchors here, exactly as the auto-official
+ * countdown anchors on the `HeatFinalizing` deadline. `None` before the race window expires,
+ * in every non-`Running` phase, and for an unbounded (`UntilScored`) grace — whose marker
+ * carries no deadline. Renders as a plain TS `number` (microseconds).
+ */
+grace_deadline?: number, 
+/**
  * The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
  * marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
  * `Unofficial` phase (before that there is no result to be provisional about). Once provisional

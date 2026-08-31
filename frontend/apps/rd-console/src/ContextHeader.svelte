@@ -121,6 +121,13 @@
   const remainingMs = $derived(
     windowMicros !== undefined ? windowMicros / 1000 - clock.elapsedMs : undefined
   );
+  // The GRACE countdown (#505) — the same derivation the HUD uses: once the server logs the
+  // RaceExpired marker its deadline supersedes the (now-negative) window clock.
+  const graceRemainingMs = $derived(
+    live?.grace_deadline != null && live?.race_started_at != null
+      ? (live.grace_deadline - live.race_started_at) / 1000 - clock.elapsedMs
+      : undefined
+  );
 </script>
 
 <div class="ctx-bar" aria-label="Event context">
@@ -157,7 +164,9 @@
       {/if}
       {#if showClock}
         <span class="ctx-clock">
-          {#if remainingMs !== undefined}
+          {#if graceRemainingMs !== undefined}
+            <RaceClock remainingMs={graceRemainingMs} label="Grace remaining" />
+          {:else if remainingMs !== undefined}
             <RaceClock {remainingMs} label="Time remaining" />
           {:else}
             <RaceClock elapsedMs={clock.elapsedMs} label="Heat time" />

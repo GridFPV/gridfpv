@@ -68,6 +68,10 @@ impl Cursor {
 /// > fully-typed [`ProjectionBody`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
+// An envelope is built once per push and immediately serialized — boxing the body would buy a
+// smaller stack copy at the cost of pattern-matching through the Box at every consumer, for a
+// value that never sits in a collection.
+#[allow(clippy::large_enum_variant)]
 pub enum Change {
     /// An incremental delta against the projection named by the envelope's
     /// [`ChangeEnvelope::projection`]. Placeholder encoding (`serde_json::Value`) until

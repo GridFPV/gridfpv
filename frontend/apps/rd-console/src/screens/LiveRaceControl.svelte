@@ -514,10 +514,20 @@
   const windowMicros = $derived(fixedEndWindowMicros(currentRound));
 
   // The HUD clock: a fixed-end heat counts DOWN from the window — past zero it runs negative
-  // (the grace window: late crossings still score) and the RaceClock styles it red, with a
-  // warn-yellow closing stretch before the buzzer. No fixed end ⇒ the classic count-up.
+  // and the RaceClock styles it red, with a warn-yellow closing stretch before the buzzer. No
+  // fixed end ⇒ the classic count-up.
   const remainingMs = $derived(
     windowMicros !== undefined ? windowMicros / 1000 - elapsedMs : undefined
+  );
+  // The GRACE countdown (#505): once the server logs the RaceExpired marker, its deadline is
+  // the clock that matters — the race window has hit zero and what remains is each pilot's one
+  // finish-the-lap crossing. Anchored to `race_started_at` so it ticks off the same server
+  // race-go every other clock uses (no per-client wall-clock drift). `None` before expiry,
+  // once the heat closes (phase-gated server-side), and for an unbounded UntilScored grace.
+  const graceRemainingMs = $derived(
+    live?.grace_deadline != null && live?.race_started_at != null
+      ? (live.grace_deadline - live.race_started_at) / 1000 - elapsedMs
+      : undefined
   );
 
   let muted = $state(audio.muted);
@@ -622,9 +632,23 @@
     </div>
 
     <div class="hud-clock">
-      <span class="label">{remainingMs !== undefined ? 'Remaining' : 'Heat time'}</span>
+      <span class="label"
+        >{graceRemainingMs !== undefined
+          ? 'Grace'
+          : remainingMs !== undefined
+            ? 'Remaining'
+            : 'Heat time'}</span
+      >
       <div class="clock">
-        {#if remainingMs !== undefined}
+        {#if graceRemainingMs !== undefined}
+          <!-- The grace window is open (#505): pilots may only finish the lap they were flying,
+               and this counts down to the server's logged deadline. -->
+          <RaceClock remainingMs={graceRemainingMs} label="Grace remaining" />
+          <div class="clock-elapsed" data-testid="elapsed-subclock">
+            <span class="clock-elapsed-label">Elapsed</span>
+            <RaceClock {elapsedMs} label="Elapsed" />
+          </div>
+        {:else if remainingMs !== undefined}
           <RaceClock {remainingMs} label="Time remaining" />
           <!-- The companion ELAPSED readout: lap times are elapsed-from-zero quantities, so a
                countdown alone makes "was that a 21 or a 24?" mental math — the small count-up

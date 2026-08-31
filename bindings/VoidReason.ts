@@ -3,4 +3,4 @@
 /**
  * Why a pass sits on the removal record instead of the lap chain.
  */
-export type VoidReason = "Marshal" | "UnderMinLap";
+export type VoidReason = "Marshal" | "UnderMinLap" | "AfterRaceEnd";
