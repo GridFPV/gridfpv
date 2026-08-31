@@ -26,8 +26,9 @@ let version = $state<string | undefined>(undefined);
 let asked = false;
 
 /**
- * The Director's version string (`"0.4.0-alpha.1"`), or `undefined` until the read lands — or for
- * good, if it never does. Reading this the first time starts the fetch.
+ * The Director's version string — a release's standard name (`"0.4.0-alpha.1"`) or a
+ * non-release build's commit stamp (`"0.4.0-dev-<short hash>"`, #513) — or `undefined` until
+ * the read lands, or for good, if it never does. Reading this the first time starts the fetch.
  */
 export function directorVersion(): string | undefined {
   if (!asked) {

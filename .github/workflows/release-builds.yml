@@ -42,7 +42,14 @@ jobs:
             portable-path: src-tauri/target/release/gridfpv-desktop
 
     steps:
+      # fetch-tags is load-bearing for the build stamp (#513): a build names itself by its
+      # release version only when HEAD sits exactly on a clean v* tag, so the tags must be
+      # present in the checkout. Dispatch this workflow FROM the tagged commit to produce a
+      # release-named build; a dispatch from an untagged commit correctly produces the
+      # 0.4.0-dev-<short hash> naming (the dev-* prerelease portables).
       - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
 
       # Linux-only: Tauri's webkit2gtk/GTK system deps (Windows uses the bundled
       # WebView2 runtime and needs none of these). Mirror src-tauri/README.md.
