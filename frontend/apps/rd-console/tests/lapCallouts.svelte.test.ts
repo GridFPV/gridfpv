@@ -569,4 +569,51 @@ describe('useCrossingTones', () => {
     expect(h.toned[2]).toEqual(inserted);
     h.cleanup();
   });
+
+  it('absorbs a same-competitor reflection burst into ONE tone (#503)', () => {
+    // One physical pass, five detections milliseconds apart (a quad in the gate's near field).
+    // The field rendered this as a pip storm per lap; the tone must answer "did the gate see
+    // me?" once. Explicit `at` values — the cooldown runs on the source clock, not offsets.
+    const h = harness();
+    const burst = [
+      { ...crossing(80, 'maverick-1', 'Counted', 1), at: 10_000_000 },
+      { ...crossing(81, 'maverick-1', 'RejectedTooShort'), at: 10_061_000 },
+      { ...crossing(82, 'maverick-1', 'RejectedTooShort'), at: 10_193_000 },
+      { ...crossing(83, 'maverick-1', 'RejectedTooShort'), at: 10_254_000 },
+      { ...crossing(84, 'maverick-1', 'RejectedTooShort'), at: 10_487_000 }
+    ];
+    h.set({ crossings: burst });
+    expect(h.toned).toEqual([burst[0]]);
+
+    // The next genuine lap — 17s later, far past the cooldown — tones again.
+    const nextLap = { ...crossing(85, 'maverick-1', 'Counted', 2), at: 27_500_000 };
+    h.set({ crossings: [...burst, nextLap] });
+    expect(h.toned).toEqual([burst[0], nextLap]);
+    h.cleanup();
+  });
+
+  it('measures the cooldown from the last SOUNDED tone — an absorbed crossing does not extend it', () => {
+    const h = harness();
+    const t0 = { ...crossing(90, 'maverick-1', 'Counted', 1), at: 10_000_000 };
+    const absorbed = { ...crossing(91, 'maverick-1', 'RejectedTooShort'), at: 10_800_000 };
+    // 1.2s after t0 but only 0.4s after the absorbed crossing: the window anchors on the TONE,
+    // so this fires. (A storm that never pauses must not silence the gate indefinitely.)
+    const clear = { ...crossing(92, 'maverick-1', 'RejectedTooShort'), at: 11_200_000 };
+    h.set({ crossings: [t0] });
+    h.set({ crossings: [t0, absorbed] });
+    h.set({ crossings: [t0, absorbed, clear] });
+    expect(h.toned).toEqual([t0, clear]);
+    h.cleanup();
+  });
+
+  it('cools down PER COMPETITOR — two pilots crossing near-simultaneously both tone', () => {
+    // The gate telling the RD it saw both pilots is the point of the feature; only repeats of
+    // the SAME competitor are noise.
+    const h = harness();
+    const mav = { ...crossing(95, 'maverick-1', 'Counted', 1), at: 10_000_000 };
+    const goose = { ...crossing(96, 'goose-2', 'Counted', 1), at: 10_050_000 };
+    h.set({ crossings: [mav, goose] });
+    expect(h.toned).toEqual([mav, goose]);
+    h.cleanup();
+  });
 });

@@ -112,6 +112,22 @@ export const WIN_CONDITION_LABELS: Readonly<Record<WinConditionKind, string>> = 
 };
 
 /**
+ * The **default channel mode** for a format — the mirror of the backend's
+ * `ChannelMode::default_for_format` (race redesign Slice 7a): the static fixed-channel qualifying
+ * formats (`timed_qual`, `round_robin`) default to **Static** — their whole schedule is
+ * channel-balanced up front, so "Generate heats" materializes every rotation at once — and every
+ * other format (brackets, multi-main, head-to-head) to **Per-heat**.
+ *
+ * The form MUST seed its picker from this rather than a flat `'PerHeat'`: it always sends
+ * `channel_mode` explicitly, so the backend's by-format default never gets to apply, and a Time
+ * Trial hardcoded to Per-heat degenerated to one-heat-at-a-time generation (#506 — the per-heat
+ * generator only advances a rotation once the previous rotation's heats are finalized).
+ */
+export function defaultChannelModeFor(format: string | undefined | null): 'Static' | 'PerHeat' {
+  return format === TIMED_QUAL || format === 'round_robin' ? 'Static' : 'PerHeat';
+}
+
+/**
  * The three **round types** the Add-round picker offers (D17 taxonomy): Practice ({@link OPEN_PRACTICE}),
  * Time Trial (`timed_qual`), and Head-to-Head ({@link HEAD_TO_HEAD}). Everything an RD flies directly is
  * one of these. Tournament *structures* (round-robin, single/double elim, multi-main) are **not** round

@@ -171,10 +171,15 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
     const m = /(\d+):(\d+)\.(\d+)/.exec(t ?? '');
     return m ? (+m[1] * 60 + +m[2]) * 1000 + +m[3] : NaN;
   };
-  const hudClockLive = page.locator('.hud-clock .gridfpv-race-clock');
+  // The round is a timed_qual with a 60s race time, so since #504 BOTH clocks count DOWN
+  // ("Time remaining") — the HUD renders the countdown as its primary clock plus the small
+  // companion elapsed subclock, so the locator scopes to the primary (direct child of .clock).
+  const hudClockLive = page.locator('.hud-clock .clock > .gridfpv-race-clock');
   const headerClockLive = page.locator('.ctx-clock .gridfpv-race-clock');
   await expect(hudClockLive).toBeVisible();
   await expect(headerClockLive).toBeVisible();
+  // The countdown's companion elapsed readout is there too (#504) — lap arithmetic at a glance.
+  await expect(page.getByTestId('elapsed-subclock')).toBeVisible();
   // Leave Live (remounting nothing in the header — it is persistent), then return so the HUD clock
   // mounts fresh well after race-go.
   await page.getByRole('button', { name: /Results/ }).click();
@@ -186,8 +191,10 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   const hudMid = parseClock(await hudClockLive.textContent());
   const headerMid = parseClock(await headerClockLive.textContent());
   expect(Math.abs(hudMid - headerMid)).toBeLessThan(150);
-  // And it must read the REAL elapsed (well past 0), proving it counted from race-go not arrival.
+  // And the countdown must be genuinely under way (well inside the 60s window, not at a mount-time
+  // 60.0), proving it anchored to race-go not arrival.
   expect(hudMid).toBeGreaterThan(1000);
+  expect(hudMid).toBeLessThan(59_000);
 
   // ── End the window: the ForceEnd command, whose button reads **Stop** to the RD (the wire tag is
   //    unchanged; `actionLabel` renames it) — the runtime-clock override for the old manual "Finish". ──
@@ -198,7 +205,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // The race has ended (only the result isn't finalized yet), so the heat clock stops at the
   // race-end instant instead of free-running. Read the HUD clock right after the transition, wait,
   // and assert it has NOT advanced. The persistent header clock (#85) mirrors the same source.
-  const hudClock = page.locator('.hud-clock .gridfpv-race-clock');
+  const hudClock = page.locator('.hud-clock .clock > .gridfpv-race-clock');
   const headerClock = page.locator('.ctx-clock .gridfpv-race-clock');
   await expect(hudClock).toBeVisible();
   // The header clock stays VISIBLE on end too — it no longer vanishes the instant the race closes

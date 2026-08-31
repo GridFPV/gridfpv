@@ -482,6 +482,40 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.min_lap_secs).toBe(0); // 0 = off, normalized server-side to None
   });
 
+  it('a NEW round seeds the 10s min-lap floor, and a floor of 0 warns loudly (#502)', async () => {
+    // The floor is the ONLY filter between a reflection burst and a recorded 0.009s lap — RH's
+    // own min-lap rule is deliberately neutralized (#407). 5s let real bursts through in the
+    // field; 10s matches the RH default. And a round whose floor is OFF must say so: the field
+    // day's unfiltered practice round looked identical to a configured one.
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    const minLap = screen.getByLabelText('Min lap seconds') as HTMLInputElement;
+    expect(minLap.value).toBe('10');
+    expect(screen.queryByRole('alert')).toBeNull();
+    await fireEvent.input(minLap, { target: { value: '0' } });
+    expect(screen.getByRole('alert').textContent).toMatch(/Floor OFF/);
+    await fireEvent.input(minLap, { target: { value: '10' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('editing a round with NO stored floor shows 0 with the floor-off warning, not a default (#502)', async () => {
+    // A round persisted before the field existed (or normalized to None) genuinely HAS no floor.
+    // Re-seeding a default here would silently turn filtering on behind the RD's back; showing 0
+    // with the warning tells the truth and makes the state loud.
+    const unfloored: RoundDef = { ...QUAL, min_lap_secs: undefined };
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      event: { ...EVENT, rounds: [unfloored] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect((screen.getByLabelText('Min lap seconds') as HTMLInputElement).value).toBe('0');
+    expect(screen.getByRole('alert').textContent).toMatch(/Floor OFF/);
+  });
+
   it('a configured start TONE survives an edit the form never touched (verbatim round-trip)', async () => {
     // The form models only the min/max delay; the server replaces the round WHOLESALE on
     // update — so rebuilding start_procedure from the two inputs silently ERASED a stored
@@ -618,7 +652,11 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     });
   });
 
-  it('defaults the channel-mode toggle to Per-heat on a new round and carries the choice', async () => {
+  it('defaults the channel-mode toggle by FORMAT and re-seeds it on a format switch (#506)', async () => {
+    // The form always sends `channel_mode` explicitly, so its seed IS the effective default —
+    // a flat 'PerHeat' seed silently overrode the backend's by-format default and a Time Trial
+    // degenerated to one-heat-at-a-time generation. The picker must open on the format's own
+    // default (Static for timed_qual) and follow a real format switch, like the params re-seed.
     const impls = baseImpls();
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
     const { session } = makeTestSession({
@@ -628,16 +666,37 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     });
     render(EventRounds, { session });
 
+    // A new round opens on Time Trials — whose default is Static (whole-round generation).
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     const mode = (await screen.findByLabelText('Channel mode')) as HTMLSelectElement;
+    expect(mode.value).toBe('Static');
+    // Switching to Head-to-Head re-seeds the bracket default; switching back re-seeds Static.
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
     expect(mode.value).toBe('PerHeat');
-    await fireEvent.input(screen.getByLabelText('Label'), { target: { value: 'Q' } });
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    expect(mode.value).toBe('Static');
+    // The RD's explicit choice still rides the request verbatim.
+    await fireEvent.input(screen.getByLabelText('Label'), { target: { value: 'Q' } });
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
-    await fireEvent.change(mode, { target: { value: 'Static' } });
+    await fireEvent.change(mode, { target: { value: 'PerHeat' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
-    expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('Static');
+    expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('PerHeat');
+  });
+
+  it('editing keeps a stored channel mode that differs from the format default (no clobber)', async () => {
+    // A Time Trial an RD deliberately set to Per-heat must read back Per-heat — the format
+    // effect re-seeds only on a REAL format switch, never on open (#506).
+    const perHeatQual: RoundDef = { ...QUAL, channel_mode: 'PerHeat' };
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      event: { ...EVENT, rounds: [perHeatQual] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const mode = (await screen.findByLabelText('Channel mode')) as HTMLSelectElement;
+    expect(mode.value).toBe('PerHeat');
   });
 
   it('for a qualifying format, the win condition IS the metric — Best-of-N only, no separate metric field', async () => {
