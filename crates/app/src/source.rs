@@ -1007,7 +1007,9 @@ fn handle_transition(
             });
         }
         // Any transition that takes the heat off `Running` stops its emission. The bridge
-        // only emits while `Running`, mirroring `consumes_pass` (race-engine §2).
+        // only emits while `Running` — which is why the grace window (#505) holds the heat
+        // IN `Running` after RaceExpired rather than reopening a closed one: a pilot's
+        // finish-the-lap crossing must still be on the log for the corrected fold to keep.
         HeatTransition::Finished
         | HeatTransition::Aborted
         | HeatTransition::Finalized
@@ -1518,20 +1520,8 @@ fn runtime_rng() -> u64 {
 /// **first lap-gate pass** while `Running`, matching how `completed_heats` derives `race_start`. The
 /// passes carry the source clock; the first crossing opens the shared race clock. `None` until the
 /// first pass lands (no crossing yet ⇒ the race-end criterion cannot be met).
-fn race_start_of(passes: &[Pass]) -> Option<SourceTime> {
-    passes.first().map(|p| p.at)
-}
-
-/// The grace hold, as a wall-clock `Duration`, for the completion driver: how long to keep the heat
-/// `Running` for trailing pilots after the win condition is met (heat-lifecycle Slice 2). An open
-/// [`GraceWindow::UntilScored`] would never auto-fire, so it is treated as **zero** here (the RD
-/// would `ForceEnd` / `Finalize` such a round); a bounded [`GraceWindow::Duration`] maps its source
-/// microseconds to a real-time hold of the same length.
-fn grace_hold(grace: GraceWindow) -> Duration {
-    match grace {
-        GraceWindow::Duration { micros } if micros > 0 => Duration::from_micros(micros as u64),
-        _ => Duration::ZERO,
-    }
+fn race_start_of(passes: &[(u64, Pass)]) -> Option<SourceTime> {
+    passes.first().map(|(_, p)| p.at)
 }
 
 /// Spawn the **start driver** for a heat that just entered `Armed` (heat-lifecycle Slice 2).
@@ -1600,33 +1590,34 @@ fn spawn_start_driver(
     })
 }
 
-/// Spawn the **completion driver** for a heat that just entered `Running` (heat-lifecycle Slice 2).
+/// Spawn the **completion driver** for a heat that just entered `Running` (heat-lifecycle Slice 2,
+/// grace rework #505).
 ///
-/// Polls the heat's running passes every [`COMPLETION_POLL`]; once the round's win condition is met
-/// (the pure [`race_end_reached`] over the passes + the race-start time), it holds the configured
-/// **grace window** for trailing pilots, then appends the `HeatStateChanged { Finished }`
-/// auto-transition (the `Running → Unofficial` step). Cancelled by the bridge if the heat leaves
-/// `Running` first (an abort / restart / a manual `ForceEnd`), so a superseded heat never appends a
-/// stale `Finished`. A round whose win condition has no intrinsic end (a bare qual — see
-/// [`race_end_reached`]) simply never fires here; the RD ends it with `ForceEnd`.
+/// Polls the heat's running passes every [`COMPLETION_POLL`] and closes the heat in two stages:
 ///
-/// **Timed-window fallback:** a [`Timed`](gridfpv_engine::scoring::WinCondition::Timed) round's
-/// pass-based criterion needs a crossing at/after the cutoff to fire — if every pilot lands at the
-/// buzzer, no such pass ever arrives. The driver therefore also closes a Timed heat on the wall
-/// clock once the window plus the grace hold has elapsed (anchored to the first observed pass, or
-/// to race-go when nobody ever crossed), so a timed heat always ends on its own.
+/// 1. **The race is over** when its fixed end passes on the wall clock — the round's
+///    [`time_limit_secs`](gridfpv_server::events::RoundDef::time_limit_secs) measured from
+///    race-go, or a [`Timed`](gridfpv_engine::scoring::WinCondition::Timed) window measured from
+///    the first observed pass — or when the pure pass-based criterion
+///    ([`race_end_reached`]) fires, whichever lands first.
+/// 2. **Then the grace window runs.** With a zero effective grace (first-to-N by #471, or a
+///    configured 0) the heat closes immediately, exactly as before. With a non-zero grace the
+///    driver appends the **`RaceExpired` marker** — the logged end-of-race-tone instant whose
+///    log position is the scoring boundary (each pilot's first pass after it still counts; the
+///    corrected fold voids the rest as `AfterRaceEnd`) — and holds the heat `Running` until the
+///    grace deadline passes **or** every still-flying pilot has taken their post-expiry crossing
+///    ([`gridfpv_engine::scoring::grace_satisfied`] — nothing further can score, so the heat
+///    ends early). An unbounded
+///    [`GraceWindow::UntilScored`] has no deadline: only the all-crossed rule (or the RD's
+///    `ForceEnd`) closes it.
 ///
-/// **Open-practice time limit (open-practice refinement):** when the round carries a
-/// [`time_limit_secs`](gridfpv_server::events::RoundDef::time_limit_secs), the driver auto-ends the
-/// heat once its elapsed running time reaches the limit — **independent of the win condition**. A
-/// practice round created without one stores the inert
-/// [`default_win_condition`](gridfpv_server::events::default_win_condition) (`BestLap`), which by
-/// construction never ends a heat, so the time limit is in practice its only automatic end. The
-/// elapsed clock starts when the heat enters `Running` (this driver's spawn), so it is the same
-/// deterministic, logged transition the other autos key off — a 1-hour practice ends itself an hour
-/// after Start. With no limit set, only the win-condition path can fire (the RD ends an open
-/// practice manually). Nothing here branches on the format: practice runs the same driver as every
-/// other round, over the same logged passes.
+/// Cancelled by the bridge if the heat leaves `Running` first (an abort / restart / a manual
+/// `ForceEnd`), and every append is fire-time re-checked, so a superseded heat never receives a
+/// stale marker or `Finished`. A round whose win condition has no intrinsic end and no time limit
+/// (a bare qual) never fires here; the RD ends it with `ForceEnd`. Nothing branches on the
+/// format: practice runs the same driver as every other round, over the same logged passes (a
+/// practice's `time_limit_secs` is simply its only fixed end, its win condition being the inert
+/// `BestLap`).
 fn spawn_completion_driver(
     state: &AppState,
     registry: &EventRegistry,
@@ -1634,11 +1625,11 @@ fn spawn_completion_driver(
     heat: HeatId,
 ) -> JoinHandle<()> {
     let config = heat_clock_config(state, registry, event_id, &heat);
-    // The Timed window, for the wall-clock fallback below. Every format goes through the same
+    // The Timed window, for the wall-clock fixed end below. Every format goes through the same
     // branch — open practice included (D5, reversed 2026-08-24). A practice round created without
     // a win condition stores the inert `default_win_condition` (`BestLap`), which is not `Timed`,
     // so no window is armed and its `time_limit_secs` / the RD's `ForceEnd` remain its only end
-    // conditions; a practice round that *was* given a real win condition now honours it, like any
+    // conditions; a practice round that *was* given a real win condition honours it, like any
     // other round.
     let timed_window = match config.win_condition {
         gridfpv_engine::scoring::WinCondition::Timed { window_micros } => {
@@ -1658,67 +1649,110 @@ fn spawn_completion_driver(
         .unwrap_or(None);
     // The running clock origin: the moment the heat entered `Running` (this spawn). The time-limit
     // deadline, when set, is measured from here — a deterministic wall-clock span (a test drives it
-    // with a short limit; production with the practice duration).
+    // with a short limit; production with the race/practice duration).
     let running_since = tokio::time::Instant::now();
     let time_limit = config
         .time_limit_secs
         .map(|secs| Duration::from_secs(secs as u64));
     let mut ticker = tokio::time::interval(COMPLETION_POLL);
     tokio::spawn(async move {
-        // The wall-clock instant this driver first OBSERVED a running pass — the fallback's
+        // The wall-clock instant this driver first OBSERVED a running pass — the Timed window's
         // race-clock anchor. Observation lags the true crossing by up to a poll tick (+ transport),
         // so a deadline anchored here is never *early* relative to the pass-anchored cutoff.
         let mut first_pass_seen: Option<tokio::time::Instant> = None;
+        // The appended RaceExpired marker, once the race is over with a live grace: its log
+        // offset (the scoring boundary `grace_satisfied` reads) and the wall-clock instant the
+        // grace runs out (`None` = UntilScored, no deadline).
+        let mut expired: Option<(u64, Option<tokio::time::Instant>)> = None;
         loop {
             ticker.tick().await;
-            // Time-limit auto-end (open-practice refinement): once the elapsed running time reaches
-            // the round's duration, close the heat regardless of any win condition or passes. For a
-            // practice round created with no win condition (the inert `BestLap`, which never ends a
-            // heat) this is its only automatic end. Logged like the other autos.
-            if let Some(limit) = time_limit {
-                if running_since.elapsed() >= limit {
-                    if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
-                        eprintln!(
-                            "gridfpv: completion driver could not append time-limit Finished: {e:?}"
-                        );
-                    }
-                    return;
-                }
-            }
             let passes = heat_running_passes(&state, &heat);
             if first_pass_seen.is_none() && !passes.is_empty() {
                 first_pass_seen = Some(tokio::time::Instant::now());
             }
-            // Timed-window wall-clock fallback: `race_end_reached` for a Timed round only fires
-            // when a lap-gate pass lands AT/AFTER the cutoff — if nobody crosses again after the
-            // window ends (pilots land at the buzzer; a short time trial), the pass-based path
-            // never triggers and the heat would stay `Running` forever. Once the window PLUS the
-            // grace hold has elapsed on the wall clock — measured from the race-clock origin (the
-            // first observed pass; race-go when nobody ever crossed) — close the heat. Grace-window
-            // crossings before this deadline still land in the log and score normally; a
-            // post-cutoff crossing still ends the heat earlier via the pass-based path below.
-            if let Some(window) = timed_window {
-                let anchor = first_pass_seen.unwrap_or(running_since);
-                if anchor.elapsed() >= window + grace_hold(config.grace_window) {
+
+            // ── Stage 2: the grace window is open — close on its deadline, or early once every
+            // still-flying pilot has taken their one post-expiry crossing.
+            if let Some((marker, deadline)) = expired {
+                let deadline_passed = deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+                if deadline_passed || gridfpv_engine::scoring::grace_satisfied(&passes, marker) {
                     if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
-                        eprintln!(
-                            "gridfpv: completion driver could not append timed-window Finished: {e:?}"
-                        );
+                        eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
                     }
                     return;
                 }
+                continue;
             }
-            let Some(race_start) = race_start_of(&passes) else {
-                continue; // no crossing yet — the race clock hasn't opened
-            };
-            if race_end_reached(&passes, config.win_condition, race_start) {
-                // The race-end criterion is met: hold the grace window for late crossings, then
-                // close the race. The hold is wall-clock; the *decision* was pure.
-                tokio::time::sleep(grace_hold(config.grace_window)).await;
-                if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
-                    eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
+
+            // ── Stage 1: is the race over? The fixed end on the wall clock (time limit from
+            // race-go; a Timed window from the first observed pass — if nobody crosses again
+            // after the buzzer the pass-based criterion alone would never fire), or the pure
+            // pass-based criterion, whichever lands first.
+            let fixed_end_reached = time_limit
+                .is_some_and(|limit| running_since.elapsed() >= limit)
+                || timed_window.is_some_and(|window| {
+                    first_pass_seen.unwrap_or(running_since).elapsed() >= window
+                });
+            let criterion_met = race_start_of(&passes).is_some_and(|race_start| {
+                let plain: Vec<Pass> = passes.iter().map(|(_, p)| p.clone()).collect();
+                race_end_reached(&plain, config.win_condition, race_start)
+            });
+            if !(fixed_end_reached || criterion_met) {
+                continue;
+            }
+
+            match config.grace_window {
+                // Zero grace (first-to-N by rule, or a configured 0): the heat closes at the
+                // fixed end exactly as before — no marker, nothing post-race can land anyway.
+                GraceWindow::Duration { micros } if micros <= 0 => {
+                    if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
+                        eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
+                    }
+                    return;
                 }
-                return;
+                grace => {
+                    // Open the grace: log the RaceExpired marker (fire-time re-checked like the
+                    // transitions — a ForceEnd landing this tick must not get a stale marker
+                    // appended over it). The deadline is logged as a fact so the console counts
+                    // down to it and a replay reads the same instant (the HeatFinalizing pattern).
+                    let grace_micros = match grace {
+                        GraceWindow::Duration { micros } => Some(micros.max(0)),
+                        GraceWindow::UntilScored => None,
+                    };
+                    let deadline_at = grace_micros.map(|m| now_micros().saturating_add(m));
+                    let h = heat.clone();
+                    let still_running = move |events: &[Event]| {
+                        gridfpv_engine::heat::heat_state(events, &h)
+                            == Some(gridfpv_engine::heat::HeatState::Running)
+                            && latest_transition_offset(events, &h) == spawn_watermark
+                    };
+                    match state.append_checked(
+                        Event::RaceExpired {
+                            heat: heat.clone(),
+                            deadline: deadline_at,
+                        },
+                        None,
+                        still_running,
+                    ) {
+                        Ok(Some(marker)) => {
+                            expired = Some((
+                                marker,
+                                grace_micros.map(|m| {
+                                    tokio::time::Instant::now() + Duration::from_micros(m as u64)
+                                }),
+                            ));
+                        }
+                        // The recheck rejected: the heat already left Running (the bridge's
+                        // cancel is in flight). Nothing to drive.
+                        Ok(None) => return,
+                        Err(e) => {
+                            eprintln!(
+                                "gridfpv: completion driver could not append RaceExpired: {e:?}"
+                            );
+                            return;
+                        }
+                    }
+                }
             }
         }
     })
@@ -1903,10 +1937,13 @@ fn spawn_auto_official_driver(
     })
 }
 
-/// The lap-gate passes attributed to `heat`'s current run: every lap-gate [`Pass`] in the log since
-/// the heat last entered `Running`. The completion driver scores over exactly the running window, so
-/// an earlier aborted run's passes don't count toward this run's win condition.
-fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
+/// The lap-gate passes attributed to `heat`'s current run, each with its **global log offset**:
+/// every lap-gate [`Pass`] in the log since the heat last entered `Running`. The completion driver
+/// scores over exactly the running window, so an earlier aborted run's passes don't count toward
+/// this run's win condition; the offsets are what [`gridfpv_engine::scoring::grace_satisfied`]
+/// orders against the
+/// `RaceExpired` marker (#505).
+fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<(u64, Pass)> {
     let Some(stored) = state.log().lock().ok().and_then(|g| g.read_all().ok()) else {
         return Vec::new();
     };
@@ -1915,7 +1952,7 @@ fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
     // Running it is the only one consuming, mirroring the bridge's single-active-heat rule.)
     let mut running = false;
     let mut passes = Vec::new();
-    for s in stored {
+    for (offset, s) in stored.into_iter().enumerate() {
         match s.event {
             Event::HeatStateChanged {
                 heat: ref h,
@@ -1933,7 +1970,7 @@ fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
             Event::Pass(p)
                 if running && p.gate.is_lap_gate() && p.heat.as_ref().is_none_or(|h| h == heat) =>
             {
-                passes.push(p)
+                passes.push((offset as u64, p))
             }
             _ => {}
         }
@@ -2641,16 +2678,18 @@ mod tests {
     /// indices) and return its `RoundId`. Uses the registry's `add_round` so the bridge resolves the
     /// round through `rounds_of` exactly as it does in production.
     fn add_open_practice_round(registry: &EventRegistry, nodes: Vec<usize>) -> RoundId {
-        add_open_practice_round_with_limit(registry, nodes, None)
+        add_open_practice_round_with_limit(registry, nodes, None, None)
     }
 
     /// As [`add_open_practice_round`], but with an optional **time limit** (open-practice refinement)
     /// — an open-practice round that has **no win condition** (the form omits it; the inert default is
-    /// stored) and whose only end condition is the `time_limit_secs` practice duration.
+    /// stored) and whose only end condition is the `time_limit_secs` practice duration — and an
+    /// optional explicit **grace window** (`None` stores the round default).
     fn add_open_practice_round_with_limit(
         registry: &EventRegistry,
         nodes: Vec<usize>,
         time_limit_secs: Option<u32>,
+        grace_window: Option<GraceWindow>,
     ) -> RoundId {
         use gridfpv_server::events::{NewRoundReq, SeedingRule};
         use gridfpv_server::scope::EventId as ScopeEventId;
@@ -2668,7 +2707,7 @@ mod tests {
             channel_mode: None,
             staging_timer_secs: None,
             start_procedure: None,
-            grace_window: None,
+            grace_window,
             protest_window: None,
             min_lap_secs: None,
         };
@@ -2796,10 +2835,18 @@ mod tests {
         // transition) once the elapsed running time reaches the limit. Its passes ARE logged
         // (D5, reversed) — the win-condition path stays silent because the stored inert
         // `default_win_condition` (`BestLap`) has no end criterion, not because the log is empty.
+        //
+        // Zero grace pins the pre-#505 shape: the heat closes AT the limit, with no RaceExpired
+        // marker (the grace path has its own tests below).
         let registry = fast_registry(3, 1);
         // A 1s practice duration (the minimum the seconds field allows): short enough for a test,
         // long enough that we can assert it does NOT fire immediately.
-        let round = add_open_practice_round_with_limit(&registry, vec![0, 1], Some(1));
+        let round = add_open_practice_round_with_limit(
+            &registry,
+            vec![0, 1],
+            Some(1),
+            Some(GraceWindow::Duration { micros: 0 }),
+        );
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = start_open_practice_heat(&state, &round, &[0, 1]);
@@ -2846,6 +2893,151 @@ mod tests {
         // The practice heat's passes ARE on the log — the time limit, not an empty log, is what
         // ended it (the inert `BestLap` win condition never fires).
         assert!(count_passes(&events) > 0);
+        // Zero grace ⇒ no RaceExpired marker: the grace machinery stays entirely out of the way.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::RaceExpired { .. })),
+            "a zero-grace round appends no RaceExpired marker"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn grace_window_holds_the_heat_and_all_crossed_ends_it_early() {
+        // The grace rework (#505): at the time limit the driver appends the RaceExpired marker
+        // (with its logged deadline) and HOLDS the heat `Running` — then closes it EARLY, well
+        // before the deadline, once every still-flying pilot has taken their one post-expiry
+        // crossing (`grace_satisfied`): nothing further can score, so nothing is waited for.
+        let registry = fast_registry(2, 1);
+        // A 60s grace: far beyond the test's patience, so a close inside 4s proves the
+        // all-crossed EARLY end, never the deadline.
+        let round = add_open_practice_round_with_limit(
+            &registry,
+            vec![0, 1],
+            Some(1),
+            Some(GraceWindow::Duration { micros: 60_000_000 }),
+        );
+        let (bridge, state) = spawn_bridge_for(&registry);
+        let heat = start_open_practice_heat(&state, &round, &[0, 1]);
+
+        // The marker lands at the ~1s limit, with the deadline logged as a fact (the
+        // HeatFinalizing pattern), and the heat is STILL Running — the grace is holding it.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(4),
+            wait_until(&state, Duration::from_secs(4), move |events| {
+                events.iter().any(
+                    |e| matches!(e, Event::RaceExpired { heat: h, deadline: Some(_) } if *h == target),
+                )
+            }),
+        )
+        .await
+        .expect("the time limit should append the RaceExpired marker");
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&read_all_events(&state), &heat),
+            Some(gridfpv_engine::heat::HeatState::Running),
+            "the grace window holds the heat Running past the time limit"
+        );
+
+        // Every still-flying pilot takes their one post-expiry crossing: append a post-marker
+        // pass for each competitor the run has seen (the sim's field), exactly what a pilot
+        // finishing the lap they were flying looks like on the log.
+        let seen: std::collections::BTreeSet<CompetitorRef> = read_all_events(&state)
+            .iter()
+            .filter_map(|e| match e {
+                Event::Pass(p) if p.gate.is_lap_gate() => Some(p.competitor.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!seen.is_empty(), "the sim must have flown the practice");
+        for (i, competitor) in seen.into_iter().enumerate() {
+            state
+                .append(
+                    Event::Pass(Pass {
+                        adapter: AdapterId(SIM_ADAPTER.to_string()),
+                        competitor,
+                        at: SourceTime::from_micros(90_000_000 + i as i64),
+                        sequence: None,
+                        gate: GateIndex::LAP,
+                        signal: None,
+                        heat: Some(heat.clone()),
+                    }),
+                    None,
+                )
+                .unwrap();
+        }
+
+        // With everyone across, the heat closes NOW — 60s of grace notwithstanding.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(4),
+            wait_until(&state, Duration::from_secs(4), move |events| {
+                gridfpv_engine::heat::heat_state(events, &target)
+                    == Some(gridfpv_engine::heat::HeatState::Unofficial)
+            }),
+        )
+        .await
+        .expect("all still-flying pilots crossed — the grace must end early");
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn grace_deadline_closes_the_heat_when_pilots_never_cross_again() {
+        // The grace rework (#505), the other exit: nobody crosses after the marker (pilots
+        // landed at the buzzer), so the heat closes when the logged grace deadline passes.
+        let registry = fast_registry(2, 1);
+        let round = add_open_practice_round_with_limit(
+            &registry,
+            vec![0, 1],
+            Some(1),
+            // A short, bounded grace: long enough to observe the hold, short enough to test.
+            Some(GraceWindow::Duration { micros: 700_000 }),
+        );
+        let (bridge, state) = spawn_bridge_for(&registry);
+        let heat = start_open_practice_heat(&state, &round, &[0, 1]);
+
+        // Marker at ~1s, then — with no further crossings — Finished at ~1.7s.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(5),
+            wait_until(&state, Duration::from_secs(5), move |events| {
+                gridfpv_engine::heat::heat_state(events, &target)
+                    == Some(gridfpv_engine::heat::HeatState::Unofficial)
+            }),
+        )
+        .await
+        .expect("the grace deadline should close the heat on its own");
+
+        let events = read_all_events(&state);
+        let marker_pos = events
+            .iter()
+            .position(|e| matches!(e, Event::RaceExpired { heat: h, .. } if *h == heat))
+            .expect("exactly one RaceExpired marker precedes the close");
+        let finished_pos = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    Event::HeatStateChanged {
+                        heat: h,
+                        transition: HeatTransition::Finished,
+                    } if *h == heat
+                )
+            })
+            .expect("the deadline appends the Finished");
+        assert!(
+            marker_pos < finished_pos,
+            "the marker is the end-of-race tone; the close follows it"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::RaceExpired { .. }))
+                .count(),
+            1,
+            "one race, one marker"
+        );
         bridge.abort();
     }
 

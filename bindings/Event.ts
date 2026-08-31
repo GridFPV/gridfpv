@@ -101,7 +101,18 @@ heat: HeatId,
  * Unix epoch) at which the runtime appends the auto `Finalize`. The countdown the console
  * shows is `at − now`.
  */
-at: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, 
+at: number, } } | { "RaceExpired": { 
+/**
+ * The heat whose race window expired (it is still in `Running`, holding for grace).
+ */
+heat: HeatId, 
+/**
+ * The **grace deadline**: the server wall-clock instant (microseconds since the Unix
+ * epoch) at which the runtime closes the heat if pilots are still out. `None` for an
+ * unbounded grace (the engine's `GraceWindow::UntilScored`): the heat then closes only
+ * on the all-crossed rule or the RD's `ForceEnd`.
+ */
+deadline?: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, 
 /**
  * The heat the inserted lap belongs to. Unlike a raw [`Pass`] (an untagged wire
  * observation attributed positionally), an insertion is an RD statement **about a

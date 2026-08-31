@@ -349,6 +349,39 @@ pub fn race_end_reached(passes: &[Pass], condition: WinCondition, race_start: So
     }
 }
 
+/// Whether the grace window's **early-end rule** is met (#505): every still-flying competitor has
+/// taken their one post-expiry crossing, so nothing further can score and the heat may close
+/// before the grace deadline.
+///
+/// `passes` are the run's lap-gate passes paired with their **global log offsets**, and
+/// `race_expired_offset` is the offset of the run's `RaceExpired` marker. The rule is log-order,
+/// not time-order — "one crossing after the end-of-race tone" is a statement about the tone, and
+/// the marker's log position IS the tone (the same boundary the corrected fold voids against).
+///
+/// "Still-flying" is [`race_end_reached`]'s derivation, from the passes and only the passes: a
+/// competitor with at least one lap-gate crossing. A DNS pilot never appears and so cannot hold
+/// the grace open; a pilot who launched and then *crashed* does — the bounded deadline (or the
+/// RD's `ForceEnd`) is the backstop, the same override every other stall resolves through (a
+/// future RD-marked DNF, #510, would subtract them here). With no crossings at all the answer is
+/// `false`, never the vacuous `true`: an unflown heat holds for its full grace.
+///
+/// Pure — no clock, no state; the runtime supplies the offsets and appends the transition.
+pub fn grace_satisfied(passes: &[(u64, Pass)], race_expired_offset: u64) -> bool {
+    let mut crossed_after: BTreeMap<CompetitorKey, bool> = BTreeMap::new();
+    for (offset, pass) in passes {
+        if !pass.gate.is_lap_gate() {
+            continue;
+        }
+        let entry = crossed_after
+            .entry(CompetitorKey::from_pass(pass))
+            .or_insert(false);
+        if *offset > race_expired_offset {
+            *entry = true;
+        }
+    }
+    !crossed_after.is_empty() && crossed_after.values().all(|crossed| *crossed)
+}
+
 /// Score a heat from its lap-gate passes under `condition`.
 ///
 /// `passes` is the heat's lap-gate [`Pass`]es (split passes are ignored; pass any
@@ -720,8 +753,17 @@ fn fastest_lap_micros(laps: &[&ScoredLap]) -> Option<i64> {
     laps.iter().map(|lap| lap.duration_micros).min()
 }
 
-/// Timed: count laps whose completing pass is strictly before the cutoff, rank by
-/// count desc then earlier last-counted-lap completion.
+/// Timed: count laps completing strictly before the cutoff **plus each competitor's one grace
+/// lap** — the first lap completing at/after it (#505) — rank by count desc then earlier
+/// last-counted-lap completion.
+///
+/// The grace lap implements the grace window's whole point ("what lets a pilot two metres from
+/// the gate finish the lap they were already flying", [`effective_grace_window`]): the first lap
+/// completing at/after the cutoff necessarily **started** before it — its opening pass is the
+/// previous counted lap's close, or the holeshot, both strictly earlier — so "finish the lap you
+/// had started" is exactly "the first post-cutoff completion counts". Everything after it does
+/// not, mirroring on the time axis the log-order rule the corrected fold enforces against the
+/// `RaceExpired` marker (one crossing after the tone, then nothing scores).
 ///
 /// `TimeAdded` here is a **pure lap-count** condition, so the penalty cannot change the
 /// lap count; per the recorded rule it is folded into the **tie-break time** (the last
@@ -737,17 +779,22 @@ fn score_timed(
     let rows = runs
         .into_iter()
         .map(|run| {
-            // HARD cutoff: strictly-before. A lap completing exactly at the cutoff
-            // (or after) does not count — no finishing the in-progress lap. Thrown-out laps are
-            // already excluded by `counted` before the cutoff filter.
+            // Thrown-out laps are already excluded by `counted` before the cutoff filter.
             let all_counted = run.counted(adj);
             // Best single lap is win-condition-independent: a lap the competitor actually flew is
             // a real lap even if it landed outside the timed window, so it is taken over every
             // counted lap, not just the windowed ones.
             let best_lap = fastest_lap_micros(&all_counted);
+            let mut grace_lap_taken = false;
             let counted: Vec<&ScoredLap> = all_counted
                 .into_iter()
-                .filter(|lap| lap.at.micros < cutoff)
+                .filter(|lap| {
+                    if lap.at.micros < cutoff {
+                        return true;
+                    }
+                    // The grace lap: first post-cutoff completion counts, once (doc above).
+                    !std::mem::replace(&mut grace_lap_taken, true)
+                })
                 .collect();
             let count = counted.len() as u32;
             let last_at = counted.last().map(|lap| lap.at);
@@ -1007,12 +1054,15 @@ mod tests {
     }
 
     #[test]
-    fn timed_hard_cutoff_excludes_lap_completing_at_or_after_window() {
-        // Window = 10s from start 0, so cutoff = 10_000_000.
-        // A completes its 2nd lap exactly AT the cutoff (10_000_000) — excluded.
-        // A's 1st lap completes at 5_000_000 — counts. So A has 1 counted lap.
-        // B completes both laps strictly before (4s, 9s) — 2 counted laps. B wins.
-        let mut passes = run("A", &[0, 5_000_000, 10_000_000]);
+    fn timed_grace_lap_counts_once_and_later_laps_do_not() {
+        // The grace lap (#505): the FIRST lap completing at/after the cutoff was already in the
+        // air at the buzzer and counts; every later one does not.
+        // Window = 10s from start 0, cutoff = 10_000_000.
+        // A: laps complete at 5s, 10s (exactly AT the cutoff — the grace lap, counts), and
+        //    14s (a lap STARTED after the buzzer — never counts) ⇒ 2 counted.
+        // B: both laps strictly inside (4s, 9s) ⇒ 2 counted. Equal count; tie-break is the
+        //    EARLIER last counted lap, so B (9s) beats A (10s).
+        let mut passes = run("A", &[0, 5_000_000, 10_000_000, 14_000_000]);
         passes.extend(run("B", &[0, 4_000_000, 9_000_000]));
 
         let r = score(
@@ -1023,14 +1073,17 @@ mod tests {
             start(),
         );
 
-        // Hard cutoff: A's lap at exactly 10_000_000 does NOT count.
-        assert_eq!(place(&r, "A").laps, 1);
+        assert_eq!(
+            place(&r, "A").laps,
+            2,
+            "the grace lap counts; the next does not"
+        );
         assert_eq!(
             place(&r, "A").metric,
-            Metric::LastLapAt(Some(SourceTime::from_micros(5_000_000)))
+            Metric::LastLapAt(Some(SourceTime::from_micros(10_000_000)))
         );
         assert_eq!(place(&r, "B").laps, 2);
-        assert_eq!(place(&r, "B").position, 1);
+        assert_eq!(place(&r, "B").position, 1, "earlier last counted lap");
         assert_eq!(place(&r, "A").position, 2);
     }
 
@@ -1059,9 +1112,19 @@ mod tests {
 
     #[test]
     fn timed_respects_nonzero_race_start() {
-        // Race starts at 100s; window 10s ⇒ cutoff 110s. A lap completing at 109.9s
-        // counts; one at 110s does not.
-        let passes = run("A", &[100_000_000, 105_000_000, 109_900_000, 110_000_000]);
+        // Race starts at 100s; window 10s ⇒ cutoff 110s. Laps complete at 105 (inside),
+        // 109.9 (inside), 110 (the grace lap — first at/after the cutoff, counts, #505),
+        // 115 (started after the buzzer — never counts) ⇒ 3 counted, last at 110s.
+        let passes = run(
+            "A",
+            &[
+                100_000_000,
+                105_000_000,
+                109_900_000,
+                110_000_000,
+                115_000_000,
+            ],
+        );
         let r = score(
             &passes,
             WinCondition::Timed {
@@ -1069,11 +1132,10 @@ mod tests {
             },
             SourceTime::from_micros(100_000_000),
         );
-        // Laps complete at 105 (count), 109.9 (count), 110 (excluded) ⇒ 2 counted.
-        assert_eq!(place(&r, "A").laps, 2);
+        assert_eq!(place(&r, "A").laps, 3);
         assert_eq!(
             place(&r, "A").metric,
-            Metric::LastLapAt(Some(SourceTime::from_micros(109_900_000)))
+            Metric::LastLapAt(Some(SourceTime::from_micros(110_000_000)))
         );
     }
 
@@ -1184,11 +1246,10 @@ mod tests {
 
     #[test]
     fn timed_placement_carries_fastest_single_lap_even_outside_the_window() {
-        // Window 10s. A's laps complete at 5s (dur 5s) and 12s (dur 7s); the 2nd lands past the
-        // cutoff so it does not COUNT, but it is a real flown lap. Fastest single lap is still the
-        // 5s one. (Here the windowed lap is also the fastest, but the point is best lap is taken
-        // over every counted lap, not just the windowed ones.)
-        let passes = run("A", &[0, 5_000_000, 12_000_000]);
+        // Window 10s. A's laps complete at 5s (dur 5s), 12s (dur 7s — the grace lap, counts,
+        // #505) and 20s (dur 8s — past the grace lap, does NOT count). Best single lap is
+        // taken over every flown lap, counted or not; here the fastest is the 5s one.
+        let passes = run("A", &[0, 5_000_000, 12_000_000, 20_000_000]);
         let r = score(
             &passes,
             WinCondition::Timed {
@@ -1196,7 +1257,11 @@ mod tests {
             },
             start(),
         );
-        assert_eq!(place(&r, "A").laps, 1, "only the windowed lap counts");
+        assert_eq!(
+            place(&r, "A").laps,
+            2,
+            "the windowed lap plus the one grace lap count"
+        );
         assert_eq!(
             place(&r, "A").best_lap_micros,
             Some(5_000_000),
@@ -1441,6 +1506,53 @@ mod tests {
         // …and well after, too.
         let after = run("A", &[0, 5_000_000, 12_000_000]);
         assert!(race_end_reached(&after, cond, start()));
+    }
+
+    // --- grace_satisfied (#505: the grace window's early-end rule) ---------------------
+
+    /// Pair passes with ascending offsets starting at `base` — the driver's window shape.
+    fn offset_from(base: u64, passes: Vec<Pass>) -> Vec<(u64, Pass)> {
+        passes
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| (base + i as u64, p))
+            .collect()
+    }
+
+    #[test]
+    fn grace_satisfied_when_every_flyer_has_crossed_after_the_marker() {
+        // A and B each crossed once past the marker (offset 10): nothing further can score.
+        let mut passes = offset_from(0, run("A", &[0, 5_000_000]));
+        passes.extend(offset_from(2, run("B", &[100_000, 5_100_000])));
+        passes.extend(offset_from(11, run("A", &[31_000_000])));
+        passes.extend(offset_from(12, run("B", &[31_100_000])));
+        assert!(grace_satisfied(&passes, 10));
+    }
+
+    #[test]
+    fn grace_holds_while_any_flyer_is_still_out() {
+        // B flew before the buzzer but has not crossed since: their finish lap is still owed.
+        let mut passes = offset_from(0, run("A", &[0, 5_000_000]));
+        passes.extend(offset_from(2, run("B", &[100_000, 5_100_000])));
+        passes.extend(offset_from(11, run("A", &[31_000_000])));
+        assert!(!grace_satisfied(&passes, 11 - 1)); // marker at 10: B never crossed after it
+    }
+
+    #[test]
+    fn a_dns_pilot_never_holds_the_grace_open() {
+        // Still-flying is derived from the passes alone (the race_end_reached rule): a pilot
+        // with no crossing at all is not in the set, so a solo flyer's post-marker crossing
+        // closes the grace even though other seats never launched.
+        let mut passes = offset_from(0, run("A", &[0, 5_000_000]));
+        passes.extend(offset_from(11, run("A", &[31_000_000])));
+        assert!(grace_satisfied(&passes, 10));
+    }
+
+    #[test]
+    fn an_unflown_heat_is_never_grace_satisfied() {
+        // No crossings at all: `all()` over the empty set must not vacuously end the heat —
+        // the deadline (or the RD) is the only way out, mirroring race_end_reached.
+        assert!(!grace_satisfied(&[], 10));
     }
 
     #[test]

@@ -12,4 +12,4 @@
  *
  * The two removal-side variants map 1:1 onto the only two [`VoidReason`]s that exist.
  */
-export type CrossingDisposition = "Holeshot" | "Counted" | "RejectedTooShort" | "VoidedByMarshal";
+export type CrossingDisposition = "Holeshot" | "Counted" | "RejectedTooShort" | "VoidedByMarshal" | "RejectedAfterRaceEnd";

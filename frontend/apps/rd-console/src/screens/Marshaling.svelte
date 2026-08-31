@@ -442,9 +442,9 @@
   }
 
   /** RESTORE a removed pass. A marshal-voided pass is undone by void-the-void (targeting the
-   *  standing removal event); a floor-suppressed pass (UnderMinLap, D26) is BLESSED by an
-   *  AdjustLap re-asserting its own raw instant — an explicit ruling outranks the floor, so
-   *  the fold exempts it and the pass returns to the chain. */
+   *  standing removal event); an AUTO-suppressed pass (UnderMinLap, D26; AfterRaceEnd, #505) is
+   *  BLESSED by an AdjustLap re-asserting its own raw instant — an explicit ruling outranks
+   *  both rules, so the fold exempts it and the pass returns to the chain. */
   function doRestorePass(v: {
     void_ref: number;
     pass_ref: number;
@@ -453,12 +453,25 @@
   }): Promise<void> {
     return submitCorrection(async () => {
       const ack = await session.send(
-        v.reason === 'UnderMinLap'
-          ? adjustLapCommand(v.pass_ref, v.at)
-          : voidDetectionCommand(v.void_ref)
+        v.reason === 'Marshal'
+          ? voidDetectionCommand(v.void_ref)
+          : adjustLapCommand(v.pass_ref, v.at)
       );
       if (ack.ok) await afterCorrection();
     });
+  }
+
+  /** The removal record's row text: WHY the pass is off the chain, by its `VoidReason`. */
+  function voidedRowLabel(v: { at: number; reason: VoidReason }): string {
+    const at = `${formatMicros(v.at)}s`;
+    switch (v.reason) {
+      case 'UnderMinLap':
+        return `crossing at ${at} — under min lap, auto-removed`;
+      case 'AfterRaceEnd':
+        return `crossing at ${at} — after race end, auto-removed`;
+      default:
+        return `removed pass at ${at} — stays removed`;
+    }
   }
 
   /** Remove (void) a lap straight from its row — the one-click removal on the lap list. */
@@ -1277,11 +1290,7 @@
                       {#each voidedSorted.filter((v) => v.at < lap.at && !cl.laps.some((o) => o.number < lap.number && o.at > v.at)) as v (v.pass_ref)}
                         <li class="voided-row">
                           <span class="mark" aria-hidden="true">∅</span>
-                          <span class="what"
-                            >{v.reason === 'UnderMinLap'
-                              ? `crossing at ${formatMicros(v.at)}s — under min lap, auto-removed`
-                              : `removed pass at ${formatMicros(v.at)}s — stays removed`}</span
-                          >
+                          <span class="what">{voidedRowLabel(v)}</span>
                           {#if canCorrect}
                             <button
                               type="button"
@@ -1363,11 +1372,7 @@
                            data that also stops re-detection from re-proposing the crossing. -->
                       <li class="voided-row">
                         <span class="mark" aria-hidden="true">∅</span>
-                        <span class="what"
-                          >{v.reason === 'UnderMinLap'
-                            ? `crossing at ${formatMicros(v.at)}s — under min lap, auto-removed`
-                            : `removed pass at ${formatMicros(v.at)}s — stays removed`}</span
-                        >
+                        <span class="what">{voidedRowLabel(v)}</span>
                         {#if canCorrect}
                           <button
                             type="button"

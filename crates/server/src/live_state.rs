@@ -132,6 +132,17 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub tone_at: Option<i64>,
+    /// The current heat's **grace deadline** while its race window has expired but the heat is
+    /// still `Running` (#505): the logged `deadline` of its latest
+    /// [`RaceExpired`](gridfpv_events::Event::RaceExpired) marker — the server wall-clock instant
+    /// (microseconds since the Unix epoch) at which the runtime closes the heat if pilots are
+    /// still out. The console's "grace" countdown anchors here, exactly as the auto-official
+    /// countdown anchors on the `HeatFinalizing` deadline. `None` before the race window expires,
+    /// in every non-`Running` phase, and for an unbounded (`UntilScored`) grace — whose marker
+    /// carries no deadline. Renders as a plain TS `number` (microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub grace_deadline: Option<i64>,
     /// The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
     /// marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
     /// `Unofficial` phase (before that there is no result to be provisional about). Once provisional
@@ -266,6 +277,7 @@ impl Default for LiveRaceState {
             race_ended_at: None,
             staged_at: None,
             tone_at: None,
+            grace_deadline: None,
             lifecycle: None,
             crossings: Vec::new(),
         }
@@ -556,7 +568,12 @@ fn live_state_core(
     // to each run `corrected_and_voided_passes_with_floor` over this identical window — the same
     // expensive fold twice, on the 16/s signal-append wake path. Folding once is also what makes
     // the two views agree by construction rather than by discipline.
-    let corrected = CorrectedWindow::of(run_window.iter().copied(), min_lap_micros);
+    // The grace rule's boundary (#505): the current run's RaceExpired marker, resolved from the
+    // same run window the fold reads (an older run's marker sits before `run_start` and is out
+    // of the window, so a Restarted heat can never inherit a stale marker).
+    let race_expired =
+        gridfpv_projection::race_expired_offset(run_window.iter().copied(), &current_heat);
+    let corrected = CorrectedWindow::of(run_window.iter().copied(), min_lap_micros, race_expired);
     // The crossing feed (#397) — the same run window, read as *crossings* rather than *laps*, so
     // the holeshot and a floor-rejected pass (neither of which derives a lap) are visible live.
     // Bounded to the most recent `MAX_LIVE_CROSSINGS`: the tail is kept and the head dropped, so
@@ -653,8 +670,10 @@ fn live_state_core(
         race_ended_at: None,
         staged_at: None,
         // Likewise set by [`with_heat_timing`]: the start-tone instant needs the `HeatStarting`
-        // event's `recorded_at`, which the bare-event fold cannot see.
+        // event's `recorded_at`, which the bare-event fold cannot see; the grace deadline is
+        // phase-gated there the same way.
         tone_at: None,
+        grace_deadline: None,
         // The lifecycle is likewise finished by [`with_heat_timing`] from the *stored* log (it needs
         // the `HeatFinalizing` deadline's `recorded_at` context); the bare-event fold leaves it `None`.
         lifecycle: None,
@@ -712,6 +731,31 @@ fn heat_finalizing_at(events: &[Event], heat: &HeatId) -> Option<i64> {
             Event::HeatFinalizing { heat: h, at: a } if h == heat => at = Some(*a),
             // A fresh run re-opens the window: drop a stale deadline so an aborted/reverted run's
             // arming never lingers onto the new one (it re-arms with its own `HeatFinalizing`).
+            Event::HeatStateChanged {
+                heat: h,
+                transition: HeatTransition::Running,
+            } if h == heat => at = None,
+            _ => {}
+        }
+    }
+    at
+}
+
+/// The current heat's **grace deadline** while `Running` past its race window (#505): the
+/// `deadline` of the most-recent [`RaceExpired`](Event::RaceExpired) the runtime logged when the
+/// window expired, cleared by any later `Running` for the heat (a re-run starts a fresh race).
+///
+/// Pure and log-derivable like [`heat_finalizing_at`]: the runtime writes the deadline once, at
+/// emission time, so a replay folds the same instant and the grace countdown is identical for
+/// every client. `None` when the run never expired, or its grace is unbounded (`UntilScored`
+/// logs a marker with no deadline — the countdown has nothing to count to).
+fn heat_grace_deadline(stored: &[StoredEvent], heat: &HeatId) -> Option<i64> {
+    let mut at = None;
+    for entry in stored {
+        match &entry.event {
+            Event::RaceExpired { heat: h, deadline } if h == heat => at = *deadline,
+            // A fresh run races anew: a stale marker's deadline must not linger onto it (its
+            // own expiry logs a fresh marker).
             Event::HeatStateChanged {
                 heat: h,
                 transition: HeatTransition::Running,
@@ -787,6 +831,13 @@ pub fn with_heat_timing(mut live: LiveRaceState, stored: &[StoredEvent]) -> Live
         // the field surfaces it, the client gates rendering to a controlling session.
         live.tone_at = match live.phase {
             HeatPhase::Armed => heat_tone_at(stored, &heat),
+            _ => None,
+        };
+        // The grace countdown anchor (#505) — present only while the heat is still `Running`
+        // (the race window has expired, pilots are finishing their laps). Once the heat closes,
+        // `race_ended_at` freezes the clocks and the grace has nothing left to count.
+        live.grace_deadline = match live.phase {
+            HeatPhase::Running => heat_grace_deadline(stored, &heat),
             _ => None,
         };
         live.lifecycle = match live.phase {

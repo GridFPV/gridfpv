@@ -54,7 +54,10 @@ pub struct CompetitorKey {
 
 impl CompetitorKey {
     /// Build a key from the `(adapter, competitor)` pair of a [`Pass`].
-    fn from_pass(pass: &Pass) -> Self {
+    /// The key of the source a pass came from. Public for the engine's grace rule
+    /// ([`grace_satisfied`](../gridfpv_engine/scoring/fn.grace_satisfied.html), #505), which
+    /// groups still-flying competitors exactly as the folds here do.
+    pub fn from_pass(pass: &Pass) -> Self {
         Self {
             adapter: pass.adapter.clone(),
             competitor: pass.competitor.clone(),
@@ -146,6 +149,12 @@ pub enum VoidReason {
     /// time (D26 — a gate reflection / double-detection; timers are dumb emitters, GridFPV
     /// owns lap semantics).
     UnderMinLap,
+    /// The corrected fold suppressed it under the **grace rule** (#505): the competitor had
+    /// already taken their one allowed crossing after the run's `RaceExpired` marker ("finish
+    /// the lap you had started; once you cross after the end-of-race tone, no more laps
+    /// count"). Marshal-restorable like [`UnderMinLap`](Self::UnderMinLap) — an explicit
+    /// ruling outranks the rule.
+    AfterRaceEnd,
 }
 
 impl CompetitorLaps {
@@ -449,11 +458,33 @@ where
 pub fn corrected_passes_with_floor<'a, I>(
     events: I,
     min_lap_micros: Option<i64>,
+    race_expired: Option<u64>,
 ) -> Vec<(u64, Pass)>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    corrected_and_voided_passes_with_floor(events, min_lap_micros).0
+    corrected_and_voided_passes_with_floor(events, min_lap_micros, race_expired).0
+}
+
+/// The offset of `heat`'s standing **`RaceExpired` marker** within `window` — the grace rule's
+/// boundary ([`VoidReason::AfterRaceEnd`]), resolved by every fold call site the same way the
+/// D26 floor is resolved by `min_lap_micros_of`. **Last one wins**: a Restarted heat re-races
+/// with a fresh marker, and the old run's passes all sit below the new marker's offset anyway.
+/// `None` when the run never expired (ended on its criterion, ForceEnd, or a zero grace) — the
+/// grace rule is then inert.
+pub fn race_expired_offset<'a, I>(window: I, heat: &gridfpv_events::HeatId) -> Option<u64>
+where
+    I: IntoIterator<Item = (u64, &'a Event)>,
+{
+    let mut found = None;
+    for (offset, event) in window {
+        if let Event::RaceExpired { heat: h, .. } = event {
+            if h == heat {
+                found = Some(offset);
+            }
+        }
+    }
+    found
 }
 
 /// One removed pass as the fold emits it:
@@ -693,18 +724,31 @@ where
     (out, voided_out)
 }
 
-/// [`corrected_and_voided_passes`] with the round's **minimum-lap floor** applied (D26).
+/// [`corrected_and_voided_passes`] with the round's **auto-suppression rules** applied: the
+/// minimum-lap floor (D26) and the grace rule against the run's `RaceExpired` marker (#505).
 ///
 /// After the marshaling corrections fold, each competitor's surviving chain is walked
-/// chronologically: a **raw, unruled** pass that would close a lap shorter than
-/// `min_lap_micros` is AUTO-SUPPRESSED — moved onto the removal record with
-/// [`VoidReason::UnderMinLap`] (its restore target is itself; a marshal re-time exempts it).
+/// chronologically:
+///
+/// - **The floor**: a **raw, unruled** pass that would close a lap shorter than
+///   `min_lap_micros` is AUTO-SUPPRESSED — moved onto the removal record with
+///   [`VoidReason::UnderMinLap`] (its restore target is itself; a marshal re-time exempts it).
+/// - **The grace rule**: past the `race_expired` marker offset (the run's end-of-race tone),
+///   each competitor keeps their **first** surviving crossing — the lap they were already
+///   flying lands — and every later one drops to the removal record with
+///   [`VoidReason::AfterRaceEnd`]. Log-order, not time-order: "one crossing after the tone"
+///   is a statement about the tone, and the marker's log position is the tone. The floor runs
+///   first, so a reflection burst at the line does not spend the pilot's one allowed crossing.
+///
 /// Marshal-created passes (inserted, split-synthetic) and re-timed passes are NEVER
-/// suppressed: an explicit ruling outranks the floor. `None`/`0` floor ⇒ identical to the
-/// plain fold, so rounds predating the setting keep their results bit-identical.
+/// suppressed by either rule: an explicit ruling outranks both — which is also what keeps
+/// post-race marshaling working, since every marshal insert is appended after the marker.
+/// `None`/`0` floor and a `None` marker ⇒ identical to the plain fold, so rounds predating
+/// the settings keep their results bit-identical.
 pub fn corrected_and_voided_passes_with_floor<'a, I>(
     events: I,
     min_lap_micros: Option<i64>,
+    race_expired: Option<u64>,
 ) -> (Vec<(u64, Pass)>, Vec<VoidedEmit>)
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
@@ -714,11 +758,12 @@ where
     // over the data, but windows are per-heat and small).
     let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
     let (surviving, mut voided) = corrected_and_voided_passes(pairs.iter().copied());
-    let Some(floor) = min_lap_micros.filter(|f| *f > 0) else {
+    let floor = min_lap_micros.filter(|f| *f > 0);
+    if floor.is_none() && race_expired.is_none() {
         return (surviving, voided);
-    };
+    }
 
-    // A pass is EXEMPT from the floor when a marshal shaped it: inserted or split-synthetic
+    // A pass is EXEMPT from both rules when a marshal shaped it: inserted or split-synthetic
     // by construction, or re-timed by a standing (un-voided) adjust.
     let mut exempt: BTreeSet<u64> = BTreeSet::new();
     for (offset, event) in &pairs {
@@ -734,7 +779,8 @@ where
     }
 
     // Walk each competitor's chain in time order, keep-first: a too-close successor that is
-    // not marshal-blessed drops to the removal record.
+    // not marshal-blessed drops to the removal record, and past the marker only the first
+    // unruled crossing survives.
     let mut by_competitor: BTreeMap<CompetitorKey, Vec<(u64, Pass)>> = BTreeMap::new();
     for (offset, pass) in surviving {
         by_competitor
@@ -746,15 +792,30 @@ where
     for (_, mut chain) in by_competitor {
         chain.sort_by_key(|(offset, p)| (p.at, *offset));
         let mut last_kept: Option<SourceTime> = None;
+        let mut post_expiry_taken = false;
         for (offset, pass) in chain {
-            let too_close =
-                last_kept.is_some_and(|prev| pass.at.micros.saturating_sub(prev.micros) < floor);
-            if too_close && !exempt.contains(&offset) {
+            let ruled = exempt.contains(&offset);
+            let too_close = floor.is_some_and(|floor| {
+                last_kept.is_some_and(|prev| pass.at.micros.saturating_sub(prev.micros) < floor)
+            });
+            if too_close && !ruled {
                 voided.push((offset, offset, pass, VoidReason::UnderMinLap));
-            } else {
-                last_kept = Some(pass.at);
-                out.push((offset, pass));
+                continue;
             }
+            if race_expired.is_some_and(|marker| offset > marker) && !ruled {
+                // The one allowed post-expiry crossing (#505): the first surviving unruled pass
+                // after the marker lands (finishing the lap already in the air — or, for a pilot
+                // who had not crossed yet, a holeshot that opens nothing scoreable); the rest
+                // are void. A pass at or before the marker's offset pre-dates the tone and is
+                // untouched by this rule.
+                if post_expiry_taken {
+                    voided.push((offset, offset, pass, VoidReason::AfterRaceEnd));
+                    continue;
+                }
+                post_expiry_taken = true;
+            }
+            last_kept = Some(pass.at);
+            out.push((offset, pass));
         }
     }
     out.sort_by_key(|(offset, _)| *offset);
@@ -782,16 +843,21 @@ pub fn lap_list_marshaled<'a, I>(events: I) -> LapList
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    lap_list_marshaled_with_floor(events, None)
+    lap_list_marshaled_with_floor(events, None, None)
 }
 
-/// [`lap_list_marshaled`] under a round's **minimum-lap floor** (D26): auto-suppressed passes
-/// land on each competitor's removal record with [`VoidReason::UnderMinLap`].
-pub fn lap_list_marshaled_with_floor<'a, I>(events: I, min_lap_micros: Option<i64>) -> LapList
+/// [`lap_list_marshaled`] under a round's **auto-suppression rules**: the minimum-lap floor
+/// (D26) and the grace rule against `race_expired` (#505) — suppressed passes land on each
+/// competitor's removal record with [`VoidReason::UnderMinLap`] / [`VoidReason::AfterRaceEnd`].
+pub fn lap_list_marshaled_with_floor<'a, I>(
+    events: I,
+    min_lap_micros: Option<i64>,
+    race_expired: Option<u64>,
+) -> LapList
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    CorrectedWindow::of(events, min_lap_micros).into_lap_list()
+    CorrectedWindow::of(events, min_lap_micros, race_expired).into_lap_list()
 }
 
 /// One window's **correction fold, folded once** — the shared input to both views of it: the
@@ -815,8 +881,9 @@ pub struct CorrectedWindow {
 }
 
 impl CorrectedWindow {
-    /// Fold `events` (a window of `(offset, event)` pairs) under the D26 floor.
-    pub fn of<'a, I>(events: I, min_lap_micros: Option<i64>) -> Self
+    /// Fold `events` (a window of `(offset, event)` pairs) under the D26 floor and the #505
+    /// grace rule (`race_expired` — the run's marker offset, [`race_expired_offset`]).
+    pub fn of<'a, I>(events: I, min_lap_micros: Option<i64>, race_expired: Option<u64>) -> Self
     where
         I: IntoIterator<Item = (u64, &'a Event)>,
     {
@@ -828,8 +895,11 @@ impl CorrectedWindow {
         // timer never detected (mis-tuned gate, dead VTX) must still appear, with zero laps, or
         // the one pilot who most needs marshaling is the one who cannot be marshaled.
         let seats = lineup_keys(pairs.iter().map(|(_, e)| *e));
-        let (surviving, voided) =
-            corrected_and_voided_passes_with_floor(pairs.iter().copied(), min_lap_micros);
+        let (surviving, voided) = corrected_and_voided_passes_with_floor(
+            pairs.iter().copied(),
+            min_lap_micros,
+            race_expired,
+        );
         Self {
             surviving,
             voided,
@@ -923,6 +993,11 @@ pub enum CrossingDisposition {
     /// A marshal explicitly removed it after the fact ([`VoidReason::Marshal`]). It was a real
     /// observed crossing when it happened; the removal is a later ruling over it.
     VoidedByMarshal,
+    /// The corrected fold **auto-suppressed** it under the grace rule (#505 —
+    /// [`VoidReason::AfterRaceEnd`]): the competitor had already taken their one allowed
+    /// crossing after the run's `RaceExpired` marker. Still tones live (#397) — the RD hears
+    /// that the gate fired, and the distinct disposition says it no longer scores.
+    RejectedAfterRaceEnd,
 }
 
 impl CrossingDisposition {
@@ -931,6 +1006,7 @@ impl CrossingDisposition {
         match reason {
             VoidReason::Marshal => Self::VoidedByMarshal,
             VoidReason::UnderMinLap => Self::RejectedTooShort,
+            VoidReason::AfterRaceEnd => Self::RejectedAfterRaceEnd,
         }
     }
 }
@@ -987,11 +1063,15 @@ pub struct DispositionedPass {
 ///   competitor who has not crossed. Conversely a crossing by a competitor who is *not* in the
 ///   lineup IS reported — a phantom detection on an empty seat is precisely what an RD needs to
 ///   notice, so this fold must never filter toward "only meaningful laps".
-pub fn dispositioned_passes<'a, I>(events: I, min_lap_micros: Option<i64>) -> Vec<DispositionedPass>
+pub fn dispositioned_passes<'a, I>(
+    events: I,
+    min_lap_micros: Option<i64>,
+    race_expired: Option<u64>,
+) -> Vec<DispositionedPass>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    CorrectedWindow::of(events, min_lap_micros).crossings(None)
+    CorrectedWindow::of(events, min_lap_micros, race_expired).crossings(None)
 }
 
 impl CorrectedWindow {
@@ -2171,7 +2251,7 @@ mod marshaling_tests {
             pass("vd", "A", 7_208_000, Some(3)), // offset 2 — real lap 1
             pass("vd", "A", 13_500_000, Some(4)), // offset 3 — real lap 2
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
         let cl = result
             .competitors
             .iter()
@@ -2193,10 +2273,152 @@ mod marshaling_tests {
             }]
         );
         // No floor ⇒ bit-identical to the plain fold (rounds predating the setting).
-        let unfloored = lap_list_marshaled_with_floor(tagged(&events), None);
+        let unfloored = lap_list_marshaled_with_floor(tagged(&events), None, None);
         let plain = lap_list_marshaled(tagged(&events));
         assert_eq!(unfloored, plain);
         assert_eq!(plain.competitors[0].laps.len(), 3);
+    }
+
+    #[test]
+    fn grace_rule_keeps_the_first_post_expiry_crossing_and_voids_the_rest() {
+        // The grace rule (#505): past the RaceExpired marker each competitor may finish the lap
+        // they were flying — their FIRST post-marker crossing counts — and nothing after it does.
+        let heat = HeatId("q-1".into());
+        let log = vec![
+            pass("rh", "A", 1_000_000, Some(1)),  // offset 0 — holeshot
+            pass("rh", "A", 18_000_000, Some(2)), // offset 1 — lap 1
+            Event::RaceExpired {
+                heat: heat.clone(),
+                deadline: None,
+            }, // offset 2 — the end-of-race tone
+            pass("rh", "A", 35_000_000, Some(3)), // offset 3 — the grace lap: counts
+            pass("rh", "A", 52_000_000, Some(4)), // offset 4 — after the allowed crossing: void
+        ];
+        // The marker is resolved from the window exactly as the server call sites do.
+        let marker = race_expired_offset(tagged(&log), &heat);
+        assert_eq!(marker, Some(2));
+        let result = lap_list_marshaled_with_floor(tagged(&log), None, marker);
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(
+            cl.laps.len(),
+            2,
+            "lap 1 plus the grace lap; the post-grace lap never lands"
+        );
+        assert_eq!(
+            cl.voided,
+            vec![VoidedPass {
+                at: SourceTime::from_micros(52_000_000),
+                pass_ref: LogRef(4),
+                void_ref: LogRef(4), // restore target = the pass itself (a marshal re-time)
+                reason: VoidReason::AfterRaceEnd,
+            }]
+        );
+        // No marker ⇒ bit-identical to the plain fold (a run that never expired).
+        assert_eq!(
+            lap_list_marshaled_with_floor(tagged(&log), None, None),
+            lap_list_marshaled(tagged(&log))
+        );
+    }
+
+    #[test]
+    fn grace_rule_is_per_competitor_and_a_marshal_ruling_is_exempt() {
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)),  // offset 0
+            pass("rh", "B", 1_100_000, Some(1)),  // offset 1
+            pass("rh", "A", 18_000_000, Some(2)), // offset 2
+            pass("rh", "B", 19_000_000, Some(2)), // offset 3 — marker sits here at offset 3
+            pass("rh", "A", 35_000_000, Some(3)), // offset 4 — A's grace lap: counts
+            pass("rh", "B", 36_000_000, Some(3)), // offset 5 — B's grace lap: counts
+            pass("rh", "A", 52_000_000, Some(4)), // offset 6 — A again: void
+            // offset 7 — a marshal INSERT (post-race by construction): exempt, and it does not
+            // spend A's one allowed crossing (that was offset 4).
+            inserted("rh", "A", 10_000_000),
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), None, Some(3));
+        let a = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        let b = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "B")
+            .unwrap();
+        // A: holeshot(1s) + inserted(10s) + 18s + grace 35s ⇒ 3 laps; the 52s crossing voided.
+        assert_eq!(
+            a.laps.len(),
+            3,
+            "the marshal insert lands mid-chain, exempt"
+        );
+        assert_eq!(a.voided.len(), 1);
+        assert_eq!(a.voided[0].reason, VoidReason::AfterRaceEnd);
+        // B took exactly the one allowed crossing: two laps, nothing voided.
+        assert_eq!(b.laps.len(), 2);
+        assert!(b.voided.is_empty());
+    }
+
+    #[test]
+    fn floor_runs_before_the_grace_rule_so_a_burst_does_not_spend_the_allowance() {
+        // A reflection burst right at the post-buzzer line: the floor strikes the echoes
+        // (UnderMinLap) and the pilot's ONE allowed crossing is the real one that closes their
+        // lap — the burst must not spend it.
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)),  // offset 0 — holeshot
+            pass("rh", "A", 18_000_000, Some(2)), // offset 1 — lap 1; marker at offset 1
+            pass("rh", "A", 35_000_000, Some(3)), // offset 2 — grace lap: counts
+            pass("rh", "A", 35_061_000, Some(4)), // offset 3 — reflection: UnderMinLap
+            pass("rh", "A", 35_193_000, Some(5)), // offset 4 — reflection: UnderMinLap
+            pass("rh", "A", 52_000_000, Some(6)), // offset 5 — real next lap: AfterRaceEnd
+        ];
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(10_000_000), Some(1));
+        let cl = result
+            .competitors
+            .iter()
+            .find(|c| c.competitor.competitor.0 == "A")
+            .unwrap();
+        assert_eq!(cl.laps.len(), 2, "lap 1 + the grace lap");
+        let reasons: Vec<VoidReason> = cl.voided.iter().map(|v| v.reason).collect();
+        assert_eq!(
+            reasons,
+            vec![
+                VoidReason::UnderMinLap,
+                VoidReason::UnderMinLap,
+                VoidReason::AfterRaceEnd
+            ],
+            "echoes fall to the floor; only the genuine extra lap falls to the grace rule"
+        );
+    }
+
+    #[test]
+    fn race_expired_offset_resolves_the_last_marker_for_the_heat() {
+        let h = HeatId("q-1".into());
+        let other = HeatId("q-2".into());
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)), // offset 0
+            Event::RaceExpired {
+                heat: h.clone(),
+                deadline: Some(10),
+            }, // offset 1 — an aborted run's stale marker
+            Event::RaceExpired {
+                heat: other.clone(),
+                deadline: None,
+            }, // offset 2 — another heat's marker: never ours
+            Event::RaceExpired {
+                heat: h.clone(),
+                deadline: Some(20),
+            }, // offset 3 — the standing marker: last one wins
+        ];
+        assert_eq!(race_expired_offset(tagged(&events), &h), Some(3));
+        assert_eq!(race_expired_offset(tagged(&events), &other), Some(2));
+        assert_eq!(
+            race_expired_offset(tagged(&events), &HeatId("q-3".into())),
+            None
+        );
     }
 
     #[test]
@@ -2210,7 +2432,7 @@ mod marshaling_tests {
             pass("vd", "A", 9_000_000, Some(3)), // offset 2
             adjusted(1, 3_000_000),              // offset 3 — marshal: "that 2s lap is real"
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
         let cl = result
             .competitors
             .iter()
@@ -2236,7 +2458,7 @@ mod marshaling_tests {
             pass("vd", "A", 10_000_000, Some(2)), // offset 1
             inserted("vd", "A", 2_500_000),       // offset 2 — a 1.5s lap, by ruling
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
         let cl = result
             .competitors
             .iter()
@@ -2257,7 +2479,7 @@ mod marshaling_tests {
             pass("vd", "A", 1_030_000, Some(4)), // echo — suppressed
             pass("vd", "A", 8_000_000, Some(5)), // real — kept (7s from last kept)
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
         let cl = result
             .competitors
             .iter()
@@ -2284,7 +2506,7 @@ mod marshaling_tests {
             pass("vd", "A", 8_000_000, Some(3)), // offset 2 — real lap
             voided(0),                           // offset 3
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000));
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
         let cl = result
             .competitors
             .iter()
@@ -3623,7 +3845,7 @@ mod marshaling_tests {
         log.push(voided(10));
 
         let floor = Some(5_000_000);
-        let window = CorrectedWindow::of(tagged(&log), floor);
+        let window = CorrectedWindow::of(tagged(&log), floor, None);
         let full = window.crossings(None);
         assert!(
             full.len() > 8,
@@ -3655,7 +3877,7 @@ mod marshaling_tests {
         assert!(window.crossings(Some(0)).is_empty());
 
         // And the free function still answers the whole run.
-        assert_eq!(dispositioned_passes(tagged(&log), floor), full);
+        assert_eq!(dispositioned_passes(tagged(&log), floor, None), full);
     }
 
     /// **One fold, two views.** The lap list and the crossing feed are now read off a single
@@ -3674,14 +3896,14 @@ mod marshaling_tests {
             pass("rh", "node-0", 60_000_000, None),
         ];
         let floor = Some(5_000_000);
-        let window = CorrectedWindow::of(tagged(&log), floor);
+        let window = CorrectedWindow::of(tagged(&log), floor, None);
         assert_eq!(
             window.crossings(None),
-            dispositioned_passes(tagged(&log), floor)
+            dispositioned_passes(tagged(&log), floor, None)
         );
         assert_eq!(
             window.into_lap_list(),
-            lap_list_marshaled_with_floor(tagged(&log), floor)
+            lap_list_marshaled_with_floor(tagged(&log), floor, None)
         );
     }
 

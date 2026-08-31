@@ -804,6 +804,35 @@ pub enum Event {
         #[ts(type = "number")]
         at: i64,
     },
+    /// The **race window expired** for a heat still `Running` — the end-of-race buzzer instant,
+    /// appended by the completion driver when the heat's fixed end (its round's `time_limit_secs`,
+    /// or a Timed window) passes with a non-zero grace window configured (#505).
+    ///
+    /// This event's **log position is the grace rule's boundary**: from here on, each competitor
+    /// may only *finish the lap they were already flying* — their first lap-gate [`Pass`] appended
+    /// after this event still counts, and every later one is auto-voided by the corrected fold
+    /// (`VoidReason::AfterRaceEnd`), marshal-restorable like the min-lap floor's. Ordering by log
+    /// position rather than source time is deliberate: "one crossing after the end-of-race tone"
+    /// is a statement about the tone, and the log is the tone's clock.
+    ///
+    /// The heat leaves `Running` when the `deadline` passes, or **earlier** once every
+    /// still-flying competitor has taken their post-expiry crossing (nothing further can score).
+    /// Mirrors [`HeatStarting`](Event::HeatStarting) / [`HeatFinalizing`](Event::HeatFinalizing):
+    /// the runtime logs the chosen timing once as a fact, the console counts down to it, and a
+    /// replay reads the same instant instead of re-deriving it from a clock. A round with a zero
+    /// grace (first-to-N by rule, or a configured 0) never emits this — the heat closes at the
+    /// fixed end exactly as before.
+    RaceExpired {
+        /// The heat whose race window expired (it is still in `Running`, holding for grace).
+        heat: HeatId,
+        /// The **grace deadline**: the server wall-clock instant (microseconds since the Unix
+        /// epoch) at which the runtime closes the heat if pilots are still out. `None` for an
+        /// unbounded grace (the engine's `GraceWindow::UntilScored`): the heat then closes only
+        /// on the all-crossed rule or the RD's `ForceEnd`.
+        #[serde(default)]
+        #[ts(optional, type = "number")]
+        deadline: Option<i64>,
+    },
     /// Marshaling: void a previously-detected pass, referenced by log offset. The
     /// projection folds it out as if it never happened — the raw [`Pass`] stays in
     /// the log untouched.

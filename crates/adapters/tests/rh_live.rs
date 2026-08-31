@@ -57,6 +57,7 @@ fn event_kind(e: &Event) -> &'static str {
         Event::CurrentHeatSelected { .. } => "CurrentHeatSelected",
         Event::HeatStarting { .. } => "HeatStarting",
         Event::HeatFinalizing { .. } => "HeatFinalizing",
+        Event::RaceExpired { .. } => "RaceExpired",
         Event::DetectionVoided { .. } => "DetectionVoided",
         Event::LapInserted { .. } => "LapInserted",
         Event::LapAdjusted { .. } => "LapAdjusted",

@@ -1264,7 +1264,9 @@ async fn open_practice_round_auto_creates_heat_and_time_limit_auto_ends_it_e2e()
             max_delay_ms: 1,
             tone: None,
         }),
-        grace_window: None,
+        // Zero grace: this e2e pins the time-limit close itself; the grace hold (#505)
+        // has its own driver tests.
+        grace_window: Some(GraceWindow::Duration { micros: 0 }),
         protest_window: None,
         min_lap_secs: None,
     };
@@ -1586,7 +1588,9 @@ async fn open_practice_laps_are_logged_and_durable_but_never_scored_e2e() {
                 max_delay_ms: 1,
                 tone: None,
             }),
-            grace_window: None,
+            // Zero grace: this e2e pins the time-limit close itself; the grace hold (#505)
+            // has its own driver tests.
+            grace_window: Some(GraceWindow::Duration { micros: 0 }),
             protest_window: None,
             min_lap_secs: None,
         },
