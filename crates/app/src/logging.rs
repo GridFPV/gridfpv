@@ -267,7 +267,7 @@ fn open_sink() -> Option<Sink> {
         .unwrap_or_else(|_| "<unknown>".to_string());
     sink.write_line(&format!(
         "==== GridFPV {} — session start (pid {}, {} {}, exe {exe}) ====",
-        env!("CARGO_PKG_VERSION"),
+        gridfpv_server::BUILD_VERSION,
         std::process::id(),
         std::env::consts::OS,
         std::env::consts::ARCH,

@@ -1720,7 +1720,9 @@ describe('seam: /about (the build stamp)', () => {
     expect(res.ok).toBe(true);
     const about = await res.json();
     expect(about.name).toBe('GridFPV');
-    // x.y.z with an optional -prerelease tail (the v0.4.0-alpha.1 scheme).
+    // x.y.z with an optional -prerelease tail: a release's standard naming
+    // (0.4.0-alpha.1), or a non-release build's commit stamp (0.4.0-dev-<short hash>,
+    // -dirty appended for an uncommitted tree) — #513.
     expect(about.version).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
     expect(typeof about.contract_version).toBe('number');
   });

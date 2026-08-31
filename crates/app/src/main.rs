@@ -111,7 +111,10 @@ fn print_startup(
         bound.to_string()
     };
 
-    println!("GridFPV Director {} — serving", env!("CARGO_PKG_VERSION"));
+    println!(
+        "GridFPV Director {} — serving",
+        gridfpv_server::BUILD_VERSION
+    );
     println!("  listening on : http://{bound}");
     println!("  console URL  : http://{url_host}/");
     match rd_token {
@@ -182,7 +185,7 @@ async fn shutdown_signal() {
 fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "GridFPV {} — walking-skeleton demo\n",
-        env!("CARGO_PKG_VERSION")
+        gridfpv_server::BUILD_VERSION
     );
 
     let events = synthetic_session(

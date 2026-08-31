@@ -383,14 +383,16 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/health", get(|| async { "ok" }))
         // The product identity (alpha field-support): WHICH build is this rig running? The
         // console footer reads it, and a bug report from the field should quote it. The
-        // version is the ONE workspace version (v0.4.0-alpha.1 scheme, `cargo xtask version`);
-        // the contract version is the independent wire-compat integer.
+        // version is the BUILD's version (#513): a release names itself (the v0.4.0-alpha.1
+        // scheme, `cargo xtask version`), any other build names its commit
+        // (`0.4.0-dev-<short hash>`); the contract version is the independent wire-compat
+        // integer.
         .route(
             "/about",
             get(|| async {
                 Json(serde_json::json!({
                     "name": "GridFPV",
-                    "version": env!("CARGO_PKG_VERSION"),
+                    "version": crate::BUILD_VERSION,
                     "contract_version": crate::CONTRACT_VERSION,
                 }))
             }),
