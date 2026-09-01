@@ -1,0 +1,8 @@
+# The Tauri CLI re-serializes src-tauri/Cargo.toml during `tauri build` — a semantic no-op
+# that is byte-identical on Linux/macOS but written with CRLF on Windows, where it read as a
+# tracked modification and stamped the Windows portable `-dirty` (#513; diagnosed by the
+# release workflow's tree-state steps). Declaring the file text/LF makes git normalize line
+# endings when comparing, so a pure EOL rewrite never counts as dirt — a material rewrite
+# (the CLI actually changing the manifest) still would, which is exactly the distinction the
+# build stamp wants.
+src-tauri/Cargo.toml text eol=lf

@@ -92,6 +92,15 @@ jobs:
           npm run build
         working-directory: frontend
 
+      # The build stamp (#513) reads `git status --porcelain` at compile time, so a build step
+      # that mutates the tree stamps the portable `-dirty`. Print the tree state before and
+      # after the build so a dirty stamp is diagnosable FROM THIS LOG instead of by archaeology
+      # (the first stamped run re-locked a stale src-tauri/Cargo.lock — #515; a Windows leg
+      # stayed dirty after that fix, which is what this step exists to name).
+      - name: Tree state before the build (the stamp reads this)
+        shell: bash
+        run: git status --porcelain
+
       # PORTABLE-ONLY build: `--no-bundle` compiles the gridfpv-desktop crate (with
       # the embedded frontend + the Windows icon) into
       # src-tauri/target/release/gridfpv-desktop[.exe] but produces NO installers
@@ -116,6 +125,13 @@ jobs:
       # That catches a missing runtime library, a panic in setup, an embedded-asset failure, or an
       # immediate exit. It does NOT prove the window renders or the console is usable — a human
       # still has to click it once per platform.
+      # The after-shot of the tree-state pair above: whatever appears here and not there is
+      # what the BUILD wrote into the tracked tree — the exact set the stamp saw (build scripts
+      # run early in the compile, so strictly the stamp may have seen a prefix of it).
+      - name: Tree state after the build (what the build dirtied)
+        shell: bash
+        run: git status --porcelain
+
       - name: Smoke-test the portable binary (does it start?)
         shell: bash
         env:
