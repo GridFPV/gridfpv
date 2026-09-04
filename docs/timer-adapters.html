@@ -199,8 +199,48 @@ flowchart LR
         <tr><td>Signal-based lap recovery</td><td>✗</td><td>✓</td><td>~</td><td>✗</td></tr>
         <tr><td>Frequency / channel mgmt</td><td>✗</td><td>✓</td><td>✓</td><td>~</td></tr>
         <tr><td>Source race lifecycle</td><td>✓</td><td>✓</td><td>~</td><td>✗</td></tr>
+        <tr><td>Race control (accepts start/stop)</td><td>✓ (host only)</td><td>✓</td><td>~</td><td>✗</td></tr>
+        <tr><td>Seating (accepts a lineup)</td><td>~ (select-only)</td><td>✓</td><td>~</td><td>✗</td></tr>
       </tbody>
     </table>
+    <div class="callout">
+      <p>
+        <strong>Capabilities are <em>reported</em>, not static per kind (decided 2026-08-29).</strong>
+        The last two rows are why: Velocidrone's race control and seating exist only while the
+        Director's machine is the <strong>multiplayer room host</strong> — the same adapter degrades
+        to observe-only otherwise — and RotorHazard's set differs socket-only vs plugin
+        (<code>PluginHello.advertises</code> is the working precedent). So the capability
+        declaration lives in the timer's <strong>live reported status</strong> (alongside
+        <code>TimerStatus</code>/<code>PluginPresence</code>), and the engine/console consult the
+        report — never the kind. <em>Race control</em> means the source accepts a commanded
+        start/stop; it is distinct from <em>source race lifecycle</em>, which only means the source
+        reports its own start/finish edges. <em>Seating "select-only"</em>: Velocidrone's
+        <code>activate</code> restricts the race to chosen lobby pilots but cannot add a pilot who
+        is not in the room.
+      </p>
+    </div>
+    <div class="callout">
+      <p>
+        <strong>As built (v0.4) — the seam gap.</strong> The <code>Capabilities</code> declaration
+        exists (<code>crates/adapters/src/lib.rs</code>, seven flags, serde-ready) but is
+        <strong>dead code outside the adapters crate</strong>: nothing reads
+        <code>capabilities()</code> at runtime, there is no TS binding, and the de-facto capability
+        check is <code>match timer.kind</code> (~10 RH-named route guards in
+        <code>crates/server/src/app.rs</code>). There are also two runtime seams, neither general:
+        <code>LapSource::run_heat</code> (sim-shaped, implemented only by the Mock) and the bespoke
+        <code>RhConnection</code> driver (persistent-connection-shaped, RH-typed throughout) —
+        and <code>PassSink::emit</code> hard-codes <code>GateIndex::LAP</code>, so a split cannot
+        survive the bridge. The agreed build order when Pillar&nbsp;4 opens this seam
+        (research 2026-08-29): <strong>1)</strong> promote <code>Capabilities</code> onto
+        <code>Timer</code>/the wire and convert the kind guards to capability refusals,
+        <strong>2)</strong> lift <code>RhConnection</code>'s arm/disarm/prepare/drain skeleton into a
+        kind-agnostic <code>TimerConnection</code> with capability-gated
+        <code>prepare</code>/<code>tune</code>/<code>seat</code>/<code>start</code>,
+        <strong>3)</strong> add <code>TimerKind::Velocidrone { url }</code>,
+        <strong>4)</strong> bind identity by ref via <code>CompetitorSeen</code> (Velocidrone keys on
+        stable player <code>uid</code>, not RH's positional <code>node-{n}</code> remap).
+      </p>
+    </div>
     <p>
       An adapter never owns truth and never blocks: it appends observations and the Director
       proceeds. A source that drops mid-race reconnects and resumes appending; deduplication
@@ -265,8 +305,72 @@ flowchart LR
       <dt>Capabilities</dt>
       <dd>Live passes ✓, splits ✓, source lifecycle ✓; signal ✗, calibration ✗, frequency
       ✗. No special-casing — the adapter simply declares this, and the UI hides calibration
-      and signal marshaling for it.</dd>
+      and signal marshaling for it. Race control and seating are declared <em>conditionally</em>:
+      present while the Director is room host, absent otherwise (§5).</dd>
     </dl>
+    <div class="callout">
+      <p>
+        <strong>Verified against the local RE workspace (2026-08-29)</strong> — the authoritative
+        sources are the maintainer's own reverse-engineering projects
+        (<code>~/development/fpv/velocidrone/</code>: the binary-derived
+        <code>velocidrone-websocket/docs/ws-spec.md</code> and <code>velocistream</code>, whose
+        <code>devel</code> branch ran the full seat → start → ingest → results loop against the live
+        sim), never community tools. Key facts, with the receipts in
+        <code>velocistream@devel</code>'s controller tests:
+      </p>
+      <p>
+        <strong>The protocol is bidirectional.</strong> <code>startrace</code>,
+        <code>abortrace</code>, <code>activate([uids])</code>, <code>getpilots</code> (and
+        lock/camera controls) all work — but are <strong>host-gated and fail silently</strong>: a
+        non-host command is a no-op with no error. Detect host status via
+        <code>player.raceManager</code>; per the RotorHazard rule, <em>prove the write landed</em> —
+        infer <code>startrace</code> success from the subsequent
+        <code>racestatus</code>/<code>countdown</code>, match <code>getpilots</code> →
+        <code>pilotlist</code> with a timed wait.
+      </p>
+      <p>
+        <strong>Wire traps, all verified:</strong> booleans arrive as strings
+        (<code>"True"</code>/<code>"False"</code>, capitalized — C# <code>bool.ToString()</code>);
+        <code>racedata.time</code> is cumulative float
+        <em>seconds</em> as a decimal string (not the spec's <code>"01:23.456"</code>);
+        <code>FinishGate.StartFinishGate</code> is a persistent <em>track-shape flag</em>, not a
+        crossing event, and lap detection must branch on it (both branches have exact-ms tests —
+        port that logic, don't re-derive it); a pilot's first <code>racedata</code> appearance is
+        the holeshot; <strong>no <code>session</code> event in single player</strong> (a multiplayer
+        room is required for the full model); practical heat cap ~10 pilots; a 40&nbsp;s server
+        timeout needs an app-level keep-alive; and the RE library's default service path
+        <code>/ws/</code> is wrong — the endpoint that has actually connected is
+        <code>ws://&lt;host&gt;:60003/velocidrone/</code> (which this repo's transport already uses).
+      </p>
+      <p>
+        <strong>Statically resolved from the 1.17.13 binary (2026-08-29, dnre-mcp over the
+        maintainer's Managed drop; full spec rewritten in the RE workspace's
+        <code>ws-spec.md</code>):</strong> every server→client message is a <strong>BINARY
+        WebSocket frame</strong> (opcode 0x2) carrying UTF-8 JSON — the game never sends text
+        frames, so this repo's text-only transport read drops the whole feed against a real game
+        (KNOWN BROKEN note in <code>velocidrone/transport.rs</code>; the #483 fix). The
+        <code>raceAction</code> vocabulary is exactly
+        <code>"start"</code>/<code>"abort"</code>/<code>"race finished"</code> (velocistream was
+        right; the old spec's <code>"started"</code>/<code>"aborted"</code> don't exist in the
+        binary). <code>racedata.uid</code> is a bare JSON <em>number</em> on 1.17.13 (string in
+        <code>pilotlist</code>/<code>ActivateError</code>); <code>gate</code> is the 1-based
+        per-lap checkpoint ordinal of a packed <code>lap*1000+gate</code> progress counter;
+        snapshots are whole-field, per crossing, throttled to 10&nbsp;Hz;
+        <code>ActivateError</code> fires <em>per missing uid</em> in request order (the seating
+        readback); <code>SocketManager</code> serves only the <strong>newest connection</strong>
+        (an older client silently starves); multiplayer countdown runs <strong>5→0</strong>; a new
+        60&nbsp;Hz all-numbers <code>imu</code> frame family (opt-in, Betaflight-only) must be
+        tolerated; and the keep-alive is <code>{"command":"ping"}</code> every ~5&nbsp;s against a
+        40&nbsp;s sliding idle timeout. The wire-faithful mock is
+        <code>gridfpv_testkit::vd_mock</code> / <code>cargo xtask vd-mock</code>, self-tested in
+        plain <code>cargo test</code> and replaying a genuine 134-frame capture.
+      </p>
+      <p>
+        <strong>Host mode is required for the 1.0.0 core loop (decided 2026-08-29)</strong> — see
+        §9. Operationally the maintainer runs a dedicated Velocidrone account for the Director to
+        host and spectate with, separate from the racing accounts.
+      </p>
+    </div>
     <div class="callout">
       <p>
         <strong>Why this keeps us honest:</strong> Velocidrone has no RSSI, no thresholds,
@@ -408,8 +512,36 @@ flowchart LR
       <code>rh-velocidrone</code> plugin and <code>VelocidroneWebSocketConsumer</code>); a raw
       WebSocket at <code>ws://&lt;host&gt;:60003/velocidrone</code> carrying one-key
       <code>racestatus</code> / <code>racedata</code> / <code>pilotlist</code> frames (see §7).
-      Lower-confidence items still pending a live capture: the full <code>raceAction</code> string
-      set and the exact split-gate numbering.</li>
+      Since verified against the local RE workspace (2026-08-29): <code>time</code> is a
+      cumulative float-seconds decimal string, and <code>uid</code> is on the wire in
+      <code>racedata</code>. The <code>raceAction</code> vocabulary is <strong>conflicted between
+      the workspace's own sources</strong>: the binary-derived spec settled
+      <code>"started"</code>/<code>"aborted"</code>, while <code>velocistream</code>'s working
+      consumer (and its tests) matches <code>"start"</code>/<code>"abort"</code>/<code>"race
+      finished"</code> — parse tolerantly until resolved. Remaining unknowns
+      (<code>raceAction</code> set, split-gate numbering, emitted decimal precision, keep-alive
+      form — this repo's transport sends empty frames, <code>velocistream</code> sends
+      <code>{"command":"ping"}</code>; #484 recommends the ping) are now resolvable
+      <strong>statically</strong>: the maintainer supplies the game binary (.NET) plus his
+      <code>dnre-mcp</code> tool, so the answers come from the decompiled current build rather
+      than waiting on a live capture, with a live session as final confirmation. The
+      full source reconciliation and mock plan live on #484.</li>
+      <li><span class="resolved">Resolved (2026-08-29) — Velocidrone control direction &amp; host
+      mode.</span> The protocol is bidirectional but host-gated (§7). The 1.0.0 core loop
+      <strong>requires the Director's machine to be the multiplayer room host</strong>, giving Grid
+      the same ownership it has over RotorHazard: command the start, push the seating
+      (<code>activate</code>). Observer mode declares its reduced capabilities honestly and
+      degrades visibly; racing through it is post-1.0.</li>
+      <li><span class="resolved">Resolved (2026-08-29) — Capabilities are reported, not static.</span>
+      The capability declaration is part of the timer's live reported status (§5): Velocidrone's
+      race control and seating flip with host status, and RotorHazard's set differs socket vs
+      plugin. A static per-kind declaration would be wrong within the first hour of field use.</li>
+      <li><span class="resolved">Resolved (2026-08-29) — Gate index through the sink; split surfaces
+      later.</span> When Pillar&nbsp;4 opens the seam, <code>PassSink::emit</code> gains a gate
+      parameter so the bridge stops discarding data the log format already models — a one-line fix
+      cheapest while the seam is open. Every split <em>surface</em> (UI, results columns) waits for
+      the multi-timer work (#113), post-1.0, where splits are designed
+      once for sim gates and physical split timers together.</li>
     </ol>
 
     <footer class="doc-footer">
