@@ -139,7 +139,10 @@ test('RD creates an event, the wizard walks the stages, and the workspace reflec
   await roundForm.getByLabel('Label').fill(ROUND);
   await roundForm.getByLabel('Format').selectOption('timed_qual');
   await roundForm.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
-  await roundForm.getByLabel('Win condition').selectOption('BestLap');
+  // Best lap = the converged **Best-of-N with N = 1** (9705af5); it still serialises to `BestLap` on
+  // the wire, but the picker no longer carries a separate "Best lap" option.
+  await roundForm.getByLabel('Win condition').selectOption('BestOfN');
+  await roundForm.getByLabel('Laps', { exact: true }).fill('1');
   await page.getByRole('button', { name: 'Add round', exact: true }).click();
   await expect(
     wizard.getByRole('list').getByRole('listitem').filter({ hasText: ROUND })

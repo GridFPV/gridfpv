@@ -6,13 +6,19 @@
  * the redesigned form for two formats and assert the **dynamic per-format field set** + the friendly
  * format names, screenshotting each:
  *
- *  - **Open Practice** — the active-channels picker + time limit show; the eligible-class dropdown,
- *    win condition, seeding and channel mode are hidden.
- *  - **Double Elimination** (a bracket format) — the eligible-class **single-select** dropdown, win
- *    condition, seeding and channel mode show; the active-channels picker is hidden.
+ *  - **Practice** (`open_practice`) — the active-channels picker + time limit show; the
+ *    eligible-class dropdown, win condition, seeding and channel mode are hidden.
+ *  - **Head-to-Head** (`head_to_head`, a scored class format) — the eligible-class **single-select**
+ *    dropdown, win condition, seeding and channel mode show; the active-channels picker is hidden.
  *
- * The format selector shows the **friendly** label ("Open Practice", "Double Elimination") while
- * storing the underlying key. Nothing is mocked. Screenshots land in `e2e/screenshots/` for the PR.
+ * The format selector shows the **friendly** label ("Practice", "Head-to-Head") while storing the
+ * underlying key. Nothing is mocked. Screenshots land in `e2e/screenshots/` for the PR.
+ *
+ * NOTE: this pair used to be driven as "open practice + `double_elim`" — a bracket. The tournament
+ * generators were carved out for the primitives-first v0.4 (71d49f2; they return with #68–#70), so
+ * the server now rejects those format keys and the picker no longer offers them. The *subject* of
+ * this spec is the form's dynamic per-format field set, not the bracket, so it is driven through
+ * Head-to-Head — the surviving non-open-practice format that exercises the same field block.
  */
 import { expect, test } from './observability.js';
 import type { Page } from '@playwright/test';
@@ -41,7 +47,7 @@ async function openTab(page: Page, name: string) {
   await page.getByRole('navigation', { name: 'Screens' }).getByRole('button', { name }).click();
 }
 
-test('the redesigned Rounds form shows the dynamic per-format fields (open practice + a bracket)', async ({
+test('the redesigned Rounds form shows the dynamic per-format fields (practice + head-to-head)', async ({
   page,
   director
 }) => {
@@ -73,11 +79,12 @@ test('the redesigned Rounds form shows the dynamic per-format fields (open pract
   await expect(form).toBeVisible();
   await form.getByLabel('Label').fill('Form Redesign Demo');
 
-  // ── Open Practice: friendly label, channels picker + time limit, no class / win / seeding ──────
+  // ── Practice: friendly label, channels picker + time limit, no class / win / seeding ───────────
   const formatSelect = form.getByLabel('Format');
-  // The selector shows the friendly label while the option value stays the key.
-  await expect(formatSelect.locator('option', { hasText: 'Open Practice' })).toHaveCount(1);
-  await expect(formatSelect.locator('option', { hasText: 'Double Elimination' })).toHaveCount(1);
+  // The selector shows the friendly label while the option value stays the key (`open_practice` →
+  // "Practice", `head_to_head` → "Head-to-Head" — see `lib/formats.ts` FORMAT_LABELS).
+  await expect(formatSelect.locator('option', { hasText: 'Practice' })).toHaveCount(1);
+  await expect(formatSelect.locator('option', { hasText: 'Head-to-Head' })).toHaveCount(1);
   await formatSelect.selectOption('open_practice');
   await expect(form.getByRole('group', { name: 'Active channels' })).toBeVisible();
   await expect(form.getByLabel('Time limit minutes')).toBeVisible();
@@ -87,8 +94,8 @@ test('the redesigned Rounds form shows the dynamic per-format fields (open pract
   await expect(form.getByLabel('Channel mode')).toBeHidden();
   await form.screenshot({ path: `${SHOTS}rounds-form-open-practice.png` });
 
-  // ── Double Elimination (a bracket): class single-select + win + seeding + channel mode + params ─
-  await formatSelect.selectOption('double_elim');
+  // ── Head-to-Head: class single-select + win + seeding + channel mode + params ──────────────────
+  await formatSelect.selectOption('head_to_head');
   await expect(form.getByRole('group', { name: 'Active channels' })).toBeHidden();
   // The eligible class is a single-select <select> (Rounds form redesign item 6).
   const classSelect = form.getByLabel('Eligible class');
@@ -98,13 +105,15 @@ test('the redesigned Rounds form shows the dynamic per-format fields (open pract
   await expect(form.getByLabel('Win condition')).toBeVisible();
   await expect(form.getByLabel('Seeding')).toBeVisible();
   await expect(form.getByLabel('Channel mode')).toBeVisible();
-  // double_elim declares a `bracket_reset` bool param, surfaced inline (item 4).
-  await expect(form.getByLabel('Bracket reset value')).toBeVisible();
+  // head_to_head declares `group_size` / `rotations` / `scoring` params, surfaced inline (item 4).
+  await expect(form.getByLabel('Group size value')).toBeVisible();
+  await expect(form.getByLabel('Heats per group value')).toBeVisible();
+  await expect(form.getByLabel('Scoring value')).toBeVisible();
   // The start-procedure delays are entered in seconds (item 3).
   await expect(form.getByLabel('Start min delay seconds')).toBeVisible();
   // The grace defaults to 30s (item 5).
   await expect(form.getByLabel('Grace window seconds')).toHaveValue('30');
-  await form.screenshot({ path: `${SHOTS}rounds-form-bracket.png` });
+  await form.screenshot({ path: `${SHOTS}rounds-form-head-to-head.png` });
 
   // Clean up the shared Director's event back to empty (no round was saved).
   await page.request.put(`${ev}/classes`, { ...json, data: { ids: [] } });
@@ -141,9 +150,10 @@ test('the win-condition selector labels the Timed condition "Timed — Most Laps
   const form = page.getByRole('form', { name: 'Add round' });
   await expect(form).toBeVisible();
 
-  // A bracket format surfaces the win-condition selector. The Timed condition is a misnomer-free
-  // "Timed — Most Laps" (the win is most laps within the set time; the time is just the parameter).
-  await form.getByLabel('Format').selectOption('double_elim');
+  // A scored (non-open-practice) format surfaces the win-condition selector. The Timed condition is
+  // a misnomer-free "Timed — Most Laps" (the win is most laps within the set time; the time is just
+  // the parameter). Driven through Head-to-Head since the bracket formats were carved out (71d49f2).
+  await form.getByLabel('Format').selectOption('head_to_head');
   const winSelect = form.getByLabel('Win condition');
   await expect(winSelect).toBeVisible();
   await expect(winSelect.locator('option', { hasText: 'Timed — Most Laps' })).toHaveCount(1);
@@ -204,13 +214,17 @@ test('a qualifying round: win condition IS the metric, "Heats per pilot", heats 
   await form.getByLabel('Format').selectOption('timed_qual');
 
   // The win-condition selector shows only the qualifying conditions (no First-to-N), and there is
-  // NO separate "qualifying metric" field — the win condition drives the qualifying ranking.
+  // NO separate "qualifying metric" field — the win condition drives the qualifying ranking. The
+  // old separate "Best lap" / "Best N consecutive" entries converged into one **Best of N laps**
+  // (9705af5): N = 1 IS best-lap (it still serialises to `BestLap` on the wire), N > 1 is best-N-
+  // consecutive — so the hint spells that out instead of the picker carrying two near-identical rows.
   const win = form.getByLabel('Win condition');
   await expect(win).toBeVisible();
-  await expect(win.locator('option', { hasText: 'Best lap' })).toHaveCount(1);
-  await expect(win.locator('option', { hasText: 'Best N consecutive' })).toHaveCount(1);
+  await expect(win.locator('option', { hasText: 'Best of N laps' })).toHaveCount(1);
   await expect(win.locator('option', { hasText: 'Timed — Most Laps' })).toHaveCount(1);
   await expect(win.locator('option', { hasText: 'First to N laps' })).toHaveCount(0);
+  await win.selectOption('BestOfN');
+  await expect(form.getByLabel('Laps', { exact: true })).toBeVisible();
   await expect(form.getByLabel('Qualifying metric value')).toBeHidden();
   await expect(form.getByLabel('Ranking metric value')).toBeHidden();
   // The `rounds` param is relabeled "Heats per pilot".
