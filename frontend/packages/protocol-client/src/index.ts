@@ -23,6 +23,7 @@ export {
   createTimer,
   updateTimer,
   deleteTimer,
+  restartTimer,
   setEventTimers,
   setPrimaryTimer,
   listPilots,

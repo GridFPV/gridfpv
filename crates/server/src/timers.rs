@@ -401,6 +401,18 @@ struct Registry {
     timers: BTreeMap<TimerId, Timer>,
     /// Directory `timers.json` is persisted under; `None` ⇒ in-memory only (no data dir).
     data_dir: Option<PathBuf>,
+    /// **Pending RotorHazard restart requests** (issue #386), in request order — the RD asked, from
+    /// the guided plugin install, that these timers re-execute their RotorHazard server so it
+    /// re-imports its `plugins/` directory.
+    ///
+    /// A hand-off queue, not state: the connection layer that owns the live sockets lives in
+    /// `gridfpv-app`, *above* this crate, so a route here cannot call it. The manual connection hold
+    /// solves the same layering problem with a flag ([`Timer::manual_connect`]); a restart is an
+    /// **edge** rather than a level, so it is a drained queue instead — the reconciler takes each
+    /// request exactly once ([`TimerRegistry::take_restart_requests`]) and emits it onto the live
+    /// connection. In-memory only, and never persisted: a Director restart must not re-fire an
+    /// RD's restart from a previous session.
+    restart_requests: Vec<TimerId>,
 }
 
 impl TimerRegistry {
@@ -458,7 +470,11 @@ impl TimerRegistry {
         }
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(Registry { timers, data_dir })),
+            inner: Arc::new(RwLock::new(Registry {
+                timers,
+                data_dir,
+                restart_requests: Vec::new(),
+            })),
         })
     }
 
@@ -627,6 +643,59 @@ impl TimerRegistry {
             .filter(|t| t.manual_connect && matches!(t.kind, TimerKind::Rotorhazard { .. }))
             .map(|t| t.id.clone())
             .collect()
+    }
+
+    /// **Request a RotorHazard restart** for `id` (issue #386), returning the [`Timer`] unchanged.
+    ///
+    /// The guided plugin install's last step: RotorHazard imports plugins **once at startup**, so a
+    /// freshly-dropped-in `plugins/gridfpv/` stays inert until RH re-executes. Rather than sending
+    /// the RD off to RotorHazard's own web UI, the Director emits RH's unauthenticated
+    /// `restart_server` on the socket it is already holding.
+    ///
+    /// This only **parks the request**: the sockets live in `gridfpv-app`, above this crate, so the
+    /// connection reconciler drains the queue on its next tick
+    /// ([`take_restart_requests`](Self::take_restart_requests)) and fires the emit. The queue is
+    /// in-memory and never persisted.
+    ///
+    /// Refused (a [`TimerError`], which the route reports as a `400`) for an unknown id, for a
+    /// non-RotorHazard timer (a Mock has no server to restart), and for a timer that is **not
+    /// connected** — there is no socket to emit on, and a request is deliberately not held over for
+    /// a future connection. Requests **coalesce**: asking twice before the reconciler drains queues
+    /// one restart, not two.
+    ///
+    /// The **race-phase refusal** — a restart must never land on a running or armed heat — is not
+    /// here: it needs the event log, so it lives in the route
+    /// (`EventRegistry::heat_in_progress_on_timer`). This layer knows only about the timer.
+    pub fn request_restart(&self, id: &TimerId) -> Result<Timer, TimerError> {
+        let mut reg = self.write();
+        let timer = reg
+            .timers
+            .get(id)
+            .cloned()
+            .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
+        if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
+            return Err(TimerError(format!(
+                "{:?} is not a RotorHazard timer — there is no timing server to restart",
+                timer.name
+            )));
+        }
+        if timer.status != TimerStatus::Connected {
+            return Err(TimerError(format!(
+                "{:?} is not connected — connect it before restarting it",
+                timer.name
+            )));
+        }
+        if !reg.restart_requests.contains(id) {
+            reg.restart_requests.push(id.clone());
+        }
+        Ok(timer)
+    }
+
+    /// Take every pending restart request (issue #386), leaving the queue empty — the connection
+    /// reconciler's drain. Each request is handed out **exactly once**: if no live connection is
+    /// found for it the request is dropped (and logged), never re-queued for a later connection.
+    pub fn take_restart_requests(&self) -> Vec<TimerId> {
+        std::mem::take(&mut self.write().restart_requests)
     }
 
     /// Delete a timer (issue #73). The built-in **Mock cannot be deleted** (it is always

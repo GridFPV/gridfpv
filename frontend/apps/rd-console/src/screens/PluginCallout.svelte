@@ -6,11 +6,34 @@
   // it, drop the gridfpv folder into RotorHazard's plugins/ dir, restart RH. A healthy plugin
   // shows a quiet ✓ chip. Renders nothing for non-RotorHazard timers or before the timer has been
   // probed.
+  //
+  // #386 closes the last step INSIDE GridFPV: RotorHazard imports plugins once at startup, so the
+  // folder the RD just dropped in is inert until RH re-executes — and RH exposes that restart,
+  // unauthenticated, on the socket the Director is already holding. The guide's **Restart timer**
+  // action fires it, so the RD never has to leave for RotorHazard's own web UI. It is confirmed
+  // before firing (it restarts the RD's timing hardware) and the Director REFUSES it outright while
+  // a race is in progress on the timer — the refusal names the heat. Only `restart_server` is
+  // wired; its `shutdown_pi` / `reboot_pi` neighbours stay out of reach.
   import { Badge, Button, Dialog, toast } from '@gridfpv/components';
   import type { Timer } from '@gridfpv/types';
+  import ConfirmButton from '../lib/ConfirmButton.svelte';
+  import type { Session } from '../lib/session.svelte.js';
   import { pluginBundleUrl, pluginView } from '../lib/pluginPresence.js';
 
-  let { timer, baseUrl }: { timer: Timer; baseUrl: string } = $props();
+  let {
+    timer,
+    baseUrl,
+    session
+  }: {
+    timer: Timer;
+    baseUrl: string;
+    /**
+     * The console session, for the RD-gated restart (#386). Optional so the callout still renders
+     * (chip + guide + download) wherever a session isn't handy; without it the restart action is
+     * simply not offered rather than firing an ungated request.
+     */
+    session?: Session;
+  } = $props();
 
   const view = $derived(pluginView(timer));
   let open = $state(false);
@@ -20,7 +43,7 @@
 
   /** In-flight guard + the last outcome, rendered **inside** the dialog (see `status`). */
   let downloading = $state(false);
-  let status = $state<{ tone: 'ok' | 'bad'; message: string } | null>(null);
+  let status = $state<{ tone: 'ok' | 'bad' | 'info'; message: string } | null>(null);
 
   /**
    * Fetch the bundle, then hand it to the browser as a download (#384).
@@ -65,6 +88,58 @@
       downloading = false;
     }
   }
+
+  // ── Restart the timer (#386) ────────────────────────────────────────────────────────────────
+  //
+  // `awaitingReconnect` is what keeps the expected drop from reading as a fault. RotorHazard
+  // re-executes, so the socket legitimately goes down and the timer passes through
+  // `Disconnected` / `Error` / `Connecting` for a few seconds before the Director's reconnect
+  // re-probes the plugin. While this flag is set, those states are narrated as a restart in
+  // progress; when the probe comes back `Present` this whole `needsInstall` branch (dialog
+  // included) is replaced by the quiet ✓ chip, which is the success signal.
+  let restarting = $state(false);
+  let awaitingReconnect = $state(false);
+
+  /** Whether the timer's connection is currently down — expected, mid-restart. */
+  const reconnecting = $derived(
+    timer.status === 'Disconnected' || timer.status === 'Error' || timer.status === 'Connecting'
+  );
+
+  /**
+   * Whether **Restart timer** can fire: we need a session to make the RD-gated call, and the
+   * Director only accepts a restart on a live connection (there is no socket to emit on otherwise).
+   * The race-phase refusal is the Director's — it owns the event log — and comes back as a named
+   * error rather than being second-guessed here.
+   */
+  const canRestart = $derived(!!session && timer.status === 'Connected');
+
+  async function restart() {
+    if (!session || restarting) return;
+    restarting = true;
+    status = null;
+    try {
+      const updated = await session.restartTimer(timer.id);
+      if (!updated) {
+        status = { tone: 'bad', message: 'A control token is required to restart a timer.' };
+        return;
+      }
+      awaitingReconnect = true;
+      // The timer is NAMED, never its URL or id (repo display rule).
+      const message =
+        `Restarting “${timer.name}”. It drops off for a few seconds and reconnects on its own — ` +
+        'the plugin badge turns green once it is back with the plugin loaded.';
+      status = { tone: 'info', message };
+      toast.info(message, 'Timer restarting');
+    } catch (err) {
+      // The Director's refusals (a heat in progress, a timer that is not connected) arrive already
+      // phrased for the RD and naming the heat — surface them verbatim.
+      const reason = err instanceof Error ? err.message : String(err);
+      status = { tone: 'bad', message: reason };
+      toast.error(reason, 'Restart refused');
+    } finally {
+      restarting = false;
+    }
+  }
 </script>
 
 {#if view}
@@ -100,7 +175,12 @@
             <code>plugins/gridfpv/</code> holding <code>__init__.py</code> and
             <code>manifest.json</code> <em>directly</em> inside it — no extra folder in between.
           </li>
-          <li>Restart RotorHazard — the timer reconnects and the badge turns green.</li>
+          <li>
+            Restart RotorHazard with <strong>Restart timer</strong> below — no need to open
+            RotorHazard's own web interface. It drops off for a few seconds, reconnects by itself,
+            and the badge turns green. (Restarting is refused while a race is staged, armed or
+            running.)
+          </li>
         </ol>
         <!--
           Where `plugins/` lives (#385). RotorHazard resolves its data dir through a six-step
@@ -146,11 +226,42 @@
           </p>
         </details>
         {#if status}
-          <p class="status" class:bad={status.tone === 'bad'} role="status">{status.message}</p>
+          <p
+            class="status"
+            class:bad={status.tone === 'bad'}
+            class:info={status.tone === 'info'}
+            role="status"
+          >
+            {status.message}
+          </p>
+        {/if}
+        <!-- The expected drop, narrated as progress rather than a fault: RotorHazard is re-executing,
+             so `Disconnected` / `Error` / `Connecting` here is the restart working, not a failure. -->
+        {#if awaitingReconnect && reconnecting}
+          <p class="status info" role="status">
+            <!-- Named, never its URL (CLAUDE.md). -->
+            Waiting for <strong>{timer.name}</strong> to come back up… this is expected right after a
+            restart.
+          </p>
         {/if}
       </div>
       {#snippet footer()}
         <Button variant="ghost" onclick={() => (open = false)}>Close</Button>
+        {#if session}
+          <!-- Confirmed before firing: this restarts the RD's timing hardware. The Director
+               additionally REFUSES it while a race is in progress — the gate is heat phase, not
+               this dialog. -->
+          <ConfirmButton
+            variant="danger"
+            disabled={!canRestart || restarting}
+            title={canRestart
+              ? `Restart RotorHazard on “${timer.name}” so it loads the plugin`
+              : `“${timer.name}” must be connected before it can be restarted`}
+            onconfirm={restart}
+          >
+            Restart timer
+          </ConfirmButton>
+        {/if}
         <Button variant="primary" loading={downloading} onclick={download}>Download plugin</Button>
       {/snippet}
     </Dialog>
@@ -212,6 +323,11 @@
     background: var(--gf-success-soft);
     color: var(--gf-success);
     font-size: 0.9em;
+  }
+  .install-guide .status.info {
+    border-color: var(--gf-info, var(--gf-accent));
+    background: var(--gf-info-soft, transparent);
+    color: var(--gf-info, var(--gf-accent));
   }
   .install-guide .status.bad {
     border-color: var(--gf-danger);

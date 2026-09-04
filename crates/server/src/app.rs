@@ -452,6 +452,10 @@ pub fn router(registry: EventRegistry) -> Router {
         // write; the hold is explicit — it lasts until `disconnect`.
         .route("/timers/{timer_id}/connect", post(connect_timer))
         .route("/timers/{timer_id}/disconnect", post(disconnect_timer))
+        // **Restart** the RotorHazard server behind a timer (#386) — the guided plugin install's
+        // last step, so installing the plugin never requires opening RotorHazard's own web UI.
+        // RD-gated, and REFUSED outright while a race is in progress on the timer.
+        .route("/timers/{timer_id}/restart", post(restart_timer))
         // The downloadable GridFPV RotorHazard plugin bundle (D16, S1) the guided-install UX
         // offers when a timer's plugin is missing/incompatible. Open read: it's static, embedded
         // at build, and carries no event data — just the plugin folder to drop into RH's plugins/.
@@ -797,6 +801,62 @@ fn set_manual_connect(
             };
             ProtocolError::new(code, e.to_string())
         })
+}
+
+/// `POST /timers/{timer_id}/restart` — restart a RotorHazard timer's server, RD-gated (#386).
+///
+/// The guided plugin install's last step. RotorHazard imports plugins **once at startup**, so the
+/// `plugins/gridfpv/` folder the RD just dropped in is inert until RH re-executes; RH exposes that
+/// restart, unauthenticated, on the socket the Director is already holding
+/// (`restart_server`). Emitting it here means the whole install is three clicks inside GridFPV
+/// rather than a trip to RotorHazard's own web UI. **Only `restart_server` is wired** — its
+/// `shutdown_pi` / `reboot_pi` neighbours take the timing hardware down rather than bringing it
+/// back, and stay out of reach.
+///
+/// # The refusals
+///
+/// * **A race in progress on this timer → `400`.** Restarting RotorHazard mid-heat takes the RD's
+///   timing hardware down with the race on it, so this is gated on **heat phase**
+///   ([`EventRegistry::heat_in_progress_on_timer`]: `Staged`/`Armed`/`Running`/`Unofficial` in any
+///   event that selects the timer), not merely confirmed in the console. The refusal names the
+///   heat and the timer by their **friendly names** (repo display rule).
+/// * A **Mock**, or a timer that is **not connected**, is a `400` (nothing to restart, or no
+///   socket to emit on); an unknown id is a 404 (`UnknownScope`).
+///
+/// On success the request is parked on the timer registry and the connection reconciler emits it on
+/// its next tick; the updated [`Timer`] is returned, matching `connect`/`disconnect`. What follows
+/// is an **expected** drop → reconnect: the socket closes, the timer passes through
+/// `Disconnected`/`Error` for a few seconds, and the reconnect re-probes the plugin — which is what
+/// flips its `PluginPresence` from `Missing` to `Present`. The console presents that window as a
+/// restart in progress, not as a fault.
+async fn restart_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<TimerId>,
+) -> Result<Json<Timer>, ProtocolError> {
+    let timers = registry.timers();
+    // Resolve the timer first so the refusals below can name it, and so an unknown id is a clean
+    // 404 rather than a message about a timer that does not exist.
+    let timer = timers.get(&timer_id).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::UnknownScope,
+            format!("no timer with id {:?}", timer_id.0),
+        )
+    })?;
+    // The hard gate: never restart the timing hardware out from under a live race.
+    if let Some(heat) = registry.heat_in_progress_on_timer(&timer_id) {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "{} is running {} — finish or reset that heat before restarting the timer",
+                timer.name, heat
+            ),
+        ));
+    }
+    timers
+        .request_restart(&timer_id)
+        .map(Json)
+        .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))
 }
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated (issue #73).

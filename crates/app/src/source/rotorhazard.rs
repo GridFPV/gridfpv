@@ -123,6 +123,13 @@ type PrepareSlot = Arc<AtomicBool>;
 /// driver thread; `None` ⇒ nothing pending.
 type SeatSlot = Arc<Mutex<Option<Vec<(u64, String)>>>>;
 
+/// A **pending timer restart** the driver fires on its next loop (#386): the RD asked, from the
+/// guided plugin install, that RotorHazard re-execute itself so it re-imports its plugins. Shared
+/// from the async [`RhConnection::restart`] caller to the blocking driver thread; `true` ⇒ a
+/// restart is due. The driver emits `restart_server` and lets the ordinary drop → backoff →
+/// reconnect → re-probe path do the rest.
+type RestartSlot = Arc<AtomicBool>;
+
 /// The RH heat id **seated** for the current arming, if seating succeeded (the laps-attribute fix):
 /// a fresh RH heat built at Stage with the bound pilots assigned + made current, so RH records +
 /// attributes passes. Held by [`drive`] **outside** its reconnect loop (not a `maintain`-local) so it
@@ -218,6 +225,12 @@ pub struct RhConnection {
     /// (`(node_index, callsign)`) onto its RH node (`seat_heat`) so RH records + attributes passes
     /// — without it RH races an empty-pilot heat and rejects every crossing ("Pilot not defined").
     seat: SeatSlot,
+    /// A **pending restart** the driver fires on its next loop (#386): set by
+    /// [`restart`](Self::restart) from the guided plugin install, the driver emits RotorHazard's
+    /// `restart_server` so RH re-executes and re-imports its `plugins/` directory. The socket then
+    /// drops, this driver reconnects with backoff, and the reconnect's plugin probe republishes the
+    /// timer's `PluginPresence` — `Missing → Present` with no extra plumbing.
+    restart: RestartSlot,
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
@@ -237,6 +250,7 @@ impl RhConnection {
         let tune: TuneSlot = Arc::new(Mutex::new(None));
         let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
         let seat: SeatSlot = Arc::new(Mutex::new(None));
+        let restart: RestartSlot = Arc::new(AtomicBool::new(false));
         let driver = {
             let cancel = cancel.clone();
             let yield_status = yield_status.clone();
@@ -244,6 +258,7 @@ impl RhConnection {
             let tune = tune.clone();
             let prepare = prepare.clone();
             let seat = seat.clone();
+            let restart = restart.clone();
             tokio::task::spawn_blocking(move || {
                 drive(
                     url,
@@ -255,6 +270,7 @@ impl RhConnection {
                     tune,
                     prepare,
                     seat,
+                    restart,
                 );
             })
         };
@@ -265,6 +281,7 @@ impl RhConnection {
             tune,
             prepare,
             seat,
+            restart,
             _driver: driver,
         }
     }
@@ -330,6 +347,25 @@ impl RhConnection {
         if let Some(heat) = slot.as_mut() {
             heat.finishing = true;
         }
+    }
+
+    /// **Restart the RotorHazard server** behind this connection (#386) — the guided plugin
+    /// install's last step, so the RD never has to open RotorHazard's own web UI.
+    ///
+    /// RotorHazard imports plugins **once at startup**, so a freshly-installed `plugins/gridfpv/`
+    /// is inert until RH re-executes. The driver emits RH's unauthenticated `restart_server` on
+    /// its next loop; from there the ordinary reconnect path does everything else — the socket
+    /// drops, [`drive`] marks the timer `Disconnected` and retries with backoff (10s cap), and the
+    /// reconnect **re-probes the plugin**, so [`PluginPresence`] flips `Missing → Present` by
+    /// itself. That expected drop → reconnect is *not* a fault, and the console presents it as
+    /// such.
+    ///
+    /// **Refused mid-race by the driver as well as by the route.** Restarting RH with a race on it
+    /// takes the timing hardware down under the running heat; the server route gates the request on
+    /// heat phase, and the driver additionally drops a request that arrives while a heat is armed on
+    /// this connection (below) so a request racing an arm can never land on a live race.
+    pub fn restart(&self) {
+        self.restart.store(true, Ordering::Relaxed);
     }
 
     /// Tear the connection down: stop any race, disconnect, leave the timer `Disconnected`. Called
@@ -446,6 +482,7 @@ fn drive(
     tune: TuneSlot,
     prepare: PrepareSlot,
     seat: SeatSlot,
+    restart: RestartSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
     // The RH heat id **seated** for the current arming (the laps-attribute fix), if seating
@@ -514,7 +551,16 @@ fn drive(
         timers.set_plugin(&timer_id, plugin);
 
         // Maintain the live link until it drops or we are cancelled.
-        let dropped = maintain(&conn, &cancel, &armed, &tune, &prepare, &seat, &seated_heat);
+        let dropped = maintain(
+            &conn,
+            &cancel,
+            &armed,
+            &tune,
+            &prepare,
+            &seat,
+            &restart,
+            &seated_heat,
+        );
 
         // Stop any in-flight race and disconnect on the way out of this connection. `disconnect`
         // returns the adapter so the next reconnect reuses its dedup state (the #105 fix).
@@ -581,6 +627,7 @@ fn maintain(
     tune: &Mutex<Option<Vec<(u64, u16)>>>,
     prepare: &AtomicBool,
     seat: &Mutex<Option<Vec<(u64, String)>>>,
+    restart: &AtomicBool,
     seated_heat: &Mutex<Option<u64>>,
 ) -> bool {
     let mut last_activity = Instant::now();
@@ -600,6 +647,38 @@ fn maintain(
         // false. (An emit alone can't be trusted — a buffering client returns `Ok` on a dead link.)
         if !conn.is_alive() {
             return true;
+        }
+
+        // Fire a pending **restart** (#386): the RD asked, from the guided plugin install, that
+        // RotorHazard re-execute itself so it picks up a freshly-dropped-in `plugins/gridfpv/`.
+        //
+        // Belt-and-braces refusal while a heat is armed: the server route already gates the request
+        // on heat phase (Staged/Armed/Running/Unofficial), but the request travels through the timer
+        // registry to the reconciler to this thread, so an arm could in principle land in between.
+        // Restarting RH under a live race takes the timing hardware down mid-heat, so the driver
+        // drops the request rather than firing it — the RD can ask again once the heat is done.
+        //
+        // Otherwise it is one fire-and-forget emit: RH re-execs, the socket drops within a moment,
+        // and the caller's reconnect loop takes over (marking `Disconnected`, retrying with backoff,
+        // and re-probing the plugin on the new connection). We do NOT return `true` here — the drop
+        // is detected by the same `is_alive` check as any other, so there is one drop path, not two.
+        if restart.swap(false, Ordering::Relaxed) {
+            if armed.lock().expect("armed-heat lock poisoned").is_some() {
+                eprintln!(
+                    "gridfpv: ignoring a RotorHazard restart request — a heat is armed on this \
+                     connection; restarting mid-race would take the timer down with the race on it"
+                );
+            } else {
+                eprintln!(
+                    "gridfpv: restarting RotorHazard (restart_server) — the connection will drop \
+                     and reconnect on its own, re-probing the GridFPV plugin"
+                );
+                if conn.restart_server().is_err() {
+                    // A failed emit on a supposedly-live socket signals a drop; reconnect and let the
+                    // RD retry (the restart may or may not have been taken — the reconnect tells us).
+                    return true;
+                }
+            }
         }
 
         // Apply a pending tune (race redesign Slice 4a): the bridge requested the device tune its
