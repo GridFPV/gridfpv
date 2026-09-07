@@ -45,6 +45,10 @@ const SCENARIOS: &[(&str, &str)] = &[
         "marshaling practice: a missed lap, a false/extra pass, and a DNF",
     ),
     (
+        "bouncy",
+        "a gate that re-detects: echo bursts per pass, plus one genuine sub-floor lap (#517)",
+    ),
+    (
         "pack",
         "a tight field crossing close together (close finishes)",
     ),

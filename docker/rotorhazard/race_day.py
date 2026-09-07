@@ -91,6 +91,39 @@ def scenario_messy(nodes, rng):
     return out
 
 
+def scenario_bouncy(nodes, rng):
+    """A GATE THAT RE-DETECTS (#517): every real crossing is followed by a burst of echoes.
+
+    This is the failure the same-pass window exists for. A quad sitting in the gate's near field
+    trips the detector several times per pass — reflections tens to a couple of hundred
+    milliseconds apart, at a lower peak than the real crossing. RotorHazard reports all of them
+    (GridFPV neutralises RH's own min-lap filter on purpose), so without a bounce rule the
+    marshaling list gets three or four removal rows between every pair of real laps.
+
+    Node 0 is the worst offender (3 echoes per pass), node 1 bounces occasionally, and the rest of
+    the field is clean — so one screen shows the collapsed burst, the untouched laps, and the
+    difference between them. One pilot also gets a genuine sub-floor crossing 3 s after a lap: far
+    outside any sane bounce window, so it must stay a full `under min lap` row and keep its tone.
+    """
+    out = []
+    for i, n in enumerate(nodes):
+        laps = _laps(n, 4, 7.0, 0.05, STRONG, rng=rng)
+        out += laps
+        if i == 0:
+            # The bad gate: three echoes after every crossing, 60–260 ms out.
+            for t, node, _peak in laps:
+                for gap in (0.061, 0.193, 0.254):
+                    out.append((t + gap, node, FALSE_PEAK + rng.randint(-8, 8)))
+        elif i == 1:
+            # An intermittent one: a single echo after the holeshot and after lap 2.
+            for t, node, _peak in (laps[0], laps[2]):
+                out.append((t + 0.088, node, FALSE_PEAK))
+            # …and a REAL crossing 3 s after lap 1 — the pilot cut the course. Under a 10 s floor
+            # this is `under min lap`, NOT a bounce: it keeps its own row and it still tones.
+            out.append((laps[1][0] + 3.0, node, STRONG - 10))
+    return out
+
+
 def scenario_pack(nodes, rng):
     out = []
     base_pace = 6.5
@@ -105,6 +138,7 @@ SCENARIOS = {
     "clean": scenario_clean,
     "varied": scenario_varied,
     "messy": scenario_messy,
+    "bouncy": scenario_bouncy,
     "pack": scenario_pack,
 }
 

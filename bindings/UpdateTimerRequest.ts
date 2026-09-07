@@ -32,4 +32,10 @@ node_count?: number,
  * A new **available-channels** set in raw MHz (race redesign Slice 4a), or `None` to leave it
  * unchanged.
  */
-available_channels?: Array<number>, };
+available_channels?: Array<number>, 
+/**
+ * A new **gate-bounce window** in µs (#517), or `None` to leave it unchanged. Send `0` to turn
+ * the bounce rule off — unlike the node-count override this needs no separate clear route,
+ * because zero already spells "no window" (the same idiom `RoundDef::min_lap_secs` uses).
+ */
+same_pass_window_micros?: number, };

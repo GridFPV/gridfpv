@@ -320,10 +320,11 @@ pub fn apply_command_in_event(
         // `Start` is the **arm** (it opens the gate to detections). It is the last moment Grid can
         // refuse before RotorHazard is driving a live race, so it carries the GridFPV-plugin
         // backstop (#405) — see [`refuse_arm_without_plugin`].
-        Command::Start { heat } => match refuse_arm_without_plugin(registry, event_id) {
-            Some(err) => CommandAck::failed(err),
-            None => apply_command(state, Command::Start { heat }),
-        },
+        // `Start` is the **arm** (it opens the gate to detections). It is the last moment Grid can
+        // refuse before RotorHazard is driving a live race, and — for the same reason — the last
+        // moment to pin the detection config this run will be judged by (#517). Both need the
+        // registry, so it runs here rather than in the log-only `apply_command`.
+        Command::Start { heat } => apply_start_heat(registry, event_id, state, heat),
         // `ScheduleHeat` also needs the event meta + timer registry (the channel cap + assignment),
         // so it is handled here rather than in the log-only `apply_command`.
         Command::ScheduleHeat {
@@ -1293,6 +1294,63 @@ fn apply_stage_heat(
         ) {
             return CommandAck::failed(err);
         }
+    }
+    match state.append(transition, None) {
+        Ok(_offset) => CommandAck::ok(),
+        Err(err) => CommandAck::failed(err),
+    }
+}
+
+/// Handle [`Command::Start`] — the **arm**, and the moment the gate opens to detections.
+///
+/// Two things have to happen here and nowhere else.
+///
+/// **The plugin backstop (#405).** Arming is the last point Grid can refuse before RotorHazard is
+/// driving a live race — see [`refuse_arm_without_plugin`].
+///
+/// **The detection pin (#517).** The gate-bounce window is *timer* config, and a timer stays
+/// editable forever, unlike a round — which freezes the moment it races precisely so results cannot
+/// shift under it. Read live by the fold, an RD nudging the Timers page would silently re-judge
+/// every race that timer ever ran. So the value in force is written to the log **here**, once, and
+/// the corrected fold reads it from there: an edit changes the next run and never a past one.
+///
+/// `(Staged, Start) -> Armed` is the only arm in the heat FSM ([`heat::apply`]), so every run
+/// passes through this exactly once — and a re-arm after an Abort or Restart re-pins, which is
+/// right: that is a new run, and it should race under the window set for it.
+///
+/// Mirrors [`apply_stage_heat`], which pins the resolved channel layout at the *stage* for exactly
+/// the same reason (#478). The general rule is #518.
+fn apply_start_heat(
+    registry: &EventRegistry,
+    event_id: &EventId,
+    state: &AppState,
+    heat: HeatId,
+) -> CommandAck {
+    if let Some(err) = refuse_arm_without_plugin(registry, event_id) {
+        return CommandAck::failed(err);
+    }
+    let _guard = state.command_guard();
+    // Validate the transition FIRST: an illegal arm must leave the log completely untouched, so a
+    // refusal can never leave a pin behind on a heat that did not arm.
+    let transition = match heat_transition(state, heat.clone(), HeatCommand::Start) {
+        Ok(event) => event,
+        Err(err) => return CommandAck::failed(err),
+    };
+    // The pin goes down BEFORE the transition, so the arm is never observable without the config it
+    // armed under. An unresolvable timer pins `None` — no bounce rule, the pre-#517 behaviour —
+    // rather than failing the arm: a race must not be blocked because a setting could not be read.
+    let window = registry
+        .meta_of(event_id)
+        .and_then(|meta| crate::round_engine::assignment_timer(&meta, &registry.timers()))
+        .and_then(|timer| timer.same_pass_window_micros);
+    if let Err(err) = state.append(
+        Event::HeatDetectionPinned {
+            heat: heat.clone(),
+            same_pass_window_micros: window,
+        },
+        None,
+    ) {
+        return CommandAck::failed(err);
     }
     match state.append(transition, None) {
         Ok(_offset) => CommandAck::ok(),
@@ -5503,6 +5561,7 @@ mod tests {
             channel_capability: Some(ChannelCapability::Flexible),
             node_count: Some(8),
             available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+            same_pass_window_micros: None,
         };
         let (registry, event_id, round) =
             event_with_timer_and_round(timer_req, &["alpha", "bravo"]);
@@ -5554,6 +5613,7 @@ mod tests {
             channel_capability: Some(ChannelCapability::Flexible),
             node_count: Some(8),
             available_channels: None,
+            same_pass_window_micros: None,
         };
         let (registry, event_id, round) =
             event_with_timer_and_round(timer_req, &["alpha", "bravo"]);
@@ -5598,6 +5658,7 @@ mod tests {
             channel_capability: Some(ChannelCapability::Flexible),
             node_count: Some(2),
             available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+            same_pass_window_micros: None,
         };
         let (registry, event_id, round) =
             event_with_timer_and_round(timer_req, &["a", "b", "c", "d"]);
@@ -5640,6 +5701,7 @@ mod tests {
             channel_capability: Some(ChannelCapability::Flexible),
             node_count: Some(8),
             available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+            same_pass_window_micros: None,
         };
         let (registry, event_id, round) = event_with_timer_and_round(timer_req, pilots);
         let meta = registry.meta_of(&event_id).unwrap();
@@ -5883,6 +5945,7 @@ mod tests {
                 channel_capability: Some(ChannelCapability::Flexible),
                 node_count: Some(8),
                 available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+                same_pass_window_micros: None,
             })
             .unwrap();
         let class = registry
@@ -6055,6 +6118,7 @@ mod tests {
                 channel_capability: Some(ChannelCapability::Flexible),
                 node_count: Some(8),
                 available_channels: Some(crate::channels::RACEBAND_MHZ.to_vec()),
+                same_pass_window_micros: None,
             })
             .unwrap();
         let class = registry
@@ -6981,6 +7045,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         // Selected while healthy — a legitimate selection under the #405 gate.

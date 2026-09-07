@@ -148,14 +148,6 @@ export function useLapCallouts(
 }
 
 /**
- * How long after a competitor's SOUNDED tone their further crossings are absorbed (#503), in
- * source-clock µs. Well under any real lap (the min-lap floor's field default is 10s) and well
- * over a reflection burst's spread (tens to hundreds of ms), so it can only ever collapse a
- * multi-detection of one physical pass, never silence a genuine next lap.
- */
-export const CROSSING_TONE_COOLDOWN_MICROS = 1_000_000;
-
-/**
  * **New-crossing detection** for the per-crossing tone (#397) — the sibling of
  * {@link useLapCallouts} above, and the reason this module is no longer only about laps.
  *
@@ -171,18 +163,28 @@ export const CROSSING_TONE_COOLDOWN_MICROS = 1_000_000;
  * too-sensitive gate, and it is exactly what a table of laps will never show them. Nothing here
  * filters toward "meaningful" crossings — but repeats are rate-limited, see the cooldown below.
  *
- * ── The cooldown: one physical pass is ONE tone (#503) ───────────────────────────────────────
+ * ── One physical pass is ONE tone — and the FOLD decides that (#503, then #517) ─────────────
  * A quad sitting in the gate's near field fires the detector several times per pass (antenna
  * reflections milliseconds apart), and on the field that rendered as a pip storm per lap — the
- * tone stopped answering "did the gate see me?" and started drowning the RD. So: a crossing by
- * the SAME competitor within {@link CROSSING_TONE_COOLDOWN_MICROS} of the last one *sounded* for
- * them is absorbed. Measured from the last sounded tone (an absorbed crossing does not extend
- * the window), keyed **per competitor** — two pilots crossing near-simultaneously must both
- * tone, that is the gate telling the RD it saw both. The window is source-clock (`at`), the axis
- * bursts are adjacent on; a crossing carrying an *older* source time than the last sounded one
- * (a marshal insert) is never absorbed. Absorbed crossings still advance the watermark — they
- * are seen, just not sounded — and the min-lap floor still voids them on its own axis; this
- * cooldown only de-duplicates the NOISE of them.
+ * tone stopped answering "did the gate see me?" and started drowning the RD.
+ *
+ * #503 fixed that here, with a private 1s per-competitor cooldown. It worked, but it made this
+ * module a second owner of a rule the server also had an opinion about: the same physical fact —
+ * *the gate stutters over one pass* — was a hardcoded client constant AND (conflated with the
+ * min-lap floor) a server-side suppression, with no way for the two to agree. The marshaling list
+ * could not collapse a reflection burst without also hiding a genuinely short lap, because by the
+ * time it saw them they were both `RejectedTooShort`.
+ *
+ * So #517 moved the rule to the one place that already judges crossings: the corrected fold. The
+ * window is per-timer config (`Timer.same_pass_window_micros`), pinned onto the log at the arm so
+ * a later edit cannot re-judge a finished race, and a crossing inside it folds to the disposition
+ * `RejectedSamePass`. This detector simply does not sound that one. **Behaviour is unchanged** —
+ * the fold measures from the last *surviving* pass exactly as the cooldown measured from the last
+ * *sounded* tone, and a suppressed crossing extends neither — but there is now one window, one
+ * owner, and the speaker and the lap list can no longer disagree.
+ *
+ * Everything else still tones, including a crossing on a seat nobody is flying: a bounce is the
+ * gate stuttering over something that happened once, and that is the ONLY thing being filtered.
  *
  * ── The watermark: fire on IDENTITY, never on a frame arriving ───────────────────────────────
  * Every `LiveCrossing` carries `pass_ref` — its **global append offset**, stable across every
@@ -232,9 +234,6 @@ export function useCrossingTones(
   let scopeKey: string | undefined;
   let baselined = false;
   let watermark = -1;
-  // The source time (µs) of the last crossing SOUNDED per competitor — the cooldown's anchor
-  // (#503). Absorbed crossings never land here, so the window measures from the last tone.
-  const lastTonedAt = new Map<CompetitorRef, number>();
 
   $effect(() => {
     const scope = getScope();
@@ -248,7 +247,6 @@ export function useCrossingTones(
       scopeKey = scope;
       baselined = false;
       watermark = -1;
-      lastTonedAt.clear();
     }
     // First sight of this scope BASELINES: retire everything on offer, announce none of it.
     const announce = baselined && audible;
@@ -261,15 +259,10 @@ export function useCrossingTones(
       if (crossing.pass_ref <= previous) continue;
       if (crossing.pass_ref > next) next = crossing.pass_ref;
       if (!announce) continue;
-      // The cooldown (#503): absorb a same-competitor crossing inside the window of their last
-      // SOUNDED tone. A negative delta (a marshal insert carrying an older source time) is a
-      // different case entirely and always tones; exactly-at-the-boundary tones too.
-      const last = lastTonedAt.get(crossing.competitor);
-      if (last !== undefined) {
-        const since = crossing.at - last;
-        if (since >= 0 && since < CROSSING_TONE_COOLDOWN_MICROS) continue;
-      }
-      lastTonedAt.set(crossing.competitor, crossing.at);
+      // The bounce (#517): the fold already decided this crossing was the same physical pass as
+      // the last surviving one, so there is nothing here for the RD to hear. It still advances the
+      // watermark — it was seen, just not sounded — exactly as the old client-side cooldown did.
+      if (crossing.disposition === 'RejectedSamePass') continue;
       onCrossing(crossing);
     }
     watermark = next;

@@ -10,6 +10,6 @@
  * So a disposition is a **position in the corrected pass chain**, or the removal record the fold
  * already keeps — never a new logged fact.
  *
- * The two removal-side variants map 1:1 onto the only two [`VoidReason`]s that exist.
+ * Every removal-side variant maps 1:1 onto the [`VoidReason`] that produced it.
  */
-export type CrossingDisposition = "Holeshot" | "Counted" | "RejectedTooShort" | "VoidedByMarshal" | "RejectedAfterRaceEnd";
+export type CrossingDisposition = "Holeshot" | "Counted" | "RejectedTooShort" | "RejectedSamePass" | "VoidedByMarshal" | "RejectedAfterRaceEnd";

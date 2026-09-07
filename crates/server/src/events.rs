@@ -4410,6 +4410,7 @@ mod tests {
                     channel_capability: None,
                     node_count: None,
                     available_channels: None,
+                    same_pass_window_micros: None,
                 })
                 .unwrap();
             rh_id = rh.id.clone();
@@ -5954,6 +5955,7 @@ mod tests {
                 channel_capability: None,
                 node_count: Some(4),
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         reg.set_timers(event, vec![timer.id.clone()]).unwrap();

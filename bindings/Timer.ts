@@ -186,4 +186,30 @@ calibration: Array<NodeCalibration>,
  * an empty record is omitted entirely, so a pre-#413 `timers.json` restores with none and a
  * console (or a test fixture) written before this existed still parses a `Timer`.
  */
-node_channels?: Array<NodeChannel>, };
+node_channels?: Array<NodeChannel>, 
+/**
+ * The **gate-bounce window** (µs): two lap-gate crossings by the same competitor closer
+ * together than this are **the same physical pass**, detected twice (#517).
+ *
+ * A quad in the gate's near field fires the detector several times per crossing — antenna
+ * reflections milliseconds apart. That is a property of *this gate*: its antenna, its RSSI
+ * thresholds, where it sits on the track. So it lives on the timer, not on the round.
+ *
+ * **Not the same thing as the min-lap floor.** `RoundDef::min_lap_secs` is a *competition
+ * rule* — "a lap shorter than this does not count" — and it is the round's to set. This is a
+ * *hardware fact* — "that was not a second crossing at all". Conflating them is what made a
+ * reflection burst indistinguishable from a genuinely short lap in the marshaling list.
+ *
+ * `None` (the default, and what an older `timers.json` restores with) means no bounce rule:
+ * every crossing stands on its own and only the round's floor judges it.
+ *
+ * Capped at [`MAX_SAME_PASS_WINDOW_MICROS`] and normalized so `0` reads as `None`. The cap is
+ * what makes the setting safe to change: no real lap can be that short, so the window can only
+ * ever collapse a multi-detection of one pass, never eat a lap somebody flew.
+ *
+ * **Read at the arm, not at the fold.** The value in force when a heat arms is stamped onto
+ * the log ([`Event::HeatDetectionPinned`](gridfpv_events::Event::HeatDetectionPinned)) and the
+ * corrected fold reads it from there — so editing this never re-judges a race that has already
+ * run. See #518 for the general rule.
+ */
+same_pass_window_micros?: number, };

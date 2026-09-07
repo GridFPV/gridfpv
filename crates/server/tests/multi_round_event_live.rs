@@ -576,6 +576,7 @@ async fn build_event(
             channel_capability: Some(ChannelCapability::Flexible),
             node_count: Some(CALLSIGNS.len() as u32),
             available_channels: Some(MEMBER_CHANNELS.to_vec()),
+            same_pass_window_micros: None,
         },
     )
     .await;

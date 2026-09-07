@@ -2328,6 +2328,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         // The timer reports four nodes; the RD has switched off the third one ("Node 3" = index 2).
@@ -2440,6 +2441,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         // Select only the RotorHazard timer for Practice.
@@ -2493,6 +2495,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         registry
@@ -3530,6 +3533,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap()
             .id
@@ -3619,6 +3623,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap()
             .id;

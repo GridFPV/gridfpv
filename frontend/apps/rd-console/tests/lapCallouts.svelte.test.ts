@@ -408,24 +408,29 @@ describe('useCrossingTones', () => {
     };
   }
 
-  it('tones on EVERY crossing — holeshot, counted, rejected-too-short and marshal-voided alike', () => {
+  it('tones on every crossing EXCEPT a fold-declared bounce', () => {
+    // #397's rule and #517's single exception, in one assertion. Everything the gate reports is
+    // audible — a holeshot, a counted lap, a pass under the floor, a marshal-voided one, and a
+    // crossing after the race ended — because each of those is a thing that happened. The one
+    // silence is `RejectedSamePass`: not a second crossing, the same one seen twice.
     const h = harness();
     const holeshot = crossing(10, 'maverick-1', 'Holeshot');
     const counted = crossing(11, 'maverick-1', 'Counted', 1);
     const rejected = crossing(12, 'maverick-1', 'RejectedTooShort');
     const voided = crossing(13, 'goose-2', 'VoidedByMarshal');
+    const afterEnd = crossing(14, 'goose-2', 'RejectedAfterRaceEnd');
+    const bounce = crossing(15, 'maverick-1', 'RejectedSamePass');
 
-    h.set({ crossings: [holeshot] });
-    h.set({ crossings: [holeshot, counted] });
-    h.set({ crossings: [holeshot, counted, rejected] });
-    h.set({ crossings: [holeshot, counted, rejected, voided] });
+    const feed = [holeshot, counted, rejected, voided, afterEnd, bounce];
+    for (let i = 1; i <= feed.length; i++) h.set({ crossings: feed.slice(0, i) });
 
-    expect(h.toned).toEqual([holeshot, counted, rejected, voided]);
+    expect(h.toned).toEqual([holeshot, counted, rejected, voided, afterEnd]);
     expect(h.toned.map((c) => c.disposition)).toEqual([
       'Holeshot',
       'Counted',
       'RejectedTooShort',
-      'VoidedByMarshal'
+      'VoidedByMarshal',
+      'RejectedAfterRaceEnd'
     ]);
     h.cleanup();
   });
@@ -570,45 +575,61 @@ describe('useCrossingTones', () => {
     h.cleanup();
   });
 
-  it('absorbs a same-competitor reflection burst into ONE tone (#503)', () => {
+  it('stays silent on a reflection burst the fold called RejectedSamePass (#503, #517)', () => {
     // One physical pass, five detections milliseconds apart (a quad in the gate's near field).
-    // The field rendered this as a pip storm per lap; the tone must answer "did the gate see
-    // me?" once. Explicit `at` values — the cooldown runs on the source clock, not offsets.
+    // The field rendered this as a pip storm per lap; the tone must answer "did the gate see me?"
+    // once. #503 did that here with a private 1s timer; #517 moved the judgement into the fold,
+    // so this detector now reads the disposition rather than re-deriving the rule from `at`.
     const h = harness();
     const burst = [
       { ...crossing(80, 'maverick-1', 'Counted', 1), at: 10_000_000 },
-      { ...crossing(81, 'maverick-1', 'RejectedTooShort'), at: 10_061_000 },
-      { ...crossing(82, 'maverick-1', 'RejectedTooShort'), at: 10_193_000 },
-      { ...crossing(83, 'maverick-1', 'RejectedTooShort'), at: 10_254_000 },
-      { ...crossing(84, 'maverick-1', 'RejectedTooShort'), at: 10_487_000 }
+      { ...crossing(81, 'maverick-1', 'RejectedSamePass'), at: 10_061_000 },
+      { ...crossing(82, 'maverick-1', 'RejectedSamePass'), at: 10_193_000 },
+      { ...crossing(83, 'maverick-1', 'RejectedSamePass'), at: 10_254_000 },
+      { ...crossing(84, 'maverick-1', 'RejectedSamePass'), at: 10_487_000 }
     ];
     h.set({ crossings: burst });
     expect(h.toned).toEqual([burst[0]]);
 
-    // The next genuine lap — 17s later, far past the cooldown — tones again.
+    // The next genuine lap tones again — the bounce absorbs the burst, not the gate.
     const nextLap = { ...crossing(85, 'maverick-1', 'Counted', 2), at: 27_500_000 };
     h.set({ crossings: [...burst, nextLap] });
     expect(h.toned).toEqual([burst[0], nextLap]);
     h.cleanup();
   });
 
-  it('measures the cooldown from the last SOUNDED tone — an absorbed crossing does not extend it', () => {
+  it('STILL tones a genuinely short crossing — RejectedTooShort is not a bounce', () => {
+    // The distinction #517 exists to make, and the one the old client-side cooldown could not:
+    // a pass 3s after the last one, under a 10s floor, is a real crossing the pilot really made.
+    // It scores nothing, but the RD must hear that the gate fired — that is the whole of #397.
+    // Under the pre-#517 cooldown this depended on `at` arithmetic; now the fold has already
+    // ruled, and a crossing it did NOT call a bounce is audible whatever its spacing.
     const h = harness();
-    const t0 = { ...crossing(90, 'maverick-1', 'Counted', 1), at: 10_000_000 };
-    const absorbed = { ...crossing(91, 'maverick-1', 'RejectedTooShort'), at: 10_800_000 };
-    // 1.2s after t0 but only 0.4s after the absorbed crossing: the window anchors on the TONE,
-    // so this fires. (A storm that never pauses must not silence the gate indefinitely.)
-    const clear = { ...crossing(92, 'maverick-1', 'RejectedTooShort'), at: 11_200_000 };
-    h.set({ crossings: [t0] });
-    h.set({ crossings: [t0, absorbed] });
-    h.set({ crossings: [t0, absorbed, clear] });
-    expect(h.toned).toEqual([t0, clear]);
+    const holeshot = { ...crossing(100, 'maverick-1', 'Counted', 1), at: 10_000_000 };
+    const tooShort = { ...crossing(101, 'maverick-1', 'RejectedTooShort'), at: 13_000_000 };
+    const bounce = { ...crossing(102, 'maverick-1', 'RejectedSamePass'), at: 13_090_000 };
+    h.set({ crossings: [holeshot] });
+    h.set({ crossings: [holeshot, tooShort] });
+    h.set({ crossings: [holeshot, tooShort, bounce] });
+    expect(h.toned).toEqual([holeshot, tooShort]);
     h.cleanup();
   });
 
-  it('cools down PER COMPETITOR — two pilots crossing near-simultaneously both tone', () => {
-    // The gate telling the RD it saw both pilots is the point of the feature; only repeats of
-    // the SAME competitor are noise.
+  it('a bounce still advances the watermark — it was seen, just not sounded', () => {
+    // The absorbed crossing must not be re-offered later. Silence is not the same as unseen: if a
+    // bounce left the watermark behind, a re-push of the same frame would sound it.
+    const h = harness();
+    const kept = { ...crossing(90, 'maverick-1', 'Counted', 1), at: 10_000_000 };
+    const bounce = { ...crossing(91, 'maverick-1', 'RejectedSamePass'), at: 10_800_000 };
+    h.set({ crossings: [kept, bounce] });
+    h.set({ crossings: [kept, bounce] });
+    expect(h.toned).toEqual([kept]);
+    h.cleanup();
+  });
+
+  it('two pilots crossing near-simultaneously both tone', () => {
+    // The gate telling the RD it saw both pilots is the point of the feature. The fold keys the
+    // bounce window per competitor for the same reason, so neither of these is ever absorbed.
     const h = harness();
     const mav = { ...crossing(95, 'maverick-1', 'Counted', 1), at: 10_000_000 };
     const goose = { ...crossing(96, 'goose-2', 'Counted', 1), at: 10_050_000 };

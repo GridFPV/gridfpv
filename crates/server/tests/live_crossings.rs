@@ -88,12 +88,25 @@ fn shape(state: &LiveRaceState) -> Vec<(u64, CrossingDisposition, Option<u32>)> 
 
 /// A heat running with `passes` already on the log, plus the offset the first pass sits at.
 fn running_heat(passes: Vec<Event>) -> (Vec<Event>, u64) {
+    running_heat_pinned(passes, None)
+}
+
+/// As [`running_heat`], with a gate-bounce window pinned at the arm (#517) — the shape the real
+/// `Start` command writes: the pin lands immediately before the `Armed` transition, which is
+/// *below* the run window's start, so this also exercises the window-inclusion rule.
+fn running_heat_pinned(passes: Vec<Event>, window: Option<i64>) -> (Vec<Event>, u64) {
     let mut events = vec![
         scheduled("q-1", &["A", "B"]),
         changed("q-1", HeatTransition::Staged),
-        changed("q-1", HeatTransition::Armed),
-        changed("q-1", HeatTransition::Running),
     ];
+    if let Some(w) = window {
+        events.push(Event::HeatDetectionPinned {
+            heat: HeatId("q-1".into()),
+            same_pass_window_micros: Some(w),
+        });
+    }
+    events.push(changed("q-1", HeatTransition::Armed));
+    events.push(changed("q-1", HeatTransition::Running));
     let first_pass_offset = events.len() as u64;
     events.extend(passes);
     (events, first_pass_offset)
@@ -147,6 +160,7 @@ fn counted_crossings_carry_the_lap_number_the_lap_list_gives_them() {
     // the lap it is labelled with.
     let laps = lap_list_marshaled_with_floor(
         with_offsets(&events).iter().map(|(o, e)| (*o, e)),
+        None,
         None,
         None,
     );
@@ -477,5 +491,152 @@ fn the_bound_never_re_announces_a_crossing_that_fell_out_of_the_window() {
     assert_eq!(
         fired, total,
         "every crossing announced once, none re-announced after the window slid past it"
+    );
+}
+
+// --- The gate-bounce window (#517) ---------------------------------------------------------
+
+/// **A bounce is its own disposition, and it reaches the live feed as one.**
+///
+/// The whole point of #517: before it, this crossing and a genuinely short one were both
+/// `RejectedTooShort`, so the console could not tell a reflection burst from a lap the pilot
+/// really flew too fast. Under a pinned 1s window the 61ms echo is `RejectedSamePass` and the 3s
+/// crossing — a real pass, under the 10s floor — is still `RejectedTooShort`.
+#[test]
+fn a_bounce_and_a_short_lap_reach_the_feed_as_different_dispositions() {
+    let (events, base) = running_heat_pinned(
+        vec![
+            pass("A", 0),
+            pass("A", 61_000),     // +61ms — the gate stuttering: a bounce
+            pass("A", 3 * SECOND), // +3s — a real crossing, but under the floor
+        ],
+        Some(SECOND),
+    );
+    let state = folded_with_floor(&events, Some(10 * SECOND));
+
+    assert_eq!(
+        shape(&state),
+        vec![
+            (base, CrossingDisposition::Holeshot, None),
+            (base + 1, CrossingDisposition::RejectedSamePass, None),
+            (base + 2, CrossingDisposition::RejectedTooShort, None),
+        ],
+        "the echo is a bounce; the 3s crossing is a real pass the floor refused"
+    );
+}
+
+/// **The pin is read from the log, so the heat-scope window must carry it.**
+///
+/// `current_run_start` opens a run's window at `Running`, and the pin is appended at the *arm* —
+/// below that boundary. If the window dropped it, the live view would apply no bounce rule while
+/// the lap list applied one, and the two surfaces would disagree about a suppressed pass. That is
+/// exactly the D26 class of bug (#409); this asserts it cannot recur for the bounce window.
+#[test]
+fn the_arm_time_pin_survives_the_run_window_and_the_lap_list_agrees() {
+    let (events, base) = running_heat_pinned(
+        vec![pass("A", 0), pass("A", 61_000), pass("A", 30 * SECOND)],
+        Some(SECOND),
+    );
+    let state = folded_with_floor(&events, None);
+    assert_eq!(
+        shape(&state),
+        vec![
+            (base, CrossingDisposition::Holeshot, None),
+            (base + 1, CrossingDisposition::RejectedSamePass, None),
+            (base + 2, CrossingDisposition::Counted, Some(1)),
+        ],
+        "the pin sits below run_start; the live fold must still see it"
+    );
+
+    // And the lap projection, read over the same log, reaches the same verdict.
+    let laps = lap_list_marshaled_with_floor(
+        with_offsets(&events).iter().map(|(o, e)| (*o, e)),
+        None,
+        gridfpv_projection::same_pass_window_of_heat(events.iter(), &HeatId("q-1".into())),
+        None,
+    );
+    let a = laps
+        .competitors
+        .iter()
+        .find(|c| c.competitor.competitor == CompetitorRef("A".into()))
+        .expect("A has laps");
+    assert_eq!(
+        a.laps.len(),
+        1,
+        "one counted lap, holeshot to the 30s crossing"
+    );
+    assert_eq!(
+        a.voided.iter().map(|v| v.reason).collect::<Vec<_>>(),
+        vec![gridfpv_projection::VoidReason::SamePassBounce]
+    );
+}
+
+/// **A re-arm re-pins, and the latest pin is the one that governs.**
+///
+/// Abort, retune the gate, re-arm: the new run must race under the window set for *it*. The old
+/// pin also sits below `run_start`, so "last one wins" is the only rule that can separate them.
+#[test]
+fn a_re_arm_races_under_the_window_pinned_at_the_new_arm() {
+    let mut events = vec![
+        scheduled("q-1", &["A", "B"]),
+        changed("q-1", HeatTransition::Staged),
+        Event::HeatDetectionPinned {
+            heat: HeatId("q-1".into()),
+            same_pass_window_micros: Some(SECOND),
+        },
+        changed("q-1", HeatTransition::Armed),
+        changed("q-1", HeatTransition::Running),
+        pass("A", 0),
+        changed("q-1", HeatTransition::Aborted),
+        changed("q-1", HeatTransition::Staged),
+        // The RD decided the gate was over-filtering and dialed the window right down.
+        Event::HeatDetectionPinned {
+            heat: HeatId("q-1".into()),
+            same_pass_window_micros: Some(100_000),
+        },
+        changed("q-1", HeatTransition::Armed),
+        changed("q-1", HeatTransition::Running),
+    ];
+    let base = events.len() as u64;
+    // 400ms apart: a bounce under the FIRST window, a real crossing under the second.
+    events.extend(vec![pass("A", 0), pass("A", 400_000)]);
+
+    let state = folded_with_floor(&events, None);
+    assert_eq!(
+        shape(&state),
+        vec![
+            (base, CrossingDisposition::Holeshot, None),
+            (base + 1, CrossingDisposition::Counted, Some(1)),
+        ],
+        "the second arm's 100ms window governs — the abandoned run's 1s pin is dead"
+    );
+}
+
+/// **No pin folds exactly as before.** Every heat armed before #517 existed, and every timer with
+/// the setting unset, must be judged by the round's floor alone.
+#[test]
+fn an_unpinned_run_is_bit_identical_to_the_pre_bounce_fold() {
+    let passes = vec![pass("A", 0), pass("A", 61_000), pass("A", 30 * SECOND)];
+    let (unpinned, _) = running_heat(passes.clone());
+    let (pinned_off, _) = running_heat_pinned(passes, Some(0));
+    let floor = Some(10 * SECOND);
+    // Dispositions, not offsets: the pinned log carries one extra event, so every append offset
+    // shifts by one. What must be identical is the VERDICT on each crossing.
+    let verdicts = |events: &[Event]| -> Vec<(CrossingDisposition, Option<u32>)> {
+        shape(&folded_with_floor(events, floor))
+            .into_iter()
+            .map(|(_, d, lap)| (d, lap))
+            .collect()
+    };
+    assert_eq!(
+        verdicts(&unpinned),
+        verdicts(&pinned_off),
+        "a pinned 0 is no rule at all, exactly like no pin"
+    );
+    assert!(
+        verdicts(&unpinned)
+            .iter()
+            .any(|(d, _)| *d == CrossingDisposition::RejectedTooShort),
+        "and without a window the echo is still judged by the floor, as it always was"
     );
 }

@@ -32,4 +32,10 @@ node_count?: number,
  * The new timer's **available channels** in raw MHz (race redesign Slice 4a). Optional;
  * defaults to empty (none configured).
  */
-available_channels?: Array<number>, };
+available_channels?: Array<number>, 
+/**
+ * The new timer's **gate-bounce window** in µs (#517) — see
+ * [`Timer::same_pass_window_micros`]. Optional; omit it (or send `0`) for no bounce rule.
+ * [`DEFAULT_SAME_PASS_WINDOW_MICROS`] is what the console offers, not what the server assumes.
+ */
+same_pass_window_micros?: number, };

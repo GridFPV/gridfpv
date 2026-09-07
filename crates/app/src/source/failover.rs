@@ -92,6 +92,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         let event = EventId(

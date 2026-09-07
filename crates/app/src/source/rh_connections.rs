@@ -735,6 +735,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .expect("timer created")
             .id
@@ -1150,6 +1151,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .expect("timer created")
             .id;

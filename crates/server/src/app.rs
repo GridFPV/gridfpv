@@ -2571,6 +2571,15 @@ pub(crate) fn class_window_offsets(events: &[Event], class: &ClassId) -> Vec<(u6
                     window.push((offset, event.clone()));
                 }
             }
+            // The pinned detection config (#517), by TAG rather than by the positional cursor.
+            // It would land here anyway — the pin is appended while its heat is active — but
+            // leaning on that would make a fold input depend on cursor bookkeeping, which is the
+            // shape of bug `heat_window_offsets`'s pass-tagging rule exists to end.
+            Event::HeatDetectionPinned { heat, .. } => {
+                if class_heats.contains(heat) {
+                    window.push((offset, event.clone()));
+                }
+            }
             // Untagged passes and adjudications belong to whichever heat is currently active.
             _ if active => window.push((offset, event.clone())),
             _ => {}
@@ -2638,6 +2647,10 @@ async fn snapshot_heat(
         HeatProjection::Laps => ProjectionBody::LapList(lap_list_marshaled_with_floor(
             heat_offsets.iter().map(|(o, e)| (*o, e)),
             min_lap_micros,
+            // The bounce window (#517): the value pinned at THIS heat's arm. Resolved from the
+            // full log rather than the window — the pin is appended at the arm, which sits below
+            // `current_run_start`. Never read live off the timer: that is the whole point.
+            gridfpv_projection::same_pass_window_of_heat(&events, &heat),
             // The grace rule's boundary (#505): the heat's standing RaceExpired marker,
             // resolved from the same window the fold reads — like the floor, it must reach
             // the laps, live, and result folds identically or the surfaces disagree.
@@ -2814,6 +2827,14 @@ pub(crate) fn heat_window_offsets(events: &[Event], heat: &HeatId) -> Vec<(u64, 
                 active = h == heat;
                 active
             }
+            // The run's pinned detection config (#517): by tag, and deliberately WITHOUT the
+            // `run_start` gate. The pin is appended at the ARM and the window opens at `Running`,
+            // so it sits below `run_start` by construction — gating it would drop the very thing
+            // the fold needs, and the heat-scope live view would then disagree with the lap list
+            // about a suppressed pass. `same_pass_window_of_heat` takes the LAST one, so an
+            // abandoned run's pin is superseded by the re-arm's rather than competing with it.
+            // (Same shape as `HeatScheduled` above, which is also in-by-tag and un-gated.)
+            Event::HeatDetectionPinned { heat: h, .. } => h == heat,
             // Heat-tagged marshaling events: by tag, never by position.
             Event::HeatVoided { heat: h }
             | Event::PenaltyApplied { heat: h, .. }
@@ -2886,6 +2907,10 @@ pub(crate) fn score_heat_window(
     let corrected = gridfpv_projection::corrected_passes_with_floor(
         heat_offsets.iter().map(|(o, e)| (*o, e)),
         min_lap_micros,
+        // The bounce window (#517) applies to the SCORE too — the scored chain and the marshaling
+        // list must be the same chain. Resolved from the log's pin, so re-scoring a finished heat
+        // (a standings recompute, a seeding draw) can never pick up a since-edited timer setting.
+        gridfpv_projection::same_pass_window_of_heat(events, heat),
         // The grace rule (#505) applies to the SCORE exactly as to the lap list: the pass
         // chain the scorer ranks is the one the marshaling view shows, marker rule included.
         gridfpv_projection::race_expired_offset(heat_offsets.iter().map(|(o, e)| (*o, e)), heat),
@@ -4626,6 +4651,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
 
@@ -4702,6 +4728,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap()
     }
@@ -4803,6 +4830,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         registry
@@ -4989,6 +5017,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         let (status, _) = post_timer_connection(registry.clone(), &rh.id.0, "restart").await;
@@ -5599,6 +5628,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         let (status, bytes) = post_calibration(
@@ -6194,6 +6224,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         let (status, bytes) =
@@ -6469,6 +6500,7 @@ mod tests {
                 }),
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         registry
@@ -6778,6 +6810,7 @@ mod tests {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         };
         let (status, raw) = post_timer(registry.clone(), &body, None).await;
         assert_eq!(status, StatusCode::OK);
@@ -6801,6 +6834,7 @@ mod tests {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         };
         let (status, _) = post_timer(registry, &body, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -6858,6 +6892,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap()
     }
@@ -7036,6 +7071,7 @@ mod tests {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         };
         let (_, raw) = post_timer(registry.clone(), &body, None).await;
         let extra: Timer = serde_json::from_slice(&raw).unwrap();
@@ -7130,6 +7166,7 @@ mod tests {
             channel_capability: None,
             node_count: Some(0),
             available_channels: None,
+            same_pass_window_micros: None,
         };
         let (status, _) = post_timer(registry, &body, None).await;
         // A 0-node timer caps every heat to no pilots — rejected as a 400, not silently created.
