@@ -339,6 +339,10 @@ fn maintain(ctx: &DriverCtx, conn: &VelocidroneConnection) {
     // Ask for the roster up front: it is the only frame that pairs a player name with a uid, so
     // having it before the heat stages makes attribution possible even if seating is never called.
     conn.send(VdCommand::GetPilots);
+    // …and PRINT it when it lands. The uid is the one thing an RD must copy into each pilot to seat
+    // them, and GridFPV has no other way to show it — the game does not put it on screen either, so
+    // without this the field is unfillable except by guesswork. Logged once per connection.
+    let mut roster_logged = false;
 
     while !ctx.cancel.load(Ordering::Relaxed) {
         if !conn.is_connected() {
@@ -355,6 +359,33 @@ fn maintain(ctx: &DriverCtx, conn: &VelocidroneConnection) {
         let events = conn.events();
         if !events.is_empty() {
             deliver(ctx, events);
+        }
+
+        if !roster_logged {
+            if let Some(roster) = conn.readback().roster {
+                roster_logged = true;
+                if roster.is_empty() {
+                    eprintln!(
+                        "gridfpv: velocidrone: {} answered `getpilots` with an EMPTY room — nobody \
+                         is in the multiplayer room yet, so there are no account IDs to read.",
+                        timer_name(&ctx.timers, &ctx.timer_id),
+                    );
+                } else {
+                    let listed: Vec<String> = roster
+                        .iter()
+                        .map(|p| format!("{} = {}", p.name, p.uid))
+                        .collect();
+                    let count = roster.len();
+                    let plural = if count == 1 { "player" } else { "players" };
+                    eprintln!(
+                        "gridfpv: velocidrone: {} sees {count} {plural} in the room. Put each ID in \
+                         that pilot's Velocidrone ID on the Pilots page — that is what seats them \
+                         in a heat: {}",
+                        timer_name(&ctx.timers, &ctx.timer_id),
+                        listed.join(", "),
+                    );
+                }
+            }
         }
 
         // Start the race once, when a heat arms; finish it when the heat leaves `Running`.
