@@ -63,7 +63,7 @@ mount, or `current_exe()` can't be resolved), the app falls back to the OS per-u
 | OS      | Fallback path                                                |
 | ------- | ------------------------------------------------------------ |
 | Linux   | `~/.local/share/org.gridfpv.desktop/`                        |
-| Windows | `%APPDATA%\org.gridfpv.desktop\` (deferred — not yet built)  |
+| Windows | `%APPDATA%\org.gridfpv.desktop\`                             |
 | macOS   | `~/Library/Application Support/org.gridfpv.desktop/`          |
 
 On startup the app prints one of:
@@ -161,7 +161,21 @@ wins; this never overwrites it.
 
 ## Windows
 
-Windows packaging is **deferred**. The crate is Windows-ready in principle (the
-`windows_subsystem = "windows"` attribute is set for release builds), but no Windows artifact
-is produced here and **no cross-compile is attempted** — it needs a Windows build host with
-the WebView2 runtime and the MSVC toolchain.
+The Windows portable **is** built — by the `windows-latest` leg of
+`.github/workflows/release-builds.yml`, which produces the
+`gridfpv-windows-portable` artifact (`src-tauri/target/release/gridfpv-desktop.exe`)
+and smoke-tests that it starts. Windows needs none of the Linux system deps above:
+it builds against the MSVC toolchain and loads the **bundled WebView2 runtime**,
+which ships with Windows 11.
+
+**No cross-compile is attempted, and that is deliberate.** Building the `.exe` from
+Linux (`cargo-xwin` and friends) is feasible — WebView2 is a runtime COM dependency,
+not a build-time one — but it cannot *launch* the result, and the startup smoke-test
+is the point: #58 is done when the single binary launches on all three OSes, not when
+it compiles for them. So a Windows artifact comes from a Windows host, which in
+practice means the CI leg.
+
+Same for the **macOS** leg (`macos-latest`, Apple Silicon): Apple's licensing keeps
+macOS builds on Apple hardware, and the maintainer has no Mac — so CI's smoke-test is
+the only thing standing between that artifact and shipping unverified. Both legs stay
+in Actions.
