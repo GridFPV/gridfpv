@@ -1214,8 +1214,11 @@ fn signal_capable_timer(
 ///
 /// An unknown id is a clean `404` (`UnknownScope`) rather than a message about a timer that does
 /// not exist, and the kind refusal is a `400` naming the timer by its **friendly name** (repo
-/// display rule). `missing` completes "`… is not a RotorHazard timer — {missing}`": what this
-/// particular route needed and a Mock has not got.
+/// display rule) **and its kind**. `missing` completes "`… is a {kind} timer — {missing}`": what this
+/// particular route needed and this sort of timer has not got. Naming the kind matters now there is
+/// a second real adapter (#484): "is not a RotorHazard timer" said of a Velocidrone timer is true,
+/// unhelpful, and reads like something the RD should go and fix — when in fact a simulator has no
+/// detector, no thresholds and no receivers by its nature (`docs/timer-adapters.html` §7).
 ///
 /// **Kind is checked before any race-phase gate**, at every call site, and that ordering is
 /// load-bearing rather than incidental: the built-in Mock is in every event's default timer
@@ -1235,7 +1238,11 @@ fn rotorhazard_timer(
     if !matches!(timer.kind, crate::timers::TimerKind::Rotorhazard { .. }) {
         return Err(ProtocolError::new(
             ErrorCode::BadRequest,
-            format!("{} is not a RotorHazard timer — {missing}", timer.name),
+            format!(
+                "{} is a {} timer — {missing}",
+                timer.name,
+                timer.kind.label()
+            ),
         ));
     }
     Ok(timer)
@@ -1244,7 +1251,7 @@ fn rotorhazard_timer(
 /// The words one **Tune write route**'s refusals use — see [`tune_write_preamble`].
 #[derive(Debug, Clone, Copy)]
 struct TuneRoute {
-    /// Completes "`… is not a RotorHazard timer — {}`", as [`rotorhazard_timer`] takes it.
+    /// Completes "`… is a {kind} timer — {}`", as [`rotorhazard_timer`] takes it.
     missing_hardware: &'static str,
     /// Completes "`{timer} is running {heat}, a scored heat — {}`". Each verb explains the harm in
     /// its own terms, and each says in as many words that open practice is exempt.
@@ -5182,15 +5189,15 @@ mod tests {
         for (post, expected) in [
             (
                 "calibration",
-                "Mock is not a RotorHazard timer — there is no detector to calibrate",
+                "Mock is a Mock timer — there is no detector to calibrate",
             ),
             (
                 "capture",
-                "Mock is not a RotorHazard timer — there is no detector to capture from",
+                "Mock is a Mock timer — there is no detector to capture from",
             ),
             (
                 "channel",
-                "Mock is not a RotorHazard timer — there is no receiver to tune",
+                "Mock is a Mock timer — there is no receiver to tune",
             ),
         ] {
             let (status, bytes) = post_tune(mocks.clone(), post, "mock").await;
@@ -5606,7 +5613,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let message = refusal(&bytes);
         assert!(
-            message.contains("Mock") && message.contains("not a RotorHazard timer"),
+            message.contains("Mock") && message.contains("is a Mock timer"),
             "the Mock refusal must name the timer and say why: {message}"
         );
 
@@ -6206,7 +6213,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let message = refusal(&bytes);
         assert!(
-            message.contains("Mock") && message.contains("not a RotorHazard timer"),
+            message.contains("Mock") && message.contains("is a Mock timer"),
             "the Mock refusal must name the timer and say why: {message}"
         );
 
@@ -6705,7 +6712,7 @@ mod tests {
         let (status, bytes) =
             post_channel(registry.clone(), "mock", json!({ "node": 0, "mhz": 5880 })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(refusal(&bytes).contains("not a RotorHazard timer"));
+        assert!(refusal(&bytes).contains("is a Mock timer"));
 
         // An unknown id is a 404, never a message about a timer that does not exist.
         let (status, _) = post_channel(

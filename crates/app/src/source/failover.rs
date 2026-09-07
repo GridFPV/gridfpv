@@ -33,10 +33,10 @@ use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry, TimerStatus};
 
 /// Whether a timer is **healthy** — able to feed passes right now (issue #112).
 ///
-/// A Mock is always healthy. A RotorHazard timer is healthy only while its persistent connection
-/// is [`TimerStatus::Connected`]; any other status (connecting, dropped, errored, resting at
-/// `Configured`) is not healthy, so it cannot be the active source. An id that no longer resolves
-/// (a since-deleted timer) is treated as not healthy.
+/// A Mock is always healthy. A RotorHazard or Velocidrone timer is healthy only while its persistent
+/// connection is [`TimerStatus::Connected`]; any other status (connecting, dropped, errored, resting
+/// at `Configured` or `Unreachable`) is not healthy, so it cannot be the active source. An id that no
+/// longer resolves (a since-deleted timer) is treated as not healthy.
 pub fn timer_is_healthy(timers: &TimerRegistry, id: &TimerId) -> bool {
     let Some(timer) = timers.get(id) else {
         return false;
@@ -44,8 +44,12 @@ pub fn timer_is_healthy(timers: &TimerRegistry, id: &TimerId) -> bool {
     match timer.kind {
         // The synthetic source needs nothing external — always ready to feed.
         TimerKind::Mock { .. } => true,
-        // A live RH timer feeds only while its persistent connection is up.
-        TimerKind::Rotorhazard { .. } => timer.status == TimerStatus::Connected,
+        // A live RH or Velocidrone timer feeds only while its persistent connection is up. Both
+        // are dialed sources whose status is published by their own reconciler's driver, so the
+        // health question — and the failover that follows from it — is the same question for both.
+        TimerKind::Rotorhazard { .. } | TimerKind::Velocidrone { .. } => {
+            timer.status == TimerStatus::Connected
+        }
     }
 }
 

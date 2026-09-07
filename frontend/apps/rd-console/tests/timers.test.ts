@@ -142,3 +142,61 @@ describe('the Simulator identity (#491)', () => {
     expect(kindSummary(SIM)).toContain('3 laps');
   });
 });
+
+describe('the VelociDrone timer kind (#484)', () => {
+  const VD: Timer['kind'] = { Velocidrone: { url: 'ws://192.168.1.20:60003/velocidrone' } };
+
+  function vdTimer(status: TimerStatus, held = true): Timer {
+    return { ...timerWith(status), kind: VD, manual_connect: held } as Timer;
+  }
+
+  it('tags, labels and tones it as a real external source — not as the Simulator', () => {
+    expect(kindTag(VD)).toBe('Velocidrone');
+    // The brand spelling, capital D. And NOT "Simulator": that is the built-in Mock's name here
+    // (#491), and a VelociDrone timer is a real source whose heats do NOT fly themselves.
+    expect(kindLabel(VD)).toBe('VelociDrone');
+    expect(kindTone(VD)).toBe('info');
+  });
+
+  it('summarizes with its URL, and says so plainly when there is none', () => {
+    expect(kindSummary(VD)).toBe('ws://192.168.1.20:60003/velocidrone');
+    expect(kindSummary({ Velocidrone: { url: '' } } as TimerKind)).toBe('No URL set');
+  });
+
+  it('is connectable and holdable — it dials something, so Connect is a real question', () => {
+    expect(isConnectable(vdTimer('Configured'))).toBe(true);
+    expect(isManuallyHeld(vdTimer('Configured'))).toBe(true);
+    expect(connectActionLabel(vdTimer('Configured'))).toBe('Disconnect');
+    expect(connectActionLabel(vdTimer('Configured', false))).toBe('Connect');
+  });
+
+  it('counts as connected once its socket is up', () => {
+    expect(isTimerConnected(vdTimer('Connected'))).toBe(true);
+    expect(isTimerConnected(vdTimer('Configured'))).toBe(false);
+  });
+
+  // The three things that are actually wrong when a VelociDrone will not answer, none of which
+  // an RD can guess from "could not reach this timer" — above all the loopback trap, which looks
+  // like it must work when the sim is on the same machine.
+  it('names the VelociDrone-specific things to check when it cannot be reached', () => {
+    const hint = connectionHint(vdTimer('Error')) ?? '';
+    expect(hint).toContain('Websocket Communication');
+    expect(hint).toContain('LAN IP');
+    expect(hint).toContain('127.0.0.1');
+    expect(hint).not.toContain('RotorHazard');
+  });
+
+  it('says GridFPV has stopped trying, and ends on the button to press', () => {
+    const hint = connectionHint(vdTimer('Unreachable')) ?? '';
+    expect(hint).toContain('stopped trying');
+    expect(hint).toContain('Websocket Communication');
+    expect(hint).toMatch(/press Connect to try again\.$/);
+  });
+
+  it('still tells a RotorHazard RD to check RotorHazard, not the sim', () => {
+    const rh = { ...timerWith('Error'), manual_connect: true } as Timer;
+    const hint = connectionHint(rh) ?? '';
+    expect(hint).toContain('RotorHazard is running');
+    expect(hint).not.toContain('Websocket Communication');
+  });
+});

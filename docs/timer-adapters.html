@@ -347,8 +347,11 @@ flowchart LR
         maintainer's Managed drop; full spec rewritten in the RE workspace's
         <code>ws-spec.md</code>):</strong> every server→client message is a <strong>BINARY
         WebSocket frame</strong> (opcode 0x2) carrying UTF-8 JSON — the game never sends text
-        frames, so this repo's text-only transport read drops the whole feed against a real game
-        (KNOWN BROKEN note in <code>velocidrone/transport.rs</code>; the #483 fix). The
+        frames, so the repo's original text-only transport read dropped the whole feed against a
+        real game. <strong>Fixed under #484</strong> (2026-09-07): the transport decodes either
+        frame type, and the <code>velocidrone_ws</code> integration test now runs against
+        <code>vd_mock</code>, which sends binary frames like the game — so the gate can finally
+        see the thing it was meant to check. The
         <code>raceAction</code> vocabulary is exactly
         <code>"start"</code>/<code>"abort"</code>/<code>"race finished"</code> (velocistream was
         right; the old spec's <code>"started"</code>/<code>"aborted"</code> don't exist in the

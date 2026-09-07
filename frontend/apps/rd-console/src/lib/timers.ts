@@ -3,25 +3,36 @@
  *
  * Pure mappers shared by the app-level Timers management screen and the per-event timer
  * selector: the human label + Badge tone for a {@link TimerKind}, sensible defaults for a
- * new Mock, and the small "summary" line each kind shows (sim pace, or RotorHazard url).
+ * new Mock, and the small "summary" line each kind shows (sim pace, or a connected timer's url).
  * No I/O — the session owns the protocol calls; these just shape `Timer`/`TimerKind` for the UI.
  */
 import type { Timer, TimerKind } from '@gridfpv/types';
 
-/** The two selectable kinds in the add/edit dialog (the discriminant tag). `'Unknown'` is the
+/** The selectable kinds in the add/edit dialog (the discriminant tag). `'Unknown'` is the
  *  version-skew fallback: a NEWER Director may send a kind this console build doesn't model
  *  yet, and it must render labeled (not mislabeled as RotorHazard, and never crash on a field
  *  access) — the timer is still real and still selectable. */
-export type TimerKindTag = 'Mock' | 'Rotorhazard' | 'Unknown';
+export type TimerKindTag = 'Mock' | 'Rotorhazard' | 'Velocidrone' | 'Unknown';
 
 /** Sensible defaults for a fresh **Mock** timer: a handful of laps at a one-minute-ish pace. */
 export const DEFAULT_MOCK_LAPS = 3;
 export const DEFAULT_MOCK_LAP_MS = 30_000;
 
-/** The discriminant tag of a kind (`'Mock'` | `'Rotorhazard'`). */
+/**
+ * The URL shape a fresh **Velocidrone** timer starts from (#484).
+ *
+ * Deliberately NOT `127.0.0.1`: Velocidrone's server binds the machine's primary LAN IPv4 address,
+ * so loopback never connects — even when the sim is on the same machine as the Director. The
+ * placeholder host is left obviously-a-placeholder so it reads as "put your IP here" rather than as
+ * a default that ought to work.
+ */
+export const DEFAULT_VELOCIDRONE_URL = 'ws://192.168.1.10:60003/velocidrone';
+
+/** The discriminant tag of a kind (`'Mock'` | `'Rotorhazard'` | `'Velocidrone'`). */
 export function kindTag(kind: TimerKind): TimerKindTag {
   if ('Mock' in kind) return 'Mock';
   if ('Rotorhazard' in kind) return 'Rotorhazard';
+  if ('Velocidrone' in kind) return 'Velocidrone';
   return 'Unknown';
 }
 
@@ -35,6 +46,10 @@ export function kindTag(kind: TimerKind): TimerKindTag {
 export function kindLabel(kind: TimerKind): string {
   if ('Mock' in kind) return 'Simulator';
   if ('Rotorhazard' in kind) return 'RotorHazard';
+  // The brand spelling, capital D — and NOT "Simulator", which is the built-in Mock's name here.
+  // A Velocidrone timer is a real, external timing source that happens to be a game; conflating
+  // the two words is exactly the confusion #491 renamed the Mock to avoid.
+  if ('Velocidrone' in kind) return 'VelociDrone';
   // A newer Director's kind: show its discriminant verbatim rather than a wrong brand.
   return Object.keys(kind)[0] ?? 'Unknown';
 }
@@ -47,6 +62,9 @@ export function kindLabel(kind: TimerKind): string {
 export function kindTone(kind: TimerKind): 'warn' | 'info' | 'neutral' {
   if ('Mock' in kind) return 'warn';
   if ('Rotorhazard' in kind) return 'info';
+  // Informational, like RotorHazard: a real source feeding real crossings. The warn tone is
+  // reserved for the Mock, whose heats fly themselves.
+  if ('Velocidrone' in kind) return 'info';
   return 'neutral';
 }
 
@@ -60,6 +78,7 @@ export function kindSummary(kind: TimerKind): string {
     return `Synthetic races — heats fly themselves: ${laps} ${lapName} · ${(lap_ms / 1000).toFixed(1)}s pace`;
   }
   if ('Rotorhazard' in kind) return kind.Rotorhazard.url || 'No URL set';
+  if ('Velocidrone' in kind) return kind.Velocidrone.url || 'No URL set';
   return 'Unsupported by this console build — update the console';
 }
 
@@ -82,16 +101,18 @@ export function isTimerConnected(timer: Timer): boolean {
 }
 
 /**
- * Whether this timer has a connection the RD can **manually hold** (issue #383).
+ * Whether this timer has a connection the RD can **manually hold** (issue #383, #484).
  *
- * Only a **RotorHazard** timer does: it is the one that dials something over the network, and so
- * the only one where "is this URL right? is it reachable? does it have the plugin?" is a question
- * worth asking. The built-in Mock needs nothing external (the Director answers its `connect` with
- * a **400**), so the control is not offered for it at all rather than offered and then rejected. An
- * unknown (newer-Director) kind is likewise left alone — this console can't reason about it.
+ * A **RotorHazard** or a **VelociDrone** timer does: both dial something over the network, so both
+ * are timers where "is this URL right? is it reachable?" is a question worth asking, and both are
+ * dialled by their own reconciler behind this one hold flag. The built-in Mock needs nothing
+ * external (the Director answers its `connect` with a **400**), so the control is not offered for it
+ * at all rather than offered and then rejected. An unknown (newer-Director) kind is likewise left
+ * alone — this console can't reason about it.
  */
 export function isConnectable(timer: Timer): boolean {
-  return kindTag(timer.kind) === 'Rotorhazard';
+  const tag = kindTag(timer.kind);
+  return tag === 'Rotorhazard' || tag === 'Velocidrone';
 }
 
 /** Whether the RD is currently **holding** a manual connection to this timer (#383). */
@@ -114,9 +135,14 @@ export function connectActionLabel(timer: Timer): 'Connect' | 'Disconnect' {
 }
 
 /**
- * A short plain-language reading of a **manually held** RotorHazard timer's status (#383) — the
- * one-liner under the row while the RD is testing a timer at a venue, phrased as the question they
- * are actually asking ("is it reachable?") rather than as the enum.
+ * A short plain-language reading of a **manually held** timer's status (#383, #484) — the one-liner
+ * under the row while the RD is testing a timer at a venue, phrased as the question they are
+ * actually asking ("is it reachable?") rather than as the enum.
+ *
+ * The failure sentences name **what to go and check for this kind of timer**, because that is the
+ * whole value of the line. A VelociDrone that will not answer almost always means one of three
+ * specific things — the game is not running, the websocket setting is off, or the URL is on
+ * loopback instead of the LAN IP — and none of those are guessable from "could not reach".
  *
  * `undefined` when there is nothing to add (no hold, or a timer that can't be held): the row's
  * existing `StatusPill` and plugin badge already carry the state, and this only adds the sentence
@@ -124,6 +150,10 @@ export function connectActionLabel(timer: Timer): 'Connect' | 'Disconnect' {
  */
 export function connectionHint(timer: Timer): string | undefined {
   if (!isManuallyHeld(timer)) return undefined;
+  const vd = kindTag(timer.kind) === 'Velocidrone';
+  const check = vd
+    ? 'Check that VelociDrone is running, that Options → Main Settings → Websocket Communication is Yes, and that the URL uses this machine’s LAN IP (VelociDrone does not answer on 127.0.0.1).'
+    : 'Check the URL, and that RotorHazard is running.';
   switch (timer.status) {
     // `Configured` is the resting status a just-held timer still reads until the reconciler's next
     // tick picks it up — to the RD that is indistinguishable from "connecting", so say so.
@@ -133,11 +163,11 @@ export function connectionHint(timer: Timer): string | undefined {
     case 'Connected':
       return 'Reachable — this timer is answering.';
     case 'Error':
-      return 'Could not reach this timer. Check the URL, and that RotorHazard is running.';
+      return `Could not reach this timer. ${check}`;
     // #462: the Director has spent its automatic attempts and stopped. Say that plainly — the
     // sentence has to end in the thing to press, because nothing else is going to happen.
     case 'Unreachable':
-      return 'Could not reach this timer, and GridFPV has stopped trying. Check the URL, and that RotorHazard is running, then press Connect to try again.';
+      return `Could not reach this timer, and GridFPV has stopped trying. ${check} Then press Connect to try again.`;
     case 'Disconnected':
       return 'The connection dropped. Retrying…';
     default:

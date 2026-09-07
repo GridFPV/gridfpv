@@ -8,17 +8,24 @@
       "laps": [
         {
           "number": 1,
-          "duration_micros": 12000000,
-          "at": 14000000,
+          "duration_micros": 4674000,
+          "at": 6010000,
           "start_ref": 3,
-          "end_ref": 6
+          "end_ref": 8
         },
         {
           "number": 2,
-          "duration_micros": 13000000,
-          "at": 27000000,
-          "start_ref": 6,
-          "end_ref": 8
+          "duration_micros": 5890000,
+          "at": 11900000,
+          "start_ref": 8,
+          "end_ref": 11
+        },
+        {
+          "number": 3,
+          "duration_micros": 5320000,
+          "at": 17220000,
+          "start_ref": 11,
+          "end_ref": 12
         }
       ]
     },
@@ -30,10 +37,24 @@
       "laps": [
         {
           "number": 1,
-          "duration_micros": 13000000,
-          "at": 15500000,
+          "duration_micros": 5348000,
+          "at": 6850000,
           "start_ref": 4,
-          "end_ref": 7
+          "end_ref": 10
+        },
+        {
+          "number": 2,
+          "duration_micros": 5850000,
+          "at": 12700000,
+          "start_ref": 10,
+          "end_ref": 13
+        },
+        {
+          "number": 3,
+          "duration_micros": 5700000,
+          "at": 18400000,
+          "start_ref": 13,
+          "end_ref": 14
         }
       ]
     }

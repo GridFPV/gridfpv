@@ -42,6 +42,7 @@
   import {
     DEFAULT_MOCK_LAPS,
     DEFAULT_MOCK_LAP_MS,
+    DEFAULT_VELOCIDRONE_URL,
     connectActionLabel,
     connectionHint,
     isBuiltInMock,
@@ -416,10 +417,20 @@
       formLaps = String(timer.kind.Mock.laps);
       formLapMs = String(timer.kind.Mock.lap_ms);
       formUrl = '';
-    } else {
+    } else if ('Rotorhazard' in timer.kind) {
       formLaps = String(DEFAULT_MOCK_LAPS);
       formLapMs = String(DEFAULT_MOCK_LAP_MS);
       formUrl = timer.kind.Rotorhazard.url;
+    } else if ('Velocidrone' in timer.kind) {
+      formLaps = String(DEFAULT_MOCK_LAPS);
+      formLapMs = String(DEFAULT_MOCK_LAP_MS);
+      formUrl = timer.kind.Velocidrone.url;
+    } else {
+      // A kind this console build does not model (a newer Director). Keep the fields blank rather
+      // than reaching into a shape we cannot know — the timer still edits its name and channels.
+      formLaps = String(DEFAULT_MOCK_LAPS);
+      formLapMs = String(DEFAULT_MOCK_LAP_MS);
+      formUrl = '';
     }
     resetChannelForm(timer);
     formError = undefined;
@@ -531,6 +542,10 @@
       return { kind: { Mock: { laps: Math.round(laps), lap_ms: Math.round(lapMs) } } };
     }
     const url = formUrl.trim();
+    if (formKind === 'Velocidrone') {
+      if (!url) return { problem: 'A VelociDrone URL is required.' };
+      return { kind: { Velocidrone: { url } } };
+    }
     if (!url) return { problem: 'A RotorHazard URL is required.' };
     return { kind: { Rotorhazard: { url } } };
   }
@@ -824,6 +839,7 @@
       <Select bind:value={formKind} aria-label="Timer kind">
         <option value="Mock">Mock (synthetic)</option>
         <option value="Rotorhazard">RotorHazard</option>
+        <option value="Velocidrone">VelociDrone (simulator)</option>
       </Select>
     </Field>
 
@@ -842,6 +858,25 @@
           />
         </Field>
       </div>
+    {:else if formKind === 'Velocidrone'}
+      <!--
+        VelociDrone's URL carries a trap RotorHazard's does not, and it costs an RD a bewildering
+        half hour: the game's server binds the machine's primary LAN IPv4 address, NOT loopback and
+        NOT 0.0.0.0 — so ws://127.0.0.1:60003 never connects even when the sim is running on this
+        very machine. The hint says so up front rather than letting "could not reach" teach it.
+      -->
+      <Field
+        label="URL"
+        hint={'VelociDrone’s websocket — ws://<this machine’s LAN IP>:60003/velocidrone. It must be the LAN IP: the game does not answer on 127.0.0.1, even locally. Turn the feed on first in Options → Main Settings → Websocket Communication, then restart VelociDrone.'}
+      >
+        <Input
+          type="text"
+          bind:value={formUrl}
+          placeholder={DEFAULT_VELOCIDRONE_URL}
+          aria-label="VelociDrone URL"
+          autocomplete="off"
+        />
+      </Field>
     {:else}
       <!--
         The URL is dialed verbatim by the RH connector — no trimming, no scheme defaulting — so the

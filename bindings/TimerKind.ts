@@ -16,7 +16,22 @@ laps: number,
 /**
  * The nominal real-time pace of one sim lap, in milliseconds.
  */
-lap_ms: number, } } | { "Rotorhazard": { 
+lap_ms: number, } } | { "Velocidrone": { 
+/**
+ * The sim's WebSocket URL — `ws://<lan-ip>:60003/velocidrone`.
+ *
+ * **The host must be the machine's LAN IP.** Velocidrone's TCP layer binds to the
+ * primary LAN IPv4 address it discovers (by probing a UDP socket at
+ * `8.8.8.8:65530` and reading the local endpoint), not `IPAddress.Any` and not
+ * loopback — so `ws://127.0.0.1:60003/velocidrone` cannot connect even when the
+ * sim is on this very machine. The console's URL field says so.
+ *
+ * Passed **verbatim** to the dialer, like [`Rotorhazard`](TimerKind::Rotorhazard):
+ * the game's handshake parser matches the path ordinally after stripping slashes
+ * and breaks on a query string, but that is the operator's URL to get right and a
+ * bad one surfaces as a connection [`Error`](TimerStatus::Error).
+ */
+url: string, } } | { "Rotorhazard": { 
 /**
  * The RotorHazard server base URL — `http://<host>:5000`, e.g.
  * `http://rotorhazard.local:5000`.

@@ -120,6 +120,26 @@ pub enum TimerKind {
         #[ts(type = "number")]
         lap_ms: u64,
     },
+    /// A **Velocidrone** simulator (#484): holds the WebSocket URL the connector dials.
+    ///
+    /// The second real adapter, and the proof the adapter seam is real. Velocidrone has no
+    /// RSSI, no thresholds and no frequencies, so the tune/calibrate surfaces are *absent*
+    /// for it rather than broken — see `docs/timer-adapters.html` §7.
+    Velocidrone {
+        /// The sim's WebSocket URL — `ws://<lan-ip>:60003/velocidrone`.
+        ///
+        /// **The host must be the machine's LAN IP.** Velocidrone's TCP layer binds to the
+        /// primary LAN IPv4 address it discovers (by probing a UDP socket at
+        /// `8.8.8.8:65530` and reading the local endpoint), not `IPAddress.Any` and not
+        /// loopback — so `ws://127.0.0.1:60003/velocidrone` cannot connect even when the
+        /// sim is on this very machine. The console's URL field says so.
+        ///
+        /// Passed **verbatim** to the dialer, like [`Rotorhazard`](TimerKind::Rotorhazard):
+        /// the game's handshake parser matches the path ordinally after stripping slashes
+        /// and breaks on a query string, but that is the operator's URL to get right and a
+        /// bad one surfaces as a connection [`Error`](TimerStatus::Error).
+        url: String,
+    },
     /// A **RotorHazard** server (#65): holds the base URL the connector dials.
     Rotorhazard {
         /// The RotorHazard server base URL — `http://<host>:5000`, e.g.
@@ -132,6 +152,36 @@ pub enum TimerKind {
         /// field states that shape (#381).
         url: String,
     },
+}
+
+impl TimerKind {
+    /// The kind's **display label** — what an operator calls this sort of timer.
+    ///
+    /// Exists so a refusal can say what the timer *is* rather than only what it is not. Before a
+    /// second real adapter existed, every hardware refusal read "… is not a RotorHazard timer",
+    /// which was true of a Mock and unhelpful about it; said to someone holding a Velocidrone timer
+    /// it is true, unhelpful, *and* reads like a misconfiguration. Naming the kind turns the same
+    /// refusal into an explanation (CLAUDE.md: what reaches a person is the friendly name).
+    pub fn label(&self) -> &'static str {
+        match self {
+            TimerKind::Mock { .. } => "Mock",
+            TimerKind::Rotorhazard { .. } => "RotorHazard",
+            TimerKind::Velocidrone { .. } => "Velocidrone",
+        }
+    }
+
+    /// Whether this kind is a **dialled** timer — one the Director opens a persistent connection to.
+    ///
+    /// True for RotorHazard and Velocidrone, false for the built-in Mock (which produces its own
+    /// passes and has nothing to reach). This is the question "can this timer be connected?", and it
+    /// is deliberately distinct from "does this timer have RotorHazard hardware?" — the two were the
+    /// same test only while RotorHazard was the only real adapter.
+    pub fn is_dialled(&self) -> bool {
+        matches!(
+            self,
+            TimerKind::Rotorhazard { .. } | TimerKind::Velocidrone { .. }
+        )
+    }
 }
 
 /// What channels a timer can be tuned to (race redesign Slice 4a) — its *channel capability*,
@@ -682,7 +732,7 @@ pub struct Timer {
 ///   also performs the write. Splitting it would let the width change between check and write.
 #[derive(Debug, Clone, Copy)]
 struct TimerOp {
-    /// Completes `"… is not a RotorHazard timer — there is no {}"`: `detector to calibrate`.
+    /// Completes `"… is a {kind} timer — there is no {}"`: `detector to calibrate`.
     no_hardware: &'static str,
     /// Completes `"… is not connected — connect it before {}"`: `setting its thresholds`.
     before_connecting: &'static str,
@@ -784,9 +834,14 @@ impl Timer {
     /// why the wording is a parameter and what the two halves deliberately do *not* cover.
     fn require_live_rh(&self, op: TimerOp) -> Result<(), TimerError> {
         if !matches!(self.kind, TimerKind::Rotorhazard { .. }) {
+            // Names the kind rather than only denying RotorHazard: for a Velocidrone timer the
+            // absence is a *fact about simulators* (no RSSI, no thresholds, no receivers — see
+            // `docs/timer-adapters.html` §7), not a setup mistake to go and fix.
             return Err(TimerError(format!(
-                "{:?} is not a RotorHazard timer — there is no {}",
-                self.name, op.no_hardware
+                "{:?} is a {} timer — there is no {}",
+                self.name,
+                self.kind.label(),
+                op.no_hardware
             )));
         }
         if self.status != TimerStatus::Connected {
@@ -948,12 +1003,14 @@ impl Timer {
     }
 
     /// Derive the [`TimerStatus`] from a [`TimerKind`]: the Mock is [`Ready`](TimerStatus::Ready);
-    /// a RotorHazard timer starts [`Configured`](TimerStatus::Configured) (a URL on file, not yet
-    /// dialed) — the connector then drives it through the live statuses.
+    /// a RotorHazard or Velocidrone timer starts [`Configured`](TimerStatus::Configured) (a URL on
+    /// file, not yet dialed) — the connector then drives it through the live statuses.
     fn status_for(kind: &TimerKind) -> TimerStatus {
         match kind {
             TimerKind::Mock { .. } => TimerStatus::Ready,
-            TimerKind::Rotorhazard { .. } => TimerStatus::Configured,
+            TimerKind::Rotorhazard { .. } | TimerKind::Velocidrone { .. } => {
+                TimerStatus::Configured
+            }
         }
     }
 
@@ -1006,6 +1063,10 @@ impl Timer {
         match self.kind {
             // Mock is unaffected: it produces its own passes, there is no plugin to require.
             TimerKind::Mock { .. } => None,
+            // Velocidrone needs no plugin: the sim's websocket IS the integration surface, so
+            // there is nothing to probe and nothing that could be missing. Whether the sim is
+            // reachable is a connection question, answered by the timer's status.
+            TimerKind::Velocidrone { .. } => None,
             TimerKind::Rotorhazard { .. } => match &self.plugin {
                 Some(PluginPresence::Present { .. }) => None,
                 Some(PluginPresence::Missing) => Some(SelectionRefusal::PluginMissing),
@@ -2533,10 +2594,14 @@ impl TimerRegistry {
             .timers
             .get_mut(id)
             .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
-        if held && !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
+        // "Can this be connected?" is a question about *dialled* timers, not about RotorHazard
+        // specifically — a Velocidrone timer is dialled too, and the RD's Connect button is how they
+        // ask whether the sim is up (#484). Only the built-in Mock has nothing to reach.
+        if held && !timer.kind.is_dialled() {
             return Err(TimerError(format!(
-                "{:?} is not a RotorHazard timer — there is nothing to connect to",
-                timer.name
+                "{:?} is a {} timer — there is nothing to connect to",
+                timer.name,
+                timer.kind.label()
             )));
         }
         timer.manual_connect = held;
@@ -2553,16 +2618,22 @@ impl TimerRegistry {
         Ok(timer.clone())
     }
 
-    /// The RotorHazard timers the RD is **manually holding a connection to** (issue #383) — the
+    /// The **dialled** timers the RD is manually holding a connection to (issue #383) — each
     /// connection reconciler's second input, unioned with the active event's selection.
     ///
-    /// Filtered to `Rotorhazard` kinds: a hold set before the timer's kind was edited to a Mock
-    /// goes dormant rather than asking the reconciler to dial something that cannot be dialled.
+    /// Filtered to kinds that can be dialled at all ([`TimerKind::is_dialled`]): a hold set before
+    /// the timer's kind was edited to a Mock goes dormant rather than asking a reconciler to dial
+    /// something that cannot be dialled.
+    ///
+    /// **Not filtered to one adapter.** There are two reconcilers now — RotorHazard's and
+    /// Velocidrone's (#484) — and each narrows this list to its own kind when it builds its wanted
+    /// set. Filtering here to `Rotorhazard` instead would have silently hidden every held sim from
+    /// the Velocidrone reconciler, so Connect in the Timers menu would have appeared to do nothing.
     pub fn manual_connections(&self) -> Vec<TimerId> {
         self.read()
             .timers
             .values()
-            .filter(|t| t.manual_connect && matches!(t.kind, TimerKind::Rotorhazard { .. }))
+            .filter(|t| t.manual_connect && t.kind.is_dialled())
             .map(|t| t.id.clone())
             .collect()
     }
@@ -2597,8 +2668,9 @@ impl TimerRegistry {
             .ok_or_else(|| TimerError(format!("no timer with id {:?}", id.0)))?;
         if !matches!(timer.kind, TimerKind::Rotorhazard { .. }) {
             return Err(TimerError(format!(
-                "{:?} is not a RotorHazard timer — there is no timing server to restart",
-                timer.name
+                "{:?} is a {} timer — there is no timing server to restart",
+                timer.name,
+                timer.kind.label()
             )));
         }
         if timer.status != TimerStatus::Connected {
@@ -3835,7 +3907,7 @@ mod tests {
             (
                 calibrate,
                 [
-                    "\"Field RH\" is not a RotorHazard timer — there is no detector to calibrate",
+                    "\"Field RH\" is a Mock timer — there is no detector to calibrate",
                     "\"Field RH\" is not connected — connect it before setting its thresholds",
                     "\"Field RH\" has 8 nodes — there is no Node 9 to calibrate",
                     "Node 3 is disabled on \"Field RH\" — enable it before setting its thresholds",
@@ -3844,7 +3916,7 @@ mod tests {
             (
                 capture,
                 [
-                    "\"Field RH\" is not a RotorHazard timer — there is no detector to capture from",
+                    "\"Field RH\" is a Mock timer — there is no detector to capture from",
                     "\"Field RH\" is not connected — connect it before capturing a level",
                     "\"Field RH\" has 8 nodes — there is no Node 9 to capture on",
                     "Node 3 is disabled on \"Field RH\" — enable it before capturing a level",
@@ -3853,7 +3925,7 @@ mod tests {
             (
                 channel,
                 [
-                    "\"Field RH\" is not a RotorHazard timer — there is no receiver to tune",
+                    "\"Field RH\" is a Mock timer — there is no receiver to tune",
                     "\"Field RH\" is not connected — connect it before setting a node's channel",
                     "\"Field RH\" has 8 nodes — there is no Node 9 to tune",
                     "Node 3 is disabled on \"Field RH\" — enable it before setting its channel",

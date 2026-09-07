@@ -70,9 +70,17 @@ mod rh_connections;
 #[cfg(feature = "live")]
 mod rotorhazard;
 #[cfg(feature = "live")]
+mod vd_connections;
+#[cfg(feature = "live")]
+mod velocidrone;
+#[cfg(feature = "live")]
 pub use rh_connections::{RhConnections, spawn_rh_reconciler};
 #[cfg(feature = "live")]
 use rotorhazard::TuneNode;
+#[cfg(feature = "live")]
+pub use vd_connections::{VdConnections, spawn_vd_reconciler};
+#[cfg(feature = "live")]
+pub use velocidrone::VdSeat;
 
 /// How often the bridge polls the log tail for new heat-loop events. Short enough that a
 /// `Start` click feels instant (the first pass lands within a poll), long enough to be a
@@ -474,6 +482,15 @@ pub fn spawn_registry_bridge(
         let (connections, _reconciler) = spawn_rh_reconciler(registry.clone());
         connections
     };
+    // …and the same for Velocidrone (#484). Two reconcilers rather than one because the two
+    // adapters share no dial, no status vocabulary beyond `TimerStatus`, and no write surface —
+    // see the note at the top of `vd_connections`. They union cleanly: each narrows the registry's
+    // held + selected timers to its own kind, so a timer is claimed by exactly one of them.
+    #[cfg(feature = "live")]
+    let vd_connections = {
+        let (connections, _reconciler) = spawn_vd_reconciler(registry.clone());
+        connections
+    };
 
     let timers = registry.timers();
     tokio::spawn(async move {
@@ -498,6 +515,8 @@ pub fn spawn_registry_bridge(
                     let event_id = meta.id.clone();
                     #[cfg(feature = "live")]
                     let connections = connections.clone();
+                    #[cfg(feature = "live")]
+                    let vd_connections = vd_connections.clone();
                     tokio::spawn(async move {
                         run_bridge(
                             state,
@@ -507,6 +526,8 @@ pub fn spawn_registry_bridge(
                             adapter,
                             #[cfg(feature = "live")]
                             connections,
+                            #[cfg(feature = "live")]
+                            vd_connections,
                         )
                         .await;
                     });
@@ -533,6 +554,7 @@ pub(crate) async fn run_bridge(
     event_id: EventId,
     adapter: AdapterId,
     #[cfg(feature = "live")] connections: RhConnections,
+    #[cfg(feature = "live")] vd_connections: VdConnections,
 ) {
     // The in-flight heat task, if a heat is currently emitting. At most one at a time.
     let mut active: Option<ActiveHeat> = None;
@@ -563,6 +585,8 @@ pub(crate) async fn run_bridge(
                     &mut clock,
                     #[cfg(feature = "live")]
                     &connections,
+                    #[cfg(feature = "live")]
+                    &vd_connections,
                     heat,
                     synthetic,
                 );
@@ -645,6 +669,8 @@ pub(crate) async fn run_bridge(
                     &mut clock,
                     #[cfg(feature = "live")]
                     &connections,
+                    #[cfg(feature = "live")]
+                    &vd_connections,
                     heat,
                     transition,
                 );
@@ -864,8 +890,9 @@ fn selected_sources(
                     Arc::new(SimSource::new(laps, Duration::from_millis(lap_ms))),
                 ));
             }
-            // RotorHazard is driven through its persistent connection (#105), not a per-heat source.
-            TimerKind::Rotorhazard { .. } => {}
+            // RotorHazard and Velocidrone are both driven through their persistent connections
+            // (#105, #484), not a per-heat source: the heat is armed onto an already-live link.
+            TimerKind::Rotorhazard { .. } | TimerKind::Velocidrone { .. } => {}
         }
     }
     sources
@@ -894,6 +921,77 @@ fn selected_rh_timers(
         .collect()
 }
 
+/// The event's selected **Velocidrone** timer ids (#484) — the sims a running heat seats and arms
+/// onto their already-live connections. An id that no longer resolves, or is not a Velocidrone
+/// timer, is skipped.
+#[cfg(feature = "live")]
+fn selected_vd_timers(
+    registry: &EventRegistry,
+    timers: &TimerRegistry,
+    event_id: &EventId,
+) -> Vec<gridfpv_server::timers::TimerId> {
+    let Some(selection) = registry.timers_of(event_id) else {
+        return Vec::new();
+    };
+    selection
+        .into_iter()
+        .filter(|id| {
+            matches!(
+                timers.get(id).map(|t| t.kind),
+                Some(TimerKind::Velocidrone { .. })
+            )
+        })
+        .collect()
+}
+
+/// The heat's seating for a **Velocidrone** timer (#484): the sim account to activate per pilot.
+///
+/// The sim has no node seats, so unlike [`seats_of`] this is not indexed by anything — it is just
+/// the heat's bound pilots, each paired with the Velocidrone account id recorded on their pilot
+/// record (`Pilot::velocidrone_id`) and their callsign.
+///
+/// Two kinds of lineup entry are skipped, and both are correct to skip:
+///
+/// - an **open-practice seat** (`node-{i}`) names a channel, not a bound pilot — there is nobody to
+///   activate;
+/// - a pilot with **no Velocidrone id on file**. There is no way to guess one: a Velocidrone uid is
+///   an account number, not derivable from a callsign, and activating the wrong uid seats the wrong
+///   person. So they are omitted from the write, and the driver says so by name.
+#[cfg(feature = "live")]
+fn vd_seats_of(
+    state: &AppState,
+    registry: &EventRegistry,
+    heat: &HeatId,
+) -> Vec<crate::source::VdSeat> {
+    let Some(lineup) = lineup_of(state, heat) else {
+        return Vec::new();
+    };
+    let pilots = registry.pilots();
+    let mut seats = Vec::new();
+    for competitor in lineup {
+        if gridfpv_server::timers::node_seat_index(&competitor).is_some() {
+            continue;
+        }
+        let pilot_id = gridfpv_server::scope::PilotId(competitor.0.clone());
+        let Some(pilot) = pilots.get(&pilot_id) else {
+            continue;
+        };
+        let Some(uid) = pilot
+            .velocidrone_id
+            .clone()
+            .filter(|u| !u.trim().is_empty())
+        else {
+            continue;
+        };
+        seats.push(crate::source::VdSeat {
+            uid,
+            competitor,
+            callsign: pilot.callsign.clone(),
+        });
+    }
+    seats
+}
+
 /// React to a heat-loop transition: start emitting from the event's selected timers on `Running`,
 /// stop on a terminal / off-ramp transition for the heat that is currently emitting.
 #[allow(clippy::too_many_arguments)]
@@ -906,6 +1004,7 @@ fn handle_transition(
     active: &mut Option<ActiveHeat>,
     clock: &mut HeatClock,
     #[cfg(feature = "live")] connections: &RhConnections,
+    #[cfg(feature = "live")] vd_connections: &VdConnections,
     heat: HeatId,
     transition: HeatTransition,
 ) {
@@ -923,6 +1022,8 @@ fn handle_transition(
                 running.stop(
                     #[cfg(feature = "live")]
                     connections,
+                    #[cfg(feature = "live")]
+                    vd_connections,
                     #[cfg(feature = "live")]
                     event_id,
                 );
@@ -982,8 +1083,29 @@ fn handle_transition(
                 }
                 armed
             };
+            // Arm the heat onto each selected Velocidrone timer's live connection (#484): the
+            // driver asks the sim to start the race and routes its passes into THIS event's log,
+            // through the same gated sink an RH arming gets, so an alternate sim stays live but
+            // silent while it is not the active source.
             #[cfg(feature = "live")]
-            let nothing_armed = armed_rh.is_empty();
+            let armed_vd = {
+                let mut armed = Vec::new();
+                for timer_id in selected_vd_timers(registry, timers, event_id) {
+                    let sink = PassSink::gated(
+                        state.clone(),
+                        adapter.clone(),
+                        gate.clone(),
+                        timer_id.clone(),
+                    )
+                    .for_heat(heat.clone());
+                    if vd_connections.arm_heat(event_id, &timer_id, sink) {
+                        armed.push(timer_id);
+                    }
+                }
+                armed
+            };
+            #[cfg(feature = "live")]
+            let nothing_armed = armed_rh.is_empty() && armed_vd.is_empty();
             #[cfg(not(feature = "live"))]
             let nothing_armed = true;
             // Spawn the completion clock (heat-lifecycle Slice 2): it watches the running passes and
@@ -1004,6 +1126,8 @@ fn handle_transition(
                 gate,
                 #[cfg(feature = "live")]
                 armed_rh,
+                #[cfg(feature = "live")]
+                armed_vd,
             });
         }
         // Any transition that takes the heat off `Running` stops its emission. The bridge
@@ -1023,6 +1147,8 @@ fn handle_transition(
                         running.stop(
                             #[cfg(feature = "live")]
                             connections,
+                            #[cfg(feature = "live")]
+                            vd_connections,
                             #[cfg(feature = "live")]
                             event_id,
                         );
@@ -1082,6 +1208,15 @@ fn handle_transition(
                     // no-current-heat gate branch).
                     if !seats.is_empty() {
                         connections.seat(event_id, &timer_id, seats.clone());
+                    }
+                }
+                // The sim's staging is seating and nothing else: no tune (no frequencies), no
+                // prepare (no staging hold to zero). One write, and its readback is handled on the
+                // driver thread where the socket lives.
+                let vd_seats = vd_seats_of(state, registry, &heat);
+                for timer_id in selected_vd_timers(registry, timers, event_id) {
+                    if !vd_seats.is_empty() {
+                        vd_connections.seat(event_id, &timer_id, vd_seats.clone());
                     }
                 }
             }
@@ -1165,6 +1300,10 @@ struct ActiveHeat {
     /// heat leaves `Running` (the connection stays alive).
     #[cfg(feature = "live")]
     armed_rh: Vec<gridfpv_server::timers::TimerId>,
+    /// The Velocidrone timers armed onto their live connections for this heat (#484), disarmed on
+    /// the same boundary and for the same reason: the sim's race is stopped, the socket is not.
+    #[cfg(feature = "live")]
+    armed_vd: Vec<gridfpv_server::timers::TimerId>,
 }
 
 impl ActiveHeat {
@@ -1181,6 +1320,7 @@ impl ActiveHeat {
     fn stop(
         &self,
         #[cfg(feature = "live")] connections: &RhConnections,
+        #[cfg(feature = "live")] vd_connections: &VdConnections,
         #[cfg(feature = "live")] event_id: &EventId,
     ) {
         for h in &self.handles {
@@ -1189,6 +1329,12 @@ impl ActiveHeat {
         #[cfg(feature = "live")]
         for timer_id in &self.armed_rh {
             connections.disarm(event_id, timer_id);
+        }
+        // Velocidrone's disarm stops the sim's race if it is still running, drains the last
+        // in-flight snapshot into this heat's log, and lets the arming go — the socket stays up.
+        #[cfg(feature = "live")]
+        for timer_id in &self.armed_vd {
+            vd_connections.disarm(event_id, timer_id);
         }
     }
 }
@@ -2051,6 +2197,8 @@ mod tests {
         let bridge_state = state.clone();
         #[cfg(feature = "live")]
         let connections = RhConnections::new();
+        #[cfg(feature = "live")]
+        let vd_connections = VdConnections::new();
         let handle = tokio::spawn(async move {
             run_bridge(
                 bridge_state,
@@ -2060,6 +2208,8 @@ mod tests {
                 adapter,
                 #[cfg(feature = "live")]
                 connections,
+                #[cfg(feature = "live")]
+                vd_connections,
             )
             .await
         });

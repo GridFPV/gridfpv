@@ -1,21 +1,67 @@
 [
-  { "pilotlist": [ { "uid": "u1", "name": "Ace" }, { "uid": "u2", "name": "Bee" } ] },
+  "A two-pilot multiplayer sprint in REAL 1.17.13 wire shapes (#494). Transcribed",
+  "against the binary-derived spec and the dargust capture, not invented: every scalar",
+  "is a quoted string, booleans are capitalized 'True'/'False', racedata.uid is a bare",
+  "JSON number while pilotlist.uid is a string, and each racedata frame is a WHOLE-FIELD",
+  "snapshot restating both pilots — not a per-crossing delta. The track has 3 gates per",
+  "lap over 3 laps, so the finishing crossing arrives as gate 4 with finished 'True'.",
 
-  { "FinishGate": { "StartFinishGate": "true" } },
+  { "pilotlist": [ { "name": "Ace", "uid": "12345" }, { "name": "Bee", "uid": "67890" } ] },
 
   { "racestatus": { "raceAction": "start" } },
+  { "racetype": { "raceMode": "THREE_LAP_SINGLE_CLASS", "raceFormat": "NORMAL", "raceLaps": "3" } },
 
-  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 1, "time": 2.0, "gate": 1, "finished": "false" } } },
-  { "racedata": { "Bee": { "uid": "u2", "name": "Bee", "lap": 1, "time": 2.5, "gate": 1, "finished": "false" } } },
+  { "countdown": { "countValue": "5" } },
+  { "countdown": { "countValue": "4" } },
+  { "countdown": { "countValue": "3" } },
+  { "countdown": { "countValue": "2" } },
+  { "countdown": { "countValue": "1" } },
+  { "countdown": { "countValue": "0" } },
+  { "FinishGate": { "StartFinishGate": "True" } },
 
-  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 1, "time": 8.0, "gate": 2, "finished": "false" } } },
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "1", "gate": "1", "time": "1.336", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "1", "gate": "1", "time": "1.502", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
 
-  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 1, "time": 8.0, "gate": 2, "finished": "false" } } },
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "1", "gate": "2", "time": "2.965", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "1", "gate": "1", "time": "1.502", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
 
-  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 2, "time": 14.0, "gate": 1, "finished": "false" } } },
-  { "racedata": { "Bee": { "uid": "u2", "name": "Bee", "lap": 2, "time": 15.5, "gate": 1, "finished": "false" } } },
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "1", "gate": "2", "time": "2.965", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "1", "gate": "2", "time": "3.101", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
 
-  { "racedata": { "Ace": { "uid": "u1", "name": "Ace", "lap": 3, "time": 27.0, "gate": 1, "finished": "true" } } },
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "1", "gate": "3", "time": "4.200", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "1", "gate": "2", "time": "3.101", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
+
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "2", "gate": "1", "time": "6.010", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "1", "gate": "3", "time": "4.905", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
+
+  "The same snapshot again — the game re-sends the whole field on every crossing, so an",
+  "unchanged (lap, gate, finished) must emit nothing at all.",
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "2", "gate": "1", "time": "6.010", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "1", "gate": "3", "time": "4.905", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
+
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "2", "gate": "1", "time": "6.010", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "2", "gate": "1", "time": "6.850", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
+
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "3", "gate": "1", "time": "11.900", "finished": "False", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "2", "gate": "1", "time": "6.850", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
+
+  "Ace finishes: gate 4 on a 3-gate track, finished 'True', and lap never reaches 4.",
+  "This is the crossing the old gate mapping filed as split 3 and lost.",
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "3", "gate": "4", "time": "17.220", "finished": "True", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "3", "gate": "1", "time": "12.700", "finished": "False", "colour": "FF0000", "uid": 67890 } } },
+
+  { "racedata": {
+      "Ace": { "position": "1", "lap": "3", "gate": "4", "time": "17.220", "finished": "True", "colour": "00FFFF", "uid": 12345 },
+      "Bee": { "position": "2", "lap": "3", "gate": "4", "time": "18.400", "finished": "True", "colour": "FF0000", "uid": 67890 } } },
 
   { "racestatus": { "raceAction": "race finished" } }
 ]
