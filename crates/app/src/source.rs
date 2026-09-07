@@ -660,20 +660,29 @@ pub(crate) async fn run_bridge(
 
         // Reap a finished/cancelled source task so a heat that ran to the end clears the
         // slot (without it, a re-Start of the same heat would be ignored). A heat with an armed
-        // RotorHazard connection is NOT reaped on the Mock tasks finishing — the live connection
+        // **persistent connection** is NOT reaped on the Mock tasks finishing — the live connection
         // keeps draining real passes until the heat leaves `Running` (it is disarmed there).
+        //
+        // Both connection kinds must be counted here. `is_finished()` is `all()` over the Mock
+        // task handles, so for a heat with NO Mock timer — the normal case for a real event — it is
+        // trivially `true`, and anything left out of this guard gets its slot reaped on the very
+        // first poll. The armed connection then never reaches `stop()`, so it is never disarmed:
+        // for Velocidrone that meant no `abortrace`, no `unlock`, and the arming leaking until the
+        // next heat overwrote it. Found by running a heat end-to-end, not by a unit test — the
+        // guard is about the *absence* of a task, which is exactly what a test with a Mock timer in
+        // it cannot see.
         if let Some(running) = &active {
-            let has_armed_rh = {
+            let has_armed_connection = {
                 #[cfg(feature = "live")]
                 {
-                    !running.armed_rh.is_empty()
+                    !running.armed_rh.is_empty() || !running.armed_vd.is_empty()
                 }
                 #[cfg(not(feature = "live"))]
                 {
                     false
                 }
             };
-            if running.is_finished() && !has_armed_rh {
+            if running.is_finished() && !has_armed_connection {
                 active = None;
             }
         }
