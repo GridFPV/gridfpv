@@ -321,7 +321,16 @@
       <Field label="MultiGP ID" hint="For a future cloud import.">
         <Input bind:value={form.multigp_id} aria-label="MultiGP ID" autocomplete="off" />
       </Field>
-      <Field label="Velocidrone ID" hint="For a future cloud import.">
+      <!--
+        NOT a future nicety any more (#484): this is the field that seats a pilot in a VelociDrone
+        race. The Director's `activate` command takes account uids, so a pilot without one is
+        omitted from the seating write — they fly, but GridFPV never puts them in the heat. The hint
+        has to say that, because "for a future cloud import" gives an RD no reason to fill it in.
+      -->
+      <Field
+        label="Velocidrone ID"
+        hint="The pilot's VelociDrone account ID. Required to seat them in a VelociDrone race — without it they cannot be put in a heat."
+      >
         <Input bind:value={form.velocidrone_id} aria-label="Velocidrone ID" autocomplete="off" />
       </Field>
     </div>

@@ -96,6 +96,9 @@ pub struct VdSeat {
 struct VdArmedHeat {
     /// The sink (the event's log) translated passes are appended through while armed.
     sink: PassSink,
+    /// Set once this arming has complained that it can attribute nothing, so the warning is said
+    /// once rather than ten times a second.
+    warned_unattributed: bool,
     /// Set once the driver has asked the sim to start the race for this arming, so a re-drain
     /// cannot re-start it.
     started: bool,
@@ -121,6 +124,9 @@ pub struct VdConnection {
     connected: Arc<AtomicBool>,
     /// A pending seating request, taken by the driver on its next pass.
     seat: Arc<Mutex<Option<Vec<VdSeat>>>>,
+    /// Player name (lowercased) → the pilot its laps attribute to. Written by the driver from the
+    /// `pilotlist` readback, and seeded at arm time with the lineup's callsigns as a fallback.
+    attribution: Arc<Mutex<HashMap<String, CompetitorRef>>>,
     /// The heat currently armed on this connection, if any.
     armed: Arc<Mutex<Option<VdArmedHeat>>>,
     /// The driver thread handle.
@@ -162,6 +168,7 @@ impl VdConnection {
             yield_status,
             connected,
             seat,
+            attribution,
             armed,
             driver,
         }
@@ -178,10 +185,33 @@ impl VdConnection {
 
     /// Arm a running heat: from now until [`disarm`](Self::disarm), translated passes are attributed
     /// and appended through `sink`, and the driver asks the sim to start the race.
-    pub fn arm_heat(&self, sink: PassSink) {
+    /// Arm a running heat, with `fallback` as a **name-based attribution of last resort**:
+    /// callsign → competitor for everyone in the lineup.
+    ///
+    /// The fallback exists because seating is not guaranteed to have happened. If no pilot in the
+    /// heat has a Velocidrone id on file, [`seat`](Self::seat) is never called, and without this
+    /// the attribution map would be empty — so every pass would be dropped and the heat would
+    /// record **zero laps with no signal anywhere**. That is the #494 failure shape one layer up,
+    /// and it is not acceptable just because the RD's config was incomplete: a sim player whose
+    /// name matches a roster callsign is attributable, and matching them is strictly better than
+    /// recording nothing.
+    ///
+    /// Seating, when it does run, *overwrites* this with the uid-confirmed map — the roster pairing
+    /// is authoritative and a callsign guess is not.
+    pub fn arm_heat(&self, sink: PassSink, fallback: Vec<(String, CompetitorRef)>) {
+        {
+            let mut map = self
+                .attribution
+                .lock()
+                .expect("vd-attribution lock poisoned");
+            for (callsign, competitor) in fallback {
+                map.entry(callsign.to_lowercase()).or_insert(competitor);
+            }
+        }
         let mut slot = self.armed.lock().expect("vd-armed lock poisoned");
         *slot = Some(VdArmedHeat {
             sink,
+            warned_unattributed: false,
             started: false,
             finishing: false,
             finished_at: None,
@@ -443,17 +473,46 @@ fn deliver(ctx: &DriverCtx, events: Vec<Event>) {
         .clone();
     let adapter = AdapterId(format!("velocidrone:{}", ctx.timer_id.0));
 
-    let slot = ctx.armed.lock().expect("vd-armed lock poisoned");
-    let Some(heat) = slot.as_ref() else {
+    let mut slot = ctx.armed.lock().expect("vd-armed lock poisoned");
+    let Some(heat) = slot.as_mut() else {
         return;
     };
+
+    // Count what arrived vs what landed. A connected feed that records nothing is the single most
+    // dangerous state this adapter can be in — it looks perfect from every screen — so it has to
+    // announce itself rather than wait to be noticed in the results.
+    let mut passes = 0usize;
+    let mut appended = 0usize;
+    let mut unknown: Vec<String> = Vec::new();
     for event in events {
+        if let Event::Pass(p) = &event {
+            passes += 1;
+            let name = p.competitor.0.clone();
+            if !attribution.contains_key(&name.to_lowercase()) && !unknown.contains(&name) {
+                unknown.push(name);
+            }
+        }
         let Some(event) = remap(event, &attribution, &adapter) else {
             continue;
         };
+        appended += 1;
         if let Err(e) = heat.sink.append_event(event) {
             eprintln!("gridfpv: velocidrone: could not append a pass: {e:?}");
         }
+    }
+
+    // Crossings are arriving and NONE of them belong to anyone we know. Say so once per arming.
+    if passes > 0 && appended == 0 && !heat.warned_unattributed {
+        heat.warned_unattributed = true;
+        let who = unknown.join(", ");
+        eprintln!(
+            "gridfpv: velocidrone: {} is receiving crossings from [{who}] but can attribute NONE of \
+             them to a pilot in this heat, so no laps are being recorded. Either the heat's pilots \
+             have no Velocidrone ID on file (set it on each pilot — it is what seats them), or the \
+             names flying in the sim do not match their callsigns. The race is running and GridFPV \
+             is counting nothing.",
+            timer_name(&ctx.timers, &ctx.timer_id),
+        );
     }
 }
 

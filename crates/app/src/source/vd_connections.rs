@@ -23,6 +23,7 @@ use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry, TimerStatus};
 use tokio::task::JoinHandle;
 
 use gridfpv_adapters::velocidrone::transport::url_for_host;
+use gridfpv_events::CompetitorRef;
 
 use super::PassSink;
 use super::velocidrone::{VdConnection, VdSeat};
@@ -121,16 +122,26 @@ impl VdConnections {
     /// connected**: the driver starts the sim's race and routes its passes into `sink`'s log.
     /// Returns whether the heat actually armed.
     ///
+    /// `fallback` is the heat's callsign → competitor pairing, used to attribute passes when
+    /// seating never ran (no pilot in the heat has a Velocidrone id). Without it such a heat would
+    /// record zero laps in silence — see [`VdConnection::arm_heat`].
+    ///
     /// The connected check matters more here than anywhere: the return value is what tells the
     /// bridge whether this heat has *any* source at all, and arming a still-dialling connection
     /// would report a heat as sourced while nothing was ever going to feed it.
-    pub fn arm_heat(&self, event: &EventId, timer: &TimerId, sink: PassSink) -> bool {
+    pub fn arm_heat(
+        &self,
+        event: &EventId,
+        timer: &TimerId,
+        sink: PassSink,
+        fallback: Vec<(String, CompetitorRef)>,
+    ) -> bool {
         let map = self.inner.lock().expect("vd-connections lock poisoned");
         if let Some(live) = map
             .get(&(Some(event.clone()), timer.clone()))
             .filter(|live| live.conn.is_connected())
         {
-            live.conn.arm_heat(sink);
+            live.conn.arm_heat(sink, fallback);
             true
         } else {
             drop(map);

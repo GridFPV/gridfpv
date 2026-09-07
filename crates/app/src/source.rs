@@ -992,6 +992,38 @@ fn vd_seats_of(
     seats
 }
 
+/// The heat's **callsign → competitor** pairing, for Velocidrone's fallback attribution (#484).
+///
+/// `racedata` is keyed by the player's sim name, and the authoritative way to resolve that to a
+/// pilot is the uid the heat was seated with, paired through the `getpilots` roster. This is what
+/// is used when that did not happen: no pilot in the heat has a Velocidrone id, so no seating write
+/// ran, so there is no roster pairing — and without a fallback every pass would be dropped and the
+/// heat would record zero laps with nothing anywhere saying why.
+///
+/// A callsign match is a guess and the roster is not, so seating overwrites this when it runs.
+#[cfg(feature = "live")]
+fn vd_callsigns(
+    state: &AppState,
+    registry: &EventRegistry,
+    heat: &HeatId,
+) -> Vec<(String, CompetitorRef)> {
+    let Some(lineup) = lineup_of(state, heat) else {
+        return Vec::new();
+    };
+    let pilots = registry.pilots();
+    let mut out = Vec::new();
+    for competitor in lineup {
+        if gridfpv_server::timers::node_seat_index(&competitor).is_some() {
+            continue;
+        }
+        let pilot_id = gridfpv_server::scope::PilotId(competitor.0.clone());
+        if let Some(pilot) = pilots.get(&pilot_id) {
+            out.push((pilot.callsign.clone(), competitor));
+        }
+    }
+    out
+}
+
 /// React to a heat-loop transition: start emitting from the event's selected timers on `Running`,
 /// stop on a terminal / off-ramp transition for the heat that is currently emitting.
 #[allow(clippy::too_many_arguments)]
@@ -1089,6 +1121,10 @@ fn handle_transition(
             // silent while it is not the active source.
             #[cfg(feature = "live")]
             let armed_vd = {
+                // The name-based attribution of last resort: every lineup pilot's callsign. Used
+                // only where the uid-confirmed roster pairing did not reach — a heat whose pilots
+                // have no Velocidrone id would otherwise record nothing at all.
+                let vd_fallback = vd_callsigns(state, registry, &heat);
                 let mut armed = Vec::new();
                 for timer_id in selected_vd_timers(registry, timers, event_id) {
                     let sink = PassSink::gated(
@@ -1098,7 +1134,7 @@ fn handle_transition(
                         timer_id.clone(),
                     )
                     .for_heat(heat.clone());
-                    if vd_connections.arm_heat(event_id, &timer_id, sink) {
+                    if vd_connections.arm_heat(event_id, &timer_id, sink, vd_fallback.clone()) {
                         armed.push(timer_id);
                     }
                 }
