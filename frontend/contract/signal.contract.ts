@@ -278,10 +278,14 @@ describe('POST /timers/{id}/capture is wired, gated and honest about refusing (#
     ).rejects.not.toThrow(/HTTP \d+/);
   });
 
-  it('refuses a capture on the built-in Mock by its friendly name', async () => {
+  it('refuses a capture on the built-in Mock, naming the timer AND its kind', async () => {
+    // The refusal says what the timer *is*, not only what it is not (#484). "Is not a RotorHazard
+    // timer" was fine while RotorHazard was the only real adapter; said of a Velocidrone timer it
+    // is true, unhelpful, and reads like a misconfiguration — when a simulator has no detector by
+    // its nature. So the kind is named, and the RD reads a fact rather than a denial.
     await expect(
       captureLevel(director.baseUrl, MOCK_TIMER_ID, { node: 0, threshold: 'enter' }, token)
-    ).rejects.toThrow(/not a RotorHazard timer/);
+    ).rejects.toThrow(/is a Mock timer — there is no detector to capture from/);
   });
 
   it('answers an unknown timer with a 404 rather than a message about a timer that does not exist', async () => {
