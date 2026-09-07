@@ -101,6 +101,156 @@ const SEAT_READBACK_WINDOW: Duration = Duration::from_millis(1_500);
 /// JSON decoder as a malformed frame.
 const STACK_PING_ANSWER: [u8; 2] = [0x8A, 0x00];
 
+/// Why a dial failed, classified into the thing the operator should actually go and fix.
+///
+/// "Could not reach this timer" is the right sentence for exactly one of these, and saying it for
+/// all of them costs a race-day half hour. The game's handshake parser answers a **400** when it
+/// reached us fine and disliked the request — overwhelmingly the service path — and telling an RD
+/// to go and check that the game is running, when the game just *answered*, sends them to the one
+/// place the problem is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectFailure {
+    /// The game answered the TCP connect and **rejected the WebSocket handshake**. It is up, the
+    /// websocket feed is on, and the network is fine — the request was wrong.
+    HandshakeRejected {
+        /// The HTTP status it answered with (the game sends `400 Bad Request`).
+        status: u16,
+    },
+    /// Nothing answered: refused, timed out, or no route. The game is not running, the websocket
+    /// setting is off, a firewall is in the way, or the host is wrong.
+    Unreachable,
+    /// Anything else — reported verbatim rather than guessed at.
+    Other,
+}
+
+/// Whether `url`'s path is the service path the game's handshake requires.
+///
+/// The parser takes the GET target, strips **all** leading and trailing `/`, and compares it
+/// **ordinally and case-sensitively** to its configured service — `velocidrone` on shipped builds.
+/// So `/velocidrone`, `/velocidrone/` and `//velocidrone//` all match; `/`, `` (no path at all),
+/// `/Velocidrone` and `/velocidrone?x=1` do **not**, and each draws a `400`.
+///
+/// This is the single most likely thing to be wrong about a hand-typed Velocidrone URL: the host
+/// and port are the parts an operator thinks about, and the path is the part they leave off.
+pub fn service_path_is_right(url: &str) -> bool {
+    // Take everything after the authority, minus any query/fragment — no URL crate needed for a
+    // check this small, and the game's own parser is this crude too.
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let path = match after_scheme.find('/') {
+        Some(i) => &after_scheme[i..],
+        None => "",
+    };
+    // The query string is deliberately NOT stripped: the game reads the raw GET target and strips
+    // only slashes, so `/velocidrone?x=1` does not match `velocidrone` and draws a 400. This
+    // function models the game's parser, so it must be wrong in the same way.
+    path.trim_matches('/') == VELOCIDRONE_SERVICE
+}
+
+/// The service path the shipped game answers on.
+const VELOCIDRONE_SERVICE: &str = "velocidrone";
+
+/// The port the game's websocket server listens on.
+///
+/// **Not configurable in VelociDrone.** `UnityWSServer._port` is a compile-time default of 60003
+/// and the game exposes no setting for it, so it is a constant of the protocol rather than
+/// something an operator chooses.
+pub const VELOCIDRONE_PORT: u16 = 60003;
+
+/// Build the WebSocket URL for a VelociDrone at `host`.
+///
+/// **The operator supplies only the host**, because that is the only part they can actually
+/// change: the scheme (`ws`, no TLS), the port ([`VELOCIDRONE_PORT`]) and the path
+/// (`/velocidrone`) are all fixed by the game, with no setting behind any of them. Asking an RD to
+/// type three constants alongside one variable invites exactly one bug — a URL missing the path,
+/// which the game answers with a `400` — and that is a bug we shipped and then had to diagnose in
+/// the field.
+///
+/// `host` is normalised generously, because being strict here fails a connection over punctuation:
+///
+/// - a pasted full URL (`ws://192.168.1.10:60003/velocidrone`) has its scheme and path stripped;
+/// - an explicit `:port` is **kept** — the game never moves, but an SSH tunnel or a port-forward
+///   does, and honouring it costs one line;
+/// - a bare IPv6 literal is bracketed so a port can be appended to it;
+/// - surrounding whitespace and stray trailing slashes go.
+///
+/// This is parsing, not guessing: each of those inputs names exactly one host, so nothing is being
+/// invented on the operator's behalf.
+pub fn url_for_host(host: &str) -> String {
+    let host = host.trim();
+    // Strip a pasted scheme.
+    let host = host.split_once("://").map_or(host, |(_, rest)| rest);
+    // Strip a pasted path / query / fragment.
+    let host = host.split(['/', '?', '#']).next().unwrap_or("").trim();
+
+    // Does it already carry a port? For a bracketed IPv6 literal that is a `:` AFTER the `]`;
+    // otherwise it is a single `:` (a bare IPv6 address has several, and no port).
+    let has_port = match host.rfind(']') {
+        Some(close) => host[close + 1..].starts_with(':'),
+        None => host.matches(':').count() == 1,
+    };
+    // A bare IPv6 literal must be bracketed before a port can be appended to it.
+    let needs_brackets = !has_port && !host.starts_with('[') && host.matches(':').count() > 1;
+
+    if has_port {
+        format!("ws://{host}/{VELOCIDRONE_SERVICE}")
+    } else if needs_brackets {
+        format!("ws://[{host}]:{VELOCIDRONE_PORT}/{VELOCIDRONE_SERVICE}")
+    } else {
+        format!("ws://{host}:{VELOCIDRONE_PORT}/{VELOCIDRONE_SERVICE}")
+    }
+}
+
+impl ConnectFailure {
+    /// Classify a dial error.
+    pub fn classify(err: &Error) -> Self {
+        match err {
+            // tungstenite surfaces a non-101 handshake response as `Http`. The game answered.
+            Error::Http(response) => ConnectFailure::HandshakeRejected {
+                status: response.status().as_u16(),
+            },
+            Error::Io(_) | Error::Url(_) => ConnectFailure::Unreachable,
+            _ => ConnectFailure::Other,
+        }
+    }
+
+    /// The operator-facing sentence: what is actually wrong, and what to do about it.
+    ///
+    /// Takes the `url` because the most useful advice depends on it — when the handshake was
+    /// rejected *and* the path is wrong, we can name the exact cause instead of listing suspects.
+    pub fn advice(&self, url: &str) -> String {
+        match self {
+            ConnectFailure::HandshakeRejected { status } => {
+                if !service_path_is_right(url) {
+                    // Only reachable for a caller that built its own URL: the Director stores a
+                    // HOST and builds the path itself ([`url_for_host`]), precisely so that an RD
+                    // can never land here.
+                    format!(
+                        "VelociDrone ANSWERED at {url} and rejected the connection ({status}) — \
+                         so the game is running and its websocket is on. The URL is missing the \
+                         service path: it must end in `/velocidrone`. The game compares the path \
+                         exactly (lower-case, no query string)."
+                    )
+                } else {
+                    format!(
+                        "VelociDrone ANSWERED at {url} and rejected the connection ({status}) — \
+                         so the game is running and reachable, but it did not accept the \
+                         handshake. The address looks right, so check for a proxy or port-forward \
+                         in between."
+                    )
+                }
+            }
+            ConnectFailure::Unreachable => format!(
+                "Nothing answered at {url}. Check that VelociDrone is running; that Options → \
+                 Main Settings → Websocket Communication is Yes (then restart the game); that the \
+                 address is the LAN IP of the machine RUNNING VELOCIDRONE — not this one, and \
+                 never 127.0.0.1, which the game does not bind; and that its firewall allows \
+                 inbound TCP 60003."
+            ),
+            ConnectFailure::Other => format!("Could not open a connection to {url}."),
+        }
+    }
+}
+
 /// One command the Director can send to Velocidrone.
 ///
 /// Wire form is `{"command":"<name>", …}`. The game lowercases the command value before
@@ -614,6 +764,125 @@ fn is_timeout(err: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The field bug that made this a host field (#484).** The operator types only the machine;
+    /// the scheme, port and path are constants of the game and are supplied here. The first field
+    /// test entered `ws://<ip>:60003` into the old URL field, the game answered `400`, and the
+    /// Director reported "could not reach this timer" — sending the RD to check the one thing that
+    /// was already working.
+    #[test]
+    fn a_bare_host_becomes_the_games_full_url() {
+        assert_eq!(
+            url_for_host("192.168.37.4"),
+            "ws://192.168.37.4:60003/velocidrone"
+        );
+        assert_eq!(
+            url_for_host("gaming-pc.local"),
+            "ws://gaming-pc.local:60003/velocidrone"
+        );
+    }
+
+    /// Whitespace and a pasted full URL both name exactly one host, so both are parsed rather than
+    /// refused — including the exact string that failed in the field.
+    #[test]
+    fn a_pasted_url_is_reduced_to_its_host() {
+        for input in [
+            "  192.168.37.4  ",
+            "ws://192.168.37.4:60003/velocidrone",
+            "ws://192.168.37.4:60003",
+            "192.168.37.4/velocidrone",
+            "ws://192.168.37.4:60003/velocidrone/",
+            "ws://192.168.37.4:60003/velocidrone?x=1",
+        ] {
+            assert_eq!(
+                url_for_host(input),
+                "ws://192.168.37.4:60003/velocidrone",
+                "{input:?} names one host and must normalise to it"
+            );
+        }
+    }
+
+    /// An explicit port is HONOURED. The game never moves off 60003, but an SSH tunnel or a
+    /// port-forward does, and refusing one would cost a real setup for no benefit.
+    #[test]
+    fn an_explicit_port_is_kept() {
+        assert_eq!(
+            url_for_host("192.168.37.4:7777"),
+            "ws://192.168.37.4:7777/velocidrone"
+        );
+        assert_eq!(
+            url_for_host("localhost:8080"),
+            "ws://localhost:8080/velocidrone"
+        );
+    }
+
+    /// IPv6 literals: a bare one is bracketed so the port can be appended, and an already-bracketed
+    /// one is left alone whether or not it carries a port.
+    #[test]
+    fn ipv6_literals_are_bracketed_correctly() {
+        assert_eq!(url_for_host("fe80::1"), "ws://[fe80::1]:60003/velocidrone");
+        assert_eq!(
+            url_for_host("[fe80::1]"),
+            "ws://[fe80::1]:60003/velocidrone"
+        );
+        assert_eq!(
+            url_for_host("[fe80::1]:7777"),
+            "ws://[fe80::1]:7777/velocidrone"
+        );
+    }
+
+    /// Whatever the input shape, the result always satisfies the game's own path rule — which is
+    /// the entire point of building the URL rather than asking for one.
+    #[test]
+    fn every_built_url_satisfies_the_games_path_rule() {
+        for input in [
+            "192.168.37.4",
+            "host:1234",
+            "ws://h:60003/velocidrone",
+            "fe80::1",
+        ] {
+            assert!(
+                service_path_is_right(&url_for_host(input)),
+                "{input:?} must build a URL the game accepts"
+            );
+        }
+    }
+
+    /// The path rule itself, against the game's parser: slashes are stripped and the comparison is
+    /// ordinal and case-sensitive.
+    #[test]
+    fn the_service_path_rule_matches_the_games_parser() {
+        assert!(service_path_is_right("ws://h:60003/velocidrone"));
+        assert!(service_path_is_right("ws://h:60003/velocidrone/"));
+        assert!(service_path_is_right("ws://h:60003//velocidrone//"));
+        // The field failure: no path at all.
+        assert!(!service_path_is_right("ws://h:60003"));
+        assert!(!service_path_is_right("ws://h:60003/"));
+        // Case-sensitive, and a query string breaks the match.
+        assert!(!service_path_is_right("ws://h:60003/Velocidrone"));
+        assert!(!service_path_is_right("ws://h:60003/velocidrone?x=1"));
+    }
+
+    /// A rejected handshake is NOT "could not reach", and the difference is the whole diagnosis:
+    /// the game answered, so its power, its websocket setting and the network are all fine.
+    #[test]
+    fn a_rejected_handshake_is_diagnosed_apart_from_an_unreachable_host() {
+        let rejected = ConnectFailure::HandshakeRejected { status: 400 };
+        let advice = rejected.advice("ws://192.168.37.4:60003");
+        assert!(advice.contains("ANSWERED"), "{advice}");
+        assert!(advice.contains("/velocidrone"), "{advice}");
+        // It must NOT send the RD off to check the things that just demonstrably worked.
+        assert!(!advice.contains("Websocket Communication"), "{advice}");
+        assert!(!advice.contains("127.0.0.1"), "{advice}");
+
+        let unreachable = ConnectFailure::Unreachable.advice("ws://192.168.37.4:60003/velocidrone");
+        assert!(unreachable.contains("Nothing answered"), "{unreachable}");
+        assert!(
+            unreachable.contains("Websocket Communication"),
+            "{unreachable}"
+        );
+        assert!(unreachable.contains("127.0.0.1"), "{unreachable}");
+    }
 
     /// The keep-alive is the vendor-blessed command, not the empty frame we used to send.
     /// An empty frame is tolerated (echoed at frame level) but any non-empty *non-command*

@@ -22,6 +22,8 @@ use gridfpv_server::scope::EventId;
 use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry, TimerStatus};
 use tokio::task::JoinHandle;
 
+use gridfpv_adapters::velocidrone::transport::url_for_host;
+
 use super::PassSink;
 use super::velocidrone::{VdConnection, VdSeat};
 
@@ -37,7 +39,11 @@ pub const RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
 /// no event, so the RD can see whether the sim answers at all. A timer never holds both at once.
 type ConnKey = (Option<EventId>, TimerId);
 
-/// One connection the Director wants: its [`ConnKey`] parts plus the timer's *current* URL.
+/// One connection the Director wants: its [`ConnKey`] parts plus the **dial URL** built from the
+/// timer's *current* host.
+///
+/// The URL rather than the host, because it is the thing the driver actually captured at spawn and
+/// therefore the thing the reconciler must compare against to notice an edit.
 type Wanted = (Option<EventId>, TimerId, String);
 
 /// One live connection plus the URL its driver dialled.
@@ -308,8 +314,8 @@ fn wanted_connections(registry: &EventRegistry, timers: &TimerRegistry) -> Vec<W
         if let Some(selection) = registry.timers_of(&active.id) {
             for id in selection {
                 if let Some(timer) = timers.get(&id) {
-                    if let TimerKind::Velocidrone { url } = timer.kind {
-                        wanted.push((Some(active.id.clone()), id, url));
+                    if let TimerKind::Velocidrone { host } = timer.kind {
+                        wanted.push((Some(active.id.clone()), id, url_for_host(&host)));
                     }
                 }
             }
@@ -321,8 +327,8 @@ fn wanted_connections(registry: &EventRegistry, timers: &TimerRegistry) -> Vec<W
             continue;
         }
         if let Some(timer) = timers.get(&id) {
-            if let TimerKind::Velocidrone { url } = timer.kind {
-                wanted.push((None, id, url));
+            if let TimerKind::Velocidrone { host } = timer.kind {
+                wanted.push((None, id, url_for_host(&host)));
             }
         }
     }
@@ -374,16 +380,19 @@ mod tests {
     use super::*;
     use gridfpv_server::timers::CreateTimerRequest;
 
+    const HOST: &str = "192.168.1.20";
+    const NEW_HOST: &str = "192.168.1.99";
+    /// What [`url_for_host`] builds from [`HOST`] — the shape the reconciler compares against.
     const URL: &str = "ws://192.168.1.20:60003/velocidrone";
     const NEW_URL: &str = "ws://192.168.1.99:60003/velocidrone";
 
-    /// Create a Velocidrone timer at `url` and return its id.
-    fn vd_timer(timers: &TimerRegistry, name: &str, url: &str) -> TimerId {
+    /// Create a Velocidrone timer at `host` and return its id.
+    fn vd_timer(timers: &TimerRegistry, name: &str, host: &str) -> TimerId {
         timers
             .create(&CreateTimerRequest {
                 name: name.to_string(),
                 kind: TimerKind::Velocidrone {
-                    url: url.to_string(),
+                    host: host.to_string(),
                 },
                 channel_capability: None,
                 node_count: None,
@@ -394,9 +403,9 @@ mod tests {
             .id
     }
 
-    fn registry_with(url: &str) -> (TimerRegistry, TimerId) {
+    fn registry_with(host: &str) -> (TimerRegistry, TimerId) {
         let timers = TimerRegistry::new(None, 5, 2500).expect("in-memory timer registry");
-        let id = vd_timer(&timers, "Ryan's sim", url);
+        let id = vd_timer(&timers, "Ryan's sim", host);
         (timers, id)
     }
 
@@ -406,7 +415,7 @@ mod tests {
 
     #[test]
     fn a_wanted_timer_with_nothing_live_is_opened() {
-        let (timers, id) = registry_with(URL);
+        let (timers, id) = registry_with(HOST);
         let wanted = vec![(event(), id.clone(), URL.to_string())];
         let (steps, rested) = plan(&[], &wanted, &timers, &HashSet::new());
         assert_eq!(steps, vec![Step::Open((event(), id), URL.into())]);
@@ -416,7 +425,7 @@ mod tests {
     /// A healthy link must not churn on a tick — that is what makes a manual hold survive.
     #[test]
     fn a_healthy_live_connection_is_left_alone() {
-        let (timers, id) = registry_with(URL);
+        let (timers, id) = registry_with(HOST);
         let url = URL.to_string();
         let live = vec![((event(), id.clone()), url.clone(), false)];
         let wanted = vec![(event(), id, url)];
@@ -428,7 +437,7 @@ mod tests {
     /// address forever. Supersede (not Close) so the timer does not flash `Disconnected`.
     #[test]
     fn an_edited_url_supersedes_and_reopens() {
-        let (timers, id) = registry_with(NEW_URL);
+        let (timers, id) = registry_with(NEW_HOST);
         let live = vec![((event(), id.clone()), URL.to_string(), false)];
         let wanted = vec![(event(), id.clone(), NEW_URL.to_string())];
         let (steps, _) = plan(&live, &wanted, &timers, &HashSet::new());
@@ -444,7 +453,7 @@ mod tests {
     /// A deselected timer is genuinely disconnected — `Disconnected` is the truth here.
     #[test]
     fn a_no_longer_wanted_connection_is_closed() {
-        let (timers, id) = registry_with(URL);
+        let (timers, id) = registry_with(HOST);
         let live = vec![((event(), id.clone()), URL.to_string(), false)];
         let (steps, _) = plan(&live, &[], &timers, &HashSet::new());
         assert_eq!(steps, vec![Step::Close((event(), id))]);
@@ -454,7 +463,7 @@ mod tests {
     /// connection must yield the status cell rather than stamp a parting `Disconnected`.
     #[test]
     fn a_replaced_connection_supersedes_rather_than_closing() {
-        let (timers, id) = registry_with(URL);
+        let (timers, id) = registry_with(HOST);
         let url = URL.to_string();
         // Live under the manual hold; wanted under the active event.
         let live = vec![((None, id.clone()), url.clone(), false)];
@@ -474,7 +483,7 @@ mod tests {
     /// against it would be pure noise.
     #[test]
     fn a_rested_driver_is_reaped_and_not_redialled() {
-        let (timers, id) = registry_with(URL);
+        let (timers, id) = registry_with(HOST);
         timers.set_status(&id, TimerStatus::Unreachable);
         let url = URL.to_string();
         // Driver finished (`true`) at the wanted URL.
@@ -495,7 +504,7 @@ mod tests {
     /// A driver that exited **without** resting (a dropped link) is reaped and reopened.
     #[test]
     fn a_dropped_driver_is_reaped_and_reopened() {
-        let (timers, id) = registry_with(URL);
+        let (timers, id) = registry_with(HOST);
         timers.set_status(&id, TimerStatus::Disconnected);
         let url = URL.to_string();
         let live = vec![((event(), id.clone()), url.clone(), true)];
@@ -518,7 +527,7 @@ mod tests {
     fn only_velocidrone_timers_are_wanted() {
         let events = EventRegistry::new(None).expect("in-memory event registry");
         let timers = events.timers();
-        let vd = vd_timer(&timers, "Ryan's sim", URL);
+        let vd = vd_timer(&timers, "Ryan's sim", HOST);
         let rh = timers
             .create(&CreateTimerRequest {
                 name: "Bench RH".into(),

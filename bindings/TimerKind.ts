@@ -18,20 +18,27 @@ laps: number,
  */
 lap_ms: number, } } | { "Velocidrone": { 
 /**
- * The sim's WebSocket URL — `ws://<lan-ip>:60003/velocidrone`.
+ * The machine running VelociDrone — its **LAN IP or hostname**, and nothing else.
  *
- * **The host must be the machine's LAN IP.** Velocidrone's TCP layer binds to the
- * primary LAN IPv4 address it discovers (by probing a UDP socket at
- * `8.8.8.8:65530` and reading the local endpoint), not `IPAddress.Any` and not
- * loopback — so `ws://127.0.0.1:60003/velocidrone` cannot connect even when the
- * sim is on this very machine. The console's URL field says so.
+ * **A host, not a URL, and deliberately so.** Everything else about the address is fixed
+ * by the game with no setting behind it: the scheme (`ws`, no TLS), the port (60003) and
+ * the service path (`/velocidrone`). A URL field therefore asked the RD to type three
+ * constants next to one variable — and the first field test did exactly what that invites,
+ * entering `ws://<ip>:60003` with no path. The game's handshake parser compares the path
+ * ordinally after stripping slashes, so it answered `400`, the Director reported "could
+ * not reach this timer", and the sentence sent the RD to check the one thing that was
+ * already working. Storing the host removes the failure class rather than documenting it.
  *
- * Passed **verbatim** to the dialer, like [`Rotorhazard`](TimerKind::Rotorhazard):
- * the game's handshake parser matches the path ordinally after stripping slashes
- * and breaks on a query string, but that is the operator's URL to get right and a
- * bad one surfaces as a connection [`Error`](TimerStatus::Error).
+ * **It must be the LAN IP of the machine running the game, not the Director's.** The sim's
+ * TCP layer binds the primary LAN IPv4 address it discovers (by probing a UDP socket at
+ * `8.8.8.8:65530` and reading the local endpoint), not `IPAddress.Any` and not loopback —
+ * so `127.0.0.1` cannot connect even when the sim is on this very machine.
+ *
+ * Normalised on the way to the dialer by
+ * [`url_for_host`](gridfpv_adapters::velocidrone::transport::url_for_host), which tolerates
+ * a pasted full URL and honours an explicit `:port` (for a tunnel or port-forward).
  */
-url: string, } } | { "Rotorhazard": { 
+host: string, } } | { "Rotorhazard": { 
 /**
  * The RotorHazard server base URL — `http://<host>:5000`, e.g.
  * `http://rotorhazard.local:5000`.

@@ -42,7 +42,7 @@
   import {
     DEFAULT_MOCK_LAPS,
     DEFAULT_MOCK_LAP_MS,
-    DEFAULT_VELOCIDRONE_URL,
+    DEFAULT_VELOCIDRONE_HOST,
     connectActionLabel,
     connectionHint,
     isBuiltInMock,
@@ -424,7 +424,7 @@
     } else if ('Velocidrone' in timer.kind) {
       formLaps = String(DEFAULT_MOCK_LAPS);
       formLapMs = String(DEFAULT_MOCK_LAP_MS);
-      formUrl = timer.kind.Velocidrone.url;
+      formUrl = timer.kind.Velocidrone.host;
     } else {
       // A kind this console build does not model (a newer Director). Keep the fields blank rather
       // than reaching into a shape we cannot know — the timer still edits its name and channels.
@@ -543,8 +543,8 @@
     }
     const url = formUrl.trim();
     if (formKind === 'Velocidrone') {
-      if (!url) return { problem: 'A VelociDrone URL is required.' };
-      return { kind: { Velocidrone: { url } } };
+      if (!url) return { problem: 'The address of the machine running VelociDrone is required.' };
+      return { kind: { Velocidrone: { host: url } } };
     }
     if (!url) return { problem: 'A RotorHazard URL is required.' };
     return { kind: { Rotorhazard: { url } } };
@@ -860,20 +860,25 @@
       </div>
     {:else if formKind === 'Velocidrone'}
       <!--
-        VelociDrone's URL carries a trap RotorHazard's does not, and it costs an RD a bewildering
-        half hour: the game's server binds the machine's primary LAN IPv4 address, NOT loopback and
-        NOT 0.0.0.0 — so ws://127.0.0.1:60003 never connects even when the sim is running on this
-        very machine. The hint says so up front rather than letting "could not reach" teach it.
+        An ADDRESS, not a URL (#484). VelociDrone's port (60003), scheme and service path are all
+        fixed by the game with no setting behind any of them, so a URL field asked the RD to type
+        three constants beside one variable — and the first field test did exactly what that
+        invites, entering `ws://<ip>:60003` with no `/velocidrone`. The game answers a missing path
+        with a 400 and the Director called it "could not reach this timer", sending the RD to check
+        the one thing that was already working. The Director builds the URL now.
+
+        The remaining trap is which machine: the game binds its own primary LAN IPv4, NOT loopback
+        and NOT 0.0.0.0, so 127.0.0.1 never connects even when the sim is on this very box.
       -->
       <Field
-        label="URL"
-        hint={'VelociDrone’s websocket — ws://<this machine’s LAN IP>:60003/velocidrone. It must be the LAN IP: the game does not answer on 127.0.0.1, even locally. Turn the feed on first in Options → Main Settings → Websocket Communication, then restart VelociDrone.'}
+        label="VelociDrone address"
+        hint={'The LAN IP (or hostname) of the machine running VelociDrone — just the address, e.g. 192.168.1.10. GridFPV adds the port and path. It must be the machine running the game, and never 127.0.0.1: VelociDrone does not answer on loopback. Turn the feed on first in Options → Main Settings → Websocket Communication, then restart VelociDrone.'}
       >
         <Input
           type="text"
           bind:value={formUrl}
-          placeholder={DEFAULT_VELOCIDRONE_URL}
-          aria-label="VelociDrone URL"
+          placeholder={DEFAULT_VELOCIDRONE_HOST}
+          aria-label="VelociDrone address"
           autocomplete="off"
         />
       </Field>

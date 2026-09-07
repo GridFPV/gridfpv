@@ -144,7 +144,7 @@ describe('the Simulator identity (#491)', () => {
 });
 
 describe('the VelociDrone timer kind (#484)', () => {
-  const VD: Timer['kind'] = { Velocidrone: { url: 'ws://192.168.1.20:60003/velocidrone' } };
+  const VD: Timer['kind'] = { Velocidrone: { host: '192.168.1.20' } };
 
   function vdTimer(status: TimerStatus, held = true): Timer {
     return { ...timerWith(status), kind: VD, manual_connect: held } as Timer;
@@ -158,9 +158,12 @@ describe('the VelociDrone timer kind (#484)', () => {
     expect(kindTone(VD)).toBe('info');
   });
 
-  it('summarizes with its URL, and says so plainly when there is none', () => {
-    expect(kindSummary(VD)).toBe('ws://192.168.1.20:60003/velocidrone');
-    expect(kindSummary({ Velocidrone: { url: '' } } as TimerKind)).toBe('No URL set');
+  // An ADDRESS, not a URL (#484): the port, scheme and path are constants of the game, so the row
+  // shows the one part the RD chose. The URL field this replaced invited a missing `/velocidrone`,
+  // which the game answers with a 400.
+  it('summarizes with its address, and says so plainly when there is none', () => {
+    expect(kindSummary(VD)).toBe('192.168.1.20');
+    expect(kindSummary({ Velocidrone: { host: '' } } as TimerKind)).toBe('No address set');
   });
 
   it('is connectable and holdable — it dials something, so Connect is a real question', () => {
@@ -181,9 +184,13 @@ describe('the VelociDrone timer kind (#484)', () => {
   it('names the VelociDrone-specific things to check when it cannot be reached', () => {
     const hint = connectionHint(vdTimer('Error')) ?? '';
     expect(hint).toContain('Websocket Communication');
-    expect(hint).toContain('LAN IP');
     expect(hint).toContain('127.0.0.1');
     expect(hint).not.toContain('RotorHazard');
+    // It must point at the machine RUNNING THE GAME. The old wording said "this machine's LAN IP",
+    // which in the normal two-box setup (Director on a server, game on the gaming PC) names the
+    // wrong one — and an RD who follows it gets a timer that can never connect.
+    expect(hint).toContain('machine running VelociDrone');
+    expect(hint).toContain('not this one');
   });
 
   it('says GridFPV has stopped trying, and ends on the button to press', () => {

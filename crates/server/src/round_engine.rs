@@ -6013,7 +6013,7 @@ mod tests {
     fn a_velocidrone_timer_assigns_no_channels_instead_of_refusing_the_heat() {
         let mut timer = timer_with(8, vec![]);
         timer.kind = TimerKind::Velocidrone {
-            url: "ws://192.168.1.20:60003/velocidrone".into(),
+            host: "192.168.1.20".into(),
         };
         assert_eq!(
             assign_frequencies(&timer, &lineup(&["A", "B"])),
@@ -6027,7 +6027,7 @@ mod tests {
     fn a_velocidrone_timer_still_enforces_its_seat_capacity() {
         let mut timer = timer_with(8, vec![]);
         timer.kind = TimerKind::Velocidrone {
-            url: "ws://192.168.1.20:60003/velocidrone".into(),
+            host: "192.168.1.20".into(),
         };
         let nodes = timer.seat_capacity();
         let over: Vec<CompetitorRef> = (0..nodes + 1)

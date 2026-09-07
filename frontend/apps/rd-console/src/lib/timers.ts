@@ -19,14 +19,19 @@ export const DEFAULT_MOCK_LAPS = 3;
 export const DEFAULT_MOCK_LAP_MS = 30_000;
 
 /**
- * The URL shape a fresh **Velocidrone** timer starts from (#484).
+ * The placeholder host for a fresh **Velocidrone** timer (#484).
  *
- * Deliberately NOT `127.0.0.1`: Velocidrone's server binds the machine's primary LAN IPv4 address,
- * so loopback never connects — even when the sim is on the same machine as the Director. The
- * placeholder host is left obviously-a-placeholder so it reads as "put your IP here" rather than as
- * a default that ought to work.
+ * A **host, not a URL**: VelociDrone's port (60003), scheme and service path are all fixed by the
+ * game with no setting behind them, so the Director builds the address and the RD supplies only the
+ * machine. The URL field this replaced asked for three constants beside one variable, and the first
+ * field test entered one without the `/velocidrone` path — which the game answers with a 400.
+ *
+ * Deliberately NOT `127.0.0.1`: VelociDrone binds the machine's primary LAN IPv4 address, so
+ * loopback never connects — even when the sim is on the same machine as the Director. The
+ * placeholder is left obviously-a-placeholder so it reads as "put your IP here" rather than as a
+ * default that ought to work.
  */
-export const DEFAULT_VELOCIDRONE_URL = 'ws://192.168.1.10:60003/velocidrone';
+export const DEFAULT_VELOCIDRONE_HOST = '192.168.1.10';
 
 /** The discriminant tag of a kind (`'Mock'` | `'Rotorhazard'` | `'Velocidrone'`). */
 export function kindTag(kind: TimerKind): TimerKindTag {
@@ -78,7 +83,7 @@ export function kindSummary(kind: TimerKind): string {
     return `Synthetic races — heats fly themselves: ${laps} ${lapName} · ${(lap_ms / 1000).toFixed(1)}s pace`;
   }
   if ('Rotorhazard' in kind) return kind.Rotorhazard.url || 'No URL set';
-  if ('Velocidrone' in kind) return kind.Velocidrone.url || 'No URL set';
+  if ('Velocidrone' in kind) return kind.Velocidrone.host || 'No address set';
   return 'Unsupported by this console build — update the console';
 }
 
@@ -141,8 +146,11 @@ export function connectActionLabel(timer: Timer): 'Connect' | 'Disconnect' {
  *
  * The failure sentences name **what to go and check for this kind of timer**, because that is the
  * whole value of the line. A VelociDrone that will not answer almost always means one of three
- * specific things — the game is not running, the websocket setting is off, or the URL is on
- * loopback instead of the LAN IP — and none of those are guessable from "could not reach".
+ * specific things — the game is not running, the websocket setting is off, or the address is the
+ * Director's own machine instead of the one running the game — and none of those are guessable from
+ * "could not reach". The earlier wording said "this machine's LAN IP", which is ambiguous in the
+ * normal two-box setup (Director on a server, game on the gaming PC) and actively points at the
+ * wrong machine.
  *
  * `undefined` when there is nothing to add (no hold, or a timer that can't be held): the row's
  * existing `StatusPill` and plugin badge already carry the state, and this only adds the sentence
@@ -152,7 +160,7 @@ export function connectionHint(timer: Timer): string | undefined {
   if (!isManuallyHeld(timer)) return undefined;
   const vd = kindTag(timer.kind) === 'Velocidrone';
   const check = vd
-    ? 'Check that VelociDrone is running, that Options → Main Settings → Websocket Communication is Yes, and that the URL uses this machine’s LAN IP (VelociDrone does not answer on 127.0.0.1).'
+    ? 'Check that VelociDrone is running; that Options → Main Settings → Websocket Communication is Yes (then restart the game); and that the address is the LAN IP of the machine running VelociDrone — not this one, and never 127.0.0.1, which the game does not answer on.'
     : 'Check the URL, and that RotorHazard is running.';
   switch (timer.status) {
     // `Configured` is the resting status a just-held timer still reads until the reconciler's next
