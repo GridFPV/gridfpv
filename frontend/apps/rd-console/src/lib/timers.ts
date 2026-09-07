@@ -25,27 +25,39 @@ export function kindTag(kind: TimerKind): TimerKindTag {
   return 'Unknown';
 }
 
-/** The short display label for the kind **badge** (RotorHazard is the brand spelling). */
+/**
+ * The short display label for the kind **badge** (RotorHazard is the brand spelling).
+ *
+ * A Mock reads **Simulator** (#491): "Mock" told an RD nothing about what selecting one does —
+ * heats fly themselves with synthetic laps and RSSI — and a field session mistook exactly that
+ * for phantom control of the Director. The name now carries the behavior.
+ */
 export function kindLabel(kind: TimerKind): string {
-  if ('Mock' in kind) return 'Mock';
+  if ('Mock' in kind) return 'Simulator';
   if ('Rotorhazard' in kind) return 'RotorHazard';
   // A newer Director's kind: show its discriminant verbatim rather than a wrong brand.
   return Object.keys(kind)[0] ?? 'Unknown';
 }
 
-/** The Badge `tone` for a kind: Mock is the brand accent; RotorHazard reads as informational. */
-export function kindTone(kind: TimerKind): 'accent' | 'info' | 'neutral' {
-  if ('Mock' in kind) return 'accent';
+/**
+ * The Badge `tone` for a kind: a Simulator reads as a **warning** (#491 — selecting it makes
+ * heats race themselves, which must never look like just another timer); RotorHazard reads as
+ * informational.
+ */
+export function kindTone(kind: TimerKind): 'warn' | 'info' | 'neutral' {
+  if ('Mock' in kind) return 'warn';
   if ('Rotorhazard' in kind) return 'info';
   return 'neutral';
 }
 
-/** A one-line summary of a kind's config for the timer row (the sim pace, or the RH url). */
+/** A one-line summary of a kind's config for the timer row (the sim behavior, or the RH url). */
 export function kindSummary(kind: TimerKind): string {
   if ('Mock' in kind) {
     const { laps, lap_ms } = kind.Mock;
     const lapName = laps === 1 ? 'lap' : 'laps';
-    return `${laps} ${lapName} · ${(lap_ms / 1000).toFixed(1)}s pace`;
+    // The behavior IS the summary (#491): an RD scanning the row must see what selecting this
+    // does, not just its pace numbers.
+    return `Synthetic races — heats fly themselves: ${laps} ${lapName} · ${(lap_ms / 1000).toFixed(1)}s pace`;
   }
   if ('Rotorhazard' in kind) return kind.Rotorhazard.url || 'No URL set';
   return 'Unsupported by this console build — update the console';
@@ -67,4 +79,68 @@ export function isBuiltInMock(timer: Timer): boolean {
  */
 export function isTimerConnected(timer: Timer): boolean {
   return timer.status === 'Connected' || timer.status === 'Ready';
+}
+
+/**
+ * Whether this timer has a connection the RD can **manually hold** (issue #383).
+ *
+ * Only a **RotorHazard** timer does: it is the one that dials something over the network, and so
+ * the only one where "is this URL right? is it reachable? does it have the plugin?" is a question
+ * worth asking. The built-in Mock needs nothing external (the Director answers its `connect` with
+ * a **400**), so the control is not offered for it at all rather than offered and then rejected. An
+ * unknown (newer-Director) kind is likewise left alone — this console can't reason about it.
+ */
+export function isConnectable(timer: Timer): boolean {
+  return kindTag(timer.kind) === 'Rotorhazard';
+}
+
+/** Whether the RD is currently **holding** a manual connection to this timer (#383). */
+export function isManuallyHeld(timer: Timer): boolean {
+  return isConnectable(timer) && timer.manual_connect === true;
+}
+
+/**
+ * The **label** for the connect control, driven by the server-authoritative `manual_connect` hold
+ * rather than by `status` (issue #383).
+ *
+ * `status` is the *result* of a hold and moves on its own (`Connecting` → `Connected` →
+ * `Disconnected` on a drop, and the dialer retries behind that). Keying the button off it would
+ * make the control flicker between "Connect" and "Disconnect" while the Director retries a bad
+ * URL — exactly the moment the RD needs a stable thing to press. The hold is the RD's *intent* and
+ * changes only when they press the button, so that is what the button reflects.
+ */
+export function connectActionLabel(timer: Timer): 'Connect' | 'Disconnect' {
+  return isManuallyHeld(timer) ? 'Disconnect' : 'Connect';
+}
+
+/**
+ * A short plain-language reading of a **manually held** RotorHazard timer's status (#383) — the
+ * one-liner under the row while the RD is testing a timer at a venue, phrased as the question they
+ * are actually asking ("is it reachable?") rather than as the enum.
+ *
+ * `undefined` when there is nothing to add (no hold, or a timer that can't be held): the row's
+ * existing `StatusPill` and plugin badge already carry the state, and this only adds the sentence
+ * that turns a status into an instruction.
+ */
+export function connectionHint(timer: Timer): string | undefined {
+  if (!isManuallyHeld(timer)) return undefined;
+  switch (timer.status) {
+    // `Configured` is the resting status a just-held timer still reads until the reconciler's next
+    // tick picks it up — to the RD that is indistinguishable from "connecting", so say so.
+    case 'Configured':
+    case 'Connecting':
+      return 'Connecting…';
+    case 'Connected':
+      return 'Reachable — this timer is answering.';
+    case 'Error':
+      return 'Could not reach this timer. Check the URL, and that RotorHazard is running.';
+    // #462: the Director has spent its automatic attempts and stopped. Say that plainly — the
+    // sentence has to end in the thing to press, because nothing else is going to happen.
+    case 'Unreachable':
+      return 'Could not reach this timer, and GridFPV has stopped trying. Check the URL, and that RotorHazard is running, then press Connect to try again.';
+    case 'Disconnected':
+      return 'The connection dropped. Retrying…';
+    default:
+      return undefined;
+  }
 }

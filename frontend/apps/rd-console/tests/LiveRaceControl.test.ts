@@ -4,8 +4,10 @@ import { fireEvent } from '@testing-library/dom';
 import { tick } from 'svelte';
 import type {
   ChannelCatalogEntry,
+  ChannelLayout,
   EventMeta,
   HeatSummary,
+  LiveCrossing,
   LiveRaceState,
   RoundDef,
   Timer
@@ -43,6 +45,7 @@ const EVENT_WITH_ROUND: EventMeta = {
 };
 const HEAT_IN_ROUND: HeatSummary = {
   heat: 'heat-1',
+  name: 'Qualifying R1 Heat 1',
   lineup: ['ALICE', 'BOB'],
   round: 'r1',
   class: 'c1',
@@ -211,6 +214,7 @@ describe('LiveRaceControl', () => {
     // Two heats in the same round: heat-1 (current) and heat-2 (filled, on deck).
     const HEAT_2: HeatSummary = {
       heat: 'heat-2',
+      name: 'Qualifying R1 Heat 2',
       lineup: ['CARLA', 'DAN'],
       round: 'r1',
       class: 'c1',
@@ -689,7 +693,25 @@ describe('LiveRaceControl', () => {
     // A roster-seeded lineup so the callsign resolves through the shared resolver: the competitor
     // ref IS the pilot id, looked up in the pilots directory.
     const CO_PILOTS = [{ id: 'maverick-4d9rp8', callsign: 'Maverick', vtx_types: [] }];
-    const coLive = (laps: number, lastLapMicros?: number, phase = 'Running'): LiveRaceState =>
+    /** One entry of the live crossing feed (#397) — the TONE's source, keyed on `pass_ref`. */
+    const cross = (
+      passRef: number,
+      disposition: LiveCrossing['disposition'],
+      lapNumber?: number,
+      competitor = 'maverick-4d9rp8'
+    ): LiveCrossing => ({
+      pass_ref: passRef,
+      competitor,
+      at: passRef * 1_000_000,
+      disposition,
+      lap_number: lapNumber
+    });
+    const coLive = (
+      laps: number,
+      lastLapMicros?: number,
+      phase = 'Running',
+      crossings: LiveCrossing[] = []
+    ): LiveRaceState =>
       ({
         current_heat: 'heat-1',
         phase,
@@ -702,7 +724,8 @@ describe('LiveRaceControl', () => {
             ...(lastLapMicros != null ? { last_lap_micros: lastLapMicros } : {})
           }
         ],
-        running_order: ['maverick-4d9rp8']
+        running_order: ['maverick-4d9rp8'],
+        crossings
       }) as LiveRaceState;
 
     function renderCallouts(opts?: { calloutsMuted?: boolean }) {
@@ -719,24 +742,58 @@ describe('LiveRaceControl', () => {
       return { ...madeSession, ...audioStub, ...speech };
     }
 
-    it('a new lap fires the crossing pip + speaks "<callsign>, lap N, M.SS" (resolved name)', async () => {
+    it('a lap pips per CROSSING (holeshot too) and speaks "<callsign>, lap N, M.SS" once', async () => {
       const { pushLive, started, utterances } = renderCallouts();
       // Let the pilots directory settle so the callsign resolves before the crossing.
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_470_000));
+      // Lap 1 is TWO crossings: the holeshot that opened it and the pass that closed it. Both pip
+      // (#397 — the holeshot used to be silent because it derives no lap); only the closing one
+      // has a lap number and a time, so only it is spoken.
+      pushLive(coLive(1, 21_470_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       // The crossing pip is the distinct high/short voice (1760), not a procedure tone.
-      expect(started).toEqual([1760]);
-      // The lap time is spoken to the hundredth.
+      expect(started).toEqual([1760, 1760]);
+      // The lap time is spoken to the hundredth — once, not once per crossing.
       expect(utterances.map((u) => u.text)).toEqual(['Maverick, lap 1, 21.47']);
+    });
+
+    it('a crossing REJECTED under the min-lap floor pips with NOTHING spoken (#397)', async () => {
+      const { pushLive, started, utterances } = renderCallouts();
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      // A too-short pass records no lap, so `progress` never moves — the case that was pure
+      // silence before, and the one that tells an RD their gate is double-triggering.
+      pushLive(
+        coLive(0, undefined, 'Running', [cross(1, 'Holeshot'), cross(2, 'RejectedTooShort')])
+      );
+      await tick();
+      expect(started).toEqual([1760, 1760]);
+      expect(utterances).toEqual([]);
+    });
+
+    it('a RE-PUSHED identical live state pips nothing — identity is pass_ref, not the frame', async () => {
+      const { pushLive, started } = renderCallouts();
+      await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
+
+      const feed = [cross(1, 'Holeshot'), cross(2, 'Counted', 1)];
+      pushLive(coLive(1, 21_400_000, 'Running', feed));
+      await tick();
+      expect(started).toEqual([1760, 1760]);
+
+      // The stream re-pushes the same state (a wake-up, a re-snapshot, a resubscribe).
+      pushLive(coLive(1, 21_400_000, 'Running', feed));
+      await tick();
+      pushLive(coLive(1, 21_400_000, 'Running', feed));
+      await tick();
+      expect(started).toEqual([1760, 1760]);
     });
 
     it('the callouts mute silences BOTH the crossing pip and the speech', async () => {
       const { pushLive, started, utterances } = renderCallouts({ calloutsMuted: true });
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_400_000));
+      pushLive(coLive(1, 21_400_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       expect(started).toEqual([]);
       expect(utterances).toEqual([]);
@@ -746,10 +803,11 @@ describe('LiveRaceControl', () => {
       const { pushLive, started, utterances } = renderCallouts();
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      // The heat finishes; a marshaling-style fold bumps the count on the finished heat.
+      // The heat finishes; a marshaling-style fold bumps the count (and appends a crossing) on
+      // the finished heat. Neither the tone nor the voice may fire.
       pushLive(coLive(0, undefined, 'Unofficial'));
       await tick();
-      pushLive(coLive(1, 20_000_000, 'Unofficial'));
+      pushLive(coLive(1, 20_000_000, 'Unofficial', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       expect(started).toEqual([]);
       expect(utterances).toEqual([]);
@@ -759,7 +817,7 @@ describe('LiveRaceControl', () => {
       const { pushLive, cancelSpy } = renderCallouts();
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_400_000));
+      pushLive(coLive(1, 21_400_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       // A natural finish (Running → Unofficial) must NOT cancel — the final laps' times are what
       // everyone is waiting to hear (cancelling here chopped the last callout mid-word).
@@ -777,7 +835,7 @@ describe('LiveRaceControl', () => {
       const { pushLive, cancelSpy, utterances } = renderCallouts();
       await waitFor(() => expect(screen.getAllByText('Maverick').length).toBeGreaterThan(0));
 
-      pushLive(coLive(1, 21_400_000));
+      pushLive(coLive(1, 21_400_000, 'Running', [cross(1, 'Holeshot'), cross(2, 'Counted', 1)]));
       await tick();
       expect(utterances).toHaveLength(1);
 
@@ -786,7 +844,13 @@ describe('LiveRaceControl', () => {
       expect(screen.getByRole('button', { name: /Callouts off/ })).toBeInTheDocument();
 
       // Further crossings while muted stay silent.
-      pushLive(coLive(2, 20_000_000));
+      pushLive(
+        coLive(2, 20_000_000, 'Running', [
+          cross(1, 'Holeshot'),
+          cross(2, 'Counted', 1),
+          cross(3, 'Counted', 2)
+        ])
+      );
       await tick();
       expect(utterances).toHaveLength(1);
     });
@@ -996,12 +1060,27 @@ const OP_TIMER: Timer = {
   status: 'Ready',
   channel_capability: 'Flexible',
   node_count: 2,
-  available_channels: [5658, 5800]
+  available_channels: [5658, 5800],
+  manual_connect: false,
+  calibration: [],
+  disabled_nodes: []
 };
 const OP_CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
   { band: 'Fatshark', channel: 'F4', mhz: 5800 }
 ];
+// #117 S3 / #402: the event's channel layout — the `node → channel` mapping a practice seat's
+// channel resolves through. Before layouts existed there was no such mapping anywhere: a practice
+// heat's `frequencies` are empty by construction, and the console had nothing but the live signal
+// to fall back on (which only two screens carry). That was #402.
+const OP_LAYOUT: ChannelLayout = {
+  id: 'practice-a',
+  name: 'Practice A',
+  nodes: [
+    { node: 0, channel: 5658 },
+    { node: 1, channel: 5800 }
+  ]
+};
 const OP_ROUND: RoundDef = {
   id: 'rp',
   label: 'Open Practice',
@@ -1009,7 +1088,8 @@ const OP_ROUND: RoundDef = {
   format: 'open_practice',
   params: {},
   win_condition: 'BestLap',
-  seeding: { AllChannels: { channels: [0, 1] } },
+  seeding: { ActiveNodes: { nodes: [0, 1] } },
+  layouts: ['practice-a'],
   channel_mode: 'Static',
   staging_timer_secs: 300,
   start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1024,24 +1104,39 @@ const OP_EVENT: EventMeta = {
   timers: ['mock'],
   roster: [],
   classes: [],
-  rounds: [OP_ROUND]
+  rounds: [OP_ROUND],
+  channel_layouts: [OP_LAYOUT]
 };
+// Deliberately still carrying EMPTY `frequencies`, and still naming every seat's channel: the
+// board resolves them through the heat's **layout**, which is the source that replaced
+// `available_channels[node]` (#117 S3). Isolating it this way is the #402 regression test — a
+// practice seat's channel now has a real source in the event's own config, not just in whatever
+// the hardware happens to report to the two screens that hold a signal subscription.
 const OP_HEAT: HeatSummary = {
   heat: 'practice-1',
+  name: 'Practice Heat',
   lineup: ['node-0', 'node-1'],
   round: 'rp',
   class: undefined,
   frequencies: [],
+  layout: 'practice-a',
   phase: 'Running',
   is_current: true
 };
-// A live open-practice state: two channels, node-0 with 3 laps (last 28.0s), node-1 quiet.
+// A live open-practice state: two channels, node-0 with 3 laps (last 28.0s, best 26.0s), node-1
+// quiet. Last and best are DIFFERENT values on purpose — the board must render the served
+// `best_lap_micros` rather than the last lap it happens to be holding (#425).
 const opLive: LiveRaceState = {
   current_heat: 'practice-1',
   phase: 'Running',
   active_pilots: ['node-0', 'node-1'],
   progress: [
-    { competitor: 'node-0', laps_completed: 3, last_lap_micros: 28_000_000 },
+    {
+      competitor: 'node-0',
+      laps_completed: 3,
+      last_lap_micros: 28_000_000,
+      best_lap_micros: 26_000_000
+    },
     { competitor: 'node-1', laps_completed: 0 }
   ],
   running_order: ['node-0', 'node-1']
@@ -1064,67 +1159,182 @@ describe('LiveRaceControl — open-practice per-channel board', () => {
     render(LiveRaceControl, { session });
 
     // The board replaces the pilot-keyed panels; rows are keyed by channel.
-    const r1 = await screen.findByLabelText('Channel Raceband R1 · 5658');
+    const r1 = await screen.findByLabelText('Channel Node 1 · Raceband R1');
     expect(r1).toBeInTheDocument();
-    expect(screen.getByLabelText('Channel Fatshark F4 · 5800')).toBeInTheDocument();
+    expect(screen.getByLabelText('Channel Node 2 · Fatshark F4')).toBeInTheDocument();
 
-    // node-0 shows 3 laps and a best lap of 28.0s (formatMicros), tracked from the last lap.
+    // node-0 shows 3 laps, its last lap (28.0s) and the SERVED best (26.0s) — two distinct values.
     expect(within(r1).getByText('3')).toBeInTheDocument();
-    expect(within(r1).getAllByText('28.000').length).toBeGreaterThan(0);
+    expect(within(r1).getByText('28.000')).toBeInTheDocument();
+    expect(within(r1).getByText('26.000')).toBeInTheDocument();
   });
 
-  it('tracks best lap as the min last-lap across the run', async () => {
+  it('renders the served best lap and accumulates nothing of its own (#425)', async () => {
     const { session, pushLive } = renderBoard();
     render(LiveRaceControl, { session });
-    const r1 = await screen.findByLabelText('Channel Raceband R1 · 5658');
-    // Both Last and Best read 28.0s on the first snapshot (best seeds from the only lap).
-    await within(r1).findAllByText('28.000');
+    const r1 = await screen.findByLabelText('Channel Node 1 · Raceband R1');
+    await within(r1).findByText('26.000');
 
-    // A faster lap arrives → best updates to 25.0s while last shows 25.0s too.
+    // A faster lap: the server's fold has already taken the `min`, so the board just renders what
+    // it is handed.
     pushLive({
       ...opLive,
       progress: [
-        { competitor: 'node-0', laps_completed: 4, last_lap_micros: 25_000_000 },
+        {
+          competitor: 'node-0',
+          laps_completed: 4,
+          last_lap_micros: 25_000_000,
+          best_lap_micros: 25_000_000
+        },
         { competitor: 'node-1', laps_completed: 0 }
       ]
     });
-    // Last + Best both now read 25.0s.
     await waitFor(() => expect(within(r1).getAllByText('25.000')).toHaveLength(2));
 
-    // A slower lap must NOT regress the best (still 25.0s), though last becomes 30.0s.
+    // A slower lap: last becomes 30.0s and best stays 25.0s — because the SERVER says so, not
+    // because the screen remembered the earlier frame.
     pushLive({
       ...opLive,
       progress: [
-        { competitor: 'node-0', laps_completed: 5, last_lap_micros: 30_000_000 },
+        {
+          competitor: 'node-0',
+          laps_completed: 5,
+          last_lap_micros: 30_000_000,
+          best_lap_micros: 25_000_000
+        },
         { competitor: 'node-1', laps_completed: 0 }
       ]
     });
     await within(r1).findByText('30.000');
-    // Best lap (25.0s) is still present in the row.
     expect(within(r1).getByText('25.000')).toBeInTheDocument();
   });
 
-  it('the New run control fills the open-practice round to clear the board', async () => {
-    const { session, sendSpy } = renderBoard();
+  it('takes a re-snapshot at its word rather than holding a stale minimum (#425)', async () => {
+    // The bug this replaced: the screen kept a running `min` over the `last_lap_micros` of the
+    // frames it observed, so a value it had seen could outlive the truth. A re-snapshot — a
+    // reconnect, a scope change, a heat re-windowed by "Run again" — is authoritative. If the
+    // server now says the best is 31.0s, the board must say 31.0s, not the 26.0s it used to hold.
+    const { session, pushLive } = renderBoard();
     render(LiveRaceControl, { session });
+    const r1 = await screen.findByLabelText('Channel Node 1 · Raceband R1');
+    await within(r1).findByText('26.000');
 
-    const reset = await screen.findByRole('button', { name: /New run/ });
-    await fireEvent.click(reset);
-
-    await waitFor(() => expect(sendSpy.mock.calls.some((c) => 'FillRound' in c[0])).toBe(true));
-    // Open practice single-steps — the New run fills its one channel heat (mode 'Next', #216).
-    expect(sendSpy.mock.calls.find((c) => 'FillRound' in c[0])![0]).toEqual({
-      FillRound: { round: 'rp', mode: 'Next' }
+    pushLive({
+      ...opLive,
+      progress: [
+        {
+          competitor: 'node-0',
+          laps_completed: 1,
+          last_lap_micros: 31_000_000,
+          best_lap_micros: 31_000_000
+        },
+        { competitor: 'node-1', laps_completed: 0 }
+      ]
     });
+    await waitFor(() => expect(within(r1).getAllByText('31.000')).toHaveLength(2));
+    expect(within(r1).queryByText('26.000')).toBeNull();
+  });
+
+  it('carries no second "new run" control — Run again is the one way to go again (#393)', () => {
+    // The board used to offer a fill-based "New run · clear board". An open-practice round has
+    // exactly ONE heat ever (`OpenPractice::next` completes after it), so once the run had ended
+    // that fill scheduled nothing and still acked ok — a button that claimed success and cleared
+    // nothing. Re-running is the transition row's Run again.
+    const { session } = renderBoard();
+    render(LiveRaceControl, { session });
+    expect(screen.queryByRole('button', { name: /New run/ })).toBeNull();
   });
 
   it('does not show the pilot-keyed panels for an open-practice heat', async () => {
     const { session } = renderBoard();
     render(LiveRaceControl, { session });
-    await screen.findByLabelText('Channel Raceband R1 · 5658');
+    await screen.findByLabelText('Channel Node 1 · Raceband R1');
     // The normal Heat sheet / Live standing panels are replaced by the practice board.
     expect(screen.queryByText('Heat sheet')).not.toBeInTheDocument();
     expect(screen.queryByText('Live standing')).not.toBeInTheDocument();
+  });
+});
+
+// ── Practice ends with "Run again", not competition ceremony (#393) ────────────────────────────
+
+describe('LiveRaceControl — practice runs again instead of being adjudicated (#393)', () => {
+  const opLiveAt = (phase: LiveRaceState['phase']) => ({ ...opLive, phase }) as LiveRaceState;
+
+  function renderPractice(phase: LiveRaceState['phase']) {
+    return makeTestSession({
+      event: OP_EVENT,
+      live: opLiveAt(phase),
+      listHeatsImpl: vi.fn(async () => [{ ...OP_HEAT, phase }]),
+      listChannelsImpl: vi.fn(async () => OP_CATALOG),
+      listTimersImpl: vi.fn(async () => [OP_TIMER])
+    });
+  }
+
+  it('offers Run again at the end of a practice run and NONE of the ceremony verbs', async () => {
+    const { session } = renderPractice('Unofficial');
+    render(LiveRaceControl, { session });
+
+    // The one obvious action, enabled. (`Restart` under a name that describes practice.)
+    const again = (await screen.findByRole('button', { name: 'Run again' })) as HTMLButtonElement;
+    expect(again.disabled).toBe(false);
+    // Practice has no result to make official — the verbs are ABSENT, not merely disabled.
+    for (const ceremony of ['Finalize', 'Advance', 'Revert']) {
+      expect(screen.queryByRole('button', { name: ceremony })).toBeNull();
+    }
+    // `Restart` is never spelled that way for practice.
+    expect(screen.queryByRole('button', { name: 'Restart' })).toBeNull();
+    // Discard stays — abandoning the session is still a real thing to want.
+    expect((screen.getByRole('button', { name: 'Discard' }) as HTMLButtonElement).disabled).toBe(
+      false
+    );
+  });
+
+  it('Run again fires the Restart command (same transition, practice name)', async () => {
+    const { session, sendSpy } = renderPractice('Unofficial');
+    render(LiveRaceControl, { session });
+
+    // Restart is destructive — it throws the run away — so it still confirms once.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Run again' }));
+    expect(sendSpy).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(sendSpy).toHaveBeenCalledWith({ Restart: { heat: 'practice-1' } });
+  });
+
+  it('replaces the provisional/official lifecycle copy with the practice run one', async () => {
+    const { session } = renderPractice('Unofficial');
+    render(LiveRaceControl, { session });
+
+    expect(await screen.findByText('Run complete')).toBeInTheDocument();
+    // No adjudication language: nothing is provisional and nothing becomes official.
+    expect(screen.queryByText('Provisional')).toBeNull();
+    expect(screen.queryByText('Official')).toBeNull();
+  });
+
+  it('never strands a practice heat at Final: Run again re-opens it, then resets', async () => {
+    // Reachable when the round carries an armed protest window (the runtime auto-finalizes).
+    const { session, sendSpy } = renderPractice('Final');
+    render(LiveRaceControl, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Run again' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(2));
+    expect(sendSpy.mock.calls.map((c) => c[0])).toEqual([
+      { Revert: { heat: 'practice-1' } },
+      { Restart: { heat: 'practice-1' } }
+    ]);
+  });
+
+  it("leaves a NON-practice heat's actions exactly as they were", () => {
+    const { session } = makeTestSession({ live: liveAt('Unofficial') });
+    render(LiveRaceControl, { session });
+    const btn = (label: string) => screen.getByRole('button', { name: label }) as HTMLButtonElement;
+    // The competition lifecycle is untouched: Finalize primary, Restart still called Restart.
+    expect(btn('Finalize').disabled).toBe(false);
+    expect(btn('Restart').disabled).toBe(false);
+    expect(btn('Discard').disabled).toBe(false);
+    expect(btn('Advance').disabled).toBe(true);
+    expect(btn('Revert').disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Run again' })).toBeNull();
   });
 });
 
@@ -1158,6 +1368,7 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
   };
   const HEAT_1: HeatSummary = {
     heat: 'p1-939hvr-heat',
+    name: 'Qualifying R1 Heat 1',
     lineup: ['node-0', 'node-1'],
     round: 'r1',
     class: 'c1',
@@ -1167,6 +1378,7 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
   };
   const HEAT_2: HeatSummary = {
     heat: 'p2-deadbeef-heat',
+    name: 'Qualifying R1 Heat 2',
     lineup: ['node-0'],
     round: 'r1',
     class: 'c1',
@@ -1201,7 +1413,10 @@ describe('LiveRaceControl — friendly names (no raw ids/refs)', () => {
     status: 'Ready',
     channel_capability: 'Flexible',
     node_count: 2,
-    available_channels: [5658, 5800]
+    available_channels: [5658, 5800],
+    manual_connect: false,
+    calibration: [],
+    disabled_nodes: []
   };
   const FN_CATALOG: ChannelCatalogEntry[] = [
     { band: 'Raceband', channel: 'R1', mhz: 5658 },
@@ -1357,6 +1572,7 @@ describe('LiveRaceControl — roster-seeded callsigns (resolve pre-race, no prog
   // assigned, and crucially `progress[].pilot` is ABSENT (no registration event was ever emitted).
   const rsHeat = (phase: HeatSummary['phase']): HeatSummary => ({
     heat: 'qualifying-r1-tj8x88-r1-h1',
+    name: 'Qualifying R1 Heat 1',
     lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
     round: 'r1',
     class: 'c1',

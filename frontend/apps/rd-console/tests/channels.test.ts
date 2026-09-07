@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChannelCapability, ChannelCatalogEntry } from '@gridfpv/types';
 import {
   assignChannelsRoundRobin,
+  bandSelection,
   capabilityTag,
   catalogEntryFor,
   channelLabel,
@@ -13,9 +14,10 @@ import {
   groupByBand,
   isCatalogChannel,
   isPlausibleMhz,
-  nodeChannelLabel,
   nodeIndexOf,
-  offeredCatalog
+  nodeSeatLabel,
+  offeredCatalog,
+  toggleBandSelection
 } from '../src/lib/channels.js';
 
 const CATALOG: ChannelCatalogEntry[] = [
@@ -24,6 +26,86 @@ const CATALOG: ChannelCatalogEntry[] = [
   { band: 'Fatshark', channel: 'F4', mhz: 5800 },
   { band: 'DJI', channel: 'R1', mhz: 5660 }
 ];
+
+describe('bandSelection / toggleBandSelection (#429, the per-band tri-state box)', () => {
+  const RACEBAND = groupByBand(CATALOG)[0].entries; // R1 5658, R2 5695
+
+  it('reads none / some / all', () => {
+    expect(bandSelection(RACEBAND, new Set())).toBe('none');
+    expect(bandSelection(RACEBAND, new Set([5658]))).toBe('some');
+    expect(bandSelection(RACEBAND, new Set([5658, 5695]))).toBe('all');
+  });
+
+  it('ignores chosen channels from OTHER bands — a band reads only its own entries', () => {
+    // 5800 is Fatshark's, and a custom 5685 is nobody's. Neither may make Raceband look fuller.
+    expect(bandSelection(RACEBAND, new Set([5800, 5685]))).toBe('none');
+    expect(bandSelection(RACEBAND, new Set([5658, 5800, 5685]))).toBe('some');
+  });
+
+  it('measures against what was OFFERED, not the raw catalog (a Fixed timer is narrowed)', () => {
+    // A Fixed timer that declares only R1: ticking R1 fills that timer's Raceband band. Measured
+    // against the full catalog it would read 'some' forever and the box would never latch.
+    //
+    // `bandSelection` bands catalog ENTRIES, and an offer may have none (#449 — a declared
+    // frequency the catalog cannot name belongs to no band), so the named ones are what it reads.
+    const offered = offeredCatalog({ Fixed: { channels: [5658] } }, CATALOG)
+      .map((o) => o.entry)
+      .filter((e): e is ChannelCatalogEntry => e !== undefined);
+    expect(bandSelection(offered, new Set([5658]))).toBe('all');
+  });
+
+  it('an empty offer is none — there is nothing to select', () => {
+    expect(bandSelection([], new Set([5658]))).toBe('none');
+  });
+
+  it('fills an empty band, and clears a full one', () => {
+    expect([...toggleBandSelection(RACEBAND, new Set())]).toEqual([5658, 5695]);
+    expect([...toggleBandSelection(RACEBAND, new Set([5658, 5695]))]).toEqual([]);
+  });
+
+  it('clearing a band keeps a frequency another offered band still holds (#464)', () => {
+    // Raceband R7 and Fatshark F8 are both 5880 MHz. The selection is frequency-keyed, so with
+    // all of an overlapping Raceband chosen, clearing Fatshark must not take R7 down with F8.
+    const overlapping: ChannelCatalogEntry[] = [
+      { band: 'Raceband', channel: 'R6', mhz: 5843 },
+      { band: 'Raceband', channel: 'R7', mhz: 5880 },
+      { band: 'Fatshark', channel: 'F7', mhz: 5860 },
+      { band: 'Fatshark', channel: 'F8', mhz: 5880 }
+    ];
+    const [raceband, fatshark] = groupByBand(overlapping).map((b) => b.entries);
+    const all = new Set([5843, 5880, 5860]);
+
+    const cleared = toggleBandSelection(fatshark, all, overlapping);
+    expect([...cleared].sort()).toEqual([5843, 5880]); // F7 gone; the shared 5880 survives
+    expect(bandSelection(raceband, cleared)).toBe('all'); // R7 still on — the point of #464
+    expect(bandSelection(fatshark, cleared)).toBe('some'); // honest: 5880 IS still enabled
+
+    // The guard needs EVIDENCE: a selection that was only ever Fatshark's clears completely —
+    // the RD asked for the band off, and no other band shows a chosen channel to defend 5880.
+    const alone = toggleBandSelection(fatshark, new Set([5860, 5880]), overlapping);
+    expect([...alone]).toEqual([]);
+    expect(bandSelection(raceband, alone)).toBe('none');
+  });
+
+  it('FILLS a partial band rather than wiping the RD’s subset', () => {
+    // The indeterminate box clicks to checked. Clearing here would throw away channels chosen one
+    // at a time, on a control reached for in order to add; filling is undone by one more click.
+    expect([...toggleBandSelection(RACEBAND, new Set([5658]))]).toEqual([5658, 5695]);
+  });
+
+  it('leaves other bands and custom raw MHz untouched in both directions', () => {
+    const chosen = new Set([5800, 5685]); // Fatshark F4 + a custom entry
+    expect([...toggleBandSelection(RACEBAND, chosen)].sort()).toEqual([5658, 5685, 5695, 5800]);
+    const full = new Set([5658, 5695, 5800, 5685]);
+    expect([...toggleBandSelection(RACEBAND, full)].sort()).toEqual([5685, 5800]);
+  });
+
+  it('does not mutate the set it is given', () => {
+    const chosen = new Set([5658]);
+    toggleBandSelection(RACEBAND, chosen);
+    expect([...chosen]).toEqual([5658]);
+  });
+});
 
 describe('groupByBand', () => {
   it('groups entries into bands, preserving catalog order across and within bands', () => {
@@ -83,14 +165,43 @@ describe('capabilityTag / fixedAllowed', () => {
 });
 
 describe('offeredCatalog', () => {
-  it('offers the whole catalog for a Flexible timer', () => {
-    expect(offeredCatalog('Flexible', CATALOG)).toHaveLength(CATALOG.length);
+  it('offers the whole catalog for a Flexible timer, each with its entry', () => {
+    const offered = offeredCatalog('Flexible', CATALOG);
+    expect(offered).toHaveLength(CATALOG.length);
+    expect(offered.map((o) => o.entry)).toEqual(CATALOG);
   });
 
   it('limits a Fixed timer to its built-in allowed set, in catalog order', () => {
     const fixed: ChannelCapability = { Fixed: { channels: [5800, 5658] } };
     const offered = offeredCatalog(fixed, CATALOG);
     expect(offered.map((e) => e.mhz)).toEqual([5658, 5800]); // catalog order, not allowed order
+  });
+
+  // #449 — this used to be a plain `catalog.filter`, so a declared frequency the catalog had no
+  // entry for vanished: a timer whose module runs a non-standard grid could never be offered the
+  // channels it actually supports, and a node sitting on one had no option to select.
+  it('offers a declared channel the catalog does not know, with no entry to name it', () => {
+    const fixed: ChannelCapability = { Fixed: { channels: [5800, 5891] } };
+    const offered = offeredCatalog(fixed, CATALOG);
+    expect(offered.map((o) => o.mhz)).toEqual([5800, 5891]);
+    // The catalog-known one carries its entry; the unknown one carries none, which is what tells a
+    // caller to label it from the raw MHz rather than invent a band for it.
+    expect(offered[0].entry).toEqual({ band: 'Fatshark', channel: 'F4', mhz: 5800 });
+    expect(offered[1].entry).toBeUndefined();
+  });
+
+  it('puts the named channels in catalog order first, then the unnamed ones ascending', () => {
+    const fixed: ChannelCapability = { Fixed: { channels: [5921, 5695, 5891, 5658] } };
+    expect(offeredCatalog(fixed, CATALOG).map((o) => o.mhz)).toEqual([5658, 5695, 5891, 5921]);
+  });
+
+  it('offers a Fixed set the catalog knows NONE of, rather than nothing at all', () => {
+    // The degenerate shape of the same bug: every declared channel off-catalog produced an empty
+    // dropdown on a timer that supports two channels perfectly well.
+    const fixed: ChannelCapability = { Fixed: { channels: [5891, 5921] } };
+    const offered = offeredCatalog(fixed, CATALOG);
+    expect(offered.map((o) => o.mhz)).toEqual([5891, 5921]);
+    expect(offered.every((o) => o.entry === undefined)).toBe(true);
   });
 });
 
@@ -152,19 +263,31 @@ describe('nodeIndexOf (open-practice node ref parsing)', () => {
   });
 });
 
-describe('nodeChannelLabel (open-practice seat label)', () => {
-  it('labels a configured seat as band + channel · MHz', () => {
-    // node 0 → available_channels[0] = 5658 → Raceband R1 · 5658
-    expect(nodeChannelLabel(0, [5658, 5800], CATALOG)).toBe('Raceband R1 · 5658');
-    expect(nodeChannelLabel(1, [5658, 5800], CATALOG)).toBe('Fatshark F4 · 5800');
+describe('nodeSeatLabel (open-practice seat label) — #416: node AND channel', () => {
+  it('reads as node + channel, which is the pair the RD actually needs', () => {
+    // The node number is what they look at on the hardware; the channel is what the pilot needs.
+    expect(nodeSeatLabel(6, 5695, CATALOG)).toBe('Node 7 · Raceband R2');
+    expect(nodeSeatLabel(0, 5658, CATALOG)).toBe('Node 1 · Raceband R1');
   });
 
   it('falls back to raw MHz for a non-catalog channel', () => {
-    expect(nodeChannelLabel(0, [5111], CATALOG)).toBe('5111 MHz');
+    expect(nodeSeatLabel(0, 5111, CATALOG)).toBe('Node 1 · 5111 MHz');
   });
 
-  it('labels a seat with no configured channel as a bare 1-based node', () => {
-    // index 2 is past the available pool → Node 3 (1-based).
-    expect(nodeChannelLabel(2, [5658, 5800], CATALOG)).toBe('Node 3');
+  it('is the 1-based node ALONE when the channel is genuinely unknown', () => {
+    expect(nodeSeatLabel(2, undefined, CATALOG)).toBe('Node 3');
+  });
+
+  it('never renders a raw seat ref', () => {
+    expect(nodeSeatLabel(6, undefined, CATALOG)).not.toContain('node-6');
+    expect(nodeSeatLabel(6, 5695, CATALOG)).not.toContain('node-6');
   });
 });
+
+// `poolChannel` is gone (#117 S3). It read a node seat's channel as `available_channels[node]` —
+// indexing the timer's ALLOWED SET by node index. An allowed set says which channels the timer may
+// ever use and carries no per-node mapping, so the answer was invented; it only looked harmless
+// because the list is empty on every Flexible timer, where it returned undefined for every node.
+//
+// A `ChannelLayout` is the mapping it never was. See `competitorName.test.ts` for the source order
+// a seat's channel now resolves through.

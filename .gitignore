@@ -36,3 +36,11 @@ frontend/playwright-report/
 frontend/blob-report/
 frontend/.playwright/
 frontend/e2e-artifacts/
+
+# Bench-Director runtime state (issue #455)
+/.gridfpv-*/
+
+# Python bytecode from touching the RotorHazard plugin locally
+__pycache__/
+*.pyc
+frontend/**/node_modules

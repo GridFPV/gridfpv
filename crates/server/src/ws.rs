@@ -36,11 +36,16 @@
 //!
 //! The mapping between them: as the engine folds the log forward it tracks the log offset
 //! it has consumed up to; whenever the scoped projection's value *changes* it emits one
-//! envelope, assigns it the next per-stream sequence (1, 2, 3, …), and remembers the offset
-//! at which it emitted. A client persists *both* — it renders by sequence order and resumes
-//! by the offset cursor. (The two coincide numerically only by accident; the protocol keeps
-//! them separate so the log offset can stay a private detail while the sequence is the
-//! public contract.)
+//! envelope, assigns it the next per-stream sequence (1, 2, 3, …), and **echoes the offset
+//! it folded through** as [`ChangeEnvelope::cursor`] (#422). A client persists *both* — it
+//! renders by sequence order and resumes by the offset cursor. (The two coincide numerically
+//! only by accident; the protocol keeps them separate because they answer different
+//! questions: "in what order?" and "from where do I resume?".)
+//!
+//! Echoing the offset is what makes the resume **exact**. Before #422 the wire carried only
+//! the sequence, so a client inferred its resume position by advancing `+1` per applied
+//! envelope — an at-or-behind lower bound that drifted further every time an append moved no
+//! projection. See [`ChangeEnvelope::cursor`] for what that drift did to live lap counts.
 //!
 //! # The bounded retained window + re-snapshot (protocol.html §3, §9.3)
 //!
@@ -52,6 +57,12 @@
 //! the fresh cursor (§3 "re-snapshot is always correct because projections are
 //! recomputable"). A `from` of `0` (or `None`, a fresh subscribe) is *never* stale: replay
 //! from the start of the log is always in-window by definition.
+//!
+//! An in-window `from` **behind** the tail is not replayed offset by offset: the catch-up
+//! span is folded once at its end and delivered as a single settled envelope (#422). See
+//! [`Engine::advance`]. That is the guard's complement, not a weakening of it — the guard
+//! still decides *whether* a cursor can resume at all; the collapse only decides what a
+//! resumable one is shown.
 //!
 //! # Guarantees (protocol.html §3)
 //!
@@ -83,8 +94,11 @@ use gridfpv_storage::StoredEvent;
 
 use crate::app::{AppState, resolve_event};
 use crate::error::{ErrorCode, ProtocolError};
-use crate::events::EventRegistry;
-use crate::live_state::{live_state, live_state_over, with_heat_timing};
+use crate::events::{EventRegistry, RoundDef};
+use crate::live_state::{
+    live_state_over_with_floor, live_state_over_with_rounds, live_state_with_rounds,
+    with_heat_timing,
+};
 use crate::scope::{EventId, Scope};
 use crate::snapshot::{ProjectionBody, ProjectionKind};
 use crate::stream::{Change, ChangeEnvelope, Cursor, StreamMessage};
@@ -147,6 +161,33 @@ struct ScopeProjection {
     encoding: Encoding,
 }
 
+/// Where a stream re-reads the event's **round config** from, so the D26 min-lap floor can be
+/// resolved per fold rather than captured once at subscribe (#409).
+///
+/// `RoundDef::min_lap_secs` lives in registry meta, not in the log, so it is invisible to a
+/// pure-log fold and it can be **edited while a stream is open**. Holding the registry handle
+/// (rather than a `Vec<RoundDef>` snapshot taken at subscribe) is what gives the stream the
+/// property the snapshot path gets for free by re-resolving per request: the config the fold
+/// applies is the config that stands *now*.
+#[derive(Clone)]
+struct RoundFloors {
+    registry: EventRegistry,
+    event: EventId,
+}
+
+impl RoundFloors {
+    /// The event's rounds as registry meta holds them **at this instant**. Read once per
+    /// [`Engine::advance`] — i.e. once per wake — and shared across the prefixes that batch
+    /// folds, which are all folded within the same instant anyway.
+    ///
+    /// An unknown event (deleted mid-stream) yields no rounds, which reads as "no floor": the
+    /// stream degrades to the pre-#409 counts rather than failing, and the socket closes on the
+    /// next log read regardless.
+    fn rounds(&self) -> Vec<RoundDef> {
+        self.registry.rounds_of(&self.event).unwrap_or_default()
+    }
+}
+
 impl ScopeProjection {
     /// The projection + encoding preference a scope's change stream uses.
     fn of(scope: &Scope) -> Self {
@@ -173,44 +214,58 @@ impl ScopeProjection {
     /// whether to emit an envelope). Reuses the same fold helpers as the snapshot path so a
     /// subscriber and a snapshot of the same scope converge to the same value.
     ///
-    /// `overlay` is the event's open-practice accumulator (open-practice format, Slice 1). An
-    /// open-practice heat's laps are accumulated in memory (NOT logged), so the log fold can't see
-    /// them; the live-state phase/clock are always the **real log's** (folded here exactly as for any
-    /// heat), and [`OpenPracticeLive::merge_into`](crate::open_practice::OpenPracticeLive::merge_into)
-    /// then splices the accumulator's per-channel laps onto that log-authoritative base — for a Heat
-    /// scope only when it addresses the active open-practice heat. The lap-list (pilot) scope is
-    /// unaffected (open practice is per channel, not per pilot).
-    fn fold(
-        scope: &Scope,
-        stored: &[StoredEvent],
-        overlay: Option<&crate::open_practice::OpenPracticeLive>,
-    ) -> Option<ProjectionBody> {
+    /// The fold is a **pure fold of the log for every format**, open practice included (D5,
+    /// reversed 2026-08-24): practice laps are ordinary logged `Pass` events, so there is no
+    /// accumulator to consult and no overlay to splice. That is what makes the change-suppression
+    /// in [`Engine::advance`] sound — an append that does not move the folded body (a
+    /// `SignalHistory` chunk, say) emits nothing at all.
+    ///
+    /// # The D26 min-lap floor is resolved PER PREFIX (#409)
+    ///
+    /// `rounds` is the event's registry meta — the only place `RoundDef::min_lap_secs` lives, so
+    /// a pure-log fold cannot see it. The floor itself is **not** a parameter: it is re-derived
+    /// inside this fold, from *this* prefix, because the floor belongs to the heat the prefix
+    /// reports as current and the current heat changes as the stream crosses into the next round.
+    /// A floor captured once at subscribe — or once per `advance` batch — would be wrong from
+    /// that crossing onward. What each scope hands down is the `rounds` list, and the live fold
+    /// resolves the floor from the heat it *itself* picks
+    /// ([`live_state_with_rounds`](crate::live_state::live_state_with_rounds) /
+    /// [`live_state_over_with_rounds`](crate::live_state::live_state_over_with_rounds)), which is
+    /// the same value the snapshot handlers get from the same entry points — so a subscriber and
+    /// a snapshot of one scope still converge, and neither pays for a pre-pass that re-folds
+    /// `current_heat` over the same slice (#460).
+    fn fold(scope: &Scope, stored: &[StoredEvent], rounds: &[RoundDef]) -> Option<ProjectionBody> {
         // The bare-event view the lap/phase fold consumes; the live-state clock timing is
         // folded separately from `stored` (which carries the `recorded_at` server timestamps).
         let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
         let events = events.as_slice();
         match scope {
             Scope::Event { .. } => {
-                // Phase/clock are the log's; the open-practice accumulator only splices its
-                // non-logged per-channel laps onto that base (a no-op when no op heat is active).
                 // `with_heat_timing` anchors the clock to the current heat's race-go (#62 follow-up).
-                let mut live = with_heat_timing(live_state(events), stored);
-                if let Some(op) = overlay {
-                    live = op.merge_into(live);
-                }
-                Some(ProjectionBody::LiveRaceState(live))
+                // `rounds` carries both the D26 floor and the rounds the event still defines (#439),
+                // which decide which heats it may report as current / on deck — exactly as they do
+                // for the snapshot.
+                Some(ProjectionBody::LiveRaceState(with_heat_timing(
+                    live_state_with_rounds(events, rounds),
+                    stored,
+                )))
             }
             Scope::Class { class, .. } => {
                 // The class's REAL filtered window, with preserved global offsets — the same
                 // fold as `snapshot_class`, so snapshot and stream converge (they used to
                 // diverge: the stream folded the whole event). Offsets matter so marshaling
                 // adjudications (global LogRef targets) resolve inside the filtered view.
+                //
+                // The floor is resolved over the WINDOW — the class fold picks its current heat
+                // from the filtered slice, so that is the heat whose round owns the floor — and it
+                // is resolved *inside* the fold, which already holds that slice. The pre-pass this
+                // replaces needed a bare `&[Event]`, so it deep-cloned the whole window a second
+                // time on every folded offset (#460 item 1).
                 let window = crate::app::class_window_offsets(events, class);
-                let mut live = with_heat_timing(live_state_over(&window), stored);
-                if let Some(op) = overlay {
-                    live = op.merge_into(live);
-                }
-                Some(ProjectionBody::LiveRaceState(live))
+                Some(ProjectionBody::LiveRaceState(with_heat_timing(
+                    live_state_over_with_rounds(&window, rounds),
+                    stored,
+                )))
             }
             Scope::Heat { heat } => {
                 // Only fold once the heat exists in the log; before that the scope has no
@@ -222,16 +277,18 @@ impl ScopeProjection {
                     return None;
                 }
                 // The heat's phase/clock are its real log window; the race-go timing folds from the
-                // full stored log. Splice the open-practice laps on when this Heat scope addresses
-                // the active open-practice heat.
+                // full stored log.
                 let window = crate::app::heat_window_offsets(events, heat);
-                let mut live = with_heat_timing(live_state_over(&window), stored);
-                if let Some(op) = overlay {
-                    if op.active_heat().as_ref() == Some(heat) {
-                        live = op.merge_into(live);
-                    }
-                }
-                Some(ProjectionBody::LiveRaceState(live))
+                // The scope NAMES the heat, so the floor is that heat's round's — resolved through
+                // the same helper `snapshot_heat` uses, against the same registry meta.
+                let floor = crate::app::min_lap_micros_of(
+                    crate::app::round_def_of_heat(events, heat, rounds).as_ref(),
+                );
+                // No defined-round filter: the scope names its heat (#439).
+                Some(ProjectionBody::LiveRaceState(with_heat_timing(
+                    live_state_over_with_floor(&window, floor, None),
+                    stored,
+                )))
             }
             Scope::Pilot { pilot, .. } => {
                 let full =
@@ -268,14 +325,20 @@ pub async fn stream_handler(
         // An unknown event id can't open a stream — reject the upgrade with the typed 404.
         Err(err) => return err.into_response(),
     };
-    ws.on_upgrade(move |socket| run_stream(socket, state))
+    // The stream keeps the registry handle so it can re-read this event's rounds — the D26
+    // min-lap floor lives there, not in the log (#409).
+    let floors = RoundFloors {
+        registry,
+        event: event_id,
+    };
+    ws.on_upgrade(move |socket| run_stream(socket, state, floors))
 }
 
 /// Drive one subscribed change stream over an upgraded socket (protocol.html §3).
 ///
 /// Reads the one [`SubscribeRequest`], then runs the replay-then-tail loop until the client
 /// disconnects, the cursor is stale, or a send fails.
-async fn run_stream(mut socket: WebSocket, state: AppState) {
+async fn run_stream(mut socket: WebSocket, state: AppState, floors: RoundFloors) {
     // 1. The client's single subscribe frame — it doubles as the connect message (§7),
     //    carrying the contract version and an optional read token.
     let request = match recv_subscribe(&mut socket).await {
@@ -340,7 +403,15 @@ async fn run_stream(mut socket: WebSocket, state: AppState) {
     // 3. Replay-then-tail. `Engine` folds the log forward from offset `from`, emitting a
     // fresh-value envelope each time the scoped projection changes, advancing the per-stream
     // sequence. `applied_offset` is how far into the log it has folded.
-    let mut engine = Engine::new(request.scope, projection, from);
+    //
+    // `tail` — the same value the stale-cursor guard just judged `from` against — bounds the
+    // **replay span** `from..tail` (#422): that span is history, already settled, and is
+    // collapsed to one settled fold. Everything at or beyond `tail` arrived after this
+    // subscription opened and is the live tail, streamed one envelope per changed offset
+    // exactly as before. Passing the tail explicitly (rather than letting the engine infer
+    // "whatever was on the log at my first fold") is what keeps that boundary deterministic:
+    // an append racing the first fold is live, not replay.
+    let mut engine = Engine::new(request.scope, projection, from, tail, floors);
     let appended = state.appended();
 
     loop {
@@ -362,12 +433,7 @@ async fn run_stream(mut socket: WebSocket, state: AppState) {
                 return;
             }
         };
-        // The event's open-practice accumulator (open-practice format, Slice 1): the per-channel,
-        // in-memory (NOT logged) laps. The fold serves the **log's** phase/clock and splices these
-        // laps on top so they drive the stream without the phase/clock ever drifting from the log.
-        // `wake_streams` after a pass / clear is what re-enters this loop.
-        let overlay = state.open_practice();
-        for message in engine.advance(&events, Some(&overlay)) {
+        for message in engine.advance(&events) {
             if send_message(&mut socket, &message).await.is_err() {
                 return; // client gone
             }
@@ -404,10 +470,28 @@ struct Engine {
     applied_offset: u64,
     /// The last projection body emitted, to suppress re-emitting an unchanged fold.
     last_emitted: Option<ProjectionBody>,
+    /// The end of the **replay span**: the log tail as it stood when this subscription opened
+    /// (#422). Offsets in `from..replay_until` are settled history and collapse to one envelope;
+    /// offsets at or beyond it are the live tail and stream one envelope per change.
+    replay_until: u64,
+    /// Whether the replay span has been dealt with (#422).
+    ///
+    /// `false` until the first [`advance`](Engine::advance) runs. Only that first call can face
+    /// the span, and it collapses it; every later call sees only the live tail.
+    caught_up: bool,
+    /// Where the D26 min-lap floor comes from (#409) — re-read on every [`advance`], never
+    /// captured as a resolved floor.
+    floors: RoundFloors,
 }
 
 impl Engine {
-    fn new(scope: Scope, projection: ScopeProjection, from: u64) -> Self {
+    fn new(
+        scope: Scope,
+        projection: ScopeProjection,
+        from: u64,
+        replay_until: u64,
+        floors: RoundFloors,
+    ) -> Self {
         Self {
             scope,
             projection,
@@ -416,6 +500,9 @@ impl Engine {
             // Seed with the projection *at* the resume point so the first envelope reflects
             // a change *after* `from`, not a re-send of what the snapshot already carried.
             last_emitted: None,
+            replay_until,
+            caught_up: false,
+            floors,
         }
     }
 
@@ -426,13 +513,13 @@ impl Engine {
     /// envelope (fresh value, the next sequence). Walking offset by offset keeps the
     /// per-stream sequence a faithful "one bump per projection change" and the order total.
     ///
-    /// `overlay` is the event's open-practice accumulator (open-practice format, Slice 1). The
-    /// per-offset walk folds the **pure log** (no laps overlay) so logged changes — including every
-    /// real heat-state transition (phase/clock) — stay gap-free; then, when an open-practice heat is
-    /// active, a final laps-spliced fold of the current prefix is emitted if it differs — that is the
-    /// non-logged per-channel live re-snapshot. Each `wake_streams` after a pass / clear re-enters
-    /// this with a fresh `overlay`, so a clear settles back onto the bare log state with no stale
-    /// frame.
+    /// Every emission is driven by a **logged** offset. There is no out-of-band re-snapshot: the
+    /// open-practice overlay that used to append one after the walk is gone (D5, reversed
+    /// 2026-08-24 — practice passes are logged like every other format's). That overlay is what
+    /// made #396's repeated lap callouts: `last_emitted` alternated between the pure-log body and
+    /// the laps-spliced body, so *every* append — a `SignalHistory` chunk included — differed from
+    /// the last value twice over and pushed two fresh `LiveRaceState` envelopes carrying the newest
+    /// lap. With one body per offset, an append that does not move the projection emits nothing.
     ///
     /// # Scheduling a heat wakes the stream even when the body is unchanged
     ///
@@ -448,13 +535,65 @@ impl Engine {
     /// The client dedups by per-stream `sequence`, not by content, so re-sending the same body is
     /// harmless; the extra envelope simply wakes consumers to re-read the heats list. `current_heat`
     /// is untouched, so this never steals focus (the `current-heat` proof stays green).
-    fn advance(
-        &mut self,
-        events: &[StoredEvent],
-        overlay: Option<&crate::open_practice::OpenPracticeLive>,
-    ) -> Vec<StreamMessage> {
+    /// # The min-lap floor is re-read here, not at subscribe (#409)
+    ///
+    /// The event's rounds are pulled from registry meta at the top of every `advance` — i.e. on
+    /// every wake — and the floor is then derived *per prefix* inside [`ScopeProjection::fold`]
+    /// (the current heat, and so the round that owns the floor, moves as the log crosses into the
+    /// next round). Since every envelope is a fresh value re-folded from the whole prefix, an
+    /// edited `min_lap_secs` re-applies to the run already on the log rather than leaving a
+    /// half-floored tail behind: the next envelope carries the counts the heat snapshot would
+    /// now give. What it cannot do is emit on its own — a meta edit appends nothing, so the new
+    /// floor reaches subscribers on the next logged event (D26 freezes the floor once the round
+    /// has raced, so an edit lands before the passes it would have re-judged).
+    ///
+    /// # The replay span is COLLAPSED, never replayed offset by offset (#422)
+    ///
+    /// The offset-by-offset walk above describes the **live tail** — the wake-driven case, where a
+    /// call sees the one or two offsets appended since the last one. The *first* call is different:
+    /// it faces `from..replay_until`, a span of history that had already settled before this
+    /// subscription opened, and walking it emitted one fresh value per changed offset — a staircase
+    /// of stale bodies ending at the current one.
+    ///
+    /// The span is bounded by the tail read at subscribe, **not** by "whatever is on the log when
+    /// the first fold happens". Those differ: an append can land between the subscribe frame and
+    /// the first fold, and it belongs to the live tail — a client that subscribed at the tail must
+    /// see each subsequent change as its own envelope whether or not it won that race. Without the
+    /// bound the number of envelopes such a client receives would depend on scheduling.
+    ///
+    /// That staircase is what made live lap counts step **backwards** after a reconnect. The client's
+    /// resume cursor used to be a lower bound (see [`ChangeEnvelope::cursor`]), so a blip resubscribed
+    /// from `tail - d` for some drift `d`; `d < RETAINED_WINDOW` is in-window, so this engine replayed
+    /// rather than the guard rejecting, and every console's `LiveRaceState` was overwritten with an
+    /// **older fold** — fewer laps — before climbing back through each intermediate one. To a Race
+    /// Director watching the board a pilot lost laps and regained them, which is exactly what a
+    /// marshal voiding a pass looks like.
+    ///
+    /// So the span is folded **once, at its end**, and emitted as a single settled envelope. This is
+    /// sound precisely because every envelope is a [`Change::FreshValue`]: only the last body of a
+    /// replayed span carries information, the earlier ones are pure waste. It also drops the walk's
+    /// quadratic re-fold of the whole prefix per offset.
+    ///
+    /// What the collapse deliberately preserves:
+    ///
+    /// - **A real correction still shows.** A marshal's void is a logged append like any other; it
+    ///   reaches a *connected* console as its own tail envelope, and it is folded into the settled
+    ///   body of any span that contains it. Only the spurious staircase goes — a count that drops
+    ///   because a pass was voided still drops.
+    /// - **The stale-cursor guard is untouched.** A cursor below `tail - RETAINED_WINDOW` is still
+    ///   answered with [`StreamMessage::ReSnapshotRequired`] before this engine is ever built.
+    /// - **A schedule still wakes the stream.** If any offset in the span is an
+    ///   [`Event::HeatScheduled`], the one collapsed envelope is emitted even when the settled body
+    ///   equals what the client already had (the fill-no-steal case above).
+    /// - **The crossing feed's contract.** [`LiveCrossing`](crate::live_state::LiveCrossing) entries
+    ///   are identified by `pass_ref` and the feed is bounded to the most recent
+    ///   [`MAX_LIVE_CROSSINGS`](crate::live_state::MAX_LIVE_CROSSINGS), oldest-dropped — so a
+    ///   consumer holding a high-water mark reads the collapsed body exactly as it reads any
+    ///   re-snapshot, and can only ever *miss* crossings the bound would already have trimmed.
+    fn advance(&mut self, events: &[StoredEvent]) -> Vec<StreamMessage> {
         let mut out = Vec::new();
         let len = events.len() as u64;
+        let rounds = self.floors.rounds();
         // Whether this scope folds the live race-state (Event/Class/Heat): only those carry the
         // heat set the `/heats` lists derive from, so only they need the schedule-wake re-emit.
         let live_state_scope = self.projection.kind == ProjectionKind::LiveRaceState;
@@ -465,7 +604,33 @@ impl Engine {
         // (`from == 0`) there is nothing prior, so the first non-empty fold is emitted.
         if self.last_emitted.is_none() && self.applied_offset > 0 {
             let prefix = &events[..(self.applied_offset as usize).min(events.len())];
-            self.last_emitted = ScopeProjection::fold(&self.scope, prefix, None);
+            self.last_emitted = ScopeProjection::fold(&self.scope, prefix, &rounds);
+        }
+
+        // The replay span (see the doc comment): fold it once at its end rather than walking it.
+        // It ends at the tail as it stood when the subscription opened — anything appended since
+        // is the live tail and falls through to the offset-by-offset walk below.
+        if !self.caught_up {
+            self.caught_up = true;
+            let span_end = self.replay_until.min(len);
+            if self.applied_offset < span_end {
+                let span = &events[self.applied_offset as usize..span_end as usize];
+                // A schedule anywhere in the span must still wake the heats lists, even if the
+                // settled body is byte-identical to what the client already holds.
+                let scheduled_heat = live_state_scope
+                    && span
+                        .iter()
+                        .any(|s| matches!(s.event, Event::HeatScheduled { .. }));
+                self.applied_offset = span_end;
+                let body =
+                    ScopeProjection::fold(&self.scope, &events[..span_end as usize], &rounds);
+                if let Some(body) = body
+                    && (scheduled_heat || self.last_emitted.as_ref() != Some(&body))
+                {
+                    out.push(StreamMessage::Change(Box::new(self.envelope(body.clone()))));
+                    self.last_emitted = Some(body);
+                }
+            }
         }
 
         while self.applied_offset < len {
@@ -479,27 +644,10 @@ impl Engine {
                     prefix.last().map(|s| &s.event),
                     Some(Event::HeatScheduled { .. })
                 );
-            // The per-offset walk is over the pure log (no overlay) so logged-change sequencing is
-            // unaffected; the overlay re-snapshot is emitted once after the walk, below.
-            let body = ScopeProjection::fold(&self.scope, prefix, None);
+            let body = ScopeProjection::fold(&self.scope, prefix, &rounds);
             if let Some(body) = body {
                 if scheduled_heat || self.last_emitted.as_ref() != Some(&body) {
-                    out.push(StreamMessage::Change(self.envelope(body.clone())));
-                    self.last_emitted = Some(body);
-                }
-            }
-        }
-
-        // The open-practice live re-snapshot (open-practice format, Slice 1): with an active
-        // open-practice heat, fold the current prefix and splice its per-channel laps onto the
-        // log-authoritative base, emitting when it differs from the last value — the non-logged laps
-        // reach the stream as a fresh-value `LiveRaceState` whose phase/clock are the log's. When the
-        // accumulator clears, this is skipped and the pure-log fold (above) is the last value emitted,
-        // so the console settles back onto the bare log state with no stale frame.
-        if overlay.is_some_and(|op| op.active_heat().is_some()) {
-            if let Some(body) = ScopeProjection::fold(&self.scope, events, overlay) {
-                if self.last_emitted.as_ref() != Some(&body) {
-                    out.push(StreamMessage::Change(self.envelope(body.clone())));
+                    out.push(StreamMessage::Change(Box::new(self.envelope(body.clone()))));
                     self.last_emitted = Some(body);
                 }
             }
@@ -513,9 +661,15 @@ impl Engine {
     /// recorded for #59 (see the module docs) but does not yet change the wire shape. The
     /// `kind` is taken from the body so a delta envelope (#59) and a fresh value name the
     /// same projection.
+    ///
+    /// The envelope's `cursor` is `applied_offset` — the log offset this body was folded
+    /// **through**, and so the exact `from` a reconnect should present (#422). It is read here
+    /// rather than passed in because `advance` has already moved `applied_offset` to the end of
+    /// whatever it folded, collapsed span or single offset alike.
     fn envelope(&mut self, body: ProjectionBody) -> ChangeEnvelope {
         let sequence = Cursor::new(self.next_seq);
         self.next_seq += 1;
+        let cursor = Cursor::new(self.applied_offset);
         let _ = self.projection.encoding; // wired for #59; fresh-value for now
         let projection = body.kind();
         debug_assert_eq!(
@@ -524,6 +678,7 @@ impl Engine {
         );
         ChangeEnvelope {
             sequence,
+            cursor,
             projection,
             change: Change::FreshValue(body),
         }
@@ -621,11 +776,34 @@ mod tests {
         }
     }
 
+    /// An event-scope engine on an empty log: `from` and the replay span are both 0, so every
+    /// offset these fixtures append afterwards is live tail, walked one at a time.
     fn event_engine() -> Engine {
+        event_engine_from(0, 0)
+    }
+
+    /// An event-scope engine resuming from log offset `from` with the tail at `replay_until` —
+    /// the shape a reconnect builds, where `from..replay_until` is the settled span to replay.
+    fn event_engine_from(from: u64, replay_until: u64) -> Engine {
+        // A registry holding one freshly-created, round-less event ⇒ no D26 floor, which is what
+        // these fixtures always meant. The floor's own conformance proof lives in
+        // `tests/min_lap_floor_conformance.rs`.
+        let registry = EventRegistry::new(None).expect("in-memory registry");
+        let event = registry
+            .create(&crate::events::CreateEventRequest::named("Test Event"))
+            .expect("create the test event")
+            .id;
         let scope = Scope::Event {
-            event: EventId("practice".into()),
+            event: event.clone(),
         };
-        Engine::new(scope.clone(), ScopeProjection::of(&scope), 0)
+        let floors = RoundFloors { registry, event };
+        Engine::new(
+            scope.clone(),
+            ScopeProjection::of(&scope),
+            from,
+            replay_until,
+            floors,
+        )
     }
 
     /// How many `Change` envelopes a batch of stream messages carries.
@@ -633,6 +811,146 @@ mod tests {
         msgs.iter()
             .filter(|m| matches!(m, StreamMessage::Change(_)))
             .count()
+    }
+
+    /// The `LiveRaceState` of the nth `Change` in a batch.
+    fn live_at(msgs: &[StreamMessage], n: usize) -> &crate::snapshot::LiveRaceState {
+        match &msgs[n] {
+            StreamMessage::Change(env) => match &env.change {
+                Change::FreshValue(ProjectionBody::LiveRaceState(live)) => live,
+                other => panic!("expected a LiveRaceState fresh value, got {other:?}"),
+            },
+            other => panic!("expected a Change envelope, got {other:?}"),
+        }
+    }
+
+    /// The envelope's echoed resume cursor (the log offset the body was folded through).
+    fn env_cursor(msgs: &[StreamMessage], n: usize) -> u64 {
+        match &msgs[n] {
+            StreamMessage::Change(env) => env.cursor.seq,
+            other => panic!("expected a Change envelope, got {other:?}"),
+        }
+    }
+
+    /// **#422 — the catch-up span is one settled envelope, not a staircase of stale folds.**
+    ///
+    /// A resume at offset 1 over a five-offset log used to walk offsets 1..5 and emit a fresh
+    /// value per changed offset: Staged, Armed, Running — the client rendering each in turn. When
+    /// the client was already *past* those (its cursor being a lower bound, not its true
+    /// position), that staircase started BELOW where it stood, which is how a live lap count came
+    /// to step backwards on a reconnect. Now the span folds once at its end.
+    #[test]
+    fn the_catch_up_span_collapses_to_one_settled_envelope() {
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(changed("q-1", HeatTransition::Armed)),
+            stored(changed("q-1", HeatTransition::Running)),
+        ];
+
+        let mut engine = event_engine_from(1, log.len() as u64);
+        let out = engine.advance(&log);
+
+        assert_eq!(
+            change_count(&out),
+            1,
+            "the whole replayed span is one envelope, not one per changed offset"
+        );
+        // The one body is the SETTLED state at the tail — no intermediate phase is ever sent.
+        assert_eq!(live_at(&out, 0).phase, crate::snapshot::HeatPhase::Running);
+        // And it names the offset it was folded through, so the client's next `from` is exact.
+        assert_eq!(env_cursor(&out, 0), log.len() as u64);
+
+        // The live tail is unaffected: a later append still emits its own envelope.
+        let mut later = log.clone();
+        later.push(stored(changed("q-1", HeatTransition::Finished)));
+        let tail = engine.advance(&later);
+        assert_eq!(change_count(&tail), 1);
+        assert_eq!(env_cursor(&tail, 0), later.len() as u64);
+    }
+
+    /// A `HeatScheduled` **inside** a collapsed span must still wake the heats lists (#422 must not
+    /// swallow the fill-no-steal wake the plain change-suppression already needed an exception for).
+    ///
+    /// q-1 is staged and q-2 on deck at the resume point; the span then schedules q-3, which moves
+    /// neither `current_heat` nor `on_deck`, so the settled body is byte-identical to what the
+    /// client already holds. One envelope must still come out.
+    #[test]
+    fn a_schedule_inside_the_collapsed_span_still_wakes_the_stream() {
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(scheduled("q-2")),
+            stored(scheduled("q-3")),
+        ];
+        // Resume at offset 3: the span is the bare q-3 schedule alone.
+        let mut engine = event_engine_from(3, log.len() as u64);
+        let out = engine.advance(&log);
+
+        assert_eq!(
+            change_count(&out),
+            1,
+            "a schedule in the span wakes the stream even though the body did not move"
+        );
+        let live = live_at(&out, 0);
+        assert_eq!(live.current_heat, Some(HeatId("q-1".into())));
+        assert_eq!(live.on_deck, Some(HeatId("q-2".into())));
+    }
+
+    /// An append that **races the first fold** is live tail, not replay (#422).
+    ///
+    /// The subscribe frame arrives, the tail is read — and then two changes land before the engine
+    /// gets to fold at all. Those are not history: a client subscribed at the tail must see each of
+    /// them as its own envelope, exactly as it would have had it won the race. Bounding the span by
+    /// the tail read at subscribe (rather than by the log length at the first fold) is what makes
+    /// that independent of scheduling.
+    #[test]
+    fn appends_that_race_the_first_fold_are_live_tail_not_replay() {
+        // Subscribed at the tail of a two-offset log…
+        let mut engine = event_engine_from(2, 2);
+        // …but by the time the first fold runs, two more offsets have landed.
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(changed("q-1", HeatTransition::Armed)),
+            stored(changed("q-1", HeatTransition::Running)),
+        ];
+        let out = engine.advance(&log);
+
+        assert_eq!(
+            change_count(&out),
+            2,
+            "post-subscribe appends stream one envelope per change, collapse or no collapse"
+        );
+        assert_eq!(live_at(&out, 0).phase, crate::snapshot::HeatPhase::Armed);
+        assert_eq!(live_at(&out, 1).phase, crate::snapshot::HeatPhase::Running);
+        assert_eq!(env_cursor(&out, 0), 3);
+        assert_eq!(env_cursor(&out, 1), 4);
+    }
+
+    /// A resume from the **exact** offset an envelope echoed has nothing to replay (#422).
+    ///
+    /// This is the whole point of echoing the offset: a reconnecting client presents the cursor it
+    /// really stands at, the engine seeds `last_emitted` with the identical fold, and the stream is
+    /// silent until something genuinely new lands.
+    #[test]
+    fn a_resume_from_the_echoed_offset_emits_nothing() {
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Staged)),
+            stored(changed("q-1", HeatTransition::Running)),
+        ];
+        let mut first = event_engine();
+        let seen = first.advance(&log);
+        let resume = env_cursor(&seen, change_count(&seen) - 1);
+        assert_eq!(resume, log.len() as u64);
+
+        let mut resumed = event_engine_from(resume, log.len() as u64);
+        assert_eq!(
+            change_count(&resumed.advance(&log)),
+            0,
+            "an exact resume cursor leaves nothing to replay"
+        );
     }
 
     #[test]
@@ -648,12 +966,12 @@ mod tests {
             stored(scheduled("q-2")),
         ];
         // Catch up to the current state; the picker would now show q-1 + q-2.
-        let _ = engine.advance(&log, None);
+        let _ = engine.advance(&log);
 
         // Append q-3 — a bare schedule that does not move current/on-deck.
         let mut log3 = log.clone();
         log3.push(stored(scheduled("q-3")));
-        let out = engine.advance(&log3, None);
+        let out = engine.advance(&log3);
 
         // Exactly one fresh-value envelope is emitted for the schedule (the wake), even though the
         // body did not change — so every console re-reads `/heats` and q-3 appears immediately.
@@ -680,9 +998,78 @@ mod tests {
             stored(scheduled("q-1")),
             stored(changed("q-1", HeatTransition::Staged)),
         ];
-        let _ = engine.advance(&log, None);
+        let _ = engine.advance(&log);
         // Re-advancing over the SAME log (no new offsets) emits nothing.
-        let out = engine.advance(&log, None);
+        let out = engine.advance(&log);
         assert_eq!(change_count(&out), 0);
+    }
+
+    /// **#396 regression — a signal append during a heat with laps must push nothing.**
+    ///
+    /// Practice repeated its lap callouts because its laps did not come from the log: the engine
+    /// walked each offset folding the pure log (practice laps `0`) and then emitted a *second*,
+    /// laps-spliced re-snapshot from the overlay. So `last_emitted` alternated between "no laps"
+    /// and "N laps", and every append — a `SignalHistory` chunk included, ~2/s/seat — differed from
+    /// the previous value twice over and pushed two fresh `LiveRaceState` envelopes carrying the
+    /// newest lap. The console's callout detector folds *down* silently on a decrease and then
+    /// announces on the next increase, so it re-announced the same lap on every signal tick.
+    ///
+    /// With practice laps on the log there is exactly one body per offset, so an append that does
+    /// not move the projection emits nothing — the behaviour `timed_qual` always had.
+    #[test]
+    fn a_signal_append_during_a_running_heat_with_laps_emits_nothing() {
+        use gridfpv_events::{AdapterId, GateIndex, Pass, SignalHistory, SourceTime};
+
+        let pass = |at: i64, seq: u64| {
+            stored(Event::Pass(Pass {
+                adapter: AdapterId("sim".into()),
+                competitor: CompetitorRef("A".into()),
+                at: SourceTime::from_micros(at),
+                sequence: Some(seq),
+                gate: GateIndex::LAP,
+                signal: None,
+                heat: Some(HeatId("q-1".into())),
+            }))
+        };
+
+        let mut engine = event_engine();
+        let log = vec![
+            stored(scheduled("q-1")),
+            stored(changed("q-1", HeatTransition::Running)),
+            pass(1_000_000, 0), // holeshot
+            pass(4_000_000, 1), // lap 1
+        ];
+        let caught_up = engine.advance(&log);
+        assert!(
+            change_count(&caught_up) > 0,
+            "the laps themselves are logged changes and DO push envelopes"
+        );
+
+        // Now the signal flood: a dense RSSI append that changes no lap and no phase.
+        let mut with_signal = log.clone();
+        with_signal.push(stored(Event::SignalHistory(SignalHistory {
+            adapter: AdapterId("sim".into()),
+            competitor: CompetitorRef("A".into()),
+            times: vec![0, 1000, 2000],
+            rssi: vec![50, 60, 70],
+            base: 0,
+        })));
+        let out = engine.advance(&with_signal);
+        assert_eq!(
+            change_count(&out),
+            0,
+            "a signal append must not re-push a LiveRaceState carrying the newest lap (#396)"
+        );
+
+        // And a second one, in case the first happened to settle an alternation.
+        let mut more_signal = with_signal.clone();
+        more_signal.push(stored(Event::SignalHistory(SignalHistory {
+            adapter: AdapterId("sim".into()),
+            competitor: CompetitorRef("A".into()),
+            times: vec![3000, 4000],
+            rssi: vec![80, 90],
+            base: 3,
+        })));
+        assert_eq!(change_count(&engine.advance(&more_signal)), 0);
     }
 }

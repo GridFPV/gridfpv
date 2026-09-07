@@ -7,23 +7,22 @@
  */
 import type { RoundDef } from '@gridfpv/types';
 
-import { OPEN_PRACTICE } from './formats.js';
-
 /**
  * The fixed window length (µs) of `round`, or `undefined` when the heat has no known fixed end.
  *
- * Only two configurations fix the end instant at race-go:
- *   • a **Timed** win-condition round — its `window_micros`, measured from race-go;
- *   • a **Practice** run with a `time_limit_secs` — the limit bounds the run.
- * First-to-N / BestLap rounds have no fixed end. NOTE an open-practice round stores an inert
- * *default* win condition that is never consulted (see RoundDef) — only its `time_limit_secs`
- * bounds the run, so a limitless practice has no fixed end either.
+ * Two configurations fix the end instant at race-go:
+ *   • a **time limit** (`time_limit_secs`) — the completion driver's auto-end, and it is
+ *     format-blind: a Time Trial stores its race duration here (Best-of-N only *ranks*, it never
+ *     ends a heat — the limit is what does), and a practice its optional duration. Checked FIRST,
+ *     mirroring the driver's unconditional time-limit branch (#504 — this used to be honoured
+ *     only for open practice, so a time trial ran with no countdown, no pips and no buzzer while
+ *     the backend ended it on schedule anyway);
+ *   • a **Timed** win-condition round — its `window_micros`, measured from race-go.
+ * First-to-N rounds (no limit set) have no fixed end.
  */
 export function fixedEndWindowMicros(round: RoundDef | undefined): number | undefined {
   if (!round) return undefined;
-  if (round.format === OPEN_PRACTICE) {
-    return round.time_limit_secs != null ? round.time_limit_secs * 1_000_000 : undefined;
-  }
+  if (round.time_limit_secs != null) return round.time_limit_secs * 1_000_000;
   const wc = round.win_condition;
   if (typeof wc === 'object' && wc !== null && 'Timed' in wc) return wc.Timed.window_micros;
   return undefined;

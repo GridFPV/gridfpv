@@ -202,6 +202,15 @@ pub struct SignalThresholds {
 /// projection **prefers** this dense history over the coarse [`SignalChunk`] samples for a
 /// competitor when both are present (the dense trace supersedes the streaming approximation).
 ///
+/// # Whole trace or slice — [`base`](SignalHistory::base) says which (#392)
+///
+/// The GridFPV plugin streams this trace **live**, every 0.5 s, so a `SignalHistory` is not always a
+/// whole trace: [`base`](SignalHistory::base) is the sample offset its `times`/`rssi` start at, and
+/// the fold replaces at `0`, appends at the trace's current length, and skips anything else. Sending
+/// the accumulated whole on every tick made the per-tick cost grow with heat length (O(n) per tick,
+/// O(n²) per heat, per seat): it flooded the heat's log and re-woke every projection subscriber
+/// twice a second with nothing new in hand (#392).
+///
 /// # Why explicit per-sample times (not a uniform cadence)
 ///
 /// [`SignalChunk`] assumes a fixed `period_micros` because the live stream emits on a regular
@@ -225,6 +234,24 @@ pub struct SignalHistory {
     pub times: Vec<i64>,
     /// The dense per-tick RSSI samples (filtered ADC counts), parallel to `times`.
     pub rssi: Vec<u16>,
+    /// The index of this event's **first** sample within the competitor's full trace — the offset
+    /// the fold applies `times`/`rssi` at (#392). Named for the plugin's own `gridfpv_signal` field,
+    /// whose semantics it carries onto the canonical wire unchanged.
+    ///
+    /// - `base == 0` — a **full snapshot**: it *replaces* the competitor's trace. The post-race
+    ///   `current_marshal_data` pull, the `race_details` fold and the plugin's end-of-race flush
+    ///   each send one, so a finished heat's marshaling trace is always whole.
+    /// - `base ==` the trace's current length — a **contiguous append**: `times`/`rssi` extend it.
+    ///   This is the live path, and it is what keeps the per-tick cost independent of heat length.
+    /// - anything else — **out of sync**: the fold skips the event rather than splice a gap or a
+    ///   duplicate into the trace. The next full snapshot resynchronises it.
+    ///
+    /// Additive on the wire: `#[serde(default)]` reads a pre-#392 log — which only ever carried
+    /// whole traces — back as `base = 0`, i.e. exactly the replace semantics it was written with.
+    /// Renders as TS `number` (a sample count, bounded far below 2^53), not a `bigint`.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub base: u64,
 }
 
 /// A gate crossing — the one observation everything else derives from.
@@ -298,6 +325,23 @@ pub struct ClassId(pub String);
 #[serde(transparent)]
 #[ts(export, export_to = "bindings/")]
 pub struct RoundId(pub String);
+
+/// Identifies one **channel layout** within an event (#117 S2/S3) — a named `node → channel`
+/// tuning of the event's timer.
+///
+/// Defined here rather than in `gridfpv_server` because a **heat carries the layout it flies**
+/// ([`Event::HeatScheduled::layout`]), exactly as it carries its class and round: which channels a
+/// heat raced on is a fact about the heat, and facts about a heat live in the log. The richer
+/// `ChannelLayout` (the mapping itself) stays event *config* in `gridfpv_server::events`, which
+/// re-exports this type so the log and the protocol never disagree on what a layout id is.
+///
+/// A transparent string newtype like [`ClassId`] / [`RoundId`], **auto-generated** (a slug of the
+/// layout's name plus a short random suffix), and a **wire handle only**: what an RD reads is the
+/// layout's name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct LayoutId(pub String);
 
 /// A reference to an already-logged event by its append **offset** — the stable id
 /// marshaling adjudications target (e.g. "void *this* pass"). The offset is assigned
@@ -614,7 +658,7 @@ pub enum Event {
     /// draw. Without this, the seeding re-resolved live on every read — so adjudicating the
     /// *source* round after this round had already raced silently rewrote who this round's
     /// field "was", vanishing raced results from its ranking. Roster-derived seedings
-    /// (`FromRoster` / `AllChannels`) never record a draw: they stay live so late entrants
+    /// (`FromRoster` / `ActiveNodes`) never record a draw: they stay live so late entrants
     /// keep working.
     RoundFieldDrawn {
         /// The round whose field this freezes.
@@ -656,6 +700,57 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         label: Option<String>,
+    },
+    /// The RD **bound a heat to a channel layout** — *"which layout does this heat fly?"*, the
+    /// heat scope of the three-scope channel model (#117 S3).
+    ///
+    /// A layout is a complete `node -> channel` tuning of the event's timer, defined once per event
+    /// (`ChannelLayout`); this is the record of a heat choosing one. `layout: None` clears the bind
+    /// and returns the heat to its round's default.
+    ///
+    /// # Why this is its own event and not a field on `HeatScheduled`
+    ///
+    /// Which layout a heat flies is an **RD decision about the heat**, made and re-made while the
+    /// heat sits in `Scheduled` — not a property of the moment it was drawn. Keeping it separate
+    /// means re-binding a layout does not have to re-assert the lineup, and a round re-fill that
+    /// re-emits `HeatScheduled` does not silently drop the bind: the fold takes the **last**
+    /// `HeatLayoutSet` per heat, independently of how many times the heat was re-scheduled.
+    ///
+    /// The heat's actual per-pilot channels still live on its most recent
+    /// [`HeatScheduled`](Event::HeatScheduled) `frequencies` — this event says *where they came
+    /// from*, and re-binding re-emits them. That split is what keeps a heat that has raced on the
+    /// channels it raced on: the frequencies are baked at schedule time and never recomputed from
+    /// a layout that has since been edited.
+    HeatLayoutSet {
+        /// The heat being bound.
+        heat: HeatId,
+        /// The layout it flies, or `None` to clear the bind (back to the round's default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        layout: Option<LayoutId>,
+    },
+    /// The RD **manually set a heat's pilots and their channels** (#117 S3) — the override the RD
+    /// reaches for when the automatic answer is wrong.
+    ///
+    /// This is *sticky*, and that is the entire point: an override quietly lost when the round is
+    /// re-filled is worse than no override at all (#419). The round fill and the #387
+    /// re-materialization both apply the last override for a heat **on top of** the plan they
+    /// compute, so re-forming the round cannot silently undo the RD's answer.
+    ///
+    /// An **empty `lineup` clears the override**, returning the heat to whatever its round's plan
+    /// and its layout produce. That is the only way out, and it is deliberately explicit.
+    HeatSeatingOverridden {
+        /// The heat whose seating the RD set by hand.
+        heat: HeatId,
+        /// The RD's lineup, in seat order — the pilots and where they sit. **Empty clears the
+        /// override.**
+        lineup: Vec<CompetitorRef>,
+        /// The RD's per-pilot channels in raw MHz. Empty means *"my pilots, the layout's
+        /// channels"* — the lineup is overridden but the channels still come from the heat's
+        /// layout (or the auto-pick), so an RD swapping two pilots does not have to retype four
+        /// frequencies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        frequencies: Vec<(CompetitorRef, u16)>,
     },
     /// A heat-loop state transition appended by the engine (race-engine.html §2).
     HeatStateChanged {
@@ -708,6 +803,66 @@ pub enum Event {
         /// shows is `at − now`.
         #[ts(type = "number")]
         at: i64,
+    },
+    /// The **race window expired** for a heat still `Running` — the end-of-race buzzer instant,
+    /// appended by the completion driver when the heat's fixed end (its round's `time_limit_secs`,
+    /// or a Timed window) passes with a non-zero grace window configured (#505).
+    ///
+    /// This event's **log position is the grace rule's boundary**: from here on, each competitor
+    /// may only *finish the lap they were already flying* — their first lap-gate [`Pass`] appended
+    /// after this event still counts, and every later one is auto-voided by the corrected fold
+    /// (`VoidReason::AfterRaceEnd`), marshal-restorable like the min-lap floor's. Ordering by log
+    /// position rather than source time is deliberate: "one crossing after the end-of-race tone"
+    /// is a statement about the tone, and the log is the tone's clock.
+    ///
+    /// The heat leaves `Running` when the `deadline` passes, or **earlier** once every
+    /// still-flying competitor has taken their post-expiry crossing (nothing further can score).
+    /// Mirrors [`HeatStarting`](Event::HeatStarting) / [`HeatFinalizing`](Event::HeatFinalizing):
+    /// the runtime logs the chosen timing once as a fact, the console counts down to it, and a
+    /// replay reads the same instant instead of re-deriving it from a clock. A round with a zero
+    /// grace (first-to-N by rule, or a configured 0) never emits this — the heat closes at the
+    /// fixed end exactly as before.
+    RaceExpired {
+        /// The heat whose race window expired (it is still in `Running`, holding for grace).
+        heat: HeatId,
+        /// The **grace deadline**: the server wall-clock instant (microseconds since the Unix
+        /// epoch) at which the runtime closes the heat if pilots are still out. `None` for an
+        /// unbounded grace (the engine's `GraceWindow::UntilScored`): the heat then closes only
+        /// on the all-crossed rule or the RD's `ForceEnd`.
+        #[serde(default)]
+        #[ts(optional, type = "number")]
+        deadline: Option<i64>,
+    },
+    /// The **detection config in force for this run**, pinned at the arm (#517).
+    ///
+    /// The gate-bounce window (`Timer::same_pass_window_micros`) is *timer* config, and a timer is
+    /// editable at any time — unlike a round, which freezes the moment it races. Read live, the
+    /// corrected fold would therefore re-judge finished races every time an RD nudged a slider on
+    /// the Timers page. So the value in force is written here, **once, when the heat arms**, and
+    /// the fold reads it from the log instead: an edit changes the next run, never a past one.
+    ///
+    /// Same shape as [`HeatStarting`](Event::HeatStarting) / [`HeatFinalizing`](Event::HeatFinalizing)
+    /// / [`RaceExpired`](Event::RaceExpired) — the runtime resolves a value once, at emission time,
+    /// and logs it as a fact so a replay reads the same answer instead of re-deriving it. Same idea
+    /// as [`HeatLayoutSet`](Event::HeatLayoutSet), too, which pins the resolved channel layout at
+    /// the *stage* for exactly this reason (#478). The general rule is #518.
+    ///
+    /// **Why the arm and not the stage:** arming is the moment the gate opens to detections, and it
+    /// is the last point before a pass can arrive. `(Staged, Start) -> Armed` is the only arm in the
+    /// heat FSM (`heat::apply`), so every run passes through here exactly once — and a re-arm after
+    /// an Abort or Restart re-pins, which is correct: it is a new run.
+    ///
+    /// **Absent means no bounce rule** — a heat armed before this existed, or one whose timer has
+    /// no window set. The fold then judges crossings on the round's min-lap floor alone, exactly as
+    /// it did before, so an older log folds bit-identically.
+    HeatDetectionPinned {
+        /// The heat this config was pinned for (it is entering `Armed`).
+        heat: HeatId,
+        /// The **gate-bounce window** (µs) in force for this run: two lap-gate crossings by the
+        /// same competitor closer together than this are one physical pass. `None` for no rule.
+        #[serde(default)]
+        #[ts(optional, type = "number")]
+        same_pass_window_micros: Option<i64>,
     },
     /// Marshaling: void a previously-detected pass, referenced by log offset. The
     /// projection folds it out as if it never happened — the raw [`Pass`] stays in
@@ -1302,6 +1457,15 @@ mod tests {
                 competitor: CompetitorRef("node-0".into()),
                 times: vec![0, 50_000, 100_000, 150_000],
                 rssi: vec![70, 88, 150, 71],
+                base: 0,
+            }),
+            // The same fact as a live slice: `base` is the sample offset it starts at (#392).
+            Event::SignalHistory(SignalHistory {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-0".into()),
+                times: vec![200_000, 250_000],
+                rssi: vec![90, 71],
+                base: 4,
             }),
         ];
         for event in events {
@@ -1343,6 +1507,35 @@ mod tests {
                 rssi: vec![60, 120, 61],
             })
         );
+    }
+
+    #[test]
+    fn legacy_signal_history_without_base_reads_back_as_a_full_snapshot() {
+        // `base` is additive (#392). A history written before it existed was always the competitor's
+        // whole trace, folded last-writer-wins — and `base = 0` is exactly that rule, so an old log
+        // replays unchanged rather than being mistaken for a slice.
+        let legacy = r#"{"SignalHistory":{"adapter":"rotorhazard","competitor":"node-0","times":[0,50000],"rssi":[70,88]}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(legacy).unwrap(),
+            Event::SignalHistory(SignalHistory {
+                adapter: AdapterId("rotorhazard".into()),
+                competitor: CompetitorRef("node-0".into()),
+                times: vec![0, 50_000],
+                rssi: vec![70, 88],
+                base: 0,
+            })
+        );
+        // And the field goes out on the wire as a plain number, so an older consumer that ignores
+        // unknown keys still parses a slice-shaped history.
+        let json = serde_json::to_string(&Event::SignalHistory(SignalHistory {
+            adapter: AdapterId("rotorhazard".into()),
+            competitor: CompetitorRef("node-0".into()),
+            times: vec![100_000],
+            rssi: vec![150],
+            base: 2,
+        }))
+        .unwrap();
+        assert!(json.contains(r#""base":2"#), "{json}");
     }
 
     #[test]

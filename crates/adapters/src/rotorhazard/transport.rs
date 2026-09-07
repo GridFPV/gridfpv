@@ -12,6 +12,54 @@
 //! Read-only in production (drain [`RotorHazardConnection::events`]); the
 //! `stage_race` / `simulate_lap` / `stop_race` helpers exist to **drive** a
 //! dockerized RH from the live integration test.
+//!
+//! # Receipts: `current_laps`, lap deletion, and who runs first
+//!
+//! Read out of RotorHazard's own source at **v4.3.0 and v4.4.0** (`RHRace.py`, `RHUI.py`,
+//! `server.py`, `eventmanager.py`, `RHAPI.py`). Everything below is identical on both versions
+//! unless it says otherwise. Recorded here because two shipped bugs (#434, #447) rested on
+//! plausible guesses about exactly these behaviours.
+//!
+//! **`build_laps_list` — what reaches the wire.** It walks `race.node_laps[node]` and emits a lap
+//! only `if (not lap.invalid) and ((not lap.deleted) or lap.late_lap)`. Consequences:
+//!
+//! - A crossing the RD deletes is marked `invalid = True` and is **absent from the payload
+//!   entirely** — it is not flagged, it is gone. There is no "deleted lap" frame to react to.
+//! - `deleted: true` therefore only ever rides on a `late_lap` (`_add_lap` records a post-finish
+//!   crossing as `deleted = late_lap = True`), and the builder numbers **every** late lap `-1`. So
+//!   a lap that is both *numbered* and `deleted` is a shape neither version can produce.
+//! - v4.3.0's per-lap dict has **no `deleted` key and no `source` key** (and calls the raw time
+//!   `lap_raw`); v4.4.0 added `deleted`, `source`, and renamed to `lap_time` /
+//!   `lap_time_formatted`. `lap_index`, `lap_number`, `lap_time_stamp`, `splits`, `late_lap` are
+//!   common to both.
+//!
+//! **`delete_lap` renumbers.** `RHRace.delete_lap` sets `invalid`/`deleted` and `lap_number = None`
+//! on the target, then walks the seat's whole list assigning `lap.lap_number = 0, 1, 2, …` to every
+//! survivor. `restore_deleted_lap` and `replace_laps` (the `replace_current_laps` handler) renumber
+//! the same way. **A `lap_number` is a position in the current table, not a crossing id.** All
+//! three paths leave `lap_time_stamp` untouched — only `lap_time` (the pass-to-pass delta of the
+//! lap *following* the edit) is recomputed — so the stamp is the stable per-crossing identity, and
+//! it is what the adapter's dedup keys on (#434). Each of these ends with `emit_current_laps()`.
+//!
+//! **Emission cadence.** Mid-race, `emit_current_laps()` lands **once per recorded crossing**:
+//! `RHRace._add_lap` calls it inline right after appending the lap. The other call sites are
+//! staging, race-status edges, node-count changes, the marshaling edits above, and a client's own
+//! `load_data('current_laps')`. There is no periodic re-send.
+//!
+//! **Plugin handlers are asynchronous; `current_laps` is not.** `eventmanager.trigger` runs a
+//! handler **inline** when its `priority < 100` and `gevent.spawn`s it otherwise;
+//! `RHAPI.EventsAPI.on` defaults `priority = 200` for everything except the `*_INITIALIZE` events.
+//! The GridFPV plugin registers `RACE_LAP_RECORDED` through that default, so its `gridfpv_pass`
+//! broadcast is spawned — while `_add_lap` reaches `emit_current_laps()` on the very next
+//! statement. **The snapshot for a lap normally arrives before the plugin's pass for it**, and a
+//! whole field crossing inside one scheduling window yields up to one snapshot per seat before any
+//! spawned handler runs. That is what sets `PLUGIN_GRACE_SNAPSHOTS` (#447).
+//!
+//! **Every socket event gets its own greenlet.** `SOCKET_IO = SocketIO(APP, async_mode='gevent',
+//! …)` on both versions, with no `async_handlers=False`, so Flask-SocketIO's default applies. A
+//! read issued after a write can be served before that write commits — which is why every readback
+//! in this file re-asks rather than trusting its first answer (`confirm_seating`,
+//! [`RotorHazardConnection::confirm_min_lap_neutral`]).
 
 // `rust_socketio::Error` is a large external enum; we thread it through unchanged
 // rather than box every signature in this thin wrapper.
@@ -35,66 +83,690 @@ pub const DIRECTOR_PROTOCOL_VERSION: u32 = 1;
 
 use rust_socketio::client::Client;
 use rust_socketio::{ClientBuilder, Payload, RawClient};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{
-    Raw, RawCurrentLaps, RawEnterExitLevels, RawGridPass, RawGridSignal, RawHeatData,
+    HeatSeat, Raw, RawCurrentLaps, RawEnterExitLevels, RawGridPass, RawGridSignal, RawHeatData,
     RawMarshalData, RawNodeData, RawPassRecord, RawPilotData, RawRaceDetails, RawRaceList,
-    RawRaceStatus, RotorHazardAdapter,
+    RawRaceStatus, RotorHazardAdapter, reported_nodes_from_frequency_data,
+    reported_nodes_from_levels,
 };
 use crate::Adapter;
 use gridfpv_events::Event;
 
-/// Decode a RotorHazard socket event (`event` name + its payload) into a [`Raw`].
+/// What one RotorHazard socket frame decoded to — see [`decode_socket`].
 ///
-/// Returns `None` for events we don't translate, or payloads that don't match the
-/// expected shape — the transport simply ignores those.
-pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
-    // RotorHazard wraps each emit's data in a one-element array.
+/// The three cases are deliberately distinct (#400). Collapsing "we don't translate this event"
+/// and "we *do* translate it but could not read this payload" into one `None` is what let schema
+/// drift — a RotorHazard or plugin version whose shapes moved — look exactly like a gate that
+/// stopped detecting: the frames arrived, the laps didn't, and nothing anywhere said why.
+#[derive(Debug)]
+pub enum Decoded {
+    /// A frame we translate, decoded into its [`Raw`].
+    Translated(Raw),
+    /// An event this adapter does not translate. RotorHazard broadcasts plenty of them; ignoring
+    /// these is normal and is *not* counted.
+    Untranslated,
+    /// A frame for an event we DO translate whose payload did not match the expected shape. The
+    /// frame is dropped — but loudly: the transport reports it to
+    /// [`RotorHazardAdapter::note_malformed_frame`].
+    Malformed {
+        /// The serde error (or shape problem), for the diagnostic line.
+        detail: String,
+    },
+}
+
+/// Decode a RotorHazard socket event (`event` name + its payload) into a [`Decoded`].
+///
+/// RotorHazard wraps each emit's data in a one-element array; we decode the first element into the
+/// matching `Raw` variant. A decode failure on an event we translate is a *reportable* drop, not a
+/// shrug — see [`Decoded`].
+pub fn decode_socket(event: &str, payload: &Payload) -> Decoded {
+    // Unknown event first: a payload we would never have read cannot be "malformed".
+    if !translates(event) {
+        return Decoded::Untranslated;
+    }
     let value = match payload {
-        Payload::Text(values) => values.first()?.clone(),
-        _ => return None,
+        Payload::Text(values) => match values.first() {
+            Some(value) => value.clone(),
+            // A known event carrying no data at all: RotorHazard always wraps a payload, so this
+            // is a wire-shape fault like any other decode failure.
+            None => {
+                return Decoded::Malformed {
+                    detail: "empty payload array".to_string(),
+                };
+            }
+        },
+        // Binary / legacy-string payloads: RotorHazard sends JSON for every event we translate,
+        // so this is drift too, not an event we chose to skip.
+        other => {
+            return Decoded::Malformed {
+                detail: format!("non-JSON payload ({})", payload_kind(other)),
+            };
+        }
     };
+    /// Decode `value` into `$t`, mapping a serde error onto [`Decoded::Malformed`].
+    macro_rules! decode {
+        ($t:ty, $variant:expr) => {
+            match serde_json::from_value::<$t>(value) {
+                Ok(decoded) => Decoded::Translated($variant(decoded)),
+                Err(error) => Decoded::Malformed {
+                    detail: error.to_string(),
+                },
+            }
+        };
+    }
     match event {
-        "race_status" => serde_json::from_value::<RawRaceStatus>(value)
-            .ok()
-            .map(Raw::RaceStatus),
-        "current_laps" => serde_json::from_value::<RawCurrentLaps>(value)
-            .ok()
-            .map(Raw::CurrentLaps),
-        "pass_record" => serde_json::from_value::<RawPassRecord>(value)
-            .ok()
-            .map(Raw::PassRecord),
-        "node_data" => serde_json::from_value::<RawNodeData>(value)
-            .ok()
-            .map(Raw::NodeData),
-        "enter_and_exit_at_levels" => serde_json::from_value::<RawEnterExitLevels>(value)
-            .ok()
-            .map(Raw::EnterExitLevels),
-        "current_marshal_data" => serde_json::from_value::<RawMarshalData>(value)
-            .ok()
-            .map(Raw::MarshalData),
-        "race_list" => serde_json::from_value::<RawRaceList>(value)
-            .ok()
-            .map(Raw::RaceList),
-        "race_details" => serde_json::from_value::<RawRaceDetails>(value)
-            .ok()
-            .map(Raw::RaceDetails),
-        "heat_data" => serde_json::from_value::<RawHeatData>(value)
-            .ok()
-            .map(Raw::HeatData),
-        "pilot_data" => serde_json::from_value::<RawPilotData>(value)
-            .ok()
-            .map(Raw::PilotData),
+        "race_status" => decode!(RawRaceStatus, Raw::RaceStatus),
+        "current_laps" => decode!(RawCurrentLaps, Raw::CurrentLaps),
+        "pass_record" => decode!(RawPassRecord, Raw::PassRecord),
+        "node_data" => decode!(RawNodeData, Raw::NodeData),
+        "enter_and_exit_at_levels" => decode!(RawEnterExitLevels, Raw::EnterExitLevels),
+        "current_marshal_data" => decode!(RawMarshalData, Raw::MarshalData),
+        "race_list" => decode!(RawRaceList, Raw::RaceList),
+        "race_details" => decode!(RawRaceDetails, Raw::RaceDetails),
+        "heat_data" => decode!(RawHeatData, Raw::HeatData),
+        "pilot_data" => decode!(RawPilotData, Raw::PilotData),
         // The GridFPV plugin's live signal push (D16, Slice 2). Absent on a stock RH.
-        "gridfpv_signal" => serde_json::from_value::<RawGridSignal>(value)
-            .ok()
-            .map(Raw::GridSignal),
+        "gridfpv_signal" => decode!(RawGridSignal, Raw::GridSignal),
         // The GridFPV plugin's native per-node pass (D16, Slice 3). Absent on a stock RH.
-        "gridfpv_pass" => serde_json::from_value::<RawGridPass>(value)
-            .ok()
-            .map(Raw::GridPass),
+        "gridfpv_pass" => decode!(RawGridPass, Raw::GridPass),
+        // Unreachable: `translates` above is the same list. Kept total rather than panicking.
+        _ => Decoded::Untranslated,
+    }
+}
+
+/// Whether `event` is one this adapter translates — the single list [`decode_socket`] keys both
+/// its "not ours" shortcut and its decode table off.
+fn translates(event: &str) -> bool {
+    matches!(
+        event,
+        "race_status"
+            | "current_laps"
+            | "pass_record"
+            | "node_data"
+            | "enter_and_exit_at_levels"
+            | "current_marshal_data"
+            | "race_list"
+            | "race_details"
+            | "heat_data"
+            | "pilot_data"
+            | "gridfpv_signal"
+            | "gridfpv_pass"
+    )
+}
+
+/// Everything one socket-frame handler writes through, cloned once per registered event.
+///
+/// `rust_socketio` wants an owned closure per event and there are a dozen of them, so this bundles
+/// the four shared cells (and the tune-telemetry tap) rather than repeating them at every `.on`.
+#[derive(Clone)]
+struct FrameCtx {
+    /// The pure translator every decoded frame is folded through.
+    adapter: Arc<Mutex<RotorHazardAdapter>>,
+    /// Where the canonical [`Event`]s accumulate until the driver drains them.
+    sink: Arc<Mutex<Vec<Event>>>,
+    /// The newest configured heat id learned from a `heat_data` response.
+    savable_heat: Arc<Mutex<Option<u64>>>,
+    /// RotorHazard's current race-format id, learned from the `race_status` stream.
+    current_format: Arc<Mutex<Option<i64>>>,
+    /// How many nodes the timer has reported (#412) — the `enter_and_exit_at_levels` fallback
+    /// writes here; the dedicated `frequency_data` handler is the primary source.
+    reported_nodes: Arc<Mutex<Option<u32>>>,
+    /// The tune-telemetry tap (#355 S2a) — **read-only from the event path's point of view**: it
+    /// is written to, never read back into a [`Raw`], and nothing it holds can become an `Event`.
+    tap: SignalTap,
+}
+
+/// A short name for a non-`Text` payload, for the malformed-frame diagnostic.
+fn payload_kind(payload: &Payload) -> &'static str {
+    match payload {
+        Payload::Text(_) => "text",
+        Payload::Binary(_) => "binary",
+        _ => "unrecognized",
+    }
+}
+
+/// Decode a RotorHazard socket event into a [`Raw`], or `None` when it is not one we translate
+/// **or** its payload did not decode.
+///
+/// Prefer [`decode_socket`]: this wrapper cannot tell those two apart, and treating them alike is
+/// #400's diagnosability gap. Kept for callers that only want the happy path.
+pub fn raw_from_socket(event: &str, payload: &Payload) -> Option<Raw> {
+    match decode_socket(event, payload) {
+        Decoded::Translated(raw) => Some(raw),
+        Decoded::Untranslated | Decoded::Malformed { .. } => None,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tune telemetry (#355, slice 2a) — the ephemeral per-node signal tap.
+// ---------------------------------------------------------------------------------------------
+
+/// The widest per-node store a tuning snapshot will ever hold.
+///
+/// RotorHazard tops out at 8 seats today. The cap is not about RH: it bounds the store against a
+/// drifting/hostile frame whose arrays claim hundreds of nodes, so "cost per tick is O(nodes)"
+/// stays a fact rather than a hope.
+const MAX_TUNE_NODES: usize = 64;
+
+/// A RotorHazard `heartbeat` frame (`BaseHardwareInterface.get_heartbeat_json`, 10 Hz from boot).
+///
+/// **Deliberately not a [`Raw`] variant, and deliberately private.** `Raw` is the *only* input to
+/// [`RotorHazardAdapter::translate`], which is the *only* thing that mints an [`Event`] — so
+/// keeping the heartbeat out of `Raw` is what makes "heartbeat data can never become a
+/// `SignalChunk`, a `SignalHistory`, or reach a log" a **structural** guarantee rather than a
+/// convention a later refactor can quietly break. There is no function anywhere that takes a
+/// `RawHeartbeat` and returns an `Event`, and none can be written without first adding a `Raw`
+/// variant on purpose.
+///
+/// `crossing_flag` is read as raw JSON because RotorHazard builds have wired it both as a bool and
+/// as a 0/1 int; see [`truthy`].
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct RawHeartbeat {
+    /// Per-node live RSSI (filtered ADC counts), array index = node index.
+    #[serde(default)]
+    current_rssi: Vec<f32>,
+    /// Per-node tuned frequency in MHz; `0` on an untuned node.
+    #[serde(default)]
+    frequency: Vec<i64>,
+    /// Per-node detector loop time in microseconds — the "is this timer keeping up?" readout.
+    #[serde(default)]
+    loop_time: Vec<i64>,
+    /// Per-node crossing state at this heartbeat (bool on stock RH; some builds send 0/1).
+    #[serde(default)]
+    crossing_flag: Vec<serde_json::Value>,
+}
+
+/// A RotorHazard `node_crossing_change` frame: one node's crossing **edge**.
+///
+/// Not a [`Raw`] variant either, for the same structural reason as [`RawHeartbeat`].
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawNodeCrossing {
+    /// Which node transitioned.
+    node_index: usize,
+    /// The new crossing state (bool, or 0/1 on some builds — see [`truthy`]).
+    #[serde(default)]
+    crossing_flag: serde_json::Value,
+}
+
+/// A RotorHazard `node_enter_at_level` / `node_exit_at_level` frame: **one** node's threshold,
+/// broadcast on its own (`RHUI.emit_enter_at_level` / `emit_exit_at_level`).
+///
+/// This is the **capture echo** (#355). RotorHazard does not answer `set_enter_at_level` at all,
+/// but when a *capture* (`cap_enter_at_btn`) finishes its sampling window, `server.py`'s
+/// `new_enter_or_exit_at_callback` calls `calibration.set_*_at_level` **and then**
+/// `rhui.emit_*_at_level(node)` — so the captured level arrives unsolicited, roughly three seconds
+/// after the button, without anyone asking for it. Verified byte-identical on v4.3.0 and v4.4.0.
+///
+/// Folded into the tune tap so it reaches the Tune page as `NodeSignal::enter_at`/`exit_at` on the
+/// very feed the page already polls. Not a [`Raw`] variant, for the same structural reason as
+/// [`RawHeartbeat`]: a threshold is an observation about the timer, never an [`Event`].
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawNodeLevel {
+    /// Which node the level belongs to, 0-based (RotorHazard's `seat_index`).
+    node_index: usize,
+    /// The level itself. RotorHazard sends an integer; read as `f32` because that is what the tap
+    /// and `NodeSignal` carry, and `enter_and_exit_at_levels` is float-shaped on the same wire.
+    level: f32,
+}
+
+/// RotorHazard's socket event that **starts** an enter-threshold capture (#355) —
+/// `server.py::on_cap_enter_at_btn`, identical on v4.3.0 and v4.4.0.
+pub const CAP_ENTER_EVENT: &str = "cap_enter_at_btn";
+
+/// RotorHazard's socket event that **starts** an exit-threshold capture (#355) —
+/// `server.py::on_cap_exit_at_btn`, identical on v4.3.0 and v4.4.0.
+pub const CAP_EXIT_EVENT: &str = "cap_exit_at_btn";
+
+/// How long RotorHazard samples for once a capture starts —
+/// `BaseHardwareInterface::CAP_ENTER_EXIT_AT_MILLIS`, `3000` on v4.3.0 and v4.4.0 alike.
+///
+/// The window opens when the emit lands, not when the pass happens, so this is the interval the RD
+/// has to fly through the gate. Published because the Director hands it to the console, which
+/// counts it down rather than hardcoding a number that could drift from RotorHazard's.
+pub const CAPTURE_WINDOW_MILLIS: u32 = 3_000;
+
+/// The body of a capture emit: `{"node_index": <0-based seat>}`.
+///
+/// A named builder rather than an inline `json!` at each call site so the **key** is asserted in
+/// one place. It is `node_index` here and `node` on `set_enter_at_level` — the same socket, the
+/// same node, two different key names — and RotorHazard answers a wrong key with a swallowed
+/// `KeyError` and a success. See [`RotorHazardConnection::capture_enter_at_level`].
+fn capture_payload(node: u64) -> serde_json::Value {
+    json!({ "node_index": node })
+}
+
+/// Whether RotorHazard's own `heat_data` really seats `pilot_id` on `node_index` (#423).
+///
+/// A seat "holds" only when the slot at that node exists **and** carries exactly the pilot the
+/// preceding `alter_heat` asked for. A missing slot, an empty slot, or a *different* pilot are all
+/// failures — the last one matters because a concurrent edit on RotorHazard's own screen can seat
+/// somebody else there, and "some pilot is present" would happily call that a success.
+///
+/// Empty is `Some(0)` from a v4.3.0 timer and `None` from a v4.4.0 one; [`HeatSeat`] has already
+/// collapsed both to `None`, which is the whole reason this compares against `Some(pilot_id)` rather
+/// than testing a sentinel here.
+fn seat_holds(
+    seated: &std::collections::HashMap<usize, HeatSeat>,
+    node_index: usize,
+    pilot_id: i64,
+) -> bool {
+    seated.get(&node_index).and_then(|s| s.pilot_id) == Some(pilot_id)
+}
+
+/// Whether **every** intended `(node_index, pilot_id, callsign)` seat holds — see [`seat_holds`].
+///
+/// All-or-nothing on purpose. A partially seated heat is not a partial success: RotorHazard's pass
+/// gate dismisses every crossing on the unseated nodes, so those pilots lose their entire run while
+/// the rest race normally — a far worse outcome than practice mode, which keeps every lap and costs
+/// only the dense RSSI trace.
+fn seating_holds(
+    seated: &std::collections::HashMap<usize, HeatSeat>,
+    intended: &[(usize, i64, &str)],
+) -> bool {
+    intended
+        .iter()
+        .all(|(node_index, pilot_id, _)| seat_holds(seated, *node_index, *pilot_id))
+}
+
+/// Which pilot in a `pilot_data` roster is the one a preceding `add_pilot` just created — the id
+/// that is in `roster` but not in `known`. `None` when the roster adds nothing we did not have.
+///
+/// **Identity by absence, not by magnitude** (#451). This used to be "the highest id above a
+/// floor", with the floor guessed as `0` whenever the pre-seating roster read timed out — and a
+/// floor of `0` admits the RD's entire roster, so a delayed `pilot_data` listing only pre-existing
+/// pilots handed back the RD's highest pilot as "the one we just made". The caller then renamed a
+/// real pilot to a GridFPV callsign and seated it, and every check downstream agreed, because the
+/// pilot it was asked about genuinely was seated.
+///
+/// Verified against RotorHazard 4.3.0 (`server.py:1363`) and 4.4.0 (`server.py:1320`), which are
+/// identical: `on_add_pilot(*args)` **discards its payload**, calls `RHData.add_pilot()` with no
+/// `init`, and then `emit_pilot_data()` with no `noself` — so the new pilot's broadcast does come
+/// back to us, but it arrives as the *whole* roster with nothing marking which row is new, and
+/// there is no way to name the pilot at creation time (`RHData.add_pilot` accepts
+/// `init={'callsign': …}`, but the socket handler never passes one — `RHData.py:895`). The pilot is
+/// created as `~Callsign <id>`, a name that is itself localised through `self.__`, so matching on
+/// it would be a guess in a different costume. Diffing the roster is the only identification that
+/// depends on nothing but what RotorHazard actually tells us.
+///
+/// When several unknown ids appear at once (the RD adding pilots on their own screen while we
+/// seat) the highest is taken — but every id is then recorded as known, so no id is ever handed
+/// out twice, and the pilots we did not create are simply left alone.
+fn added_pilot(known: &std::collections::BTreeSet<i64>, roster: &[i64]) -> Option<i64> {
+    roster
+        .iter()
+        .copied()
+        .filter(|id| !known.contains(id))
+        .max()
+}
+
+/// Read a RotorHazard crossing flag that may be wired as a bool **or** as a 0/1 number.
+fn truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|v| v != 0.0),
+        _ => false,
+    }
+}
+
+/// What happened to a tune-telemetry frame — the observable that makes the pre-parse gate
+/// *testable* rather than merely intended.
+///
+/// [`Gated`](TapOutcome::Gated) is returned **before the payload is looked at**, so a test that
+/// feeds a deliberately unreadable payload with the subscription closed and gets `Gated` (rather
+/// than [`Unreadable`](TapOutcome::Unreadable)) has proved the parse never ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapOutcome {
+    /// No subscription is open: the frame was dropped **without being deserialized**.
+    Gated,
+    /// The frame was deserialized and folded into the per-node store.
+    Folded,
+    /// A subscription is open but the payload did not match the expected shape. Dropped quietly —
+    /// unlike the [`Raw`] frames, nothing downstream depends on this, so a drifting heartbeat costs
+    /// a blank readout, not a missing lap.
+    Unreadable,
+}
+
+/// Fold a `heartbeat` frame into `tap`, **checking the subscription gate before parsing**.
+///
+/// The order of the two statements below is the whole point of this function existing separately
+/// from its `.on("heartbeat", …)` closure: `capturing()` is a relaxed load on a cold `bool`, and it
+/// stands in front of a `from_value` that allocates four `Vec`s — ten times a second, a hundred
+/// with RotorHazard's frequency scanner on, on the single socket callback thread that also parses
+/// `current_laps` (#392).
+fn tap_heartbeat(tap: &SignalTap, payload: &Payload) -> TapOutcome {
+    if !tap.capturing() {
+        return TapOutcome::Gated;
+    }
+    match first_text(payload).and_then(|v| serde_json::from_value::<RawHeartbeat>(v).ok()) {
+        Some(hb) => {
+            tap.note_heartbeat(&hb);
+            TapOutcome::Folded
+        }
+        None => TapOutcome::Unreadable,
+    }
+}
+
+/// Fold a `node_crossing_change` edge into `tap`, gated before parsing exactly as
+/// [`tap_heartbeat`] is.
+fn tap_crossing(tap: &SignalTap, payload: &Payload) -> TapOutcome {
+    if !tap.capturing() {
+        return TapOutcome::Gated;
+    }
+    match first_text(payload).and_then(|v| serde_json::from_value::<RawNodeCrossing>(v).ok()) {
+        Some(change) => {
+            tap.note_crossing(&change);
+            TapOutcome::Folded
+        }
+        None => TapOutcome::Unreadable,
+    }
+}
+
+/// Fold a single-node `node_enter_at_level` / `node_exit_at_level` broadcast into `tap`, gated
+/// before parsing exactly as [`tap_heartbeat`] is.
+///
+/// `enter` selects which threshold the frame carries — the two RotorHazard events have identical
+/// payloads and differ only in name, so one folder serves both rather than two that can drift.
+fn tap_captured_level(tap: &SignalTap, payload: &Payload, enter: bool) -> TapOutcome {
+    if !tap.capturing() {
+        return TapOutcome::Gated;
+    }
+    match first_text(payload).and_then(|v| serde_json::from_value::<RawNodeLevel>(v).ok()) {
+        Some(frame) => {
+            tap.note_level(frame.node_index, frame.level, enter);
+            TapOutcome::Folded
+        }
+        None => TapOutcome::Unreadable,
+    }
+}
+
+/// The first element of a Socket.IO text payload (RotorHazard wraps every emit in a one-element
+/// array), cloned out for deserialization.
+fn first_text(payload: &Payload) -> Option<serde_json::Value> {
+    match payload {
+        Payload::Text(values) => values.first().cloned(),
         _ => None,
+    }
+}
+
+/// The **latest** signal readings for one RotorHazard node — last-value-wins, no history.
+///
+/// Everything a tuning UI shows for a node, in one flat record. Nothing here is a lap, a pass or
+/// an event: it is a live readout, overwritten on the next frame and forgotten when the
+/// [`SignalTap`]'s subscription lapses.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeTick {
+    /// Whether RotorHazard has ever reported this node. An **unseated** node still reports — "is
+    /// this node even alive?" is half the diagnostic, so a tuning snapshot must include it.
+    pub seen: bool,
+    /// Live RSSI from the newest `heartbeat` (filtered ADC counts).
+    pub rssi: Option<f32>,
+    /// The node's tuned frequency in MHz; `None` when RotorHazard reports `0` (untuned).
+    pub frequency_mhz: Option<u16>,
+    /// The detector's loop time in microseconds.
+    pub loop_time_micros: Option<u32>,
+    /// The crossing state as of the newest frame (heartbeat level, or a `node_crossing_change` edge).
+    pub crossing: bool,
+    /// **Sticky**: any crossing observed since the last [`SignalTap::take`]. The Director decimates
+    /// to ~5 Hz, so a crossing that opens and closes between two samples would otherwise vanish;
+    /// this is what carries the edge through the decimation.
+    pub crossed: bool,
+    /// `node_data.node_peak_rssi` — the node's running peak.
+    pub node_peak_rssi: Option<f32>,
+    /// `node_data.node_nadir_rssi` — the node's running nadir.
+    pub node_nadir_rssi: Option<f32>,
+    /// `node_data.pass_peak_rssi` — the peak of the most recent pass.
+    pub pass_peak_rssi: Option<f32>,
+    /// `node_data.pass_nadir_rssi` — the nadir of the most recent pass.
+    pub pass_nadir_rssi: Option<f32>,
+    /// `node_data.debug_pass_count` — how many passes this node has detected.
+    pub pass_count: Option<u32>,
+    /// The node's enter threshold, from `enter_and_exit_at_levels`.
+    pub enter_at: Option<f32>,
+    /// The node's exit threshold, from `enter_and_exit_at_levels`.
+    pub exit_at: Option<f32>,
+}
+
+/// The **on-demand, in-memory** per-node signal tap the Tune page's telemetry is read from (#355).
+///
+/// Two pieces, both load-bearing:
+///
+/// * **A relaxed atomic gate** ([`capturing`](Self::capturing)). `rust_socketio` binds every
+///   handler at `ClientBuilder` time, so the `heartbeat` handler is *always* registered and there
+///   is no "unsubscribe" to reach for. The gate is therefore checked **before** the frame is
+///   deserialized — a `load(Relaxed)` on a cold `bool` in front of a `serde_json::from_value` that
+///   allocates four `Vec`s, ten times a second, on the single socket callback thread that also
+///   parses `current_laps`. That thread is the #392 hazard, and it is the whole reason the gate is
+///   here rather than an `if wanted { … }` after the parse.
+/// * **A bounded, last-value-wins store.** One [`NodeTick`] per node, overwritten in place. There
+///   is no ring here: the *history* is the Director's business (it decimates onto its own
+///   cadence), so the transport's cost per frame is O(nodes) and independent of how long the Tune
+///   page has been open.
+///
+/// Nothing in this type produces an [`Event`]. See [`RawHeartbeat`] for why that is structural.
+#[derive(Clone, Default)]
+pub struct SignalTap {
+    /// The pre-parse subscription gate — a **hint**, not the authority. Relaxed throughout: it
+    /// guards no other memory, and a frame landing on either side of the flip is equally correct
+    /// *as far as the parse is concerned*. Whether the resulting fold may be **stored** is decided
+    /// separately, by [`TapStore::open`] under the store lock (#452).
+    capture: Arc<AtomicBool>,
+    /// The subscription flag and the readings, behind one lock — see [`TapStore`].
+    store: Arc<Mutex<TapStore>>,
+}
+
+/// The tap's mutable state: the authoritative subscription flag **and** the readings it guards,
+/// behind a single lock (#452).
+///
+/// They are one datum, not two. Before this, `capturing()` was an atomic checked outside the lock
+/// and the readings were a `Mutex<Vec<NodeTick>>` cleared inside it, so a socket-callback thread
+/// could pass the gate, get descheduled, and have the driver tick close the subscription and empty
+/// the store underneath it — then wake up and write its frame into the supposedly-empty store. The
+/// next `set_signal_capture(true)` session's first `take()` then reported the *previous* session's
+/// RSSI, crossing and `crossed` flags as current. Deciding "is the subscription open?" and writing
+/// the frame under one lock is what makes "a lapsed Tune page leaves nothing behind" an invariant
+/// rather than a likelihood.
+#[derive(Debug, Default)]
+struct TapStore {
+    /// Whether the subscription is open, as decided **under this lock**. Kept in lockstep with
+    /// [`SignalTap::capture`], which exists only to answer the pre-parse gate without locking.
+    open: bool,
+    /// Latest reading per node index. Grows to the widest array a frame has reported, capped at
+    /// [`MAX_TUNE_NODES`].
+    nodes: Vec<NodeTick>,
+}
+
+impl SignalTap {
+    /// Whether a subscription is currently open — the check every gated handler makes **first**.
+    ///
+    /// A lock-free *hint*, deliberately: its job is to skip the deserialization of a frame nobody
+    /// wants (the #392 hazard), and being one instant stale there costs nothing. It is **not** the
+    /// permission to write — [`widen`](Self::widen) re-checks under the store lock (#452).
+    pub fn capturing(&self) -> bool {
+        self.capture.load(Ordering::Relaxed)
+    }
+
+    /// Open or close the subscription, returning the **previous** state so a caller can act on the
+    /// edge. Closing empties the store: a lapsed Tune page must leave nothing behind.
+    ///
+    /// The flag flip and the clear happen under **one** acquisition of the store lock, so a
+    /// concurrent fold either completes entirely before the close (and is then cleared) or observes
+    /// `open == false` in [`widen`](Self::widen) and writes nothing. There is no window between
+    /// them for an in-flight frame to land in (#452).
+    fn set_capturing(&self, on: bool) -> bool {
+        let mut store = self.store.lock().expect("signal-tap lock");
+        let was = store.open;
+        store.open = on;
+        if was && !on {
+            store.nodes.clear();
+        }
+        // Publish the hint while still holding the lock, so it can never advertise "open" for a
+        // store this call is about to empty.
+        self.capture.store(on, Ordering::Relaxed);
+        was
+    }
+
+    /// The current per-node readings, clearing the sticky [`NodeTick::crossed`] flags so the next
+    /// read reports only crossings seen since this one.
+    fn take(&self) -> Vec<NodeTick> {
+        let mut store = self.store.lock().expect("signal-tap lock");
+        let snapshot = store.nodes.clone();
+        for node in store.nodes.iter_mut() {
+            node.crossed = false;
+        }
+        snapshot
+    }
+
+    /// Widen the store to `len` nodes (capped) and return the guard to write through — or `None`
+    /// when the subscription has closed since the caller passed the pre-parse gate.
+    ///
+    /// This `None` is the whole of the #452 fix: the fold is abandoned rather than resurrecting a
+    /// closed session's readings. Every `note_*` fold goes through here, so none of them can write
+    /// to a closed tap.
+    fn widen(&self, len: usize) -> Option<std::sync::MutexGuard<'_, TapStore>> {
+        let mut store = self.store.lock().expect("signal-tap lock");
+        if !store.open {
+            return None;
+        }
+        let want = len.min(MAX_TUNE_NODES);
+        if store.nodes.len() < want {
+            store.nodes.resize(want, NodeTick::default());
+        }
+        Some(store)
+    }
+
+    /// Fold a `heartbeat` frame in. Called **only** when [`capturing`](Self::capturing) is true.
+    fn note_heartbeat(&self, hb: &RawHeartbeat) {
+        let len = hb
+            .current_rssi
+            .len()
+            .max(hb.frequency.len())
+            .max(hb.loop_time.len())
+            .max(hb.crossing_flag.len());
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
+            let mut touched = false;
+            if let Some(&rssi) = hb.current_rssi.get(index) {
+                node.rssi = Some(rssi);
+                touched = true;
+            }
+            if let Some(&mhz) = hb.frequency.get(index) {
+                // RotorHazard reports `0` for a node tuned to nothing; that is an absence, not a
+                // 0 MHz channel, and the panel must be able to say so.
+                node.frequency_mhz = u16::try_from(mhz).ok().filter(|mhz| *mhz != 0);
+                touched = true;
+            }
+            if let Some(&loop_time) = hb.loop_time.get(index) {
+                node.loop_time_micros = u32::try_from(loop_time).ok();
+                touched = true;
+            }
+            if let Some(flag) = hb.crossing_flag.get(index) {
+                let crossing = truthy(flag);
+                node.crossing = crossing;
+                node.crossed |= crossing;
+                touched = true;
+            }
+            node.seen |= touched;
+        }
+    }
+
+    /// Fold a `node_crossing_change` edge in. Called only while capturing.
+    fn note_crossing(&self, change: &RawNodeCrossing) {
+        if change.node_index >= MAX_TUNE_NODES {
+            return;
+        }
+        let Some(mut store) = self.widen(change.node_index + 1) else {
+            return;
+        };
+        if let Some(node) = store.nodes.get_mut(change.node_index) {
+            let crossing = truthy(&change.crossing_flag);
+            node.crossing = crossing;
+            node.crossed |= crossing;
+            node.seen = true;
+        }
+    }
+
+    /// Fold a `node_data` frame's peak / nadir / pass-count readouts in.
+    ///
+    /// `heartbeat` carries **only** rssi / frequency / loop-time / crossing, so every peak, nadir
+    /// and pass count a tuning panel shows comes from here. Both feeds are needed; neither is a
+    /// subset of the other. The frame is parsed regardless (it is a [`Raw`] the adapter already
+    /// translates), so this adds no parse — only the fold, which is itself gated.
+    fn note_node_data(&self, data: &RawNodeData) {
+        let len = data
+            .node_peak_rssi
+            .len()
+            .max(data.node_nadir_rssi.len())
+            .max(data.pass_peak_rssi.len())
+            .max(data.pass_nadir_rssi.len())
+            .max(data.debug_pass_count.len());
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
+            let mut touched = false;
+            for (slot, source) in [
+                (&mut node.node_peak_rssi, &data.node_peak_rssi),
+                (&mut node.node_nadir_rssi, &data.node_nadir_rssi),
+                (&mut node.pass_peak_rssi, &data.pass_peak_rssi),
+                (&mut node.pass_nadir_rssi, &data.pass_nadir_rssi),
+            ] {
+                if let Some(&value) = source.get(index) {
+                    *slot = Some(value);
+                    touched = true;
+                }
+            }
+            if let Some(&count) = data.debug_pass_count.get(index) {
+                node.pass_count = u32::try_from(count).ok();
+                touched = true;
+            }
+            node.seen |= touched;
+        }
+    }
+
+    /// Fold an `enter_and_exit_at_levels` frame's per-node thresholds in.
+    ///
+    /// Tuning needs these with **no event and no armed heat**, which is exactly what the app
+    /// layer's lineup remap cannot provide (it drops every node outside the armed heat), so the
+    /// tap reads them straight off the wire.
+    fn note_levels(&self, levels: &RawEnterExitLevels) {
+        let len = levels
+            .enter_at_levels
+            .len()
+            .max(levels.exit_at_levels.len());
+        let Some(mut store) = self.widen(len) else {
+            return;
+        };
+        for (index, node) in store.nodes.iter_mut().enumerate() {
+            if let Some(&enter) = levels.enter_at_levels.get(index) {
+                node.enter_at = Some(enter);
+            }
+            if let Some(&exit) = levels.exit_at_levels.get(index) {
+                node.exit_at = Some(exit);
+            }
+        }
+    }
+
+    /// Fold **one** node's threshold in — the single-node `node_enter_at_level` /
+    /// `node_exit_at_level` broadcast a finished *capture* fires (#355).
+    ///
+    /// Widens the store the same way the array-shaped frames do, so a capture on a node the tap has
+    /// not otherwise heard from still lands rather than being dropped for being out of range.
+    fn note_level(&self, index: usize, level: f32, enter: bool) {
+        let Some(mut store) = self.widen(index + 1) else {
+            return;
+        };
+        let Some(node) = store.nodes.get_mut(index) else {
+            return;
+        };
+        if enter {
+            node.enter_at = Some(level);
+        } else {
+            node.exit_at = Some(level);
+        }
     }
 }
 
@@ -113,13 +785,278 @@ pub struct PluginHello {
     /// The RHAPI version the plugin reports (e.g. `"1.4"`).
     #[serde(default)]
     pub rhapi_version: String,
-    /// Capabilities the plugin declares it implements (e.g. `["hello"]`; later `"live_signal"`,
-    /// `"clean_control"`, `"recalc"`). The Director keys transport decisions off these.
+    /// Capabilities the plugin declares it implements (e.g. `["hello"]`, `"live_signal"`,
+    /// [`CAP_LIVE_PASS`]; later `"clean_control"`, `"recalc"`). The Director keys transport
+    /// decisions off these — see [`PluginHello::advertises`].
     #[serde(default)]
     pub capabilities: Vec<String>,
     /// The plugin's node/seat count.
     #[serde(default)]
     pub node_count: u32,
+    /// The id of the plugin's **Grid-owned race format** row (D16, S3b / #404), if it could be
+    /// created. `None` from an older plugin build that has no such concept, and `None` **with**
+    /// [`grid_format_error`](Self::grid_format_error) set when this build tried and failed.
+    #[serde(default)]
+    pub grid_format_id: Option<i64>,
+    /// The plugin's name for that format row (`"GridFPV"`), for diagnostics an RD can act on.
+    #[serde(default)]
+    pub grid_format_name: Option<String>,
+    /// Why the plugin could not create its owned race format at load, if it could not. Announced
+    /// through the [`crate::diag`] sink: a timer whose race decisions were not neutralised is
+    /// exactly #403, and it must never be a silent condition.
+    #[serde(default)]
+    pub grid_format_error: Option<String>,
+    /// The plugin's **min-lap neutralisation report** (#407): what it found RotorHazard's own
+    /// min-lap filter set to, and what it reads now after zeroing it.
+    ///
+    /// `None` from a plugin build older than the one that does this (the field timer still runs
+    /// v0.1.0), which is not an error — it means the Director must do the job itself over the
+    /// socket. See [`RotorHazardConnection::ensure_min_lap_neutral`].
+    #[serde(default)]
+    pub min_lap: Option<MinLapReport>,
+}
+
+impl PluginHello {
+    /// Whether the plugin advertised `capability` in its handshake.
+    pub fn advertises(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|c| c == capability)
+    }
+}
+
+/// The plugin capability that makes it the **authoritative pass source** (#389): it emits
+/// `gridfpv_pass` natively from `RACE_LAP_RECORDED`. The plugin earns this with a load-time
+/// self-check and omits it when its lap atom is unreadable, so its presence in the handshake — and
+/// nothing else — decides whether the adapter takes plugin passes or RotorHazard's `current_laps`.
+pub const CAP_LIVE_PASS: &str = "live_pass";
+
+/// The GridFPV plugin's **min-lap report**, carried on both `gridfpv_hello_ack` (the load-time
+/// neutralisation) and `gridfpv_format_ack` (the per-stage re-assertion) — #407.
+///
+/// RotorHazard runs its own minimum-lap rule underneath GridFPV's, and its behaviour flag can
+/// **discard** a sub-minimum crossing rather than merely flag it. A discarded crossing never
+/// reaches GridFPV at all, so GridFPV's own per-round floor (D26) never gets to run on it and
+/// #397's rejected-crossing tone never fires — the crossing an RD most needs to hear about is
+/// exactly the one the timer threw away.
+///
+/// `*_was` are what the plugin found the **first** time it touched that server, not on this call:
+/// they are the record of the setting GridFPV displaced, and re-reading them after the write would
+/// only ever report GridFPV's own zero back.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MinLapReport {
+    /// Whether RotorHazard's filter is confirmed neutral — the plugin re-reads after writing
+    /// rather than trusting the write.
+    pub ok: bool,
+    /// RotorHazard's `MinLapSec` as first found (seconds; RH's own default is 10).
+    #[serde(default)]
+    pub secs_was: Option<i64>,
+    /// RotorHazard's `TIMING`/`MinLapBehavior` as first found (0 = highlight, non-zero = discard).
+    #[serde(default)]
+    pub behavior_was: Option<i64>,
+    /// What `MinLapSec` reads now, after the write and the confirming re-read.
+    #[serde(default)]
+    pub secs_now: Option<i64>,
+    /// What `MinLapBehavior` reads now, same.
+    #[serde(default)]
+    pub behavior_now: Option<i64>,
+    /// Why it could not be neutralised, when `ok` is false.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The plugin capability that says the plugin **neutralises RotorHazard's own min-lap filter**
+/// (#407) and reports what it found. Absent from plugin builds older than v0.4.0 — the Director
+/// then does it over the socket instead, and says so.
+pub const CAP_MIN_LAP_NEUTRAL: &str = "min_lap_neutral";
+
+/// The min-lap floor GridFPV applies to a RotorHazard timer: **none**.
+///
+/// This is GridFPV's value, stated in GridFPV's own source. It is never derived from what the
+/// timer happened to be set to — D27: a value read from a timer is evidence about the timer, not
+/// an input to a decision. GridFPV's *real* min-lap rule is the per-round floor of D26, enforced
+/// on every live fold (#409) and reversible from marshaling; the timer's job is to report every
+/// crossing so that rule has something to run on.
+pub const MIN_LAP_NEUTRAL_SECS: i64 = 0;
+
+/// The min-lap **behaviour** GridFPV applies: `0`, RotorHazard's "highlight, don't discard".
+///
+/// Belt-and-braces with [`MIN_LAP_NEUTRAL_SECS`]: either alone neutralises the filter today, but
+/// they are independent settings on two independent RotorHazard screens (an option row and a
+/// server-config item), and GridFPV must not depend on the RD leaving the other one alone.
+pub const MIN_LAP_BEHAVIOR_HIGHLIGHT: i64 = 0;
+
+/// How long [`ensure_min_lap_neutral`](RotorHazardConnection::ensure_min_lap_neutral) waits for
+/// RotorHazard's `min_lap` frame — both for the initial read and for the confirming re-read.
+///
+/// Short: this is a `load_data` against a socket that has already answered several others, and it
+/// runs once per connection at handshake, before any heat is armed. A timeout is not fatal, it is
+/// *loud* — the RD is told the filter could not be read.
+const MIN_LAP_READBACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How GridFPV neutralised RotorHazard's min-lap filter on this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum MinLapRoute {
+    /// Nothing has been attempted yet on this connection.
+    Unattempted,
+    /// The GridFPV plugin did it in-process through RHAPI (`db.option_set` +
+    /// `config.set`) — the preferred route, and the only one that also re-asserts per stage.
+    Plugin,
+    /// The Director did it over the socket (`set_min_lap` / `set_min_lap_behavior`), because the
+    /// timer's plugin is older than [`CAP_MIN_LAP_NEUTRAL`] or its own attempt failed.
+    Socket,
+}
+
+/// **GridFPV's record of what it did to a timer's min-lap filter** (#407, D27).
+///
+/// D27's rule for a value GridFPV pushes onto hardware: writing to a timer is *applying*, not
+/// storing, and what GridFPV decided must be recorded on GridFPV's side rather than read back off
+/// the timer as truth. So this record separates the two halves explicitly:
+///
+/// * `found_*` is **evidence about the timer** — what the RD had it set to, captured once, before
+///   GridFPV wrote anything. It is what an RD needs in order to put their timer back, and it is
+///   never promoted into a GridFPV setting.
+/// * `applied_*` is **GridFPV's decision** — the constants above, which are the same on every
+///   timer GridFPV drives and are readable from GridFPV's source without a timer attached.
+///
+/// `neutral` is the only bit that gates anything, and it is set from a **confirming re-read**, not
+/// from a successful write.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MinLapRecord {
+    /// Which route got there (or `Unattempted`).
+    pub route: MinLapRoute,
+    /// `MinLapSec` as first observed on this timer, before GridFPV wrote anything. `None` if it
+    /// could never be read — which is itself the loud case.
+    pub found_secs: Option<i64>,
+    /// `TIMING`/`MinLapBehavior` as first observed, same.
+    pub found_behavior: Option<i64>,
+    /// What GridFPV applied — always [`MIN_LAP_NEUTRAL_SECS`].
+    pub applied_secs: i64,
+    /// What GridFPV applied — always [`MIN_LAP_BEHAVIOR_HIGHLIGHT`].
+    pub applied_behavior: i64,
+    /// Whether the timer is **confirmed** to pass every crossing through to GridFPV.
+    pub neutral: bool,
+    /// Why not, when `neutral` is false.
+    pub error: Option<String>,
+}
+
+impl Default for MinLapRecord {
+    fn default() -> Self {
+        Self {
+            route: MinLapRoute::Unattempted,
+            found_secs: None,
+            found_behavior: None,
+            applied_secs: MIN_LAP_NEUTRAL_SECS,
+            applied_behavior: MIN_LAP_BEHAVIOR_HIGHLIGHT,
+            neutral: false,
+            error: None,
+        }
+    }
+}
+
+impl MinLapRecord {
+    /// Record the timer's own values, **once**. Later observations are of GridFPV's own writes and
+    /// would erase the only note of what the RD had — the same first-sighting discipline
+    /// `OwnedFormat`'s displaced-format capture uses.
+    fn observe(&mut self, secs: Option<i64>, behavior: Option<i64>) {
+        if self.found_secs.is_none() && self.found_behavior.is_none() {
+            self.found_secs = secs;
+            self.found_behavior = behavior;
+        }
+    }
+}
+
+/// Whether a `(MinLapSec, MinLapBehavior)` pair lets **every** crossing through to GridFPV.
+///
+/// From `RHRace.py::pass_record_callback`, identical on v4.3.0 and v4.4.0:
+/// `if lap_ok_flag and lap_time < (min_lap * 1000) { … if min_lap_behavior != 0 { lap_ok_flag = false } }`
+/// — so a zero floor makes the test unreachable and a zero behaviour keeps the crossing even when
+/// it fires. GridFPV requires *both*, because either can be moved from RotorHazard's UI alone.
+fn min_lap_is_neutral(secs: Option<i64>, behavior: Option<i64>) -> bool {
+    secs == Some(MIN_LAP_NEUTRAL_SECS) && behavior == Some(MIN_LAP_BEHAVIOR_HIGHLIGHT)
+}
+
+/// Per-connection min-lap state: GridFPV's record, plus the socket-route scratch space.
+#[derive(Debug, Default)]
+struct MinLapState {
+    /// GridFPV's record — the thing the rest of the system reads.
+    record: MinLapRecord,
+    /// The most recent `min_lap` frame RotorHazard sent, as `(min_lap, min_lap_behavior)`.
+    /// Cleared before each request so a stale frame cannot answer a fresh question.
+    observed: Option<(i64, i64)>,
+    /// One-shot latch: the "could not be neutralised" warning has already been announced on this
+    /// connection. Announced once, not once per heat — a per-stage repeat would bury it.
+    announced: bool,
+}
+
+/// Parse RotorHazard's `min_lap` frame into `(min_lap_secs, min_lap_behavior)`.
+///
+/// `RHUI.emit_min_lap` sends `{min_lap, min_lap_behavior}` on v4.3.0 and adds `min_first_crossing`
+/// on v4.4.0 — an extra key GridFPV ignores, which is why this reads the two fields it needs
+/// rather than deserializing a struct. Both values come from RotorHazard's own `get_optionInt` /
+/// `get_item_int`, so they are JSON numbers; a numeric **string** is accepted too, because a
+/// never-set config item can round-trip through RotorHazard's JSON config file as one.
+fn parse_min_lap_frame(value: &serde_json::Value) -> Option<(i64, i64)> {
+    fn field(value: &serde_json::Value, key: &str) -> Option<i64> {
+        let raw = value.get(key)?;
+        raw.as_i64()
+            .or_else(|| raw.as_f64().map(|f| f as i64))
+            .or_else(|| raw.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+    }
+    Some((field(value, "min_lap")?, field(value, "min_lap_behavior")?))
+}
+
+/// The plugin capability that makes **Grid own its RotorHazard race format** (#404, #405): the
+/// plugin creates (find-or-create, once) a `GridFPV` format row with every RH-side race decision
+/// neutralised, and selects it on request. Its presence is what switches
+/// [`prepare_instant_start`](RotorHazardConnection::prepare_instant_start) from mutating the race
+/// director's own active format to selecting Grid's.
+pub const CAP_OWNED_FORMAT: &str = "owned_format";
+
+/// How long [`prepare_instant_start`](RotorHazardConnection::prepare_instant_start) waits for the
+/// plugin's `gridfpv_format_ack` the **first** time it selects the Grid-owned format on a
+/// connection. Only the first selection blocks: the Director asks at the heat's Stage transition
+/// (pre-Armed, seconds before "go"), so a short confirm there costs nothing, and every later call
+/// is fire-and-forget because the format is already proven. On a timeout the fallback engages and
+/// is announced — Grid never races on an unconfirmed neutralisation.
+const FORMAT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The plugin's `gridfpv_format_ack` — its reply to a `gridfpv_select_format` request (D16, S3b).
+///
+/// Carries the outcome of the plugin's find-or-create-and-select of its `GridFPV` race format:
+/// which row it is, whether this call created or repaired it, and the race director's own format
+/// that Grid displaced (so handing the timer back is a known id, not a guess). `ok: false` with
+/// `error` set when the plugin could not get the timer into a neutral state — which the Director
+/// announces and then falls back from.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FormatAck {
+    /// Whether the Grid-owned format is now RotorHazard's current race format.
+    pub ok: bool,
+    /// The `GridFPV` format row id, when there is one.
+    #[serde(default)]
+    pub format_id: Option<i64>,
+    /// The plugin's name for that row (`"GridFPV"`).
+    #[serde(default)]
+    pub format_name: Option<String>,
+    /// Whether this call created the row (as opposed to reusing the existing one) — `false` on
+    /// every call after the first ever, which is what idempotency looks like on the wire.
+    #[serde(default)]
+    pub created: bool,
+    /// Conduct fields that had drifted off neutral and were written back (normally empty).
+    #[serde(default)]
+    pub repaired: Vec<String>,
+    /// The race director's own format that Grid took the timer over from, if any.
+    #[serde(default)]
+    pub previous_format_id: Option<i64>,
+    /// That format's name, for a diagnostic an RD recognises (the raw id alone is not a name).
+    #[serde(default)]
+    pub previous_format_name: Option<String>,
+    /// The plugin's **re-assertion** of the min-lap neutralisation for this stage (#407). RH's
+    /// filter lives on a settings screen the RD can reach between heats, so it is re-checked every
+    /// time the format is, not only at handshake. `None` from a plugin older than v0.4.0.
+    #[serde(default)]
+    pub min_lap: Option<MinLapReport>,
+    /// Why it failed, when `ok` is false.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Parse a `gridfpv_hello_ack` socket payload (a one-element array, like every RH emit) into a
@@ -130,6 +1067,238 @@ fn parse_hello(payload: &Payload) -> Option<PluginHello> {
         _ => return None,
     };
     serde_json::from_value(value).ok()
+}
+
+/// Parse a `gridfpv_format_ack` socket payload into a [`FormatAck`]. `None` for a
+/// malformed/unexpected shape (treated as no answer — the confirm then times out and the
+/// fallback engages, loudly).
+fn parse_format_ack(payload: &Payload) -> Option<FormatAck> {
+    let value = match payload {
+        Payload::Text(values) => values.first()?.clone(),
+        _ => return None,
+    };
+    serde_json::from_value(value).ok()
+}
+
+/// What this connection knows about the plugin's **Grid-owned race format** (#404).
+///
+/// One instance per connection (never carried across a reconnect): a timer whose plugin was
+/// removed, downgraded, or whose format row was deleted while we were away must re-earn all of
+/// this on the new socket rather than inherit a stale "yes, it's neutralised".
+#[derive(Debug, Default)]
+struct OwnedFormat {
+    /// Whether the connected plugin advertised [`CAP_OWNED_FORMAT`].
+    advertised: bool,
+    /// The `GridFPV` format row id, once the plugin has named one.
+    id: Option<i64>,
+    /// Set once a `gridfpv_format_ack` confirmed the format is **selected** on this connection.
+    selected: bool,
+    /// The plugin's failure text, from a failed ack or a failed load-time create.
+    error: Option<String>,
+    /// One-shot latch: the fallback to mutating the RD's own format has already been announced on
+    /// this connection. Announced once, not once per heat — a per-stage repeat would bury it.
+    ///
+    /// **Diagnostics only.** Both fallback announcements (the owned-format confirm giving up, and
+    /// [`RotorHazardConnection::neutralize_active_format`] engaging the legacy path) latch it, so an
+    /// operator hears "this timer is on the weaker guarantee" once and not twice. It says nothing
+    /// about whether the confirm has run — see [`gave_up`](Self::gave_up).
+    announced: bool,
+    /// One-shot latch: the **owned-format confirm** has already run to its
+    /// [`FORMAT_ACK_TIMEOUT`] deadline (or a failed ack) on this connection, so later selections
+    /// must not block on it again.
+    ///
+    /// Separate from [`announced`](Self::announced) because they answer different questions, and
+    /// conflating them lost the confirm entirely (#453): `prepare_instant_start` running once
+    /// *before* the plugin's `gridfpv_hello_ack` was folded sees `advertised == false`, takes the
+    /// legacy path, and `neutralize_active_format` latches `announced`. When the hello then arrives
+    /// advertising [`CAP_OWNED_FORMAT`], every later `select_owned_format` read that same latch as
+    /// "already gave up" and returned `Ok(false)` **without ever waiting** — so the connection kept
+    /// racing on the RD's own format, with RotorHazard's stopping and counting decisions intact
+    /// (#403), even though the plugin would have confirmed within
+    /// [`FORMAT_ACK_TIMEOUT`]. Only `select_owned_format` sets this, and only after actually
+    /// waiting.
+    gave_up: bool,
+}
+
+/// Fold a plugin [`MinLapReport`] into GridFPV's [`MinLapRecord`]; returns whether the record was
+/// neutral **before** this fold (so a caller can tell a regression from a never-worked).
+///
+/// `None` — an older plugin with no opinion — leaves the record `Unattempted` rather than marking
+/// it failed: it is not a failure, it is a job the Director has not done yet.
+fn fold_plugin_min_lap(slot: &Arc<Mutex<MinLapState>>, report: Option<&MinLapReport>) -> bool {
+    let mut state = slot.lock().expect("min-lap lock");
+    let was_neutral = state.record.neutral;
+    let Some(report) = report else {
+        return was_neutral;
+    };
+    state.record.route = MinLapRoute::Plugin;
+    state.record.observe(report.secs_was, report.behavior_was);
+    state.record.neutral = report.ok;
+    state.record.error = report.error.clone();
+    was_neutral
+}
+
+/// Re-ask `read` for RotorHazard's `(min_lap, behavior)` pair until one reads **neutral** or
+/// `expired` says the budget is spent; returns the neutral pair, else the last pair observed, else
+/// `None` if RH never answered at all (#444).
+///
+/// Split out from [`RotorHazardConnection::confirm_min_lap_neutral`] as the part that carries the
+/// judgement, so the frame sequence that caused the false alarm is a unit test rather than a
+/// docker leg. `expired` is checked **after** a read, so the confirm always gets at least one ask.
+fn confirm_neutral_by_reasking(
+    mut read: impl FnMut() -> Option<(i64, i64)>,
+    mut expired: impl FnMut() -> bool,
+) -> Option<(i64, i64)> {
+    // The last pair RH reported, so a genuine failure names the values rather than only timing
+    // out — and so a non-neutral last answer still reaches the record.
+    let mut last: Option<(i64, i64)> = None;
+    loop {
+        if let Some((secs, behavior)) = read() {
+            if min_lap_is_neutral(Some(secs), Some(behavior)) {
+                return Some((secs, behavior));
+            }
+            last = Some((secs, behavior));
+        }
+        if expired() {
+            return last;
+        }
+    }
+}
+
+/// What [`RotorHazardConnection::select_owned_format`] should do, given what this connection knows
+/// about the plugin's Grid-owned race format.
+///
+/// A named decision rather than a chain of early returns because getting it wrong is invisible:
+/// #453 was one latch read in place of another, and the symptom — a connection quietly racing on
+/// the RD's own format for a whole heat — looks identical to working correctly from every layer
+/// above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatSelection {
+    /// No plugin, or a plugin build predating the owned format: don't ask, take the legacy path.
+    Legacy,
+    /// Already confirmed selected on this connection: ask again (seating can change the effective
+    /// format) but don't block on the ack.
+    AlreadySelected,
+    /// The confirm has already run its full deadline once and lost: ask again so a recovered
+    /// plugin is picked up, but don't re-block every stage waiting for one that will not answer.
+    AlreadyGaveUp,
+    /// The first selection on this connection: ask, then wait for the ack before racing on it.
+    Confirm,
+}
+
+/// Decide from an [`OwnedFormat`] snapshot. Order matters: `advertised` gates everything (there is
+/// nothing to ask), then a confirmed selection short-circuits, then a spent confirm.
+///
+/// Note what is **not** consulted: [`OwnedFormat::announced`]. That latch is set by the legacy
+/// announcement too, so reading it here made one pre-hello `prepare_instant_start` suppress the
+/// confirm for the entire connection (#453). "Have we said this out loud yet" and "has the confirm
+/// run" are different questions.
+fn format_selection(owned: &OwnedFormat) -> FormatSelection {
+    if !owned.advertised {
+        FormatSelection::Legacy
+    } else if owned.selected {
+        FormatSelection::AlreadySelected
+    } else if owned.gave_up {
+        FormatSelection::AlreadyGaveUp
+    } else {
+        FormatSelection::Confirm
+    }
+}
+
+/// Whether a missing Grid-owned race format id is news yet — and if so, which news (#454 finding 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedFormatAlarm {
+    /// Nothing to say: either the plugin named its format row, or there is no plugin to ask.
+    Quiet,
+    /// The plugin tried and named a reason. Announce it wherever we are — it will not fix itself.
+    Failed,
+    /// No id and **no reason**, at the handshake. RotorHazard is still booting: say nothing yet.
+    NotReadyYet,
+    /// No id and no reason, but RotorHazard is demonstrably past startup. The row never appeared
+    /// and nobody said why — which is worth a line precisely because it is inexplicable.
+    NeverAppeared,
+}
+
+/// Decide whether an absent [`CAP_OWNED_FORMAT`] row is a failure or merely a not-yet.
+///
+/// **The distinction is real, and it is RotorHazard's own startup ordering** — verified against
+/// 4.3.0 and 4.4.0 source, which are identical here:
+///
+/// 1. `server.py::start()` calls `Events.trigger(Evt.STARTUP, …)` and only *afterwards* calls
+///    `SOCKET_IO.run(APP, …)` — 4.3.0 `server.py:3570`/`:3600`, 4.4.0 `server.py:3590`/`:3620`.
+/// 2. `eventmanager.py::EventManager.trigger` runs a handler **inline** only when its
+///    `priority < 100`; everything else is `gevent.spawn`ed (`eventmanager.py:94`/`:97`, byte for
+///    byte the same on both versions).
+/// 3. `RHAPI.py::EventsAPI.on` defaults to `priority = 200` for every event except the
+///    `*_INITIALIZE` family (which get 75). `Evt.STARTUP` is not in that family, so **our**
+///    `ready_grid_format` handler is spawned, not run inline.
+/// 4. `gevent.spawn` only *schedules* a greenlet; it runs when the calling greenlet yields — and
+///    the next thing `start()` does is enter `SOCKET_IO.run`, which is what starts accepting
+///    connections in the first place.
+///
+/// So the socket is listening, and answers `gridfpv_hello`, in a window where the plugin's STARTUP
+/// greenlet has not yet run. The plugin's `state["format_id"]` and `state["format_error"]` are both
+/// still `None` then, which is exactly the `grid_format_id: null, grid_format_error: null` shape a
+/// Director sees when it dials an RH that is still coming up. That is "not ready yet" — the row
+/// appears seconds later — and announcing it as "could not create its race format (no reason
+/// given)" cries wolf on every fast reconnect.
+///
+/// Losing the alarm entirely would be the wrong trade, so it is deferred rather than dropped:
+/// `past_startup` is `false` at the handshake and `true` at the `gridfpv_format_ack` seam, which is
+/// only reached because the Director asked the plugin to select the format at a heat's stage —
+/// long after any boot race. A real, permanent failure still surfaces two ways: the plugin sets
+/// `grid_format_error` when its own create raises (→ [`Failed`](Self::Failed), announced at once,
+/// with the reason), and a select that cannot produce the row comes back `ok: false` on the ack,
+/// which has always been announced.
+fn owned_format_alarm(
+    advertised: bool,
+    id: Option<i64>,
+    error: Option<&str>,
+    past_startup: bool,
+) -> OwnedFormatAlarm {
+    if !advertised || id.is_some() {
+        // A plugin that named its row is fine; one that never advertised the capability is a build
+        // that has no opinion, and `format_selection` already routes it to the legacy path.
+        OwnedFormatAlarm::Quiet
+    } else if error.is_some() {
+        OwnedFormatAlarm::Failed
+    } else if past_startup {
+        OwnedFormatAlarm::NeverAppeared
+    } else {
+        OwnedFormatAlarm::NotReadyYet
+    }
+}
+
+/// Announce, once, that a timer's own min-lap filter could not be neutralised (#407).
+///
+/// Deliberately explicit about the consequence rather than the mechanism. Silence here recreates
+/// exactly the bug this fixes: RotorHazard discarding a crossing is invisible from GridFPV's side —
+/// there is no missing-lap counter to trip and no malformed frame to blame — so an RD who is not
+/// told will read a swallowed crossing as a dead gate, which is the diagnosis #403 cost a session to.
+fn announce_min_lap_failure(record: &MinLapRecord) {
+    crate::diag!("{}", min_lap_failure_line(record));
+}
+
+/// The text of that announcement, built separately from the emitting so its *content* — not merely
+/// the fact that something was said — is what the test asserts on. What this line says is the whole
+/// point of #407: an RD who is told "the filter could not be cleared" and nothing else has no
+/// reason to connect that to the tone that stopped firing.
+fn min_lap_failure_line(record: &MinLapRecord) -> String {
+    format!(
+        "gridfpv: rotorhazard: could NOT neutralise this timer's own min-lap filter ({}) — it was \
+         MinLapSec={:?}, MinLapBehavior={:?} (behavior 0 = highlight, non-zero = DISCARD). While \
+         it stands, RotorHazard may throw away crossings closer together than its minimum before \
+         GridFPV ever sees them: GridFPV's own min-lap ruling never runs on them, marshaling \
+         cannot restore them, and the rejected-crossing tone (#397) stays silent for exactly the \
+         crossings it exists to announce. Set RotorHazard's minimum lap time to 0 (Settings → \
+         Timing) before racing",
+        record
+            .error
+            .clone()
+            .unwrap_or_else(|| "no reason given".to_string()),
+        record.found_secs,
+        record.found_behavior,
+    )
 }
 
 /// A live connection to a RotorHazard server, translating its socket stream into
@@ -166,14 +1335,131 @@ pub struct RotorHazardConnection {
     /// [`wait_for_plugin`](Self::wait_for_plugin). Stays `None` against a stock RH (no handler
     /// registered) — that absence is what drives the Director's guided-install prompt (D16, S1).
     hello: Arc<Mutex<Option<PluginHello>>>,
+    /// What this connection knows about the plugin's **Grid-owned race format** (#404) — see
+    /// [`OwnedFormat`]. Written by the `gridfpv_hello_ack` / `gridfpv_format_ack` handlers, read
+    /// by [`prepare_instant_start`](Self::prepare_instant_start) to decide whether Grid selects
+    /// its own format row or falls back to mutating the race director's.
+    owned_format: Arc<Mutex<OwnedFormat>>,
+    /// **GridFPV's min-lap record for this connection** (#407) — see [`MinLapRecord`]. Written by
+    /// the `gridfpv_hello_ack` / `gridfpv_format_ack` handlers (the plugin route) and by
+    /// [`ensure_min_lap_neutral`](Self::ensure_min_lap_neutral) (the socket route); the `min_lap`
+    /// handler drops RotorHazard's readback frames into it.
+    ///
+    /// Per-connection, never carried across a reconnect: a timer whose RD moved the setting back
+    /// while GridFPV was away must be re-read and re-neutralised, not inherit a stale "yes, every
+    /// crossing gets through".
+    min_lap: Arc<Mutex<MinLapState>>,
+    /// **How many nodes the timer reported** on this connection (#412), or `None` until it has
+    /// said. Written by the `frequency_data` handler (and, as a fallback, by the
+    /// `enter_and_exit_at_levels` one); read by [`wait_for_reported_nodes`](Self::wait_for_reported_nodes).
+    ///
+    /// Per-connection, never carried across a reconnect: a timer that came back with a node missing
+    /// must re-report rather than inherit a stale width.
+    reported_nodes: Arc<Mutex<Option<u32>>>,
+    /// The **tune-telemetry tap** (#355 S2a): the gate the `heartbeat` / `node_crossing_change`
+    /// handlers check before parsing, plus the bounded last-value-wins per-node store they and the
+    /// `node_data` / `enter_and_exit_at_levels` handlers write into.
+    ///
+    /// Deliberately parallel to — and disjoint from — the `events` sink. Nothing in here is an
+    /// [`Event`], nothing in here reaches a log, and nothing in here survives
+    /// [`set_signal_capture(false)`](Self::set_signal_capture).
+    tap: SignalTap,
+}
+
+/// The `set_frequency` payload for one node — the **single place** either channel-write path turns
+/// a GridFPV channel into RotorHazard's wire vocabulary.
+///
+/// Both writers land here: the Tune page's bench write (#413) and a heat's channel assignment on
+/// stage (#421). They agreed on the frequency and disagreed on the label until the heat path
+/// started carrying one, which is exactly the ambiguity an RD cross-checking RH's screen mid-event
+/// cannot resolve — `5880` where they expect `R7`, or a stale `R5` against a changed frequency.
+///
+/// `label` is GridFPV's `(band, code)` — `("Raceband", "R7")`. **RotorHazard's own vocabulary is
+/// different**: `band` is a single LETTER and `channel` is an INT, so its profile holds
+/// `{"b": "R", "c": 7}`, never `("Raceband", "R7")`.
+///
+/// `on_set_frequency` runs `int(data['channel'])` unguarded, so sending the catalog's code raised
+/// `ValueError: invalid literal for int() with base 10: 'R8'` and aborted the whole handler — the
+/// frequency was never set. And because the emit is fire-and-forget, the Director answered 200
+/// every time: a dead write that reported success (#423's class).
+///
+/// A label that cannot be confidently translated is OMITTED, never guessed. RotorHazard then keeps
+/// whatever label it had and still applies the frequency — losing a label is cosmetic on RH's
+/// screen; losing the write puts a gate on the wrong channel.
+fn set_frequency_payload(node: u64, frequency: u16, label: Option<(&str, &str)>) -> Value {
+    let mut payload = json!({ "node": node, "frequency": frequency });
+    if let (Some((_, code)), Some(map)) = (label, payload.as_object_mut()) {
+        if let Some((letter, number)) = rh_band_channel(code) {
+            map.insert("band".into(), json!(letter));
+            map.insert("channel".into(), json!(number));
+        }
+    }
+    payload
+}
+
+/// Split a catalog channel code (`"R8"`, `"F4"`, `"A1"`) into RotorHazard's `(band letter, channel
+/// number)` pair.
+///
+/// RotorHazard stores a frequency's label as a one-letter band and an integer channel, and
+/// `on_set_frequency` calls `int()` on the channel with no guard — so anything else is not merely
+/// ignored, it throws and takes the frequency change down with it.
+///
+/// Returns `None` for a code that is not `<letters><digits>`, so the caller can omit the label
+/// rather than send something RotorHazard will choke on.
+fn rh_band_channel(code: &str) -> Option<(String, u16)> {
+    let split = code.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = code.split_at(split);
+    if letters.is_empty() || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some((letters.to_ascii_uppercase(), digits.parse().ok()?))
 }
 
 impl RotorHazardConnection {
     /// Connect to `url` (e.g. `http://localhost:5000`) and start translating the
     /// RotorHazard socket stream through `adapter`.
-    pub fn connect(url: &str, adapter: RotorHazardAdapter) -> Result<Self, rust_socketio::Error> {
+    ///
+    /// # The adapter comes back if the connect fails (#435)
+    ///
+    /// The `Err` carries the adapter alongside the error, and it has to: this consumes the adapter
+    /// by value, and on a **mid-race reconnect** that adapter is the only thing suppressing the
+    /// in-progress `current_laps` snapshot RotorHazard re-sends on every new socket. An attempt
+    /// that fails — RH momentarily unreachable, the common case right after the blip that dropped
+    /// the socket — used to drop it, so the next attempt started from an empty deduplicator and
+    /// re-minted every lap of the running heat as a fresh `Pass`. The lap projection does not dedup
+    /// by sequence, so one Wi-Fi blip plus one failed retry doubled a heat's lap log.
+    ///
+    /// `rust_socketio::Error` carries nothing back on its own, which is why the recovery is in the
+    /// signature rather than left to the caller to arrange.
+    ///
+    /// ⚠️ **One thing is still lost on a failed attempt**, and it is not the dedup state: the
+    /// `set_plugin_live_pass(false)` reset below runs *before* the socket is dialled, and any laps
+    /// it mints go into this attempt's event sink, which the `Err` path drops. That is a
+    /// pre-existing narrowing of #400 (it can only bite on the first attempt after a `live_pass`
+    /// link dropped, since the reset is idempotent), and it is left alone here deliberately —
+    /// re-ordering the reset around `.connect()` changes where those laps land relative to the
+    /// socket's own first frames, which is a separate question from this one.
+    pub fn connect(
+        url: &str,
+        adapter: RotorHazardAdapter,
+    ) -> Result<Self, (rust_socketio::Error, RotorHazardAdapter)> {
         let adapter = Arc::new(Mutex::new(adapter));
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        // Fresh link, fresh pass-source decision (#389). The adapter is REUSED across reconnects
+        // (the #105 fix), so a stale `live_pass` would survive a plugin being uninstalled and leave
+        // the adapter waiting for passes that can no longer come. Start from "no plugin has
+        // spoken" — `current_laps` — and let this connection's `gridfpv_hello_ack` re-earn it.
+        //
+        // This is exactly the mid-race-reconnect path of #400: the reused adapter may still be
+        // holding laps `current_laps` reported while the plugin was quiet, and the switch mints
+        // them. The sink exists first so those laps go straight onto it instead of being dropped.
+        let carried = adapter
+            .lock()
+            .expect("adapter lock")
+            .set_plugin_live_pass(false);
+        if !carried.is_empty() {
+            events.lock().expect("event sink lock").extend(carried);
+        }
         // Starts alive; flipped to `false` by the `close`/`error` reserved-event handlers below.
         let alive = Arc::new(AtomicBool::new(true));
         // The newest savable heat id, stashed by the `heat_data` handler and drained by the driver
@@ -185,6 +1471,27 @@ impl RotorHazardConnection {
         // The GridFPV plugin handshake reply, stashed by the `gridfpv_hello_ack` handler below and
         // read by the driver (see the struct field). Empty until/unless a plugin-equipped RH answers.
         let hello: Arc<Mutex<Option<PluginHello>>> = Arc::new(Mutex::new(None));
+        // Fresh link, fresh owned-format state: nothing is assumed neutralised until THIS socket's
+        // plugin says so (see `OwnedFormat`).
+        let owned_format: Arc<Mutex<OwnedFormat>> = Arc::new(Mutex::new(OwnedFormat::default()));
+        // Fresh link, fresh min-lap record (#407): nothing is assumed to be letting crossings
+        // through until THIS socket proves it (see `MinLapState`).
+        let min_lap: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
+        // The tune-telemetry tap (#355 S2a), closed. A fresh link starts NOT capturing: the Tune
+        // page's lease is what opens it, and a reconnect under a still-open lease is re-opened by
+        // the driver's next tick (which re-reads the lease and re-warms the store).
+        // #412 node discovery: filled by the `frequency_data` handler below, and by
+        // `enter_and_exit_at_levels` as a fallback. Per-connection.
+        let reported_nodes: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+        let tap = SignalTap::default();
+        let ctx = FrameCtx {
+            adapter: adapter.clone(),
+            sink: events.clone(),
+            savable_heat: savable_heat.clone(),
+            current_format: current_format.clone(),
+            reported_nodes: reported_nodes.clone(),
+            tap: tap.clone(),
+        };
 
         // `rust_socketio`'s reserved events: on a dropped socket the poll loop fires `error`
         // (the engine.io read failed) and, on a clean disconnect packet, `close`. Either way the
@@ -202,11 +1509,15 @@ impl RotorHazardConnection {
         // `history_times` trace — which the `current_marshal_data` handler below feeds back through the
         // same adapter as `SignalHistory`. Driving the request from the `race_status` callback keeps
         // all wire IO in the transport while the trigger stays in the pure translator.
-        let handler = |name: &'static str,
-                       adapter: Arc<Mutex<RotorHazardAdapter>>,
-                       sink: Arc<Mutex<Vec<Event>>>,
-                       savable_heat: Arc<Mutex<Option<u64>>>,
-                       current_format: Arc<Mutex<Option<i64>>>| {
+        let handler = |name: &'static str, ctx: FrameCtx| {
+            let FrameCtx {
+                adapter,
+                sink,
+                savable_heat,
+                current_format,
+                reported_nodes,
+                tap,
+            } = ctx;
             move |payload: Payload, client: RawClient| {
                 // Learn the current race-format id from the `race_status` stream (it carries
                 // `race_format_id`). `prepare_instant_start` zeroes that format's staging delays so
@@ -224,7 +1535,50 @@ impl RotorHazardConnection {
                         }
                     }
                 }
-                if let Some(raw) = raw_from_socket(name, &payload) {
+                let raw = match decode_socket(name, &payload) {
+                    Decoded::Translated(raw) => Some(raw),
+                    // Not ours — RotorHazard broadcasts plenty we don't translate. Normal.
+                    Decoded::Untranslated => None,
+                    // Ours, but unreadable: the frame is dropped either way, so at minimum say
+                    // so and count it (#400). Silently swallowing this made a plugin/RH version
+                    // skew look identical to a gate that stopped detecting.
+                    Decoded::Malformed { detail } => {
+                        adapter
+                            .lock()
+                            .expect("adapter lock")
+                            .note_malformed_frame(name, &detail);
+                        None
+                    }
+                };
+                if let Some(raw) = raw {
+                    // Tune telemetry (#355 S2a). These two frames are decoded *anyway* — they are
+                    // `Raw`s the adapter translates — so the tap adds no parse here, only the
+                    // O(nodes) fold, and that stays behind the same subscription gate as the
+                    // heartbeat so an idle timer pays nothing. `node_data` carries every peak /
+                    // nadir / pass-count readout (the heartbeat carries none of them); the levels
+                    // carry the thresholds the tuning graph draws its handles at, which the app
+                    // layer's lineup remap cannot supply because tuning has no armed heat.
+                    if tap.capturing() {
+                        match &raw {
+                            Raw::NodeData(data) => tap.note_node_data(data),
+                            Raw::EnterExitLevels(levels) => tap.note_levels(levels),
+                            _ => {}
+                        }
+                    }
+                    // Node-count discovery **fallback** (#412). `enter_at_levels` is explicitly
+                    // sliced `[:num_nodes]` on both v4.3.0 and v4.4.0, so its length is the node
+                    // count too. `frequency_data` is preferred (a list of dicts, unambiguous), so
+                    // this only fills in when that frame has not arrived — an RH build or plugin
+                    // that answers one `load_data` type and not the other still gets discovered
+                    // rather than silently falling back to the 8-node default.
+                    if let Raw::EnterExitLevels(levels) = &raw {
+                        if let Some(nodes) = reported_nodes_from_levels(levels) {
+                            let mut slot = reported_nodes.lock().expect("reported-nodes lock");
+                            if slot.is_none() {
+                                *slot = Some(nodes);
+                            }
+                        }
+                    }
                     let (translated, request_marshal, pilotrace_requests, heat_ids) = {
                         let mut a = adapter.lock().unwrap();
                         let translated = a.translate(raw);
@@ -253,11 +1607,15 @@ impl RotorHazardConnection {
                         }
                     }
                     if request_marshal {
-                        // Heat just ended: pull the dense history. Two RotorHazard builds expose it
-                        // differently, so drive both — whichever the server implements answers:
-                        //  • newer RH: the aggregate `current_race_marshal` -> `current_marshal_data`;
-                        //  • older RH: per-pilotrace — `save_laps` (persist the run), then request the
-                        //    saved-race tree (`race_list`) whose ids drive `get_pilotrace` below.
+                        // Heat just ended: pull the dense history. The two supported RotorHazard
+                        // versions expose it differently, so drive both — see
+                        // [`request_marshal_data`], which names exactly which is which. In short:
+                        //  • **v4.4.0 only**: the aggregate `current_race_marshal` ->
+                        //    `current_marshal_data`. There is no such handler on v4.3.0 — the emit
+                        //    is silently discarded there, which is why the second path is not a
+                        //    fallback but the *only* route at the D16 floor.
+                        //  • **both**: per-pilotrace — `save_laps` (persist the run), then request
+                        //    the saved-race tree (`race_list`) whose ids drive `get_pilotrace` below.
                         // All best-effort: a failed emit on a dropped link just leaves the coarse
                         // streamed trace, which the driver's reconnect path tolerates.
                         let _ = client.emit("current_race_marshal", Payload::Text(vec![]));
@@ -302,149 +1660,336 @@ impl RotorHazardConnection {
             .reconnect(false)
             .on("error", drop_handler(alive.clone()))
             .on("close", drop_handler(alive.clone()))
-            .on(
-                "race_status",
-                handler(
-                    "race_status",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "current_laps",
-                handler(
-                    "current_laps",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "node_data",
-                handler(
-                    "node_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "pass_record",
-                handler(
-                    "pass_record",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "enter_and_exit_at_levels",
-                handler(
-                    "enter_and_exit_at_levels",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "current_marshal_data",
-                handler(
-                    "current_marshal_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "race_list",
-                handler(
-                    "race_list",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "race_details",
-                handler(
-                    "race_details",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "heat_data",
-                handler(
-                    "heat_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
-            .on(
-                "pilot_data",
-                handler(
-                    "pilot_data",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
+            .on("race_status", handler("race_status", ctx.clone()))
+            .on("current_laps", handler("current_laps", ctx.clone()))
+            .on("node_data", handler("node_data", ctx.clone()))
+            .on("pass_record", handler("pass_record", ctx.clone()))
+            .on("enter_and_exit_at_levels", handler("enter_and_exit_at_levels", ctx.clone()))
+            .on("current_marshal_data", handler("current_marshal_data", ctx.clone()))
+            .on("race_list", handler("race_list", ctx.clone()))
+            .on("race_details", handler("race_details", ctx.clone()))
+            .on("heat_data", handler("heat_data", ctx.clone()))
+            .on("pilot_data", handler("pilot_data", ctx.clone()))
             // The GridFPV plugin's live signal push (D16, S2): folds straight through the same
             // translator as the RH-native signal events (→ SignalThresholds/SignalHistory).
-            .on(
-                "gridfpv_signal",
-                handler(
-                    "gridfpv_signal",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
+            .on("gridfpv_signal", handler("gridfpv_signal", ctx.clone()))
             // The GridFPV plugin's native per-node pass (D16, S3): folds to a Pass, deduped with
             // the current_laps path.
-            .on(
-                "gridfpv_pass",
-                handler(
-                    "gridfpv_pass",
-                    adapter.clone(),
-                    events.clone(),
-                    savable_heat.clone(),
-                    current_format.clone(),
-                ),
-            )
+            .on("gridfpv_pass", handler("gridfpv_pass", ctx.clone()))
             // The GridFPV plugin's handshake reply (D16, S1): a plugin-equipped RH answers our
             // `gridfpv_hello` (emitted below) with `gridfpv_hello_ack`. Stash it for the driver.
+            // It also carries the plugin's capabilities, which is where the **pass source** is
+            // decided (#389): `live_pass` present ⇒ the plugin's `gridfpv_pass` mints the laps and
+            // `current_laps` becomes a checked backstop; absent ⇒ `current_laps` mints them and
+            // plugin passes are ignored. Declared here, not inferred from whichever stream happens
+            // to arrive first.
+            // ---------------------------------------------------------------------------------
+            // Tune telemetry (#355 S2a): the two frames NOTHING else in this adapter consumes.
+            //
+            // Both handlers are bound here, unconditionally, because `rust_socketio` binds at
+            // `ClientBuilder` time and there is no way to attach one later — so the subscription
+            // is expressed as a **gate inside** the handler, checked BEFORE the payload is
+            // deserialized. `heartbeat` runs at 10 Hz from RotorHazard's boot (and at 100 Hz when
+            // RH's own frequency scanner is on), on the same single socket callback thread that
+            // parses `current_laps`; paying a `from_value` + four `Vec` allocations per tick for a
+            // Tune page nobody has open is precisely the #392 hazard. The relaxed load in front of
+            // it is the cheapest thing that can stand there.
+            .on("heartbeat", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    // The gate lives inside `tap_heartbeat`, ahead of the parse — see there.
+                    tap_heartbeat(&tap, &payload);
+                }
+            })
+            // Crossing **edges**. The heartbeat's `crossing_flag` is a level sampled at 10 Hz and
+            // the Director decimates below that, so a short crossing can fall between two samples;
+            // these edges are what make the crossing lamp honest. Same pre-parse gate.
+            // **Node-count discovery** (#412). `frequency_data` carries one `fdata` entry per
+            // node, which is the only unambiguous statement of width RotorHazard makes on the
+            // socket. Bound unconditionally (there is no way to attach a handler later) but it
+            // costs nothing when idle: RH emits it on `load_data` — which `connect` asks for below
+            // — and thereafter only when a frequency actually changes.
+            .on("frequency_data", {
+                let reported_nodes = reported_nodes.clone();
+                move |payload: Payload, _client: RawClient| {
+                    let Some(value) = first_text(&payload) else {
+                        return;
+                    };
+                    // `frequency_data` is NOT a `Raw` variant, deliberately (like `heartbeat`):
+                    // a node count is an observation about the hardware, and `Raw` is the only
+                    // input to the translator that mints `Event`s. The parse is the shared,
+                    // always-compiled one so its wire contract is unit-testable without a socket.
+                    if let Some(nodes) = reported_nodes_from_frequency_data(&value) {
+                        *reported_nodes.lock().expect("reported-nodes lock") = Some(nodes);
+                    }
+                }
+            })
+            // **RotorHazard's own min-lap filter, read back** (#407). `RHUI.emit_min_lap`, in
+            // reply to the `load_data` `ensure_min_lap_neutral` sends and again (broadcast) after
+            // any `set_min_lap` / `set_min_lap_behavior`. Bound unconditionally — there is no way
+            // to attach a handler later — but it costs nothing when idle: RotorHazard emits it
+            // only when asked, or when the setting actually changes.
+            //
+            // Not a `Raw` variant, deliberately, exactly like `frequency_data`: a timer's config
+            // is an *observation about the timer*, and `Raw` is the only input to the translator
+            // that mints `Event`s. It never becomes a GridFPV setting (D27).
+            .on("min_lap", {
+                let min_lap = min_lap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    let Some(value) = first_text(&payload) else {
+                        return;
+                    };
+                    if let Some(pair) = parse_min_lap_frame(&value) {
+                        min_lap.lock().expect("min-lap lock").observed = Some(pair);
+                    }
+                }
+            })
+            .on("node_crossing_change", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    tap_crossing(&tap, &payload);
+                }
+            })
+            // The **capture echo** (#355). A finished `cap_enter_at_btn` / `cap_exit_at_btn`
+            // broadcasts the level it settled on — `server.py`'s `new_enter_or_exit_at_callback`
+            // calls `calibration.set_*_at_level` and then `rhui.emit_*_at_level(node)` — so the
+            // captured value arrives unasked, ~3 s after the button. That is the one place
+            // RotorHazard *does* echo a level, and it is why a capture is confirmable without
+            // waiting on the next readback. Same pre-parse gate as the two frames above: these are
+            // broadcast to every client, so a Director with no Tune page open must not pay for
+            // them. (The driver still fires the ordinary `enter_and_exit_at_levels` readback after
+            // the window as a backstop — this echo is a broadcast we are glad to have, not the only
+            // evidence we accept.)
+            .on("node_enter_at_level", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    tap_captured_level(&tap, &payload, true);
+                }
+            })
+            .on("node_exit_at_level", {
+                let tap = tap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    tap_captured_level(&tap, &payload, false);
+                }
+            })
             .on("gridfpv_hello_ack", {
                 let hello = hello.clone();
+                let adapter = adapter.clone();
+                let sink = events.clone();
+                let owned_format = owned_format.clone();
+                let min_lap = min_lap.clone();
                 move |payload: Payload, _client: RawClient| {
                     if let Some(parsed) = parse_hello(&payload) {
+                        // The Grid-owned race format (#404): learn the row the plugin made for us,
+                        // or the reason it could not. A plugin that advertises the capability but
+                        // carries no id is a timer whose race decisions are NOT neutralised — say
+                        // so now, not after a heat comes up four laps short (#403).
+                        {
+                            let mut owned = owned_format.lock().expect("owned-format lock");
+                            owned.advertised = parsed.advertises(CAP_OWNED_FORMAT);
+                            owned.id = parsed.grid_format_id;
+                            owned.error = parsed.grid_format_error.clone();
+                        }
+                        // `past_startup: false` — a hello is answered from inside RotorHazard's
+                        // boot, before the plugin's spawned STARTUP handler has necessarily run
+                        // (see `owned_format_alarm`). "No id, no reason" here means "not ready
+                        // yet", and announcing it as a failure cried wolf on every fast dial
+                        // (#454 finding 3). Only a plugin that named a reason speaks now.
+                        if owned_format_alarm(
+                            parsed.advertises(CAP_OWNED_FORMAT),
+                            parsed.grid_format_id,
+                            parsed.grid_format_error.as_deref(),
+                            false,
+                        ) == OwnedFormatAlarm::Failed
+                        {
+                            crate::diag!(
+                                "gridfpv: rotorhazard: the GridFPV plugin (v{}) could not create \
+                                 its `{}` race format ({}) — it will retry at each heat's stage, \
+                                 and until it succeeds Grid falls back to altering the race \
+                                 director's own format (#403/#404)",
+                                parsed.plugin_version,
+                                parsed
+                                    .grid_format_name
+                                    .clone()
+                                    .unwrap_or_else(|| "GridFPV".to_string()),
+                                parsed
+                                    .grid_format_error
+                                    .clone()
+                                    .unwrap_or_else(|| "no reason given".to_string()),
+                            );
+                        }
+                        // RotorHazard's own min-lap filter (#407). A plugin that did the job
+                        // in-process is the preferred route; anything else — an older plugin with
+                        // no opinion, or one that tried and failed — leaves the record
+                        // un-neutralised, and the driver's `ensure_min_lap_neutral` then takes the
+                        // socket route. Nothing is announced here: the driver announces once, with
+                        // the final outcome, so an RD is not told the filter is broken and then
+                        // immediately told it is fine.
+                        fold_plugin_min_lap(&min_lap, parsed.min_lap.as_ref());
+
+                        let live_pass = parsed.advertises(CAP_LIVE_PASS);
+                        // The switch mints any laps held for the plugin instead of dropping them
+                        // (#400) — forward them to the same sink the frame handlers feed.
+                        let carried = adapter
+                            .lock()
+                            .expect("adapter lock")
+                            .set_plugin_live_pass(live_pass);
+                        if !carried.is_empty() {
+                            sink.lock().expect("event sink lock").extend(carried);
+                        }
+                        if !live_pass {
+                            crate::diag!(
+                                "gridfpv: rotorhazard: the GridFPV plugin (v{}) did not advertise \
+                                 `{CAP_LIVE_PASS}` — it could not prove it can read this timer's \
+                                 lap atom, so RotorHazard's own lap table is the pass source (#389)",
+                                parsed.plugin_version,
+                            );
+                        }
                         *hello.lock().expect("plugin-hello lock") = Some(parsed);
                     }
                 }
             })
-            .connect()?;
+            // The plugin's reply to `gridfpv_select_format` (D16, S3b): the Grid-owned race format
+            // is (or is not) now RotorHazard's current format. `prepare_instant_start` blocks on
+            // this the first time; afterwards it is the channel through which a *later* failure —
+            // an RD editing the row mid-event, a format change refused because RH was not READY —
+            // still gets announced instead of silently un-neutralising the timer.
+            .on("gridfpv_format_ack", {
+                let owned_format = owned_format.clone();
+                let min_lap_slot = min_lap.clone();
+                move |payload: Payload, _client: RawClient| {
+                    let Some(ack) = parse_format_ack(&payload) else {
+                        return;
+                    };
+                    let name = ack
+                        .format_name
+                        .clone()
+                        .unwrap_or_else(|| "GridFPV".to_string());
+                    // Whether this ack is the moment the takeover took effect on this link —
+                    // the Director asks at every heat's stage, so only the transition is news.
+                    let (first_selection, alarm) = {
+                        let mut owned = owned_format.lock().expect("owned-format lock");
+                        let first = ack.ok && !owned.selected;
+                        owned.id = ack.format_id.or(owned.id);
+                        owned.selected = ack.ok;
+                        owned.error = ack.error.clone();
+                        // The deferred half of #454 finding 3. Reaching this seam at all means the
+                        // Director asked the plugin to select the format at a heat's stage, which
+                        // is long past any boot race — so `past_startup: true`, and an id that is
+                        // still absent is real news rather than a not-yet.
+                        let alarm =
+                            owned_format_alarm(owned.advertised, owned.id, owned.error.as_deref(), true);
+                        (first, alarm)
+                    };
+                    // Only the inexplicable case speaks here: a select that reports success yet
+                    // still names no row and gives no reason. A select that *failed* carries its
+                    // reason and is announced by the `!ack.ok` branch below — announcing both
+                    // would say the same thing twice.
+                    if ack.ok && alarm == OwnedFormatAlarm::NeverAppeared {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: the GridFPV plugin reported its `{name}` race \
+                             format selected but has never named the format row, and gave no \
+                             reason — RotorHazard's own race decisions may NOT be neutralised on \
+                             this timer (#403/#404/#454)"
+                        );
+                    }
+                    // The per-stage re-assertion (#407): RH's filter can be moved back from its
+                    // own settings screen between heats, and the plugin re-checks it every time it
+                    // re-checks the format. A regression here IS announced — unlike the handshake
+                    // fold, there is no later step that will report the final outcome, and a filter
+                    // that came back mid-event silently takes #397's rejected-crossing tone with it.
+                    if let Some(report) = ack.min_lap.as_ref() {
+                        let was_neutral = fold_plugin_min_lap(&min_lap_slot, Some(report));
+                        if !report.ok && was_neutral {
+                            crate::diag!(
+                                "gridfpv: rotorhazard: this timer's own min-lap filter came BACK \
+                                 mid-event and could not be cleared ({}) — it may now DISCARD \
+                                 crossings closer together than its minimum before GridFPV ever \
+                                 sees them, which silently disables both GridFPV's own min-lap \
+                                 ruling and its rejected-crossing tone (#397/#407). Set \
+                                 RotorHazard's minimum lap time back to 0 before racing",
+                                report
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "no reason given".to_string()),
+                            );
+                        }
+                    }
+                    if !ack.ok {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: the GridFPV plugin could not select its `{name}` \
+                             race format ({}) — RotorHazard's own race decisions are NOT \
+                             neutralised on this timer, so it may declare a winner and delete \
+                             later crossings at source (#403)",
+                            ack.error
+                                .clone()
+                                .unwrap_or_else(|| "no reason given".to_string()),
+                        );
+                        return;
+                    }
+                    // Worth a line when something actually changed: the first takeover names the
+                    // RD's format so they know what to re-select to get their timer back, and a
+                    // repair means the row had drifted off neutral since we last looked.
+                    if ack.created {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: created the Grid-owned `{name}` race format — \
+                             RotorHazard will declare no winner, apply no lap cap, no time limit \
+                             and no team aggregation while Grid drives (#403/#404)"
+                        );
+                    }
+                    if !ack.repaired.is_empty() {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: the `{name}` race format had drifted off \
+                             neutral ({}) — repaired before staging",
+                            ack.repaired.join(", "),
+                        );
+                    }
+                    if let (true, Some(previous)) =
+                        (first_selection, ack.previous_format_name.clone())
+                    {
+                        crate::diag!(
+                            "gridfpv: rotorhazard: racing on the Grid-owned `{name}` race format; \
+                             this timer's own format `{previous}` is untouched — select it again \
+                             in RotorHazard to hand the timer back"
+                        );
+                    }
+                }
+            })
+            .connect();
+        // Hand the adapter back rather than dropping it with the failed attempt (#435). It is only
+        // ever shared with this attempt's own handlers, none of which can outlive a connect that
+        // never succeeded, so the `Arc` is uncontended here — but recover defensively rather than
+        // unwrapping it, because losing the dedup state to a panic on a mid-race reconnect is the
+        // very outcome this exists to prevent.
+        let client = match client {
+            Ok(client) => client,
+            Err(error) => {
+                let recovered = match Arc::try_unwrap(adapter) {
+                    Ok(cell) => cell.into_inner().unwrap_or_else(|e| e.into_inner()),
+                    Err(shared) => shared
+                        .lock()
+                        .map(|a| a.clone())
+                        .unwrap_or_else(|e| e.into_inner().clone()),
+                };
+                return Err((error, recovered));
+            }
+        };
 
         // Warm initial state on (re)connect: ask RH to send current per-node RSSI, the enter/exit
-        // detection thresholds, and the current race status (so the **current format id** is learned
-        // early — `prepare_instant_start` needs it to zero that format's staging). `current_laps`
-        // also arrives via the normal snapshot stream.
+        // detection thresholds, the current race status (so the **current format id** is learned
+        // early — `prepare_instant_start` needs it to zero that format's staging), and
+        // `frequency_data` — whose `fdata` length is how many nodes the timer has (#412).
+        // `current_laps` also arrives via the normal snapshot stream.
         let _ = client.emit(
             "load_data",
-            json!({ "load_types": ["node_data", "enter_and_exit_at_levels", "race_status"] }),
+            json!({
+                "load_types": [
+                    "node_data",
+                    "enter_and_exit_at_levels",
+                    "race_status",
+                    "frequency_data",
+                ]
+            }),
         );
 
         // Probe for the GridFPV plugin (D16, S1): emit `gridfpv_hello` over the connection we just
@@ -464,7 +2009,46 @@ impl RotorHazardConnection {
             savable_heat,
             current_format,
             hello,
+            owned_format,
+            min_lap,
+            reported_nodes,
+            tap,
         })
+    }
+
+    /// Open or close the **tune-telemetry subscription** on this link (#355 S2a), returning `true`
+    /// when this call *opened* it (the rising edge).
+    ///
+    /// This is the only way the gate moves. Called from the driver thread on every maintain tick
+    /// with the current state of the Tune page's TTL lease, so:
+    ///
+    /// * a closed tab, a crashed browser or a lost network stops the stream when the lease lapses —
+    ///   there is no flag left set forever by a client that never said goodbye;
+    /// * a reconnect under a still-open lease re-opens by itself on the next tick.
+    ///
+    /// On the rising edge it asks RotorHazard to re-send the two frames that are **not** periodic
+    /// enough to wait for: `node_data`'s peak/nadir/count readouts and the enter/exit thresholds
+    /// the tuning graph draws its handles at. Without that, a Tune page opened long after connect
+    /// would show blank readouts until RH happened to re-broadcast. Best-effort: a failed emit on a
+    /// dying link just means the first snapshot carries rssi only.
+    pub fn set_signal_capture(&self, on: bool) -> bool {
+        let was = self.tap.set_capturing(on);
+        let rising = on && !was;
+        if rising {
+            let _ = self.client.emit(
+                "load_data",
+                json!({ "load_types": ["node_data", "enter_and_exit_at_levels"] }),
+            );
+        }
+        rising
+    }
+
+    /// The latest per-node readings, clearing the sticky crossing flags (see [`NodeTick::crossed`]).
+    ///
+    /// Bounded by construction: one [`NodeTick`] per node and nothing else, so the cost is
+    /// O(nodes) however long the Tune page has been open. Empty while the subscription is closed.
+    pub fn take_signal(&self) -> Vec<NodeTick> {
+        self.tap.take()
     }
 
     /// Take (and clear) the newest savable heat id learned from a `heat_data` response, if any.
@@ -475,6 +2059,30 @@ impl RotorHazardConnection {
     /// until the `heat_data` response has been folded.
     pub fn take_savable_heat(&self) -> Option<u64> {
         self.savable_heat.lock().expect("savable-heat lock").take()
+    }
+
+    /// Take (and clear) the adapter's latest **pass-source warning** (#389), if any.
+    ///
+    /// `Some` means the timer's plugin advertised `live_pass` but did not deliver laps RotorHazard
+    /// itself reported, so the adapter fell back to the `current_laps` snapshot. Laps keep flowing;
+    /// the operator needs to know the plugin is faulty on this timer. The warning is written to stderr
+    /// when it fires; this is the hook for the driver to surface it in the Director UI too — a
+    /// silent degrade is exactly what made #389 undiagnosable.
+    pub fn take_pass_warning(&self) -> Option<String> {
+        self.adapter
+            .lock()
+            .expect("adapter lock")
+            .take_pass_warning()
+    }
+
+    /// Whether the connected plugin advertised the `live_pass` capability, i.e. whether the plugin
+    /// is the selected pass source (#389). `false` against a stock RH or a plugin whose lap-atom
+    /// self-check failed.
+    pub fn plugin_live_pass(&self) -> bool {
+        self.adapter
+            .lock()
+            .expect("adapter lock")
+            .plugin_live_pass()
     }
 
     /// Wait up to `timeout` for the GridFPV plugin's `gridfpv_hello_ack` (D16, S1), returning the
@@ -496,6 +2104,29 @@ impl RotorHazardConnection {
         }
     }
 
+    /// Wait up to `timeout` for the timer to say **how many nodes it has** (#412), or `None` if it
+    /// never did.
+    ///
+    /// `connect` asks for `frequency_data` (and `enter_and_exit_at_levels`) in its warm-up
+    /// `load_data`, so by the time the driver calls this the answer is usually already in. Blocking
+    /// poll with small sleeps, exactly like [`wait_for_plugin`](Self::wait_for_plugin), and called
+    /// from the driver thread so it never stalls the async runtime.
+    ///
+    /// `None` is not a failure to handle loudly — a stock RH that answers neither `load_data` type
+    /// simply leaves GridFPV on its configured width, which is where it was before #412.
+    pub fn wait_for_reported_nodes(&self, timeout: Duration) -> Option<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(nodes) = *self.reported_nodes.lock().expect("reported-nodes lock") {
+                return Some(nodes);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// **Seat a heat's bound pilots on RotorHazard nodes** so RH records *and* attributes passes for
     /// each bound node — the laps-attribute fix. Without this, GridFPV's node→pilot binding lives only
     /// in the Director's log; RH races a current heat with **no seated pilots**, and its pass gate
@@ -505,12 +2136,20 @@ impl RotorHazardConnection {
     ///
     /// `seats` is the heat's `(node_index, callsign)` bind, one entry per **bound** node (unbound
     /// nodes are simply left unseated — RH won't record there, which is correct). For each seat this:
-    ///   1. adds a fresh RH pilot (`add_pilot`) and learns its id (the highest from `pilot_data`),
+    ///   1. adds a fresh RH pilot (`add_pilot`) and learns its id — the id `pilot_data`'s roster
+    ///      gained, never merely its highest, so a pilot the RD already had can never be adopted as
+    ///      ours and renamed out from under them (see [`added_pilot`] and #451),
     ///   2. names it with the GridFPV callsign (`alter_pilot { callsign }`) so RH's own view + its
     ///      "Racing heat … pilots: …" log are right,
     ///   3. assigns it to the heat's slot at that node (`alter_heat { heat, slot_id, pilot }`).
     ///
-    /// Then it selects the heat as current (`set_current_heat`) so the seats take effect for the race.
+    /// Then it **reads the seating back** (`load_data { heat_data }`, checking each slot's
+    /// `pilot_id` — see [`confirm_seating`](Self::confirm_seating)) and only then selects the heat as
+    /// current (`set_current_heat`) so the seats take effect for the race. The readback is not
+    /// ceremony: none of the writes above echoes to the socket that made them (`alter_heat` answers
+    /// `noself`, and RH swallows a handler exception into its log), and racing a heat whose seats did
+    /// not take costs the affected pilots **every lap** — the loudest version of the accepted-but-dead
+    /// write this whole audit exists to find (#423).
     ///
     /// The heat is **freshly added** here (`add_heat`) and this is the heat the finish-time dense save
     /// then reuses (it is already current + savable), so seating doubles as the savable-heat selection
@@ -536,31 +2175,60 @@ impl RotorHazardConnection {
             return Ok(None);
         };
 
-        // Learn the current highest pilot id BEFORE creating any, so each `add_pilot` can be
-        // identified as "the new id strictly greater than the floor" rather than the bare max — RH
-        // also broadcasts `pilot_data` on an `alter_pilot` rename, so a stale broadcast carrying an
-        // *existing* (lower-or-equal) id must not be mistaken for the just-added pilot.
+        // Learn **which pilots already exist** BEFORE creating any, so each `add_pilot` can be
+        // identified as "the id the roster gained" — `on_add_pilot` broadcasts `pilot_data` to
+        // every socket (this one included, no `noself`), so the burst in flight while we seat
+        // carries the *whole* pilot list, and a frame listing only pre-existing pilots must not be
+        // mistaken for the pilot we just added. (An `alter_pilot` rename answers
+        // `emit_pilot_data(noself=True)` and so never reaches this socket at all — it is
+        // `add_pilot`'s own broadcast that makes this necessary.)
+        //
+        // Drop any roster already sitting in the adapter first, so what we read back is the answer
+        // to *this* `load_data` and not a frame from before the heat was added.
+        self.adapter.lock().unwrap().take_pilot_roster();
         self.client
             .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
-        // The current highest pilot id (0 if RH has no pilots yet); the next created pilot exceeds it.
-        let mut pilot_floor = self.wait_for_pilot_above(i64::MIN).unwrap_or(0);
+        // **This read may not be guessed at** (#451). It used to fall back to a floor of 0 when it
+        // timed out, and a floor of 0 admits every pilot RotorHazard has: the delayed reply to this
+        // very `load_data` then arrived mid-seat, listing only the RD's pre-existing pilots, and
+        // the highest of them was adopted as "the pilot we just created". `alter_pilot` renamed a
+        // real entry on the RD's roster to a GridFPV callsign, `alter_heat` seated it, and
+        // `confirm_seating` confirmed it — the wrong pilot, successfully, with nothing to surface.
+        //
+        // So: no answer, no seating. Returning `None` here drops to the practice-mode flow, which
+        // still records laps via RH's `current_heat is HEAT_ID_NONE` gate branch and costs only the
+        // dense per-tick RSSI trace. Clobbering the RD's roster is not a degradation, it is damage.
+        // An RH with no pilots at all answers `Some(vec![])`, which is a real answer and seats fine.
+        let Some(roster) = self.wait_for_pilot_roster() else {
+            return Ok(None);
+        };
+        // Every pilot id we must NOT adopt as our own: the RD's existing roster, plus each pilot we
+        // create as we go.
+        let mut known: std::collections::BTreeSet<i64> = roster.into_iter().collect();
 
-        let mut seated_any = false;
+        // What we *intended* to seat: `(node_index, pilot_id, callsign)` for every seat whose write
+        // chain got as far as an `alter_heat`. This is the list the readback below has to find
+        // reflected in RotorHazard's own `heat_data` before the heat may be selected.
+        let mut intended: Vec<(usize, i64, &str)> = Vec::new();
         for (node_index, callsign) in seats {
-            let Some(&slot_id) = node_to_slot.get(&(*node_index as usize)) else {
+            let node_index = *node_index as usize;
+            let Some(seat) = node_to_slot.get(&node_index) else {
                 // The freshly-added heat has no slot for this node index (more bound nodes than RH
-                // nodes) — skip it; RH won't record there, which is the correct degradation.
+                // nodes) — skip it; RH won't record there, which is the correct degradation. It is
+                // deliberately NOT in `intended`: there is no receiver at that seat to lose laps on.
                 continue;
             };
-            // Create a pilot and learn its id (the new id strictly above the running floor).
-            self.adapter.lock().unwrap().take_pilot_ids();
+            // Create a pilot and learn its id — the one id in the roster we did not already know.
+            // A delayed frame carrying only pilots we knew about adds nothing, so it is ignored and
+            // the wait continues rather than adopting somebody else's pilot (#451).
+            self.adapter.lock().unwrap().take_pilot_roster();
             self.client.emit("add_pilot", Payload::Text(vec![]))?;
             self.client
                 .emit("load_data", json!({ "load_types": ["pilot_data"] }))?;
-            let Some(pilot_id) = self.wait_for_pilot_above(pilot_floor) else {
+            let Some(pilot_id) = self.wait_for_added_pilot(&known) else {
                 continue;
             };
-            pilot_floor = pilot_id;
+            known.insert(pilot_id);
             // Name it with the GridFPV callsign so RH's own view + its staging log show the callsign.
             self.client.emit(
                 "alter_pilot",
@@ -569,9 +2237,9 @@ impl RotorHazardConnection {
             // Seat the pilot on the heat's node slot.
             self.client.emit(
                 "alter_heat",
-                json!({ "heat": heat_id, "slot_id": slot_id, "pilot": pilot_id }),
+                json!({ "heat": heat_id, "slot_id": seat.slot_id, "pilot": pilot_id }),
             )?;
-            seated_any = true;
+            intended.push((node_index, pilot_id, callsign.as_str()));
         }
 
         // Only make the heat current (and claim it as savable + seated) if at least one bound pilot
@@ -580,7 +2248,27 @@ impl RotorHazardConnection {
         // ("Pilot not defined") → zero laps, strictly worse than NOT selecting it. Returning `None`
         // leaves the connection in practice mode (no current heat), where RH still records via its
         // `current_heat is HEAT_ID_NONE` gate branch, and the finish path adds its own savable heat.
-        if !seated_any {
+        if intended.is_empty() {
+            return Ok(None);
+        }
+        // **Confirm the seating landed before selecting the heat** (#423). Everything above is
+        // fire-and-forget: `on_alter_heat` answers with `emit_heat_data(noself=True)`, which
+        // excludes the socket that made the write, and `@catchLogExcWithDBWrapper` swallows any
+        // failure into RotorHazard's log — so an accepted `alter_heat` proves only that the bytes
+        // left. Selecting a heat whose seats did not take is the worst outcome this file can
+        // produce: RH's pass gate then dismisses **every** crossing on the unseated node
+        // (`RHRace.py`: `pilot_id is not None and pilot_id != PILOT_ID_NONE`), so a competitor's
+        // whole race is silently absent — while GridFPV reported a seated heat. Practice mode loses
+        // only the dense per-tick RSSI trace, so it is strictly the safer degradation.
+        //
+        // Note this confirms the pilots are on **this** heat, which matters beyond "did the write
+        // fail". `RHData.alter_heat` resolves the slot as a bare `HeatNode.query.get(slot_id)` — a
+        // primary-key lookup NOT scoped to the heat — so a slot id belonging to some *other* heat
+        // seats the pilot there, successfully, while the heat selected below stays empty. The slot
+        // ids above come from "the freshest heat in whatever `heat_data` arrived", and RH dispatches
+        // each socket event on its own greenlet, so a pre-`add_heat` snapshot is a legal answer.
+        // Checking the heat by id is what makes that unreachable rather than unlikely.
+        if !self.confirm_seating(heat_id, &intended) {
             return Ok(None);
         }
         // Make the seated heat current so the seats take effect (and so it is the savable heat the
@@ -590,24 +2278,133 @@ impl RotorHazardConnection {
         Ok(Some(heat_id as u64))
     }
 
-    /// Wait (bounded) for a `heat_data` response after [`seat_heat`]'s `add_heat`, returning the
-    /// **freshest** heat (highest id) and its `node_index → slot_id` map — but only once that map is
-    /// **non-empty** (RH may broadcast a `heat_data` for a freshly-added heat before its `HeatNode`
-    /// rows carry a `node_index`; accepting an empty map would seat nobody yet still mark the heat
-    /// savable). `None` on timeout.
-    fn wait_for_heat_slots(&self) -> Option<(i64, std::collections::HashMap<usize, i64>)> {
+    /// Read the seating of `heat_id` back off RotorHazard and check every `intended`
+    /// `(node_index, pilot_id, callsign)` is really there (#423); `true` when all of them are.
+    ///
+    /// The readback is `load_data { heat_data }`, which RH answers **`nobroadcast`** — addressed to
+    /// this socket, so unlike the `noself` broadcast `alter_heat` triggers it actually reaches the
+    /// writer. `RHUI.emit_heat_data` serialises each slot's `pilot_id`, which is the one value that
+    /// says whether the write took.
+    ///
+    /// A mismatch is announced through the [`crate::diag`] sink naming the **callsigns** that did
+    /// not seat, because "node 2 is empty" is not what the RD needs to hear at Stage.
+    ///
+    /// ## Why it asks repeatedly rather than once
+    ///
+    /// RotorHazard builds its `SocketIO` without `async_handlers=False` (`server.py`, both
+    /// versions), so Flask-SocketIO's default applies and **every event is dispatched on its own
+    /// greenlet**. The `load_data` behind this readback can therefore be served *before* the
+    /// `alter_heat` ahead of it has committed — a single ask would then read a pre-write snapshot
+    /// and drop a perfectly good heat into practice mode. So this re-asks until the seating is
+    /// confirmed or [`SEAT_RESPONSE_TIMEOUT`] elapses, and only reports failure on the last
+    /// observation. Re-asking is free: `load_data` is a pure read, addressed to this socket.
+    fn confirm_seating(&self, heat_id: i64, intended: &[(usize, i64, &str)]) -> bool {
+        /// How often to re-ask while waiting for the seating to appear.
+        const RETRY_INTERVAL: Duration = Duration::from_millis(300);
+
         let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
+        // The last `heat_data` seen for this heat, so the failure line can say what RH actually
+        // reported rather than only that it timed out.
+        let mut last: Option<std::collections::HashMap<usize, HeatSeat>> = None;
+        loop {
+            self.adapter.lock().unwrap().take_heat_slots();
+            if self
+                .client
+                .emit("load_data", json!({ "load_types": ["heat_data"] }))
+                .is_err()
+            {
+                return false;
+            }
+            if let Some(seated) = self.wait_for_heat(heat_id, RETRY_INTERVAL) {
+                if seating_holds(&seated, intended) {
+                    return true;
+                }
+                last = Some(seated);
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                break;
+            }
+        }
+        let Some(seated) = last else {
+            crate::diag!(
+                "gridfpv: rotorhazard: could not confirm the heat's seating — RotorHazard did not \
+                 answer load_data(heat_data) for heat {heat_id} within {}s. Racing this heat \
+                 unseated would make RotorHazard dismiss every crossing (\"Pilot not defined\"), so \
+                 GridFPV is racing it in practice mode instead: laps are still recorded and \
+                 GridFPV attributes them itself, but RotorHazard's own dense per-tick RSSI trace \
+                 for this run is not saved",
+                SEAT_RESPONSE_TIMEOUT.as_secs(),
+            );
+            return false;
+        };
+        let unseated: Vec<&str> = intended
+            .iter()
+            .filter(|(node_index, pilot_id, _)| !seat_holds(&seated, *node_index, *pilot_id))
+            .map(|(_, _, callsign)| *callsign)
+            .collect();
+        crate::diag!(
+            "gridfpv: rotorhazard: RotorHazard did not seat {} on heat {heat_id} — after {}s its \
+             own heat_data still reports {} of {} seat(s) unseated. Racing the heat anyway would \
+             make RotorHazard's pass gate dismiss every crossing on those nodes (\"Pilot not \
+             defined\") and lose those pilots' whole run, so GridFPV is racing in practice mode \
+             instead: every lap is still captured and GridFPV attributes it, but RotorHazard's \
+             dense per-tick RSSI trace for this run is not saved",
+            unseated.join(", "),
+            SEAT_RESPONSE_TIMEOUT.as_secs(),
+            unseated.len(),
+            intended.len(),
+        );
+        false
+    }
+
+    /// Wait (bounded) for a `heat_data` response after [`seat_heat`]'s `add_heat`, returning the
+    /// **freshest** heat (highest id) and its `node_index → `[`HeatSeat`] map — but only once that
+    /// map is **non-empty** (RH may broadcast a `heat_data` for a freshly-added heat before its
+    /// `HeatNode` rows carry a `node_index`; accepting an empty map would seat nobody yet still mark
+    /// the heat savable). `None` on timeout.
+    fn wait_for_heat_slots(&self) -> Option<(i64, std::collections::HashMap<usize, HeatSeat>)> {
+        self.wait_for_matching_heat(SEAT_RESPONSE_TIMEOUT, |slots| {
+            // Pick the freshest heat (highest id) that actually carries node→slot mappings.
+            slots
+                .iter()
+                .filter(|(_, m)| !m.is_empty())
+                .max_by_key(|(id, _)| **id)
+                .map(|(&heat_id, seats)| (heat_id, seats.clone()))
+        })
+    }
+
+    /// Wait up to `budget` for a `heat_data` response carrying **this** heat, returning its
+    /// `node_index → `[`HeatSeat`] map. `None` if none arrived in time. The seating readback
+    /// ([`confirm_seating`](Self::confirm_seating)) uses it: unlike
+    /// [`wait_for_heat_slots`](Self::wait_for_heat_slots) it must not settle for "the freshest heat"
+    /// — a `heat_data` for some *other* heat would confirm nothing — and it takes a short budget
+    /// because the caller re-asks rather than waiting out the whole seating timeout on one answer.
+    fn wait_for_heat(
+        &self,
+        heat_id: i64,
+        budget: Duration,
+    ) -> Option<std::collections::HashMap<usize, HeatSeat>> {
+        self.wait_for_matching_heat(budget, |slots| slots.get(&heat_id).cloned())
+    }
+
+    /// The shared bounded wait behind [`wait_for_heat_slots`](Self::wait_for_heat_slots) and
+    /// [`wait_for_heat`](Self::wait_for_heat): drain each `heat_data` the adapter has folded and
+    /// hand it to `pick`, returning the first non-`None` answer. `None` once `budget` elapses or
+    /// the socket drops.
+    fn wait_for_matching_heat<T>(
+        &self,
+        budget: Duration,
+        pick: impl Fn(
+            &std::collections::HashMap<i64, std::collections::HashMap<usize, HeatSeat>>,
+        ) -> Option<T>,
+    ) -> Option<T> {
+        let deadline = Instant::now() + budget;
         loop {
             {
                 let mut a = self.adapter.lock().unwrap();
                 let slots = a.take_heat_slots();
-                // Pick the freshest heat (highest id) that actually carries node→slot mappings.
-                if let Some((&heat_id, node_to_slot)) = slots
-                    .iter()
-                    .filter(|(_, m)| !m.is_empty())
-                    .max_by_key(|(id, _)| **id)
-                {
-                    return Some((heat_id, node_to_slot.clone()));
+                if let Some(found) = pick(&slots) {
+                    return Some(found);
                 }
             }
             if Instant::now() >= deadline || !self.is_alive() {
@@ -617,21 +2414,35 @@ impl RotorHazardConnection {
         }
     }
 
-    /// Wait (bounded) for a `pilot_data` response carrying a pilot id **strictly greater than**
-    /// `floor`, returning that id (the highest such) — used to identify the pilot a preceding
-    /// `add_pilot` just created. Passing `i64::MIN` returns the current highest id (the seating
-    /// floor). `None` on timeout (no id above `floor` arrived).
-    fn wait_for_pilot_above(&self, floor: i64) -> Option<i64> {
+    /// Wait (bounded) for a `pilot_data` response and return the roster it carried — used once, at
+    /// the top of [`seat_heat`](Self::seat_heat), to learn which pilots RotorHazard already has.
+    ///
+    /// `Some(vec![])` is a real answer ("no pilots yet") and `None` means RotorHazard never
+    /// answered. The caller must not conflate them: see the `#451` note at the call site.
+    fn wait_for_pilot_roster(&self) -> Option<Vec<i64>> {
+        let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
+        loop {
+            if let Some(roster) = self.adapter.lock().unwrap().take_pilot_roster() {
+                return Some(roster);
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Wait (bounded) for a `pilot_data` response that reports a pilot **we did not already know
+    /// about** — the one a preceding `add_pilot` just created — and return its id.
+    ///
+    /// Frames listing only `known` pilots are the delayed broadcasts in flight from earlier
+    /// `add_pilot`s and `load_data`s; they are skipped and the wait continues. `None` on timeout.
+    fn wait_for_added_pilot(&self, known: &std::collections::BTreeSet<i64>) -> Option<i64> {
         let deadline = Instant::now() + SEAT_RESPONSE_TIMEOUT;
         loop {
             {
-                let mut a = self.adapter.lock().unwrap();
-                let id = a
-                    .take_pilot_ids()
-                    .into_iter()
-                    .filter(|id| *id > floor)
-                    .max();
-                if let Some(id) = id {
+                let roster = self.adapter.lock().unwrap().take_pilot_roster();
+                if let Some(id) = roster.as_deref().and_then(|r| added_pilot(known, r)) {
                     return Some(id);
                 }
             }
@@ -662,36 +2473,149 @@ impl RotorHazardConnection {
         self.client.emit("stage_race", Payload::Text(vec![]))
     }
 
-    /// **Prepare RotorHazard for an instant start** — the Grid-owns-all-timing model: GridFPV's own
-    /// start procedure (the randomized Armed hold + the start tone) is the *only* delay; RH must just
-    /// begin recording the instant Grid says go, with **no RH-side staging hold or tones**.
+    /// **Put RotorHazard in a state where it makes no race decisions** — it detects crossings,
+    /// Grid referees.
     ///
-    /// Stock RotorHazard formats ship with a multi-second staging sequence — staging *tones* plus a
-    /// fixed/random *start delay* (`start_delay_min_ms`/`start_delay_max_ms`, typically 1–2 s) — that
-    /// `on_stage_race` runs as its own STAGING→RACING countdown ("Staging new race, format: … →
-    /// tones → Race started"). That ran *on top of* Grid's start procedure (two competing start
-    /// sequences — the root of the staging-race-eats-laps bug the `STAGE_RESET_SETTLE` band-aid
-    /// papered over). This zeroes the **current** format's staging fields so `stage_race`'s
-    /// `staging_total_ms` is 0 and RH transitions straight to RACING:
-    ///   * `staging_fixed_tones = 0`, `staging_delay_tones = 0` — no staging tones;
-    ///   * `start_delay_min_ms = 0`, `start_delay_max_ms = 0` — no fixed/random staging delay;
-    ///   * `unlimited_time = 1` — RH never auto-expires the race; **Grid owns the stop**, not RH's
-    ///     race-format timer.
+    /// Two referees is how #403 happened: an open-practice heat in which the pilot flew 8 gate
+    /// crossings and Grid recorded 4, because RotorHazard declared a winner at lap 3 and numbered
+    /// the rest `-1`, marking them late/deleted *at source*. Grid correctly skips deleted laps, so
+    /// four crossings the timer had detected perfectly were gone before Grid could see them.
     ///
-    /// The only residual is RotorHazard's fixed `RACE_START_DELAY_EXTRA_SECS` prestage (a
-    /// `Config.GENERAL` value, ~0.9 s by default, with no socket setter), which is *constant* and so
-    /// **does not affect lap-time correctness**: RH timestamps every pass relative to its own race
-    /// start, and Grid derives lap times as pass-to-pass deltas on that clock, so a constant prestage
-    /// offset cancels out. (If a deployment needs RH RACING to coincide exactly with Grid's tone, set
-    /// `RACE_START_DELAY_EXTRA_SECS = 0` in the timer's config — outside this socket API.)
+    /// Two paths, in preference order:
     ///
-    /// Targets the current format learned from the `race_status` stream; re-applies it as current so
-    /// `RaceContext.race.format` reflects the zeroed staging. **Must be emitted while RH is READY** —
-    /// `alter_race_format`/`set_race_format` are rejected during an active race — so the bridge calls
-    /// this at **Stage** (pre-Armed, pre-go), not at the start instant. A no-op (best-effort `Ok`) if
-    /// no current format id has been learned yet. Idempotent: re-zeroing an already-zeroed format is
-    /// harmless.
+    /// 1. **The Grid-owned format** (#404/#405, the plugin's [`CAP_OWNED_FORMAT`]). The plugin
+    ///    creates a `GridFPV` race format once — every conduct field neutral: no win condition, no
+    ///    lap cap, no time limit, no team aggregation, holeshot lap numbering, no staging tones or
+    ///    start delay — and selects it. The race director's own format is **never touched**, so the
+    ///    takeover is reversible by construction (`race.raceformat = <theirs>` puts it back) with
+    ///    no snapshot/restore bookkeeping to get wrong and nothing left behind if Grid dies
+    ///    mid-race. See [`select_owned_format`](Self::select_owned_format).
+    /// 2. **The legacy in-place path** — kept working for the transition, while plugin builds older
+    ///    than the owned format are still in the field. It zeroes the *staging* half of whichever
+    ///    format is current (tones + start delays + `unlimited_time`) by mutating the RD's own row.
+    ///    That is what shipped before this change; it fixes the start but leaves RH's *stopping*
+    ///    and *counting* decisions intact, which is precisely #403. Engaging it is announced.
+    ///
+    /// Either way this is about *staging*: RotorHazard rejects `alter_race_format`/`set_race_format`
+    /// during an active race, so the bridge calls this at **Stage** (pre-Armed, pre-go), never at
+    /// the start instant. Idempotent — the driver calls it again immediately before `stage_race`,
+    /// because seating a heat can switch the effective format.
+    ///
+    /// The only residual delay is RotorHazard's fixed `RACE_START_DELAY_EXTRA_SECS` prestage (a
+    /// `Config.GENERAL` value, ~0.9 s by default; the plugin zeroes it at load). It is *constant*
+    /// and so does not affect lap-time correctness: RH timestamps every pass relative to its own
+    /// race start and Grid derives lap times as pass-to-pass deltas on that clock, so a constant
+    /// offset cancels out.
     pub fn prepare_instant_start(&self) -> Result<(), rust_socketio::Error> {
+        if self.select_owned_format()? {
+            return Ok(());
+        }
+        self.neutralize_active_format()
+    }
+
+    /// Ask the plugin to select its **Grid-owned `GridFPV` race format**; `Ok(true)` when the timer
+    /// is confirmed racing on it (#404).
+    ///
+    /// `Ok(false)` means the caller must fall back to [`neutralize_active_format`] — and by then
+    /// the reason has already been announced through the [`crate::diag`] sink, once per connection.
+    /// The confirm only blocks the **first** selection on a connection: the Director asks at the
+    /// heat's Stage transition, seconds of Armed hold before "go", so waiting there is free, while
+    /// the second call (immediately before `stage_race`, at the go instant) is fire-and-forget
+    /// against an already-proven format. A later failure still surfaces — the `gridfpv_format_ack`
+    /// handler announces any `ok: false` whenever it arrives.
+    fn select_owned_format(&self) -> Result<bool, rust_socketio::Error> {
+        let decision = {
+            // Clear any stale failure — the plugin's load-time error, or a previous stage's — so
+            // only an ack for the request we are about to send can end the confirm below. The
+            // plugin retries the create on every request, so yesterday's reason is not evidence.
+            let mut owned = self.owned_format.lock().expect("owned-format lock");
+            owned.error = None;
+            // Reads `gave_up`, NOT `announced` (#453) — see `format_selection`.
+            format_selection(&owned)
+        };
+        // No plugin, or a plugin build predating the owned format: the legacy path, announced once.
+        if decision == FormatSelection::Legacy {
+            return Ok(false);
+        }
+        self.client.emit("gridfpv_select_format", json!({}))?;
+        match decision {
+            FormatSelection::AlreadySelected => return Ok(true),
+            // The request above still went out, so a plugin that recovers is picked up at the next
+            // stage — but don't re-block every stage waiting for one that will not answer.
+            FormatSelection::AlreadyGaveUp => return Ok(false),
+            FormatSelection::Legacy | FormatSelection::Confirm => {}
+        }
+        // First selection on this link: confirm before racing on it.
+        let deadline = Instant::now() + FORMAT_ACK_TIMEOUT;
+        loop {
+            {
+                let owned = self.owned_format.lock().expect("owned-format lock");
+                if owned.selected {
+                    return Ok(true);
+                }
+                // A failed ack already announced itself in its handler; stop waiting.
+                if owned.error.is_some() {
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut owned = self.owned_format.lock().expect("owned-format lock");
+        // The confirm has now actually run its course on this connection: don't block a later
+        // stage on it again. Latched here and nowhere else (#453).
+        owned.gave_up = true;
+        if !owned.announced {
+            owned.announced = true;
+            let why = match owned.error.as_ref() {
+                Some(error) => format!("it reported: {error}"),
+                None => format!("it did not answer within {}s", FORMAT_ACK_TIMEOUT.as_secs()),
+            };
+            crate::diag!(
+                "gridfpv: rotorhazard: the GridFPV plugin advertised `{CAP_OWNED_FORMAT}` but its \
+                 race format is not selected — {why}. Falling back to altering this timer's own \
+                 race format, which neutralises its START but NOT its stopping or counting: \
+                 RotorHazard may still declare a winner and delete later crossings at source (#403)"
+            );
+        }
+        Ok(false)
+    }
+
+    /// The **legacy** neutralisation: mutate whichever race format is currently selected on the
+    /// timer, zeroing its staging so `stage_race` transitions straight to RACING.
+    ///
+    /// This is what shipped before the Grid-owned format, kept working for the transition period —
+    /// a stock RotorHazard, or a plugin build older than [`CAP_OWNED_FORMAT`], still needs *some*
+    /// neutralisation, and losing the instant start would be a worse regression than the gap this
+    /// leaves. But understand what it does not do: it zeroes four *starting* fields and
+    /// `unlimited_time`, and says nothing about **stopping** or **counting**. Whatever
+    /// `win_condition` / `number_laps_win` the RD last set still governs the race, which is #403.
+    /// It also edits the RD's own row, which is why #404 could not answer "restore, or don't?".
+    ///
+    /// Both of those are why the owned-format path above exists and is preferred. Engaging this
+    /// one is announced once per connection so a timer running on the weaker guarantee is never a
+    /// silent condition.
+    ///
+    /// Targets the current format learned from the `race_status` stream, then re-selects it so
+    /// `RaceContext.race.format` picks up the zeroed staging (altering the row alone does not
+    /// refresh the in-memory current-format object on every RH build). A no-op (best-effort `Ok`)
+    /// if no current format id has been learned yet. Idempotent.
+    fn neutralize_active_format(&self) -> Result<(), rust_socketio::Error> {
+        {
+            let mut owned = self.owned_format.lock().expect("owned-format lock");
+            if !owned.announced {
+                owned.announced = true;
+                crate::diag!(
+                    "gridfpv: rotorhazard: no GridFPV plugin race format on this timer — Grid is \
+                     altering the timer's own active format to zero its staging. That does NOT \
+                     neutralise RotorHazard's win condition or lap cap, so a heat run past the \
+                     timer's configured lap limit can still lose crossings (#403). Install/update \
+                     the GridFPV plugin to race on a Grid-owned format instead."
+                );
+            }
+        }
         let Some(format_id) = *self.current_format.lock().expect("current-format lock") else {
             // No format id known yet (no `race_status` folded): cannot target a format. Best-effort
             // no-op — staging then keeps whatever the format ships, which the reset/stage flow still
@@ -706,6 +2630,12 @@ impl RotorHazardConnection {
                 "staging_delay_tones": 0,
                 "start_delay_min_ms": 0,
                 "start_delay_max_ms": 0,
+                // `1` = NO time limit. Verified rather than assumed (#423): `RHData.alter_raceFormat`
+                // stores `1 if data['unlimited_time'] else 0`, and `RHRace` branches on
+                // `unlimited_time == 0` for "count down" — the same on v4.3.0 and v4.4.0. The
+                // often-repeated "this field means the opposite of its name" is about the *column*
+                // it maps to (`DB.Column('race_mode', …)`, with a deprecated `race_mode` property
+                // beside it), not about this key, which lands the way it reads.
                 "unlimited_time": 1,
             }),
         )?;
@@ -715,38 +2645,442 @@ impl RotorHazardConnection {
             .emit("set_race_format", json!({ "race_format": format_id }))
     }
 
+    /// The id of the **Grid-owned `GridFPV` race format** on this connection, once the plugin has
+    /// named one. `None` against a stock RH, an older plugin build, or a plugin that could not
+    /// create it.
+    pub fn owned_format_id(&self) -> Option<i64> {
+        self.owned_format.lock().expect("owned-format lock").id
+    }
+
+    /// Whether this connection is confirmed racing on the Grid-owned race format — i.e. whether
+    /// RotorHazard has been stripped of *every* race decision, not just its staging (#403/#404).
+    /// `false` means the legacy in-place path is in use (and has been announced).
+    pub fn owned_format_selected(&self) -> bool {
+        self.owned_format
+            .lock()
+            .expect("owned-format lock")
+            .selected
+    }
+
+    /// RotorHazard's currently selected race-format id, as last reported by the `race_status`
+    /// stream. `None` until the first status carrying one has been folded.
+    pub fn current_format_id(&self) -> Option<i64> {
+        *self.current_format.lock().expect("current-format lock")
+    }
+
+    /// **Give a race format a lap-count win condition** — a driving helper that recreates #403's
+    /// field configuration on a disposable RotorHazard, so a regression test can prove Grid no
+    /// longer inherits it.
+    ///
+    /// `win_condition` takes RotorHazard's `RHRace.WinCondition` values (`2` = `FIRST_TO_LAP_X`,
+    /// the one that bit); `number_laps_win` is the cap. With both set, RH marks a node finished at
+    /// `lap_number >= number_laps_win` and flags every later crossing late — `RHRace.py` then sets
+    /// `lap_data.deleted`, and the crossing never reaches Grid at all. Never for a production
+    /// timer: this deliberately mis-configures the format it targets.
+    pub fn set_race_format_win_condition(
+        &self,
+        format_id: i64,
+        win_condition: i64,
+        number_laps_win: i64,
+    ) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "alter_race_format",
+            json!({
+                "format_id": format_id,
+                "win_condition": win_condition,
+                "number_laps_win": number_laps_win,
+            }),
+        )?;
+        self.client
+            .emit("set_race_format", json!({ "race_format": format_id }))
+    }
+
     /// Inject a simulated pass on `node` (0-based) — driving helper for tests.
     pub fn simulate_lap(&self, node: u64) -> Result<(), rust_socketio::Error> {
         self.client.emit("simulate_lap", json!({ "node": node }))
     }
 
-    /// **Tune** `node` (0-based) to `frequency` MHz (race redesign Slice 4a) — the engine allocates
-    /// the channel, the adapter applies it (RE §7.3). Emits RotorHazard's `set_frequency` handler
-    /// (`{ node, frequency }`); the server retunes that node's receiver. Best-effort: a failed emit
-    /// on a dropped socket surfaces as an `Err` the caller logs.
-    pub fn set_frequency(&self, node: u64, frequency: u16) -> Result<(), rust_socketio::Error> {
+    /// **Tune** `node` (0-based) to `frequency` MHz (race redesign Slice 4a; #413) — the engine
+    /// allocates the channel, the adapter applies it (RE §7.3). Emits RotorHazard's `set_frequency`
+    /// handler; the server retunes that node's receiver. Best-effort: a failed emit on a dropped
+    /// socket surfaces as an `Err` the caller logs.
+    ///
+    /// ## `label` is not decoration — it is half the write
+    ///
+    /// `on_set_frequency` accepts `{ node, frequency, band?, channel? }` (`server.py`) and stores
+    /// the band/channel pair on the **active profile** when it is given. Emitting the frequency
+    /// alone leaves RotorHazard's own UI showing a bare number where its channel label goes, and an
+    /// RD who validates a channel change by refreshing that page reads an unlabelled frequency as
+    /// *"it half worked"*. So a caller that knows the catalog entry — the Tune page's channel write
+    /// does (#413) — passes `Some(("Raceband", "R7"))`, and the two keys are simply **omitted**
+    /// (rather than sent as nulls) when it does not: RotorHazard leaves whatever label it had in
+    /// place, which is better than overwriting it with an empty string.
+    ///
+    /// The frequency is still the authoritative half. `label` never changes what the receiver tunes
+    /// to; it only decides what RotorHazard's screen calls it.
+    pub fn set_frequency(
+        &self,
+        node: u64,
+        frequency: u16,
+        label: Option<(&str, &str)>,
+    ) -> Result<(), rust_socketio::Error> {
         self.client.emit(
             "set_frequency",
-            json!({ "node": node, "frequency": frequency }),
+            set_frequency_payload(node, frequency, label),
         )
     }
 
-    /// Set RotorHazard's **minimum lap time** (general setting `MIN_LAP_TIME`, in **seconds**) —
-    /// a driving helper so the sim/test harness does not trip RH's "Pass record under lap
-    /// minimum" filter.
+    /// **Set node `node`'s enter threshold** to `level` (#355) — the calibration write.
     ///
-    /// RotorHazard defaults `MIN_LAP_TIME` to **10s** and logs `Pass record under lap minimum (10)`
-    /// for any crossing closer than that to the previous one — which the test harness's rapid
-    /// `simulate_lap` injections (and short-lap sim CSVs) routinely are, so RH spams the warning.
-    /// Emitting RotorHazard's `set_option` handler with `{ option: "MIN_LAP_TIME", value: "<sec>" }`
-    /// persists the setting server-side; passing `0` disables the minimum entirely so every
-    /// short sim lap records cleanly. Best-effort (a failed emit on a dropped socket is the
-    /// caller's to log); intended for the disposable test RH only, never a production timer.
-    pub fn set_min_lap_time(&self, seconds: u64) -> Result<(), rust_socketio::Error> {
+    /// Emits RotorHazard's `set_enter_at_level` handler with `{ node, enter_at_level }`, where
+    /// `node` is the 0-based seat index. **Verified identical on v4.3.0 and v4.4.0**
+    /// (`server.py::on_set_enter_at_level`): same event name, same two payload keys; v4.4.0 only
+    /// adds an `int(… or 0)` coercion around the value. It carries **no authentication** — the
+    /// `@requires_auth` decorators in that file guard Flask HTTP routes, not socket handlers — so
+    /// the Director can calibrate on the socket it is already holding, with no plugin involved.
+    ///
+    /// The handler runs `calibration.py::set_enter_at_level`, which writes the active profile's
+    /// `enter_ats`, **pushes the level to the timing hardware** (`interface.set_enter_at_level`),
+    /// and fires `Evt.ENTER_AT_LEVEL_SET`.
+    ///
+    /// ## Two traps this exists to avoid
+    ///
+    /// * **`level` must never be `0`.** `calibration.py` tests the value for *truthiness*, so a `0`
+    ///   is read as "re-read the level off the node" and the old threshold survives — while the
+    ///   write looks perfectly successful. Callers clamp to a minimum of 1 (`RSSI_MIN`).
+    /// * **RotorHazard does not echo this.** The handler emits nothing at all, so an `Ok` here means
+    ///   only that the emit was accepted. [`request_thresholds`](Self::request_thresholds) is the
+    ///   readback, and the caller fires it after a write so the confirming
+    ///   `enter_and_exit_at_levels` broadcast lands on this socket.
+    ///
+    /// Callers **must** gate this on heat phase — a threshold that moves mid-race changes what
+    /// counts as a lap while it is being counted. This layer only moves the bytes.
+    pub fn set_enter_at_level(&self, node: u64, level: u32) -> Result<(), rust_socketio::Error> {
         self.client.emit(
-            "set_option",
-            json!({ "option": "MIN_LAP_TIME", "value": seconds.to_string() }),
+            "set_enter_at_level",
+            json!({ "node": node, "enter_at_level": level }),
         )
+    }
+
+    /// **Set node `node`'s exit threshold** to `level` (#355) — the twin of
+    /// [`set_enter_at_level`](Self::set_enter_at_level), and everything said there applies here.
+    ///
+    /// Emits `set_exit_at_level` with `{ node, exit_at_level }` (`server.py::on_set_exit_at_level`,
+    /// identical on v4.3.0 and v4.4.0). `0` is falsy to `calibration.py` and silently re-reads the
+    /// node's own level instead of setting one; there is no echo, so confirmation is by readback.
+    pub fn set_exit_at_level(&self, node: u64, level: u32) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_exit_at_level",
+            json!({ "node": node, "exit_at_level": level }),
+        )
+    }
+
+    /// **Start a peak-sampling CAPTURE of node `node`'s enter threshold** (#355) — RotorHazard's
+    /// `cap_enter_at_btn`, the only non-guessing way to bootstrap a timer nobody has ever tuned.
+    ///
+    /// # What it actually does, which is not what its name suggests
+    ///
+    /// Verified in the container (v4.3.0) and against the v4.4.0 tree — the capture path is
+    /// **byte-identical on both**, in `server.py`, `calibration.py` and `BaseHardwareInterface.py`
+    /// alike.
+    ///
+    /// `server.py::on_cap_enter_at_btn` reads `data['node_index']` and calls
+    /// `interface.start_capture_enter_at_level(node_index)`, which arms a **3-second sampling
+    /// window** (`CAP_ENTER_EXIT_AT_MILLIS = 3000`) starting *now*. Over that window the RSSI loop
+    /// accumulates `current_rssi` and a sample count; at the deadline the level becomes
+    /// `round(total / count)` — the **mean** of what the node saw, not its peak. For the *enter*
+    /// threshold only there is then one correction: if `node_peak_rssi - level` is under
+    /// `ENTER_AT_PEAK_MARGIN` (5), the level is pulled down to `node_peak_rssi - 5`.
+    ///
+    /// So the RD does not fly a lap and *then* capture. The window opens the instant this emit
+    /// lands, and the pass has to happen inside it. Any UI wording that says otherwise sends the
+    /// RD to the gate three seconds too late — which is why the console labels this as a
+    /// three-second window rather than as a verb.
+    ///
+    /// # Preconditions, and the silence when they fail
+    ///
+    /// It needs **no race, no crossing and no seated pilot** — it works on a wholly idle timer,
+    /// which is the entire point. It is refused, and `start_capture_enter_at_level` returns
+    /// `False`, when a capture of this threshold is *already* running on this node, or when the
+    /// node's `api_valid_flag` is clear (nothing answering at that seat). An out-of-range
+    /// `node_index` raises an `IndexError` that `@catchLogExcWithDBWrapper` swallows into the log.
+    ///
+    /// **Every one of those failures is silent on the socket.** The handler emits nothing on the
+    /// refusal path and returns nothing on any path, so an `Ok` here means the bytes left, and
+    /// nothing more. This is the fourth write in this file with that property (`set_min_lap_time`,
+    /// `frequencyset_alter` and `set_frequency`'s label were the first three, #423) and it gets the
+    /// same treatment: the caller proves it landed by watching the level change on the signal feed.
+    ///
+    /// # This one DOES echo — eventually
+    ///
+    /// Unlike `set_enter_at_level`, a *finished* capture broadcasts its result: at the end of the
+    /// window `new_enter_or_exit_at_callback` calls `calibration.set_enter_at_level` (profile row,
+    /// hardware push, `Evt.ENTER_AT_LEVEL_SET`) **and** `rhui.emit_enter_at_level(node)`, which
+    /// puts `node_enter_at_level` `{node_index, level}` on the wire ~3.0-3.1 s after this emit.
+    /// This transport folds that into the tune tap, so the captured level reaches the Tune page on
+    /// the feed it is already polling. The driver *also* fires
+    /// [`request_thresholds`](Self::request_thresholds) once the window has elapsed, because one
+    /// broadcast is not a thing to stake a gate's calibration on.
+    ///
+    /// ⚠️ **The payload key is `node_index`, not `node`.** The calibration writes on this same
+    /// socket use `node`; these two handlers use `node_index`. Sending `node` gives a `KeyError`
+    /// the exception wrapper swallows — accepted, logged, and nothing captured.
+    ///
+    /// Callers **must** gate this on heat phase exactly as they gate the calibration write: a
+    /// capture ends by *setting* the threshold, so it moves a detector mid-race just as surely.
+    pub fn capture_enter_at_level(&self, node: u64) -> Result<(), rust_socketio::Error> {
+        self.client.emit(CAP_ENTER_EVENT, capture_payload(node))
+    }
+
+    /// **Start a capture of node `node`'s exit threshold** (#355) — RotorHazard's
+    /// `cap_exit_at_btn`, the twin of [`capture_enter_at_level`](Self::capture_enter_at_level).
+    ///
+    /// Everything said there applies, with one difference: the exit branch has **no peak margin**.
+    /// `BaseHardwareInterface` sets `exit_at_level` to the plain mean of the window and stops
+    /// there, where the enter branch additionally pulls the level to `node_peak_rssi - 5` when it
+    /// came out too close to the node's peak. Same 3-second window, same `node_index` payload key,
+    /// same silence on refusal, and the same `node_exit_at_level` echo at the end.
+    pub fn capture_exit_at_level(&self, node: u64) -> Result<(), rust_socketio::Error> {
+        self.client.emit(CAP_EXIT_EVENT, capture_payload(node))
+    }
+
+    /// **Ask RotorHazard for its min-lap filter** — `load_data` with
+    /// `{"load_types": ["min_lap"]}`, which RH answers with a `min_lap` emit addressed to this
+    /// socket (`nobroadcast`) carrying `{min_lap, min_lap_behavior}` (#407).
+    ///
+    /// This is the **readback**, and it is what makes the socket route honest rather than a blind
+    /// write: `server.py::on_load_data`'s `min_lap` branch calls `RHUI.emit_min_lap`, which
+    /// serialises the two values the filter actually consults. Identical on v4.3.0 and v4.4.0 —
+    /// v4.4.0 adds a `min_first_crossing` key GridFPV ignores.
+    pub fn request_min_lap(&self) -> Result<(), rust_socketio::Error> {
+        self.client
+            .emit("load_data", json!({ "load_types": ["min_lap"] }))
+    }
+
+    /// Set RotorHazard's **minimum lap time** in seconds (#407).
+    ///
+    /// Emits `set_min_lap` with `{ min_lap }` — `server.py::on_set_min_lap`, which writes the
+    /// `MinLapSec` option, fires `Evt.MIN_LAP_TIME_SET`, and re-broadcasts `min_lap`. Verified
+    /// identical on v4.3.0 and v4.4.0, and carries no authentication (the `@requires_auth`
+    /// decorators in that file guard Flask HTTP routes, not socket handlers).
+    ///
+    /// ## This replaces a helper that did nothing
+    ///
+    /// The previous `set_min_lap_time` emitted `set_option` with
+    /// `{option: "MIN_LAP_TIME", value: "<sec>"}` and was documented "for the disposable test RH
+    /// only, never a production timer". Both halves of that were wrong. RotorHazard has **no
+    /// option named `MIN_LAP_TIME`** — that string is only the name of an *event* constant
+    /// (`Evt.MIN_LAP_TIME_SET`); the filter reads `MinLapSec`. `on_set_option` writes whatever key
+    /// it is handed, so the emit stored a row nothing ever read and returned `Ok`: a no-op that
+    /// looked like a success on both versions. It survived because RotorHazard's *default*
+    /// behaviour is highlight-don't-discard, so the harness's short sim laps recorded anyway and
+    /// nobody had reason to check.
+    ///
+    /// And a production timer is exactly where this belongs. RotorHazard applying its own min-lap
+    /// rule underneath GridFPV's is the two-referees problem of #403/#405 in its worst form: a
+    /// discarded crossing is not miscounted, it is *absent*, so GridFPV's own per-round floor
+    /// (D26) never runs on it, marshaling cannot restore it, and #397's rejected-crossing tone —
+    /// validated in the field as one of the most useful things the RD gets — never fires. Under
+    /// D27 pushing this value is GridFPV *applying* its own config to an instrument, which is
+    /// legitimate precisely because it is recorded on GridFPV's side ([`MinLapRecord`]) rather
+    /// than read back off the timer as truth.
+    ///
+    /// Prefer the plugin ([`CAP_MIN_LAP_NEUTRAL`]), which does this in-process through RHAPI and
+    /// re-asserts it per stage. This is the fallback for a plugin build that predates it — the
+    /// field timer still runs v0.1.0 — and for the sim harness.
+    pub fn set_min_lap(&self, seconds: i64) -> Result<(), rust_socketio::Error> {
+        self.client
+            .emit("set_min_lap", json!({ "min_lap": seconds }))
+    }
+
+    /// Set RotorHazard's **min-lap behaviour** (#407): `0` = highlight the sub-minimum crossing
+    /// but record it, non-zero = *discard* it.
+    ///
+    /// Emits `set_min_lap_behavior` with `{ min_lap_behavior }` — `server.py::on_set_min_lap_behavior`,
+    /// identical on v4.3.0 and v4.4.0. Note this one is **not** a database option: it writes
+    /// `serverconfig`'s `TIMING`/`MinLapBehavior`, a different store from
+    /// [`set_min_lap`](Self::set_min_lap)'s `MinLapSec`, which is why neutralising the filter takes
+    /// two writes rather than one. It is not in RotorHazard's restart-required key set, so it takes
+    /// effect immediately.
+    pub fn set_min_lap_behavior(&self, behavior: i64) -> Result<(), rust_socketio::Error> {
+        self.client.emit(
+            "set_min_lap_behavior",
+            json!({ "min_lap_behavior": behavior }),
+        )
+    }
+
+    /// **Make sure every crossing this timer detects reaches GridFPV** (#407), returning GridFPV's
+    /// [`MinLapRecord`] of what it found and what it applied.
+    ///
+    /// Two routes, in preference order — the same shape as
+    /// [`prepare_instant_start`](Self::prepare_instant_start):
+    ///
+    /// 1. **The plugin** ([`CAP_MIN_LAP_NEUTRAL`], v0.4.0+). It reads and zeroes both values
+    ///    in-process through RHAPI (`db.option_set("MinLapSec", 0)` and
+    ///    `config.set("TIMING", "MinLapBehavior", 0)` — present and identical on RHAPI 1.3 and
+    ///    1.4), confirms by re-reading, reports the outcome in `gridfpv_hello_ack`, and
+    ///    **re-asserts it at every stage** so a setting moved back between heats is caught. When
+    ///    the handshake already carried a confirmed-neutral report there is nothing to do here.
+    /// 2. **This socket**, otherwise: `load_data(min_lap)` to read, `set_min_lap` +
+    ///    `set_min_lap_behavior` to write, then `load_data(min_lap)` **re-asked until the pair
+    ///    reads neutral or the readback budget runs out** — one ask accepts a half-written frame
+    ///    and raises a false alarm, see [`confirm_min_lap_neutral`](Self::confirm_min_lap_neutral)
+    ///    (#444). Its limitation
+    ///    against the plugin route is that it runs **once, at handshake** — GridFPV has no reason
+    ///    to re-read it per heat on a link where nothing reports the change, so a filter the RD
+    ///    restores mid-event goes unnoticed until the next connect. That is the concrete cost of
+    ///    running a plugin older than v0.4.0.
+    ///
+    /// Called by the driver once per connection, right after the plugin probe and before any heat
+    /// can be armed. **Never silent**: an un-neutralised filter is announced through the
+    /// [`crate::diag`] sink naming the tone it compromises, once per connection.
+    ///
+    /// Never fails the connection — a timer whose filter could not be cleared must still connect,
+    /// so the Director can say so.
+    pub fn ensure_min_lap_neutral(&self) -> MinLapRecord {
+        // The plugin already proved it, in-process, and keeps re-proving it per stage.
+        {
+            let state = self.min_lap.lock().expect("min-lap lock");
+            if state.record.route == MinLapRoute::Plugin && state.record.neutral {
+                return state.record.clone();
+            }
+        }
+
+        let found = self.read_min_lap();
+        let Some((secs, behavior)) = found else {
+            let mut state = self.min_lap.lock().expect("min-lap lock");
+            state.record.route = MinLapRoute::Socket;
+            state.record.neutral = false;
+            state.record.error = Some(format!(
+                "RotorHazard did not answer load_data(min_lap) within {}s",
+                MIN_LAP_READBACK_TIMEOUT.as_secs()
+            ));
+            let record = state.record.clone();
+            let announce = !std::mem::replace(&mut state.announced, true);
+            drop(state);
+            if announce {
+                announce_min_lap_failure(&record);
+            }
+            return record;
+        };
+
+        {
+            let mut state = self.min_lap.lock().expect("min-lap lock");
+            state.record.route = MinLapRoute::Socket;
+            state.record.observe(Some(secs), Some(behavior));
+        }
+
+        if !min_lap_is_neutral(Some(secs), Some(behavior)) {
+            // Both, always — see `MIN_LAP_BEHAVIOR_HIGHLIGHT`. A failed emit is not returned: the
+            // confirming re-read below is what decides, and it cannot be fooled by an emit that
+            // was accepted and then ignored.
+            let _ = self.set_min_lap(MIN_LAP_NEUTRAL_SECS);
+            let _ = self.set_min_lap_behavior(MIN_LAP_BEHAVIOR_HIGHLIGHT);
+        }
+
+        // Confirm by re-reading, never by trusting the write — the discipline `request_thresholds`
+        // applies to calibration, and for the same reason. Re-asked rather than asked once: see
+        // `confirm_min_lap_neutral` (#444).
+        let confirmed = self.confirm_min_lap_neutral();
+        let neutral = match confirmed {
+            Some((s, b)) => min_lap_is_neutral(Some(s), Some(b)),
+            None => false,
+        };
+        let mut state = self.min_lap.lock().expect("min-lap lock");
+        state.record.neutral = neutral;
+        state.record.error = if neutral {
+            None
+        } else {
+            Some(match confirmed {
+                Some((s, b)) => format!(
+                    "RotorHazard still reports MinLapSec={s}, MinLapBehavior={b} after the write"
+                ),
+                None => format!(
+                    "RotorHazard did not confirm the write within {}s",
+                    MIN_LAP_READBACK_TIMEOUT.as_secs()
+                ),
+            })
+        };
+        let record = state.record.clone();
+        let announce = !neutral && !std::mem::replace(&mut state.announced, true);
+        drop(state);
+
+        if announce {
+            announce_min_lap_failure(&record);
+        } else if neutral && (record.found_secs, record.found_behavior) != (Some(0), Some(0)) {
+            crate::diag!(
+                "gridfpv: rotorhazard: cleared this timer's own min-lap filter over the socket \
+                 (it was MinLapSec={:?}, MinLapBehavior={:?}) so every crossing reaches GridFPV \
+                 and GridFPV's per-round floor referees it (#407). Its GridFPV plugin is older \
+                 than the one that does this in-process, so the filter is NOT re-checked between \
+                 heats on this link — restoring it in RotorHazard mid-event would go unnoticed \
+                 until the next reconnect",
+                record.found_secs,
+                record.found_behavior,
+            );
+        }
+        record
+    }
+
+    /// GridFPV's min-lap record for this connection (#407) — see [`MinLapRecord`]. `Unattempted`
+    /// until [`ensure_min_lap_neutral`](Self::ensure_min_lap_neutral) or a plugin handshake has run.
+    pub fn min_lap_record(&self) -> MinLapRecord {
+        self.min_lap.lock().expect("min-lap lock").record.clone()
+    }
+
+    /// Confirm the min-lap write by **re-asking** until RotorHazard reports a neutral pair or
+    /// [`MIN_LAP_READBACK_TIMEOUT`] elapses; returns the **last** pair observed (or `None` if it
+    /// never answered at all), so the failure line can say what RH actually reported.
+    ///
+    /// ## Why it asks repeatedly rather than once
+    ///
+    /// The same reason [`confirm_seating`](Self::confirm_seating) does, plus one specific to this
+    /// pair — and taking the first frame that lands was a false-alarm generator (#444):
+    ///
+    /// * **Neutralising takes two writes to two different stores.** `set_min_lap` writes the
+    ///   `MinLapSec` *database option*; `set_min_lap_behavior` writes `serverconfig`'s
+    ///   `TIMING`/`MinLapBehavior`. Between them the timer is legitimately half-written.
+    /// * **Each write re-broadcasts `min_lap` to us.** `server.py::on_set_min_lap` and
+    ///   `on_set_min_lap_behavior` both end in `RHUI.emit_min_lap(noself=True)` — and
+    ///   `RHUI.emit_min_lap` only ever branches on `nobroadcast`, so **`noself` is silently
+    ///   ignored** and the frame goes out on `self._socket.emit`, i.e. to every client *including
+    ///   the writer*. Verified identical on v4.3.0 and v4.4.0. So the first write's broadcast
+    ///   carries `(0, <old behavior>)` — not neutral — and is indistinguishable, at the socket,
+    ///   from an answer to our `load_data`.
+    /// * **Every event gets its own greenlet.** RH builds `SocketIO(...)` without
+    ///   `async_handlers=False` on both versions, so a `load_data(min_lap)` can be served from a
+    ///   pre-commit read while the writes ahead of it are still landing.
+    ///
+    /// Taking the first frame therefore latched `record.neutral = false` for the whole connection —
+    /// the socket route never re-checks — and told the RD the timer's min-lap filter could not be
+    /// neutralised when both writes had in fact landed. Re-asking is free: `load_data` is a pure
+    /// read.
+    fn confirm_min_lap_neutral(&self) -> Option<(i64, i64)> {
+        let deadline = Instant::now() + MIN_LAP_READBACK_TIMEOUT;
+        confirm_neutral_by_reasking(
+            || self.read_min_lap(),
+            || Instant::now() >= deadline || !self.is_alive(),
+        )
+    }
+
+    /// Ask for, and wait (bounded) for, RotorHazard's `min_lap` frame — `(min_lap, behavior)`, or
+    /// `None` if it never answered.
+    ///
+    /// Clears the previous observation first so a frame from an earlier request (or from the
+    /// broadcast a *write* triggers) cannot be mistaken for the answer to this one.
+    fn read_min_lap(&self) -> Option<(i64, i64)> {
+        self.min_lap.lock().expect("min-lap lock").observed = None;
+        self.request_min_lap().ok()?;
+        let deadline = Instant::now() + MIN_LAP_READBACK_TIMEOUT;
+        loop {
+            if let Some(pair) = self.min_lap.lock().expect("min-lap lock").observed {
+                return Some(pair);
+            }
+            if Instant::now() >= deadline || !self.is_alive() {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Stop the current race — driving helper for tests.
@@ -754,9 +3088,25 @@ impl RotorHazardConnection {
         self.client.emit("stop_race", Payload::Text(vec![]))
     }
 
-    /// Re-request the per-node enter/exit detection thresholds (`load_data` /
-    /// `enter_and_exit_at_levels`) — a driving helper so a test can re-capture thresholds after
-    /// draining the connect-time burst.
+    /// **Re-request the per-node enter/exit detection thresholds** — `load_data` with
+    /// `{"load_types": ["enter_and_exit_at_levels"]}`, which RotorHazard answers with an
+    /// `enter_and_exit_at_levels` emit addressed to this socket (`nobroadcast`).
+    ///
+    /// This is the **calibration readback** (#355), not merely a test helper. Neither
+    /// `set_enter_at_level` nor `set_exit_at_level` echoes, so the only way to learn whether a write
+    /// landed is to ask: the driver fires this immediately after a calibration emit, the adapter
+    /// parses the reply into the per-node thresholds, and the Tune page sees the value come back on
+    /// its next `GET /timers/{id}/signal` poll.
+    ///
+    /// ⚠️ It reads **RotorHazard's active profile row**, not the node. `RHUI.emit_enter_and_exit_at_levels`
+    /// serialises `profile.enter_ats` / `profile.exit_ats`, and `calibration.py` writes that row
+    /// *before* `interface.set_enter_at_level` — which then drops the value if
+    /// `Node.is_valid_rssi` rejects it. So the readback confirms "RotorHazard took it", which is one
+    /// step short of "the detector holds it"; keeping the level inside the valid range is what
+    /// closes the gap.
+    ///
+    /// Also used as a driving helper so a test can re-capture thresholds after draining the
+    /// connect-time burst.
     pub fn request_thresholds(&self) -> Result<(), rust_socketio::Error> {
         self.client.emit(
             "load_data",
@@ -780,9 +3130,10 @@ impl RotorHazardConnection {
     /// per-tick RSSI history (the marshaling Slice 1 / path-2 precondition).
     ///
     /// RotorHazard only writes a run's `history_values`/`history_times` (the dense trace its marshal
-    /// page reviews, pulled via `current_marshal_data` / `get_pilotrace`) when a heat is current —
-    /// `on_save_laps` and `emit_race_marshal_data` both no-op while `current_heat == HEAT_ID_NONE`,
-    /// the default in practice mode. The production staging path drives RH through
+    /// page reviews, pulled via `get_pilotrace` on both versions, or `current_marshal_data` on
+    /// v4.4.0) when a heat is current — `RHRace.save` *discards* rather than saves while
+    /// `current_heat == HEAT_ID_NONE` (the default in practice mode), and v4.4.0's
+    /// `emit_race_marshal_data` returns early on the same condition. The production staging path drives RH through
     /// `stop_race`/`discard_laps`/`stage_race` but never selects a heat, so without this the dense
     /// pull always comes back empty and only the coarse streamed [`SignalChunk`]s survive.
     ///
@@ -811,16 +3162,38 @@ impl RotorHazardConnection {
             .emit("set_current_heat", json!({ "heat": heat }))
     }
 
-    /// Request RotorHazard's dense **post-race marshal data** (`current_race_marshal`) — the
-    /// request-driven `current_marshal_data` with each node's `history_values`/`history_times`.
+    /// Request RotorHazard's dense **post-race marshal data** — each node's
+    /// `history_values`/`history_times`, by whichever of the two routes this timer implements.
     ///
     /// In normal operation the adapter auto-requests this on the heat-end (`DONE`) transition (see
     /// the `race_status` handler); this explicit helper lets a test pull it on demand after staging a
-    /// race down, so the dense-history capture can be asserted deterministically. RotorHazard only
-    /// answers while the race is `DONE` (`emit_race_marshal_data` returns early otherwise).
+    /// race down, so the dense-history capture can be asserted deterministically.
+    ///
+    /// ## `current_race_marshal` **does not exist on v4.3.0** (#423)
+    ///
+    /// The aggregate route — `current_race_marshal` → `current_marshal_data` — is a **v4.4.0-only**
+    /// handler. Verified by absence: `current_race_marshal` appears nowhere in the v4.3.0 tree, and
+    /// `RHUI.emit_race_marshal_data` (the function that builds the payload) was *added* in v4.4.0.
+    /// Socket.IO discards an emit no handler is registered for, so on v4.3.0 — the D16 floor and
+    /// what the RD's field timer runs — this emit returns `Ok`, produces no reply, and no error
+    /// anywhere. Another accepted-but-dead write, found by reading the source rather than the name.
+    ///
+    /// So this drives **both** routes, exactly as the heat-end path does, and the per-pilotrace one
+    /// is what actually answers at the floor:
+    ///
+    /// * `current_race_marshal` — v4.4.0 only. Answers only while the race is `DONE` **and** a heat
+    ///   is current (`emit_race_marshal_data` returns early on either).
+    /// * `save_laps` then `load_data { race_list }` — **both versions**. Persists the run, then asks
+    ///   for the saved-race tree whose `pilotrace_id`s the adapter turns into `get_pilotrace` pulls
+    ///   (`race_details`, identical on both versions bar two extra keys GridFPV ignores). This also
+    ///   needs a current heat: `RHRace.save` discards rather than saves while
+    ///   `current_heat == HEAT_ID_NONE`.
     pub fn request_marshal_data(&self) -> Result<(), rust_socketio::Error> {
         self.client
-            .emit("current_race_marshal", Payload::Text(vec![]))
+            .emit("current_race_marshal", Payload::Text(vec![]))?;
+        self.client.emit("save_laps", Payload::Text(vec![]))?;
+        self.client
+            .emit("load_data", json!({ "load_types": ["race_list"] }))
     }
 
     /// Discard the current race's laps, returning RotorHazard to a READY state —
@@ -836,6 +3209,35 @@ impl RotorHazardConnection {
     pub fn probe_liveness(&self) -> Result<(), rust_socketio::Error> {
         self.client
             .emit("load_data", json!({ "load_types": ["node_data"] }))
+    }
+
+    /// **Restart the RotorHazard server** — re-execute its process so it re-imports its plugins
+    /// (#386).
+    ///
+    /// RotorHazard imports every plugin **once, at startup**, so a freshly-dropped-in
+    /// `plugins/gridfpv/` does nothing until the server restarts. RH exposes that restart on the
+    /// socket we already hold — `@SOCKET_IO.on('restart_server')` / `on_restart_server()`
+    /// ("Re-execute the current process"), v4.4.0 `server.py:1881`, identical on v4.3.0. It carries
+    /// **no authentication**: the `@requires_auth` decorators in that file guard Flask HTTP routes,
+    /// not this socket handler. So the Director can complete the guided plugin install without the
+    /// RD ever opening RotorHazard's web UI.
+    ///
+    /// **Deliberately the only power control we wire.** `server.py` exposes `shutdown_pi` and
+    /// `reboot_pi` right beside this one; both take the RD's timing hardware *down* rather than
+    /// bringing it back, so they stay out of reach and must not be added here.
+    ///
+    /// The emit is fire-and-forget: RH re-execs immediately, so the socket drops within a moment
+    /// and the connection's `close` handler flips [`is_alive`](Self::is_alive) to `false`. The
+    /// persistent driver then reconnects with backoff and **re-probes the plugin on the new
+    /// connection**, which is what flips a timer's plugin presence `Missing → Present` with no
+    /// further plumbing. An `Ok` here means only that the emit was accepted, never that RH came
+    /// back — the reconnect loop is the source of truth for that.
+    ///
+    /// Restarting mid-race is destructive (it takes the timing hardware down with the race on it),
+    /// so callers **must** gate this on heat phase; this layer only moves the bytes.
+    pub fn restart_server(&self) -> Result<(), rust_socketio::Error> {
+        // 0-arg server handler: emit with no payload args.
+        self.client.emit("restart_server", Payload::Text(vec![]))
     }
 
     /// Disconnect from the server, **returning the adapter** so the persistent driver can carry its
@@ -856,5 +3258,1157 @@ impl RotorHazardConnection {
             Ok(mutex) => mutex.into_inner().expect("adapter mutex poisoned"),
             Err(shared) => shared.lock().expect("adapter mutex poisoned").clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(value: serde_json::Value) -> Payload {
+        Payload::Text(vec![value])
+    }
+
+    /// Build a `node_index → HeatSeat` map from `(node, slot, pilot)` triples, where a `pilot` of
+    /// `None` is an empty slot (as [`HeatSeat`] already normalises both RH sentinels).
+    fn seats(rows: &[(usize, i64, Option<i64>)]) -> std::collections::HashMap<usize, HeatSeat> {
+        rows.iter()
+            .map(|&(node, slot_id, pilot_id)| (node, HeatSeat { slot_id, pilot_id }))
+            .collect()
+    }
+
+    /// The seating readback (#423) is the only thing standing between a silently-failed
+    /// `alter_heat` and a heat that loses every crossing on the unseated node. Each way it can be
+    /// wrong is a way a pilot's whole run disappears, so pin all of them.
+    #[test]
+    fn seating_holds_only_when_every_intended_seat_carries_its_own_pilot() {
+        let intended = [(0usize, 11i64, "ALPHA"), (1usize, 12i64, "BRAVO")];
+
+        assert!(
+            seating_holds(&seats(&[(0, 100, Some(11)), (1, 101, Some(12))]), &intended),
+            "both seats carry the pilot they were written with"
+        );
+        assert!(
+            !seating_holds(&seats(&[(0, 100, Some(11)), (1, 101, None)]), &intended),
+            "an EMPTY slot is the failure this exists to catch — RH would dismiss every crossing \
+             on node 1 (\"Pilot not defined\") and lose BRAVO's whole run"
+        );
+        assert!(
+            !seating_holds(&seats(&[(0, 100, Some(11)), (1, 101, Some(99))]), &intended),
+            "a DIFFERENT pilot is not a success either: a concurrent edit on RotorHazard's own \
+             screen would otherwise pass as seated, and BRAVO's laps would land on someone else"
+        );
+        assert!(
+            !seating_holds(&seats(&[(0, 100, Some(11))]), &intended),
+            "a slot that is not in the readback at all is unconfirmed, not assumed"
+        );
+        assert!(
+            seating_holds(&seats(&[]), &[]),
+            "nothing intended is vacuously confirmed (the caller returns early before this)"
+        );
+    }
+
+    /// Fold a `pilot_data` frame through the adapter and hand back the roster the transport would
+    /// read — the same seam `seat_heat` waits on, so these tests exercise the real message path
+    /// rather than a hand-built vector.
+    fn folded_roster(adapter: &mut RotorHazardAdapter, pilot_ids: &[i64]) -> Option<Vec<i64>> {
+        adapter.translate(Raw::PilotData(RawPilotData {
+            pilots: pilot_ids
+                .iter()
+                .map(|&pilot_id| crate::rotorhazard::RawPilotEntry { pilot_id })
+                .collect(),
+        }));
+        adapter.take_pilot_roster()
+    }
+
+    /// **The #451 race, at the seam it happens on.**
+    ///
+    /// The pre-seating roster read times out on a congested link; its reply lands *later*, in the
+    /// middle of the seat loop, listing only the RD's own pre-existing pilots. Under the old
+    /// "highest id above a floor of 0" rule that frame answered the wait, and pilot 12 — a real
+    /// entry on the RD's roster — was renamed to `ALPHA` and seated as though we had created it.
+    #[test]
+    fn a_delayed_frame_of_pre_existing_pilots_is_never_mistaken_for_the_pilot_we_added() {
+        let mut adapter = RotorHazardAdapter::new();
+        let known: std::collections::BTreeSet<i64> = [11, 12].into_iter().collect();
+
+        // The delayed reply to the pre-seating `load_data`: the RD's roster, nothing of ours.
+        let roster = folded_roster(&mut adapter, &[11, 12]).expect("a frame did arrive");
+        assert_eq!(
+            added_pilot(&known, &roster),
+            None,
+            "this frame adds nothing we did not already have, so it is not evidence that our \
+             `add_pilot` landed — adopting pilot 12 here renames the RD's own pilot and seats it"
+        );
+
+        // The real `add_pilot` broadcast then arrives, and it is unmistakable: a new id.
+        let roster = folded_roster(&mut adapter, &[11, 12, 13]).expect("a frame did arrive");
+        assert_eq!(
+            added_pilot(&known, &roster),
+            Some(13),
+            "the id the roster GAINED is the pilot we just created"
+        );
+    }
+
+    /// The floor read must be able to say "this timer has no pilots" out loud. `None` means
+    /// RotorHazard never answered, and `seat_heat` refuses to seat on that rather than guessing a
+    /// floor of 0 — which is precisely the guess that made the race above reachable.
+    #[test]
+    fn an_empty_roster_is_an_answer_and_silence_is_not() {
+        let mut adapter = RotorHazardAdapter::new();
+        assert_eq!(
+            adapter.take_pilot_roster(),
+            None,
+            "nothing folded yet: RotorHazard has not answered"
+        );
+
+        let roster =
+            folded_roster(&mut adapter, &[]).expect("an empty pilot list is still a frame");
+        assert!(roster.is_empty());
+        let known: std::collections::BTreeSet<i64> = roster.into_iter().collect();
+
+        // A fresh timer's first seated pilot is then identified perfectly well.
+        let roster = folded_roster(&mut adapter, &[1]).expect("a frame did arrive");
+        assert_eq!(added_pilot(&known, &roster), Some(1));
+    }
+
+    /// Ids are not assumed to be increasing, and a concurrent edit on RotorHazard's own screen
+    /// does not derail the seat loop: the highest unknown id is taken, and the caller records
+    /// every id it is handed, so no pilot is ever adopted twice.
+    #[test]
+    fn identification_is_by_absence_not_by_magnitude() {
+        // A gap re-used below the RD's highest id — "the max" would answer 40 here, forever.
+        let known: std::collections::BTreeSet<i64> = [7, 40].into_iter().collect();
+        assert_eq!(
+            added_pilot(&known, &[7, 40, 8]),
+            Some(8),
+            "the new pilot is the one that was not there before, wherever it sorts"
+        );
+
+        let mut known = known;
+        // Two unknown ids at once (the RD added one while we seated): take one, remember both.
+        let roster = [7, 40, 41, 42];
+        let picked = added_pilot(&known, &roster).expect("something is new");
+        assert_eq!(picked, 42);
+        known.extend(roster.iter().copied());
+        assert_eq!(
+            added_pilot(&known, &roster),
+            None,
+            "once recorded, no id is ever handed out a second time"
+        );
+    }
+
+    /// v4.3.0 spells "no pilot" as `0` and v4.4.0 as `null` (`RHUtils.PILOT_ID_NONE`). Both must
+    /// read as unseated here, and — the trap worth naming — pilot id `0` must never be something a
+    /// seat can legitimately hold, or the 4.3.0 empty slot would confirm itself.
+    #[test]
+    fn a_zero_pilot_id_is_an_empty_seat_not_a_seated_one() {
+        let seated = seats(&[(0, 100, None)]);
+        assert!(
+            !seat_holds(&seated, 0, 0),
+            "RotorHazard v4.3.0 writes an empty slot as pilot_id 0; treating that as \"pilot 0 is \
+             seated\" would confirm exactly the failure the readback exists to detect"
+        );
+        assert!(
+            !seat_holds(&seated, 0, 11),
+            "an empty slot does not confirm a real pilot either"
+        );
+    }
+
+    /// A stock RotorHazard 4.3.0 heartbeat, as it arrives at idle with no race running.
+    fn heartbeat(rssi: [f32; 4], crossing: [bool; 4]) -> Payload {
+        text(json!({
+            "current_rssi": rssi,
+            "frequency": [5658, 5695, 5760, 0],
+            "loop_time": [1200, 1180, 1210, 1195],
+            "crossing_flag": crossing,
+        }))
+    }
+
+    /// The gate is checked **before** the payload is parsed — the #392 hazard, structurally.
+    ///
+    /// The proof is the outcome on an *unreadable* payload with the subscription closed: a parse
+    /// that ran would report `Unreadable`. Reporting `Gated` can only mean the deserializer was
+    /// never reached. That is the property that matters, because the cost being avoided is the
+    /// parse itself (10–100 frames/sec on the socket callback thread), not the fold after it.
+    #[test]
+    fn the_subscription_gate_is_checked_before_the_payload_is_parsed() {
+        let tap = SignalTap::default();
+        // Closed subscription, a payload no `RawHeartbeat` could ever come out of.
+        let garbage = text(json!("not an object at all"));
+        assert_eq!(tap_heartbeat(&tap, &garbage), TapOutcome::Gated);
+        assert_eq!(tap_crossing(&tap, &garbage), TapOutcome::Gated);
+        // A perfectly good heartbeat is dropped just as early, and leaves nothing behind.
+        assert_eq!(
+            tap_heartbeat(&tap, &heartbeat([40.0, 41.0, 42.0, 43.0], [false; 4])),
+            TapOutcome::Gated
+        );
+        assert!(tap.take().is_empty(), "a closed tap stores nothing");
+
+        // Open the subscription: now — and only now — the same garbage reaches the parser and is
+        // reported as what it is.
+        tap.set_capturing(true);
+        assert_eq!(tap_heartbeat(&tap, &garbage), TapOutcome::Unreadable);
+        assert_eq!(
+            tap_heartbeat(&tap, &heartbeat([40.0, 41.0, 42.0, 43.0], [false; 4])),
+            TapOutcome::Folded
+        );
+        assert_eq!(tap.take().len(), 4);
+    }
+
+    /// Closing the subscription leaves nothing behind: a lapsed Tune page must not keep a node's
+    /// last RSSI alive in memory, and must not have it reappear if the page comes back.
+    #[test]
+    fn closing_the_subscription_empties_the_store() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        tap_heartbeat(&tap, &heartbeat([40.0, 41.0, 42.0, 43.0], [false; 4]));
+        assert_eq!(tap.take().len(), 4);
+        assert!(
+            tap.set_capturing(false),
+            "the gate reports its previous state"
+        );
+        assert!(tap.take().is_empty());
+        assert!(
+            !tap.set_capturing(true),
+            "and reports the rising edge as such"
+        );
+        assert!(tap.take().is_empty(), "a reopened tap starts from nothing");
+    }
+
+    /// **A frame already past the gate when the subscription closes must not survive the close**
+    /// (#452).
+    ///
+    /// This is the socket-callback thread's exact interleaving, replayed deterministically. A
+    /// handler checks [`SignalTap::capturing`] (true), is descheduled while it deserializes, and
+    /// the driver tick meanwhile calls `set_capturing(false)` — which empties the store. The
+    /// handler then wakes and performs its fold. Before the fix the fold took the `nodes` lock and
+    /// wrote unconditionally, so the closed session's RSSI, crossing state and sticky `crossed`
+    /// flags were sitting in the store for the *next* Tune session's first `take()` to report as
+    /// current readings. Now the fold re-checks under the same lock and abandons the frame.
+    ///
+    /// The gated `note_*` folds are called directly here on purpose: `tap_heartbeat` re-reads the
+    /// gate itself, so going through it would test the gate rather than the race behind it.
+    #[test]
+    fn a_fold_in_flight_when_the_subscription_closes_leaves_nothing_behind() {
+        for (name, fold) in [
+            (
+                "heartbeat",
+                Box::new(|tap: &SignalTap| {
+                    let hb: RawHeartbeat = serde_json::from_value(json!({
+                        "current_rssi": [40.0, 41.0, 42.0, 43.0],
+                        "frequency": [5658, 5695, 5760, 5800],
+                        "loop_time": [1200, 1180, 1210, 1195],
+                        "crossing_flag": [true, true, true, true],
+                    }))
+                    .unwrap();
+                    tap.note_heartbeat(&hb);
+                }) as Box<dyn Fn(&SignalTap)>,
+            ),
+            (
+                "node_data",
+                Box::new(|tap: &SignalTap| {
+                    let data: RawNodeData = serde_json::from_value(json!({
+                        "node_peak_rssi": [90.0, 91.0, 92.0, 93.0],
+                        "pass_peak_rssi": [88.0, 89.0, 90.0, 91.0],
+                        "debug_pass_count": [3, 3, 3, 3],
+                    }))
+                    .unwrap();
+                    tap.note_node_data(&data);
+                }),
+            ),
+            (
+                "node_crossing_change",
+                Box::new(|tap: &SignalTap| {
+                    let change: RawNodeCrossing =
+                        serde_json::from_value(json!({ "node_index": 2, "crossing_flag": true }))
+                            .unwrap();
+                    tap.note_crossing(&change);
+                }),
+            ),
+        ] {
+            let tap = SignalTap::default();
+            tap.set_capturing(true);
+
+            // The handler passes the pre-parse gate...
+            assert!(tap.capturing(), "{name}: the gate is open when it is read");
+            // ...the driver tick closes the subscription and empties the store...
+            assert!(tap.set_capturing(false), "{name}: the tap was open");
+            // ...and only now does the descheduled handler's fold reach the store.
+            fold(&tap);
+
+            assert!(
+                tap.take().is_empty(),
+                "{name}: a fold that lost the race to the close must write nothing — the store \
+                 belongs to a subscription that is gone"
+            );
+
+            // The proof this matters: the next Tune session must start from nothing.
+            tap.set_capturing(true);
+            assert!(
+                tap.take().is_empty(),
+                "{name}: the next session's first take() reported the previous session's readings"
+            );
+        }
+    }
+
+    /// **Both feeds surface.** `get_heartbeat_json` carries only rssi / frequency / loop-time /
+    /// crossing; every peak, nadir and pass count a tuning panel shows comes from `node_data`, and
+    /// the thresholds from `enter_and_exit_at_levels`. A snapshot missing either half cannot answer
+    /// the question the RD is asking, so all three must land on the same [`NodeTick`].
+    #[test]
+    fn both_rotorhazard_feeds_land_on_the_same_node() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        tap_heartbeat(
+            &tap,
+            &heartbeat([48.0, 12.0, 0.0, 0.0], [true, false, false, false]),
+        );
+        tap.note_node_data(&RawNodeData {
+            pass_peak_rssi: vec![118.0, 0.0, 0.0, 0.0],
+            node_peak_rssi: vec![132.0, 0.0, 0.0, 0.0],
+            node_nadir_rssi: vec![12.0, 0.0, 0.0, 0.0],
+            pass_nadir_rssi: vec![41.0, 0.0, 0.0, 0.0],
+            debug_pass_count: vec![7, 0, 0, 0],
+        });
+        tap.note_levels(&RawEnterExitLevels {
+            enter_at_levels: vec![90.0, 90.0, 90.0, 90.0],
+            exit_at_levels: vec![80.0, 80.0, 80.0, 80.0],
+        });
+
+        let nodes = tap.take();
+        let first = &nodes[0];
+        // The heartbeat half.
+        assert_eq!(first.rssi, Some(48.0));
+        assert_eq!(first.frequency_mhz, Some(5658));
+        assert_eq!(first.loop_time_micros, Some(1200));
+        assert!(first.crossing);
+        // The `node_data` half — none of which the heartbeat carries.
+        assert_eq!(first.node_peak_rssi, Some(132.0));
+        assert_eq!(first.node_nadir_rssi, Some(12.0));
+        assert_eq!(first.pass_peak_rssi, Some(118.0));
+        assert_eq!(first.pass_nadir_rssi, Some(41.0));
+        assert_eq!(first.pass_count, Some(7));
+        // The thresholds the tuning graph draws its handles at.
+        assert_eq!(first.enter_at, Some(90.0));
+        assert_eq!(first.exit_at, Some(80.0));
+    }
+
+    /// **Every node the timer reports, including ones no heat has seated.** "Is this node even
+    /// alive?" is half the diagnostic a mistuned timer needs, and the tap is the layer that must
+    /// not filter — the app layer's lineup remap drops off-lineup nodes, which is exactly why tune
+    /// telemetry does not go through it.
+    #[test]
+    fn unseated_nodes_are_reported_too() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        // Four nodes; only the first two are tuned to anything and only the first has any signal.
+        tap_heartbeat(
+            &tap,
+            &heartbeat([48.0, 11.0, 9.0, 8.0], [true, false, false, false]),
+        );
+
+        let nodes = tap.take();
+        assert_eq!(
+            nodes.len(),
+            4,
+            "no node is filtered out of a tuning snapshot"
+        );
+        assert!(
+            nodes.iter().all(|n| n.seen),
+            "every reported node is marked seen"
+        );
+        // Node 3 is untuned — RotorHazard reports 0 MHz, which is an absence, not a channel.
+        assert_eq!(nodes[3].frequency_mhz, None);
+        assert_eq!(nodes[3].rssi, Some(8.0));
+    }
+
+    /// A crossing that opens and closes between two Director samples must still light the lamp.
+    /// The level (`crossing`) is last-value-wins; the edge (`crossed`) is sticky until read.
+    #[test]
+    fn a_crossing_between_samples_survives_as_a_sticky_edge() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        // Open and close within one sample interval.
+        tap_crossing(
+            &tap,
+            &text(json!({ "node_index": 1, "crossing_flag": true })),
+        );
+        tap_crossing(
+            &tap,
+            &text(json!({ "node_index": 1, "crossing_flag": false })),
+        );
+
+        let nodes = tap.take();
+        assert!(!nodes[1].crossing, "the level is back down");
+        assert!(nodes[1].crossed, "but the edge is not lost");
+        // Reading clears it: the next snapshot reports only what happened since.
+        let nodes = tap.take();
+        assert!(!nodes[1].crossed);
+    }
+
+    /// Some RotorHazard builds wire the crossing flag as a 0/1 int rather than a bool.
+    #[test]
+    fn a_numeric_crossing_flag_reads_the_same_as_a_bool() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        tap_crossing(&tap, &text(json!({ "node_index": 0, "crossing_flag": 1 })));
+        assert!(tap.take()[0].crossing);
+        tap_crossing(&tap, &text(json!({ "node_index": 0, "crossing_flag": 0 })));
+        assert!(!tap.take()[0].crossing);
+    }
+
+    /// The per-node store is bounded by [`MAX_TUNE_NODES`], so a drifting or hostile frame cannot
+    /// make "cost per tick is O(nodes)" untrue.
+    #[test]
+    fn the_node_store_is_capped() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        let wide: Vec<f32> = (0..10_000).map(|i| i as f32).collect();
+        tap.note_heartbeat(&RawHeartbeat {
+            current_rssi: wide,
+            ..Default::default()
+        });
+        assert_eq!(tap.take().len(), MAX_TUNE_NODES);
+        // An out-of-range crossing edge is dropped rather than widening the store.
+        tap_crossing(
+            &tap,
+            &text(json!({ "node_index": 9_999, "crossing_flag": true })),
+        );
+        assert_eq!(tap.take().len(), MAX_TUNE_NODES);
+    }
+
+    /// Neither tune-telemetry frame is a [`Raw`], which is what makes "heartbeat data can never
+    /// become an `Event`" structural rather than conventional: `translate` takes a `Raw` and there
+    /// is no `Raw` to build from a heartbeat.
+    #[test]
+    fn the_tune_telemetry_frames_are_not_translatable_events() {
+        assert!(matches!(
+            decode_socket("heartbeat", &heartbeat([1.0; 4], [false; 4])),
+            Decoded::Untranslated
+        ));
+        assert!(matches!(
+            decode_socket(
+                "node_crossing_change",
+                &text(json!({ "node_index": 0, "crossing_flag": true }))
+            ),
+            Decoded::Untranslated
+        ));
+    }
+
+    /// An event we don't translate is not a fault — RotorHazard broadcasts plenty. It must stay
+    /// distinct from a frame we *do* translate but could not read (#400).
+    #[test]
+    fn an_unknown_event_is_untranslated_not_malformed() {
+        assert!(matches!(
+            decode_socket("some_other_rh_event", &text(json!({ "anything": 1 }))),
+            Decoded::Untranslated
+        ));
+    }
+
+    #[test]
+    fn a_well_formed_frame_translates() {
+        assert!(matches!(
+            decode_socket("race_status", &text(json!({ "race_status": 1 }))),
+            Decoded::Translated(Raw::RaceStatus(RawRaceStatus { race_status: 1, .. }))
+        ));
+    }
+
+    /// Schema drift on an event we translate: the frame is dropped either way, but it must be
+    /// *reportable*. Swallowing it is what made a plugin/RH version skew look exactly like a gate
+    /// that stopped detecting (#400).
+    #[test]
+    fn schema_drift_on_a_translated_event_is_malformed() {
+        // `current_laps` without its `current` key — the shape a version skew produces.
+        let Decoded::Malformed { detail } =
+            decode_socket("current_laps", &text(json!({ "laps": [] })))
+        else {
+            panic!("a payload we cannot read must be reported, not silently skipped");
+        };
+        assert!(!detail.is_empty(), "the decode error names the drift");
+        // The compatibility wrapper still just says "nothing to translate".
+        assert!(raw_from_socket("current_laps", &text(json!({ "laps": [] }))).is_none());
+    }
+
+    #[test]
+    fn an_empty_or_non_json_payload_on_a_translated_event_is_malformed() {
+        assert!(matches!(
+            decode_socket("node_data", &Payload::Text(vec![])),
+            Decoded::Malformed { .. }
+        ));
+        assert!(matches!(
+            decode_socket("node_data", &Payload::Binary(vec![0u8, 1].into())),
+            Decoded::Malformed { .. }
+        ));
+        // ...but the same payloads on an event we never read stay untranslated.
+        assert!(matches!(
+            decode_socket("whatever", &Payload::Text(vec![])),
+            Decoded::Untranslated
+        ));
+    }
+
+    /// A `-1` lap number is RotorHazard talking, not drift: once it declares a winner it numbers
+    /// every later crossing `-1` (*recorded, but not counted*). Typing that field `u64` made serde
+    /// fail the **whole `current_laps` frame**, so the valid laps beside it were thrown away too
+    /// and the loss was charged to the malformed-frame counter — "schema drift", pointing an RD at
+    /// a plugin-version mismatch, when the real fault was the timer still refereeing (#406).
+    #[test]
+    fn a_negative_lap_number_decodes_and_keeps_the_rest_of_its_frame() {
+        // The frame as RotorHazard 4.4 sends it with a lap-count win condition in force.
+        let frame = text(json!({
+            "current": { "node_index": [{
+                "pilot": { "callsign": "ZIP" },
+                "laps": [
+                    { "lap_index": 0, "lap_number": 0, "lap_time_stamp": 0.0, "late_lap": false },
+                    { "lap_index": 1, "lap_number": 1, "lap_time_stamp": 31000.0, "late_lap": false },
+                    // RotorHazard declared the pilot finished here and stopped counting.
+                    { "lap_index": 2, "lap_number": -1, "lap_time_stamp": 62000.0,
+                      "late_lap": true, "deleted": true },
+                ],
+            }] }
+        }));
+
+        let Decoded::Translated(raw) = decode_socket("current_laps", &frame) else {
+            panic!(
+                "a `-1` lap number must decode: it is RotorHazard's own value, not drift (#406)"
+            );
+        };
+
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(Raw::RaceStatus(RawRaceStatus {
+            race_status: 1,
+            race_heat_id: Some(1),
+        }));
+        let events = adapter.translate(raw);
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, gridfpv_events::Event::Pass(_)))
+                .count(),
+            2,
+            "the two counted laps in the frame survive — that is the regression"
+        );
+        assert_eq!(
+            adapter.counts.uncounted, 1,
+            "and the uncounted crossing is counted as one"
+        );
+        assert_eq!(
+            adapter.counts.malformed_frames, 0,
+            "nothing about this frame is malformed"
+        );
+    }
+
+    // ---- RotorHazard's own min-lap filter (#407) -------------------------------------------
+    //
+    // The bug these guard: RH runs a second min-lap rule underneath GridFPV's, and its behaviour
+    // flag can DISCARD the crossing rather than flag it. A discarded crossing never reaches
+    // GridFPV, so D26's per-round floor never runs on it, marshaling has nothing to restore, and
+    // #397's rejected-crossing tone is silent for precisely the crossing it exists to announce.
+
+    /// A `min_lap` frame as RotorHazard 4.3.0 sends it (`RHUI.emit_min_lap`), at its own defaults.
+    fn min_lap_frame_430(secs: i64, behavior: i64) -> serde_json::Value {
+        json!({ "min_lap": secs, "min_lap_behavior": behavior })
+    }
+
+    /// The same frame on 4.4.0 — one extra key (`min_first_crossing`) GridFPV does not consult.
+    fn min_lap_frame_440(secs: i64, behavior: i64) -> serde_json::Value {
+        json!({
+            "min_lap": secs,
+            "min_first_crossing": 10,
+            "min_lap_behavior": behavior,
+        })
+    }
+
+    /// **Both values are read, on both supported RotorHazard versions.**
+    ///
+    /// Reading one is not enough and never was: `MinLapSec` is a database option, `MinLapBehavior`
+    /// is a *server config* item in a different store, and it is the second one that decides
+    /// whether an under-minimum crossing is merely logged or destroyed. 4.4.0's extra
+    /// `min_first_crossing` key must not break the parse — a struct deserialize would have been
+    /// fine here, but only by luck. The standing example of a name that does not carry is
+    /// `PILOT_ID_NONE`, which is `0` on v4.3.0 and `None` on v4.4.0 (#423); `unlimited_time` is
+    /// often cited for this too, but that one is a *column* rename (`race_mode`) under a field
+    /// whose own meaning is stable across both versions.
+    #[test]
+    fn the_min_lap_readback_carries_both_values_on_both_versions() {
+        assert_eq!(
+            parse_min_lap_frame(&min_lap_frame_430(10, 0)),
+            Some((10, 0)),
+            "4.3.0: RotorHazard's own defaults — a 10s floor, highlight-don't-discard"
+        );
+        assert_eq!(
+            parse_min_lap_frame(&min_lap_frame_440(10, 1)),
+            Some((10, 1)),
+            "4.4.0: the extra min_first_crossing key is ignored, both values still land"
+        );
+        // RotorHazard's JSON config file can round-trip a never-set item back as a string.
+        assert_eq!(
+            parse_min_lap_frame(&json!({ "min_lap": "10", "min_lap_behavior": "1" })),
+            Some((10, 1))
+        );
+        // A frame missing the behaviour half is NOT half an answer: reporting `MinLapSec=0, all
+        // clear` off a frame that never said what the behaviour was is the silent-failure mode.
+        assert_eq!(parse_min_lap_frame(&json!({ "min_lap": 0 })), None);
+        assert_eq!(parse_min_lap_frame(&json!("not an object")), None);
+    }
+
+    /// **Neutral means BOTH.** Either setting alone lets every crossing through *today*, but they
+    /// live on two independent RotorHazard screens and GridFPV must not depend on the RD leaving
+    /// the other one alone. The `(10, 1)` row is the one that actually loses laps.
+    #[test]
+    fn only_a_zero_floor_and_a_zero_behavior_count_as_neutral() {
+        assert!(min_lap_is_neutral(Some(0), Some(0)));
+        assert!(
+            !min_lap_is_neutral(Some(10), Some(1)),
+            "a 10s floor set to DISCARD is the #407 timer: crossings vanish before GridFPV"
+        );
+        assert!(!min_lap_is_neutral(Some(10), Some(0)));
+        assert!(!min_lap_is_neutral(Some(0), Some(1)));
+        assert!(
+            !min_lap_is_neutral(None, Some(0)),
+            "a value that could not be read is not a value that is fine"
+        );
+    }
+
+    /// **The handshake reads both values off the plugin, and an older plugin says nothing.**
+    ///
+    /// The field timer runs plugin v0.1.0 while the repo is at v0.4.0, so the no-`min_lap` ack is
+    /// the case that must not become an error: it means "the Director does this itself over the
+    /// socket", not "this timer is broken".
+    #[test]
+    fn the_plugin_handshake_carries_the_min_lap_report_and_survives_an_older_plugin() {
+        let ack = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "live_signal", "owned_format", "min_lap_neutral"],
+            "node_count": 4,
+            "grid_format_id": 7,
+            "min_lap": {
+                "ok": true,
+                "secs_was": 10,
+                "behavior_was": 1,
+                "secs_now": 0,
+                "behavior_now": 0,
+                "error": null,
+            },
+        }));
+        let parsed = parse_hello(&ack).expect("a v0.4.0 hello ack must parse");
+        assert!(parsed.advertises(CAP_MIN_LAP_NEUTRAL));
+        let report = parsed.min_lap.expect("the report rides the handshake");
+        assert!(report.ok);
+        assert_eq!(
+            (report.secs_was, report.behavior_was),
+            (Some(10), Some(1)),
+            "what the RD's timer was set to — read, not assumed"
+        );
+        assert_eq!((report.secs_now, report.behavior_now), (Some(0), Some(0)));
+
+        // The v0.1.0 ack in the field: no such key, and no such capability.
+        let old = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.1.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "live_signal"],
+            "node_count": 4,
+        }));
+        let parsed = parse_hello(&old).expect("an older plugin's ack must still parse");
+        assert!(!parsed.advertises(CAP_MIN_LAP_NEUTRAL));
+        assert!(
+            parsed.min_lap.is_none(),
+            "absence is 'not done yet', which the socket route then handles"
+        );
+    }
+
+    /// **The neutralise path, recorded GridFPV-side.**
+    ///
+    /// D27's discipline: what GridFPV *applied* is GridFPV's own constant, and what it *found* is
+    /// evidence captured once — before GridFPV wrote anything. The second fold is the one that
+    /// matters: the plugin re-asserts at every stage, and a naive record would by then be
+    /// reporting GridFPV's own zero back as "what the race director had", erasing the only note of
+    /// the setting GridFPV displaced.
+    #[test]
+    fn the_neutralise_path_records_what_grid_found_once_and_what_grid_applied() {
+        let slot: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
+        assert_eq!(
+            slot.lock().unwrap().record.route,
+            MinLapRoute::Unattempted,
+            "a fresh connection assumes nothing"
+        );
+
+        let was_neutral = fold_plugin_min_lap(
+            &slot,
+            Some(&MinLapReport {
+                ok: true,
+                secs_was: Some(10),
+                behavior_was: Some(1),
+                secs_now: Some(0),
+                behavior_now: Some(0),
+                error: None,
+            }),
+        );
+        assert!(!was_neutral, "it was not neutral before this fold");
+        let record = slot.lock().unwrap().record.clone();
+        assert_eq!(record.route, MinLapRoute::Plugin);
+        assert!(record.neutral);
+        assert_eq!(
+            (record.found_secs, record.found_behavior),
+            (Some(10), Some(1))
+        );
+        assert_eq!(
+            (record.applied_secs, record.applied_behavior),
+            (MIN_LAP_NEUTRAL_SECS, MIN_LAP_BEHAVIOR_HIGHLIGHT),
+            "GridFPV's decision, from GridFPV's source — never derived from the timer"
+        );
+
+        // The per-stage re-assertion, reporting the timer as GridFPV left it.
+        fold_plugin_min_lap(
+            &slot,
+            Some(&MinLapReport {
+                ok: true,
+                secs_was: Some(10),
+                behavior_was: Some(1),
+                secs_now: Some(0),
+                behavior_now: Some(0),
+                error: None,
+            }),
+        );
+        let record = slot.lock().unwrap().record.clone();
+        assert_eq!(
+            (record.found_secs, record.found_behavior),
+            (Some(10), Some(1)),
+            "the RD's original setting survives every re-assertion — it is the hand-back record"
+        );
+
+        // An older plugin's silence leaves the record alone rather than marking it failed.
+        let fresh: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
+        fold_plugin_min_lap(&fresh, None);
+        let record = fresh.lock().unwrap().record.clone();
+        assert_eq!(record.route, MinLapRoute::Unattempted);
+        assert!(!record.neutral);
+        assert!(
+            record.error.is_none(),
+            "not yet done is not the same as failed"
+        );
+    }
+
+    /// **A plugin that tried and failed leaves the record un-neutral, with its reason.**
+    /// That is what sends the Director down the socket route rather than racing on a filter it
+    /// merely hopes is gone.
+    #[test]
+    fn a_failed_plugin_neutralisation_is_recorded_as_a_failure() {
+        let slot: Arc<Mutex<MinLapState>> = Arc::new(Mutex::new(MinLapState::default()));
+        fold_plugin_min_lap(
+            &slot,
+            Some(&MinLapReport {
+                ok: false,
+                secs_was: Some(10),
+                behavior_was: Some(1),
+                secs_now: Some(10),
+                behavior_now: Some(1),
+                error: Some("MinLapSec: OperationalError('database is locked')".into()),
+            }),
+        );
+        let record = slot.lock().unwrap().record.clone();
+        assert!(!record.neutral);
+        assert_eq!(record.route, MinLapRoute::Plugin);
+        assert!(record.error.unwrap().contains("database is locked"));
+    }
+
+    /// **The failure is loud, and it names the tone.**
+    ///
+    /// Silence here recreates the bug this fixes. RotorHazard discarding a crossing is invisible
+    /// from GridFPV's side — no missing-lap counter trips, no frame is malformed — so an RD who is
+    /// not told reads a swallowed crossing as a dead gate, which is the diagnosis #403 cost a
+    /// session to. The line must therefore carry the *consequence* (#397's tone, GridFPV's own
+    /// ruling), the values found, and what to do about it — not just "could not set option".
+    #[test]
+    fn a_filter_that_cannot_be_cleared_is_announced_loudly_and_names_the_consequence() {
+        let record = MinLapRecord {
+            route: MinLapRoute::Socket,
+            found_secs: Some(10),
+            found_behavior: Some(1),
+            neutral: false,
+            error: Some("RotorHazard did not answer load_data(min_lap) within 3s".into()),
+            ..MinLapRecord::default()
+        };
+        let line = min_lap_failure_line(&record);
+        for needle in [
+            "could NOT neutralise",
+            "MinLapSec=Some(10)",
+            "MinLapBehavior=Some(1)",
+            "DISCARD",
+            "#397",
+            "did not answer load_data(min_lap)",
+        ] {
+            assert!(
+                line.contains(needle),
+                "the warning must say {needle:?}: {line}"
+            );
+        }
+
+        // …and it actually goes out, through the sink the shipped console-less build reads (#380),
+        // rather than only being formattable.
+        static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        crate::diag::set_sink(|line| {
+            CAPTURED
+                .lock()
+                .expect("captured lock")
+                .push(line.to_string());
+        });
+        CAPTURED.lock().expect("captured lock").clear();
+        announce_min_lap_failure(&record);
+        let announced = CAPTURED.lock().expect("captured lock").clone();
+        assert!(
+            announced.iter().any(|l| l == &line),
+            "the un-neutralised filter must reach the operator's log, not just stderr: {announced:?}"
+        );
+    }
+
+    /// The transport's half of the contract: a frame it drops lands on the adapter's counter, so
+    /// the heat summary can say "laps may be missing, and here is why".
+    #[test]
+    fn a_malformed_frame_is_reported_to_the_adapter() {
+        let mut adapter = RotorHazardAdapter::new();
+        let Decoded::Malformed { detail } = decode_socket("current_laps", &text(json!({}))) else {
+            panic!("expected a malformed frame");
+        };
+        adapter.note_malformed_frame("current_laps", &detail);
+        assert_eq!(adapter.counts.malformed_frames, 1);
+    }
+    /// The capture emit's **event names and payload key**, pinned against the RotorHazard source.
+    ///
+    /// Not a tautology: the key is `node_index` here and `node` on `set_enter_at_level`, on the same
+    /// socket, for the same node. RotorHazard answers a wrong key with a `KeyError` its exception
+    /// wrapper swallows into the log — the emit succeeds and nothing is captured. This is the
+    /// assertion that would have caught the three writes RotorHazard silently ignored (#423).
+    #[test]
+    fn a_capture_emit_carries_node_index_and_rotorhazards_own_event_names() {
+        // `server.py::on_cap_enter_at_btn` / `on_cap_exit_at_btn`, v4.3.0 and v4.4.0 alike.
+        assert_eq!(CAP_ENTER_EVENT, "cap_enter_at_btn");
+        assert_eq!(CAP_EXIT_EVENT, "cap_exit_at_btn");
+        // `BaseHardwareInterface::CAP_ENTER_EXIT_AT_MILLIS`, both versions.
+        assert_eq!(CAPTURE_WINDOW_MILLIS, 3_000);
+
+        let payload = capture_payload(2);
+        assert_eq!(payload, json!({ "node_index": 2 }));
+        // The trap, stated as an assertion: NOT the key the calibration write uses.
+        assert!(
+            payload.get("node").is_none(),
+            "the capture handlers read `node_index`; sending `node` is a swallowed KeyError"
+        );
+    }
+
+    // ── #453: the owned-format confirm must not be suppressed by the legacy announcement ─────
+
+    /// **A pre-hello legacy announcement must not cost this connection its format confirm** (#453).
+    ///
+    /// The Director can call `prepare_instant_start` before the plugin's `gridfpv_hello_ack` has
+    /// been folded — the handshake and the first Stage race each other, and RH dispatches every
+    /// event on its own greenlet. With `advertised == false` that call takes the legacy path, and
+    /// `neutralize_active_format` latches `announced`. When the hello then lands advertising
+    /// `CAP_OWNED_FORMAT`, the confirm must still run: it is the only thing standing between the
+    /// heat and racing on the RD's own format with RotorHazard's stopping and counting decisions
+    /// intact (#403).
+    #[test]
+    fn a_pre_hello_legacy_announcement_does_not_suppress_the_first_format_confirm() {
+        let mut owned = OwnedFormat::default();
+        // The Stage that beat the handshake: nothing is advertised yet.
+        assert_eq!(format_selection(&owned), FormatSelection::Legacy);
+        // …so `neutralize_active_format` ran and announced itself.
+        owned.announced = true;
+        // The hello_ack now arrives, advertising the owned format.
+        owned.advertised = true;
+
+        assert_eq!(
+            format_selection(&owned),
+            FormatSelection::Confirm,
+            "the confirm has never run on this connection — the legacy announcement is not \
+             evidence that it did, and skipping it leaves the timer refereeing the race (#403)"
+        );
+    }
+
+    /// The three states that legitimately skip the wait, and the one that does not.
+    #[test]
+    fn only_a_spent_confirm_skips_the_format_ack_wait() {
+        let spent = OwnedFormat {
+            advertised: true,
+            gave_up: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(format_selection(&spent), FormatSelection::AlreadyGaveUp);
+
+        // A confirmed selection short-circuits ahead of everything else: nothing left to wait for.
+        let selected = OwnedFormat {
+            advertised: true,
+            selected: true,
+            gave_up: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(
+            format_selection(&selected),
+            FormatSelection::AlreadySelected
+        );
+
+        // No plugin owned format at all: never ask, never wait.
+        let stock = OwnedFormat {
+            announced: true,
+            ..OwnedFormat::default()
+        };
+        assert_eq!(format_selection(&stock), FormatSelection::Legacy);
+    }
+
+    /// **A Director that dials an RH still inside its own boot must not cry wolf** (#454 finding 3).
+    ///
+    /// RotorHazard triggers `Evt.STARTUP` *before* `SOCKET_IO.run`, and our STARTUP handler is
+    /// `gevent.spawn`ed at priority 200 rather than run inline — so the socket answers
+    /// `gridfpv_hello` in a window where the plugin has neither created its format row nor failed
+    /// to. That is the `grid_format_id: null, grid_format_error: null` shape, and it resolves
+    /// itself seconds later. Calling it "could not create its race format (no reason given)" told
+    /// an RD their timer was un-neutralised when it was merely still coming up.
+    #[test]
+    fn a_hello_with_neither_a_format_id_nor_a_reason_is_still_booting_not_broken() {
+        let booting = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "live_signal", "owned_format"],
+            "node_count": 4,
+            "grid_format_id": null,
+            "grid_format_error": null,
+        }));
+        let parsed = parse_hello(&booting).expect("a pre-STARTUP hello ack must parse");
+        assert!(parsed.advertises(CAP_OWNED_FORMAT));
+        assert_eq!(
+            owned_format_alarm(
+                parsed.advertises(CAP_OWNED_FORMAT),
+                parsed.grid_format_id,
+                parsed.grid_format_error.as_deref(),
+                false,
+            ),
+            OwnedFormatAlarm::NotReadyYet,
+            "no id AND no reason, at the handshake, is RotorHazard still booting — the row \
+             appears once the spawned STARTUP greenlet runs"
+        );
+    }
+
+    /// The alarm is deferred, not deleted: a plugin that *named* a reason is announced at once,
+    /// at the handshake, exactly as before.
+    #[test]
+    fn a_hello_that_names_a_reason_is_announced_at_the_handshake() {
+        let failed = text(json!({
+            "protocol_version": 1,
+            "plugin_version": "0.4.0",
+            "rhapi_version": "1.3",
+            "capabilities": ["hello", "owned_format"],
+            "node_count": 4,
+            "grid_format_id": null,
+            "grid_format_error": "OperationalError('no such table: race_format')",
+        }));
+        let parsed = parse_hello(&failed).expect("a failed-create hello ack must parse");
+        assert_eq!(
+            owned_format_alarm(
+                parsed.advertises(CAP_OWNED_FORMAT),
+                parsed.grid_format_id,
+                parsed.grid_format_error.as_deref(),
+                false,
+            ),
+            OwnedFormatAlarm::Failed,
+            "a named reason is a real failure and will not fix itself — say so now"
+        );
+    }
+
+    /// Past startup — the `gridfpv_format_ack` seam, reached only because the Director asked the
+    /// plugin to select the format at a heat's stage — the same silence IS news.
+    #[test]
+    fn a_format_that_never_appeared_past_startup_is_announced() {
+        assert_eq!(
+            owned_format_alarm(true, None, None, true),
+            OwnedFormatAlarm::NeverAppeared,
+            "no boot race can explain this one: the plugin has had a whole stage to create or \
+             fail, and did neither"
+        );
+        // …and the same inputs at the handshake still say nothing. This pair IS the fix.
+        assert_eq!(
+            owned_format_alarm(true, None, None, false),
+            OwnedFormatAlarm::NotReadyYet
+        );
+    }
+
+    /// Nothing to announce when there is nothing wrong: a named row, or a build that never
+    /// advertised the capability (which `format_selection` already routes to the legacy path).
+    #[test]
+    fn a_named_format_row_or_an_unadvertising_plugin_is_quiet() {
+        for past_startup in [false, true] {
+            assert_eq!(
+                owned_format_alarm(true, Some(7), None, past_startup),
+                OwnedFormatAlarm::Quiet,
+                "the plugin named its row"
+            );
+            assert_eq!(
+                owned_format_alarm(false, None, None, past_startup),
+                OwnedFormatAlarm::Quiet,
+                "a plugin that never advertised `owned_format` is not failing at it"
+            );
+            // An id present alongside a stale error is still a working format — the id wins, so a
+            // recovered plugin does not keep being announced as broken.
+            assert_eq!(
+                owned_format_alarm(
+                    true,
+                    Some(7),
+                    Some("an earlier attempt raised"),
+                    past_startup
+                ),
+                OwnedFormatAlarm::Quiet
+            );
+        }
+    }
+
+    // ── #444: the min-lap confirm must not accept a half-written frame ───────────────────────
+
+    /// **The confirm must survive the broadcast its own first write triggers** (#444).
+    ///
+    /// Neutralising takes two writes to two different stores, and each one re-broadcasts `min_lap`
+    /// to us — `on_set_min_lap` / `on_set_min_lap_behavior` both end in `emit_min_lap(noself=True)`,
+    /// and `RHUI.emit_min_lap` only branches on `nobroadcast`, so `noself` is silently ignored and
+    /// the frame reaches the writer. The first of those carries `(0, <old behavior>)`: both writes
+    /// are landing, but the pair is not neutral *yet*. Taking that frame as the answer latched
+    /// `record.neutral = false` for the whole connection and told the RD the filter could not be
+    /// neutralised.
+    #[test]
+    fn the_min_lap_confirm_reasks_past_the_writes_own_broadcast() {
+        // Frame order at the socket: set_min_lap's broadcast, then set_min_lap_behavior's.
+        let frames = std::cell::RefCell::new(vec![Some((0, 0)), Some((0, 1))]);
+        let confirmed = confirm_neutral_by_reasking(
+            || frames.borrow_mut().pop().flatten(),
+            || frames.borrow().is_empty(),
+        );
+        assert_eq!(
+            confirmed,
+            Some((0, 0)),
+            "the half-written (0, 1) frame is not the answer to the confirm — both writes landed"
+        );
+    }
+
+    /// A genuinely un-neutral timer still fails, and names what RotorHazard actually reported
+    /// rather than only that the budget ran out.
+    #[test]
+    fn the_min_lap_confirm_reports_the_last_pair_when_it_never_goes_neutral() {
+        let asks = std::cell::Cell::new(0);
+        let observed = confirm_neutral_by_reasking(
+            || {
+                asks.set(asks.get() + 1);
+                Some((10, 1))
+            },
+            || asks.get() >= 3,
+        );
+        assert_eq!(observed, Some((10, 1)));
+        assert_eq!(asks.get(), 3, "it keeps asking until the budget is spent");
+
+        // And RH answering nothing at all stays distinguishable from RH answering badly.
+        assert_eq!(confirm_neutral_by_reasking(|| None, || true), None);
+    }
+
+    /// One ask always happens, even against an already-expired budget — the confirm is not
+    /// optional.
+    #[test]
+    fn the_min_lap_confirm_always_asks_at_least_once() {
+        let asks = std::cell::Cell::new(0);
+        let confirmed = confirm_neutral_by_reasking(
+            || {
+                asks.set(asks.get() + 1);
+                Some((0, 0))
+            },
+            || true,
+        );
+        assert_eq!((confirmed, asks.get()), (Some((0, 0)), 1));
+    }
+
+    /// A finished capture's **echo** reaches the tune tap as that node's threshold — the thing that
+    /// makes a capture confirmable at all, since the RD cannot know the value in advance.
+    #[test]
+    fn a_finished_captures_echo_lands_on_the_node_it_names() {
+        let tap = SignalTap::default();
+        tap.set_capturing(true);
+        // `RHUI.emit_enter_at_level` / `emit_exit_at_level`, verbatim shape.
+        assert_eq!(
+            tap_captured_level(&tap, &text(json!({ "node_index": 1, "level": 118 })), true),
+            TapOutcome::Folded
+        );
+        assert_eq!(
+            tap_captured_level(&tap, &text(json!({ "node_index": 1, "level": 96 })), false),
+            TapOutcome::Folded
+        );
+        let ticks = tap.take();
+        assert_eq!(ticks[1].enter_at, Some(118.0));
+        assert_eq!(ticks[1].exit_at, Some(96.0));
+        // The other nodes are untouched — a single-node broadcast must not smear across the row.
+        assert_eq!(ticks[0].enter_at, None);
+        assert_eq!(ticks[0].exit_at, None);
+    }
+
+    /// The echo pays the same pre-parse gate the heartbeat does: these frames are **broadcast** to
+    /// every connected client, so a Director with no Tune page open must not deserialize them.
+    #[test]
+    fn the_capture_echo_is_gated_before_it_is_parsed() {
+        let tap = SignalTap::default();
+        let good = text(json!({ "node_index": 0, "level": 118 }));
+        assert_eq!(tap_captured_level(&tap, &good, true), TapOutcome::Gated);
+        assert_eq!(tap_captured_level(&tap, &good, false), TapOutcome::Gated);
+        assert!(tap.take().is_empty());
+    }
+
+    #[test]
+    fn a_catalog_channel_code_becomes_rotorhazards_letter_and_number() {
+        // RotorHazard stores `{"b": "R", "c": 8}` and calls `int()` on the channel with no guard.
+        // Sending the catalog's own `"R8"` raised ValueError and aborted `on_set_frequency`, so the
+        // frequency was never set — while the fire-and-forget emit still reported success.
+        assert_eq!(rh_band_channel("R8"), Some(("R".to_string(), 8)));
+        assert_eq!(rh_band_channel("F4"), Some(("F".to_string(), 4)));
+        assert_eq!(rh_band_channel("A1"), Some(("A".to_string(), 1)));
+    }
+
+    #[test]
+    fn both_channel_write_paths_emit_rotorhazards_letter_and_number() {
+        // The Tune page's bench write (#413) and a heat's channel assignment (#421) build the SAME
+        // payload from the same helper, so what an RD sees on RotorHazard's screen after staging a
+        // heat is what they see after tuning a node by hand — `R7`, not `5880`.
+        let tuned = set_frequency_payload(2, 5880, Some(("Raceband", "R7")));
+        assert_eq!(
+            tuned,
+            json!({ "node": 2, "frequency": 5880, "band": "R", "channel": 7 })
+        );
+        // Same frequency named from its other band still lands as RH's own letter+number.
+        assert_eq!(
+            set_frequency_payload(2, 5880, Some(("Fatshark", "F8"))),
+            json!({ "node": 2, "frequency": 5880, "band": "F", "channel": 8 })
+        );
+    }
+
+    #[test]
+    fn a_custom_frequency_emits_the_frequency_alone_and_never_an_invented_label() {
+        // A raw MHz the catalog cannot name reaches here with no label, and leaves with none: the
+        // node still retunes, and RotorHazard is not told a channel GridFPV made up.
+        assert_eq!(
+            set_frequency_payload(0, 5885, None),
+            json!({ "node": 0, "frequency": 5885 })
+        );
+        // A label that survives to here but cannot be translated is dropped, not guessed — the
+        // frequency write is worth more than the name.
+        assert_eq!(
+            set_frequency_payload(0, 5885, Some(("Raceband", "Raceband"))),
+            json!({ "node": 0, "frequency": 5885 })
+        );
+    }
+
+    #[test]
+    fn an_untranslatable_code_yields_no_label_rather_than_a_guess() {
+        // Omitting the label costs a name on RotorHazard's screen. Guessing one costs the write —
+        // and with it, a gate left on the wrong channel.
+        assert_eq!(rh_band_channel(""), None);
+        assert_eq!(rh_band_channel("8"), None);
+        assert_eq!(rh_band_channel("R"), None);
+        assert_eq!(rh_band_channel("Raceband"), None);
     }
 }

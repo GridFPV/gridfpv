@@ -8,7 +8,7 @@
    * (a routed page here; the in-event Roster will embed the same component with per-event selection
    * layered on next). `Breadcrumbs` + the brand root get you home from here.
    */
-  import { Button, Card } from '@gridfpv/components';
+  import { Button, Card, InfoTip } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
@@ -33,12 +33,15 @@
 
     <header class="page-head">
       <div class="page-titles">
-        <h1 class="page-title">Pilots</h1>
-        <p class="lead">
-          The application-level pilot directory — maintained once here, rostered per event. Each
-          pilot needs only a <strong>callsign</strong>; the rest (team, country, color, VTX, IDs) is
-          optional.
-        </p>
+        <div class="page-titleline">
+          <h1 class="page-title">Pilots</h1>
+          <!-- #466: moved off the page. "Callsign is the only required field" is already carried by
+               the required marker on the field itself. -->
+          <InfoTip
+            label="About the pilot directory"
+            text="The application-level pilot directory — maintained once here, rostered per event. Each pilot needs only a callsign; the rest (team, country, colour, VTX, IDs) is optional."
+          />
+        </div>
       </div>
       <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add pilot</Button>
     </header>
@@ -82,20 +85,14 @@
     gap: var(--gf-space-2);
     min-width: 0;
   }
+  .page-titleline {
+    display: flex;
+    align-items: center;
+  }
   .page-title {
     margin: 0;
     font-size: var(--gf-font-size-2xl);
     letter-spacing: var(--gf-tracking-tight);
-  }
-  .lead {
-    margin: 0;
-    max-width: 38rem;
-    color: var(--gf-text-muted);
-    font-size: var(--gf-font-size-sm);
-  }
-  .lead strong {
-    color: var(--gf-text-secondary);
-    font-weight: var(--gf-font-weight-semibold);
   }
   .manager-wrap {
     padding: var(--gf-space-2);

@@ -41,11 +41,14 @@
 //! not the scored result; the authoritative scored ranking is the
 //! [`HeatResult`](gridfpv_engine::scoring::HeatResult) projection.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use gridfpv_engine::heat::{HeatState, heat_state};
-use gridfpv_events::{ClassId, CompetitorRef, Event, HeatId, HeatTransition, PilotId, RoundId};
-use gridfpv_projection::{CompetitorKey, lap_list_marshaled_with_floor, registrations};
+use gridfpv_engine::heat::{HeatState, heat_state, next_state};
+use gridfpv_events::{
+    ClassId, CompetitorRef, Event, HeatId, HeatTransition, LayoutId, LogRef, PilotId, RoundId,
+    SourceTime,
+};
+use gridfpv_projection::{CompetitorKey, CorrectedWindow, CrossingDisposition, registrations};
 use gridfpv_storage::StoredEvent;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -129,6 +132,17 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub tone_at: Option<i64>,
+    /// The current heat's **grace deadline** while its race window has expired but the heat is
+    /// still `Running` (#505): the logged `deadline` of its latest
+    /// [`RaceExpired`](gridfpv_events::Event::RaceExpired) marker — the server wall-clock instant
+    /// (microseconds since the Unix epoch) at which the runtime closes the heat if pilots are
+    /// still out. The console's "grace" countdown anchors here, exactly as the auto-official
+    /// countdown anchors on the `HeatFinalizing` deadline. `None` before the race window expires,
+    /// in every non-`Running` phase, and for an unbounded (`UntilScored`) grace — whose marker
+    /// carries no deadline. Renders as a plain TS `number` (microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub grace_deadline: Option<i64>,
     /// The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
     /// marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
     /// `Unofficial` phase (before that there is no result to be provisional about). Once provisional
@@ -139,6 +153,90 @@ pub struct LiveRaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub lifecycle: Option<LifecycleState>,
+    /// The current heat's recent **gate crossings, each with its disposition** (#397) — the live
+    /// feed a console announces from, in ascending `pass_ref` (append-offset) order.
+    ///
+    /// `progress` reports *laps*, and laps are derived (`passes.windows(2)`), so a lap-derived
+    /// consumer is structurally blind to most crossings: the **holeshot** closes no lap, and a
+    /// crossing **rejected under the round's min-lap floor** is auto-voided in the projection and
+    /// reaches no live consumer at all. This field carries the crossings themselves, so "the gate
+    /// saw nothing" and "the gate saw something that did not count" stop being the same silence.
+    ///
+    /// **Idempotency (the hard requirement).** Every entry carries a stable
+    /// [`pass_ref`](LiveCrossing::pass_ref) — the crossing's global append offset — and the feed is
+    /// ordered by it. A consumer holds a single high-water mark and acts on `pass_ref >` it, so
+    /// a re-pushed or re-snapshotted `LiveRaceState` (or a resubscribe, or a scope change) can
+    /// never look like new crossings. Receipt of a frame means nothing; identity is everything.
+    ///
+    /// **Bounded** to the most recent [`MAX_LIVE_CROSSINGS`] entries — see that constant for why
+    /// dropping the *oldest* is the one truncation that leaves the high-water mark sound.
+    ///
+    /// Additive: absent on the wire when empty, so older payloads round-trip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crossings: Vec<LiveCrossing>,
+}
+
+/// How many crossings [`LiveRaceState::crossings`] carries at most — the feed's bound.
+///
+/// A heat is not small: 8 seats × 20 laps is ~168 crossings before any rejection, and open
+/// practice runs unbounded, so the feed cannot simply be "every crossing of the run" — that would
+/// grow a latency-sensitive frame without limit, and `Engine::advance` re-folds and re-sends it
+/// once per appended offset.
+///
+/// **The truncation drops the OLDEST entries, never the newest.** That preserves idempotency:
+/// append offsets only grow, so anything trimmed is already *below* any consumer's high-water mark
+/// and can never be mistaken for new. Trimming the other end would make new crossings vanish and
+/// then reappear. The only thing a bound can cost is a *miss*: a consumer that was away for more
+/// than this many crossings sees the window jump past some — and those are stale by then anyway
+/// (a tone for a crossing 64 crossings ago is noise, not awareness).
+///
+/// 64 is ~8 laps of an 8-seat heat, far more than the 1–2 crossings that land between two
+/// consecutive live-state frames, so a connected console never loses one.
+pub const MAX_LIVE_CROSSINGS: usize = 64;
+
+/// One gate crossing of the current heat, with what became of it (#397).
+///
+/// The **crossing** is the observation; the lap is a derivation over pairs of them. This carries
+/// the observation, so a consumer can react to crossings that never became laps — the holeshot,
+/// and a pass rejected under the min-lap floor.
+///
+/// Competitor and pilot are raw wire handles, exactly as [`PilotProgress`] carries them; the
+/// console resolves them to a callsign through its shared resolver before anything is displayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct LiveCrossing {
+    /// **The crossing's stable identity**: its global append offset in the event log. Identical on
+    /// every re-fold of the same log and across every scope, so a consumer deduplicates on this
+    /// and never on frame arrival. The feed is sorted ascending by it.
+    pub pass_ref: LogRef,
+    /// The source-local competitor that crossed. Not necessarily a member of the current lineup —
+    /// a crossing on an unseated node is reported too, because a phantom detection is exactly what
+    /// an RD needs to notice.
+    pub competitor: CompetitorRef,
+    /// The GridFPV pilot this competitor is bound to, if a registration has bound it (#60). `None`
+    /// for an unregistered competitor, which still appears by its bare [`CompetitorRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pilot: Option<PilotId>,
+    /// When the crossing happened, on the **source's** clock (µs) — the same axis as
+    /// [`Lap::at`](gridfpv_projection::Lap::at) and the signal trace's sample times, NOT the server
+    /// wall clock the race anchors (`race_started_at`) use. Renders as a plain TS `number`.
+    pub at: SourceTime,
+    /// What became of this crossing — holeshot / counted / rejected-too-short / voided by a
+    /// marshal. Derived from the crossing's position in the corrected pass chain and the fold's
+    /// removal record; nothing in the log states it.
+    ///
+    /// A crossing's disposition MAY change while its `pass_ref` stays the same (a marshal voids a
+    /// counted lap; voiding a holeshot promotes the next crossing). That is correct and is why
+    /// deduplication keys on `pass_ref` alone: a re-labelled crossing is not a new one.
+    pub disposition: CrossingDisposition,
+    /// The 1-based lap this crossing **closed**, when it closed one. `None` for a holeshot (it
+    /// opens the first lap and closes none) and for a rejected or voided crossing. Lets a consumer
+    /// tell a crossing that already drove a lap callout from one that did not, without
+    /// re-deriving laps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub lap_number: Option<u32>,
 }
 
 /// The provisional → official lifecycle of a heat's result (marshaling Slice 5), projected for the
@@ -179,7 +277,9 @@ impl Default for LiveRaceState {
             race_ended_at: None,
             staged_at: None,
             tone_at: None,
+            grace_deadline: None,
             lifecycle: None,
+            crossings: Vec::new(),
         }
     }
 }
@@ -207,6 +307,19 @@ pub struct PilotProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub last_lap_micros: Option<i64>,
+    /// Duration (µs, source clock) of the pilot's **fastest** completed lap of the run, or
+    /// `None` before they have completed one (#425).
+    ///
+    /// Served, never accumulated. The console used to fold a running `min` over the
+    /// `last_lap_micros` of the frames it happened to observe, which made the displayed best a
+    /// function of *which frames a client saw* — lossy on any re-snapshot, and more so since
+    /// #422 collapses a resumed span into one settled envelope rather than re-walking each
+    /// intermediate lap time. Here the whole (marshaling-aware, floored) lap list is in hand, so
+    /// this is a `min` over every lap that counted: correct by construction, identical on a
+    /// re-fold, and unchanged by a reconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub best_lap_micros: Option<i64>,
 }
 
 /// Fold the event log into the [`LiveRaceState`] (protocol.html §1) — issue #41.
@@ -216,49 +329,194 @@ pub struct PilotProgress {
 /// [`HeatPhase`], reads its lineup, derives each active pilot's [`PilotProgress`] from the
 /// (marshaling-aware) lap projection, ranks them into a running order, and finds the
 /// on-deck heat. Replaying the same log twice yields the same state.
+///
+/// **Unfloored** (D26): it counts every raw pass, so it is for the *positional* questions —
+/// `current_heat`, `phase`, `on_deck` — that no floor can move. A surface that shows LAPS must
+/// go through [`live_state_with_floor`] with the current round's floor, or it will disagree with
+/// the lap list about a suppressed echo, which is the bug #409 records.
+///
+/// **Meta-free**: with no round list in hand it cannot tell a heat of a removed round from any
+/// other (#439), so it reports every heat the log holds. A surface an RD looks at resolves the
+/// event's rounds and goes through [`live_state_with_floor`].
 pub fn live_state(events: &[Event]) -> LiveRaceState {
     let window: Vec<(u64, &Event)> = events
         .iter()
         .enumerate()
         .map(|(i, e)| (i as u64, e))
         .collect();
-    live_state_core(events, &window, None)
+    live_state_core(events, &window, Floor::Fixed(None), None)
 }
 
-/// Fold a **windowed** log slice with its PRESERVED global offsets — the heat/class-scope
-/// entry point (`heat_window_offsets` / `class_window_offsets` output). The marshaling
-/// adjudications inside the window (`DetectionVoided`/`LapThrownOut`/…) target global
-/// [`LogRef`]s; folding a filtered slice through the plain [`live_state`] re-enumerated it
-/// `0,1,2,…`, so a correction to a heat deep in the log silently missed (or, on coincidence,
-/// hit the wrong pass) in every heat-scoped live view. `window` must be in log order.
-pub fn live_state_over(window: &[(u64, Event)]) -> LiveRaceState {
-    live_state_over_with_floor(window, None)
+/// Where [`live_state_core`] gets the D26 min-lap floor.
+///
+/// The floor belongs to the round owning the heat the fold reports as **current** — which is a
+/// fact the fold itself establishes. `OfCurrentHeat` therefore resolves it *inside* the fold,
+/// after that heat is known, so the floor and the heat it applies to cannot be derived from
+/// different answers (#409's failure mode) and the resolution costs nothing extra.
+///
+/// It used to be a caller-side pre-pass (`app::live_fold_floor`) that re-ran [`current_heat`] over
+/// the same slice: right only by discipline, and on the change stream's per-offset fold it cost a
+/// duplicate pair of full-log scans on every wake — plus, for the class scope, a second **deep
+/// clone of the whole window** purely to hand the pre-pass a bare `&[Event]` (#460 items 1 and 4).
+enum Floor<'a> {
+    /// Already resolved by the caller: the **heat** scope names the heat it folds, so its floor is
+    /// that heat's round's rather than the current heat's; the meta-free callers (unit tests,
+    /// [`live_state`]) pass `None`, which is "this round has no floor", never "unavailable".
+    Fixed(Option<i64>),
+    /// Resolve it from the current heat this fold picks, against the event's rounds — the event
+    /// and class scopes, which fold a slice but report exactly one heat.
+    OfCurrentHeat(&'a [crate::events::RoundDef]),
 }
 
-/// [`live_state_over`] under the current heat's **min-lap floor** (D26): the live lap fold
-/// suppresses under-floor raw passes exactly like the laps/result projections, so the race
-/// screen's lap counts and the marshaling list can never disagree about an echo.
+/// [`live_state`] under the current heat's **min-lap floor** (D26) — the whole-log (event
+/// scope) counterpart of [`live_state_over_with_floor`].
+///
+/// The event and class scopes fold the log as a whole but still report exactly ONE heat (the
+/// current one), so exactly one round's floor applies. A caller that HAS the event's rounds
+/// should use [`live_state_with_rounds`] instead and let the fold resolve the floor from the heat
+/// it picks; this entry point is for callers holding a floor and no meta (the unit tests).
+///
+/// Passing `None` here is "this round has no floor", never "the floor was not available":
+/// the event scope used to count a sub-floor echo the heat scope's lap list had suppressed,
+/// which is exactly the D26 violation #409 records.
+///
+/// `defined` is the event's stored round ids (#439): a heat of a round the event no longer
+/// defines is neither current nor on deck. See [`removed_round_heats`].
+pub fn live_state_with_floor(
+    events: &[Event],
+    min_lap_micros: Option<i64>,
+    defined: Option<&[RoundId]>,
+) -> LiveRaceState {
+    let window: Vec<(u64, &Event)> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i as u64, e))
+        .collect();
+    live_state_core(events, &window, Floor::Fixed(min_lap_micros), defined)
+}
+
+/// The **event scope**'s fold: the whole log, under the current heat's round's D26 floor and the
+/// rounds the event still defines (#439), both taken from `rounds` — the event's registry meta.
+///
+/// This is [`live_state_with_floor`] with the floor and the `defined` list derived here rather
+/// than by the caller, which is the point: the floor is the *current heat's* round's, and the
+/// current heat is something only this fold decides. Resolving both from one `rounds` argument
+/// means the snapshot handler and the change stream cannot hand the fold a floor belonging to a
+/// heat it does not report (#409), and neither pays for the duplicate `current_heat` scan the
+/// old pre-pass cost on every streamed offset (#460).
+pub fn live_state_with_rounds(
+    events: &[Event],
+    rounds: &[crate::events::RoundDef],
+) -> LiveRaceState {
+    let window: Vec<(u64, &Event)> = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i as u64, e))
+        .collect();
+    let defined = defined_round_ids(rounds);
+    live_state_core(
+        events,
+        &window,
+        Floor::OfCurrentHeat(rounds),
+        Some(&defined),
+    )
+}
+
+/// Fold a **windowed** log slice with its PRESERVED global offsets, under the current heat's
+/// **min-lap floor** (D26) — the heat/class-scope entry point (`heat_window_offsets` /
+/// `class_window_offsets` output).
+///
+/// The marshaling adjudications inside the window (`DetectionVoided`/`LapThrownOut`/…) target
+/// global [`LogRef`]s; folding a filtered slice through the plain [`live_state`] re-enumerated it
+/// `0,1,2,…`, so a correction to a heat deep in the log silently missed (or, on coincidence, hit
+/// the wrong pass) in every heat-scoped live view. `window` must be in log order.
+///
+/// The floor is **required, not optional**: the live lap fold suppresses under-floor raw passes
+/// exactly like the laps/result projections, so the race screen's lap counts and the marshaling
+/// list can never disagree about an echo. There is deliberately no floorless windowed entry point
+/// — the one that existed is how the change stream came to violate D26 (#409). This is the
+/// **heat** scope's entry point: the heat is named, so its floor is resolved by the caller with
+/// [`crate::app::round_def_of_heat`] + [`crate::app::min_lap_micros_of`], and `None` means the
+/// round genuinely has no floor. A caller folding a *class* window has no heat to name and should
+/// use [`live_state_over_with_rounds`].
+///
+/// `defined` is the event's stored round ids (#439), exactly as for [`live_state_with_floor`] —
+/// except for the **heat** scope, which NAMES the heat it folds: there is nothing left to choose,
+/// so that caller passes `None` and a heat asked for by id is still served.
 pub fn live_state_over_with_floor(
     window: &[(u64, Event)],
     min_lap_micros: Option<i64>,
+    defined: Option<&[RoundId]>,
+) -> LiveRaceState {
+    live_state_over(window, Floor::Fixed(min_lap_micros), defined)
+}
+
+/// The **class scope**'s fold: a class's filtered window (global offsets preserved), under the
+/// floor of the round owning the heat *that window* reports as current, plus the rounds the event
+/// still defines — both from `rounds`.
+///
+/// The class-scope counterpart of [`live_state_with_rounds`], and the reason it exists: the floor
+/// must be resolved over the **window**, not the whole log, so the pre-pass shape forced the
+/// caller to deep-clone the entire window a second time just to produce a bare `&[Event]` for it
+/// (#460 item 1). Resolving inside the fold, which already holds that slice, deletes the clone.
+pub fn live_state_over_with_rounds(
+    window: &[(u64, Event)],
+    rounds: &[crate::events::RoundDef],
+) -> LiveRaceState {
+    let defined = defined_round_ids(rounds);
+    live_state_over(window, Floor::OfCurrentHeat(rounds), Some(&defined))
+}
+
+/// The shared body of the two windowed entry points.
+fn live_state_over(
+    window: &[(u64, Event)],
+    floor: Floor<'_>,
+    defined: Option<&[RoundId]>,
 ) -> LiveRaceState {
     // The positional helpers (current heat, phase, lineup, run boundary) read a bare event
     // slice; the offsets matter only to the marshaling-aware lap fold below.
     let events: Vec<Event> = window.iter().map(|(_, e)| e.clone()).collect();
     let pairs: Vec<(u64, &Event)> = window.iter().map(|(o, e)| (*o, e)).collect();
-    live_state_core(&events, &pairs, min_lap_micros)
+    live_state_core(&events, &pairs, floor, defined)
 }
 
-/// The shared fold behind [`live_state`] (full log, positional offsets) and
-/// [`live_state_over`] (a window with preserved global offsets). `window` is the SAME
+/// One competitor ref's accumulation while folding the run's lap list into [`PilotProgress`].
+///
+/// A ref can appear once per adapter, so every field folds across entries: the lap count adds,
+/// the last lap keeps the temporally latest, and `best` takes the `min` over every counted lap.
+#[derive(Debug, Clone, Copy, Default)]
+struct RefProgress {
+    /// Laps counted for this ref so far.
+    laps: u32,
+    /// Duration (µs) of the temporally latest counted lap — the wire's `last_lap_micros`.
+    last_duration: Option<i64>,
+    /// Completion instant (source µs) of that latest lap — the running-order tie-break.
+    last_at: Option<i64>,
+    /// Shortest counted lap duration (µs) of the run — the wire's `best_lap_micros` (#425).
+    best: Option<i64>,
+}
+
+/// The shared fold behind [`live_state_with_floor`] (full log, positional offsets) and
+/// [`live_state_over_with_floor`] (a window with preserved global offsets). `window` is the SAME
 /// sequence as `events`, paired with each event's global append offset.
 fn live_state_core(
     events: &[Event],
     window: &[(u64, &Event)],
-    min_lap_micros: Option<i64>,
+    floor: Floor<'_>,
+    defined: Option<&[RoundId]>,
 ) -> LiveRaceState {
-    let Some(current_heat) = current_heat(events) else {
+    let Some(current_heat) = current_heat(events, defined) else {
         return LiveRaceState::default();
+    };
+
+    // The D26 floor, resolved HERE for the event/class scopes — the current heat is settled, and
+    // the floor is by definition that heat's round's, so there is no second `current_heat` fold
+    // and no way for the two to name different heats. See [`Floor`].
+    let min_lap_micros = match floor {
+        Floor::Fixed(value) => value,
+        Floor::OfCurrentHeat(rounds) => crate::app::min_lap_micros_of(
+            crate::app::round_def_of_heat(events, &current_heat, rounds).as_ref(),
+        ),
     };
 
     let phase = heat_state(events, &current_heat)
@@ -280,46 +538,87 @@ fn live_state_core(
     // boundary, so everything counts (a normally-finalized heat is unaffected).
     let run_start = current_run_start(events, &current_heat);
     let pass_ceiling = current_run_pass_ceiling(events, &current_heat);
-    let laps = lap_list_marshaled_with_floor(
-        window
-            .iter()
-            .enumerate()
-            .filter(|(i, (_, e))| {
-                if *i < run_start {
-                    return false;
+    // The current run's window, with global offsets preserved. Materialised once because two folds
+    // read it: the lap projection below (which drives `progress`/`running_order`) and the crossing
+    // feed (#397). Feeding both from the SAME window is what keeps the two views of one pass
+    // consistent — a crossing the lap fold counted is `Counted` in the feed, with the same lap
+    // number, and one the floor suppressed is `RejectedTooShort` in both.
+    let run_window: Vec<(u64, &Event)> = window
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, e))| {
+            if *i < run_start {
+                return false;
+            }
+            // Tag-aware pass attribution: a pass stamped for ANOTHER heat never counts
+            // toward this one — selecting an older heat as current used to absorb every
+            // later heat's passes (they all sit after its run_start). An untagged
+            // (legacy) pass keeps the positional rule. Either way a pass landing AFTER
+            // the run went official is frozen out (the Final freeze).
+            match e {
+                Event::Pass(p) => {
+                    *i < pass_ceiling && p.heat.as_ref().is_none_or(|h| h == &current_heat)
                 }
-                // Tag-aware pass attribution: a pass stamped for ANOTHER heat never counts
-                // toward this one — selecting an older heat as current used to absorb every
-                // later heat's passes (they all sit after its run_start). An untagged
-                // (legacy) pass keeps the positional rule. Either way a pass landing AFTER
-                // the run went official is frozen out (the Final freeze).
-                match e {
-                    Event::Pass(p) => {
-                        *i < pass_ceiling && p.heat.as_ref().is_none_or(|h| h == &current_heat)
-                    }
-                    _ => true,
-                }
-            })
-            .map(|(_, (offset, e))| (*offset, *e)),
+                _ => true,
+            }
+        })
+        .map(|(_, (offset, e))| (*offset, *e))
+        .collect();
+    // ONE correction fold, read two ways (#460 item 2). The lap list and the crossing feed used
+    // to each run `corrected_and_voided_passes_with_floor` over this identical window — the same
+    // expensive fold twice, on the 16/s signal-append wake path. Folding once is also what makes
+    // the two views agree by construction rather than by discipline.
+    // The grace rule's boundary (#505): the current run's RaceExpired marker, resolved from the
+    // same run window the fold reads (an older run's marker sits before `run_start` and is out
+    // of the window, so a Restarted heat can never inherit a stale marker).
+    let race_expired =
+        gridfpv_projection::race_expired_offset(run_window.iter().copied(), &current_heat);
+    // The bounce window (#517): the value pinned at this heat's arm. Resolved over the WHOLE log,
+    // not `run_window` — the pin is appended at the arm and `current_run_start` opens the window at
+    // Running, so a window-scoped scan would never find it. Unlike the marker above, this resolves
+    // a value rather than a boundary, so a wider scan costs nothing and a narrower one loses it.
+    let same_pass_window = gridfpv_projection::same_pass_window_of_heat(events, &current_heat);
+    let corrected = CorrectedWindow::of(
+        run_window.iter().copied(),
         min_lap_micros,
+        same_pass_window,
+        race_expired,
     );
+    // The crossing feed (#397) — the same run window, read as *crossings* rather than *laps*, so
+    // the holeshot and a floor-rejected pass (neither of which derives a lap) are visible live.
+    // Bounded to the most recent `MAX_LIVE_CROSSINGS`: the tail is kept and the head dropped, so
+    // every surviving `pass_ref` is still above anything a consumer already retired. The bound is
+    // pushed INTO the projection so an unbounded open-practice run never materialises every
+    // crossing it has ever had just to keep the last 64.
+    let dispositioned = corrected.crossings(Some(MAX_LIVE_CROSSINGS));
+    let laps = corrected.into_lap_list();
     // Per ref: lap count, the last lap's DURATION (the wire's `last_lap_micros` display value),
-    // and the last lap's COMPLETION time (`at`) — the running-order tie-break. The scorer ranks
-    // equal-lap pilots by earlier last-lap completion; ordering on duration here made the live
-    // overlay contradict the scored Timed result (a slower-but-ahead pilot showed behind).
-    let mut by_ref: BTreeMap<&CompetitorRef, (u32, Option<i64>, Option<i64>)> = BTreeMap::new();
+    // the last lap's COMPLETION time (`at`) — the running-order tie-break — and the run's BEST
+    // lap duration (#425). The scorer ranks equal-lap pilots by earlier last-lap completion;
+    // ordering on duration here made the live overlay contradict the scored Timed result (a
+    // slower-but-ahead pilot showed behind).
+    let mut by_ref: BTreeMap<&CompetitorRef, RefProgress> = BTreeMap::new();
     for cl in &laps.competitors {
         let CompetitorKey { competitor, .. } = &cl.competitor;
-        let entry = by_ref.entry(competitor).or_insert((0, None, None));
-        entry.0 += cl.lap_count() as u32;
+        let entry = by_ref.entry(competitor).or_default();
+        entry.laps += cl.lap_count() as u32;
         if let Some(last) = cl.laps.last() {
             // Across adapters, keep the TEMPORALLY latest lap (not whichever adapter
             // iterates later).
-            if entry.2.is_none_or(|prev| last.at.micros >= prev) {
-                entry.1 = Some(last.duration_micros);
-                entry.2 = Some(last.at.micros);
+            if entry.last_at.is_none_or(|prev| last.at.micros >= prev) {
+                entry.last_duration = Some(last.duration_micros);
+                entry.last_at = Some(last.at.micros);
             }
         }
+        // Best is a `min` over EVERY counted lap, folded together with whatever another adapter
+        // already contributed for this ref. No ordering assumption at all — unlike the last lap,
+        // which has to pick the temporally latest.
+        entry.best = cl
+            .laps
+            .iter()
+            .map(|lap| lap.duration_micros)
+            .chain(entry.best)
+            .min();
     }
 
     // Fold the registration bindings and index them by competitor ref. The lineup carries
@@ -336,13 +635,13 @@ fn live_state_core(
     let progress: Vec<PilotProgress> = active_pilots
         .iter()
         .map(|competitor| {
-            let (laps_completed, last_lap_micros, _) =
-                by_ref.get(competitor).copied().unwrap_or((0, None, None));
+            let entry = by_ref.get(competitor).copied().unwrap_or_default();
             PilotProgress {
                 competitor: competitor.clone(),
                 pilot: pilot_by_ref.get(competitor).map(|p| (*p).clone()),
-                laps_completed,
-                last_lap_micros,
+                laps_completed: entry.laps,
+                last_lap_micros: entry.last_duration,
+                best_lap_micros: entry.best,
             }
         })
         .collect();
@@ -351,9 +650,21 @@ fn live_state_core(
     // `score_timed`), never by lap duration: physically ahead means crossed sooner.
     let last_completion: BTreeMap<&CompetitorRef, i64> = by_ref
         .iter()
-        .filter_map(|(competitor, (_, _, at))| at.map(|at| (*competitor, at)))
+        .filter_map(|(competitor, entry)| entry.last_at.map(|at| (*competitor, at)))
         .collect();
     let running_order = running_order_by_completion(&progress, &last_completion);
+
+    let crossings: Vec<LiveCrossing> = dispositioned
+        .iter()
+        .map(|d| LiveCrossing {
+            pass_ref: d.offset,
+            competitor: d.pass.competitor.clone(),
+            pilot: pilot_by_ref.get(&d.pass.competitor).map(|p| (*p).clone()),
+            at: d.pass.at,
+            disposition: d.disposition,
+            lap_number: d.lap_number,
+        })
+        .collect();
 
     LiveRaceState {
         current_heat: Some(current_heat.clone()),
@@ -361,19 +672,22 @@ fn live_state_core(
         active_pilots,
         progress,
         running_order,
-        on_deck: on_deck(events, &current_heat),
+        on_deck: on_deck(events, &current_heat, defined),
         // Timing is set by [`with_heat_timing`] from the *stored* log (which carries the
         // `recorded_at` server timestamps the bare `Event` slice lacks). The plain fold over
-        // `&[Event]` — the open-practice synthetic path and the unit tests — leaves it `None`.
+        // `&[Event]` (the unit tests, and any caller that has no stored log) leaves it `None`.
         race_started_at: None,
         race_ended_at: None,
         staged_at: None,
         // Likewise set by [`with_heat_timing`]: the start-tone instant needs the `HeatStarting`
-        // event's `recorded_at`, which the bare-event fold cannot see.
+        // event's `recorded_at`, which the bare-event fold cannot see; the grace deadline is
+        // phase-gated there the same way.
         tone_at: None,
+        grace_deadline: None,
         // The lifecycle is likewise finished by [`with_heat_timing`] from the *stored* log (it needs
         // the `HeatFinalizing` deadline's `recorded_at` context); the bare-event fold leaves it `None`.
         lifecycle: None,
+        crossings,
     }
 }
 
@@ -427,6 +741,31 @@ fn heat_finalizing_at(events: &[Event], heat: &HeatId) -> Option<i64> {
             Event::HeatFinalizing { heat: h, at: a } if h == heat => at = Some(*a),
             // A fresh run re-opens the window: drop a stale deadline so an aborted/reverted run's
             // arming never lingers onto the new one (it re-arms with its own `HeatFinalizing`).
+            Event::HeatStateChanged {
+                heat: h,
+                transition: HeatTransition::Running,
+            } if h == heat => at = None,
+            _ => {}
+        }
+    }
+    at
+}
+
+/// The current heat's **grace deadline** while `Running` past its race window (#505): the
+/// `deadline` of the most-recent [`RaceExpired`](Event::RaceExpired) the runtime logged when the
+/// window expired, cleared by any later `Running` for the heat (a re-run starts a fresh race).
+///
+/// Pure and log-derivable like [`heat_finalizing_at`]: the runtime writes the deadline once, at
+/// emission time, so a replay folds the same instant and the grace countdown is identical for
+/// every client. `None` when the run never expired, or its grace is unbounded (`UntilScored`
+/// logs a marker with no deadline — the countdown has nothing to count to).
+fn heat_grace_deadline(stored: &[StoredEvent], heat: &HeatId) -> Option<i64> {
+    let mut at = None;
+    for entry in stored {
+        match &entry.event {
+            Event::RaceExpired { heat: h, deadline } if h == heat => at = *deadline,
+            // A fresh run races anew: a stale marker's deadline must not linger onto it (its
+            // own expiry logs a fresh marker).
             Event::HeatStateChanged {
                 heat: h,
                 transition: HeatTransition::Running,
@@ -504,6 +843,13 @@ pub fn with_heat_timing(mut live: LiveRaceState, stored: &[StoredEvent]) -> Live
             HeatPhase::Armed => heat_tone_at(stored, &heat),
             _ => None,
         };
+        // The grace countdown anchor (#505) — present only while the heat is still `Running`
+        // (the race window has expired, pilots are finishing their laps). Once the heat closes,
+        // `race_ended_at` freezes the clocks and the grace has nothing left to count.
+        live.grace_deadline = match live.phase {
+            HeatPhase::Running => heat_grace_deadline(stored, &heat),
+            _ => None,
+        };
         live.lifecycle = match live.phase {
             HeatPhase::Unofficial => {
                 let events: Vec<Event> = stored.iter().map(|s| s.event.clone()).collect();
@@ -555,21 +901,65 @@ fn phase_of(state: HeatState) -> HeatPhase {
 /// (Stage/Start/…) or an explicit manual selection. If there has been neither yet, fall
 /// back to the **first `HeatScheduled`** so the very first heat is controllable before any
 /// transition. `None` if no heat was ever scheduled.
-fn current_heat(events: &[Event]) -> Option<HeatId> {
+///
+/// The D26 floor belongs to the round owning *this* heat, so re-deriving "which heat" by any
+/// other rule is how the live view and the lap list drift apart. [`Floor::OfCurrentHeat`] closes
+/// that door by construction: it resolves the floor from this function's answer, inside the same
+/// fold, rather than from a second call over the same slice.
+///
+/// A heat of a **removed round** is never reported (#439): see [`removed_round_heats`]. The
+/// fallback then names the first scheduled heat the event still defines, so an RD who filled a
+/// scratch round, threw it away and started a real one is not left controlling a heat that
+/// exists on no screen.
+pub(crate) fn current_heat(events: &[Event], defined: Option<&[RoundId]>) -> Option<HeatId> {
+    let ghosts = removed_round_heats(events, defined);
     let mut active: Option<HeatId> = None;
     let mut first_scheduled: Option<HeatId> = None;
     for event in events {
         match event {
             Event::HeatStateChanged { heat, .. } | Event::CurrentHeatSelected { heat } => {
-                active = Some(heat.clone());
+                if !ghosts.contains(heat) {
+                    active = Some(heat.clone());
+                }
             }
-            Event::HeatScheduled { heat, .. } if first_scheduled.is_none() => {
+            Event::HeatScheduled { heat, .. }
+                if first_scheduled.is_none() && !ghosts.contains(heat) =>
+            {
                 first_scheduled = Some(heat.clone());
             }
             _ => {}
         }
     }
     active.or(first_scheduled)
+}
+
+/// The heats of rounds the event **no longer defines** — the read-side discard behind removing a
+/// round (#439/#418), as a set the live fold can test a heat against.
+///
+/// `defined` is the event's stored round ids. `None` means *"the caller has no event meta"* — a
+/// pure-log fold (the unit tests, [`live_state`], a caller whose event has vanished) — and
+/// discards nothing: with no round list in hand, "this round is gone" is not a claim that can be
+/// made, and guessing it would blank a live view rather than sharpen it. An **untagged** heat
+/// (`round: None` — the free-text / sim path) is never discarded either; it belongs to no round.
+///
+/// The heat's round is its **most recent** `HeatScheduled` tag, the same last-wins rule
+/// [`latest_schedule`] and [`heats_of_defined_rounds`] read it by, so one heat cannot be a ghost
+/// to one surface and live to another.
+fn removed_round_heats(events: &[Event], defined: Option<&[RoundId]>) -> BTreeSet<HeatId> {
+    let Some(defined) = defined else {
+        return BTreeSet::new();
+    };
+    let mut round_of: BTreeMap<&HeatId, Option<&RoundId>> = BTreeMap::new();
+    for event in events {
+        if let Event::HeatScheduled { heat, round, .. } = event {
+            round_of.insert(heat, round.as_ref());
+        }
+    }
+    round_of
+        .into_iter()
+        .filter(|(_, round)| round.is_some_and(|round| !defined.contains(round)))
+        .map(|(heat, _)| heat.clone())
+        .collect()
 }
 
 /// The log index where the current heat's **current run** begins — the boundary the live lap count /
@@ -674,11 +1064,23 @@ fn lineup_of(events: &[Event], heat: &HeatId) -> Vec<CompetitorRef> {
 /// current heat is last, or it isn't in the schedule at all), fall back to the first
 /// still-`Scheduled` heat overall, so the RD can still advance to an earlier-scheduled-but-unrun
 /// heat rather than getting stuck. The "after current" candidate is always preferred.
-pub(crate) fn on_deck(events: &[Event], current: &HeatId) -> Option<HeatId> {
+///
+/// **A heat of a removed round is never on deck** (#439). Removing a round is documented to drop
+/// its heats "from every list the console reads", but the RD does not reach the next heat through
+/// a list — they reach it through on-deck and Advance. A ghost on deck names a race that appears
+/// on no screen and whose round config (layouts, staging timer, min-lap) is gone from event meta,
+/// so it can neither be run correctly nor found to be fixed. `defined` is the event's stored round
+/// ids; see [`removed_round_heats`] for what `None` means.
+pub(crate) fn on_deck(
+    events: &[Event],
+    current: &HeatId,
+    defined: Option<&[RoundId]>,
+) -> Option<HeatId> {
+    let ghosts = removed_round_heats(events, defined);
     let mut seen: Vec<HeatId> = Vec::new();
     for event in events {
         if let Event::HeatScheduled { heat, .. } = event {
-            if !seen.contains(heat) {
+            if !seen.contains(heat) && !ghosts.contains(heat) {
                 seen.push(heat.clone());
             }
         }
@@ -735,25 +1137,6 @@ fn running_order_by_completion(
     order.into_iter().map(|p| p.competitor.clone()).collect()
 }
 
-/// Rank by lap count with the last-lap **duration** tie-break — the legacy proxy, kept for
-/// the open-practice per-channel board (whose in-memory laps carry durations, not global
-/// completion instants). The real heat overlay uses [`running_order_by_completion`].
-pub(crate) fn running_order(progress: &[PilotProgress]) -> Vec<CompetitorRef> {
-    let mut order: Vec<&PilotProgress> = progress.iter().collect();
-    order.sort_by(|a, b| {
-        b.laps_completed
-            .cmp(&a.laps_completed)
-            .then_with(|| match (a.last_lap_micros, b.last_lap_micros) {
-                (Some(x), Some(y)) => x.cmp(&y),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            })
-            .then_with(|| a.competitor.cmp(&b.competitor))
-    });
-    order.into_iter().map(|p| p.competitor.clone()).collect()
-}
-
 /// A scheduled heat as the **Heats UI** lists it (race redesign Slice 3b) — the per-heat view
 /// model the Rounds & Heats stage renders under each round.
 ///
@@ -764,8 +1147,22 @@ pub(crate) fn running_order(progress: &[PilotProgress]) -> Vec<CompetitorRef> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct HeatSummary {
-    /// The heat's id (its scheduled handle, the same one the live/control path drives).
+    /// The heat's id (its scheduled handle, the same one the live/control path drives). A **wire
+    /// handle**: [`name`](Self::name) is what a screen shows (repo display rule).
     pub heat: HeatId,
+    /// The heat's **friendly display name** — "Qualifying Heat 2", "A-Main", "Practice Heat 2", or
+    /// the RD's own typed label.
+    ///
+    /// Resolved server-side by [`round_engine::heat_name`](crate::round_engine::heat_name), which
+    /// is now the ONE place the convention lives (#456): the console consumes this rather than
+    /// re-deriving it, because the two derivations had already drifted — the console numbered a
+    /// round's extra practice heats and the server did not, so an RD saw "Practice Heat 2" on
+    /// screen and a bare "Practice Heat" in every sentence the server wrote.
+    ///
+    /// Falls back to the raw handle for a heat with **no resolvable round** (a sim / free-text
+    /// heat, or one whose round the caller had no meta for) — there is the RD's own typed
+    /// identifier, and it is the same last-resort the display rule allows a resolver.
+    pub name: String,
     /// The heat's lineup — the competitors from its most recent `HeatScheduled`, in lineup order.
     pub lineup: Vec<CompetitorRef>,
     /// The class this heat was tagged with, when the scheduler assigned one (`None` for the
@@ -792,6 +1189,24 @@ pub struct HeatSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub label: Option<String>,
+    /// The **channel layout** this heat flies (#117 S3) — the last
+    /// [`HeatLayoutSet`](gridfpv_events::Event::HeatLayoutSet) for it.
+    ///
+    /// A wire handle: the console resolves it to the layout's **name** against the event's
+    /// `channel_layouts` (CLAUDE.md), and uses its `node → channel` mapping as the per-node channel
+    /// source a seat resolves through — the value that replaces `available_channels[node]`, which
+    /// an allowed set never had any business answering.
+    ///
+    /// This is the **RD's own bind**, not the layout the heat resolves to: `None` whenever no
+    /// `HeatLayoutSet` names one — the RD never picked for this heat (#441: the fill records no
+    /// bind, so this is the common case for a generated heat, which follows its round's default),
+    /// they cleared their pick, or the round names no layouts at all. The heat's actual per-seat
+    /// channels are always on [`frequencies`](Self::frequencies), which is the first source a
+    /// console seat resolves through; this only backfills a seat that has none. Additive —
+    /// defaults absent so older logs round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub layout: Option<LayoutId>,
     /// The heat's folded loop phase (its derived status: scheduled / running / final / …).
     pub phase: HeatPhase,
     /// Whether this heat is the one currently on the timer (the live `current_heat`).
@@ -806,34 +1221,146 @@ pub struct HeatSummary {
 /// ordered by first appearance in the log (the order the generator emitted them). Each heat's
 /// `phase` is its folded [`HeatState`] and `is_current` marks the one on the timer. The Heats UI
 /// filters this by `round` to render each round's heats.
-pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
-    let current = current_heat(events);
+///
+/// `rounds` is the event's stored rounds — its registry meta — and it does two jobs. Their ids
+/// decide which heat is `is_current`, the same answer the live fold gives (#439), so the list
+/// cannot mark a removed round's heat as the one on the timer while Live control shows another;
+/// discarding the ghost **rows** is [`heats_of_defined_rounds`]'s job, applied by the caller over
+/// this list. Their labels and formats resolve each heat's
+/// [`name`](HeatSummary::name), through
+/// [`round_engine::heat_name`](crate::round_engine::heat_name) (#456).
+///
+/// `None` means *"the caller has no event meta"* — a pure-log fold (the unit tests) — and is not
+/// the same as an empty list: nothing is discarded, and every heat falls back to its own label or
+/// its raw handle, because with no round list in hand there is no name to derive.
+///
+/// # One pass, not one pass per heat (#460 item 3)
+///
+/// Each heat's schedule, loop phase and layout bind are last-write-wins folds over the log, and
+/// this used to run all three *per heat* — `O(heats × log)` on every `GET /heats`, which on a full
+/// event day is the largest read the console makes. They are folded here in a single walk into
+/// per-heat maps instead, with the rules unchanged: [`latest_schedule`] keeps the same last-wins
+/// semantics (it is still the entry point for a caller asking about ONE heat, via
+/// [`round_of_heat`]), and the phase advances through the same
+/// [`next_state`](gridfpv_engine::heat::next_state) machine
+/// [`heat_state`](gridfpv_engine::heat::heat_state) applies — seeded by `HeatScheduled`, ignoring
+/// a transition for a heat that has none, a re-schedule re-seeding to `Scheduled`.
+///
+/// The **layout bind** (#117 S3 — the last `HeatLayoutSet`, `None` when never bound or cleared)
+/// stays a *separate* accumulator from the schedule, and that separation is load-bearing rather
+/// than incidental: the bind and the schedule change at different moments — a round re-fill
+/// re-emits the schedule, binding a layout re-emits the bind — so folding them into one entry
+/// would make the last write of either silently reset the other.
+pub fn heat_summaries(
+    events: &[Event],
+    rounds: Option<&[crate::events::RoundDef]>,
+) -> Vec<HeatSummary> {
+    let all = rounds.unwrap_or(&[]);
+    let defined = rounds.map(defined_round_ids);
+    let current = current_heat(events, defined.as_deref());
 
-    // First-scheduled order, deduped — collect the heat ids in the order they first appear.
+    // First-scheduled order, deduped, plus every per-heat last-wins fold — in ONE walk of the log.
     let mut order: Vec<HeatId> = Vec::new();
+    let mut schedules: BTreeMap<&HeatId, ScheduleFacts> = BTreeMap::new();
+    let mut layouts: BTreeMap<&HeatId, Option<LayoutId>> = BTreeMap::new();
+    let mut states: BTreeMap<&HeatId, HeatState> = BTreeMap::new();
+    // Each round's heats in first-scheduled order — the same list
+    // [`round_engine::scheduled_round_heats`] builds, for every round at once, so a heat's position
+    // (and so its number) is identical whether it is named from here or from the log-folding
+    // `heat_display_name` (#456).
+    let mut round_heats: BTreeMap<&RoundId, Vec<&HeatId>> = BTreeMap::new();
     for event in events {
-        if let Event::HeatScheduled { heat, .. } = event {
-            if !order.contains(heat) {
-                order.push(heat.clone());
-            }
-        }
-    }
-
-    order
-        .into_iter()
-        .map(|heat| {
-            let (lineup, class, round, frequencies, label) = latest_schedule(events, &heat);
-            let phase = heat_state(events, &heat)
-                .map(phase_of)
-                .unwrap_or(HeatPhase::Scheduled);
-            let is_current = current.as_ref() == Some(&heat);
-            HeatSummary {
+        match event {
+            Event::HeatScheduled {
                 heat,
                 lineup,
                 class,
                 round,
                 frequencies,
                 label,
+            } => {
+                if !schedules.contains_key(heat) {
+                    order.push(heat.clone());
+                }
+                if let Some(round) = round {
+                    let listed = round_heats.entry(round).or_default();
+                    if !listed.contains(&heat) {
+                        listed.push(heat);
+                    }
+                }
+                schedules.insert(
+                    heat,
+                    (
+                        lineup.clone(),
+                        class.clone(),
+                        round.clone(),
+                        frequencies.clone(),
+                        label.clone(),
+                    ),
+                );
+                // A second `HeatScheduled` re-seeds the state, matching `heat_state`.
+                states.insert(heat, HeatState::Scheduled);
+            }
+            Event::HeatStateChanged { heat, transition } => {
+                // A transition before the heat was scheduled has no state to advance from and is
+                // ignored, exactly as in `heat_state`.
+                if let Some(state) = states.get(heat).copied() {
+                    states.insert(heat, next_state(state, *transition));
+                }
+            }
+            Event::HeatLayoutSet { heat, layout } => {
+                layouts.insert(heat, layout.clone());
+            }
+            _ => {}
+        }
+    }
+
+    order
+        .iter()
+        .map(|heat| {
+            let (lineup, class, round, frequencies, label) =
+                schedules.remove(heat).unwrap_or_default();
+            let phase = states
+                .get(heat)
+                .copied()
+                .map(phase_of)
+                .unwrap_or(HeatPhase::Scheduled);
+            let is_current = current.as_ref() == Some(heat);
+            // #117 S3: which channel layout this heat flies, folded independently of the schedule
+            // so a re-fill that re-emits `HeatScheduled` cannot drop it.
+            let layout = layouts.get(heat).cloned().flatten();
+            // The heat's friendly name, resolved HERE rather than by the console (#456), from the
+            // facts this pass already holds — so the wire carries the name and nothing has to
+            // re-derive it. A heat whose round the event does not define (or does not have meta
+            // for) keeps its own label, or falls back to its raw handle.
+            let name = round
+                .as_ref()
+                .and_then(|id| all.iter().find(|def| &def.id == id))
+                .map(|def| {
+                    let listed = round_heats.get(&def.id);
+                    let heats_in_round = listed.map_or(0, |l| l.len());
+                    let position = listed
+                        .and_then(|l| l.iter().position(|h| *h == heat))
+                        .unwrap_or(heats_in_round);
+                    crate::round_engine::heat_name(def, label.as_deref(), position, heats_in_round)
+                })
+                .unwrap_or_else(|| {
+                    let custom = label.as_deref().map(str::trim).unwrap_or_default();
+                    if custom.is_empty() {
+                        heat.0.clone()
+                    } else {
+                        custom.to_string()
+                    }
+                });
+            HeatSummary {
+                heat: heat.clone(),
+                name,
+                lineup,
+                class,
+                round,
+                frequencies,
+                label,
+                layout,
                 phase,
                 is_current,
             }
@@ -841,19 +1368,62 @@ pub fn heat_summaries(events: &[Event]) -> Vec<HeatSummary> {
         .collect()
 }
 
-/// The lineup + class/round tag a heat carries, taken from its **most recent** `HeatScheduled`
-/// (a re-schedule of the same id supersedes the earlier one).
-#[allow(clippy::type_complexity)]
-fn latest_schedule(
-    events: &[Event],
-    heat: &HeatId,
-) -> (
+/// Drop the heats of rounds the event **no longer defines** — the read half of removing a round
+/// (#418).
+///
+/// The log is append-only, so removing a round cannot remove the `HeatScheduled` entries it once
+/// produced; they stay as the historical fact that those heats were planned. But the round they
+/// resolve their name, win condition and scoring through is gone, so they are no longer heats the
+/// console can render or the RD can run: `heatNameById` would have nothing to derive a name from
+/// and would fall back to the raw heat id, which is exactly the leak the repo display rule forbids.
+///
+/// So a heat tagged to a round that is not in `defined` is **discarded on read**. Nothing with
+/// results is ever hidden this way: [`EventRegistry::remove_round`] refuses a round with a heat in
+/// progress or past `Scheduled`, so every heat this can drop was unstarted and holds no laps.
+///
+/// An **untagged** heat (`round: None` — the free-text / sim path) is never touched: it resolves
+/// its own name and belongs to no round.
+///
+/// [`EventRegistry::remove_round`]: crate::events::EventRegistry::remove_round
+///
+/// The `defined` list itself comes from [`defined_round_ids`] — one place builds it, so the heats
+/// list, the live fold and Advance cannot end up asking different questions.
+pub fn heats_of_defined_rounds(
+    summaries: Vec<HeatSummary>,
+    defined: &[RoundId],
+) -> Vec<HeatSummary> {
+    summaries
+        .into_iter()
+        .filter(|h| match &h.round {
+            Some(round) => defined.contains(round),
+            None => true,
+        })
+        .collect()
+}
+
+/// The ids of the rounds an event **still defines** — the `defined` argument every read that
+/// discards a removed round's heats takes ([`heats_of_defined_rounds`], [`heat_summaries`],
+/// [`live_state_with_floor`], [`live_state_over_with_floor`], `Advance`).
+///
+/// One builder, deliberately: a filter fed a differently-built list is a different filter, and the
+/// whole point of #439 is that on-deck, Advance and `GET /heats` answer the same question.
+pub fn defined_round_ids(rounds: &[crate::events::RoundDef]) -> Vec<RoundId> {
+    rounds.iter().map(|round| round.id.clone()).collect()
+}
+
+/// What a heat's `HeatScheduled` carries: lineup, class tag, round tag, per-seat frequencies and
+/// custom label — the tuple [`latest_schedule`] resolves and [`heat_summaries`] folds per heat.
+type ScheduleFacts = (
     Vec<CompetitorRef>,
     Option<ClassId>,
     Option<RoundId>,
     Vec<(CompetitorRef, u16)>,
     Option<String>,
-) {
+);
+
+/// The lineup + class/round tag a heat carries, taken from its **most recent** `HeatScheduled`
+/// (a re-schedule of the same id supersedes the earlier one).
+fn latest_schedule(events: &[Event], heat: &HeatId) -> ScheduleFacts {
     let mut out = (Vec::new(), None, None, Vec::new(), None);
     for event in events {
         if let Event::HeatScheduled {
@@ -1026,6 +1596,132 @@ mod tests {
     }
 
     #[test]
+    fn best_lap_is_the_runs_fastest_lap_not_the_most_recent_one() {
+        // #425. A flies 3.0s, then 2.0s, then 4.0s. `last_lap_micros` is the 4.0s lap — the live
+        // "last lap" an overlay shows — and `best_lap_micros` is the 2.0s one. They are DIFFERENT
+        // values, which is the whole point: before this field the console derived "best" by folding
+        // a running `min` over the `last_lap_micros` of the frames it happened to observe.
+        let events = vec![
+            scheduled("q-1", &["A", "B"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 0, 1),
+            pass("A", 3_000_000, 2),
+            pass("A", 5_000_000, 3),
+            pass("A", 9_000_000, 4),
+            // B completed exactly one lap: its best IS its last, and both are that lap.
+            pass("B", 500_000, 1),
+            pass("B", 3_100_000, 2),
+        ];
+        let s = live_state(&events);
+
+        let a = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("A".into()))
+            .unwrap();
+        assert_eq!(a.laps_completed, 3);
+        assert_eq!(a.last_lap_micros, Some(4_000_000), "the most recent lap");
+        assert_eq!(a.best_lap_micros, Some(2_000_000), "the fastest lap");
+
+        let b = s
+            .progress
+            .iter()
+            .find(|p| p.competitor == CompetitorRef("B".into()))
+            .unwrap();
+        assert_eq!(b.laps_completed, 1);
+        assert_eq!(b.last_lap_micros, Some(2_600_000));
+        assert_eq!(b.best_lap_micros, Some(2_600_000));
+    }
+
+    #[test]
+    fn best_lap_survives_a_re_snapshot_because_it_is_folded_not_accumulated() {
+        // #425's actual failure: a client that watched every frame kept the fast lap, and one that
+        // re-snapshotted after it had gone by did not. Folding the SAME log at any point must give
+        // the same best — so a fresh subscriber joining after the fast lap reads it too.
+        let head = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 0, 1),
+            pass("A", 3_000_000, 2),
+            // The fast lap. A client watching live sees this frame; one that reconnects afterwards
+            // is delivered a single settled envelope and never re-walks it (#422).
+            pass("A", 5_000_000, 3),
+        ];
+        let mid = live_state(&head);
+        assert_eq!(
+            mid.progress[0].best_lap_micros,
+            Some(2_000_000),
+            "the fast lap is the best while it is also the last"
+        );
+
+        // Two slower laps go by. A LATE joiner folds the whole log from scratch — the re-snapshot
+        // path — and must still see the 2.0s lap.
+        let mut whole = head.clone();
+        whole.push(pass("A", 9_000_000, 4));
+        whole.push(pass("A", 14_500_000, 5));
+        let late = live_state(&whole);
+        assert_eq!(late.progress[0].last_lap_micros, Some(5_500_000));
+        assert_eq!(
+            late.progress[0].best_lap_micros,
+            Some(2_000_000),
+            "a re-snapshot after the fast lap must still report it — this is exactly what the \
+             client-side accumulator could not do"
+        );
+        // And re-folding is idempotent: the same log yields the same state, every time.
+        assert_eq!(live_state(&whole), late);
+    }
+
+    #[test]
+    fn best_lap_is_absent_before_the_first_completed_lap() {
+        // A holeshot closes no lap, so there is nothing to be fastest yet. `None`, not zero — a
+        // zero best lap would sort ahead of every real one on any board that ranked on it.
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 1_000_000, 1),
+        ];
+        let s = live_state(&events);
+        assert_eq!(s.progress[0].laps_completed, 0);
+        assert_eq!(s.progress[0].last_lap_micros, None);
+        assert_eq!(s.progress[0].best_lap_micros, None);
+    }
+
+    #[test]
+    fn best_lap_obeys_the_min_lap_floor_like_the_lap_list_does() {
+        // D26/#409: a sub-floor echo is suppressed in the lap list, so it must not become the best
+        // lap either — a floored-out 0.4s "lap" is the one value that would poison this readout
+        // hardest, and it is precisely the one the fold must never see.
+        let events = vec![
+            scheduled("q-1", &["A"]),
+            changed("q-1", HeatTransition::Staged),
+            changed("q-1", HeatTransition::Armed),
+            changed("q-1", HeatTransition::Running),
+            pass("A", 0, 1),
+            pass("A", 3_000_000, 2),
+            // An echo 0.4s later — below a 1.0s floor.
+            pass("A", 3_400_000, 3),
+            pass("A", 5_500_000, 4),
+        ];
+        let floored = live_state_with_floor(&events, Some(1_000_000), None);
+        assert_eq!(floored.progress[0].laps_completed, 2);
+        assert_eq!(
+            floored.progress[0].best_lap_micros,
+            Some(2_500_000),
+            "the echo is not a lap, so it cannot be the best one"
+        );
+        // Unfloored, the same log DOES count the echo — which is what makes the floored answer
+        // above a real assertion rather than a coincidence of the data.
+        let unfloored = live_state(&events);
+        assert_eq!(unfloored.progress[0].best_lap_micros, Some(400_000));
+    }
+
+    #[test]
     fn running_order_breaks_lap_ties_by_last_lap_time() {
         // Both completed 1 lap; B's lap (2.0s) is faster than A's (3.0s) ⇒ B leads.
         let events = vec![
@@ -1124,6 +1820,60 @@ mod tests {
             heat: HeatId("q-1".into()),
         });
         assert_eq!(live_state(&events).current_heat, Some(HeatId("q-1".into())));
+    }
+
+    /// #439: a heat tagged to a round the event no longer defines is neither current nor on deck.
+    ///
+    /// The fold's half of "a removed round takes its heats with it": the RD reaches the next heat
+    /// through on-deck and Advance, not through the heats list `heats_of_defined_rounds` already
+    /// filtered — and a heat whose round is gone has no name, no layout and no staging timer left
+    /// to run it by.
+    #[test]
+    fn a_removed_rounds_heat_is_neither_current_nor_on_deck() {
+        let in_round = |id: &str, round: &str| Event::HeatScheduled {
+            heat: HeatId(id.into()),
+            lineup: vec![CompetitorRef("A".into())],
+            class: None,
+            round: Some(RoundId(round.into())),
+            frequencies: vec![],
+            label: None,
+        };
+        // The ghost is scheduled FIRST (so it is the fallback current heat) and again between the
+        // two surviving heats (so it is the first candidate on deck).
+        let events = vec![
+            in_round("ghost-1", "scratch"),
+            in_round("q-1", "qual"),
+            in_round("ghost-2", "scratch"),
+            in_round("q-2", "qual"),
+        ];
+        let defined = vec![RoundId("qual".into())];
+
+        let s = live_state_with_floor(&events, None, Some(&defined));
+        assert_eq!(
+            s.current_heat,
+            Some(HeatId("q-1".into())),
+            "the fallback current heat is the first scheduled heat of a round that still exists"
+        );
+        assert_eq!(
+            s.on_deck,
+            Some(HeatId("q-2".into())),
+            "on deck steps over the removed round's heat"
+        );
+
+        // With no round list in hand (a pure-log fold) nothing is discarded — "this round is gone"
+        // is not a claim `live_state` is in a position to make.
+        let unfiltered = live_state(&events);
+        assert_eq!(unfiltered.current_heat, Some(HeatId("ghost-1".into())));
+        assert_eq!(unfiltered.on_deck, Some(HeatId("q-1".into())));
+    }
+
+    /// #439/#418: an **untagged** heat belongs to no round, so no round removal can discard it.
+    #[test]
+    fn an_untagged_heat_survives_the_defined_round_filter() {
+        let events = vec![scheduled("free-1", &["A"]), scheduled("free-2", &["B"])];
+        let s = live_state_with_floor(&events, None, Some(&[]));
+        assert_eq!(s.current_heat, Some(HeatId("free-1".into())));
+        assert_eq!(s.on_deck, Some(HeatId("free-2".into())));
     }
 
     #[test]
@@ -1599,7 +2349,7 @@ mod tests {
         // q-1's last event is a transition (Finalized); q-2 and q-x are bare schedules that don't
         // steal focus — so the current heat is q-1 (its `Final` heat stays on the timer between
         // heats, "last heat, now scored"), not the freshly-scheduled q-x.
-        let summaries = heat_summaries(&events);
+        let summaries = heat_summaries(&events, None);
         assert_eq!(summaries.len(), 3);
 
         // First-scheduled order is preserved.
@@ -1634,7 +2384,7 @@ mod tests {
 
     #[test]
     fn heat_summaries_empty_log_is_empty() {
-        assert!(heat_summaries(&[]).is_empty());
+        assert!(heat_summaries(&[], None).is_empty());
     }
 
     /// Wrap an event as a stored log entry with an explicit `recorded_at` (µs).
@@ -1967,7 +2717,7 @@ mod tests {
             ],
             label: None,
         };
-        let summaries = heat_summaries(&[assigned, scheduled("q-2", &["C"])]);
+        let summaries = heat_summaries(&[assigned, scheduled("q-2", &["C"])], None);
         assert_eq!(
             summaries[0].frequencies,
             vec![

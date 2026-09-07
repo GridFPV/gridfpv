@@ -26,22 +26,28 @@
     HeatSummary,
     LiveRaceState,
     Pilot,
-    PilotId,
     PilotProgress,
-    RoundDef
+    RoundDef,
+    TimerSignal
   } from '@gridfpv/types';
-  import { channelLabel, nodeChannelLabel, nodeIndexOf } from '../lib/channels.js';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
-  import { heatDisplayName, heatNameById } from '../lib/heats.js';
+  import { nodeIndexOf } from '../lib/channels.js';
+  import { collapseStore } from '../lib/collapse.svelte.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
+  import { gateGroups } from '../lib/gateSignal.js';
+  import GateSignalStrip from '../lib/GateSignalStrip.svelte';
+  import { useSignalFeed } from '../lib/signalFeed.svelte.js';
+  import { SIGNAL_POLL_MS, type FetchSignal, type StopSignal } from '../lib/tuning.js';
+  import { heatDisplayName, heatNameById, isOpenPracticeRound } from '../lib/heats.js';
   import {
-    ACTION_ORDER,
     actionDescription,
-    commandForAction,
+    actionsForKind,
+    commandsForAction,
     isActionLegal,
     actionLabel,
     isDestructive,
     primaryAction,
-    type HeatAction
+    type HeatAction,
+    type HeatKind
   } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useRaceClock } from '../lib/raceClock.svelte.js';
@@ -53,12 +59,26 @@
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
 
-  let { session, names = {} }: { session: Session; names?: Record<string, string> } = $props();
+  let {
+    session,
+    names = {},
+    fetchSignal,
+    stopSignal,
+    signalPollMs = SIGNAL_POLL_MS
+  }: {
+    session: Session;
+    names?: Record<string, string>;
+    /** Test/host seam for the gate-signal poll; defaults to `GET /timers/{id}/signal` (#415). */
+    fetchSignal?: FetchSignal;
+    /** Test/host seam for releasing the gate-signal lease; defaults to `POST .../signal/stop`. */
+    stopSignal?: StopSignal;
+    /** Gate-signal poll cadence (ms) — the thing that renews the Director's lease. */
+    signalPollMs?: number;
+  } = $props();
 
   const live = $derived<LiveRaceState | undefined>(session.liveState);
   const phase = $derived(live?.phase ?? 'Scheduled');
   const heat = $derived<HeatId | undefined>(live?.current_heat);
-  const primary = $derived(primaryAction(phase));
   // Role-gate the heat transitions (marshaling Slice 5, mirroring Slice 3): the RD commits; a
   // read-only pilot session sees the live race + lifecycle but the transition controls (Finalize /
   // Revert / …) are hidden — the Director is the enforced boundary, this reflects it client-side.
@@ -111,16 +131,7 @@
       });
   });
 
-  // The current heat's ref → channel-label map (race redesign Slice 4b). Empty for a sim/free-text
-  // heat (no frequencies assigned), in which case the channels panel shows "—".
-  const currentChannels = $derived.by(() => {
-    const summary = heats.find((h) => h.heat === heat);
-    const map = new Map<CompetitorRef, string>();
-    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
-  });
   const lineup = $derived<CompetitorRef[]>(live?.active_pilots ?? []);
-  const hasChannels = $derived(currentChannels.size > 0);
 
   // ── Friendly names everywhere (heat names + pilot callsigns) ─────────────────────────────────
   // Live Control knows heats and competitors only as raw ids/refs (the live `LiveRaceState` carries
@@ -141,40 +152,151 @@
         pilotsError = true;
       });
   });
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  // A competitor ref → its bound pilot id from the live `progress`, which carries an **explicit**
-  // `pilot` only when a `Register` command bound it (the open-practice / manual-registration path).
-  // This is empty for the common roster-seeded heat: `FromRoster` seeding makes each competitor ref
-  // *equal to the pilot id itself* and emits **no** `CompetitorRegistered` event, so `progress.pilot`
-  // stays `null` in every phase (Scheduled → Running) — see `competitorName` for the roster fallback.
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (live?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
-  );
 
-  // `heatName(id)` → the friendly "<Round> Heat N" / "Open Practice Heat" name for a heat id (the
-  // same helper the picker uses), falling back to the bare id for an untagged/free-text heat. Used
-  // for the current-heat title and the on-deck heat.
-  function heatName(id: HeatId | undefined): string {
-    if (!id) return '';
-    return heatNameById(id, heats, session.currentEvent?.rounds ?? []);
-  }
+  // ── The gate signal (#415) ───────────────────────────────────────────────────────────────────
+  //
+  // Read-only live RSSI for the heat on the timer. Mid-race is exactly when an RD cannot tune and
+  // most needs to know what the gate is seeing: a lap that does not register looks identical on the
+  // board whether the craft is producing no signal at all, crossing under the enter threshold, or
+  // not crossing — three faults, three different responses, one unmoving lap count. The trace, the
+  // threshold lines and the crossing marks are what tell them apart.
+  //
+  // The feed is a LEASE, not a read. The poll cadence is what keeps the Director streaming, and
+  // `useSignalFeed` is the other half of that bargain — it gives the lease back on unmount, on the
+  // route change that unmounts this screen, and on `visibilitychange → hidden`, so an RD who walks
+  // to the gate with the phone in their pocket does not leave a timer streaming to nobody. Exactly
+  // what the Tune page does, because it is literally the same helper.
+  //
+  // Bandwidth was raised as an objection and disproved by measurement: 9,155 bytes per poll on a
+  // full 8-node ring is ~36 KB/s at this cadence — 0.03% of a 1 Gb race network — and the
+  // timer→Director link is unchanged either way (the `node_data` heartbeat already flows for the
+  // marshaling trace; the lease only decides whether the Director buffers it). So there is no
+  // throttling or gating here on purpose.
+  //
+  // Held only by a CONTROLLING session. `GET /timers/{id}/signal` is `ControlAuth`-gated at the
+  // Director, so a read-only / pilot session cannot have it at all — subscribing anyway would earn
+  // them a 401 rendered as "lost the timer's signal feed", which is a false statement about the
+  // hardware in front of somebody who cannot act on it either way.
+  const gateTimer = $derived(canControl ? session.primaryTimer : undefined);
+  const gateFeed = useSignalFeed({
+    timer: () => gateTimer?.id,
+    // Defaults to the SESSION's calls, not a bare `fetch`: both routes are `ControlAuth`-gated, so
+    // a hand-rolled fetch would 401 against any token-gated Director — including the RD's own.
+    read: () => fetchSignal ?? ((id, opts) => session.timerSignal(id, { signal: opts.signal })),
+    release: () => stopSignal ?? ((id) => session.stopTimerSignal(id)),
+    pollMs: () => signalPollMs
+  });
 
-  // `competitorName(ref)` → the **callsign** (directory pilot), else an open-practice `node-{i}`
-  // seat's **channel label**, else the bare ref. The single shared resolver every pilot/lineup/
-  // leaderboard row goes through — the same one Marshaling uses (see `competitorName.ts` for the
-  // full rule and why the binding comes from the always-available roster binding, not race progress,
-  // so a callsign shows whether the heat is Scheduled, Staged, Running, or done).
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({
-      pilotById,
-      explicitPilotByRef,
-      channelByRef: currentChannels
+  // ── The signal, held still for the name resolver (#460) ────────────────────────────────────
+  //
+  // `gateFeed.snapshot` is replaced wholesale ~4-5 times a second, and it is one of the resolver's
+  // inputs — so `seatNames` below was rebuilt at poll cadence: every map in `buildCompetitorNames`
+  // re-assembled, and four fresh closures handed to the deriveds downstream, which then all
+  // invalidated too. Nothing had changed. A poll is not news.
+  //
+  // The fix is to separate the two halves the snapshot serves. The **lookup** half is genuinely
+  // live — `gates` below reads RSSI and crossing state off every snapshot, and must. The half the
+  // resolver wants is only each node's **seat and reported frequency**, which changes when the RD
+  // retunes a node, not when a poll lands.
+  //
+  // So this is the snapshot the resolver sees: the real one, re-read only when that tuning moves.
+  // The key covers exactly what `buildCompetitorNames` reads out of a signal (`nodes[].node`,
+  // `nodes[].seat`, `nodes[].frequency_mhz`), which is what makes holding the older object safe —
+  // it is not stale for this purpose, it is identical for this purpose. Everything else on the
+  // snapshot is read from `gateFeed.snapshot` directly, live, by the consumers that want it.
+  //
+  // Deliberately NOT a second resolver, and not a trimmed-down copy of the builder: CLAUDE.md's
+  // rule is that a shared resolver fed two different input sets is two resolvers. This changes
+  // *when* the one builder is called, never what it is called with.
+  let tunedKey: string | undefined = undefined;
+  let tunedSignal: TimerSignal | undefined = undefined;
+  const nameSignal = $derived.by<TimerSignal | undefined>(() => {
+    const snapshot = gateFeed.snapshot;
+    const key = JSON.stringify(
+      (snapshot?.nodes ?? []).map((n) => [n.node, n.seat, n.frequency_mhz ?? null])
+    );
+    if (key !== tunedKey) {
+      tunedKey = key;
+      tunedSignal = snapshot;
+    }
+    return tunedSignal;
+  });
+
+  // ONE assembly of the resolver inputs (#416). Every screen hands `buildCompetitorNames` the
+  // sources it has and consumes the result — the three independent constructions this screen, the
+  // Rounds & Heats stage and Marshaling each used to do are what put `node-6` on one screen and
+  // `Node 7` on another for the same seat. This screen now holds a live signal subscription too,
+  // so it can hand over `NodeSignal.frequency_mhz` — what each node is ACTUALLY tuned to, and the
+  // only channel source that works on a Flexible RotorHazard timer (whose pool is empty). It hands
+  // over {@link nameSignal} rather than the raw feed, which is the same signal on a rebuild cadence
+  // that matches the tuning rather than the poll — see above.
+  //
+  // `progress` carries an **explicit** `pilot` only when a `Register` command bound it (the
+  // open-practice / manual-registration path); it is empty for the common roster-seeded heat, where
+  // the ref IS the pilot id (see `competitorName.ts` for the full rule).
+  const seatNames = $derived(
+    buildCompetitorNames({
+      pilots,
+      progress: live?.progress,
+      heat: heats.find((h) => h.heat === heat),
+      catalog,
+      signal: nameSignal,
+      // The registry's timer, NOT `gateTimer` — the name inputs are needed by every session, and
+      // `gateTimer` is deliberately absent for a read-only one (see the subscription above).
+      timer: session.primaryTimer,
+      membership: session.currentEvent?.classes_membership,
+      // #117 S3: the event's channel layouts. Paired with the heat's own `layout`, they are the
+      // per-node channel mapping a `node-{i}` seat resolves through — the source that used to be
+      // `available_channels[node]`, which carried no per-node meaning at all.
+      layouts: session.currentEvent?.channel_layouts
     })
   );
+
+  // The heat's own gates, then every other node the timer reports (including the ones RotorHazard
+  // has never reported at all — "is node 3 even alive?" is half the diagnostic). Attribution is a
+  // join, never a guess: an open-practice lineup IS node seats, and a competition lineup is paired
+  // by channel only where exactly one node and exactly one competitor claim that frequency.
+  const gates = $derived(gateGroups(gateFeed.snapshot, lineup, seatNames.mhzFor));
+
+  // Always-visible or a toggle? A toggle — but one whose CLOSED state still answers the first
+  // question. The strip's collapsed header carries a live chip per gate (reporting / crossing / not
+  // reporting), so a dead node is visible at a glance without spending vertical space on eight
+  // plots; opening it is for "how close was that pass to the enter line?". The choice sticks per
+  // event, so an RD who wants it open all meeting gets it open on every heat.
+  const collapseEventId = $derived(session.currentEvent?.id ?? 'event');
+  const collapseStores = new Map<string, ReturnType<typeof collapseStore>>();
+  function collapse(sectionId: string, defaultOpen: boolean): ReturnType<typeof collapseStore> {
+    const key = `${collapseEventId}:${sectionId}`;
+    let s = collapseStores.get(key);
+    if (!s) {
+      s = collapseStore(collapseEventId, sectionId, defaultOpen);
+      collapseStores.set(key, s);
+    }
+    return s;
+  }
+  const gateCollapse = $derived(collapse('race-gate-signal', false));
+  const gateOthersCollapse = $derived(collapse('race-gate-signal-others', false));
+
+  // `heatName(id)` → the friendly "<Round> Heat N" / "Practice Heat" name for a heat id (the same
+  // helper the picker uses). The name is resolved server-side and carried on the summary (#456);
+  // this is the id → summary lookup. Used for the current-heat title and the on-deck heat.
+  function heatName(id: HeatId | undefined): string {
+    if (!id) return '';
+    return heatNameById(id, heats);
+  }
+
+  // `competitorName(ref)` → the **callsign** (directory pilot), else an open-practice seat's
+  // `"Node 7 · Raceband R7"` label, else the bare ref. The single shared resolver every
+  // pilot/lineup/leaderboard row goes through — the same one Marshaling and the Rounds & Heats
+  // stage use, built from the same inputs (see `competitorName.ts` for the full rule and why the
+  // binding comes from the always-available roster binding, not race progress, so a callsign shows
+  // whether the heat is Scheduled, Staged, Running, or done).
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => seatNames.name);
+  /** The channel a lineup seat is on, or `undefined` when GridFPV genuinely does not know. */
+  const channelOf = $derived.by<(ref: CompetitorRef) => string | undefined>(
+    () => seatNames.channelFor
+  );
+  const hasChannels = $derived(lineup.some((ref) => channelOf(ref) !== undefined));
 
   // A plain ref → display-name record for the shared `HeatSheet` (which takes `names`). Built over
   // the union of the lineup and the progress rows so every rendered row resolves.
@@ -193,23 +315,21 @@
   // ── Heat picker (manual current-heat selection) ──────────────────────────────────────────────
   // Filling a new heat no longer steals Live control's focus (the backend's current_heat only moves
   // on a real transition or an explicit selection), so the RD picks which heat to show/control here.
-  // Each option is labelled with the shared "<Round> Heat N" / "Open Practice Heat" name (the same
-  // helper the Rounds & Heats stage uses), derived from the heat's round off `currentEvent.rounds`
-  // and its position within that round's heats. Untagged/free-text heats fall back to the bare id.
+  // Each option is labelled with the shared "<Round> Heat N" / "Practice Heat" name the server
+  // resolved onto the summary (#456) — the same name the Rounds & Heats stage renders, because it
+  // is the same string. Untagged/free-text heats fall back to the bare handle.
   interface HeatOption {
     heat: HeatId;
     label: string;
     isCurrent: boolean;
   }
-  const heatOptions = $derived.by<HeatOption[]>(() => {
-    const rounds = session.currentEvent?.rounds ?? [];
-    return heats.map((h) => {
-      const round = h.round ? rounds.find((r) => r.id === h.round) : undefined;
-      const inRound = round ? heats.filter((x) => x.round === round.id) : [];
-      const label = round ? heatDisplayName(round, h, inRound) : h.heat;
-      return { heat: h.heat, label, isCurrent: h.heat === heat };
-    });
-  });
+  const heatOptions = $derived.by<HeatOption[]>(() =>
+    heats.map((h) => ({
+      heat: h.heat,
+      label: heatDisplayName(h),
+      isCurrent: h.heat === heat
+    }))
+  );
 
   // The picker is **locked** once the current heat is mid-commit — its phase is Staged/Armed/Running.
   // After Stage you're committed to that race; you switch only by aborting it back to Scheduled or
@@ -282,12 +402,16 @@
   // The casual **open-practice** format runs one open heat over the active **channels**: its live
   // `LiveRaceState` rows are unbound (`pilot: null`) with competitor refs `node-{i}` (the timer
   // seat). Rather than the pilot-keyed channels/heat-sheet panels, this heat reads as a per-channel
-  // practice board — each row a channel (resolved `node-{i}` → the primary timer's
-  // `available_channels[i]` → catalog label) with its laps, last lap, and best lap.
-  const OPEN_PRACTICE = 'open_practice';
-  const isOpenPractice = $derived(currentRound?.format === OPEN_PRACTICE);
-  // The primary timer (its `available_channels` resolve each `node-{i}` seat to a channel label).
-  const availableChannels = $derived<number[]>(session.primaryTimer?.available_channels ?? []);
+  // practice board — each row a seat, named `Node 7 · Raceband R7` through the shared seat-label
+  // builder (#416), with its laps, last lap, and best lap.
+  const isOpenPractice = $derived(currentRound ? isOpenPracticeRound(currentRound) : false);
+  // The transition model's second axis (#393): an open-practice heat is scored by nobody, so it
+  // drops the result-ceremony verbs (Finalize / Advance / Revert) and its `Restart` is spelled
+  // "Run again". Everything else about the heat loop — phases, commands, the engine — is identical.
+  const heatKind = $derived<HeatKind>(isOpenPractice ? 'Practice' : 'Competition');
+  // The obvious next step for this heat: `Finalize` at the end of a competition run, `Run again`
+  // (Restart) at the end of a practice one. Declared here, with the kind it depends on.
+  const primary = $derived(primaryAction(phase, heatKind));
 
   // One per-channel board row: its node index, channel label, laps, last lap, and best lap (µs).
   interface ChannelRow {
@@ -298,37 +422,19 @@
     lastLapMicros: number | undefined;
     bestLapMicros: number | undefined;
   }
-  // Best lap isn't carried on the live stream (`PilotProgress` is laps + last lap), so the board
-  // tracks it client-side: the min `last_lap_micros` observed per channel over the run. It resets
-  // whenever the heat changes (a fresh practice run / Reset starts a clean board — the backend
-  // clears its in-memory laps on the new heat, and this mirrors that).
-  let bestByRef = $state<Map<CompetitorRef, number>>(new Map());
-  let bestForHeat = $state<HeatId | undefined>(undefined);
-  $effect(() => {
-    // On a heat change, wipe the accumulated bests (matches the backend clearing its lap store).
-    if (heat !== bestForHeat) {
-      bestForHeat = heat;
-      bestByRef = new Map();
-    }
-    if (!isOpenPractice) return;
-    let changed = false;
-    const next = new Map(bestByRef);
-    for (const p of live?.progress ?? []) {
-      const last = p.last_lap_micros;
-      if (last === undefined || last === null) continue;
-      const prev = next.get(p.competitor);
-      if (prev === undefined || last < prev) {
-        next.set(p.competitor, last);
-        changed = true;
-      }
-    }
-    if (changed) bestByRef = next;
-  });
+  // Best lap is **served** (#425): `PilotProgress.best_lap_micros` is a `min` over the run's whole
+  // (marshaling-aware, floored) lap list, computed where that list already is. This screen used to
+  // accumulate it instead — a running `min` over the `last_lap_micros` of the frames it happened to
+  // observe — which made the displayed best a function of which frames the client saw: lossy on any
+  // re-snapshot, and more so since #422 delivers a resumed span as one settled envelope rather than
+  // re-walking each intermediate lap time. The accumulator is gone; do not reintroduce one. A
+  // "Run again" (Restart) windows the heat's laps server-side, so the served best follows the new
+  // run for free, with no client-side reset to keep in step.
 
   // The board rows, in node order: every active `node-{i}` channel with its live laps. A channel
   // with no laps yet still shows (a quiet seat reads "0 laps").
-  const channelRows = $derived<ChannelRow[]>(buildChannelRows(live, availableChannels));
-  function buildChannelRows(state: LiveRaceState | undefined, avail: number[]): ChannelRow[] {
+  const channelRows = $derived<ChannelRow[]>(buildChannelRows(live));
+  function buildChannelRows(state: LiveRaceState | undefined): ChannelRow[] {
     const byRef = new Map<CompetitorRef, PilotProgress>(
       (state?.progress ?? []).map((p) => [p.competitor, p])
     );
@@ -341,34 +447,26 @@
       rows.push({
         node,
         ref,
-        label: nodeChannelLabel(node, avail, catalog),
+        // The seat's own name, through the shared builder — never `available_channels[node]`,
+        // which is empty (and so answers "unknown" for every node) on a Flexible timer.
+        label: seatNames.seatLabel(node),
         laps: p?.laps_completed ?? 0,
         lastLapMicros: p?.last_lap_micros ?? undefined,
-        bestLapMicros: bestByRef.get(ref)
+        bestLapMicros: p?.best_lap_micros ?? undefined
       });
     }
     return rows.sort((a, b) => a.node - b.node);
   }
 
-  // ── Reset / new practice run (open-practice Slice 2) ──────────────────────────────────────────
-  // A fresh run re-fills the open-practice round to mint a new heat, which clears the backend's
-  // in-memory laps (per the format) — wiping the board between practice sessions. The new heat
-  // arrives on the live stream; the best-lap tracker resets on the heat change (above).
-  let resetting = $state(false);
-  async function startFreshRun() {
-    const roundId = currentRound?.id;
-    if (!roundId || resetting) return;
-    resetting = true;
-    try {
-      const ack = await session.fillRound(roundId);
-      if (!ack.ok) return; // The error banner surfaces session.lastCommandError.
-      toast.success('Fresh practice run — board cleared.');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      resetting = false;
-    }
-  }
+  // ── Going again (#393) ────────────────────────────────────────────────────────────────────────
+  // There is deliberately no second "new run" control here. The board used to carry one that
+  // re-filled the round, on the pre-#398 theory that a fresh heat was how you cleared the
+  // in-memory laps — but an open-practice round has exactly ONE heat, ever (`OpenPractice::next`
+  // completes after it), so once the run had ended that fill scheduled nothing and still acked ok:
+  // a button that reported success and did not clear the board. Re-running practice is the
+  // transition row's **Run again** (the `Restart` command), which re-stages the one heat and
+  // windows the previous run's laps away — one obvious action, in the place every other heat
+  // action lives.
 
   // ── Staging countdown (heat-lifecycle Slice 3) ───────────────────────────────────────────────
   // While the heat is Staged, count down from the round's staging window. Informational only — no
@@ -416,10 +514,20 @@
   const windowMicros = $derived(fixedEndWindowMicros(currentRound));
 
   // The HUD clock: a fixed-end heat counts DOWN from the window — past zero it runs negative
-  // (the grace window: late crossings still score) and the RaceClock styles it red, with a
-  // warn-yellow closing stretch before the buzzer. No fixed end ⇒ the classic count-up.
+  // and the RaceClock styles it red, with a warn-yellow closing stretch before the buzzer. No
+  // fixed end ⇒ the classic count-up.
   const remainingMs = $derived(
     windowMicros !== undefined ? windowMicros / 1000 - elapsedMs : undefined
+  );
+  // The GRACE countdown (#505): once the server logs the RaceExpired marker, its deadline is
+  // the clock that matters — the race window has hit zero and what remains is each pilot's one
+  // finish-the-lap crossing. Anchored to `race_started_at` so it ticks off the same server
+  // race-go every other clock uses (no per-client wall-clock drift). `None` before expiry,
+  // once the heat closes (phase-gated server-side), and for an unbounded UntilScored grace.
+  const graceRemainingMs = $derived(
+    live?.grace_deadline != null && live?.race_started_at != null
+      ? (live.grace_deadline - live.race_started_at) / 1000 - elapsedMs
+      : undefined
   );
 
   let muted = $state(audio.muted);
@@ -447,10 +555,10 @@
           competitor: { adapter: '', competitor: ref },
           position: i + 1,
           laps: p.laps_completed,
+          // The visible column is "Last lap", so that is what the deciding metric carries.
           metric: { BestLapMicros: p.last_lap_micros ?? null },
-          // No per-pilot fastest lap in the live progress stream; this provisional board does not
-          // tie-break on it, so leave it absent.
-          best_lap_micros: null
+          // The run's fastest lap, now served rather than accumulated (#425).
+          best_lap_micros: p.best_lap_micros ?? null
         };
       })
     };
@@ -461,11 +569,17 @@
     // Unlock the audio context on this user gesture (autoplay policy) so the later race-go tone is
     // audible — every transition click counts, well before the heat reaches Running.
     audio.resume();
-    const ack = await session.send(commandForAction(action, heat));
+    // Almost every action is one command; practice's "Run again" from an auto-finalized heat is two
+    // (re-open, then reset), so the screen walks the sequence and stops on the first failure — the
+    // error banner surfaces it, and a half-applied sequence leaves the heat where the engine put it.
+    for (const command of commandsForAction(action, heat, phase, heatKind)) {
+      const ack = await session.send(command);
+      if (!ack.ok) return;
+    }
     // Finalizing locks in the heat result; pull it so the Results screen has it to show. The
     // live stream only carries `LiveRaceState`, so the scored `HeatResult` is a separate
     // heat-scope fetch (`?projection=result`).
-    if (ack.ok && action === 'Finalize') {
+    if (action === 'Finalize') {
       await session.fetchHeatResult(heat);
     }
   }
@@ -518,9 +632,23 @@
     </div>
 
     <div class="hud-clock">
-      <span class="label">{remainingMs !== undefined ? 'Remaining' : 'Heat time'}</span>
+      <span class="label"
+        >{graceRemainingMs !== undefined
+          ? 'Grace'
+          : remainingMs !== undefined
+            ? 'Remaining'
+            : 'Heat time'}</span
+      >
       <div class="clock">
-        {#if remainingMs !== undefined}
+        {#if graceRemainingMs !== undefined}
+          <!-- The grace window is open (#505): pilots may only finish the lap they were flying,
+               and this counts down to the server's logged deadline. -->
+          <RaceClock remainingMs={graceRemainingMs} label="Grace remaining" />
+          <div class="clock-elapsed" data-testid="elapsed-subclock">
+            <span class="clock-elapsed-label">Elapsed</span>
+            <RaceClock {elapsedMs} label="Elapsed" />
+          </div>
+        {:else if remainingMs !== undefined}
           <RaceClock {remainingMs} label="Time remaining" />
           <!-- The companion ELAPSED readout: lap times are elapsed-from-zero quantities, so a
                countdown alone makes "was that a 21 or a 24?" mental math — the small count-up
@@ -542,9 +670,11 @@
       </div>
     {/if}
 
-    <!-- The "Callouts" toggle mutes ONLY the informational layer (crossing pips + spoken lap
+    <!-- The "Callouts" toggle mutes ONLY the informational layer (the per-CROSSING pips — #397:
+         every crossing including the holeshot and a floor-rejected pass — plus the spoken lap
          callouts). The procedure tones — start tone, end-of-race countdown, race-end buzzer — are
-         always on and have no toggle (the old "Tone on/off" switch is gone). -->
+         always on and have no toggle (the old "Tone on/off" switch is gone). Per-tone enable /
+         volume is #193's sounds panel, not this one switch. -->
     <div class="audio-tools">
       <button
         type="button"
@@ -552,8 +682,8 @@
         onclick={toggleMute}
         aria-pressed={muted}
         title={muted
-          ? 'Lap callouts muted — click to unmute. Race tones (start / countdown / end) always sound.'
-          : 'Lap callouts on — click to mute. Race tones (start / countdown / end) always sound.'}
+          ? 'Crossing tones and lap callouts muted — click to unmute. Race tones (start / countdown / end) always sound.'
+          : 'Crossing tones and lap callouts on — click to mute. Race tones (start / countdown / end) always sound.'}
       >
         <span class="mute-icon" aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
         <span class="mute-text">{muted ? 'Callouts off' : 'Callouts on'}</span>
@@ -611,7 +741,20 @@
     </div>
   {/if}
 
-  {#if heat && (phase === 'Unofficial' || phase === 'Final')}
+  {#if heat && isOpenPractice && (phase === 'Unofficial' || phase === 'Final')}
+    <!-- Practice has no result lifecycle (#393): nothing is provisional, nothing becomes official,
+         and there is no protest window to count down. The run simply ended — its laps are on the
+         log and on the board below — and the next step is Run again. -->
+    <div class="lifecycle" role="status" aria-label="Practice run">
+      <span class="lifecycle-dot" aria-hidden="true"></span>
+      <div class="lifecycle-copy">
+        <span class="lifecycle-title">Run complete</span>
+        <span class="lifecycle-sub"
+          >Practice isn’t scored — review the board, then Run again when you’re ready.</span
+        >
+      </div>
+    </div>
+  {:else if heat && (phase === 'Unofficial' || phase === 'Final')}
     <!-- Provisional → official lifecycle (marshaling Slice 5). Provisional (Unofficial): correctable;
          when a protest window is armed, count down to the auto-official deadline; the RD can finalize
          early via the Finalize transition below. Official (Final): the result is locked (Revert
@@ -666,20 +809,48 @@
     <div class="controls" role="group" aria-label="Heat transitions">
       <span class="controls-label">Transitions</span>
       <div class="controls-row">
-        {#each ACTION_ORDER as action (action)}
-          {@const legal = isActionLegal(phase, action)}
+        <!-- Only the actions this KIND of heat can ever use (#393): a practice heat never draws the
+             ceremony verbs at all, since a greyed-out Finalize still reads as the thing to do next. -->
+        {#each actionsForKind(heatKind) as action (action)}
+          {@const legal = isActionLegal(phase, action, heatKind)}
           <ConfirmButton
             onconfirm={() => fire(action)}
             confirm={isDestructive(action)}
             disabled={!legal || !heat}
             variant={action === primary ? 'primary' : isDestructive(action) ? 'danger' : 'default'}
-            title={actionDescription(action)}
+            title={actionDescription(action, heatKind)}
           >
-            <span class="action-btn">{actionLabel(action)}</span>
+            <span class="action-btn">{actionLabel(action, heatKind)}</span>
           </ConfirmButton>
         {/each}
       </div>
     </div>
+  {/if}
+
+  {#if gateTimer}
+    <!-- The gate signal (#415), read-only.
+         PLACEMENT, decided by the RD: **not** in the leaderboard rows. A per-row sparkline was
+         considered and rejected — Race control is the highest-stakes screen and the leaderboard is
+         what an RD actually reads during a heat, so graphs embedded in it compete with the thing
+         they are meant to support. It sits here instead, between the transition row and the board:
+         in the same glance as the standings it explains, and above them so it reads as the cause
+         and they read as the effect. Collapsed it costs one header row, so the board barely moves;
+         expanding it is a deliberate act, and at that moment the gates SHOULD be the prominent
+         thing on screen.
+         Only rendered with a primary timer at all: a sim-only event has no gate to show, and no
+         lease worth holding. -->
+    <GateSignalStrip
+      groups={gates}
+      signal={gateFeed.snapshot}
+      streaming={gateFeed.streaming}
+      everLoaded={gateFeed.everLoaded}
+      error={gateFeed.error}
+      timerName={gateTimer.name}
+      nameFor={competitorName}
+      seatLabel={seatNames.seatLabel}
+      bind:open={gateCollapse.open}
+      bind:othersOpen={gateOthersCollapse.open}
+    />
   {/if}
 
   {#if isOpenPractice}
@@ -687,23 +858,12 @@
          (`node-{i}` → the timer's available channel), each with its laps + last/best lap. The
          pilot-keyed channels/heat-sheet/standing panels are replaced by this practice board. -->
     <Card title="Practice board">
-      {#snippet actions()}
-        <Button
-          variant="secondary"
-          size="sm"
-          onclick={startFreshRun}
-          loading={resetting}
-          disabled={!heat || resetting}
-          title="Mint a fresh open-practice heat — clears the live board"
-        >
-          New run · clear board
-        </Button>
-      {/snippet}
-
       {#if !heat}
         <p class="empty pad">— no practice heat on the timer —</p>
       {:else if channelRows.length === 0}
-        <p class="empty pad">No active channels — fill the round to start a practice run.</p>
+        <p class="empty pad">
+          No active channels — pick some on the round in Rounds &amp; Heats, then stage the heat.
+        </p>
       {:else}
         <ul class="practice-board" aria-label="Per-channel practice board">
           {#each channelRows as row (row.ref)}
@@ -734,14 +894,22 @@
           {#each lineup as ref (ref)}
             <li class="channel-row">
               <span class="channel-pilot">{competitorName(ref)}</span>
-              <span class="channel-label" class:none={!currentChannels.get(ref)}>
-                {currentChannels.get(ref) ?? '—'}
+              <span class="channel-label" class:none={!channelOf(ref)}>
+                {channelOf(ref) ?? 'Channel unknown'}
               </span>
             </li>
           {/each}
         </ul>
         {#if !hasChannels}
-          <p class="channels-note">No channels assigned (a sim heat tunes none).</p>
+          <!-- Unknown is not "none" (#416). GridFPV knows a seat's channel from the heat's own
+               assignment, from what the node reports it is tuned to, or from the timer's
+               configured pool — a Flexible RotorHazard timer with no pool configured supplies
+               none of those, and saying "no channels" there would be a false statement about
+               the hardware. -->
+          <p class="channels-note">
+            No channel known for this heat — a sim heat tunes none, and a timer with no channel pool
+            configured has not told GridFPV what its nodes are on.
+          </p>
         {/if}
       </Card>
     {/if}
@@ -1248,8 +1416,12 @@
   .practice-node {
     display: inline-grid;
     place-items: center;
-    width: 2.2rem;
-    height: 2.2rem;
+    /* Sized to its content, not to one digit. #108 raised `lg` to 21px, at which a fixed 2.2rem
+       square clipped a two-digit node number — and an 8+ node timer has those. `min-width` keeps
+       the square look for a single digit while letting `10`+ widen instead of truncate. */
+    min-width: 2.4rem;
+    min-height: 2.4rem;
+    padding: 0 var(--gf-space-1);
     flex-shrink: 0;
     border-radius: var(--gf-radius-sm);
     background: var(--gf-surface-sunken);

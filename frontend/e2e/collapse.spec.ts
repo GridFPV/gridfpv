@@ -18,7 +18,7 @@
 import { expect, test } from './observability.js';
 
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -44,7 +44,7 @@ test('RD collapses a class placement section and a round; both persist across a 
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Collapse-Ace-${SUFFIX}`;
@@ -74,7 +74,10 @@ test('RD collapses a class placement section and a round; both persist across a 
         classes: [classId],
         format: 'timed_qual',
         params: {},
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -112,7 +115,7 @@ test('RD collapses a class placement section and a round; both persist across a 
 
   // ── It persisted: a reload keeps the placement section collapsed. ─────────────────────────────
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Classes & Roster');
   // Collapsed: the group is hidden, so match the placement toggle by its accessible name (title + count).
   const placeToggleAfter = page.getByRole('button', { name: /Open Class.*placed/ });
@@ -143,7 +146,7 @@ test('RD collapses a class placement section and a round; both persist across a 
       .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/rounds-heats-collapsed.png` });
 
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Rounds & Heats');
   const roundToggleAfter = page
     .getByRole('region', { name: `Heats for ${ROUND_LABEL}` })

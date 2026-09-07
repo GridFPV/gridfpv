@@ -12,8 +12,10 @@
    *
    * A countdown carries **urgency** styling (readable at a glance in sunlight):
    * normal text color while comfortable, **warn** (yellow) inside the closing
-   * {@link CLOSING_MS} seconds, **danger** (red) once past zero — the negative,
-   * sign-prefixed readout of a timed heat running down its grace window.
+   * {@link CLOSING_MS} seconds, **danger** (red) once past zero. (The grace
+   * window has its own labeled countdown since #505 — the callers swap this
+   * clock's target to the server's grace deadline — so a negative readout here
+   * means a clock genuinely past its target, not the grace.)
    */
   let {
     elapsedMs = 0,

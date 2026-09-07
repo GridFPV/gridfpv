@@ -28,4 +28,17 @@ laps_completed: number,
  * Duration (µs, source clock) of the most recently completed lap, or `None` before
  * the pilot has completed a lap. Renders as a plain TS `number` (bounded far below 2^53).
  */
-last_lap_micros?: number, };
+last_lap_micros?: number, 
+/**
+ * Duration (µs, source clock) of the pilot's **fastest** completed lap of the run, or
+ * `None` before they have completed one (#425).
+ *
+ * Served, never accumulated. The console used to fold a running `min` over the
+ * `last_lap_micros` of the frames it happened to observe, which made the displayed best a
+ * function of *which frames a client saw* — lossy on any re-snapshot, and more so since
+ * #422 collapses a resumed span into one settled envelope rather than re-walking each
+ * intermediate lap time. Here the whole (marshaling-aware, floored) lap list is in hand, so
+ * this is a `min` over every lap that counted: correct by construction, identical on a
+ * re-fold, and unchanged by a reconnect.
+ */
+best_lap_micros?: number, };

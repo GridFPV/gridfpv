@@ -67,8 +67,25 @@ interface Observability {
   ws: WsLine[];
 }
 
+/**
+ * The worker's Director **plus the event its specs drive** (#414).
+ *
+ * There is no built-in event any more, so the fixture creates one — named "Practice", because
+ * that is exactly what an RD makes for a warm-up session — and hands the specs its generated id.
+ * Specs address per-event routes through `eventRoot` instead of a magic `/events/practice`.
+ */
+export interface E2eDirector extends Director {
+  /** The id of the event the worker's specs drive. */
+  readonly event: string;
+  /** `${baseUrl}/events/${event}` — the per-event route root. */
+  readonly eventRoot: string;
+}
+
+/** The display name the worker's event is created with (the picker row specs click). */
+export const E2E_EVENT_NAME = 'Practice';
+
 interface WorkerFixtures {
-  director: Director;
+  director: E2eDirector;
 }
 
 interface TestFixtures {
@@ -86,11 +103,27 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       // default, #72 Slice 1b), so the console drives the whole race with no token step —
       // the lazy prompt never fires. (A token-gated path can be covered by a focused spec
       // that passes an explicit `token`.)
-      const director = await startDirector({
+      const base = await startDirector({
         token: false,
         assets: dist,
         simLaps: SIM_LAPS,
         simLapMs: SIM_LAP_MS
+      });
+      // Create the event the specs drive. Control is open on this Director, so no token is
+      // needed. (`first-run.spec.ts` boots its own Director to cover the genuinely empty picker.)
+      const res = await fetch(`${base.baseUrl}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: E2E_EVENT_NAME })
+      });
+      if (!res.ok) {
+        await base.stop();
+        throw new Error(`could not create the e2e event: HTTP ${res.status}`);
+      }
+      const { id } = (await res.json()) as { id: string };
+      const director: E2eDirector = Object.assign(base, {
+        event: id,
+        eventRoot: `${base.baseUrl}/events/${id}`
       });
       await use(director);
       await director.stop();

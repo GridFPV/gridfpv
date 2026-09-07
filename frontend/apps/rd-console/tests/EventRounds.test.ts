@@ -3,11 +3,13 @@ import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type {
   ChannelCatalogEntry,
+  ChannelLayout,
   Class,
   EventMeta,
   HeatSummary,
   Pilot,
   RoundDef,
+  RoundIssue,
   Timer
 } from '@gridfpv/types';
 import EventRounds from '../src/screens/EventRounds.svelte';
@@ -308,13 +310,22 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     const raced: HeatSummary[] = [
       {
         heat: 'q-1',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
         phase: 'Final',
         is_current: false
       },
-      { heat: 'q-2', lineup: ['p3'], class: 'c1', round: 'r1', phase: 'Final', is_current: false }
+      {
+        heat: 'q-2',
+        name: 'Qualifying R1 Heat 2',
+        lineup: ['p3'],
+        class: 'c1',
+        round: 'r1',
+        phase: 'Final',
+        is_current: false
+      }
     ];
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
       ...QUAL,
@@ -471,6 +482,40 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(req.min_lap_secs).toBe(0); // 0 = off, normalized server-side to None
   });
 
+  it('a NEW round seeds the 10s min-lap floor, and a floor of 0 warns loudly (#502)', async () => {
+    // The floor is the ONLY filter between a reflection burst and a recorded 0.009s lap — RH's
+    // own min-lap rule is deliberately neutralized (#407). 5s let real bursts through in the
+    // field; 10s matches the RH default. And a round whose floor is OFF must say so: the field
+    // day's unfiltered practice round looked identical to a configured one.
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    const minLap = screen.getByLabelText('Min lap seconds') as HTMLInputElement;
+    expect(minLap.value).toBe('10');
+    expect(screen.queryByRole('alert')).toBeNull();
+    await fireEvent.input(minLap, { target: { value: '0' } });
+    expect(screen.getByRole('alert').textContent).toMatch(/Floor OFF/);
+    await fireEvent.input(minLap, { target: { value: '10' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('editing a round with NO stored floor shows 0 with the floor-off warning, not a default (#502)', async () => {
+    // A round persisted before the field existed (or normalized to None) genuinely HAS no floor.
+    // Re-seeding a default here would silently turn filtering on behind the RD's back; showing 0
+    // with the warning tells the truth and makes the state loud.
+    const unfloored: RoundDef = { ...QUAL, min_lap_secs: undefined };
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      event: { ...EVENT, rounds: [unfloored] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    expect((screen.getByLabelText('Min lap seconds') as HTMLInputElement).value).toBe('0');
+    expect(screen.getByRole('alert').textContent).toMatch(/Floor OFF/);
+  });
+
   it('a configured start TONE survives an edit the form never touched (verbatim round-trip)', async () => {
     // The form models only the min/max delay; the server replaces the round WHOLESALE on
     // update — so rebuilding start_procedure from the two inputs silently ERASED a stored
@@ -607,7 +652,11 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     });
   });
 
-  it('defaults the channel-mode toggle to Per-heat on a new round and carries the choice', async () => {
+  it('defaults the channel-mode toggle by FORMAT and re-seeds it on a format switch (#506)', async () => {
+    // The form always sends `channel_mode` explicitly, so its seed IS the effective default —
+    // a flat 'PerHeat' seed silently overrode the backend's by-format default and a Time Trial
+    // degenerated to one-heat-at-a-time generation. The picker must open on the format's own
+    // default (Static for timed_qual) and follow a real format switch, like the params re-seed.
     const impls = baseImpls();
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({ ...QUAL, id: 'r2' }));
     const { session } = makeTestSession({
@@ -617,19 +666,40 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     });
     render(EventRounds, { session });
 
+    // A new round opens on Time Trials — whose default is Static (whole-round generation).
     await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
     const mode = (await screen.findByLabelText('Channel mode')) as HTMLSelectElement;
+    expect(mode.value).toBe('Static');
+    // Switching to Head-to-Head re-seeds the bracket default; switching back re-seeds Static.
+    await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
     expect(mode.value).toBe('PerHeat');
-    await fireEvent.input(screen.getByLabelText('Label'), { target: { value: 'Q' } });
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'timed_qual' } });
+    expect(mode.value).toBe('Static');
+    // The RD's explicit choice still rides the request verbatim.
+    await fireEvent.input(screen.getByLabelText('Label'), { target: { value: 'Q' } });
     await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
-    await fireEvent.change(mode, { target: { value: 'Static' } });
+    await fireEvent.change(mode, { target: { value: 'PerHeat' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
-    expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('Static');
+    expect(createRoundImpl.mock.calls[0][2].channel_mode).toBe('PerHeat');
   });
 
-  it('for a qualifying format, the win condition IS the metric — no separate metric field, no First-to-N option', async () => {
+  it('editing keeps a stored channel mode that differs from the format default (no clobber)', async () => {
+    // A Time Trial an RD deliberately set to Per-heat must read back Per-heat — the format
+    // effect re-seeds only on a REAL format switch, never on open (#506).
+    const perHeatQual: RoundDef = { ...QUAL, channel_mode: 'PerHeat' };
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      event: { ...EVENT, rounds: [perHeatQual] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const mode = (await screen.findByLabelText('Channel mode')) as HTMLSelectElement;
+    expect(mode.value).toBe('PerHeat');
+  });
+
+  it('for a qualifying format, the win condition IS the metric — Best-of-N only, no separate metric field', async () => {
     // The qualifying metric is derived from the win condition (Rounds form redesign), so a
     // qualifying format (timed_qual / round_robin) shows NO separate "qualifying metric" field and
     // the win-condition dropdown offers only the qualifying-applicable conditions.
@@ -644,16 +714,25 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(screen.queryByLabelText(/qualifying metric/i)).toBeNull();
     expect(screen.queryByLabelText(/ranking metric/i)).toBeNull();
 
-    // The win-condition dropdown offers only the qualifying conditions — Timed and the converged
-    // Best-of-N (best of N laps; N=1 = best lap). First-to-N is hidden.
+    // The win-condition dropdown offers only the converged Best-of-N (best of N laps; N=1 = best
+    // lap). First-to-N is not a qualifying metric; and #472 moved "Timed — Most Laps" out of the
+    // time-trial bucket entirely (pilots racing each other on lap count in one window is
+    // head-to-head), so it is no longer offered here either — the option list used to be
+    // ['Timed', 'BestOfN'].
     const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
     const options = Array.from(win.options).map((o) => o.value);
-    expect(options).toEqual(['Timed', 'BestOfN']);
+    expect(options).toEqual(['BestOfN']);
     expect(options).not.toContain('FirstToLaps');
+    expect(options).not.toContain('Timed');
+    // …and the form opens on it, rather than on a Timed it would have to snap away.
+    expect(win.value).toBe('BestOfN');
+    expect(screen.queryByText('Timed — Most Laps')).toBeNull();
   });
 
-  it('shows the First-to-N win condition for a non-qualifying (head-to-head) format', async () => {
-    // A racing (non-qualifying) format keeps the full win-condition catalogue, including First-to-N.
+  it('head-to-head keeps both racing win conditions — First-to-N and Timed — Most Laps (#472)', async () => {
+    // The head-to-head bucket is where "Timed — Most Laps" belongs: a field flying together,
+    // competing on lap count inside one shared window. Best-of-N (the time-trial metric) is not
+    // how you decide a race, so it stays out.
     const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
     render(EventRounds, { session });
 
@@ -662,7 +741,7 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'head_to_head' } });
 
     const win = (await screen.findByLabelText('Win condition')) as HTMLSelectElement;
-    expect(Array.from(win.options).map((o) => o.value)).toContain('FirstToLaps');
+    expect(Array.from(win.options).map((o) => o.value)).toEqual(['Timed', 'FirstToLaps']);
   });
 
   it('Add-round offers only the three round types — not tournament structures (D17 taxonomy)', async () => {
@@ -804,14 +883,25 @@ describe('EventRounds (define rounds — classes, format, seeding)', () => {
     expect(editMode.value).toBe('Static');
   });
 
-  it('removes a round via deleteRound', async () => {
+  it('removes a round only through the explicit confirm — one click arms, never deletes', async () => {
+    // Removing a round DISCARDS its still-Scheduled heats since #439, so the button is a
+    // two-step ConfirmButton (field, 2026-08-28): first click arms, Cancel disarms, and only
+    // the explicit Confirm fires deleteRound.
     const impls = baseImpls();
     const deleteRoundImpl = vi.fn(async (_b, _e, _id) => ({ ...EVENT, rounds: [] }));
     const { session } = makeTestSession({ ...impls, deleteRoundImpl, event: EVENT });
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    expect(deleteRoundImpl).not.toHaveBeenCalled();
 
+    // Cancel disarms without deleting.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(deleteRoundImpl).not.toHaveBeenCalled();
+
+    // Arm again and confirm — now, and only now, the round goes.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Confirm/ }));
     await waitFor(() => expect(deleteRoundImpl).toHaveBeenCalledTimes(1));
     expect(deleteRoundImpl.mock.calls[0][2]).toBe('r1');
     await waitFor(() => expect(session.currentEvent?.rounds).toEqual([]));
@@ -900,7 +990,10 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     status: 'Ready',
     channel_capability: 'Flexible',
     node_count: 2,
-    available_channels: [5658, 5800]
+    available_channels: [5658, 5800],
+    manual_connect: false,
+    calibration: [],
+    disabled_nodes: []
   };
 
   function opImpls() {
@@ -921,7 +1014,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -951,9 +1044,10 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     // No separate hours field anymore — minutes only.
     expect(screen.queryByLabelText('Time limit hours')).toBeNull();
 
-    // Pick both active channels (the picker is driven by the primary timer's node seats).
-    await fireEvent.click(await screen.findByLabelText(/Channel .*5658/));
-    await fireEvent.click(screen.getByLabelText(/Channel .*5800/));
+    // Pick both active seats. This round flies no layout, so the seats carry no channel in their
+    // label — the picker names the node alone rather than inventing a channel for it (#117 S3).
+    await fireEvent.click(await screen.findByLabelText('Channel Node 1'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 2'));
 
     // Set a 90-minute practice duration (stored as 90*60 = 5400s).
     await fireEvent.input(screen.getByLabelText('Time limit minutes'), { target: { value: '90' } });
@@ -962,10 +1056,10 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
 
     await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
     const [, , req] = createRoundImpl.mock.calls[0];
-    // No win condition is sent; the AllChannels seeding + the time limit (in seconds) are.
+    // No win condition is sent; the ActiveNodes seeding + the time limit (in seconds) are.
     expect(req.win_condition).toBeUndefined();
     expect(req.classes).toEqual([]);
-    expect(req.seeding).toEqual({ AllChannels: { channels: [0, 1] } });
+    expect(req.seeding).toEqual({ ActiveNodes: { nodes: [0, 1] } });
     expect(req.time_limit_secs).toBe(5400); // 90 min * 60
   });
 
@@ -977,7 +1071,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -998,8 +1092,9 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     });
     await fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'open_practice' } });
     await waitFor(() => expect(screen.queryByLabelText('Win condition')).toBeNull());
-    await fireEvent.click(await screen.findByLabelText(/Channel .*5658/));
-    await fireEvent.click(screen.getByLabelText(/Channel .*5800/));
+    // No layout on this round: the seats name the node alone (#117 S3).
+    await fireEvent.click(await screen.findByLabelText('Channel Node 1'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 2'));
 
     // Leave the minutes field blank → no limit.
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
@@ -1016,7 +1111,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1036,11 +1131,13 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
     await within(roundsCard).findByText('Free Practice');
     expect(within(roundsCard).getByText('1h')).toBeInTheDocument();
 
-    // The Heats area drops the manual fill control for the open-practice round — neither the
-    // single-step "Add next heat" nor the deterministic "Generate heats" (#216).
+    // An open-practice round has no field to lay into heats — its fill emits one heat, ever — so it
+    // offers no generation control at all. It DOES offer "Add heat": the RD can still seat another
+    // practice heat by hand, which is the only way to get one.
     const heatsCard = screen.getByRole('heading', { name: 'Heats' }).closest('section')!;
-    expect(within(heatsCard).queryByRole('button', { name: 'Add next heat' })).toBeNull();
+    expect(within(heatsCard).queryByRole('button', { name: 'Generate next heat' })).toBeNull();
     expect(within(heatsCard).queryByRole('button', { name: 'Generate heats' })).toBeNull();
+    expect(within(heatsCard).getByRole('button', { name: 'Add heat' })).toBeInTheDocument();
   });
 
   it('round-trips an open-practice time limit through edit', async () => {
@@ -1051,7 +1148,7 @@ describe('EventRounds (open practice — no win condition + time limit)', () => 
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0] } },
+      seeding: { ActiveNodes: { nodes: [0] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1186,6 +1283,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   it("lists a round's heats with lineup callsigns, status, and the current marker", async () => {
     const heat: HeatSummary = {
       heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1212,6 +1310,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const heats: HeatSummary[] = [
       {
         heat: 'q-a',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1220,6 +1319,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       },
       {
         heat: 'q-b',
+        name: 'Qualifying R1 Heat 2',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1240,6 +1340,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   it("renders each pilot's assigned channel as a band+channel label, custom MHz, or — (Slice 4b)", async () => {
     const heat: HeatSummary = {
       heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1266,9 +1367,10 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     expect(within(heatRow).getByText('5685 MHz')).toBeInTheDocument();
   });
 
-  it('shows — for a sim/free-text heat that carries no frequencies (Slice 4b)', async () => {
+  it('says the channel is UNKNOWN, not "none", for a heat with no assignment (#416)', async () => {
     const heat: HeatSummary = {
       heat: 'q-2',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1285,13 +1387,15 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const heatRow = (await screen.findByText('Qualifying R1 Heat 1')).closest(
       '.heat-row'
     ) as HTMLElement;
-    // Both pilots show the dash (no channel assigned).
-    const dashes = within(heatRow).getAllByText('—');
-    expect(dashes.length).toBe(2);
+    // Unknown is not "none": nothing here has told GridFPV what channel these seats are on, and an
+    // em dash meaning "no channel" would be a different — and false — statement (#416, #413).
+    const unknown = within(heatRow).getAllByText('unknown');
+    expect(unknown.length).toBe(2);
+    expect(within(heatRow).queryByText('—')).toBeNull();
   });
 
   it("names an open-practice round's auto-created heat 'Practice Heat' (not its id)", async () => {
-    // An open-practice round (open_practice format + AllChannels seeding) auto-creates one heat;
+    // An open-practice round (open_practice format + ActiveNodes seeding) auto-creates one heat;
     // it should display as "Practice Heat" rather than the generated heat id.
     const OP_ROUND: RoundDef = {
       id: 'op1',
@@ -1300,7 +1404,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       format: 'open_practice',
       params: {},
       win_condition: 'BestLap',
-      seeding: { AllChannels: { channels: [0, 1] } },
+      seeding: { ActiveNodes: { nodes: [0, 1] } },
       channel_mode: 'PerHeat',
       staging_timer_secs: 300,
       start_procedure: { mode: 'randomized-delay', min_delay_ms: 2000, max_delay_ms: 5000 },
@@ -1309,6 +1413,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     };
     const heat: HeatSummary = {
       heat: 'op1-heat-7x2',
+      name: 'Practice Heat',
       lineup: ['p1', 'p2'],
       round: 'op1',
       phase: 'Scheduled',
@@ -1330,6 +1435,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const impls = heatsImpls([]);
     const newHeat: HeatSummary = {
       heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['p1', 'p2'],
       class: 'c1',
       round: 'r1',
@@ -1357,6 +1463,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const filled: HeatSummary[] = [
       {
         heat: 'q-1',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1365,6 +1472,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       },
       {
         heat: 'q-2',
+        name: 'Qualifying R1 Heat 2',
         lineup: ['p1', 'p2'],
         class: 'c1',
         round: 'r1',
@@ -1391,10 +1499,10 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
 
-    // There is no heat-id field to fill — the RD only picks a round (defaults to the first) and a
-    // lineup. Submit is enabled by round + lineup alone.
+    // There is no heat-id field to fill, and no round to pick either — the builder is opened FROM a
+    // round, so it is already scoped to it and says so in its title. Submit is enabled by lineup.
     expect(screen.queryByLabelText('Build heat id')).toBeNull();
     expect(screen.getByRole('button', { name: 'Schedule heat' })).toBeDisabled();
 
@@ -1434,7 +1542,10 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
       status: 'Ready',
       channel_capability: 'Flexible',
       node_count: 2,
-      available_channels: [5658, 5800]
+      available_channels: [5658, 5800],
+      manual_connect: false,
+      calibration: [],
+      disabled_nodes: []
     };
     const impls = {
       ...heatsImpls([]),
@@ -1444,7 +1555,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session } = makeTestSession({ ...impls, event: event3 });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     // The 2-node timer caps the lineup at 2: after two picks the third is disabled + a note shows.
     await fireEvent.click(await screen.findByLabelText('Select AceOne'));
     await fireEvent.click(screen.getByLabelText('Select Bolt'));
@@ -1461,7 +1572,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     render(EventRounds, { session });
 
     const buildOne = async () => {
-      await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+      await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
       await fireEvent.click(screen.getByLabelText('Select AceOne'));
       await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
     };
@@ -1483,7 +1594,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session, sendSpy } = makeTestSession({ ...impls, event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     await fireEvent.input(await screen.findByLabelText('Build heat name'), {
       target: { value: 'Featured Heat' }
     });
@@ -1502,25 +1613,29 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
   });
 
   // ── The build-heat form is a modal Dialog (ux(rounds)) ────────────────────────────────────────
-  it('does not show the build-heat dialog until "+ Build heat" is clicked', async () => {
+  it('does not show the build-heat dialog until the round’s "Add heat" is clicked', async () => {
     const { session } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
     // No dialog shown (and so the build form is not presented) until the trigger is clicked.
-    await screen.findByRole('button', { name: '+ Build heat' });
+    await screen.findByRole('button', { name: 'Add heat' });
     expect(screen.queryByRole('dialog')).toBeNull();
 
-    await fireEvent.click(screen.getByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add heat' }));
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
     expect(screen.getByRole('form', { name: 'Build heat' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Build round')).toBeInTheDocument();
+    // Pre-scoped to the round whose button opened it — there is no round picker to re-answer.
+    expect(screen.queryByLabelText('Build round')).toBeNull();
+    expect(
+      screen.getByRole('heading', { name: 'Add a heat to Qualifying R1' })
+    ).toBeInTheDocument();
   });
 
   it('cancel closes the build-heat dialog without scheduling a heat', async () => {
     const { session, sendSpy } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     await fireEvent.click(await screen.findByLabelText('Select AceOne'));
     await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
@@ -1532,7 +1647,7 @@ describe('EventRounds (Heats — fill round, heats list, manual build)', () => {
     const { session, sendSpy } = makeTestSession({ ...heatsImpls([]), event: EVENT_WITH_MEMBERS });
     render(EventRounds, { session });
 
-    await fireEvent.click(await screen.findByRole('button', { name: '+ Build heat' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Add heat' }));
     await fireEvent.click(await screen.findByLabelText('Select AceOne'));
     await fireEvent.click(screen.getByRole('button', { name: 'Schedule heat' }));
 
@@ -1665,7 +1780,10 @@ const PRACTICE_TIMER: Timer = {
   status: 'Ready',
   channel_capability: 'Flexible',
   node_count: 4,
-  available_channels: [5658, 5800, 5732]
+  available_channels: [5658, 5800, 5732],
+  manual_connect: false,
+  calibration: [],
+  disabled_nodes: []
 };
 // The schemas including open_practice so the format dropdown offers it.
 const OP_SCHEMAS = [...SCHEMAS, { name: 'open_practice', params: [] }];
@@ -1674,16 +1792,33 @@ const OP_CATALOG: ChannelCatalogEntry[] = [
   { band: 'Raceband', channel: 'R1', mhz: 5658 },
   { band: 'Fatshark', channel: 'F4', mhz: 5800 }
 ];
+// #117 S3 / #402: the event's channel layout — the `node → channel` mapping the practice picker
+// labels its seats through. Node 4 is deliberately absent, so that seat has NO known channel and
+// must read as the bare "Node 4": unknown is not "none", and it is certainly not a guess.
+//
+// Before S3 these labels came from `available_channels[node]` — indexing the timer's *allowed set*
+// by node index, which carries no per-node meaning. That fabrication is what #402 called out here
+// by name: the picker was channel-blind at exactly the moment the RD chooses which channels
+// practice runs on.
+const OP_LAYOUT: ChannelLayout = {
+  id: 'practice-a',
+  name: 'Practice A',
+  nodes: [
+    { node: 0, channel: 5658 },
+    { node: 1, channel: 5800 },
+    { node: 2, channel: 5732 }
+  ]
+};
 
 describe('EventRounds — open-practice active-channels picker', () => {
-  it('swaps to an active-channels picker and saves AllChannels with the selected node indices', async () => {
+  it('swaps to an active-node picker and saves ActiveNodes with the selected node indices', async () => {
     const createRoundImpl = vi.fn(async (_b, _e, _req) => ({
       ...QUAL,
       id: 'r2',
       label: 'Open Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [0, 2] } }
+      seeding: { ActiveNodes: { nodes: [0, 2] } }
     }));
     const { session } = makeTestSession({
       listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
@@ -1692,7 +1827,7 @@ describe('EventRounds — open-practice active-channels picker', () => {
       listTimersImpl: vi.fn(async () => [PRACTICE_TIMER]),
       listChannelsImpl: vi.fn(async () => OP_CATALOG),
       createRoundImpl,
-      event: { ...EVENT, rounds: [] }
+      event: { ...EVENT, rounds: [], channel_layouts: [OP_LAYOUT] }
     });
     render(EventRounds, { session });
 
@@ -1706,14 +1841,22 @@ describe('EventRounds — open-practice active-channels picker', () => {
     });
     await waitFor(() => expect(screen.queryByLabelText('Eligible Open')).not.toBeInTheDocument());
 
-    // Seats labelled by band+channel·MHz, with a bare node for the unconfigured 4th seat.
-    expect(await screen.findByLabelText('Channel Raceband R1 · 5658')).toBeInTheDocument();
-    expect(screen.getByLabelText('Channel Fatshark F4 · 5800')).toBeInTheDocument();
+    // With no layout chosen the seats are honestly channel-less — the picker does not invent one
+    // from the timer's allowed set (#117 S3).
+    expect(await screen.findByLabelText('Channel Node 1')).toBeInTheDocument();
+
+    // Fly the practice round on a layout → every seat it tunes now names its channel (#402).
+    await fireEvent.click(screen.getByLabelText('Practice A'));
+
+    // Seats labelled by band+channel·MHz, with a bare node for the 4th seat the layout does not
+    // tune — unknown, which is not the same statement as "no channel".
+    expect(await screen.findByLabelText('Channel Node 1 · Raceband R1')).toBeInTheDocument();
+    expect(screen.getByLabelText('Channel Node 2 · Fatshark F4')).toBeInTheDocument();
     expect(screen.getByLabelText('Channel Node 4')).toBeInTheDocument();
 
     // Activate node 0 (Raceband R1) and node 2 (5732 → custom MHz).
-    await fireEvent.click(screen.getByLabelText('Channel Raceband R1 · 5658'));
-    await fireEvent.click(screen.getByLabelText('Channel 5732 MHz'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 1 · Raceband R1'));
+    await fireEvent.click(screen.getByLabelText('Channel Node 3 · 5732 MHz'));
 
     await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
 
@@ -1724,7 +1867,10 @@ describe('EventRounds — open-practice active-channels picker', () => {
       label: 'Open Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [0, 2] } }
+      seeding: { ActiveNodes: { nodes: [0, 2] } },
+      // #117 S3: the round records which layout its heats fly, so the practice heat's channels are
+      // a real `heat → channel` mapping rather than whatever the hardware happened to be on.
+      layouts: ['practice-a']
     });
   });
 
@@ -1735,7 +1881,10 @@ describe('EventRounds — open-practice active-channels picker', () => {
       label: 'Practice',
       classes: [],
       format: 'open_practice',
-      seeding: { AllChannels: { channels: [1] } }
+      seeding: { ActiveNodes: { nodes: [1] } },
+      // The round already flies a layout, so re-opening it shows every seat's channel straight
+      // away — the RD does not have to re-tick anything to read what practice is on (#402).
+      layouts: ['practice-a']
     };
     const { session } = makeTestSession({
       listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
@@ -1743,14 +1892,14 @@ describe('EventRounds — open-practice active-channels picker', () => {
       listFormatSchemasImpl: vi.fn(async () => OP_SCHEMAS),
       listTimersImpl: vi.fn(async () => [PRACTICE_TIMER]),
       listChannelsImpl: vi.fn(async () => OP_CATALOG),
-      event: { ...EVENT, rounds: [OP_ROUND] }
+      event: { ...EVENT, rounds: [OP_ROUND], channel_layouts: [OP_LAYOUT] }
     });
     render(EventRounds, { session });
 
     await fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     // The saved active channel (node 1 → Fatshark F4) seeds checked; node 0 is not.
-    const f4 = (await screen.findByLabelText('Channel Fatshark F4 · 5800')) as HTMLInputElement;
-    const r1 = screen.getByLabelText('Channel Raceband R1 · 5658') as HTMLInputElement;
+    const f4 = (await screen.findByLabelText('Channel Node 2 · Fatshark F4')) as HTMLInputElement;
+    const r1 = screen.getByLabelText('Channel Node 1 · Raceband R1') as HTMLInputElement;
     expect(f4.checked).toBe(true);
     expect(r1.checked).toBe(false);
   });
@@ -1776,5 +1925,618 @@ describe('EventRounds — open-practice active-channels picker', () => {
     expect((screen.getByRole('button', { name: 'Add round' }) as HTMLButtonElement).disabled).toBe(
       true
     );
+  });
+});
+
+/**
+ * Editing a round is refused while one of its heats is in progress (#387).
+ *
+ * The Director re-materializes a round's still-`Scheduled` heats when the round is saved, and so
+ * refuses the edit outright when any of the round's heats is Staged/Armed/Running/Unofficial or is
+ * the heat loaded on the timer. The console mirrors that **before** the RD types: at a timing table,
+ * filling in a form and then being rejected is worse than not being offered it.
+ */
+describe('EventRounds — a round with a heat in progress cannot be edited (#387)', () => {
+  function impls(heats: HeatSummary[]) {
+    return {
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => heats)
+    };
+  }
+  /** A heat of the `r1` round in the given phase. */
+  function heatIn(phase: HeatSummary['phase'], is_current = false): HeatSummary {
+    return {
+      heat: 'q-1',
+      name: 'Qualifying R1 Heat 1',
+      lineup: ['p1', 'p2'],
+      class: 'c1',
+      round: 'r1',
+      phase,
+      is_current
+    };
+  }
+  /** The round's Edit button, and the row it lives in. */
+  async function editButton() {
+    const roundsCard = screen.getByRole('heading', { name: 'Rounds' }).closest('section')!;
+    await within(roundsCard).findByText('Qualifying R1');
+    return within(roundsCard).getByRole('button', { name: 'Edit' }) as HTMLButtonElement;
+  }
+
+  for (const phase of ['Staged', 'Armed', 'Running', 'Unofficial'] as const) {
+    it(`disables Edit while one of the round's heats is ${phase}`, async () => {
+      const { session } = makeTestSession({ ...impls([heatIn(phase)]), event: EVENT });
+      render(EventRounds, { session });
+
+      await waitFor(async () => expect((await editButton()).disabled).toBe(true));
+      // It names the heat by its FRIENDLY name and says what to do — never the raw id.
+      expect(
+        await screen.findByText(/Can’t edit while Qualifying R1 Heat 1 is in progress/)
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/q-1/)).toBeNull();
+    });
+  }
+
+  it('leaves Edit alive when the round has only scheduled heats', async () => {
+    const { session } = makeTestSession({ ...impls([heatIn('Scheduled')]), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(false));
+    expect(screen.queryByText(/is in progress/)).toBeNull();
+  });
+
+  it('leaves Edit alive when the round has RACED — the scoring freeze owns that, not this', async () => {
+    // `Final` is not "in progress": a raced round stays editable in the fields the freeze allows.
+    const { session } = makeTestSession({ ...impls([heatIn('Final')]), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(false));
+  });
+
+  it('disables Edit for a SCHEDULED heat that is loaded on the timer', async () => {
+    // A scheduled heat the RD has loaded in Live control is off limits too — its channels may
+    // already have been read off to the pilots on the line. Another heat has raced, so the
+    // `is_current` marker is a real load rather than the first-scheduled fallback.
+    const heats: HeatSummary[] = [
+      { ...heatIn('Final'), heat: 'q-0' },
+      { ...heatIn('Scheduled', true), heat: 'q-1' }
+    ];
+    const { session } = makeTestSession({ ...impls(heats), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(true));
+  });
+
+  it('does NOT disable Edit for the first-scheduled fallback in a fresh event', async () => {
+    // THE false-refusal guard. `current_heat` falls back to the first scheduled heat when nothing
+    // has ever been staged or selected, so a fresh event always reports a "current" heat that is
+    // not loaded on any timer. The Director's refusal deliberately ignores that fallback — treating
+    // it as a real load would refuse every round edit in a fresh event, including the open-practice
+    // channel edit #387 exists to make work.
+    const { session } = makeTestSession({ ...impls([heatIn('Scheduled', true)]), event: EVENT });
+    render(EventRounds, { session });
+
+    await waitFor(async () => expect((await editButton()).disabled).toBe(false));
+    expect(screen.queryByText(/is in progress/)).toBeNull();
+  });
+
+  it('warns on the EDIT form that saving rebuilds the round’s scheduled heats', async () => {
+    const { session } = makeTestSession({ ...impls([heatIn('Scheduled')]), event: EVENT });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await editButton());
+    const form = await screen.findByRole('form', { name: 'Edit round' });
+    // The side effect is stated before the RD types, and scoped: raced heats are left alone.
+    expect(within(form).getByText(/Saving rebuilds this round’s/)).toBeInTheDocument();
+    expect(within(form).getByText(/already raced are\s+left alone/)).toBeInTheDocument();
+  });
+
+  it('does not warn on the ADD form — a new round has no heats to rebuild', async () => {
+    const { session } = makeTestSession({ ...impls([]), event: EVENT });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    const form = await screen.findByRole('form', { name: 'Add round' });
+    expect(within(form).queryByText(/Saving rebuilds/)).toBeNull();
+  });
+});
+
+/**
+ * #416 — a STORED round seating a node that cannot record a lap is surfaced where the RD can
+ * repair it.
+ *
+ * #412 refuses an impossible seat when a round is *written*, so new rounds are safe. The round on
+ * the bench predates that fix: it seeds `ActiveNodes { nodes: [6] }` — node index 6, the 7th
+ * node — on a four-node timer, so its practice heat can never record a lap, and nothing said so.
+ * Silently rendering that seat is the worst available behaviour.
+ */
+describe('EventRounds — the impossible seat (#416)', () => {
+  const issue = (over: Partial<RoundIssue> = {}): RoundIssue => ({
+    round: 'r1',
+    round_label: 'Qualifying R1',
+    timer: 'rh',
+    timer_name: 'Docker RH',
+    node: 6,
+    node_label: 'Node 7',
+    problem: 'NoSuchNode',
+    detail:
+      'Qualifying R1 seats a pilot on Node 7, but Docker RH has only 4 nodes — that seat can ' +
+      'never record a lap. Edit the round and pick a node the timer has.',
+    ...over
+  });
+
+  it('flags the round, by friendly name, with the Director\u2019s own sentence', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => [issue()]),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const alert = await screen.findByText(/records nothing/);
+    const row = alert.closest('.round-row') as HTMLElement;
+    // On the round it belongs to — beside the Edit control that repairs it.
+    expect(within(row).getByText('Qualifying R1')).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // 1-based node, named timer, named round. Never a raw index or ref.
+    expect(alert.textContent).toContain('Node 7');
+    expect(row.textContent).toContain('Docker RH');
+    expect(row.textContent).not.toContain('node-6');
+  });
+
+  it('says nothing when every seat is live', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => []),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    await screen.findAllByText('Qualifying R1');
+    expect(screen.queryByText(/records nothing/)).toBeNull();
+  });
+
+  it('says the CHECK did not run rather than implying the seats are fine', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => {
+        throw new Error('nope');
+      }),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    // Silence here would read as "checked, nothing wrong" — the failure mode this read exists for.
+    expect(await screen.findByText(/that check has not run/)).toBeInTheDocument();
+  });
+
+  it('flags a DISABLED node distinctly from one that does not exist', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => [
+        issue({
+          node: 2,
+          node_label: 'Node 3',
+          problem: 'Disabled',
+          detail:
+            'Qualifying R1 seats a pilot on Node 3, which is switched off on Docker RH — that ' +
+            'seat can never record a lap. Re-enable the node on the timer, or edit the round and ' +
+            'pick another.'
+        })
+      ]),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const alert = await screen.findByText(/records nothing/);
+    expect(alert.closest('.round-row')?.textContent).toContain('switched off');
+  });
+});
+
+/**
+ * #117 S3 follow-up — a scheduled heat still bound to a channel layout its round no longer names.
+ *
+ * The RD's words: *"we create a round, it has a layout, create a heat from that round, remove the
+ * layout from the round, but the heat stays on the layout channels?"* Yes — the bind is a logged
+ * event so a re-fill cannot lose it, and that same durability makes it outlive a round edit. The
+ * RD chose to be **told, not blocked**, because there are two valid repairs and refusing the round
+ * edit would prevent both.
+ */
+describe('EventRounds — a heat bound to a layout its round dropped (#117 S3)', () => {
+  const orphan: RoundIssue = {
+    round: 'r1',
+    round_label: 'Qualifying R1',
+    problem: 'HeatLayoutNotInRound',
+    heat: 'heat-9f3c',
+    heat_name: 'Practice Heat',
+    layout: 'layout-7b2d',
+    layout_name: 'Bracket A',
+    detail:
+      'Practice Heat still flies the Bracket A channel layout, but Qualifying R1 no longer names ' +
+      'it — the heat keeps Bracket A’s channels even though its round no longer says it may. Pick ' +
+      'a layout Qualifying R1 names for Practice Heat, or set its channels by hand.'
+  };
+
+  it('names the heat, the round and the layout, and offers both repairs', async () => {
+    const { session } = makeTestSession({
+      listClassesImpl: vi.fn(async () => [OPEN, SPEC]),
+      listRoundIssuesImpl: vi.fn(async () => [orphan]),
+      event: EVENT
+    });
+    render(EventRounds, { session });
+
+    const alert = await screen.findByText(/still flies the Bracket A/);
+    const row = alert.closest('.round-row') as HTMLElement;
+    // On the round that owns it, beside the Edit control that repairs it.
+    expect(within(row).getByText('Qualifying R1')).toBeInTheDocument();
+    // Three friendly names, no raw handles (CLAUDE.md).
+    expect(row.textContent).toContain('Practice Heat');
+    expect(row.textContent).toContain('Bracket A');
+    expect(row.textContent).not.toContain('heat-9f3c');
+    expect(row.textContent).not.toContain('layout-7b2d');
+    // Both repairs: rebind the heat, or set its channels by hand. The RD is told, not blocked.
+    expect(row.textContent).toContain('Pick a layout');
+    expect(row.textContent).toContain('by hand');
+    // The headline names the HEAT — this problem has no node, and none is invented to fill the
+    // slot the seat headline uses.
+    expect(alert.textContent).toContain('Practice Heat flies channels this round no longer names.');
+    expect(row.textContent).not.toContain('records nothing');
+  });
+});
+
+// ── #117 S3: rounds name channel layouts, heats fly one ──────────────────────────────────────
+
+describe('EventRounds — a round names the channel layouts its heats may fly (#117 S3)', () => {
+  const BRACKET: ChannelLayout = {
+    id: 'bracket-a',
+    name: 'Bracket A',
+    nodes: [
+      { node: 0, channel: 5658 },
+      { node: 1, channel: 5800 }
+    ]
+  };
+  const WHOOPS: ChannelLayout = {
+    id: 'whoops',
+    name: 'Whoop pack',
+    nodes: [
+      { node: 0, channel: 5732 },
+      { node: 1, channel: 5769 }
+    ]
+  };
+  const EVENT_WITH_MEMBERS: EventMeta = {
+    ...EVENT,
+    roster: ['p1', 'p2'],
+    classes_membership: [{ class: 'c1', pilots: [{ pilot: 'p1' }, { pilot: 'p2' }] }],
+    rounds: [{ ...QUAL, layouts: ['bracket-a'] }],
+    channel_layouts: [BRACKET, WHOOPS]
+  };
+  /** A scheduled heat in the qual round, flying Bracket A. */
+  const HEAT: HeatSummary = {
+    heat: 'r1-h0',
+    name: 'Qualifying R1 Heat 1',
+    lineup: ['p1', 'p2'],
+    class: 'c1',
+    round: 'r1',
+    frequencies: [
+      ['p1', 5658],
+      ['p2', 5800]
+    ],
+    layout: 'bracket-a',
+    phase: 'Scheduled',
+    is_current: false
+  };
+
+  function withLayouts(heat: HeatSummary = HEAT) {
+    return makeTestSession({
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [heat]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
+      event: EVENT_WITH_MEMBERS
+    });
+  }
+
+  it('submits the layouts the RD ticked, first one being each heat’s default', async () => {
+    const createRoundImpl = vi.fn(async (_b, _e, _req) => QUAL);
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      createRoundImpl,
+      event: { ...EVENT, rounds: [], channel_layouts: [BRACKET, WHOOPS] }
+    });
+    render(EventRounds, { session });
+
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    await fireEvent.input(await screen.findByLabelText('Label'), { target: { value: 'Bracket' } });
+    await fireEvent.change(screen.getByLabelText('Eligible class'), { target: { value: 'c1' } });
+    await fireEvent.click(await screen.findByLabelText('Whoop pack'));
+    await fireEvent.click(screen.getByLabelText('Bracket A'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add round' }));
+
+    await waitFor(() => expect(createRoundImpl).toHaveBeenCalledTimes(1));
+    const [, , req] = createRoundImpl.mock.calls[0];
+    // Tick order is the order sent — the FIRST is each heat's default, which is the only way order
+    // is meaningful here.
+    expect(req.layouts).toEqual(['whoops', 'bracket-a']);
+  });
+
+  it('says which layout a single-layout round puts every heat on', async () => {
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      event: { ...EVENT, rounds: [], channel_layouts: [BRACKET, WHOOPS] }
+    });
+    render(EventRounds, { session });
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    // The bracket strategy: one layout, and there is nothing per-heat left to do.
+    await fireEvent.click(await screen.findByLabelText('Bracket A'));
+    expect(await screen.findByText(/Every heat in this round flies Bracket A/)).toBeInTheDocument();
+    // Several layouts: heats ALTERNATE through them (#117) rather than all defaulting to the
+    // first. That is what stops a landing heat and a staging heat sharing frequencies, and it is
+    // why naming a second layout is no longer an odd way to say "use the first".
+    await fireEvent.click(screen.getByLabelText('Whoop pack'));
+    expect(
+      await screen.findByText(/Heats alternate through these 2 layouts in order/)
+    ).toBeInTheDocument();
+  });
+
+  it('names the layout, never its id, and points at the layouts page when there are none', async () => {
+    const { session } = makeTestSession({ ...baseImpls(), event: { ...EVENT, rounds: [] } });
+    render(EventRounds, { session });
+    await fireEvent.click(await screen.findByRole('button', { name: '+ Add round' }));
+    expect(
+      await screen.findByText(/No channel layouts defined for this event/)
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('bracket-a');
+  });
+
+  it('binds a scheduled heat to one of its round’s layouts', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+
+    const picker = (await screen.findByLabelText(
+      'Channel layout for Qualifying R1 Heat 1'
+    )) as HTMLSelectElement;
+    // The menu offers the round's layouts by NAME, plus the "no layout" escape.
+    expect([...picker.options].map((o) => o.textContent?.trim())).toEqual([
+      'Automatic',
+      'Bracket A'
+    ]);
+    expect(picker.value).toBe('bracket-a');
+
+    await fireEvent.change(picker, { target: { value: '' } });
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({ SetHeatLayout: { heat: 'r1-h0' } });
+  });
+
+  it('offers no re-tuning once the heat has been staged', async () => {
+    // A heat keeps the channels it raced on, so the controls are not offered — and it still SHOWS
+    // the layout it flew, which is the record.
+    const { session } = withLayouts({ ...HEAT, phase: 'Final' });
+    render(EventRounds, { session });
+    await screen.findByText(/Flew the/);
+    expect(screen.queryByLabelText('Channel layout for Qualifying R1 Heat 1')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Edit seating/ })).toBeNull();
+    expect(document.body.textContent).toContain('Bracket A');
+  });
+
+  it('sends a manual seating override, and says that it sticks', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    // The dialog says the override sticks — the one property that makes it worth having (#419).
+    expect(
+      await screen.findByText(/re-filling or editing the round will not undo it/i)
+    ).toBeInTheDocument();
+
+    // The two pilots swap seats; both channels stay as the heat already has them.
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 1'), { target: { value: 'p2' } });
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 2'), { target: { value: 'p1' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      OverrideHeatSeating: {
+        heat: 'r1-h0',
+        lineup: ['p2', 'p1'],
+        frequencies: [
+          ['p2', 5658],
+          ['p1', 5800]
+        ]
+      }
+    });
+  });
+
+  it('refuses to save a seating that sits one pilot twice', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 2'), { target: { value: 'p1' } });
+    expect(await screen.findByText(/No pilot can sit twice in one heat/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  // ── Seat-first, pilot-OPTIONAL (the RD's practice-seating bug) ───────────────────────────────
+  //
+  // "for practice where we dont have assigned pilots, we cant manually set seating because it
+  // requires a pilot." The Director never required one — `node-{i}` refs are the open-practice
+  // lineup and skip the membership check — so this was the console requiring something the wire
+  // does not. These four cover the rule and its edges.
+
+  /** A 4-node timer with node 2 switched off, so the enabled gates are 0, 1 and 3 (#412). */
+  const GATED_TIMER: Timer = {
+    id: 'mock',
+    name: 'Mock',
+    kind: { Mock: { laps: 3, lap_ms: 1000 } },
+    status: 'Ready',
+    channel_capability: 'Flexible',
+    node_count: 4,
+    available_channels: [5658, 5800],
+    manual_connect: false,
+    calibration: [],
+    disabled_nodes: [2]
+  };
+
+  /** An open-practice round: no classes, so no membership — its competitors ARE its gates. */
+  const PRACTICE: RoundDef = {
+    ...QUAL,
+    id: 'op1',
+    label: 'Free Practice',
+    format: 'open_practice',
+    classes: [],
+    seeding: { ActiveNodes: { nodes: [0, 1] } }
+  };
+  /** Its heat, seated on two node refs and flying no layout — the case that could not be edited. */
+  const PRACTICE_HEAT: HeatSummary = {
+    heat: 'op1-heat',
+    name: 'Practice Heat',
+    lineup: ['node-0', 'node-1'],
+    round: 'op1',
+    phase: 'Scheduled',
+    is_current: false
+  };
+
+  function practiceSession(heat: HeatSummary = PRACTICE_HEAT) {
+    return makeTestSession({
+      ...baseImpls(),
+      listFormatsImpl: vi.fn(async () => [...FORMATS, 'open_practice']),
+      listFormatSchemasImpl: vi.fn(async () => [...SCHEMAS, { name: 'open_practice', params: [] }]),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [heat]),
+      listTimersImpl: vi.fn(async () => [GATED_TIMER]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
+      event: { ...EVENT, classes: [], rounds: [PRACTICE], channel_layouts: [] }
+    });
+  }
+
+  it('opens the seating editor on a heat that flies no layout at all', async () => {
+    // The button used to appear only once a layout was set — hiding the escape hatch exactly when
+    // there was no automatic answer to escape from.
+    const { session } = practiceSession();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Practice Heat' })
+    );
+    expect(await screen.findByRole('form', { name: 'Set heat seating' })).toBeInTheDocument();
+    // No layout picker to be found — and the seating editor opened regardless.
+    expect(screen.queryByLabelText(/^Channel layout for/)).toBeNull();
+  });
+
+  it('saves a practice heat’s seating with NO pilot, landing node refs in the lineup', async () => {
+    const { session, sendSpy } = practiceSession();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Practice Heat' })
+    );
+
+    // Every seat's pilot cell is empty and that is a complete answer — the seat IS the competitor.
+    const pilot = screen.getByLabelText('Pilot in seat 1') as HTMLSelectElement;
+    expect(pilot.value).toBe('');
+    expect([...pilot.options].map((o) => o.textContent?.trim())).toEqual(['Open seat — no pilot']);
+    // The gates are named, never the raw ref, and node 2 is off so it is not offered (#412).
+    const node = screen.getByLabelText('Node in seat 1') as HTMLSelectElement;
+    expect([...node.options].map((o) => o.textContent?.trim())).toEqual([
+      'Node 1',
+      'Node 2',
+      'Node 4'
+    ]);
+
+    // Move the second seat onto the last enabled gate and save — with no pilot anywhere.
+    await fireEvent.change(screen.getByLabelText('Node in seat 2'), { target: { value: '3' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      // No channel was typed on any seat, so none is sent — the seats take the round's own answer.
+      OverrideHeatSeating: { heat: 'op1-heat', lineup: ['node-0', 'node-3'] }
+    });
+  });
+
+  it('adds a pilot-less seat on the next free gate, skipping the disabled one', async () => {
+    const { session, sendSpy } = practiceSession();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Practice Heat' })
+    );
+    // Gates 0 and 1 are taken; 2 is switched off, so the next seat is gate 3 — never a renumbered 2.
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add seat' }));
+    expect((screen.getByLabelText('Node in seat 3') as HTMLSelectElement).value).toBe('3');
+    // Three enabled gates, three seats — the cap is the ENABLED set, not the width.
+    expect(screen.getByRole('button', { name: '+ Add seat' })).toBeDisabled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+    await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+    expect(sendSpy.mock.calls[0][0]).toEqual({
+      OverrideHeatSeating: { heat: 'op1-heat', lineup: ['node-0', 'node-1', 'node-3'] }
+    });
+  });
+
+  it('still requires a pilot on every seat of a round that HAS a field', async () => {
+    const { session, sendSpy } = withLayouts();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    // The qual round's classes have members, so an empty seat is a mistake, not a practice seat.
+    await fireEvent.change(screen.getByLabelText('Pilot in seat 2'), { target: { value: '' } });
+    expect(
+      await screen.findByText(/Every seat needs a pilot from this round’s field/)
+    ).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Save seating' }));
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('says so when a pilot would fly a gate other than the one their row names', async () => {
+    // A `node-{i}` seat names its own gate; a PILOT takes the next free one. So skipping a gate
+    // below a pilot slides them down onto it, and the row would otherwise show a gate they are not
+    // on — the quiet wrongness the display rule exists to prevent. Said out loud, with the fix.
+    const { session } = makeTestSession({
+      ...baseImpls(),
+      listPilotsImpl: vi.fn(async () => [ACE, BOLT]),
+      listHeatsImpl: vi.fn(async () => [{ ...HEAT, layout: undefined, frequencies: undefined }]),
+      listTimersImpl: vi.fn(async () => [GATED_TIMER]),
+      listChannelsImpl: vi.fn(async () => CATALOG),
+      event: EVENT_WITH_MEMBERS
+    });
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    // Seats on gates 1 and 2, no drift: the pilots already fly the gates their rows name.
+    expect(screen.queryByText(/would fly/)).toBeNull();
+
+    // Drop the first seat and move the survivor up to the last gate — nothing now claims gate 1,
+    // so the Director would hand it to them.
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove seat 1' }));
+    await fireEvent.change(screen.getByLabelText('Node in seat 1'), { target: { value: '3' } });
+
+    const note = (await screen.findByText(/would fly/)).textContent?.replace(/\s+/g, ' ') ?? '';
+    // Both gates NAMED, never `node-3` and never a bare index.
+    expect(note).toContain('Bolt would fly Node 1, not Node 4');
+    // And the fix is offered, not just the diagnosis.
+    expect(note).toContain('open seat');
+    // It is a note, not a refusal — the RD may well mean it.
+    expect(screen.getByRole('button', { name: 'Save seating' })).toBeEnabled();
+  });
+
+  it('names every gate and channel it offers — no raw ref, no bare MHz', async () => {
+    const { session } = withLayouts();
+    render(EventRounds, { session });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit seating for Qualifying R1 Heat 1' })
+    );
+    const channel = (await screen.findByLabelText('Channel in seat 1')) as HTMLSelectElement;
+    // A picker carries the frequency BESIDE the friendly name (channels.ts), never instead of it.
+    expect([...channel.options].map((o) => o.textContent?.trim())).toEqual([
+      'From the layout',
+      'Raceband R1 — 5658',
+      'Fatshark F4 — 5800'
+    ]);
+    const form = screen.getByRole('form', { name: 'Set heat seating' });
+    expect(form.textContent).not.toMatch(/node-\d/);
   });
 });

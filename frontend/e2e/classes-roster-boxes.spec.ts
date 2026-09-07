@@ -19,7 +19,7 @@
 import { expect, test } from './observability.js';
 
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -57,7 +57,7 @@ test('two labelled boxes collapse + persist; select-all roster; per-class auto-a
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const PILOTS = [`E2E-Box-Ace-${SUFFIX}`, `E2E-Box-Bee-${SUFFIX}`, `E2E-Box-Cas-${SUFFIX}`];
@@ -101,7 +101,7 @@ test('two labelled boxes collapse + persist; select-all roster; per-class auto-a
 
   // ── It persisted: a reload keeps both boxes collapsed. ─────────────────────────────────────────
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Classes & Roster');
   for (const title of ['Classes', 'Pilots']) {
     await expect(boxToggle(page, title)).toHaveAttribute('aria-expanded', 'false', {

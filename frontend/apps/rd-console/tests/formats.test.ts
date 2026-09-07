@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  defaultWinConditionKindFor,
   fieldsForFormat,
   FORMAT_LABELS,
   formatLabel,
+  HEAD_TO_HEAD,
   isDeterministicFormat,
   isOpenPracticeFormat,
-  OPEN_PRACTICE
+  OPEN_PRACTICE,
+  TIMED_QUAL,
+  WIN_CONDITION_KINDS,
+  WIN_CONDITION_LABELS,
+  winConditionKindsFor
 } from '../src/lib/formats.js';
 
 describe('formats — friendly-name mapping (Rounds form redesign item 1)', () => {
@@ -78,5 +84,43 @@ describe('formats — dynamic field set per format (Rounds form redesign item 2)
       expect(f.activeChannels).toBe(false);
       expect(f.timeLimit).toBe(false);
     }
+  });
+});
+
+describe('formats — the format↔win-condition taxonomy (#472)', () => {
+  it('puts "Timed — Most Laps" in the head-to-head bucket, not the time-trial one', () => {
+    // The decision (Ryan, 2026-08-27): pilots flying simultaneously and competing on lap count in
+    // one window are racing each other; "time trial" means the solo/async run against the clock.
+    expect(winConditionKindsFor(HEAD_TO_HEAD)).toContain('Timed');
+    expect(winConditionKindsFor(TIMED_QUAL)).not.toContain('Timed');
+  });
+
+  it('head-to-head offers the two racing conditions and no time-trial metric', () => {
+    expect(winConditionKindsFor(HEAD_TO_HEAD)).toEqual(['Timed', 'FirstToLaps']);
+  });
+
+  it('a time trial offers Best-of-N alone — its single ranking metric', () => {
+    expect(winConditionKindsFor(TIMED_QUAL)).toEqual(['BestOfN']);
+  });
+
+  it('an unrecognised format (a structure round reached by editing) still offers all three', () => {
+    expect(winConditionKindsFor('single_elim')).toEqual(WIN_CONDITION_KINDS);
+    expect(winConditionKindsFor(undefined)).toEqual(WIN_CONDITION_KINDS);
+  });
+
+  it('defaults a fresh round to a kind its own family offers', () => {
+    // Not a `Timed` the taxonomy would have to snap away the moment the form opened.
+    expect(defaultWinConditionKindFor(TIMED_QUAL)).toBe('BestOfN');
+    expect(defaultWinConditionKindFor(HEAD_TO_HEAD)).toBe('Timed');
+    for (const fmt of [HEAD_TO_HEAD, TIMED_QUAL, 'single_elim']) {
+      expect(winConditionKindsFor(fmt)).toContain(defaultWinConditionKindFor(fmt));
+    }
+  });
+
+  it('labels every kind, so the picker never renders a bare discriminator', () => {
+    for (const kind of WIN_CONDITION_KINDS) {
+      expect(WIN_CONDITION_LABELS[kind]).toBeTruthy();
+    }
+    expect(WIN_CONDITION_LABELS.Timed).toBe('Timed — Most Laps');
   });
 });

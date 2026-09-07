@@ -18,18 +18,59 @@
    * background; on a save error the change is reverted (re-seeded from the event) and surfaced.
    * Because every save sends the *entire* current selection (not a delta), coalescing rapid clicks
    * into one trailing save is safe last-write-wins.
+   *
+   * ## The GridFPV-plugin gate (#405)
+   *
+   * A RotorHazard timer without a loaded, compatible GridFPV plugin **cannot be selected**: its
+   * checkbox is disabled *and* the row carries the reason plus the next action, because "greyed
+   * out with no explanation" is the state that stranded the RD in #385. The Director enforces the
+   * same rule on `PUT /events/{id}/timers` — this is the half that fails while the RD is choosing
+   * equipment rather than while they are trying to start a race.
+   *
+   * ## Tuning from inside the event (#355/#411)
+   *
+   * The Tune action on a row navigates to the **event-scoped** tune route, so back returns here
+   * rather than to the global Timers page. This is where an RD actually stands when a gate is missing
+   * laps — mid-event, with a heat waiting — so tuning has to be reachable from here and not only from
+   * the app-level Timers page.
+   *
+   * A timer the event **already** selects stays tickable (and untickable) even when its plugin has
+   * since gone away: the Director grandfathers an existing selection so a pre-#405 event is still
+   * editable, and the row carries a warning instead. What stops such an event from racing it is
+   * the Director's arm-time backstop.
+   *
+   * ## Channel layouts (#117 S2)
+   *
+   * Per the RD, in **event** scope the timer page becomes per-node channel selection — the
+   * {@link EventChannelLayouts} card at the bottom. Note carefully what the two halves of this page
+   * edit: the checkbox picker inside {@link TimerManager} writes `Timer.available_channels`, the
+   * **global** record of what a timer may *ever* use; a **layout** is this event's own `node →
+   * channel` tuning, stored on the event's meta. Global is the seed, the event owns what it runs —
+   * and editing a layout never touches a timer, which is the bug that slice exists to close.
    */
   import { Button, Card, toast } from '@gridfpv/components';
   import type { Timer, TimerId } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import { AutoSaver } from '../lib/autosave.js';
+  import { selectionRefusal } from '../lib/pluginPresence.js';
+  import EventChannelLayouts from './EventChannelLayouts.svelte';
   import TimerManager from './TimerManager.svelte';
 
   let {
     session,
-    onselectionchange = undefined
+    ontune,
+    onselectionchange = undefined,
+    showLayers = true
   }: {
     session: Session;
+    /**
+     * Open the per-timer **Tune** page for a timer, scoped to THIS event (#355/#411). The shell
+     * owns the route (`#/events/<eventId>/timers/<timerId>/tune`); this screen is the entry point
+     * the RD actually works from mid-event — "tuning from in the event would be ideal, as long as
+     * when we click back we are back in the event". Optional, so an embedder with nowhere to
+     * navigate to (the setup wizard's Timer step) simply doesn't offer the action.
+     */
+    ontune?: (timerId: TimerId) => void;
     /**
      * Fires the **live** working-selection count whenever it changes — including the local-only
      * empty state the setup wizard gates on (an empty selection is kept local, not persisted, so
@@ -37,6 +78,15 @@
      * Timer step until ≥1 timer is ticked. Inert for the standalone Timers page (no callback).
      */
     onselectionchange?: (count: number) => void;
+    /**
+     * Whether to show the per-node **channel layout** editor (#117 S2). On by default — this is the
+     * event Timers page, and in event scope the timer page *is* per-node channel selection.
+     *
+     * The setup wizard passes `false`: its Timer step is where the RD is still choosing *which*
+     * timer feeds the event, and a layout tunes a timer that has not been settled on yet. Layouts
+     * stay fully editable on this page afterwards, which is the wizard's whole posture.
+     */
+    showLayers?: boolean;
   } = $props();
 
   let manager = $state<TimerManager | undefined>(undefined);
@@ -80,10 +130,31 @@
   // The ids to save, in the registry's listed order (a stable, sensible order).
   const orderedSelection = $derived(timers.filter((t) => selected.has(t.id)).map((t) => t.id));
 
+  // ── The GridFPV-plugin gate (#405) ────────────────────────────────────────
+  //
+  // `blocked` is "the Director would refuse to *newly* select this". A timer the event already
+  // selects is grandfathered by the Director (so a pre-#405 event stays editable), so its box
+  // stays live — the RD must be able to untick it, which is the fix. Its row still carries the
+  // warning, which is how a presence change on an already-selected timer surfaces here.
+  function isBlocked(timer: Timer): boolean {
+    return selectionRefusal(timer) !== null && !selected.has(timer.id);
+  }
+  /** The sentence the row shows: the refusal, or the already-selected warning. */
+  function rowReason(timer: Timer): string | undefined {
+    const refusal = selectionRefusal(timer);
+    if (!refusal) return undefined;
+    return selected.has(timer.id) ? refusal.alreadySelectedWarning : refusal.reason;
+  }
+
   // ── Auto-save (debounced, optimistic, wholesale `setEventTimers`) ──────────
   const autosaver = new AutoSaver();
 
   function toggle(id: TimerId) {
+    // The plugin gate (#405): never send a selection the Director will refuse. The box is already
+    // disabled for a blocked timer; this is the belt to that braces, so a programmatic/keyboard
+    // path can't slip a refused id into the wholesale save.
+    const timer = timers.find((t) => t.id === id);
+    if (timer && isBlocked(timer)) return;
     // Optimistic flip first so the checkbox reflects the click instantly.
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -141,6 +212,26 @@
   // Guards a primary change in flight so the radios don't double-fire mid-request.
   let settingPrimary = $state(false);
 
+  // ── Channel layouts (#117 S2) ──────────────────────────────────────────────
+  //
+  // Per the RD, in **event** scope the timer page becomes per-node channel selection. That is the
+  // layout editor below: a layout is one complete tuning of this event's timer (node → channel),
+  // drawn from the channels ticked above.
+  //
+  // The distinction the two halves of this page draw is the whole slice: the checkbox picker inside
+  // `TimerManager` edits `Timer.available_channels` — **the global timer record**, what a timer may
+  // *ever* use — while a layout is **event** state. Editing a layout never touches a timer.
+  //
+  // A layout tunes the event's **effective primary** timer (#112's redundant timers are two boxes at
+  // one gate, so an alternate must be listening on the same channels). Resolved from the registry
+  // rows this screen already holds, so the editor and the roles picker cannot disagree about which
+  // timer is primary.
+  const layerTimer = $derived(timers.find((t) => t.id === effectivePrimary));
+
+  // #491: a selected Simulator means started heats race themselves — the banner tracks the
+  // SELECTION (a Simulator merely existing in the registry warns nobody).
+  const simSelected = $derived(timers.some((t) => 'Mock' in t.kind && selected.has(t.id)));
+
   async function choosePrimary(id: TimerId) {
     if (settingPrimary || id === effectivePrimary) return;
     settingPrimary = true;
@@ -162,11 +253,21 @@
 <section class="event-timers" aria-label="Event timers">
   <Card
     title="Timers for this event"
-    subtitle="Add, edit, or remove timers, and tick which ones feed this event's races."
+    help="Add, edit, or remove timers, and tick which ones feed this event's races."
   >
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={() => manager?.openAdd()}>+ Add timer</Button>
     {/snippet}
+
+    <!-- #491: a selected Simulator means every started heat races ITSELF — synthetic laps and
+         RSSI, races that auto-complete. A field session read exactly that as phantom control of
+         the Director, so the state gets a standing banner, not just a row badge. -->
+    {#if simSelected}
+      <p class="sim-selected" role="status">
+        A <strong>Simulator</strong> timer is selected for this event: started heats will fly themselves
+        with synthetic laps and RSSI. Untick it before racing on real hardware.
+      </p>
+    {/if}
 
     <TimerManager
       bind:this={manager}
@@ -174,15 +275,26 @@
       bind:timers
       onchange={onRegistryChange}
       rowChecked={(t) => selected.has(t.id)}
+      ontune={ontune ? (timer) => ontune(timer.id) : undefined}
     >
       {#snippet rowLead(timer)}
         <input
           type="checkbox"
           class="select-box"
           checked={selected.has(timer.id)}
+          disabled={isBlocked(timer)}
           onchange={() => toggle(timer.id)}
           aria-label={`Use ${timer.name}`}
         />
+      {/snippet}
+
+      <!-- #405: the reason lives ON the row, not in a tooltip — a disabled checkbox with no
+           explanation is exactly the dead end this gate is supposed to prevent. -->
+      {#snippet rowNote(timer)}
+        {@const reason = rowReason(timer)}
+        {#if reason}
+          <span class="gate-reason" role="status">{reason}</span>
+        {/if}
       {/snippet}
 
       {#snippet listFooter()}
@@ -198,7 +310,7 @@
   {#if showRoles}
     <Card
       title="Timer roles"
-      subtitle="Primary feeds the race; alternates are hot standby and take over if the primary drops."
+      help="Primary feeds the race; alternates are hot standby and take over if the primary drops."
     >
       <ul class="roles" aria-label="Timer roles">
         {#each roleTimers as timer (timer.id)}
@@ -227,6 +339,10 @@
         {/each}
       </ul>
     </Card>
+  {/if}
+
+  {#if showLayers}
+    <EventChannelLayouts {session} timer={layerTimer} />
   {/if}
 </section>
 
@@ -299,6 +415,26 @@
     accent-color: var(--gf-accent);
     flex-shrink: 0;
     cursor: pointer;
+  }
+  .select-box:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+  /* The #405 refusal / warning sentence. Sized like real data, not chrome: at a venue this is the
+     line that tells the RD why they cannot race this timer and what to do about it. */
+  .gate-reason {
+    margin-top: 2px;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-warn);
+  }
+  .sim-selected {
+    margin: 0 0 var(--gf-space-3);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border-left: 3px solid var(--gf-warn);
+    border-radius: 0 var(--gf-radius-sm) var(--gf-radius-sm) 0;
+    /* Flattened against the surface, not a translucent wash — the #476 rule for large fills. */
+    background: color-mix(in srgb, var(--gf-warn) 14%, var(--gf-surface));
+    font-size: var(--gf-font-size-sm);
   }
   .foot {
     display: flex;

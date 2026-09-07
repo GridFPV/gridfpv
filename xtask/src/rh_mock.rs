@@ -418,8 +418,9 @@ fn print_run_instructions(url: &str, node_count: usize) {
     println!(
         "\n  \x1b[2mNote: RH's default 10s lap minimum logs `Pass record under lap minimum (10)` \
          for the brisk sub-second mock laps, but RH's default behavior still RECORDS them, so they \
-         flow through to the Director. (If you drive RH directly and want the warnings gone, emit \
-         set_option MIN_LAP_TIME=0.)\x1b[0m"
+         flow through to the Director. The Director clears both settings at handshake (#407). (If \
+         you drive RH directly and want the warnings gone, emit set_min_lap {{min_lap: 0}} — and \
+         set_min_lap_behavior {{min_lap_behavior: 0}} if yours is set to discard.)\x1b[0m"
     );
 }
 

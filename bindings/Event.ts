@@ -4,6 +4,7 @@ import type { ClassId } from "./ClassId";
 import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 import type { HeatTransition } from "./HeatTransition";
+import type { LayoutId } from "./LayoutId";
 import type { LogRef } from "./LogRef";
 import type { Pass } from "./Pass";
 import type { Penalty } from "./Penalty";
@@ -57,7 +58,31 @@ frequencies?: Array<[CompetitorRef, number]>,
  * keeps the auto-name. Additive and default-absent, so a pre-existing log (or a
  * generator heat) reads back as `None` and round-trips unchanged.
  */
-label?: string, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "CurrentHeatSelected": { heat: HeatId, } } | { "HeatStarting": { 
+label?: string, } } | { "HeatLayoutSet": { 
+/**
+ * The heat being bound.
+ */
+heat: HeatId, 
+/**
+ * The layout it flies, or `None` to clear the bind (back to the round's default).
+ */
+layout?: LayoutId, } } | { "HeatSeatingOverridden": { 
+/**
+ * The heat whose seating the RD set by hand.
+ */
+heat: HeatId, 
+/**
+ * The RD's lineup, in seat order — the pilots and where they sit. **Empty clears the
+ * override.**
+ */
+lineup: Array<CompetitorRef>, 
+/**
+ * The RD's per-pilot channels in raw MHz. Empty means *"my pilots, the layout's
+ * channels"* — the lineup is overridden but the channels still come from the heat's
+ * layout (or the auto-pick), so an RD swapping two pilots does not have to retype four
+ * frequencies.
+ */
+frequencies?: Array<[CompetitorRef, number]>, } } | { "HeatStateChanged": { heat: HeatId, transition: HeatTransition, } } | { "CurrentHeatSelected": { heat: HeatId, } } | { "HeatStarting": { 
 /**
  * The heat whose start procedure fired (it is in `Armed`).
  */
@@ -76,7 +101,27 @@ heat: HeatId,
  * Unix epoch) at which the runtime appends the auto `Finalize`. The countdown the console
  * shows is `at − now`.
  */
-at: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, 
+at: number, } } | { "RaceExpired": { 
+/**
+ * The heat whose race window expired (it is still in `Running`, holding for grace).
+ */
+heat: HeatId, 
+/**
+ * The **grace deadline**: the server wall-clock instant (microseconds since the Unix
+ * epoch) at which the runtime closes the heat if pilots are still out. `None` for an
+ * unbounded grace (the engine's `GraceWindow::UntilScored`): the heat then closes only
+ * on the all-crossed rule or the RD's `ForceEnd`.
+ */
+deadline?: number, } } | { "HeatDetectionPinned": { 
+/**
+ * The heat this config was pinned for (it is entering `Armed`).
+ */
+heat: HeatId, 
+/**
+ * The **gate-bounce window** (µs) in force for this run: two lap-gate crossings by the
+ * same competitor closer together than this are one physical pass. `None` for no rule.
+ */
+same_pass_window_micros?: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, 
 /**
  * The heat the inserted lap belongs to. Unlike a raw [`Pass`] (an untagged wire
  * observation attributed positionally), an insertion is an RD statement **about a

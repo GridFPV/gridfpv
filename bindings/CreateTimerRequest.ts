@@ -23,12 +23,19 @@ kind: TimerKind,
  */
 channel_capability?: ChannelCapability, 
 /**
- * The new timer's **node/slot count** (race redesign Slice 4a) — the heat-size cap. Optional;
- * defaults to [`DEFAULT_NODE_COUNT`].
+ * The new timer's **node-count override** (race redesign Slice 4a; #412). Optional — omit it
+ * (the normal case now) and the timer's width follows what the hardware reports on connect,
+ * falling back to [`DEFAULT_NODE_COUNT`] until it does.
  */
 node_count?: number, 
 /**
  * The new timer's **available channels** in raw MHz (race redesign Slice 4a). Optional;
  * defaults to empty (none configured).
  */
-available_channels?: Array<number>, };
+available_channels?: Array<number>, 
+/**
+ * The new timer's **gate-bounce window** in µs (#517) — see
+ * [`Timer::same_pass_window_micros`]. Optional; omit it (or send `0`) for no bounce rule.
+ * [`DEFAULT_SAME_PASS_WINDOW_MICROS`] is what the console offers, not what the server assumes.
+ */
+same_pass_window_micros?: number, };

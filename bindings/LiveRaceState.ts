@@ -3,6 +3,7 @@ import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 import type { HeatPhase } from "./HeatPhase";
 import type { LifecycleState } from "./LifecycleState";
+import type { LiveCrossing } from "./LiveCrossing";
 import type { PilotProgress } from "./PilotProgress";
 
 /**
@@ -88,6 +89,17 @@ staged_at?: number,
  */
 tone_at?: number, 
 /**
+ * The current heat's **grace deadline** while its race window has expired but the heat is
+ * still `Running` (#505): the logged `deadline` of its latest
+ * [`RaceExpired`](gridfpv_events::Event::RaceExpired) marker — the server wall-clock instant
+ * (microseconds since the Unix epoch) at which the runtime closes the heat if pilots are
+ * still out. The console's "grace" countdown anchors here, exactly as the auto-official
+ * countdown anchors on the `HeatFinalizing` deadline. `None` before the race window expires,
+ * in every non-`Running` phase, and for an unbounded (`UntilScored`) grace — whose marker
+ * carries no deadline. Renders as a plain TS `number` (microseconds).
+ */
+grace_deadline?: number, 
+/**
  * The **provisional → official lifecycle** of the current heat (marshaling Slice 5,
  * marshaling.html §3.3), surfaced for the Marshaling/Live UI. `None` until the heat reaches the
  * `Unofficial` phase (before that there is no result to be provisional about). Once provisional
@@ -96,4 +108,26 @@ tone_at?: number,
  * heat's phase + the logged [`HeatFinalizing`](gridfpv_events::Event::HeatFinalizing) deadline,
  * so it folds deterministically like the rest of this projection.
  */
-lifecycle?: LifecycleState, };
+lifecycle?: LifecycleState, 
+/**
+ * The current heat's recent **gate crossings, each with its disposition** (#397) — the live
+ * feed a console announces from, in ascending `pass_ref` (append-offset) order.
+ *
+ * `progress` reports *laps*, and laps are derived (`passes.windows(2)`), so a lap-derived
+ * consumer is structurally blind to most crossings: the **holeshot** closes no lap, and a
+ * crossing **rejected under the round's min-lap floor** is auto-voided in the projection and
+ * reaches no live consumer at all. This field carries the crossings themselves, so "the gate
+ * saw nothing" and "the gate saw something that did not count" stop being the same silence.
+ *
+ * **Idempotency (the hard requirement).** Every entry carries a stable
+ * [`pass_ref`](LiveCrossing::pass_ref) — the crossing's global append offset — and the feed is
+ * ordered by it. A consumer holds a single high-water mark and acts on `pass_ref >` it, so
+ * a re-pushed or re-snapshotted `LiveRaceState` (or a resubscribe, or a scope change) can
+ * never look like new crossings. Receipt of a frame means nothing; identity is everything.
+ *
+ * **Bounded** to the most recent [`MAX_LIVE_CROSSINGS`] entries — see that constant for why
+ * dropping the *oldest* is the one truncation that leaves the high-water mark sound.
+ *
+ * Additive: absent on the wire when empty, so older payloads round-trip.
+ */
+crossings?: Array<LiveCrossing>, };

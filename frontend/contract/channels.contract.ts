@@ -9,7 +9,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { listChannels } from '../packages/protocol-client/dist/index.js';
+import { listChannels, rateChannels } from '../packages/protocol-client/dist/index.js';
 import { type Director } from '../test-harness/director.ts';
 import { startContractDirector } from './harness.ts';
 
@@ -53,5 +53,40 @@ describe('GET /channels serves the standard FPV channel catalog', () => {
     ]);
     expect(raceband[0].mhz).toBe(5658);
     expect(raceband[7].mhz).toBe(5917);
+  });
+});
+
+describe('GET /channels/imd serves IMDTabler’s own rating (#117 S4)', () => {
+  it('rateChannels answers with the number an RD reads off RotorHazard, open (no token)', async () => {
+    // RotorHazard’s default IMD6C profile. This exact integer is the point of #430: the
+    // Director’s port must reproduce IMDTabler, or the console is showing the RD a second
+    // opinion dressed up as the standard.
+    const imd6c = await rateChannels(director.baseUrl, [5658, 5695, 5760, 5800, 5880, 5917]);
+    expect(imd6c.rating).toBe(29);
+    // ...and it names the worst offender, whose arithmetic must actually hold.
+    const worst = imd6c.worst;
+    expect(worst).toBeDefined();
+    if (!worst) return;
+    expect(2 * worst.doubled - worst.subtracted).toBe(worst.product);
+    expect(Math.abs(worst.product - worst.lands_on)).toBe(worst.gap_mhz);
+    expect(worst.gap_mhz).toBeLessThan(35);
+
+    // The canonical table, end to end over the wire.
+    expect((await rateChannels(director.baseUrl, [5658, 5732, 5843, 5917])).rating).toBe(100);
+    expect(
+      (await rateChannels(director.baseUrl, [5645, 5685, 5760, 5805, 5905, 5945])).rating
+    ).toBe(67);
+    expect(
+      (await rateChannels(director.baseUrl, [5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917]))
+        .rating
+    ).toBe(-635);
+  });
+
+  it('a clean set has no offender to name', async () => {
+    // Racebnd4 rates the ceiling because nothing lands within 35 MHz. Reporting a nearest miss
+    // here would tell the RD a clean set has a problem.
+    const clean = await rateChannels(director.baseUrl, [5658, 5732, 5843, 5917]);
+    expect(clean.rating).toBe(100);
+    expect(clean.worst).toBeUndefined();
   });
 });

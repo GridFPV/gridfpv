@@ -8,10 +8,12 @@ import type {
   HeatSummary,
   LapList,
   LiveRaceState,
-  RoundDef
+  RoundDef,
+  SignalTraceView
 } from '@gridfpv/types';
 import { toasts } from '@gridfpv/components';
 import Marshaling from '../src/screens/Marshaling.svelte';
+import { REMOVED_HEAT_NAME } from '../src/lib/heats.js';
 import { makeTestSession } from './support.js';
 import {
   liveRunning,
@@ -65,6 +67,7 @@ describe('Marshaling (Slice 3)', () => {
     const heats: HeatSummary[] = [
       {
         heat: 'heat-1',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['ALICE'],
         round: 'r1',
         class: 'c1',
@@ -74,6 +77,7 @@ describe('Marshaling (Slice 3)', () => {
       },
       {
         heat: 'heat-2',
+        name: 'Qualifying R1 Heat 2',
         lineup: ['BOB'],
         round: 'r1',
         class: 'c1',
@@ -858,6 +862,75 @@ describe('Marshaling (Slice 3)', () => {
       expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 13, at: 43_000_000 } });
     });
 
+    it('collapses a gate-bounce burst to one line, and expands to per-crossing Restore (#517)', async () => {
+      // The complaint this issue came from: a bouncy gate put a row per reflection between every
+      // pair of real laps, and the laps became the minority of the list. Collapsed, the burst is
+      // one muted line; the individual crossings — and their Restores — are one click away.
+      const bouncy: LapList = {
+        competitors: [
+          {
+            competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+            laps: [
+              { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
+            ],
+            voided: [
+              { at: 41_061_000, pass_ref: 13, void_ref: 13, reason: 'SamePassBounce' as const },
+              { at: 41_193_000, pass_ref: 14, void_ref: 14, reason: 'SamePassBounce' as const },
+              { at: 41_254_000, pass_ref: 15, void_ref: 15, reason: 'SamePassBounce' as const }
+            ]
+          }
+        ]
+      };
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: bouncy });
+      render(Marshaling, { session });
+
+      // Collapsed: one summary, and none of the three crossings has a row of its own.
+      expect(screen.getByText(/3 same-pass crossings/)).toBeInTheDocument();
+      expect(screen.queryByText(/crossing at 41\.061s/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /Restore removed pass at 41\.061s/ })
+      ).not.toBeInTheDocument();
+
+      // Expanded: the ordinary removal rows, each with its own Restore. No bulk action exists.
+      await fireEvent.click(screen.getByRole('button', { name: /3 same-pass crossings/ }));
+      expect(
+        screen.getByText(/crossing at 41\.061s — same pass \(gate bounce\), auto-removed/)
+      ).toBeInTheDocument();
+      await fireEvent.click(
+        screen.getByRole('button', { name: /Restore removed pass at 41\.061s/ })
+      );
+      expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 13, at: 41_061_000 } });
+    });
+
+    it('a bounce burst does NOT collapse a genuinely short crossing beside it (#517)', async () => {
+      // The distinction the whole issue turns on. Both were `UnderMinLap` before #517, so the
+      // console could not hide one without hiding the other. The 3s crossing is a real pass the
+      // pilot made — it keeps its own row and its own Restore, at full prominence.
+      const mixed: LapList = {
+        competitors: [
+          {
+            competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+            laps: [
+              { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
+            ],
+            voided: [
+              { at: 41_061_000, pass_ref: 13, void_ref: 13, reason: 'SamePassBounce' as const },
+              { at: 44_000_000, pass_ref: 14, void_ref: 14, reason: 'UnderMinLap' as const }
+            ]
+          }
+        ]
+      };
+      const { session } = makeTestSession({ live: liveRunning, laps: mixed });
+      render(Marshaling, { session });
+      expect(screen.getByText(/1 same-pass crossing\b/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/crossing at 44\.000s — under min lap, auto-removed/)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: /Restore removed pass at 44\.000s/ })
+      ).toBeInTheDocument();
+    });
+
     it('Restore on a removed pass sends void-the-void at the STANDING removal event', async () => {
       const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: voidedLapList });
       render(Marshaling, { session });
@@ -1018,6 +1091,7 @@ describe('Marshaling (Slice 3)', () => {
     };
     const FN_HEAT: HeatSummary = {
       heat: 'q1-heat',
+      name: 'Qualifying R1 Heat 1',
       lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
       round: 'r1',
       class: 'c1',
@@ -1270,6 +1344,7 @@ describe('Marshaling (Slice 3)', () => {
       };
       const NODE_HEAT: HeatSummary = {
         heat: 'q1-heat',
+        name: 'Qualifying R1 Heat 1',
         lineup: ['node-0'],
         round: 'r1',
         class: 'c1',
@@ -1355,10 +1430,12 @@ describe('Marshaling (Slice 3)', () => {
       });
       render(Marshaling, { session });
 
-      // After the first (empty) read the names fall back to raw ids — the bug's visible symptom.
+      // After the first (empty) read the heat name cannot resolve — the bug's visible symptom. It
+      // still is not the raw id: `heatNameById` never prints a heat handle (#418).
       await waitFor(() => {
         const header = screen.getByRole('region', { name: 'Marshaling' }).querySelector('.heat');
-        expect(header?.textContent).toContain('q1-heat');
+        expect(header?.textContent).toContain(REMOVED_HEAT_NAME);
+        expect(header?.textContent).not.toContain('q1-heat');
       });
 
       // The active event settles — a fresh `EventMeta` assigned with no accompanying stream advance
@@ -1486,6 +1563,100 @@ describe('Marshaling (Slice 3)', () => {
       expect(
         (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
       ).toBe(false);
+    });
+
+    // --- the min-lap floor binds re-detection, not the RD's hand (#469) ---------------------
+    //
+    // The same fixture, but the heat now belongs to a round with a 25s minimum lap. Adding the
+    // 60s crossing would mint a 19s lap (41s → 60s) — under the floor. Because a commit inserts
+    // it as a MARSHAL-CREATED pass, which the corrected-passes fold exempts from the floor,
+    // nothing downstream could strip that lap: the refusal has to happen in the redetect math.
+    const FLOORED_ROUND = {
+      id: 'r-floor',
+      label: 'Qualifying',
+      classes: ['c1'],
+      format: 'timed_qual',
+      params: {},
+      win_condition: { Timed: { window_micros: 120_000_000 } },
+      seeding: 'FromRoster',
+      channel_mode: 'Static',
+      protest_window: 'Off',
+      min_lap_secs: 25
+    } as unknown as RoundDef;
+    const FLOORED_EVENT = {
+      id: 'e1',
+      name: 'Friday',
+      created_at: 0,
+      persistent: true,
+      timers: ['mock'],
+      roster: [],
+      classes: ['c1'],
+      rounds: [FLOORED_ROUND]
+    } as EventMeta;
+    const FLOORED_HEAT = {
+      heat: 'heat-1',
+      round: 'r-floor',
+      lineup: ['ALICE']
+    } as unknown as HeatSummary;
+
+    function renderFloored() {
+      return makeTestSession({
+        live: liveRunning,
+        laps: TUNE_LAPS,
+        signal: TUNE_TRACE,
+        event: FLOORED_EVENT,
+        listHeatsImpl: vi.fn(async () => [FLOORED_HEAT])
+      });
+    }
+
+    it('refuses to mint a re-detected lap under the round min lap, and flags why', async () => {
+      const { session, sendSpy } = renderFloored();
+      render(Marshaling, { session });
+      // Wait for the heats read (the floor is resolved from the heat's round).
+      await screen.findByLabelText('Enter threshold');
+
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+          'Would be 2 laps (+0 added, −0 removed, 1 under the 25s min lap refused)'
+        )
+      );
+      // Nothing to commit: the ONLY thing the new levels found was the sub-floor crossing.
+      expect(
+        (screen.getByRole('button', { name: 'Commit re-detection' }) as HTMLButtonElement).disabled
+      ).toBe(true);
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+
+    it('without the floor the identical re-detection DOES add the lap (control)', async () => {
+      // The un-floored fixture is the same trace, same levels — so the test above cannot be
+      // passing because the 60s peak went missing.
+      const { session } = renderTune();
+      render(Marshaling, { session });
+      await fireEvent.input(screen.getByLabelText('Enter threshold'), {
+        target: { value: '100' }
+      });
+      expect(screen.getByTestId('redetect-summary')).toHaveTextContent(
+        'Would be 3 laps (+1 added, −0 removed)'
+      );
+    });
+
+    it('the RD may still ADD a sub-floor lap by hand — the floor binds the automated path only', async () => {
+      // The other half of the rule: an explicit ruling outranks the floor. Typing a time 2s after
+      // ALICE's 41s pass — far under the 25s floor — still sends the InsertLap unrefused.
+      const { session, sendSpy } = renderFloored();
+      render(Marshaling, { session });
+      await fireEvent.click((await screen.findAllByRole('button', { name: '+ Add lap' }))[0]);
+      await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '43' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+      await waitFor(() => expect(sendSpy).toHaveBeenCalled());
+      const cmd = sendSpy.mock.calls[0][0] as {
+        InsertLap: { competitor: string; at: number };
+      };
+      expect(cmd.InsertLap.competitor).toBe('ALICE');
+      expect(cmd.InsertLap.at).toBe(43_000_000);
     });
 
     it('passes the new levels DROP interleave as struck "removed" rows in the one preview list', async () => {
@@ -1644,5 +1815,106 @@ describe('Marshaling (Slice 3)', () => {
     expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Void heat' })).toBeNull();
     expect(screen.queryByLabelText('Reverse ruling')).toBeNull();
+  });
+
+  // ── The pilot the timer never detected (#388) ────────────────────────────────────────────────
+  //
+  // The lap list used to be derived purely from observed passes, so a competitor with ZERO
+  // detections was absent from the projection entirely — and this screen, which keys its rows off
+  // the lap list, had nothing to render. Zero laps is precisely when marshaling matters most (a
+  // mis-tuned gate means the whole race must be rebuilt by hand from the RSSI trace), so the
+  // projection now seeds the list from the heat's LINEUP. These assert the screen does the right
+  // thing with such an entry: names it, shows its evidence, and addresses its insert correctly.
+  describe('a competitor the timer never detected (#388)', () => {
+    // A node-seeded heat on a SECOND timer: the zero-lap seat is `node-0` bound durably to
+    // Maverick, and its lap-list entry carries its own adapter (`rh-2`, not the default `rh-1`).
+    const ZERO_LAPS: LapList = {
+      competitors: [
+        { competitor: { adapter: 'rh-2', competitor: 'node-0' }, laps: [] },
+        {
+          competitor: { adapter: 'rh-2', competitor: 'node-1' },
+          laps: [
+            { number: 1, duration_micros: 40_000_000, at: 40_000_000, start_ref: 10, end_ref: 12 }
+          ]
+        }
+      ]
+    };
+    // The RSSI that streamed all along for the undetected seat — the evidence the RD rebuilds from.
+    const ZERO_TRACE: SignalTraceView = {
+      competitors: [
+        {
+          competitor: { adapter: 'rh-2', competitor: 'node-0' },
+          from: 0,
+          period_micros: 1_000_000,
+          samples: Array.from({ length: 60 }, (_, i) => 70 + (i % 5)),
+          enter: 110,
+          exit: 95
+        }
+      ]
+    };
+    const ZERO_LIVE: LiveRaceState = {
+      current_heat: 'q1-heat',
+      phase: 'Unofficial',
+      active_pilots: ['node-0', 'node-1'],
+      progress: [
+        { competitor: 'node-0', pilot: 'maverick-4d9rp8', laps_completed: 0 },
+        { competitor: 'node-1', laps_completed: 1, last_lap_micros: 40_000_000 }
+      ],
+      running_order: ['node-1', 'node-0']
+    };
+    const ZERO_PILOTS = [{ id: 'maverick-4d9rp8', callsign: 'Maverick', vtx_types: [] }];
+
+    function session0() {
+      return makeTestSession({
+        live: ZERO_LIVE,
+        heatLive: ZERO_LIVE,
+        laps: ZERO_LAPS,
+        signal: ZERO_TRACE,
+        listPilotsImpl: vi.fn(async () => ZERO_PILOTS as unknown as never),
+        listChannelsImpl: vi.fn(async () => [])
+      });
+    }
+
+    it('lists the zero-lap pilot BY CALLSIGN and renders its trace + empty lap box', async () => {
+      const { session } = session0();
+      render(Marshaling, { session });
+
+      // It is in the marshal-pilot picker at all (the regression: it used to be missing), and
+      // labelled by callsign — never the raw "node-0" seat (the friendly-name rule).
+      const picker = screen.getByLabelText('Marshal pilot') as HTMLSelectElement;
+      await waitFor(() =>
+        expect(Array.from(picker.options).map((o) => o.textContent?.trim())).toContain('Maverick')
+      );
+      const opt = Array.from(picker.options).find((o) => o.textContent?.trim() === 'Maverick')!;
+      expect(opt.value).toBe('node-0');
+      expect(Array.from(picker.options).map((o) => o.textContent?.trim())).not.toContain('node-0');
+
+      // Shown, it renders an empty lap box under its callsign — and the RSSI graph, so the RD can
+      // read the missed crossings off the evidence.
+      await fireEvent.change(picker, { target: { value: 'node-0' } });
+      await waitFor(() =>
+        expect(screen.getByRole('heading', { name: 'Maverick' })).toBeInTheDocument()
+      );
+      expect(screen.getByText('No laps yet.')).toBeInTheDocument();
+      expect(screen.getByLabelText('RSSI signal graph')).toBeInTheDocument();
+    });
+
+    it('addresses the recovered lap to the seat’s OWN timing source', async () => {
+      const { session, sendSpy } = session0();
+      render(Marshaling, { session });
+
+      await fireEvent.change(screen.getByLabelText('Marshal pilot'), {
+        target: { value: 'node-0' }
+      });
+      await fireEvent.click(screen.getByRole('button', { name: '+ Add lap' }));
+      await fireEvent.input(screen.getByLabelText('Add-lap time'), { target: { value: '9.5' } });
+      await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+
+      // `rh-2` — the adapter the seat's own lap-list entry carries. Sending the console's default
+      // `rh-1` would key the insert to a DIFFERENT competitor and split the pilot in two.
+      expect(sendSpy).toHaveBeenCalledWith({
+        InsertLap: { adapter: 'rh-2', competitor: 'node-0', at: 9_500_000, heat: 'q1-heat' }
+      });
+    });
   });
 });

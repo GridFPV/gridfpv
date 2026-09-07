@@ -2,6 +2,7 @@
 import type { ChannelMode } from "./ChannelMode";
 import type { ClassId } from "./ClassId";
 import type { GraceWindow } from "./GraceWindow";
+import type { LayoutId } from "./LayoutId";
 import type { ProtestWindow } from "./ProtestWindow";
 import type { SeedingRule } from "./SeedingRule";
 import type { StartProcedure } from "./StartProcedure";
@@ -57,6 +58,13 @@ time_limit_secs?: number,
  * qual round per-heat). Additive on the wire.
  */
 channel_mode?: ChannelMode, 
+/**
+ * The **channel layouts** this round's heats may fly (#117 S3). Optional — omit for none (the
+ * auto-pick, the pre-S3 behaviour). Each must name a layout this event has, and none twice.
+ * Stored on [`RoundDef::layouts`]; naming several makes the round's heats **alternate** across
+ * them in this order (#117 S3), which the RD may still override per heat.
+ */
+layouts?: Array<LayoutId>, 
 /**
  * The round's staging timer in seconds (heat-lifecycle Slice 2). Optional — omit for the
  * [`default_staging_timer_secs`] (300). Informational only (no auto-advance).

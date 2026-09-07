@@ -20,6 +20,11 @@
  * the single source of truth for "given this phase, which actions are legal, and what
  * `Command` does each emit" — built once here, unit-tested exhaustively, and consumed
  * by the live-control screen so the buttons and the tests agree by construction.
+ *
+ * The model has a **second axis** since #393: a heat's {@link HeatKind}. An open-practice heat
+ * walks the same phases and fires the same commands, but it produces no result — so it drops the
+ * result-ceremony verbs and spells `Restart` **"Run again"** (see {@link HeatKind}). That is the
+ * whole of the practice special case: presentation, decided here, with no branch below the console.
  */
 
 import type { Command, HeatId, HeatPhase } from '@gridfpv/types';
@@ -42,12 +47,39 @@ export type HeatAction =
   | 'Restart'
   | 'Discard';
 
+/**
+ * Which lifecycle a heat's actions follow — the second axis of the model (#393).
+ *
+ * `Competition` is every scored format: a run produces a result and the RD adjudicates it
+ * (`Finalize` makes it official, `Revert` re-opens it, `Advance` moves on).
+ *
+ * `Practice` is an **open-practice** heat, which produces no result at all. Since #398 its laps are
+ * ordinary logged `Pass` events like anyone else's, but the round is excluded from results,
+ * standings and rankings — so there is nothing to make official. Offering the ceremony verbs there
+ * asks the RD to adjudicate something that does not exist, and `Finalize` in particular is a trap:
+ * it strands the heat at `Final`, which the engine will not `Restart` from. A practice heat
+ * therefore renders **none** of the three ({@link actionsForKind}) and gets one obvious action at
+ * the end of a run instead — `Restart`, labelled **"Run again"**.
+ */
+export type HeatKind = 'Competition' | 'Practice';
+
 /** Actions that destroy or rewind progress — the console confirms these (§5). */
 export const DESTRUCTIVE_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>([
   'Revert',
   'Abort',
   'Restart',
   'Discard'
+]);
+
+/**
+ * The **result-ceremony** verbs: the ones that only mean anything once a run has produced a result
+ * to adjudicate. A {@link HeatKind} of `Practice` never renders them at all — see
+ * {@link actionsForKind} and {@link HeatKind}.
+ */
+export const CEREMONY_ACTIONS: ReadonlySet<HeatAction> = new Set<HeatAction>([
+  'Finalize',
+  'Advance',
+  'Revert'
 ]);
 
 /**
@@ -72,6 +104,23 @@ const PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
   Running: null,
   Unofficial: 'Finalize',
   Final: 'Advance'
+};
+
+/**
+ * The forward "primary" action for a **practice** heat (#393).
+ *
+ * Identical up to the end of the run; from there the obvious next step is not to adjudicate but to
+ * **go again**, so `Restart` (rendered "Run again") is the primary at `Unofficial` — and at `Final`
+ * too, for a practice heat that an armed protest window auto-finalized, so the RD is never stranded
+ * somewhere the console offers no way forward.
+ */
+const PRACTICE_PRIMARY_BY_PHASE: Record<HeatPhase, HeatAction | null> = {
+  Scheduled: 'Stage',
+  Staged: 'Start',
+  Armed: null,
+  Running: null,
+  Unofficial: 'Restart',
+  Final: 'Restart'
 };
 
 /**
@@ -104,6 +153,36 @@ const LEGAL_BY_PHASE: Record<HeatPhase, ReadonlySet<HeatAction>> = {
   Final: new Set<HeatAction>(['Advance', 'Revert', 'Discard'])
 };
 
+/**
+ * Which actions are legal in each phase for a **practice** heat (#393).
+ *
+ * The forward path and the off-ramps are the competition set minus every
+ * {@link CEREMONY_ACTIONS} verb: a practice run has no result, so there is nothing to finalize,
+ * re-open, or advance past. What is left at the end of a run is `Restart` — the "Run again" the RD
+ * actually wants — and `Discard`.
+ *
+ * `Final` is the one entry that is *more* permissive than the competition table. A practice heat
+ * cannot reach it through this console any more (there is no `Finalize` button to press), but an
+ * armed protest window auto-finalizes any heat, practice included, and an older session may have
+ * finalized one by hand. A heat parked there with only `Discard` on offer would be worse than the
+ * workflow this issue replaced — so "Run again" is offered there too, and
+ * {@link commandsForAction} re-opens the heat before resetting it (the engine restarts a committed
+ * heat only up to `Unofficial`).
+ */
+const PRACTICE_LEGAL_BY_PHASE: Record<HeatPhase, ReadonlySet<HeatAction>> = {
+  Scheduled: new Set<HeatAction>(['Stage']),
+  Staged: new Set<HeatAction>(['Start', 'Abort']),
+  Armed: new Set<HeatAction>(['Abort', 'Restart']),
+  Running: new Set<HeatAction>(['ForceEnd', 'Abort', 'Restart']),
+  Unofficial: new Set<HeatAction>(['Restart', 'Discard']),
+  Final: new Set<HeatAction>(['Restart', 'Discard'])
+};
+
+/** The legality table `kind` reads. */
+function legalTable(kind: HeatKind): Record<HeatPhase, ReadonlySet<HeatAction>> {
+  return kind === 'Practice' ? PRACTICE_LEGAL_BY_PHASE : LEGAL_BY_PHASE;
+}
+
 /** The display order actions render in (forward steps first, then overrides, then off-ramps). */
 export const ACTION_ORDER: readonly HeatAction[] = [
   'Stage',
@@ -117,19 +196,36 @@ export const ACTION_ORDER: readonly HeatAction[] = [
   'Discard'
 ];
 
-/** Is `action` legal to fire while the heat is in `phase`? */
-export function isActionLegal(phase: HeatPhase, action: HeatAction): boolean {
-  return LEGAL_BY_PHASE[phase].has(action);
+/**
+ * Every action the console **renders** for `kind`, in {@link ACTION_ORDER}.
+ *
+ * The controls row draws each of these once and disables the ones illegal in the current phase, so
+ * this is the set an RD can ever see. A practice heat drops the {@link CEREMONY_ACTIONS} entirely —
+ * not merely disabled, absent: a greyed-out `Finalize` still reads as "the thing I am supposed to
+ * do eventually", which is exactly the misdirection #393 is about.
+ */
+export function actionsForKind(kind: HeatKind = 'Competition'): HeatAction[] {
+  if (kind !== 'Practice') return [...ACTION_ORDER];
+  return ACTION_ORDER.filter((a) => !CEREMONY_ACTIONS.has(a));
 }
 
-/** Every action legal in `phase`, in {@link ACTION_ORDER}. */
-export function legalActions(phase: HeatPhase): HeatAction[] {
-  return ACTION_ORDER.filter((a) => isActionLegal(phase, a));
+/** Is `action` legal to fire while a `kind` heat is in `phase`? */
+export function isActionLegal(
+  phase: HeatPhase,
+  action: HeatAction,
+  kind: HeatKind = 'Competition'
+): boolean {
+  return legalTable(kind)[phase].has(action);
+}
+
+/** Every action legal in `phase` for `kind`, in {@link ACTION_ORDER}. */
+export function legalActions(phase: HeatPhase, kind: HeatKind = 'Competition'): HeatAction[] {
+  return actionsForKind(kind).filter((a) => isActionLegal(phase, a, kind));
 }
 
 /** The single forward "primary" action for `phase`, or `null` at no obvious step. */
-export function primaryAction(phase: HeatPhase): HeatAction | null {
-  return PRIMARY_BY_PHASE[phase];
+export function primaryAction(phase: HeatPhase, kind: HeatKind = 'Competition'): HeatAction | null {
+  return kind === 'Practice' ? PRACTICE_PRIMARY_BY_PHASE[phase] : PRIMARY_BY_PHASE[phase];
 }
 
 /** Does this action need a confirm before firing (clients.html §5)? */
@@ -167,8 +263,33 @@ export function commandForAction(action: HeatAction, heat: HeatId): Command {
   }
 }
 
+/**
+ * The command(s) an action fires, **in order** — what the console actually sends.
+ *
+ * Every action is one command ({@link commandForAction}) with a single exception: practice's
+ * "Run again" from `Final`. The engine restarts a committed heat only up to `Unofficial`
+ * (`heat.rs`: `Armed | Running | Unofficial` + `Restart` → `Restarted`), so a practice heat that an
+ * armed protest window auto-finalized has to be re-opened first. The console spells that as one
+ * button and sends the two commands itself, rather than making the RD reach for `Revert` — the
+ * adjudication verb this format has no use for.
+ */
+export function commandsForAction(
+  action: HeatAction,
+  heat: HeatId,
+  phase: HeatPhase,
+  kind: HeatKind = 'Competition'
+): Command[] {
+  if (kind === 'Practice' && action === 'Restart' && phase === 'Final') {
+    return [{ Revert: { heat } }, { Restart: { heat } }];
+  }
+  return [commandForAction(action, heat)];
+}
+
 /** A short human label for an action button. */
-export function actionLabel(action: HeatAction): string {
+export function actionLabel(action: HeatAction, kind: HeatKind = 'Competition'): string {
+  // Practice re-runs constantly and adjudicates nothing, so its `Restart` is named for what the RD
+  // is doing — going again — not for throwing out a contested run (#393). Same command, same reset.
+  if (kind === 'Practice' && action === 'Restart') return 'Run again';
   switch (action) {
     // The command stays ForceEnd on the wire; to the RD it is simply the race's Stop button.
     case 'ForceEnd':
@@ -181,7 +302,17 @@ export function actionLabel(action: HeatAction): string {
 }
 
 /** A one-line description of what an action does, for tooltips / confirms. */
-export function actionDescription(action: HeatAction): string {
+export function actionDescription(action: HeatAction, kind: HeatKind = 'Competition'): string {
+  if (kind === 'Practice') {
+    switch (action) {
+      case 'Restart':
+        return 'Clear the board and run practice again — the heat re-stages from the top.';
+      case 'Discard':
+        return 'End this practice session — the heat is thrown away, laps and all.';
+      default:
+        break;
+    }
+  }
   switch (action) {
     case 'Stage':
       return 'Call pilots to the line and stage the heat.';

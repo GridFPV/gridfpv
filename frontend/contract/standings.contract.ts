@@ -17,25 +17,28 @@ import {
   createClass,
   createPilot,
   createRound,
-  PRACTICE_EVENT_ID,
   roundRanking,
   roundStandings,
   setClassMembership,
   setEventClasses,
   setEventRoster
 } from '../packages/protocol-client/dist/index.js';
-import { type Director } from '../test-harness/director.ts';
-import { driveToRunning, eventRoot, rdControl, startContractDirector } from './harness.ts';
+import {
+  driveToRunning,
+  rdControl,
+  startDirectorWithEvent,
+  type ContractDirector
+} from './harness.ts';
 
 const TOKEN = 'rd-standings-contract';
 const HEAT = 's-1';
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
   // A brisk sim (one quick lap) so the heat scores fast; the sim makes the top seed faster than
   // the next, giving a deterministic A-before-B round ranking.
-  director = await startContractDirector({ token: TOKEN, simLaps: 1, simLapMs: 30 });
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 1, simLapMs: 30 });
 });
 
 afterAll(async () => {
@@ -49,11 +52,11 @@ describe('GET round ranking + class standings serve the season-join projections'
     const pilotA = await createPilot(director.baseUrl, { callsign: 'alpha' }, TOKEN);
     const pilotB = await createPilot(director.baseUrl, { callsign: 'bravo' }, TOKEN);
 
-    await setEventClasses(director.baseUrl, PRACTICE_EVENT_ID, [klass.id], TOKEN);
-    await setEventRoster(director.baseUrl, PRACTICE_EVENT_ID, [pilotA.id, pilotB.id], TOKEN);
+    await setEventClasses(director.baseUrl, director.event, [klass.id], TOKEN);
+    await setEventRoster(director.baseUrl, director.event, [pilotA.id, pilotB.id], TOKEN);
     await setClassMembership(
       director.baseUrl,
-      PRACTICE_EVENT_ID,
+      director.event,
       klass.id,
       [pilotA.id, pilotB.id],
       TOKEN
@@ -62,7 +65,7 @@ describe('GET round ranking + class standings serve the season-join projections'
     // A single-round timed_qual over the class (BestLap), seeded from the roster membership.
     const round = await createRound(
       director.baseUrl,
-      PRACTICE_EVENT_ID,
+      director.event,
       {
         label: 'Qualifying',
         classes: [klass.id],
@@ -79,7 +82,7 @@ describe('GET round ranking + class standings serve the season-join projections'
     // Schedule the round's heat tagged with the round + class; lineup is the two members.
     expect(
       (
-        await rdControl(director.baseUrl, TOKEN, {
+        await rdControl(director, TOKEN, {
           ScheduleHeat: {
             heat: HEAT,
             lineup: [pilotA.id, pilotB.id],
@@ -92,24 +95,24 @@ describe('GET round ranking + class standings serve the season-join projections'
 
     // Drive the heat to Running; the sim bridge emits a holeshot + one lap per pilot, with the
     // top seed (A) faster than the next (B) — a deterministic round ranking.
-    await driveToRunning(director.baseUrl, TOKEN, HEAT);
+    await driveToRunning(director, TOKEN, HEAT);
 
     // Wait until both pilots have banked their lap (a `laps` projection shows a completed lap each)
     // before closing the heat, so the scored result is final.
-    await waitForBothLaps(director.baseUrl, HEAT);
+    await waitForBothLaps(director.eventRoot, HEAT);
 
     // Close the heat: ForceEnd (the completion override) → Finalize.
-    expect((await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } })).ok).toBe(true);
-    expect((await rdControl(director.baseUrl, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
+    expect((await rdControl(director, TOKEN, { ForceEnd: { heat: HEAT } })).ok).toBe(true);
+    expect((await rdControl(director, TOKEN, { Finalize: { heat: HEAT } })).ok).toBe(true);
 
     // 1) The round ranking: best-first, A ahead of B, positions 1-based.
-    const ranking = await roundRanking(director.baseUrl, PRACTICE_EVENT_ID, round.id);
+    const ranking = await roundRanking(director.baseUrl, director.event, round.id);
     expect(ranking.map((e) => e.competitor)).toEqual([pilotA.id, pilotB.id]);
     expect(ranking[0].position).toBe(1);
 
     // 1b) The round standings: same competitors + positions as the ranking, each with a best lap
     // and the BestLap win-condition metric (this round is scored under BestLap).
-    const standingsByRound = await roundStandings(director.baseUrl, PRACTICE_EVENT_ID, round.id);
+    const standingsByRound = await roundStandings(director.baseUrl, director.event, round.id);
     expect(standingsByRound.map((s) => [s.competitor, s.position])).toEqual(
       ranking.map((e) => [e.competitor, e.position])
     );
@@ -117,7 +120,7 @@ describe('GET round ranking + class standings serve the season-join projections'
     expect(standingsByRound[0].metric).toHaveProperty('BestLap');
 
     // 2) The class standings: one row per pilot, aggregated across the class's rounds, best first.
-    const standings = await classStandings(director.baseUrl, PRACTICE_EVENT_ID, klass.id);
+    const standings = await classStandings(director.baseUrl, director.event, klass.id);
     expect(standings.class).toBe(klass.id);
     expect(standings.standings.map((s) => s.competitor)).toEqual([pilotA.id, pilotB.id]);
     expect(standings.standings[0].position).toBe(1);
@@ -128,10 +131,10 @@ describe('GET round ranking + class standings serve the season-join projections'
 });
 
 /** Poll the heat's `laps` projection until every competitor present has at least one completed lap. */
-async function waitForBothLaps(baseUrl: string, heat: string, timeoutMs = 10_000): Promise<void> {
+async function waitForBothLaps(eventRoot: string, heat: string, timeoutMs = 10_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const resp = await fetch(`${eventRoot(baseUrl)}/snapshot/heat/${heat}?projection=laps`);
+    const resp = await fetch(`${eventRoot}/snapshot/heat/${heat}?projection=laps`);
     if (resp.ok) {
       const snap = (await resp.json()) as {
         body: { LapList?: { competitors: Array<{ laps: unknown[] }> } };

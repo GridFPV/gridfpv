@@ -53,10 +53,12 @@ use gridfpv_events::{
 };
 use gridfpv_projection::{CompetitorKey, registrations};
 use gridfpv_server::app::AppState;
+#[cfg(feature = "live")]
+use gridfpv_server::channels;
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::pilots::PilotDirectory;
 use gridfpv_server::scope::EventId;
-use gridfpv_server::timers::{TimerId, TimerKind, TimerRegistry};
+use gridfpv_server::timers::{Timer, TimerId, TimerKind, TimerRegistry};
 use gridfpv_storage::Offset;
 use tokio::task::JoinHandle;
 
@@ -69,6 +71,8 @@ mod rh_connections;
 mod rotorhazard;
 #[cfg(feature = "live")]
 pub use rh_connections::{RhConnections, spawn_rh_reconciler};
+#[cfg(feature = "live")]
+use rotorhazard::TuneNode;
 
 /// How often the bridge polls the log tail for new heat-loop events. Short enough that a
 /// `Start` click feels instant (the first pass lands within a poll), long enough to be a
@@ -149,11 +153,6 @@ pub struct PassSink {
     gate: Option<ActiveSourceGate>,
     /// The timer this sink feeds for; appends pass the gate only while it is the active source.
     timer: Option<TimerId>,
-    /// The **open-practice** heat this sink feeds, if any (open-practice format, Slice 1). When set,
-    /// the sink routes passes into the event's in-memory per-channel accumulator (NOT the log) and
-    /// wakes `/stream` to push the fresh per-channel live state — so an open-practice session's
-    /// passes are *never* appended to the durable log (only its `HeatScheduled` + start/stop are).
-    open_practice: Option<HeatId>,
     /// The heat this sink feeds — **stamped onto every appended pass** (`Pass::heat`), so pass
     /// attribution is by tag, not log position (a heat-span event landing mid-race can no longer
     /// steal the running heat's laps). The bridge sets it when it builds a Running heat's sinks;
@@ -170,7 +169,6 @@ impl PassSink {
             adapter,
             gate: None,
             timer: None,
-            open_practice: None,
             heat: None,
         }
     }
@@ -188,18 +186,8 @@ impl PassSink {
             adapter,
             gate: Some(gate),
             timer: Some(timer),
-            open_practice: None,
             heat: None,
         }
-    }
-
-    /// Mark this sink as feeding the **open-practice** `heat` (open-practice format, Slice 1):
-    /// passes are routed into the event's in-memory per-channel accumulator and `/stream` is woken,
-    /// rather than appended to the log. Builder style — applied to a gated/plain sink for an
-    /// open-practice heat so its laps are tracked live but never logged.
-    pub fn for_open_practice(mut self, heat: HeatId) -> Self {
-        self.open_practice = Some(heat);
-        self
     }
 
     /// Bind this sink to the heat it feeds: every appended pass is stamped `Pass::heat` so the
@@ -242,14 +230,6 @@ impl PassSink {
             signal: None,
             heat: self.heat.clone(),
         };
-        // Open practice (open-practice format, Slice 1): route the pass into the in-memory
-        // per-channel accumulator and wake `/stream` — it is **never** appended to the log.
-        if self.open_practice.is_some() {
-            if self.state.open_practice().record(pass) {
-                self.state.wake_streams();
-            }
-            return Ok(());
-        }
         self.state
             .append(Event::Pass(pass), None)
             .map_err(|e| SourceError(format!("{e:?}")))?;
@@ -267,16 +247,6 @@ impl PassSink {
         // The connection stays live (hot standby) — only its appends are gated here.
         if !self.feeds() {
             return Ok(());
-        }
-        // Open practice (open-practice format, Slice 1): a lap-gate pass from a live RH source is
-        // routed into the in-memory accumulator (not logged); any non-pass event still appends.
-        if self.open_practice.is_some() {
-            if let Event::Pass(pass) = event {
-                if pass.gate.is_lap_gate() && self.state.open_practice().record(pass) {
-                    self.state.wake_streams();
-                }
-                return Ok(());
-            }
         }
         // Stamp the sink's heat onto the pass (tag attribution — see `for_heat`): the adapter
         // built the pass without one; the sink is the component that knows which heat it feeds.
@@ -479,7 +449,7 @@ pub const REGISTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection live (resolving each
 /// id through the app-level [`TimerRegistry`]) when a heat starts. A selected **Mock** timer runs
 /// the synthetic emission with *that timer's* `laps`/`lap_ms`; a selected **RotorHazard** timer is
-/// a no-op stub (2b / #65 connects it). The built-in Mock's config comes from the env
+/// not driven by the sim bridge — the RH connection reconciler dials it (#65/#73). The built-in Mock's config comes from the env
 /// defaults seeded into the timer registry.
 ///
 /// This spawner seeds a bridge for every event present at startup (Practice + any already-loaded
@@ -554,7 +524,7 @@ pub fn spawn_registry_bridge(
 /// On a `Running` transition the bridge reads the event's current
 /// [`EventMeta::timers`](gridfpv_server::events::EventMeta::timers) selection from `registry`,
 /// resolves each id through `timers`, and builds the [`LapSource`] for it (a Sim timer's
-/// `laps`/`lap_ms`; a RotorHazard timer is skipped as a no-op stub). Exposed (crate-internal) so
+/// `laps`/`lap_ms`; a RotorHazard timer is skipped here — its passes come from the real adapter). Exposed (crate-internal) so
 /// the test harness can run it directly against an in-memory [`AppState`].
 pub(crate) async fn run_bridge(
     state: AppState,
@@ -964,17 +934,6 @@ fn handle_transition(
             if lineup.is_empty() {
                 return;
             }
-            // Open practice (open-practice format, Slice 1): an open-practice heat's passes are
-            // tracked **in memory, per channel — never logged**. Begin the accumulator over the
-            // heat's channel lineup (this also clears any prior open-practice state, e.g. a
-            // superseded heat) and mark each source's sink so its passes route there + wake
-            // `/stream`. A non-open-practice heat leaves the accumulator untouched.
-            let open_practice = is_open_practice_heat(state, registry, event_id, &heat);
-            if open_practice {
-                state.open_practice().begin(heat.clone(), lineup.clone());
-                // Push the cleared/initial live state so a subscriber sees the fresh empty heat.
-                state.wake_streams();
-            }
             // Issue #112: the **active-source gate** — only the active source's passes feed the log
             // (the primary while healthy, else the first healthy alternate). All selected timers
             // still run (hot standby); the gate drops a non-active source's passes. It is seeded
@@ -989,12 +948,8 @@ fn handle_transition(
             let sources = selected_sources(registry, timers, event_id);
             let mut handles = Vec::with_capacity(sources.len());
             for (timer_id, source) in sources {
-                let mut sink =
-                    PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id)
-                        .for_heat(heat.clone());
-                if open_practice {
-                    sink = sink.for_open_practice(heat.clone());
-                }
+                let sink = PassSink::gated(state.clone(), adapter.clone(), gate.clone(), timer_id)
+                    .for_heat(heat.clone());
                 let run = HeatRun {
                     heat: heat.clone(),
                     lineup: lineup.clone(),
@@ -1014,16 +969,13 @@ fn handle_transition(
             let armed_rh = {
                 let mut armed = Vec::new();
                 for timer_id in selected_rh_timers(registry, timers, event_id) {
-                    let mut sink = PassSink::gated(
+                    let sink = PassSink::gated(
                         state.clone(),
                         adapter.clone(),
                         gate.clone(),
                         timer_id.clone(),
                     )
                     .for_heat(heat.clone());
-                    if open_practice {
-                        sink = sink.for_open_practice(heat.clone());
-                    }
                     if connections.arm_heat(event_id, &timer_id, lineup.clone(), sink) {
                         armed.push(timer_id);
                     }
@@ -1055,7 +1007,9 @@ fn handle_transition(
             });
         }
         // Any transition that takes the heat off `Running` stops its emission. The bridge
-        // only emits while `Running`, mirroring `consumes_pass` (race-engine §2).
+        // only emits while `Running` — which is why the grace window (#505) holds the heat
+        // IN `Running` after RaceExpired rather than reopening a closed one: a pilot's
+        // finish-the-lap crossing must still be on the log for the corrected fold to keep.
         HeatTransition::Finished
         | HeatTransition::Aborted
         | HeatTransition::Finalized
@@ -1074,25 +1028,6 @@ fn handle_transition(
                         );
                     }
                 }
-            }
-            // Open practice (open-practice format, Slice 1): **clear on stop**. Drop the in-memory
-            // per-channel accumulator when the open-practice heat reaches a terminal / abort / restart
-            // transition, then wake `/stream` so it re-folds the now-overlay-free log state (the
-            // console settles back onto the bare log — no stale laps frame). The `Finished`
-            // (Running → Unofficial) step is *kept* so the RD still sees the final practice laps
-            // before finalizing; the true terminals below clear it. A new heat/round becoming active
-            // also clears it (via `begin`).
-            //
-            // The overlay is **laps-only** now: the heat's phase/clock are always the real log's
-            // (this same `HeatStateChanged` was already appended and woke the stream), so the served
-            // phase follows the log to `Unofficial` here and to `Scheduled` on a `Restart` with no
-            // shadow-tracking. We therefore only need to clear the laps on the terminals and wake.
-            if state.open_practice().is_active(&heat)
-                && !matches!(transition, HeatTransition::Finished)
-                && state.open_practice().clear()
-            {
-                // Wake-on-clear: re-fold without the overlay so the laps drop immediately.
-                state.wake_streams();
             }
             // Auto-official timer (marshaling Slice 5): the two transitions that land the heat in
             // `Unofficial` — `Finished` (race-end) and `Reverted` (a finalized result re-opened) —
@@ -1123,9 +1058,16 @@ fn handle_transition(
         HeatTransition::Staged => {
             #[cfg(feature = "live")]
             {
-                let plan = tune_plan_of(state, &heat);
-                let seats = seats_of(state, registry, &heat);
+                // #412: the tune plan and the seating are both **per timer** now. A heat's
+                // lineup position `n` maps to the timer's *n*-th ENABLED node, which is not `n`
+                // once the RD has switched one off — and two selected timers may have different
+                // nodes disabled, so one shared plan would seat a pilot on the wrong gate.
                 for timer_id in selected_rh_timers(registry, timers, event_id) {
+                    let Some(timer) = timers.get(&timer_id) else {
+                        continue;
+                    };
+                    let plan = tune_plan_of(state, &timer, &heat);
+                    let seats = seats_of(state, registry, &timer, &heat);
                     // Ready RH for an instant start at Grid's go: zero its staging hold/tones + reset
                     // to READY now, well before the Armed hold + tone fire. Retires the old at-go
                     // reset/stage race (the `STAGE_RESET_SETTLE` band-aid).
@@ -1310,11 +1252,25 @@ fn lineup_of(state: &AppState, heat: &HeatId) -> Option<Vec<CompetitorRef>> {
 }
 
 /// The per-pilot frequency assignment of `heat` from its most recent `HeatScheduled` (race redesign
-/// Slice 4a), mapped onto **node indices** for the RH `set_frequency` tune: node `n` runs
-/// `lineup[n]`, so a competitor's assigned MHz is applied to the node at its lineup position. A heat
-/// with no assigned frequencies (a sim/un-channelled heat) yields an empty plan (no tuning).
+/// Slice 4a), mapped onto **real node indices** for the RH `set_frequency` tune, each carrying the
+/// catalog band/channel that labels it on RotorHazard's own screen (#421).
+///
+/// The node a competitor's MHz is applied to is its seat on `timer` — [`Timer::seat_nodes`], which
+/// walks the timer's **enabled** indices rather than `0..lineup.len()` (#412). Tuning by lineup
+/// position would put the heat's third pilot's channel on node 2 while RotorHazard seats them on
+/// node 3: the pilot flies a gate tuned to somebody else's video channel, which is a dead node with
+/// extra steps. A **disabled node is never tuned** — it is not offered a channel at all.
+///
+/// The **label** is resolved here, once, through the catalog's single resolver
+/// (`gridfpv_server::channels::label_of`) — the same one the Tune page's write goes through — so
+/// both write paths put the *same* name on RotorHazard for the same frequency. `HeatScheduled`
+/// stores raw allocated MHz, and the catalog's first matching entry wins deterministically, so this
+/// needs nothing on the wire. A **custom** frequency the catalog does not know resolves to `None`
+/// and is emitted as a bare frequency — never an invented label.
+///
+/// A heat with no assigned frequencies (a sim/un-channelled heat) yields an empty plan (no tuning).
 #[cfg(feature = "live")]
-fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
+fn tune_plan_of(state: &AppState, timer: &Timer, heat: &HeatId) -> Vec<TuneNode> {
     let Some(stored) = state.log().lock().ok().and_then(|g| g.read_all().ok()) else {
         return Vec::new();
     };
@@ -1329,14 +1285,26 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
         } = s.event
         {
             if &h == heat {
-                // Map each (competitor, mhz) to the competitor's node seat (its lineup index).
+                // Map each (competitor, mhz) onto the REAL node that competitor is seated on.
+                let seats = timer.seat_nodes(&lineup);
                 plan = frequencies
                     .into_iter()
                     .filter_map(|(competitor, mhz)| {
-                        lineup
+                        seats
                             .iter()
-                            .position(|c| *c == competitor)
-                            .map(|node| (node as u64, mhz))
+                            .find(|(_, seated)| *seated == competitor)
+                            .map(|(node, _)| {
+                                // `unzip` is the honest shape: the catalog answers with both
+                                // halves of a label or with neither, and a half-label is not a
+                                // thing RotorHazard can be told.
+                                let (band, channel) = channels::label_of(mhz).unzip();
+                                TuneNode {
+                                    node: *node as u64,
+                                    mhz,
+                                    band,
+                                    channel,
+                                }
+                            })
                     })
                     .collect();
             }
@@ -1347,29 +1315,35 @@ fn tune_plan_of(state: &AppState, heat: &HeatId) -> Vec<(u64, u16)> {
 
 /// The heat's **node→pilot seating** for RotorHazard (the laps-attribute fix): one
 /// `(node_index, callsign)` per **bound** node of `heat`, read from the heat's lineup (its durable
-/// `HeatScheduled` bind — node `n` runs `lineup[n]`).
+/// `HeatScheduled` bind).
 ///
-/// `lineup[n]` is the **pilot ref** for node `n` (the round engine builds the field as
-/// `CompetitorRef(pilot_id)`), so each bound node resolves to its pilot's **callsign** via the
-/// directory (CLAUDE.md: resolve a ref to its friendly name from a durable source, never print the
-/// raw id). An open-practice / unchannelled heat seats per **channel** as `node-{i}` refs (no bound
-/// pilot) — those are skipped here, leaving an empty plan (RH then races in practice mode). A pilot
-/// ref that does not resolve falls back to the raw ref string as a last resort so the node is still
-/// seated (RH records there) rather than dropped.
+/// `node_index` is the **real** node the pilot flies — [`Timer::seat_nodes`] walks `timer`'s enabled
+/// indices, so the heat's third pilot sits on node 3 when node 2 is disabled, not on node 2 (#412).
+/// RotorHazard's `alter_heat` is keyed on that real `seat_index`, so getting it wrong seats the
+/// pilot on the dead node this whole feature exists to keep them off — and their laps would land on
+/// somebody else's row.
+///
+/// Each bound seat resolves to its pilot's **callsign** via the directory (CLAUDE.md: resolve a ref
+/// to its friendly name from a durable source, never print the raw id). An open-practice /
+/// unchannelled heat seats per **channel** as `node-{i}` refs (no bound pilot) — those are skipped
+/// here, leaving an empty plan (RH then races in practice mode). A pilot ref that does not resolve
+/// falls back to the raw ref string as a last resort so the node is still seated (RH records there)
+/// rather than dropped.
 #[cfg(feature = "live")]
-fn seats_of(state: &AppState, registry: &EventRegistry, heat: &HeatId) -> Vec<(u64, String)> {
+fn seats_of(
+    state: &AppState,
+    registry: &EventRegistry,
+    timer: &Timer,
+    heat: &HeatId,
+) -> Vec<(u64, String)> {
     let Some(lineup) = lineup_of(state, heat) else {
         return Vec::new();
     };
     let pilots = registry.pilots();
     let mut seats = Vec::new();
-    for (node, competitor) in lineup.into_iter().enumerate() {
+    for (node, competitor) in timer.seat_nodes(&lineup) {
         // An open-practice seat (`node-{i}`) names a channel, not a bound pilot: leave it unseated.
-        if competitor
-            .0
-            .strip_prefix("node-")
-            .is_some_and(|s| s.parse::<usize>().is_ok())
-        {
+        if gridfpv_server::timers::node_seat_index(&competitor).is_some() {
             continue;
         }
         let pilot_id = gridfpv_server::scope::PilotId(competitor.0.clone());
@@ -1447,7 +1421,14 @@ fn heat_clock_config(
         Some(r) => HeatClockConfig {
             start_procedure: r.start_procedure,
             win_condition: r.win_condition,
-            grace_window: r.grace_window,
+            // Resolved through the engine rule, not read raw: a first-to-N round has NO grace
+            // window whatever the round stores (#471). Applied once here so both `grace_hold`
+            // call sites below — the criterion hold and the Timed wall-clock fallback — get the
+            // effective window rather than each remembering the exception.
+            grace_window: gridfpv_engine::heat::effective_grace_window(
+                r.win_condition,
+                r.grace_window,
+            ),
             time_limit_secs: r.time_limit_secs,
             protest_window: r.protest_window,
         },
@@ -1458,7 +1439,12 @@ fn heat_clock_config(
         None => HeatClockConfig {
             start_procedure: StartProcedure::default(),
             win_condition: default_sim_win_condition(),
-            grace_window: gridfpv_server::events::default_grace_window(),
+            // Same rule: the sim's condition IS first-to-N, so this resolves to no grace window
+            // and a sim heat closes the moment its last flying pilot banks the target lap.
+            grace_window: gridfpv_engine::heat::effective_grace_window(
+                default_sim_win_condition(),
+                gridfpv_server::events::default_grace_window(),
+            ),
             time_limit_secs: None,
             // A round-less heat (sim/free-text) has no protest window: manual finalize only.
             protest_window: ProtestWindow::Off,
@@ -1474,27 +1460,6 @@ fn default_sim_win_condition() -> gridfpv_engine::scoring::WinCondition {
     gridfpv_engine::scoring::WinCondition::FirstToLaps {
         n: DEFAULT_SIM_LAPS,
     }
-}
-
-/// Whether `heat` is an **open-practice** heat (open-practice format, Slice 1): its most-recent
-/// `HeatScheduled.round` resolves to a round that [`is_open_practice`](gridfpv_server::round_engine::is_open_practice).
-///
-/// The bridge uses this on a `Running` transition to decide whether to route the heat's passes into
-/// the in-memory per-channel accumulator (open practice) rather than the log. A heat with no round
-/// tag, or a round that is not open-practice, returns `false` (the normal logged path).
-fn is_open_practice_heat(
-    state: &AppState,
-    registry: &EventRegistry,
-    event_id: &EventId,
-    heat: &HeatId,
-) -> bool {
-    let Some(round_id) = round_of_heat(state, heat) else {
-        return false;
-    };
-    registry
-        .rounds_of(event_id)
-        .and_then(|rounds| rounds.into_iter().find(|r| r.id == round_id))
-        .is_some_and(|r| gridfpv_server::round_engine::is_open_practice(&r))
 }
 
 /// The `RoundId` tag on `heat`'s most-recent `HeatScheduled`, if any.
@@ -1555,20 +1520,8 @@ fn runtime_rng() -> u64 {
 /// **first lap-gate pass** while `Running`, matching how `completed_heats` derives `race_start`. The
 /// passes carry the source clock; the first crossing opens the shared race clock. `None` until the
 /// first pass lands (no crossing yet ⇒ the race-end criterion cannot be met).
-fn race_start_of(passes: &[Pass]) -> Option<SourceTime> {
-    passes.first().map(|p| p.at)
-}
-
-/// The grace hold, as a wall-clock `Duration`, for the completion driver: how long to keep the heat
-/// `Running` for trailing pilots after the win condition is met (heat-lifecycle Slice 2). An open
-/// [`GraceWindow::UntilScored`] would never auto-fire, so it is treated as **zero** here (the RD
-/// would `ForceEnd` / `Finalize` such a round); a bounded [`GraceWindow::Duration`] maps its source
-/// microseconds to a real-time hold of the same length.
-fn grace_hold(grace: GraceWindow) -> Duration {
-    match grace {
-        GraceWindow::Duration { micros } if micros > 0 => Duration::from_micros(micros as u64),
-        _ => Duration::ZERO,
-    }
+fn race_start_of(passes: &[(u64, Pass)]) -> Option<SourceTime> {
+    passes.first().map(|(_, p)| p.at)
 }
 
 /// Spawn the **start driver** for a heat that just entered `Armed` (heat-lifecycle Slice 2).
@@ -1637,30 +1590,34 @@ fn spawn_start_driver(
     })
 }
 
-/// Spawn the **completion driver** for a heat that just entered `Running` (heat-lifecycle Slice 2).
+/// Spawn the **completion driver** for a heat that just entered `Running` (heat-lifecycle Slice 2,
+/// grace rework #505).
 ///
-/// Polls the heat's running passes every [`COMPLETION_POLL`]; once the round's win condition is met
-/// (the pure [`race_end_reached`] over the passes + the race-start time), it holds the configured
-/// **grace window** for trailing pilots, then appends the `HeatStateChanged { Finished }`
-/// auto-transition (the `Running → Unofficial` step). Cancelled by the bridge if the heat leaves
-/// `Running` first (an abort / restart / a manual `ForceEnd`), so a superseded heat never appends a
-/// stale `Finished`. A round whose win condition has no intrinsic end (a bare qual — see
-/// [`race_end_reached`]) simply never fires here; the RD ends it with `ForceEnd`.
+/// Polls the heat's running passes every [`COMPLETION_POLL`] and closes the heat in two stages:
 ///
-/// **Timed-window fallback:** a [`Timed`](gridfpv_engine::scoring::WinCondition::Timed) round's
-/// pass-based criterion needs a crossing at/after the cutoff to fire — if every pilot lands at the
-/// buzzer, no such pass ever arrives. The driver therefore also closes a Timed heat on the wall
-/// clock once the window plus the grace hold has elapsed (anchored to the first observed pass, or
-/// to race-go when nobody ever crossed), so a timed heat always ends on its own.
+/// 1. **The race is over** when its fixed end passes on the wall clock — the round's
+///    [`time_limit_secs`](gridfpv_server::events::RoundDef::time_limit_secs) measured from
+///    race-go, or a [`Timed`](gridfpv_engine::scoring::WinCondition::Timed) window measured from
+///    the first observed pass — or when the pure pass-based criterion
+///    ([`race_end_reached`]) fires, whichever lands first.
+/// 2. **Then the grace window runs.** With a zero effective grace (first-to-N by #471, or a
+///    configured 0) the heat closes immediately, exactly as before. With a non-zero grace the
+///    driver appends the **`RaceExpired` marker** — the logged end-of-race-tone instant whose
+///    log position is the scoring boundary (each pilot's first pass after it still counts; the
+///    corrected fold voids the rest as `AfterRaceEnd`) — and holds the heat `Running` until the
+///    grace deadline passes **or** every still-flying pilot has taken their post-expiry crossing
+///    ([`gridfpv_engine::scoring::grace_satisfied`] — nothing further can score, so the heat
+///    ends early). An unbounded
+///    [`GraceWindow::UntilScored`] has no deadline: only the all-crossed rule (or the RD's
+///    `ForceEnd`) closes it.
 ///
-/// **Open-practice time limit (open-practice refinement):** when the round carries a
-/// [`time_limit_secs`](gridfpv_server::events::RoundDef::time_limit_secs), the driver auto-ends the
-/// heat once its elapsed running time reaches the limit — **independent of the win condition** (an
-/// open-practice heat does no scoring and its passes are never logged, so the win-condition path
-/// never fires for it; the time limit is the only end condition). The elapsed clock starts when the
-/// heat enters `Running` (this driver's spawn), so it is the same deterministic, logged transition
-/// the other autos key off — a 1-hour practice ends itself an hour after Start. With no limit set,
-/// only the win-condition path can fire (the RD ends an open practice manually).
+/// Cancelled by the bridge if the heat leaves `Running` first (an abort / restart / a manual
+/// `ForceEnd`), and every append is fire-time re-checked, so a superseded heat never receives a
+/// stale marker or `Finished`. A round whose win condition has no intrinsic end and no time limit
+/// (a bare qual) never fires here; the RD ends it with `ForceEnd`. Nothing branches on the
+/// format: practice runs the same driver as every other round, over the same logged passes (a
+/// practice's `time_limit_secs` is simply its only fixed end, its win condition being the inert
+/// `BestLap`).
 fn spawn_completion_driver(
     state: &AppState,
     registry: &EventRegistry,
@@ -1668,13 +1625,14 @@ fn spawn_completion_driver(
     heat: HeatId,
 ) -> JoinHandle<()> {
     let config = heat_clock_config(state, registry, event_id, &heat);
-    // The Timed window, for the wall-clock fallback below. Open practice is EXCLUDED: its round
-    // stores an inert default win condition that must never be consulted — its `time_limit_secs`
-    // is the only end condition (the branch above).
+    // The Timed window, for the wall-clock fixed end below. Every format goes through the same
+    // branch — open practice included (D5, reversed 2026-08-24). A practice round created without
+    // a win condition stores the inert `default_win_condition` (`BestLap`), which is not `Timed`,
+    // so no window is armed and its `time_limit_secs` / the RD's `ForceEnd` remain its only end
+    // conditions; a practice round that *was* given a real win condition honours it, like any
+    // other round.
     let timed_window = match config.win_condition {
-        gridfpv_engine::scoring::WinCondition::Timed { window_micros }
-            if !is_open_practice_heat(state, registry, event_id, &heat) =>
-        {
+        gridfpv_engine::scoring::WinCondition::Timed { window_micros } => {
             Some(Duration::from_micros(window_micros.max(0) as u64))
         }
         _ => None,
@@ -1691,67 +1649,110 @@ fn spawn_completion_driver(
         .unwrap_or(None);
     // The running clock origin: the moment the heat entered `Running` (this spawn). The time-limit
     // deadline, when set, is measured from here — a deterministic wall-clock span (a test drives it
-    // with a short limit; production with the practice duration).
+    // with a short limit; production with the race/practice duration).
     let running_since = tokio::time::Instant::now();
     let time_limit = config
         .time_limit_secs
         .map(|secs| Duration::from_secs(secs as u64));
     let mut ticker = tokio::time::interval(COMPLETION_POLL);
     tokio::spawn(async move {
-        // The wall-clock instant this driver first OBSERVED a running pass — the fallback's
+        // The wall-clock instant this driver first OBSERVED a running pass — the Timed window's
         // race-clock anchor. Observation lags the true crossing by up to a poll tick (+ transport),
         // so a deadline anchored here is never *early* relative to the pass-anchored cutoff.
         let mut first_pass_seen: Option<tokio::time::Instant> = None;
+        // The appended RaceExpired marker, once the race is over with a live grace: its log
+        // offset (the scoring boundary `grace_satisfied` reads) and the wall-clock instant the
+        // grace runs out (`None` = UntilScored, no deadline).
+        let mut expired: Option<(u64, Option<tokio::time::Instant>)> = None;
         loop {
             ticker.tick().await;
-            // Time-limit auto-end (open-practice refinement): once the elapsed running time reaches
-            // the practice duration, close the heat regardless of any win condition or passes — the
-            // only end condition for an open-practice heat (whose passes are never logged, so the
-            // win-condition branch below never fires for it). Logged like the other autos.
-            if let Some(limit) = time_limit {
-                if running_since.elapsed() >= limit {
-                    if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
-                        eprintln!(
-                            "gridfpv: completion driver could not append time-limit Finished: {e:?}"
-                        );
-                    }
-                    return;
-                }
-            }
             let passes = heat_running_passes(&state, &heat);
             if first_pass_seen.is_none() && !passes.is_empty() {
                 first_pass_seen = Some(tokio::time::Instant::now());
             }
-            // Timed-window wall-clock fallback: `race_end_reached` for a Timed round only fires
-            // when a lap-gate pass lands AT/AFTER the cutoff — if nobody crosses again after the
-            // window ends (pilots land at the buzzer; a short time trial), the pass-based path
-            // never triggers and the heat would stay `Running` forever. Once the window PLUS the
-            // grace hold has elapsed on the wall clock — measured from the race-clock origin (the
-            // first observed pass; race-go when nobody ever crossed) — close the heat. Grace-window
-            // crossings before this deadline still land in the log and score normally; a
-            // post-cutoff crossing still ends the heat earlier via the pass-based path below.
-            if let Some(window) = timed_window {
-                let anchor = first_pass_seen.unwrap_or(running_since);
-                if anchor.elapsed() >= window + grace_hold(config.grace_window) {
+
+            // ── Stage 2: the grace window is open — close on its deadline, or early once every
+            // still-flying pilot has taken their one post-expiry crossing.
+            if let Some((marker, deadline)) = expired {
+                let deadline_passed = deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+                if deadline_passed || gridfpv_engine::scoring::grace_satisfied(&passes, marker) {
                     if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
-                        eprintln!(
-                            "gridfpv: completion driver could not append timed-window Finished: {e:?}"
-                        );
+                        eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
                     }
                     return;
                 }
+                continue;
             }
-            let Some(race_start) = race_start_of(&passes) else {
-                continue; // no crossing yet — the race clock hasn't opened
-            };
-            if race_end_reached(&passes, config.win_condition, race_start) {
-                // The race-end criterion is met: hold the grace window for late crossings, then
-                // close the race. The hold is wall-clock; the *decision* was pure.
-                tokio::time::sleep(grace_hold(config.grace_window)).await;
-                if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
-                    eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
+
+            // ── Stage 1: is the race over? The fixed end on the wall clock (time limit from
+            // race-go; a Timed window from the first observed pass — if nobody crosses again
+            // after the buzzer the pass-based criterion alone would never fire), or the pure
+            // pass-based criterion, whichever lands first.
+            let fixed_end_reached = time_limit
+                .is_some_and(|limit| running_since.elapsed() >= limit)
+                || timed_window.is_some_and(|window| {
+                    first_pass_seen.unwrap_or(running_since).elapsed() >= window
+                });
+            let criterion_met = race_start_of(&passes).is_some_and(|race_start| {
+                let plain: Vec<Pass> = passes.iter().map(|(_, p)| p.clone()).collect();
+                race_end_reached(&plain, config.win_condition, race_start)
+            });
+            if !(fixed_end_reached || criterion_met) {
+                continue;
+            }
+
+            match config.grace_window {
+                // Zero grace (first-to-N by rule, or a configured 0): the heat closes at the
+                // fixed end exactly as before — no marker, nothing post-race can land anyway.
+                GraceWindow::Duration { micros } if micros <= 0 => {
+                    if let Err(e) = append_finished_if_running(&state, &heat, spawn_watermark) {
+                        eprintln!("gridfpv: completion driver could not append Finished: {e:?}");
+                    }
+                    return;
                 }
-                return;
+                grace => {
+                    // Open the grace: log the RaceExpired marker (fire-time re-checked like the
+                    // transitions — a ForceEnd landing this tick must not get a stale marker
+                    // appended over it). The deadline is logged as a fact so the console counts
+                    // down to it and a replay reads the same instant (the HeatFinalizing pattern).
+                    let grace_micros = match grace {
+                        GraceWindow::Duration { micros } => Some(micros.max(0)),
+                        GraceWindow::UntilScored => None,
+                    };
+                    let deadline_at = grace_micros.map(|m| now_micros().saturating_add(m));
+                    let h = heat.clone();
+                    let still_running = move |events: &[Event]| {
+                        gridfpv_engine::heat::heat_state(events, &h)
+                            == Some(gridfpv_engine::heat::HeatState::Running)
+                            && latest_transition_offset(events, &h) == spawn_watermark
+                    };
+                    match state.append_checked(
+                        Event::RaceExpired {
+                            heat: heat.clone(),
+                            deadline: deadline_at,
+                        },
+                        None,
+                        still_running,
+                    ) {
+                        Ok(Some(marker)) => {
+                            expired = Some((
+                                marker,
+                                grace_micros.map(|m| {
+                                    tokio::time::Instant::now() + Duration::from_micros(m as u64)
+                                }),
+                            ));
+                        }
+                        // The recheck rejected: the heat already left Running (the bridge's
+                        // cancel is in flight). Nothing to drive.
+                        Ok(None) => return,
+                        Err(e) => {
+                            eprintln!(
+                                "gridfpv: completion driver could not append RaceExpired: {e:?}"
+                            );
+                            return;
+                        }
+                    }
+                }
             }
         }
     })
@@ -1936,10 +1937,13 @@ fn spawn_auto_official_driver(
     })
 }
 
-/// The lap-gate passes attributed to `heat`'s current run: every lap-gate [`Pass`] in the log since
-/// the heat last entered `Running`. The completion driver scores over exactly the running window, so
-/// an earlier aborted run's passes don't count toward this run's win condition.
-fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
+/// The lap-gate passes attributed to `heat`'s current run, each with its **global log offset**:
+/// every lap-gate [`Pass`] in the log since the heat last entered `Running`. The completion driver
+/// scores over exactly the running window, so an earlier aborted run's passes don't count toward
+/// this run's win condition; the offsets are what [`gridfpv_engine::scoring::grace_satisfied`]
+/// orders against the
+/// `RaceExpired` marker (#505).
+fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<(u64, Pass)> {
     let Some(stored) = state.log().lock().ok().and_then(|g| g.read_all().ok()) else {
         return Vec::new();
     };
@@ -1948,7 +1952,7 @@ fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
     // Running it is the only one consuming, mirroring the bridge's single-active-heat rule.)
     let mut running = false;
     let mut passes = Vec::new();
-    for s in stored {
+    for (offset, s) in stored.into_iter().enumerate() {
         match s.event {
             Event::HeatStateChanged {
                 heat: ref h,
@@ -1966,7 +1970,7 @@ fn heat_running_passes(state: &AppState, heat: &HeatId) -> Vec<Pass> {
             Event::Pass(p)
                 if running && p.gate.is_lap_gate() && p.heat.as_ref().is_none_or(|h| h == heat) =>
             {
-                passes.push(p)
+                passes.push((offset as u64, p))
             }
             _ => {}
         }
@@ -1988,25 +1992,39 @@ mod tests {
     use std::time::Duration;
 
     use gridfpv_events::RoundId;
-    use gridfpv_server::events::{EventRegistry, PRACTICE_EVENT_ID};
+    use gridfpv_server::events::{CreateEventRequest, EventRegistry};
     use gridfpv_server::live_state::live_state;
     use gridfpv_server::timers::{
         CreateTimerRequest, MOCK_TIMER_ID, TimerId, TimerKind, TimerStatus, UpdateTimerRequest,
     };
     use tokio::time::{Instant, sleep, timeout};
 
-    /// The Practice event id every bridge test drives (its in-memory log + default `["mock"]`
-    /// selection).
-    fn practice() -> EventId {
-        EventId(PRACTICE_EVENT_ID.to_string())
+    /// The id of the one event a bridge-test registry holds (its log + default `["mock"]`
+    /// selection). There is no built-in event any more (#414): [`fast_registry`] creates one
+    /// through the real creation path, and this reads it back.
+    fn event_of(registry: &EventRegistry) -> EventId {
+        let mut list = registry.list();
+        assert_eq!(list.len(), 1, "one created event per bridge-test registry");
+        EventId(list.remove(0).id.0)
     }
 
-    /// Build a fresh registry and retune its built-in **Mock** to a fast pace (`lap_ms`) and
-    /// the wanted `laps`, so the whole heat runs in a few ms. Practice defaults to selecting the
-    /// Mock, so the bridge over Practice drives this retuned source. The bridge polls at
+    /// A registry holding exactly one **created** event — the fixture that replaced the built-in
+    /// Practice event (#414). Going through `create` means the bridge tests drive the same kind
+    /// of event an RD makes, with the same default `["mock"]` timer selection.
+    fn test_registry() -> EventRegistry {
+        let registry = EventRegistry::new(None).unwrap();
+        registry
+            .create(&CreateEventRequest::named("Test Event"))
+            .expect("create the test event");
+        registry
+    }
+
+    /// Build a [`test_registry`] and retune the built-in **Mock** to a fast pace (`lap_ms`) and
+    /// the wanted `laps`, so the whole heat runs in a few ms. A new event defaults to selecting
+    /// the Mock, so the bridge over it drives this retuned source. The bridge polls at
     /// [`POLL_INTERVAL`], which dominates start-up latency, so tests keep total laps small.
     fn fast_registry(laps: u32, lap_ms: u64) -> EventRegistry {
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         registry
             .timers()
             .update(
@@ -2021,11 +2039,12 @@ mod tests {
         registry
     }
 
-    /// Spawn the selection-aware bridge for `registry`'s Practice event, returning the bridge
-    /// handle and Practice's `AppState` (the same log the bridge polls), so a test appends the
+    /// Spawn the selection-aware bridge for `registry`'s event, returning the bridge handle and
+    /// that event's `AppState` (the same log the bridge polls), so a test appends the
     /// schedule/transition events the bridge reacts to.
     fn spawn_bridge_for(registry: &EventRegistry) -> (JoinHandle<()>, AppState) {
-        let state = registry.resolve(&practice()).unwrap();
+        let event = event_of(registry);
+        let state = registry.resolve(&event).unwrap();
         let timers = registry.timers();
         let adapter = AdapterId(SIM_ADAPTER.to_string());
         let reg = registry.clone();
@@ -2037,7 +2056,7 @@ mod tests {
                 bridge_state,
                 reg,
                 timers,
-                practice(),
+                event,
                 adapter,
                 #[cfg(feature = "live")]
                 connections,
@@ -2287,12 +2306,18 @@ mod tests {
         bridge.abort();
     }
 
+    /// #412: the seat/tune emits must carry the **real** node index, not the lineup position.
+    ///
+    /// This is the failure the feature exists to prevent, one layer down: RotorHazard's
+    /// `alter_heat` and `set_frequency` are keyed on `seat_index`, so a heat whose third pilot is
+    /// pushed as node 2 while the enabled set says node 3 seats them on the dead gate — and their
+    /// laps land on somebody else's row.
     #[tokio::test]
-    async fn an_event_selecting_only_rotorhazard_emits_nothing() {
-        // RotorHazard is a reserved no-op stub in this slice (#73): an event whose ONLY selected
-        // timer is RotorHazard must emit no synthetic passes when its heat runs.
-        use gridfpv_server::timers::CreateTimerRequest;
-        let registry = EventRegistry::new(None).unwrap();
+    async fn seating_and_tuning_carry_the_real_node_indices_over_a_disabled_node() {
+        use gridfpv_server::pilots::CreatePilotRequest;
+        use gridfpv_server::timers::SetTimerNodesRequest;
+
+        let registry = test_registry();
         let rh = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -2303,10 +2328,126 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
+            })
+            .unwrap();
+        // The timer reports four nodes; the RD has switched off the third one ("Node 3" = index 2).
+        registry.timers().set_reported_nodes(&rh.id, 4);
+        registry
+            .timers()
+            .set_nodes(
+                &rh.id,
+                &SetTimerNodesRequest {
+                    node_count: None,
+                    enabled: Some(vec![0, 1, 3]),
+                },
+            )
+            .unwrap();
+        let timer = registry.timers().get(&rh.id).unwrap();
+
+        // Three pilots in the directory, so the seating resolves callsigns rather than raw ids.
+        let mut refs = Vec::new();
+        for callsign in ["Ace", "Bolt", "Cyan"] {
+            let pilot = registry
+                .pilots()
+                .create(&CreatePilotRequest {
+                    callsign: callsign.into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            refs.push(CompetitorRef(pilot.id.0));
+        }
+
+        let state = registry.resolve(&event_of(&registry)).unwrap();
+        let heat = HeatId("q-1".into());
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: refs.clone(),
+                    class: None,
+                    round: None,
+                    frequencies: vec![
+                        (refs[0].clone(), 5658),
+                        (refs[1].clone(), 5695),
+                        (refs[2].clone(), 5732),
+                    ],
+                    label: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        // The seating emit: node 0, node 1, node **3** — with callsigns, never raw ids.
+        let seats = seats_of(&state, &registry, &timer, &heat);
+        assert_eq!(
+            seats,
+            vec![
+                (0, "Ace".to_string()),
+                (1, "Bolt".to_string()),
+                (3, "Cyan".to_string()),
+            ],
+            "the third pilot sits on node 3, not node 2"
+        );
+
+        // The tune emit follows the same seats: node 3 gets Cyan's channel, and the disabled node 2
+        // is offered no channel at all. Each node carries its catalog label as well as the raw MHz
+        // (#421) — that is what puts `R1`/`R2`/`R3` on RotorHazard's own screen instead of a bare
+        // frequency, matching the Tune page's write.
+        let plan = tune_plan_of(&state, &timer, &heat);
+        assert_eq!(
+            plan,
+            vec![
+                TuneNode {
+                    node: 0,
+                    mhz: 5658,
+                    band: Some("Raceband".into()),
+                    channel: Some("R1".into()),
+                },
+                TuneNode {
+                    node: 1,
+                    mhz: 5695,
+                    band: Some("Raceband".into()),
+                    channel: Some("R2".into()),
+                },
+                TuneNode {
+                    node: 3,
+                    mhz: 5732,
+                    band: Some("Raceband".into()),
+                    channel: Some("R3".into()),
+                },
+            ]
+        );
+        assert!(
+            !plan.iter().any(|n| n.node == 2),
+            "a disabled node must never be tuned: {plan:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_event_selecting_only_rotorhazard_emits_nothing() {
+        // The SIM bridge never speaks for a RotorHazard timer: an event whose ONLY selected timer
+        // is RotorHazard must emit no *synthetic* passes when its heat runs — its real passes arrive
+        // through the RH adapter connection instead (#65/#73).
+        use gridfpv_server::timers::CreateTimerRequest;
+        let registry = test_registry();
+        let rh = registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: "Field RH".into(),
+                kind: TimerKind::Rotorhazard {
+                    url: "http://rh.local:5000".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         // Select only the RotorHazard timer for Practice.
-        registry.set_timers(&practice(), vec![rh.id]).unwrap();
+        registry
+            .set_timers(&event_of(&registry), vec![rh.id])
+            .unwrap();
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = HeatId("q-1".into());
@@ -2345,7 +2486,7 @@ mod tests {
         // emission with THAT timer's laps — proving the bridge reads the per-event selection and
         // the selected timer's own config (#73).
         use gridfpv_server::timers::CreateTimerRequest;
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         let timer = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -2354,9 +2495,12 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
-        registry.set_timers(&practice(), vec![timer.id]).unwrap();
+        registry
+            .set_timers(&event_of(&registry), vec![timer.id])
+            .unwrap();
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = HeatId("q-1".into());
@@ -2395,14 +2539,15 @@ mod tests {
 
     // --- race redesign Slice 1a: sim auto-presence reconciler ---------------------------------
 
-    /// Spawn the presence reconciler for `registry`'s Practice event, returning its handle and
-    /// Practice's `AppState` (the same log it polls), mirroring [`spawn_bridge_for`].
+    /// Spawn the presence reconciler for `registry`'s event, returning its handle and that
+    /// event's `AppState` (the same log it polls), mirroring [`spawn_bridge_for`].
     fn spawn_reconciler_for(registry: &EventRegistry) -> (JoinHandle<()>, AppState) {
-        let state = registry.resolve(&practice()).unwrap();
+        let event = event_of(registry);
+        let state = registry.resolve(&event).unwrap();
         let reg = registry.clone();
         let reconciler_state = state.clone();
         let handle = tokio::spawn(async move {
-            run_presence_reconciler(reconciler_state, reg, practice()).await;
+            run_presence_reconciler(reconciler_state, reg, event).await;
         });
         (handle, state)
     }
@@ -2424,7 +2569,7 @@ mod tests {
     async fn seen_player_matching_a_rostered_pilot_is_added_and_bound() {
         use gridfpv_server::pilots::CreatePilotRequest;
 
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         // A directory pilot whose callsign matches the sim player name (case/space-insensitively).
         let pilot = registry
             .pilots()
@@ -2453,7 +2598,7 @@ mod tests {
         timeout(Duration::from_secs(5), async {
             loop {
                 let rostered = registry
-                    .meta_of(&practice())
+                    .meta_of(&event_of(&registry))
                     .map(|m| m.roster.contains(&pilot_id))
                     .unwrap_or(false);
                 if rostered && !bindings_in(&state).is_empty() {
@@ -2484,7 +2629,7 @@ mod tests {
             .unwrap();
         sleep(POLL_INTERVAL * 3).await;
         assert_eq!(
-            registry.meta_of(&practice()).unwrap().roster,
+            registry.meta_of(&event_of(&registry)).unwrap().roster,
             vec![pilot.id.clone()],
             "presence is set-membership — no duplicate roster entry"
         );
@@ -2499,7 +2644,7 @@ mod tests {
 
     #[tokio::test]
     async fn seen_player_with_no_matching_pilot_is_a_no_op() {
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         // No directory pilot named "Stranger".
         let (reconciler, state) = spawn_reconciler_for(&registry);
 
@@ -2516,7 +2661,11 @@ mod tests {
         // Wait past several poll cycles: the roster stays empty and no binding is appended.
         sleep(POLL_INTERVAL * 4).await;
         assert!(
-            registry.meta_of(&practice()).unwrap().roster.is_empty(),
+            registry
+                .meta_of(&event_of(&registry))
+                .unwrap()
+                .roster
+                .is_empty(),
             "an unmatched seen player must not be added to the roster"
         );
         assert!(
@@ -2528,24 +2677,27 @@ mod tests {
 
     // --- open practice (open-practice format, Slice 1): laps in memory, not logged ----------------
 
-    /// Add an **open-practice** round to Practice (open-practice format) over `channels` (node
+    /// Add an **open-practice** round to Practice (open-practice format) over `nodes` (node
     /// indices) and return its `RoundId`. Uses the registry's `add_round` so the bridge resolves the
     /// round through `rounds_of` exactly as it does in production.
-    fn add_open_practice_round(registry: &EventRegistry, channels: Vec<usize>) -> RoundId {
-        add_open_practice_round_with_limit(registry, channels, None)
+    fn add_open_practice_round(registry: &EventRegistry, nodes: Vec<usize>) -> RoundId {
+        add_open_practice_round_with_limit(registry, nodes, None, None)
     }
 
     /// As [`add_open_practice_round`], but with an optional **time limit** (open-practice refinement)
     /// — an open-practice round that has **no win condition** (the form omits it; the inert default is
-    /// stored) and whose only end condition is the `time_limit_secs` practice duration.
+    /// stored) and whose only end condition is the `time_limit_secs` practice duration — and an
+    /// optional explicit **grace window** (`None` stores the round default).
     fn add_open_practice_round_with_limit(
         registry: &EventRegistry,
-        channels: Vec<usize>,
+        nodes: Vec<usize>,
         time_limit_secs: Option<u32>,
+        grace_window: Option<GraceWindow>,
     ) -> RoundId {
         use gridfpv_server::events::{NewRoundReq, SeedingRule};
         use gridfpv_server::scope::EventId as ScopeEventId;
         let req = NewRoundReq {
+            layouts: Vec::new(),
             label: "Open Practice".into(),
             classes: vec![],
             format: "open_practice".into(),
@@ -2554,16 +2706,16 @@ mod tests {
             // is stored by `add_round`). The practice ends on the time limit (or the RD's ForceEnd).
             win_condition: None,
             time_limit_secs,
-            seeding: SeedingRule::AllChannels { channels },
+            seeding: SeedingRule::ActiveNodes { nodes },
             channel_mode: None,
             staging_timer_secs: None,
             start_procedure: None,
-            grace_window: None,
+            grace_window,
             protest_window: None,
             min_lap_secs: None,
         };
         registry
-            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .add_round(&ScopeEventId(event_of(registry).0), req)
             .expect("open-practice round added")
             .id
     }
@@ -2602,40 +2754,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_practice_laps_are_in_memory_not_logged_and_drive_live_state() {
-        // An open-practice heat's passes go to the in-memory per-channel accumulator, NOT the log:
-        // the log carries the heat's HeatScheduled + start/stop and ZERO Pass events, while the live
-        // state shows per-channel laps with no pilot bound; the accumulator clears on stop.
+    async fn open_practice_laps_are_logged_like_every_other_format_and_drive_live_state() {
+        // D5, reversed (#398): an open-practice heat's passes are appended to the **durable log**
+        // exactly like any other format's — stamped with the heat — and the ordinary log fold is
+        // what shows the per-channel laps. There is no accumulator and no overlay.
         let laps = 3u32;
         let registry = fast_registry(laps, 1);
         let round = add_open_practice_round(&registry, vec![0, 1]);
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = start_open_practice_heat(&state, &round, &[0, 1]);
-        let op = state.open_practice();
 
-        // Wait until both channels have accumulated their laps in memory (holeshot + `laps`).
+        // Wait until the LOG-derived live state shows both channels' laps (holeshot + `laps`).
+        let target = heat.clone();
         timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(ls) = op.live_state() {
-                    if ls.progress.len() == 2
-                        && ls.progress.iter().all(|p| p.laps_completed >= laps)
-                    {
-                        return;
-                    }
+                let ls = gridfpv_server::live_state::live_state(&read_all_events(&state));
+                if ls.current_heat.as_ref() == Some(&target)
+                    && ls.progress.len() == 2
+                    && ls.progress.iter().all(|p| p.laps_completed >= laps)
+                {
+                    return;
                 }
                 sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("the open-practice accumulator should fill from the sim");
+        .expect("the log fold should show the practice laps");
 
-        // (a) The LOG has the heat's HeatScheduled + start/stop, but ZERO Pass events.
+        // (a) The passes really are on the durable log, tagged with the practice heat.
         let events = read_all_events(&state);
-        assert_eq!(
-            count_passes(&events),
-            0,
-            "an open-practice heat appends NO Pass events to the log"
+        assert!(
+            count_passes(&events) > 0,
+            "an open-practice heat appends its Pass events to the log like any other heat"
+        );
+        assert!(
+            events.iter().all(|e| match e {
+                Event::Pass(p) => p.heat.as_ref() == Some(&heat),
+                _ => true,
+            }),
+            "every practice pass is stamped with the heat it was flown in"
         );
         assert!(
             events
@@ -2643,25 +2801,17 @@ mod tests {
                 .any(|e| matches!(e, Event::HeatScheduled { round: Some(r), .. } if *r == round)),
             "the heat's HeatScheduled (the session) is logged"
         );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                Event::HeatStateChanged {
-                    transition: HeatTransition::Running,
-                    ..
-                }
-            )),
-            "the session start is logged"
-        );
 
-        // (b) The live state shows per-channel laps, each channel unbound (pilot: None).
-        let ls = op.live_state().expect("an active open-practice live state");
+        // (b) The live state shows per-channel laps, each channel unbound (pilot: None) — practice
+        // seats need no pilot binding for their laps to be logged and folded.
+        let ls = gridfpv_server::live_state::live_state(&events);
         assert_eq!(ls.progress.len(), 2);
         assert!(ls.progress.iter().all(|p| p.pilot.is_none()));
         assert!(ls.progress.iter().all(|p| p.laps_completed >= laps));
         assert_eq!(ls.current_heat, Some(heat.clone()));
 
-        // (c) Clear on stop: a terminal transition drops the accumulator.
+        // (c) A reset drops the run's laps through the SAME rule every format uses — the heat window
+        // starts past its latest `Aborted`/`Restarted`/`Discarded` — not through a special clear.
         state
             .append(
                 Event::HeatStateChanged {
@@ -2671,19 +2821,13 @@ mod tests {
                 None,
             )
             .unwrap();
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if op.live_state().is_none() {
-                    return;
-                }
-                sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the accumulator should clear on the terminal transition");
-
-        // Still no Pass events ever reached the log.
-        assert_eq!(count_passes(&read_all_events(&state)), 0);
+        let after_reset = gridfpv_server::live_state::live_state(&read_all_events(&state));
+        assert!(
+            after_reset.progress.iter().all(|p| p.laps_completed == 0),
+            "an Abort resets the practice lap counts, exactly as it does for a qualifying heat"
+        );
+        // The passes themselves stay on the log — a reset windows them out, it does not erase them.
+        assert!(count_passes(&read_all_events(&state)) > 0);
         bridge.abort();
     }
 
@@ -2691,13 +2835,21 @@ mod tests {
     async fn open_practice_time_limit_auto_ends_the_running_heat() {
         // Open-practice refinement: an open-practice round with **no win condition** but a
         // `time_limit_secs` auto-ends its running heat (Running → Unofficial / a `Finished`
-        // transition) once the elapsed running time reaches the limit — independent of any win
-        // condition, and even though an open-practice heat logs NO passes (so the win-condition path
-        // never fires). The completion driver's time-limit branch is the only end condition here.
+        // transition) once the elapsed running time reaches the limit. Its passes ARE logged
+        // (D5, reversed) — the win-condition path stays silent because the stored inert
+        // `default_win_condition` (`BestLap`) has no end criterion, not because the log is empty.
+        //
+        // Zero grace pins the pre-#505 shape: the heat closes AT the limit, with no RaceExpired
+        // marker (the grace path has its own tests below).
         let registry = fast_registry(3, 1);
         // A 1s practice duration (the minimum the seconds field allows): short enough for a test,
         // long enough that we can assert it does NOT fire immediately.
-        let round = add_open_practice_round_with_limit(&registry, vec![0, 1], Some(1));
+        let round = add_open_practice_round_with_limit(
+            &registry,
+            vec![0, 1],
+            Some(1),
+            Some(GraceWindow::Duration { micros: 0 }),
+        );
         let (bridge, state) = spawn_bridge_for(&registry);
 
         let heat = start_open_practice_heat(&state, &round, &[0, 1]);
@@ -2741,8 +2893,154 @@ mod tests {
             finished, 1,
             "the time limit auto-appends exactly one Finished (Running → Unofficial)"
         );
-        // No passes were ever logged for the open-practice heat (the time limit, not scoring, ended it).
-        assert_eq!(count_passes(&events), 0);
+        // The practice heat's passes ARE on the log — the time limit, not an empty log, is what
+        // ended it (the inert `BestLap` win condition never fires).
+        assert!(count_passes(&events) > 0);
+        // Zero grace ⇒ no RaceExpired marker: the grace machinery stays entirely out of the way.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::RaceExpired { .. })),
+            "a zero-grace round appends no RaceExpired marker"
+        );
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn grace_window_holds_the_heat_and_all_crossed_ends_it_early() {
+        // The grace rework (#505): at the time limit the driver appends the RaceExpired marker
+        // (with its logged deadline) and HOLDS the heat `Running` — then closes it EARLY, well
+        // before the deadline, once every still-flying pilot has taken their one post-expiry
+        // crossing (`grace_satisfied`): nothing further can score, so nothing is waited for.
+        let registry = fast_registry(2, 1);
+        // A 60s grace: far beyond the test's patience, so a close inside 4s proves the
+        // all-crossed EARLY end, never the deadline.
+        let round = add_open_practice_round_with_limit(
+            &registry,
+            vec![0, 1],
+            Some(1),
+            Some(GraceWindow::Duration { micros: 60_000_000 }),
+        );
+        let (bridge, state) = spawn_bridge_for(&registry);
+        let heat = start_open_practice_heat(&state, &round, &[0, 1]);
+
+        // The marker lands at the ~1s limit, with the deadline logged as a fact (the
+        // HeatFinalizing pattern), and the heat is STILL Running — the grace is holding it.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(4),
+            wait_until(&state, Duration::from_secs(4), move |events| {
+                events.iter().any(
+                    |e| matches!(e, Event::RaceExpired { heat: h, deadline: Some(_) } if *h == target),
+                )
+            }),
+        )
+        .await
+        .expect("the time limit should append the RaceExpired marker");
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(&read_all_events(&state), &heat),
+            Some(gridfpv_engine::heat::HeatState::Running),
+            "the grace window holds the heat Running past the time limit"
+        );
+
+        // Every still-flying pilot takes their one post-expiry crossing: append a post-marker
+        // pass for each competitor the run has seen (the sim's field), exactly what a pilot
+        // finishing the lap they were flying looks like on the log.
+        let seen: std::collections::BTreeSet<CompetitorRef> = read_all_events(&state)
+            .iter()
+            .filter_map(|e| match e {
+                Event::Pass(p) if p.gate.is_lap_gate() => Some(p.competitor.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!seen.is_empty(), "the sim must have flown the practice");
+        for (i, competitor) in seen.into_iter().enumerate() {
+            state
+                .append(
+                    Event::Pass(Pass {
+                        adapter: AdapterId(SIM_ADAPTER.to_string()),
+                        competitor,
+                        at: SourceTime::from_micros(90_000_000 + i as i64),
+                        sequence: None,
+                        gate: GateIndex::LAP,
+                        signal: None,
+                        heat: Some(heat.clone()),
+                    }),
+                    None,
+                )
+                .unwrap();
+        }
+
+        // With everyone across, the heat closes NOW — 60s of grace notwithstanding.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(4),
+            wait_until(&state, Duration::from_secs(4), move |events| {
+                gridfpv_engine::heat::heat_state(events, &target)
+                    == Some(gridfpv_engine::heat::HeatState::Unofficial)
+            }),
+        )
+        .await
+        .expect("all still-flying pilots crossed — the grace must end early");
+        bridge.abort();
+    }
+
+    #[tokio::test]
+    async fn grace_deadline_closes_the_heat_when_pilots_never_cross_again() {
+        // The grace rework (#505), the other exit: nobody crosses after the marker (pilots
+        // landed at the buzzer), so the heat closes when the logged grace deadline passes.
+        let registry = fast_registry(2, 1);
+        let round = add_open_practice_round_with_limit(
+            &registry,
+            vec![0, 1],
+            Some(1),
+            // A short, bounded grace: long enough to observe the hold, short enough to test.
+            Some(GraceWindow::Duration { micros: 700_000 }),
+        );
+        let (bridge, state) = spawn_bridge_for(&registry);
+        let heat = start_open_practice_heat(&state, &round, &[0, 1]);
+
+        // Marker at ~1s, then — with no further crossings — Finished at ~1.7s.
+        let target = heat.clone();
+        timeout(
+            Duration::from_secs(5),
+            wait_until(&state, Duration::from_secs(5), move |events| {
+                gridfpv_engine::heat::heat_state(events, &target)
+                    == Some(gridfpv_engine::heat::HeatState::Unofficial)
+            }),
+        )
+        .await
+        .expect("the grace deadline should close the heat on its own");
+
+        let events = read_all_events(&state);
+        let marker_pos = events
+            .iter()
+            .position(|e| matches!(e, Event::RaceExpired { heat: h, .. } if *h == heat))
+            .expect("exactly one RaceExpired marker precedes the close");
+        let finished_pos = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    Event::HeatStateChanged {
+                        heat: h,
+                        transition: HeatTransition::Finished,
+                    } if *h == heat
+                )
+            })
+            .expect("the deadline appends the Finished");
+        assert!(
+            marker_pos < finished_pos,
+            "the marker is the end-of-race tone; the close follows it"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::RaceExpired { .. }))
+                .count(),
+            1,
+            "one race, one marker"
+        );
         bridge.abort();
     }
 
@@ -2759,6 +3057,7 @@ mod tests {
 
         let registry = fast_registry(2, 1); // holeshot + 2 laps per pilot, all inside ~10ms
         let req = NewRoundReq {
+            layouts: Vec::new(),
             label: "Short Time".into(),
             classes: vec![],
             format: "timed_qual".into(),
@@ -2778,7 +3077,7 @@ mod tests {
             min_lap_secs: None,
         };
         let round = registry
-            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .add_round(&ScopeEventId(event_of(&registry).0), req)
             .expect("timed round added")
             .id;
         let (bridge, state) = spawn_bridge_for(&registry);
@@ -2852,7 +3151,7 @@ mod tests {
         // re-fire the historical transitions (a spurious HeatStarting, re-spawned sim sources
         // whose passes corrupted the scored window). Startup must append NOTHING for history.
         let registry = fast_registry(2, 1);
-        let state = registry.resolve(&practice()).unwrap();
+        let state = registry.resolve(&event_of(&registry)).unwrap();
         let heat = HeatId("q-old".into());
         state
             .append(
@@ -2996,6 +3295,7 @@ mod tests {
         use gridfpv_server::events::{NewRoundReq, SeedingRule};
         use gridfpv_server::scope::EventId as ScopeEventId;
         let req = NewRoundReq {
+            layouts: Vec::new(),
             label: "Qualifying".into(),
             classes: vec![],
             format: "timed_qual".into(),
@@ -3015,7 +3315,7 @@ mod tests {
             min_lap_secs: None,
         };
         registry
-            .add_round(&ScopeEventId(PRACTICE_EVENT_ID.to_string()), req)
+            .add_round(&ScopeEventId(event_of(registry).0), req)
             .expect("protest-window round added")
             .id
     }
@@ -3233,6 +3533,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap()
             .id
@@ -3277,7 +3578,7 @@ mod tests {
         let alternate = create_mock(&registry, "Backup", laps, 1);
         // Select both; the first (the built-in Mock) is the default primary.
         registry
-            .set_timers(&practice(), vec![primary.clone(), alternate])
+            .set_timers(&event_of(&registry), vec![primary.clone(), alternate])
             .unwrap();
         let (bridge, state) = spawn_bridge_for(&registry);
 
@@ -3311,7 +3612,7 @@ mod tests {
         // gated off, hot standby). Dropping the RH primary fails over to the Mock alternate, whose
         // synthetic passes then take over — exactly the "primary RH drops → Mock alternate takes
         // over" scenario, proven in-process without Docker.
-        let registry = EventRegistry::new(None).unwrap();
+        let registry = test_registry();
         let rh = registry
             .timers()
             .create(&CreateTimerRequest {
@@ -3322,6 +3623,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap()
             .id;
@@ -3330,10 +3632,10 @@ mod tests {
         // passes that have yet to be emitted.
         let mock = create_mock(&registry, "Backup Mock", 200, 30);
         registry
-            .set_timers(&practice(), vec![rh.clone(), mock.clone()])
+            .set_timers(&event_of(&registry), vec![rh.clone(), mock.clone()])
             .unwrap();
         registry
-            .set_primary_timer(&practice(), Some(rh.clone()))
+            .set_primary_timer(&event_of(&registry), Some(rh.clone()))
             .unwrap();
         // Bring the RH primary "up" — it is the active source, so the Mock alternate is gated off.
         registry.timers().set_status(&rh, TimerStatus::Connected);

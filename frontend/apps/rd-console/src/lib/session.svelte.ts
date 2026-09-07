@@ -47,6 +47,16 @@ import {
   createTimer,
   updateTimer,
   deleteTimer,
+  connectTimer,
+  disconnectTimer,
+  restartTimer,
+  setCalibration,
+  captureLevel,
+  setNodeChannel,
+  timerNodes,
+  setTimerNodes,
+  timerSignal,
+  stopTimerSignal,
   setEventTimers,
   setPrimaryTimer,
   listPilots,
@@ -66,23 +76,39 @@ import {
   listFormats,
   listFormatSchemas,
   listChannels,
+  rateChannels,
   createRound,
   updateRound,
   deleteRound,
+  listChannelLayouts,
+  createChannelLayout,
+  updateChannelLayout,
+  deleteChannelLayout,
   listHeats,
+  listRoundIssues,
   eventAudit,
   roundRanking,
   roundStandings,
   classStandings,
-  PRACTICE_EVENT_ID
+  isRequestFailure
 } from '@gridfpv/protocol-client';
-import type { ProtocolClient, ProtocolState, ConnectionStatus } from '@gridfpv/protocol-client';
+import type {
+  ProtocolClient,
+  ProtocolState,
+  ConnectionStatus,
+  CalibrationRequest,
+  CaptureDispatch,
+  CaptureRequest,
+  ChannelDispatch,
+  ChannelRequest
+} from '@gridfpv/protocol-client';
 import { createControlClient } from './control.js';
 import type { ControlClient } from './control.js';
 import type {
   AdapterId,
   AuditEntry,
   ChannelCatalogEntry,
+  ChannelLayouts,
   Class,
   ClassId,
   ClassStandings,
@@ -101,20 +127,28 @@ import type {
   HeatId,
   HeatResult,
   HeatSummary,
+  ImdReading,
+  LayoutId,
   LiveRaceState,
   MemberSlot,
   Pilot,
   PilotId,
+  NewChannelLayoutRequest,
   NewRoundReq,
   ProjectionBody,
   RankEntry,
   RoundDef,
   RoundId,
+  RoundIssue,
   RoundStanding,
   Scope,
+  SetChannelLayoutRequest,
+  SetTimerNodesRequest,
   SignalTraceView,
   Timer,
   TimerId,
+  TimerNodes,
+  TimerSignal,
   UpdateClassRequest,
   UpdatePilotRequest,
   UpdateRoundReq,
@@ -145,36 +179,18 @@ function isAuthAck(ack: CommandAck): boolean {
 }
 
 /**
- * The HTTP status a thrown request error carries, if any: a structural `status` field when the
- * error provides one, else the trailing `… failed: HTTP <status>` every protocol-client request
- * rejection ends with. Anything else — a transport error, or a message that merely *contains*
- * "401" somewhere (an event id like `evt-401`, a 500 body echoing a token) — resolves
- * `undefined`, so it can never masquerade as an auth status. (The old whole-message
- * `\b(401|403)\b` scan opened the token dialog on exactly those.)
- */
-function httpStatusOf(e: unknown): number | undefined {
-  if (
-    e &&
-    typeof e === 'object' &&
-    'status' in e &&
-    typeof (e as { status: unknown }).status === 'number'
-  ) {
-    return (e as { status: number }).status;
-  }
-  const msg = e instanceof Error ? e.message : String(e);
-  const m = /\bfailed: HTTP (\d{3})$/.exec(msg);
-  return m ? Number(m[1]) : undefined;
-}
-
-/**
  * Whether a thrown error from `createEvent` (and the other gated writes) is an HTTP **401/403**
- * — i.e. the Director is gating the action. Matched on the error's HTTP *status* (structural, or
- * the protocol client's anchored `failed: HTTP <status>` suffix — see {@link httpStatusOf}),
- * never on digits appearing anywhere in the message.
+ * — i.e. the Director is gating the action, and the lazy token prompt should fire.
+ *
+ * Keyed on the {@link RequestFailure}'s structural `status`, **never on the words**. Every
+ * protocol-client rejection carries the status as a field (#433) precisely so the message can be
+ * the Director's own sentence — written for the RD, and free to change — without auth detection
+ * riding on its wording. Both earlier text scans were bugs waiting to happen: a whole-message
+ * `\b(401|403)\b` opened the token dialog on an event id like `evt-401`, and the anchored
+ * `failed: HTTP <status>` suffix that replaced it tied this branch to a route line #433 removed.
  */
 function isAuthFailure(e: unknown): boolean {
-  const status = httpStatusOf(e);
-  return status === 401 || status === 403;
+  return isRequestFailure(e) && (e.status === 401 || e.status === 403);
 }
 
 /**
@@ -219,6 +235,86 @@ function liveStateOf(body: ProjectionBody | undefined): LiveRaceState | undefine
  * mutating controls (the Director is the enforced boundary; this mirrors it client-side).
  */
 export type SessionRole = 'rd' | 'readonly';
+
+/**
+ * **The session's outward seams, in one place.** Every protocol-client read/write the console makes
+ * plus the control-client factory — the real implementations, which a {@link Session} inherits
+ * wholesale and a test overrides by key (#459).
+ *
+ * This list *is* the type: {@link SessionApi} is `typeof realApi`, so adding an endpoint here is
+ * the whole change — there is no second declaration to keep in step.
+ */
+const realApi = {
+  connect,
+  createControlClient,
+  listEvents,
+  createEvent,
+  deleteEvent,
+  getActiveEvent,
+  setActiveEvent,
+  listTimers,
+  createTimer,
+  updateTimer,
+  deleteTimer,
+  connectTimer,
+  disconnectTimer,
+  restartTimer,
+  setCalibration,
+  captureLevel,
+  setNodeChannel,
+  timerSignal,
+  stopTimerSignal,
+  timerNodes,
+  setTimerNodes,
+  setEventTimers,
+  setPrimaryTimer,
+  listPilots,
+  createPilot,
+  updatePilot,
+  deletePilot,
+  setEventRoster,
+  addToRoster,
+  removeFromRoster,
+  listClasses,
+  createClass,
+  updateClass,
+  deleteClass,
+  setClassHidden,
+  setEventClasses,
+  setClassMembership,
+  listFormats,
+  listFormatSchemas,
+  listChannels,
+  rateChannels,
+  createRound,
+  updateRound,
+  deleteRound,
+  listChannelLayouts,
+  createChannelLayout,
+  updateChannelLayout,
+  deleteChannelLayout,
+  listHeats,
+  listRoundIssues,
+  eventAudit,
+  roundRanking,
+  roundStandings,
+  classStandings
+};
+
+/** The record of seams a {@link Session} calls outward through — see {@link realApi}. */
+export type SessionApi = typeof realApi;
+
+/**
+ * The overrides a caller actually supplied. A key present but `undefined` is dropped rather than
+ * spread over the real implementation — the same semantics the old `opts?.xImpl ?? x` lines had,
+ * and what lets a test helper forward optional overrides straight through.
+ */
+function definedOnly(overrides: Partial<SessionApi> | undefined): Partial<SessionApi> {
+  if (!overrides) return {};
+  return Object.fromEntries(
+    Object.entries(overrides).filter(([, v]) => v !== undefined)
+  ) as Partial<SessionApi>;
+}
 
 /** The reactive console session — one instance, shared across screens. */
 export class Session {
@@ -344,126 +440,28 @@ export class Session {
   #tokenProvider: TokenProvider | undefined;
   /** The live-status poll interval while inside an event; cleared on leave/teardown. */
   #timerPoll: ReturnType<typeof setInterval> | undefined;
-  // Injectable for tests so the session never opens a real socket.
-  #connectImpl: typeof connect;
-  #controlFactory: typeof createControlClient;
-  #listEventsImpl: typeof listEvents;
-  #createEventImpl: typeof createEvent;
-  #deleteEventImpl: typeof deleteEvent;
-  #getActiveEventImpl: typeof getActiveEvent;
-  #setActiveEventImpl: typeof setActiveEvent;
-  #listTimersImpl: typeof listTimers;
-  #createTimerImpl: typeof createTimer;
-  #updateTimerImpl: typeof updateTimer;
-  #deleteTimerImpl: typeof deleteTimer;
-  #setEventTimersImpl: typeof setEventTimers;
-  #setPrimaryTimerImpl: typeof setPrimaryTimer;
-  #listPilotsImpl: typeof listPilots;
-  #createPilotImpl: typeof createPilot;
-  #updatePilotImpl: typeof updatePilot;
-  #deletePilotImpl: typeof deletePilot;
-  #setEventRosterImpl: typeof setEventRoster;
-  #addToRosterImpl: typeof addToRoster;
-  #removeFromRosterImpl: typeof removeFromRoster;
-  #listClassesImpl: typeof listClasses;
-  #createClassImpl: typeof createClass;
-  #updateClassImpl: typeof updateClass;
-  #deleteClassImpl: typeof deleteClass;
-  #setClassHiddenImpl: typeof setClassHidden;
-  #setEventClassesImpl: typeof setEventClasses;
-  #setClassMembershipImpl: typeof setClassMembership;
-  #listFormatsImpl: typeof listFormats;
-  #listFormatSchemasImpl: typeof listFormatSchemas;
-  #listChannelsImpl: typeof listChannels;
-  #createRoundImpl: typeof createRound;
-  #updateRoundImpl: typeof updateRound;
-  #deleteRoundImpl: typeof deleteRound;
-  #listHeatsImpl: typeof listHeats;
-  #eventAuditImpl: typeof eventAudit;
-  #roundRankingImpl: typeof roundRanking;
-  #roundStandingsImpl: typeof roundStandings;
-  #classStandingsImpl: typeof classStandings;
+  /**
+   * The protocol-client + control seams, as **one injected record** (#459).
+   *
+   * Every call the session makes outward goes through here. Tests hand `opts.api` the keys they
+   * want to steer and inherit {@link realApi} for the rest — which is what lets a screen test stub
+   * `listHeats` without also naming the fifty seams it does not care about. Before this, each seam
+   * cost a private field, an options entry and a constructor line, and adding an endpoint meant
+   * remembering all three.
+   */
+  #api: SessionApi;
 
   constructor(opts?: {
-    connectImpl?: typeof connect;
-    controlFactory?: typeof createControlClient;
-    listEventsImpl?: typeof listEvents;
-    createEventImpl?: typeof createEvent;
-    deleteEventImpl?: typeof deleteEvent;
-    getActiveEventImpl?: typeof getActiveEvent;
-    setActiveEventImpl?: typeof setActiveEvent;
-    listTimersImpl?: typeof listTimers;
-    createTimerImpl?: typeof createTimer;
-    updateTimerImpl?: typeof updateTimer;
-    deleteTimerImpl?: typeof deleteTimer;
-    setEventTimersImpl?: typeof setEventTimers;
-    setPrimaryTimerImpl?: typeof setPrimaryTimer;
-    listPilotsImpl?: typeof listPilots;
-    createPilotImpl?: typeof createPilot;
-    updatePilotImpl?: typeof updatePilot;
-    deletePilotImpl?: typeof deletePilot;
-    setEventRosterImpl?: typeof setEventRoster;
-    addToRosterImpl?: typeof addToRoster;
-    removeFromRosterImpl?: typeof removeFromRoster;
-    listClassesImpl?: typeof listClasses;
-    createClassImpl?: typeof createClass;
-    updateClassImpl?: typeof updateClass;
-    deleteClassImpl?: typeof deleteClass;
-    setClassHiddenImpl?: typeof setClassHidden;
-    setEventClassesImpl?: typeof setEventClasses;
-    setClassMembershipImpl?: typeof setClassMembership;
-    listFormatsImpl?: typeof listFormats;
-    listFormatSchemasImpl?: typeof listFormatSchemas;
-    listChannelsImpl?: typeof listChannels;
-    createRoundImpl?: typeof createRound;
-    updateRoundImpl?: typeof updateRound;
-    deleteRoundImpl?: typeof deleteRound;
-    listHeatsImpl?: typeof listHeats;
-    eventAuditImpl?: typeof eventAudit;
-    roundRankingImpl?: typeof roundRanking;
-    roundStandingsImpl?: typeof roundStandings;
-    classStandingsImpl?: typeof classStandings;
+    /**
+     * Override any of the outward seams (see {@link SessionApi}); every key left out keeps its
+     * real implementation. A key present but `undefined` is treated as absent, so a test helper
+     * may forward `{ listHeats: overrides?.listHeats }` without blanking the real one.
+     */
+    api?: Partial<SessionApi>;
     baseUrl?: string;
     autoRestore?: boolean;
   }) {
-    this.#connectImpl = opts?.connectImpl ?? connect;
-    this.#controlFactory = opts?.controlFactory ?? createControlClient;
-    this.#listEventsImpl = opts?.listEventsImpl ?? listEvents;
-    this.#createEventImpl = opts?.createEventImpl ?? createEvent;
-    this.#deleteEventImpl = opts?.deleteEventImpl ?? deleteEvent;
-    this.#getActiveEventImpl = opts?.getActiveEventImpl ?? getActiveEvent;
-    this.#setActiveEventImpl = opts?.setActiveEventImpl ?? setActiveEvent;
-    this.#listTimersImpl = opts?.listTimersImpl ?? listTimers;
-    this.#createTimerImpl = opts?.createTimerImpl ?? createTimer;
-    this.#updateTimerImpl = opts?.updateTimerImpl ?? updateTimer;
-    this.#deleteTimerImpl = opts?.deleteTimerImpl ?? deleteTimer;
-    this.#setEventTimersImpl = opts?.setEventTimersImpl ?? setEventTimers;
-    this.#setPrimaryTimerImpl = opts?.setPrimaryTimerImpl ?? setPrimaryTimer;
-    this.#listPilotsImpl = opts?.listPilotsImpl ?? listPilots;
-    this.#createPilotImpl = opts?.createPilotImpl ?? createPilot;
-    this.#updatePilotImpl = opts?.updatePilotImpl ?? updatePilot;
-    this.#deletePilotImpl = opts?.deletePilotImpl ?? deletePilot;
-    this.#setEventRosterImpl = opts?.setEventRosterImpl ?? setEventRoster;
-    this.#addToRosterImpl = opts?.addToRosterImpl ?? addToRoster;
-    this.#removeFromRosterImpl = opts?.removeFromRosterImpl ?? removeFromRoster;
-    this.#listClassesImpl = opts?.listClassesImpl ?? listClasses;
-    this.#createClassImpl = opts?.createClassImpl ?? createClass;
-    this.#updateClassImpl = opts?.updateClassImpl ?? updateClass;
-    this.#deleteClassImpl = opts?.deleteClassImpl ?? deleteClass;
-    this.#setClassHiddenImpl = opts?.setClassHiddenImpl ?? setClassHidden;
-    this.#setEventClassesImpl = opts?.setEventClassesImpl ?? setEventClasses;
-    this.#setClassMembershipImpl = opts?.setClassMembershipImpl ?? setClassMembership;
-    this.#listFormatsImpl = opts?.listFormatsImpl ?? listFormats;
-    this.#listFormatSchemasImpl = opts?.listFormatSchemasImpl ?? listFormatSchemas;
-    this.#listChannelsImpl = opts?.listChannelsImpl ?? listChannels;
-    this.#createRoundImpl = opts?.createRoundImpl ?? createRound;
-    this.#updateRoundImpl = opts?.updateRoundImpl ?? updateRound;
-    this.#deleteRoundImpl = opts?.deleteRoundImpl ?? deleteRound;
-    this.#listHeatsImpl = opts?.listHeatsImpl ?? listHeats;
-    this.#eventAuditImpl = opts?.eventAuditImpl ?? eventAudit;
-    this.#roundRankingImpl = opts?.roundRankingImpl ?? roundRanking;
-    this.#roundStandingsImpl = opts?.roundStandingsImpl ?? roundStandings;
-    this.#classStandingsImpl = opts?.classStandingsImpl ?? classStandings;
+    this.#api = { ...realApi, ...definedOnly(opts?.api) };
     if (opts?.baseUrl) this.baseUrl = opts.baseUrl;
     if (opts?.autoRestore !== false) {
       const stored = loadStoredToken();
@@ -488,7 +486,7 @@ export class Session {
     persistToken(trimmed);
     // Re-home the control client so it carries the new token, if inside an event.
     if (this.currentEvent) {
-      this.#control = this.#controlFactory(this.baseUrl, this.#token, {
+      this.#control = this.#api.createControlClient(this.baseUrl, this.#token, {
         eventId: this.currentEvent.id
       });
     }
@@ -500,7 +498,7 @@ export class Session {
     this.hasToken = false;
     persistToken(undefined);
     if (this.currentEvent) {
-      this.#control = this.#controlFactory(this.baseUrl, undefined, {
+      this.#control = this.#api.createControlClient(this.baseUrl, undefined, {
         eventId: this.currentEvent.id
       });
     }
@@ -511,7 +509,7 @@ export class Session {
    * event picker on load. Rejects on a transport/HTTP failure (the picker shows it).
    */
   listEvents(): Promise<EventMeta[]> {
-    return this.#listEventsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listEvents(this.baseUrl, { token: this.#token });
   }
 
   // ── Timer registry (issue #73) ─────────────────────────────────────────────
@@ -528,7 +526,7 @@ export class Session {
    * Used by the app-level Timers management screen. Rejects on a transport/HTTP failure.
    */
   listTimers(): Promise<Timer[]> {
-    return this.#listTimersImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listTimers(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -540,7 +538,7 @@ export class Session {
    * Pilots count and the placeholder page's read-only callsign list.
    */
   listPilots(): Promise<Pilot[]> {
-    return this.#listPilotsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listPilots(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -551,7 +549,7 @@ export class Session {
    * throws on a non-auth failure (a bad hex `color` / `country` is a **400** the form surfaces).
    */
   createPilot(request: CreatePilotRequest): Promise<Pilot | undefined> {
-    return this.#privilegedWrite((token) => this.#createPilotImpl(this.baseUrl, request, token));
+    return this.#privilegedWrite((token) => this.#api.createPilot(this.baseUrl, request, token));
   }
 
   /**
@@ -562,7 +560,7 @@ export class Session {
    */
   updatePilot(id: PilotId, request: UpdatePilotRequest): Promise<Pilot | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#updatePilotImpl(this.baseUrl, id, request, token)
+      this.#api.updatePilot(this.baseUrl, id, request, token)
     );
   }
 
@@ -574,7 +572,7 @@ export class Session {
    */
   deletePilot(id: PilotId): Promise<true | undefined> {
     return this.#privilegedWrite(async (token) => {
-      await this.#deletePilotImpl(this.baseUrl, id, token);
+      await this.#api.deletePilot(this.baseUrl, id, token);
       return true as const;
     });
   }
@@ -593,7 +591,7 @@ export class Session {
    * its count. Rejects on a transport/HTTP failure (the page surfaces it).
    */
   listClasses(): Promise<Class[]> {
-    return this.#listClassesImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listClasses(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -604,7 +602,7 @@ export class Session {
    * on a non-auth failure.
    */
   createClass(request: CreateClassRequest): Promise<Class | undefined> {
-    return this.#privilegedWrite((token) => this.#createClassImpl(this.baseUrl, request, token));
+    return this.#privilegedWrite((token) => this.#api.createClass(this.baseUrl, request, token));
   }
 
   /**
@@ -616,7 +614,7 @@ export class Session {
    */
   updateClass(id: ClassId, request: UpdateClassRequest): Promise<Class | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#updateClassImpl(this.baseUrl, id, request, token)
+      this.#api.updateClass(this.baseUrl, id, request, token)
     );
   }
 
@@ -627,7 +625,7 @@ export class Session {
    */
   deleteClass(id: ClassId): Promise<true | undefined> {
     return this.#privilegedWrite(async (token) => {
-      await this.#deleteClassImpl(this.baseUrl, id, token);
+      await this.#api.deleteClass(this.baseUrl, id, token);
       return true as const;
     });
   }
@@ -643,7 +641,7 @@ export class Session {
    */
   setClassHidden(id: ClassId, hidden: boolean): Promise<Class | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#setClassHiddenImpl(this.baseUrl, id, hidden, token)
+      this.#api.setClassHidden(this.baseUrl, id, hidden, token)
     );
   }
 
@@ -670,7 +668,7 @@ export class Session {
    * Director's token prompt was cancelled, or throws on a non-auth failure.
    */
   createTimer(request: CreateTimerRequest): Promise<Timer | undefined> {
-    return this.#privilegedWrite((token) => this.#createTimerImpl(this.baseUrl, request, token));
+    return this.#privilegedWrite((token) => this.#api.createTimer(this.baseUrl, request, token));
   }
 
   /**
@@ -679,7 +677,7 @@ export class Session {
    */
   updateTimer(id: TimerId, request: UpdateTimerRequest): Promise<Timer | undefined> {
     return this.#privilegedWrite((token) =>
-      this.#updateTimerImpl(this.baseUrl, id, request, token)
+      this.#api.updateTimer(this.baseUrl, id, request, token)
     );
   }
 
@@ -692,9 +690,152 @@ export class Session {
    */
   deleteTimer(id: TimerId): Promise<true | undefined> {
     return this.#privilegedWrite(async (token) => {
-      await this.#deleteTimerImpl(this.baseUrl, id, token);
+      await this.#api.deleteTimer(this.baseUrl, id, token);
       return true as const;
     });
+  }
+
+  /**
+   * **Hold** a live connection to a RotorHazard timer (`POST /timers/{id}/connect`) — issue #383.
+   *
+   * Deliberately **event-independent**: this is how the Timers screen answers "is this timer even
+   * reachable?" while an RD is setting up at a venue, before any event exists. The Director's
+   * reconciler dials the held timer on its next tick and publishes the same `status` /
+   * `plugin` the event-driven connection does, so the existing badges tell the story.
+   *
+   * Returns the updated {@link Timer}, `undefined` on a cancelled token prompt, or throws
+   * otherwise (the built-in Mock has nothing to dial and answers **400**).
+   */
+  connectTimer(id: TimerId): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#api.connectTimer(this.baseUrl, id, token));
+  }
+
+  /**
+   * **Release** a manually-held RotorHazard connection (`POST /timers/{id}/disconnect`) — #383.
+   * The hold is explicit, so this is the only thing that clears it. If the active event also
+   * selects the timer its connection stays up; only the manual hold is released. Returns the
+   * updated {@link Timer}, `undefined` on a cancelled token prompt, or throws otherwise.
+   */
+  disconnectTimer(id: TimerId): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#api.disconnectTimer(this.baseUrl, id, token));
+  }
+
+  /**
+   * Restart a RotorHazard timer's server (`POST /timers/{id}/restart`) — the guided plugin
+   * install's last step (#386), so installing the plugin never means opening RotorHazard's own web
+   * UI. Resolves to the {@link Timer}, `undefined` on a cancelled token prompt, or throws on any
+   * other failure — including the Director's **refusal while a race is in progress on the timer**
+   * (a 400 whose message names the heat), which the caller surfaces verbatim.
+   */
+  restartTimer(id: TimerId): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#api.restartTimer(this.baseUrl, id, token));
+  }
+
+  /**
+   * Set a timer node's enter/exit detection thresholds (`POST /timers/{id}/calibration`, #355) —
+   * the Tune page's write half. Resolves when the Director **accepted** the change, `undefined` on
+   * a cancelled token prompt, or throws on any other failure (including the Director's refusal for
+   * a Mock, a disconnected timer, or an unknown node, whose message the caller surfaces verbatim).
+   *
+   * Accepted is not applied: RotorHazard does not echo a level set, so the Tune page confirms by
+   * watching `NodeSignal.enter_at` / `exit_at` on the signal feed it is already polling.
+   */
+  setCalibration(id: TimerId, request: CalibrationRequest): Promise<void | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.setCalibration(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * **Capture** a timer node's threshold from a pass (`POST /timers/{id}/capture`, #355) — the Tune
+   * page's third write, and the only one that does not carry a number.
+   *
+   * Resolves with the Director's `CaptureDispatch` when the capture was **started**, `undefined` on
+   * a cancelled token prompt, or throws on any other failure (a Mock, a disconnected timer, a
+   * scored heat running on it, a disabled or non-existent node, or a capture of that threshold
+   * already running on that node — each message already phrased for the RD, so the caller surfaces
+   * it verbatim).
+   *
+   * Started is not captured, and it is not even *measured* yet: RotorHazard samples for the
+   * dispatch's `window_ms` from the moment this lands, so the RD's pass has to happen inside that
+   * window. The page counts it down from the dispatch and then confirms the same way it confirms a
+   * typed level — by watching `NodeSignal.enter_at` / `exit_at` come back on the signal feed it is
+   * already polling. A level that never comes back is a capture that did not land.
+   */
+  captureLevel(id: TimerId, request: CaptureRequest): Promise<CaptureDispatch | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.captureLevel(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Set a timer node's **channel** (`POST /timers/{id}/channel`, #413) — the Tune page's other
+   * write. Resolves with the Director's `ChannelDispatch` when it **accepted** the change,
+   * `undefined` on a cancelled token prompt, or throws on any other failure (a Mock, a disconnected
+   * timer, a scored heat running on it, a disabled or non-existent node, a channel a Fixed timer
+   * cannot tune to — each message already phrased for the RD, so the caller surfaces it verbatim).
+   *
+   * Accepted is not applied: the page confirms by watching `NodeSignal.frequency_mhz` come back on
+   * the signal feed it is already polling. The dispatch is still worth reading for the one thing
+   * the page cannot know on its own — whether the node's stored thresholds were tuned on a
+   * different channel.
+   */
+  setNodeChannel(id: TimerId, request: ChannelRequest): Promise<ChannelDispatch | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.setNodeChannel(this.baseUrl, id, request, token)
+    );
+  }
+
+  /**
+   * Poll a timer's live tuning signal (`GET /timers/{id}/signal`, #355) — the Tune page's read half.
+   *
+   * Deliberately **not** a `#privilegedWrite`: this runs several times a second, and the lazy
+   * token prompt that path opens on a 401 would fire a dialog per poll. It sends whatever token the
+   * session already holds and lets the failure surface, which the page renders as a lost feed.
+   *
+   * Every call renews the Director's lease on the stream — so this *is* the subscription, and the
+   * page's cadence is what keeps the timer streaming. See {@link stopTimerSignal}.
+   */
+  timerSignal(id: TimerId, opts: { signal?: AbortSignal } = {}): Promise<TimerSignal> {
+    return this.#api.timerSignal(this.baseUrl, id, { token: this.#token, signal: opts.signal });
+  }
+
+  /**
+   * End a timer's tuning stream now (`POST /timers/{id}/signal/stop`, #355) — what the Tune page
+   * calls when it leaves, so a timer is not left streaming to nobody for the rest of its lease.
+   *
+   * Same reasoning as {@link timerSignal} for skipping the token prompt: this fires on teardown,
+   * where a modal dialog would be absurd, and the lease is the backstop if it fails.
+   */
+  stopTimerSignal(id: TimerId): Promise<void> {
+    return this.#api.stopTimerSignal(this.baseUrl, id, this.#token);
+  }
+
+  /**
+   * Read a timer's **node configuration** (`GET /timers/{id}/nodes`, #412) — what the hardware
+   * reported, what GridFPV is configured for, which nodes are enabled, and any drift between them.
+   *
+   * An open read like {@link timerSignal}, and for the same reason it is not a `#privilegedWrite`:
+   * it is used to *render* a screen, and a token prompt fired by a render would be absurd. It sends
+   * whatever token the session already holds.
+   */
+  timerNodes(id: TimerId, opts: { signal?: AbortSignal } = {}): Promise<TimerNodes> {
+    return this.#api.timerNodes(this.baseUrl, id, { token: this.#token, signal: opts.signal });
+  }
+
+  /**
+   * Write a timer's **node configuration** (`PUT /timers/{id}/nodes`, #412) — the width override
+   * (`node_count: null` clears it and follows the hardware again) and/or the enabled node set.
+   *
+   * A **decision**, so it is RD-gated and persisted: a node disabled here stays disabled across a
+   * reconnect. Resolves to the resulting {@link TimerNodes}, `undefined` on a cancelled token
+   * prompt, or throws — including the Director's refusals (a zero width, or an edit leaving no node
+   * enabled), whose messages are already phrased for the RD and are surfaced verbatim.
+   */
+  setTimerNodes(id: TimerId, request: SetTimerNodesRequest): Promise<TimerNodes | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.setTimerNodes(this.baseUrl, id, request, token)
+    );
   }
 
   /**
@@ -707,7 +848,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setEventTimersImpl(this.baseUrl, event.id, ids, token)
+      this.#api.setEventTimers(this.baseUrl, event.id, ids, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -726,7 +867,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setPrimaryTimerImpl(this.baseUrl, event.id, id, token)
+      this.#api.setPrimaryTimer(this.baseUrl, event.id, id, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -744,7 +885,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setEventRosterImpl(this.baseUrl, event.id, pilotIds, token)
+      this.#api.setEventRoster(this.baseUrl, event.id, pilotIds, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -762,7 +903,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setEventClassesImpl(this.baseUrl, event.id, classIds, token)
+      this.#api.setEventClasses(this.baseUrl, event.id, classIds, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -785,7 +926,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#setClassMembershipImpl(this.baseUrl, event.id, classId, members, token)
+      this.#api.setClassMembership(this.baseUrl, event.id, classId, members, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -802,7 +943,7 @@ export class Session {
    * format dropdown reads, rather than a hard-coded list. Rejects on a transport/HTTP failure.
    */
   listFormats(): Promise<string[]> {
-    return this.#listFormatsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listFormats(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -813,7 +954,7 @@ export class Session {
    * typed control per knob. Rejects on a transport/HTTP failure.
    */
   listFormatSchemas(): Promise<FormatSchema[]> {
-    return this.#listFormatSchemasImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listFormatSchemas(this.baseUrl, { token: this.#token });
   }
 
   /**
@@ -823,7 +964,20 @@ export class Session {
    * assigned frequencies. Rejects on a transport/HTTP failure.
    */
   listChannels(): Promise<ChannelCatalogEntry[]> {
-    return this.#listChannelsImpl(this.baseUrl, { token: this.#token });
+    return this.#api.listChannels(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Rate a candidate **channel set** (`GET /channels/imd`, open, no token) — #117 S4. IMDTabler's
+   * rating for those channels flown together, plus the worst offending mixing product.
+   *
+   * The Director owns the metric and is the only implementation of it, so the number here is the
+   * number an RD reads off RotorHazard for the same channels (#430). Pure over its argument — no
+   * event, no timer, no state — which is what lets the layout editor ask on every tick. Rejects on
+   * a transport/HTTP failure; the caller shows nothing rather than blocking on it.
+   */
+  rateChannels(channels: readonly number[]): Promise<ImdReading> {
+    return this.#api.rateChannels(this.baseUrl, channels, { token: this.#token });
   }
 
   /**
@@ -837,7 +991,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const round = await this.#privilegedWrite((token) =>
-      this.#createRoundImpl(this.baseUrl, event.id, request, token)
+      this.#api.createRound(this.baseUrl, event.id, request, token)
     );
     if (round) {
       this.currentEvent = { ...event, rounds: [...(event.rounds ?? []), round] };
@@ -856,7 +1010,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const round = await this.#privilegedWrite((token) =>
-      this.#updateRoundImpl(this.baseUrl, event.id, roundId, request, token)
+      this.#api.updateRound(this.baseUrl, event.id, roundId, request, token)
     );
     if (round) {
       const rounds = (event.rounds ?? []).map((r) => (r.id === roundId ? round : r));
@@ -875,10 +1029,89 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#deleteRoundImpl(this.baseUrl, event.id, roundId, token)
+      this.#api.deleteRound(this.baseUrl, event.id, roundId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
+  }
+
+  // --- Event channel layouts (#117 S2) -----------------------------------------------------------
+  //
+  // A **layout** is one complete tuning of the event's timer — one channel per enabled node, drawn
+  // from the timer's *allowed* set. Layouts are **event** state: the read is open, the writes are
+  // control-gated, and every one of them keeps {@link currentEvent}'s `channel_layouts` in step so
+  // the cached meta never disagrees with what the Director holds.
+  //
+  // Note what these do NOT do: no layout write touches a `Timer`. That is the whole point — the
+  // Timers page's checkboxes edit the global allowed set (what a timer may *ever* use), and a layout
+  // is the event's own answer to what goes on which node.
+
+  /**
+   * List the current event's **channel layouts** (`GET /events/{id}/layouts`, open, no token) — #117
+   * S2. Resolves the {@link ChannelLayouts} view — the layouts in definition order plus the advisory
+   * cross-layout `overlaps` the Director computed. Resolves an empty view when no event is selected,
+   * so a caller never has to special-case the picker; rejects on a transport/HTTP failure.
+   */
+  listChannelLayouts(): Promise<ChannelLayouts> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve({ layouts: [], overlaps: [] });
+    return this.#api.listChannelLayouts(this.baseUrl, event.id, { token: this.#token });
+  }
+
+  /**
+   * Define a **channel layout** on the current event (`POST /events/{id}/layouts`) — #117 S2.
+   * RD-gated; the layout id is auto-generated server-side.
+   *
+   * **Omit `nodes` to seed the layout from the timer's allowed set** — the global→event seam. No-op
+   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayouts}
+   * view also re-homes {@link currentEvent}'s `channel_layouts`; returns it, `undefined` on a
+   * cancelled prompt, or throws with the Director's own refusal sentence (already phrased for the
+   * RD — it names the node, the channel and the timer).
+   */
+  async createChannelLayout(request: NewChannelLayoutRequest): Promise<ChannelLayouts | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const view = await this.#privilegedWrite((token) =>
+      this.#api.createChannelLayout(this.baseUrl, event.id, request, token)
+    );
+    if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
+    return view;
+  }
+
+  /**
+   * Replace a **channel layout**'s name and mapping (`PUT /events/{id}/layouts/{layout}`) — #117 S2.
+   * RD-gated; the id is not editable and the whole mapping is replaced wholesale, re-validated as on
+   * create. No-op (resolves `undefined`) when no event is selected. On success the returned
+   * {@link ChannelLayouts} view re-homes {@link currentEvent}'s `channel_layouts`; returns it,
+   * `undefined` on a cancelled prompt, or throws with the Director's own refusal sentence.
+   */
+  async updateChannelLayout(
+    layoutId: LayoutId,
+    request: SetChannelLayoutRequest
+  ): Promise<ChannelLayouts | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const view = await this.#privilegedWrite((token) =>
+      this.#api.updateChannelLayout(this.baseUrl, event.id, layoutId, request, token)
+    );
+    if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
+    return view;
+  }
+
+  /**
+   * Remove a **channel layout** (`DELETE /events/{id}/layouts/{layout}`) — #117 S2. RD-gated. No-op
+   * (resolves `undefined`) when no event is selected. On success the returned {@link ChannelLayouts}
+   * view re-homes {@link currentEvent}'s `channel_layouts`; returns it, `undefined` on a cancelled
+   * prompt, or throws (an unknown layout is a **404**).
+   */
+  async deleteChannelLayout(layoutId: LayoutId): Promise<ChannelLayouts | undefined> {
+    const event = this.currentEvent;
+    if (!event) return undefined;
+    const view = await this.#privilegedWrite((token) =>
+      this.#api.deleteChannelLayout(this.baseUrl, event.id, layoutId, token)
+    );
+    if (view) this.currentEvent = { ...event, channel_layouts: view.layouts };
+    return view;
   }
 
   // --- Heats (race redesign Slice 3b) -----------------------------------------------------------
@@ -917,6 +1150,45 @@ export class Session {
   }
 
   /**
+   * **Bind a heat to a channel layout** (`Command::SetHeatLayout`) — #117 S3, the heat scope of the
+   * three-scope channel model.
+   *
+   * A layout is a complete `node → channel` tuning of the event's timer, so binding one *re-tunes*
+   * the heat: the Director re-emits its schedule with the channel each seat's node is on. Pass
+   * `undefined` to **clear** the bind and fall back to the round's default layout.
+   *
+   * Refused (a failed {@link CommandAck} carrying the Director's own sentence) when the heat is
+   * past `Scheduled` — a heat keeps the channels it raced on — or when the layout is not one the
+   * heat's round names. Sent through the control path; returns the raw {@link CommandAck}.
+   */
+  setHeatLayout(heat: HeatId, layout?: LayoutId): Promise<CommandAck> {
+    return this.send({ SetHeatLayout: layout === undefined ? { heat } : { heat, layout } });
+  }
+
+  /**
+   * **Set a heat's pilots and their channels by hand** (`Command::OverrideHeatSeating`) — #117 S3,
+   * the RD's escape hatch for when the automatic answer is wrong.
+   *
+   * The override is **sticky**: re-filling the round, or editing the round so its heats are
+   * re-materialized, both re-apply it — an override silently lost on a re-fill is worse than no
+   * override at all (#419). Pass an **empty `lineup` to clear it** and return the heat to its
+   * round's plan.
+   *
+   * Omit `frequencies` for *"my pilots, the layout's channels"*: the lineup is overridden and the
+   * channels still come from the heat's layout, so swapping two pilots does not mean retyping four
+   * frequencies. Sent through the control path; returns the raw {@link CommandAck}.
+   */
+  overrideHeatSeating(
+    heat: HeatId,
+    lineup: CompetitorRef[],
+    frequencies: [CompetitorRef, number][] = []
+  ): Promise<CommandAck> {
+    return this.send({
+      OverrideHeatSeating: frequencies.length ? { heat, lineup, frequencies } : { heat, lineup }
+    });
+  }
+
+  /**
    * Schedule a heat by hand (`Command::ScheduleHeat`) — race redesign Slice 3b, the manual build that
    * replaces the retired free-text NewHeat form. The lineup is real {@link CompetitorRef}s drawn from
    * a round's eligible class members (no typed names), and the heat is **tagged** with the round and
@@ -943,7 +1215,23 @@ export class Session {
   listHeats(): Promise<HeatSummary[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#listHeatsImpl(this.baseUrl, event.id, { token: this.#token });
+    return this.#api.listHeats(this.baseUrl, event.id, { token: this.#token });
+  }
+
+  /**
+   * List the current event's **round issues** (`GET /events/{id}/round-issues`, open, no token) —
+   * #416. One {@link RoundIssue} per stored round seat that cannot record a lap: a node beyond the
+   * primary timer's width, one the RD disabled, or one beyond what the timer reported.
+   *
+   * The Rounds & Heats stage renders these on the round they belong to, beside the edit control
+   * that repairs them. An **empty list means nothing is wrong**; a failed read is surfaced by the
+   * caller rather than swallowed, because silently showing a seat that cannot record is the exact
+   * behaviour this read exists to stop. No-op (resolves `[]`) when no event is selected.
+   */
+  listRoundIssues(): Promise<RoundIssue[]> {
+    const event = this.currentEvent;
+    if (!event) return Promise.resolve([]);
+    return this.#api.listRoundIssues(this.baseUrl, event.id, { token: this.#token });
   }
 
   /**
@@ -958,7 +1246,7 @@ export class Session {
   eventAudit(): Promise<EventAuditEntry[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#eventAuditImpl(this.baseUrl, event.id, { token: this.#token });
+    return this.#api.eventAudit(this.baseUrl, event.id, { token: this.#token });
   }
 
   // --- Rankings & standings (race redesign Slice 5/6a + 5/6b) -----------------------------------
@@ -976,7 +1264,7 @@ export class Session {
   roundRanking(roundId: RoundId): Promise<RankEntry[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#roundRankingImpl(this.baseUrl, event.id, roundId, { token: this.#token });
+    return this.#api.roundRanking(this.baseUrl, event.id, roundId, { token: this.#token });
   }
 
   /**
@@ -990,7 +1278,7 @@ export class Session {
   roundStandings(roundId: RoundId): Promise<RoundStanding[]> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve([]);
-    return this.#roundStandingsImpl(this.baseUrl, event.id, roundId, { token: this.#token });
+    return this.#api.roundStandings(this.baseUrl, event.id, roundId, { token: this.#token });
   }
 
   /**
@@ -1004,7 +1292,7 @@ export class Session {
   classStandings(classId: ClassId): Promise<ClassStandings> {
     const event = this.currentEvent;
     if (!event) return Promise.resolve({ class: classId, standings: [] });
-    return this.#classStandingsImpl(this.baseUrl, event.id, classId, { token: this.#token });
+    return this.#api.classStandings(this.baseUrl, event.id, classId, { token: this.#token });
   }
 
   /**
@@ -1033,7 +1321,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#addToRosterImpl(this.baseUrl, event.id, pilotId, token)
+      this.#api.addToRoster(this.baseUrl, event.id, pilotId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -1049,7 +1337,7 @@ export class Session {
     const event = this.currentEvent;
     if (!event) return undefined;
     const updated = await this.#privilegedWrite((token) =>
-      this.#removeFromRosterImpl(this.baseUrl, event.id, pilotId, token)
+      this.#api.removeFromRoster(this.baseUrl, event.id, pilotId, token)
     );
     if (updated) this.currentEvent = updated;
     return updated;
@@ -1065,7 +1353,7 @@ export class Session {
    */
   async getActiveEventId(): Promise<EventMeta['id'] | undefined> {
     try {
-      const { event } = await this.#getActiveEventImpl(this.baseUrl, { token: this.#token });
+      const { event } = await this.#api.getActiveEvent(this.baseUrl, { token: this.#token });
       return event?.id;
     } catch {
       return undefined;
@@ -1087,7 +1375,7 @@ export class Session {
   async resolveActiveEvent(): Promise<void> {
     this.resolvingActiveEvent = true;
     try {
-      const { event } = await this.#getActiveEventImpl(this.baseUrl, { token: this.#token });
+      const { event } = await this.#api.getActiveEvent(this.baseUrl, { token: this.#token });
       if (event) this.selectEvent(event);
     } catch {
       // The Director is unreachable / errored — leave the picker to surface it (it re-lists
@@ -1110,11 +1398,11 @@ export class Session {
    */
   async chooseEvent(meta: EventMeta): Promise<EventMeta | undefined> {
     try {
-      await this.#setActiveEventImpl(this.baseUrl, meta.id, this.#token);
+      await this.#api.setActiveEvent(this.baseUrl, meta.id, this.#token);
     } catch (e) {
       if (this.#token || !isAuthFailure(e)) throw e;
       if (!(await this.#promptForToken())) return undefined;
-      await this.#setActiveEventImpl(this.baseUrl, meta.id, this.#token);
+      await this.#api.setActiveEvent(this.baseUrl, meta.id, this.#token);
     }
     this.selectEvent(meta);
     return meta;
@@ -1134,11 +1422,11 @@ export class Session {
    */
   async deleteEvent(id: EventMeta['id']): Promise<true | undefined> {
     try {
-      await this.#deleteEventImpl(this.baseUrl, id, this.#token);
+      await this.#api.deleteEvent(this.baseUrl, id, this.#token);
     } catch (e) {
       if (this.#token || !isAuthFailure(e)) throw e;
       if (!(await this.#promptForToken())) return undefined;
-      await this.#deleteEventImpl(this.baseUrl, id, this.#token);
+      await this.#api.deleteEvent(this.baseUrl, id, this.#token);
     }
     // If we were inside the just-deleted event, leave it so the workspace doesn't dangle.
     if (this.currentEvent?.id === id) this.leaveEvent();
@@ -1157,11 +1445,11 @@ export class Session {
   selectEvent(meta: EventMeta, scope?: Scope): void {
     this.leaveEvent();
     this.currentEvent = meta;
-    this.#control = this.#controlFactory(this.baseUrl, this.#token, { eventId: meta.id });
+    this.#control = this.#api.createControlClient(this.baseUrl, this.#token, { eventId: meta.id });
 
     const liveScope: Scope = scope ?? { Event: { event: meta.id } };
     this.connectionStatus = 'connecting';
-    this.#client = this.#connectImpl({
+    this.#client = this.#api.connect({
       baseUrl: this.baseUrl,
       eventId: meta.id,
       scope: liveScope,
@@ -1291,7 +1579,7 @@ export class Session {
     this.#unsub?.();
     this.#client?.close();
     this.connectionStatus = 'connecting';
-    this.#client = this.#connectImpl({
+    this.#client = this.#api.connect({
       baseUrl: this.baseUrl,
       eventId: event.id,
       scope,
@@ -1366,7 +1654,7 @@ export class Session {
     fields?: CreateEventFields
   ): Promise<EventMeta | undefined> {
     try {
-      const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      const meta = await this.#api.createEvent(this.baseUrl, name, this.#token, { fields });
       await this.#persistActive(meta.id);
       this.selectEvent(meta);
       return meta;
@@ -1375,7 +1663,7 @@ export class Session {
       if (this.#token || !isAuthFailure(e)) throw e;
       // Open Director would have succeeded; a 401/403 means control is gated — prompt once.
       if (!(await this.#promptForToken())) return undefined;
-      const meta = await this.#createEventImpl(this.baseUrl, name, this.#token, { fields });
+      const meta = await this.#api.createEvent(this.baseUrl, name, this.#token, { fields });
       await this.#persistActive(meta.id);
       this.selectEvent(meta);
       return meta;
@@ -1390,7 +1678,7 @@ export class Session {
    */
   async #persistActive(id: EventMeta['id']): Promise<void> {
     try {
-      await this.#setActiveEventImpl(this.baseUrl, id, this.#token);
+      await this.#api.setActiveEvent(this.baseUrl, id, this.#token);
     } catch {
       /* leave the active event unset; entering locally still works */
     }
@@ -1605,5 +1893,3 @@ export class Session {
     return undefined;
   }
 }
-
-export { PRACTICE_EVENT_ID };

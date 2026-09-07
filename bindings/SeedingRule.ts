@@ -8,7 +8,8 @@ import type { RoundId } from "./RoundId";
  * ([`FromRoster`](Self::FromRoster) — practice / first qualifying), or from a **prior round's
  * ranking** ([`FromRanking`](Self::FromRanking) — the bracket / cut case, the issue-#84 carry that
  * a later slice consumes), or — for the casual **open-practice** format — from a set of active
- * **channels** ([`AllChannels`](Self::AllChannels)) rather than pilots. Derives serde + `ts_rs::TS`.
+ * **timer nodes** ([`ActiveNodes`](Self::ActiveNodes)) rather than pilots. Derives serde +
+ * `ts_rs::TS`.
  */
 export type SeedingRule = "FromRoster" | { "FromRanking": { 
 /**
@@ -43,9 +44,11 @@ take: number, } } | { "Combine": {
  * The sub-rules whose fields are concatenated (in order) then de-duplicated first-wins.
  * Each is resolved exactly as a standalone seeding rule. Always at least one entry.
  */
-sources: Array<SeedingRule>, } } | { "AllChannels": { 
+sources: Array<SeedingRule>, } } | { "ActiveNodes": { 
 /**
- * The active channels as **node indices** (the timer-seat indices the RD made live), laid
- * out as `node-{i}` competitor refs by the field builder, in this order.
+ * The active **node indices** (the timer-seat indices the RD made live), laid out as
+ * `node-{i}` competitor refs by the field builder, in this order. These are seats on the
+ * timer, never frequencies — what a seat is *tuned to* comes from the round's
+ * [`ChannelLayout`].
  */
-channels: Array<number>, } };
+nodes: Array<number>, } };

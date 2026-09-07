@@ -10,7 +10,7 @@
 import { expect, test } from './observability.js';
 
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -38,7 +38,7 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
   director
 }) => {
   // ── Schedule a heat over the open control path (no round tag ⇒ default 5:00 staging) ──────────
-  const ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  const ack = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { ScheduleHeat: { heat: 's3-1', lineup: ['Ace', 'Bee', 'Cee'] } }
   });
@@ -47,7 +47,7 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
   // shared worker Director's `current_heat` stays pinned to whatever heat a prior spec last touched
   // (it never resets between specs), and filling a heat does NOT steal Live focus (current-heat.spec.ts)
   // — so this server-side selection keeps the run independent of spec order.
-  const focused = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  const focused = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { SetCurrentHeat: { heat: 's3-1' } }
   });
@@ -69,12 +69,17 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
   await page.getByRole('button', { name: 'Start', exact: true }).click();
   const arming = page.getByRole('status', { name: 'Arming' });
   await expect(arming).toBeVisible();
-  await expect(arming).toHaveText(/Arming… stand by/);
+  // The hold is deliberately random *to pilots*, so the precise countdown is RD-control-only: a
+  // **controlling** session (this Director is open / full-trust) reads "Tone in S.s", and only a
+  // read-only session gets the generic "Arming… stand by" — see `LiveRaceControl.svelte`. This spec
+  // drives the controlling view, so it asserts that copy.
+  await expect(arming).toHaveText(/Tone in \d/);
+  await expect(arming).toHaveText(/The race starts on its own/);
   await shot(arming, 'arming-state');
 
   // Let it auto-advance, then clean the heat up (Abort) so the shared Director is left tidy.
   await expect(page.locator('.phase').first()).toHaveText('Running', { timeout: 15_000 });
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
   await page.getByRole('button', { name: 'Discard', exact: true }).click();
   await page.getByRole('button', { name: 'Confirm' }).click();
@@ -123,7 +128,8 @@ test('Slice 3 surfaces: staging countdown, arming state, and the round config fo
 
   // Clean up: cancel the form, then back on Classes & Roster deselect the class so the shared
   // Director resets to empty for the next spec.
-  await form.getByRole('button', { name: 'Cancel' }).click();
+  // The dialog's actions live in its footer, OUTSIDE the `<form>` (`EventRounds.svelte`).
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
   await page
     .getByRole('navigation', { name: 'Screens' })
     .getByRole('button', { name: 'Classes & Roster' })

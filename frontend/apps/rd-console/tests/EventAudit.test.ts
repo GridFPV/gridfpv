@@ -42,6 +42,7 @@ const PILOTS = [
 const HEATS: HeatSummary[] = [
   {
     heat: 'q1-heat',
+    name: 'Qualifying R1 Heat 1',
     lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
     round: 'r1',
     class: 'c1',
@@ -51,6 +52,7 @@ const HEATS: HeatSummary[] = [
   },
   {
     heat: 'q2-heat',
+    name: 'Qualifying R1 Heat 2',
     lineup: ['maverick-4d9rp8', 'goose-yla6dp'],
     round: 'r1',
     class: 'c1',

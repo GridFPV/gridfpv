@@ -11,6 +11,9 @@ import type { FetchLike, WebSocketLike } from './client.js';
 
 // ── Test fixtures ────────────────────────────────────────────────────────────
 
+/** The event every test connection is rooted under — explicit since #414 removed the default. */
+const EVENT = 'test-event-ab12';
+
 const SCOPE: Scope = { Heat: { heat: 'heat-1' } };
 
 const liveState = (phase: HeatPhase): ProjectionBody => ({
@@ -115,8 +118,21 @@ function manualTimer(): {
   };
 }
 
-const envelope = (sequence: number, phase: HeatPhase): ChangeEnvelope => ({
+/**
+ * The `cursor` a fixture envelope carries when a test does not care about the resume
+ * axis. Deliberately far from any `sequence` these tests use: the two are different
+ * axes (#422 / seam 3), and a fixture that let them coincide would hide a client
+ * conflating them.
+ */
+const someOffset = (sequence: number): number => 1000 + sequence;
+
+const envelope = (
+  sequence: number,
+  phase: HeatPhase,
+  cursor = someOffset(sequence)
+): ChangeEnvelope => ({
   sequence,
+  cursor,
   projection: 'LiveRaceState',
   change: { FreshValue: liveState(phase) }
 });
@@ -126,17 +142,23 @@ const envelope = (sequence: number, phase: HeatPhase): ChangeEnvelope => ({
  * `{ Change: ChangeEnvelope }` (externally tagged). The client must unwrap it — a
  * raw, unwrapped envelope was the shape these mocks used before, which masked the
  * client ignoring every real (wrapped) frame.
+ *
+ * `cursor` is the log offset the server folded that body through (#422). It is what the
+ * client must store as its resume position — never a count of envelopes it applied.
  */
-const change = (sequence: number, phase: HeatPhase) => ({ Change: envelope(sequence, phase) });
+const change = (sequence: number, phase: HeatPhase, cursor = someOffset(sequence)) => ({
+  Change: envelope(sequence, phase, cursor)
+});
 
 /**
  * A `Delta` change envelope, wrapped as the wire `StreamMessage`. The per-projection
  * delta encodings are deferred (#43), so the client cannot fold one into `body` —
  * an in-order delta must fail safe (re-snapshot), never freeze the view silently.
  */
-const deltaChange = (sequence: number) => ({
+const deltaChange = (sequence: number, cursor = someOffset(sequence)) => ({
   Change: {
     sequence,
+    cursor,
     projection: 'LiveRaceState',
     change: { Delta: { appended: 'lap' } }
   }
@@ -161,6 +183,7 @@ describe('ProtocolClient', () => {
 
     const client = connect({
       baseUrl: 'http://director.local:8080',
+      eventId: EVENT,
       scope: SCOPE,
       fetch,
       webSocketFactory: factory
@@ -193,17 +216,24 @@ describe('ProtocolClient', () => {
     // which is every real Director snapshot. Earlier tests used cursor 0, masking it.
     const { fetch } = mockFetch([{ cursor: 5, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
-    sockets[0].emit(change(1, 'Staged'));
-    sockets[0].emit(change(2, 'Armed'));
-    sockets[0].emit(change(3, 'Running'));
+    // The three envelopes were folded through log offsets 6, 7 and 8 — the server states
+    // each one; the stream sequence (1, 2, 3) is the other axis entirely.
+    sockets[0].emit(change(1, 'Staged', 6));
+    sockets[0].emit(change(2, 'Armed', 7));
+    sockets[0].emit(change(3, 'Running', 8));
 
-    // Every envelope applied → body converged. The resume cursor ADVANCES by one per
-    // applied envelope (5 → 8) — it tracks the last-applied position (each envelope is
-    // ≥ 1 log append), so a reconnect resumes there rather than replaying from the
+    // Every envelope applied → body converged. The resume cursor is the last envelope's
+    // OWN offset (8), so a reconnect resumes exactly there rather than replaying from the
     // snapshot offset. It is still NOT the stream sequence (a different axis).
     expect(phaseOf(client.getState().body)).toBe('Running');
     expect(client.getState().cursor).toBe(8);
@@ -214,7 +244,13 @@ describe('ProtocolClient', () => {
   it('is idempotent: re-delivered envelopes at/below the cursor are no-ops', async () => {
     const { fetch } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -236,7 +272,13 @@ describe('ProtocolClient', () => {
       { cursor: 5, body: liveState('Running') } // re-snapshot after the gap
     ]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -258,9 +300,9 @@ describe('ProtocolClient', () => {
     expect(req.from).toBe(5);
 
     // The fresh subscription restarts the per-stream sequence, so its first envelope
-    // is accepted and the body converges. The resume cursor advances past the
-    // re-snapshot offset with the applied envelope (5 → 6).
-    sockets[1].emit(change(6, 'Unofficial'));
+    // is accepted and the body converges. The resume cursor moves to that envelope's own
+    // offset (6), past the re-snapshot's 5.
+    sockets[1].emit(change(6, 'Unofficial', 6));
     expect(phaseOf(client.getState().body)).toBe('Unofficial');
     expect(client.getState().cursor).toBe(6);
 
@@ -273,12 +315,18 @@ describe('ProtocolClient', () => {
       { cursor: 200, body: liveState('Running') }
     ]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
-    // An applied envelope advances the resume cursor off the snapshot offset (100 → 101)…
-    sockets[0].emit(change(1, 'Armed'));
+    // An applied envelope moves the resume cursor off the snapshot offset (100 → 101)…
+    sockets[0].emit(change(1, 'Armed', 101));
     expect(client.getState().cursor).toBe(101);
 
     const staleErr: ProtocolError = { code: 'StaleCursor', message: 'cursor too old to replay' };
@@ -300,6 +348,7 @@ describe('ProtocolClient', () => {
     const timer = manualTimer();
     const client = connect({
       baseUrl: 'http://d',
+      eventId: EVENT,
       scope: SCOPE,
       fetch,
       webSocketFactory: factory,
@@ -309,8 +358,10 @@ describe('ProtocolClient', () => {
     });
     await flush();
     sockets[0].open();
-    sockets[0].emit(change(1, 'Staged'));
-    sockets[0].emit(change(2, 'Armed'));
+    // Two envelopes, folded through log offsets 1 and 5 — offsets 2, 3 and 4 were appends
+    // that moved no projection (a signal chunk, a marshaling no-op) and so emitted nothing.
+    sockets[0].emit(change(1, 'Staged', 1));
+    sockets[0].emit(change(2, 'Armed', 5));
 
     // Socket drops.
     sockets[0].drop();
@@ -325,17 +376,88 @@ describe('ProtocolClient', () => {
 
     sockets[1].open();
     const req = JSON.parse(sockets[1].sent[0]);
-    // Resume from the LAST-APPLIED position: the resume cursor advanced by one per
-    // applied envelope (snapshot offset 0 + 2 applied = 2), so the re-subscribe does
-    // NOT re-present the original snapshot offset and replay the whole backlog
-    // through onState (the stale-state flashes), and it cannot age out of the
-    // retained window (StaleCursor) while envelopes keep applying.
-    expect(req.from).toBe(2);
+    // Resume from the LAST-APPLIED position, as the SERVER stated it: the second envelope
+    // was folded through offset 5, so that is the `from`. Counting applied envelopes would
+    // have said 2 — three offsets short — and the server would have replayed 3, 4 and 5,
+    // pushing an older fold through onState before climbing back (#422). The re-subscribe
+    // also cannot age out of the retained window (StaleCursor) while envelopes keep applying.
+    expect(req.from).toBe(5);
     expect(client.getState().status).toBe('live');
 
     // The resumed subscription restarts the sequence; its first envelope converges.
     sockets[1].emit(change(1, 'Running'));
     expect(phaseOf(client.getState().body)).toBe('Running');
+
+    client.close();
+  });
+
+  it('#422: the resume cursor is the offset the server echoed, never a count of applied envelopes', async () => {
+    // The bug, at its source. The wire echoed no offset, so this client advanced `cursor`
+    // by one per APPLIED envelope and documented it as "conservative (at-or-behind the true
+    // offset)". Every log append that moved no projection — a SignalHistory chunk, a
+    // CompetitorSeen, a marshaling no-op — emitted nothing, so it was never counted, and the
+    // gap between the cursor and the true tail grew without bound. A reconnect then resumed
+    // from `tail - drift`, which is INSIDE the server's retained window, so the stream
+    // replayed instead of asking for a re-snapshot: `body` was overwritten with an older
+    // fold (fewer laps) and climbed back through every intermediate one. On the Race
+    // Director's board a pilot lost laps and regained them, mid-race, with no operator
+    // action — indistinguishable from a marshal voiding a pass.
+    const { fetch } = mockFetch([{ cursor: 40, body: liveState('Scheduled') }]);
+    const { factory, sockets } = mockWsFactory();
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
+    await flush();
+    sockets[0].open();
+
+    // Three envelopes across a log that advanced by 30 offsets: the ones in between moved
+    // no projection. A +1 tracker would say 43; the truth is 70.
+    sockets[0].emit(change(1, 'Staged', 47));
+    expect(client.getState().cursor).toBe(47);
+    sockets[0].emit(change(2, 'Armed', 61));
+    sockets[0].emit(change(3, 'Running', 70));
+
+    expect(client.getState().cursor).toBe(70);
+    expect(client.getState().cursor).not.toBe(43); // what counting envelopes would have said
+
+    // A duplicate redelivery must not move the cursor at all — it is not applied.
+    sockets[0].emit(change(2, 'Scheduled', 61));
+    expect(client.getState().cursor).toBe(70);
+    expect(phaseOf(client.getState().body)).toBe('Running');
+
+    client.close();
+  });
+
+  it('#422: falls back to the old lower-bound advance against a server that echoes no offset', async () => {
+    // A Director too old to carry `ChangeEnvelope.cursor` still has to resume somewhere.
+    // Losing the resume position outright would re-present the original snapshot offset on
+    // every blip (or age out of the retained window); the pre-#422 `+1` advance is the
+    // graceful degradation. Its stream still replays on reconnect — that is the bug this
+    // field fixes — but nothing here may re-derive an offset the server did not state.
+    const { fetch } = mockFetch([{ cursor: 10, body: liveState('Scheduled') }]);
+    const { factory, sockets } = mockWsFactory();
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
+    await flush();
+    sockets[0].open();
+
+    const legacy = (sequence: number, phase: HeatPhase) => ({
+      Change: { sequence, projection: 'LiveRaceState', change: { FreshValue: liveState(phase) } }
+    });
+    sockets[0].emit(legacy(1, 'Staged'));
+    sockets[0].emit(legacy(2, 'Armed'));
+
+    expect(phaseOf(client.getState().body)).toBe('Armed');
+    expect(client.getState().cursor).toBe(12); // 10 + the two applied envelopes
 
     client.close();
   });
@@ -350,7 +472,13 @@ describe('ProtocolClient', () => {
       { cursor: 9, body: liveState('Running') } // re-snapshot forced by the delta
     ]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
@@ -376,12 +504,18 @@ describe('ProtocolClient', () => {
   it('a re-delivered Delta at/below the applied sequence is a duplicate no-op (no re-snapshot)', async () => {
     const { fetch, calls } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
     await flush();
     sockets[0].open();
 
-    sockets[0].emit(change(1, 'Staged'));
-    sockets[0].emit(change(2, 'Armed'));
+    sockets[0].emit(change(1, 'Staged', 1));
+    sockets[0].emit(change(2, 'Armed', 2));
     // At-least-once redelivery of an already-applied sequence as a Delta: it is deduped
     // by sequence BEFORE the unsupported-delta check, so no re-snapshot fires.
     sockets[0].emit(deltaChange(2));
@@ -390,7 +524,7 @@ describe('ProtocolClient', () => {
     expect(calls).toHaveLength(1); // no extra snapshot fetch
     expect(sockets).toHaveLength(1); // the socket stayed up
     expect(phaseOf(client.getState().body)).toBe('Armed');
-    expect(client.getState().cursor).toBe(2); // 0 + the two applied envelopes
+    expect(client.getState().cursor).toBe(2); // the last APPLIED envelope's own offset
 
     client.close();
   });
@@ -398,7 +532,13 @@ describe('ProtocolClient', () => {
   it('notifies onState listeners and stops after close', async () => {
     const { fetch } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
-    const client = connect({ baseUrl: 'http://d', scope: SCOPE, fetch, webSocketFactory: factory });
+    const client = connect({
+      baseUrl: 'http://d',
+      eventId: EVENT,
+      scope: SCOPE,
+      fetch,
+      webSocketFactory: factory
+    });
 
     const seen: (HeatPhase | undefined)[] = [];
     const unsub = client.onState((s) => seen.push(phaseOf(s.body)));
@@ -420,26 +560,7 @@ describe('ProtocolClient', () => {
 
   // ── Event-rooted surface (issue #72) ─────────────────────────────────────────
 
-  it('roots the snapshot + stream URLs under the default Practice event', async () => {
-    const { fetch, calls } = mockFetch([{ cursor: 3, body: liveState('Scheduled') }]);
-    const { factory, sockets } = mockWsFactory();
-
-    const client = connect({
-      baseUrl: 'http://director.local:8080',
-      scope: SCOPE,
-      fetch,
-      webSocketFactory: factory
-    });
-    await flush();
-
-    // No eventId given → both the snapshot and the WS are rooted under `/events/practice`.
-    expect(calls[0]).toBe('http://director.local:8080/events/practice/snapshot/heat/heat-1');
-    expect(sockets[0].url).toBe('ws://director.local:8080/events/practice/stream');
-
-    client.close();
-  });
-
-  it('roots the URLs under an explicit eventId when given', async () => {
+  it('roots the snapshot + stream URLs under the named event', async () => {
     const { fetch, calls } = mockFetch([{ cursor: 0, body: liveState('Scheduled') }]);
     const { factory, sockets } = mockWsFactory();
 
@@ -470,14 +591,21 @@ describe('events lifecycle helpers (#72)', () => {
         ok: true,
         status: 200,
         json: async (): Promise<unknown> => [
-          { id: 'practice', name: 'Practice', created_at: 1, persistent: false }
+          { id: 'spring-cup-2026-ab12', name: 'Spring Cup', created_at: 1, persistent: true }
         ]
       } as unknown as Response;
     };
     const { listEvents } = await import('./client.js');
     const events = await listEvents('http://director.local:8080/', { fetch });
     expect(calls[0]).toBe('http://director.local:8080/events');
-    expect(events[0].id).toBe('practice');
+    expect(events[0].id).toBe('spring-cup-2026-ab12');
+  });
+
+  it('listEvents accepts an EMPTY list — a fresh Director has no events (#414)', async () => {
+    const fetch: FetchLike = async () =>
+      ({ ok: true, status: 200, json: async (): Promise<unknown> => [] }) as unknown as Response;
+    const { listEvents } = await import('./client.js');
+    expect(await listEvents('http://director.local:8080/', { fetch })).toEqual([]);
   });
 
   it('createEvent POSTs the name to /events with the RD token and returns the new EventMeta', async () => {
@@ -707,5 +835,189 @@ describe('events lifecycle helpers (#72)', () => {
     const { setPrimaryTimer } = await import('./client.js');
     await setPrimaryTimer('http://director.local:8080', 'evt-a', null, 'rd-tok', { fetch });
     expect(seen[0].body).toEqual({ id: null });
+  });
+});
+
+// ── Request failures: the Director's words, never a route line (#433) ────────────────────────
+//
+// Refusing to delete a round used to reach the RD as
+// `DELETE /events/{eventId}/rounds/{roundId} failed: HTTP 400` — two raw ids on screen and the
+// server's explanation discarded, while the Director had written a sentence naming the heat by its
+// friendly name precisely so it could be shown.
+
+describe("request failures carry the Director's words (#433)", () => {
+  const BASE = 'http://director.local:8080';
+  const TOKEN = 'rd-tok';
+  const EVT = 'evt-9f3a7c';
+  const ROUND = 'round-4b21';
+  const TIMER = 'timer-7e55';
+  const PILOT = 'pilot-3c4d';
+  const CLASS = 'class-88ee';
+  const LAYOUT = 'layout-11aa';
+  /** Every raw handle the sweep hands the client — none may come back out in a message. */
+  const RAW_IDS = [EVT, ROUND, TIMER, PILOT, CLASS, LAYOUT];
+
+  /**
+   * A stand-in request body. The failing fetch never reads one, and `never` satisfies every
+   * request-param type, so the sweep below needs no fixture per wire shape.
+   */
+  const REQ = {} as unknown as never;
+
+  /** A fetch that fails every request — with a typed `ProtocolError` body, or with none at all. */
+  const failing =
+    (status: number, body?: ProtocolError): FetchLike =>
+    async () =>
+      ({
+        ok: false,
+        status,
+        json: async (): Promise<unknown> => {
+          // A bodyless failure is what a bare 500 (or an HTML error page) actually looks like.
+          if (!body) throw new SyntaxError('Unexpected end of JSON input');
+          return body;
+        }
+      }) as unknown as Response;
+
+  /** Run a call expected to reject and hand back the error it threw. */
+  async function caught(run: () => Promise<unknown>): Promise<Error & { status?: number }> {
+    try {
+      await run();
+    } catch (e) {
+      return e as Error & { status?: number };
+    }
+    throw new Error('expected the request to reject');
+  }
+
+  it("throws the Director's refusal verbatim — the sentence #433 was discarding", async () => {
+    const REFUSAL =
+      'this round has a heat in progress (Practice Heat) — finalize or reset it before removing the round';
+    const { deleteRound, isRequestFailure } = await import('./client.js');
+    const err = await caught(() =>
+      deleteRound(BASE, EVT, ROUND, TOKEN, {
+        fetch: failing(400, { code: 'BadRequest', message: REFUSAL })
+      })
+    );
+    // Verbatim: not prefixed, not wrapped, not appended to.
+    expect(err.message).toBe(REFUSAL);
+    expect(isRequestFailure(err)).toBe(true);
+    expect(err.status).toBe(400);
+    expect((err as { code?: string }).code).toBe('BadRequest');
+  });
+
+  it('falls back only when there is no body, and then says what was attempted', async () => {
+    const { deleteRound } = await import('./client.js');
+    const err = await caught(() => deleteRound(BASE, EVT, ROUND, TOKEN, { fetch: failing(500) }));
+    // Honest, actionable, and status-bearing — a poor message is fine, a silent one is not.
+    expect(err.message).toBe('The Director could not remove the round (HTTP 500).');
+    expect(err.status).toBe(500);
+    expect((err as { code?: string }).code).toBeUndefined();
+  });
+
+  it('never puts a raw id — or a route line — in a surfaced message', async () => {
+    const c = await import('./client.js');
+    const probes: [string, (fetch: FetchLike) => Promise<unknown>][] = [
+      ['listEvents', (fetch) => c.listEvents(BASE, { fetch })],
+      ['createEvent', (fetch) => c.createEvent(BASE, 'Friday', TOKEN, { fetch })],
+      ['deleteEvent', (fetch) => c.deleteEvent(BASE, EVT, TOKEN, { fetch })],
+      ['getActiveEvent', (fetch) => c.getActiveEvent(BASE, { fetch })],
+      ['setActiveEvent', (fetch) => c.setActiveEvent(BASE, EVT, TOKEN, { fetch })],
+      ['listTimers', (fetch) => c.listTimers(BASE, { fetch })],
+      ['createTimer', (fetch) => c.createTimer(BASE, REQ, TOKEN, { fetch })],
+      ['updateTimer', (fetch) => c.updateTimer(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['connectTimer', (fetch) => c.connectTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['disconnectTimer', (fetch) => c.disconnectTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['restartTimer', (fetch) => c.restartTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['timerSignal', (fetch) => c.timerSignal(BASE, TIMER, { fetch })],
+      ['stopTimerSignal', (fetch) => c.stopTimerSignal(BASE, TIMER, TOKEN, { fetch })],
+      ['setCalibration', (fetch) => c.setCalibration(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['captureLevel', (fetch) => c.captureLevel(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['timerNodes', (fetch) => c.timerNodes(BASE, TIMER, { fetch })],
+      ['setTimerNodes', (fetch) => c.setTimerNodes(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['setNodeChannel', (fetch) => c.setNodeChannel(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['deleteTimer', (fetch) => c.deleteTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['setEventTimers', (fetch) => c.setEventTimers(BASE, EVT, [TIMER], TOKEN, { fetch })],
+      ['setPrimaryTimer', (fetch) => c.setPrimaryTimer(BASE, EVT, TIMER, TOKEN, { fetch })],
+      ['listPilots', (fetch) => c.listPilots(BASE, { fetch })],
+      ['createPilot', (fetch) => c.createPilot(BASE, REQ, TOKEN, { fetch })],
+      ['updatePilot', (fetch) => c.updatePilot(BASE, PILOT, REQ, TOKEN, { fetch })],
+      ['deletePilot', (fetch) => c.deletePilot(BASE, PILOT, TOKEN, { fetch })],
+      ['setEventRoster', (fetch) => c.setEventRoster(BASE, EVT, [PILOT], TOKEN, { fetch })],
+      ['addToRoster', (fetch) => c.addToRoster(BASE, EVT, PILOT, TOKEN, { fetch })],
+      ['removeFromRoster', (fetch) => c.removeFromRoster(BASE, EVT, PILOT, TOKEN, { fetch })],
+      ['listClasses', (fetch) => c.listClasses(BASE, { fetch })],
+      ['createClass', (fetch) => c.createClass(BASE, REQ, TOKEN, { fetch })],
+      ['updateClass', (fetch) => c.updateClass(BASE, CLASS, REQ, TOKEN, { fetch })],
+      ['deleteClass', (fetch) => c.deleteClass(BASE, CLASS, TOKEN, { fetch })],
+      ['setClassHidden', (fetch) => c.setClassHidden(BASE, CLASS, true, TOKEN, { fetch })],
+      ['setEventClasses', (fetch) => c.setEventClasses(BASE, EVT, [CLASS], TOKEN, { fetch })],
+      [
+        'setClassMembership',
+        (fetch) => c.setClassMembership(BASE, EVT, CLASS, [PILOT], TOKEN, { fetch })
+      ],
+      ['listFormatSchemas', (fetch) => c.listFormatSchemas(BASE, { fetch })],
+      ['listFormats', (fetch) => c.listFormats(BASE, { fetch })],
+      ['listChannels', (fetch) => c.listChannels(BASE, { fetch })],
+      ['rateChannels', (fetch) => c.rateChannels(BASE, [5658], { fetch })],
+      ['createRound', (fetch) => c.createRound(BASE, EVT, REQ, TOKEN, { fetch })],
+      ['updateRound', (fetch) => c.updateRound(BASE, EVT, ROUND, REQ, TOKEN, { fetch })],
+      ['deleteRound', (fetch) => c.deleteRound(BASE, EVT, ROUND, TOKEN, { fetch })],
+      ['listChannelLayouts', (fetch) => c.listChannelLayouts(BASE, EVT, { fetch })],
+      ['createChannelLayout', (fetch) => c.createChannelLayout(BASE, EVT, REQ, TOKEN, { fetch })],
+      [
+        'updateChannelLayout',
+        (fetch) => c.updateChannelLayout(BASE, EVT, LAYOUT, REQ, TOKEN, { fetch })
+      ],
+      [
+        'deleteChannelLayout',
+        (fetch) => c.deleteChannelLayout(BASE, EVT, LAYOUT, TOKEN, { fetch })
+      ],
+      ['listHeats', (fetch) => c.listHeats(BASE, EVT, { fetch })],
+      ['listRoundIssues', (fetch) => c.listRoundIssues(BASE, EVT, { fetch })],
+      ['eventAudit', (fetch) => c.eventAudit(BASE, EVT, { fetch })],
+      ['roundRanking', (fetch) => c.roundRanking(BASE, EVT, ROUND, { fetch })],
+      ['roundStandings', (fetch) => c.roundStandings(BASE, EVT, ROUND, { fetch })],
+      ['classStandings', (fetch) => c.classStandings(BASE, EVT, CLASS, { fetch })]
+    ];
+
+    for (const [name, run] of probes) {
+      const err = await caught(() => run(failing(400)));
+      const surfaced = `${name}: ${err.message}`;
+      for (const id of RAW_IDS) expect(surfaced).not.toContain(id);
+      // No method/URL either — a route line is what carried the ids in the first place.
+      expect(surfaced).not.toMatch(/\//);
+      expect(surfaced).not.toMatch(/\b(GET|PUT|POST|DELETE)\b/);
+      // Still honest about the status, and still branchable on it.
+      expect(surfaced).toContain('HTTP 400');
+      expect(err.status).toBe(400);
+    }
+  });
+
+  it("prefers the Director's sentence over the fallback on every call site", async () => {
+    const c = await import('./client.js');
+    const SAID = 'Track RH is a simulated timer and has no signal to read';
+    const fetch = failing(400, { code: 'BadRequest', message: SAID });
+    const messages = await Promise.all(
+      [
+        () => c.timerSignal(BASE, TIMER, { fetch }),
+        () => c.restartTimer(BASE, TIMER, TOKEN, { fetch }),
+        () => c.deleteRound(BASE, EVT, ROUND, TOKEN, { fetch }),
+        () => c.setEventRoster(BASE, EVT, [PILOT], TOKEN, { fetch }),
+        () => c.roundRanking(BASE, EVT, ROUND, { fetch })
+      ].map(async (run) => (await caught(run)).message)
+    );
+    expect(messages).toEqual([SAID, SAID, SAID, SAID, SAID]);
+  });
+
+  it('carries the status structurally so auth detection never reads the words', async () => {
+    const { deleteEvent, isRequestFailure } = await import('./client.js');
+    // A 401 whose message says nothing about 401 — the console's `isAuthFailure` must still fire.
+    const err = await caught(() =>
+      deleteEvent(BASE, EVT, undefined, {
+        fetch: failing(401, { code: 'Unauthorized', message: 'Control on this Director is gated.' })
+      })
+    );
+    expect(err.message).toBe('Control on this Director is gated.');
+    expect(err.message).not.toContain('401');
+    expect(isRequestFailure(err) && err.status === 401).toBe(true);
+    expect((err as { code?: string }).code).toBe('Unauthorized');
   });
 });

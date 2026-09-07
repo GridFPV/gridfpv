@@ -18,22 +18,20 @@ import {
   createPilot,
   createRound,
   listHeats,
-  PRACTICE_EVENT_ID,
   setClassMembership,
   setEventClasses,
   setEventRoster
 } from '../packages/protocol-client/dist/index.js';
-import { type Director } from '../test-harness/director.ts';
-import { rdControl, startContractDirector } from './harness.ts';
+import { rdControl, startDirectorWithEvent, type ContractDirector } from './harness.ts';
 
 const TOKEN = 'rd-heats-contract';
 const HEAT = 'q-1';
 const LABEL = 'Featured Heat';
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
-  director = await startContractDirector({ token: TOKEN });
+  director = await startDirectorWithEvent({ token: TOKEN });
 });
 
 afterAll(async () => {
@@ -47,18 +45,18 @@ describe('GET /heats serves the round-tagged scheduled heats', () => {
     const klass = await createClass(director.baseUrl, { name: 'Open' }, TOKEN);
     const pilotA = await createPilot(director.baseUrl, { callsign: 'alpha' }, TOKEN);
     const pilotB = await createPilot(director.baseUrl, { callsign: 'bravo' }, TOKEN);
-    await setEventClasses(director.baseUrl, PRACTICE_EVENT_ID, [klass.id], TOKEN);
-    await setEventRoster(director.baseUrl, PRACTICE_EVENT_ID, [pilotA.id, pilotB.id], TOKEN);
+    await setEventClasses(director.baseUrl, director.event, [klass.id], TOKEN);
+    await setEventRoster(director.baseUrl, director.event, [pilotA.id, pilotB.id], TOKEN);
     await setClassMembership(
       director.baseUrl,
-      PRACTICE_EVENT_ID,
+      director.event,
       klass.id,
       [pilotA.id, pilotB.id],
       TOKEN
     );
     const round = await createRound(
       director.baseUrl,
-      PRACTICE_EVENT_ID,
+      director.event,
       {
         label: 'Qualifying',
         classes: [klass.id],
@@ -74,13 +72,13 @@ describe('GET /heats serves the round-tagged scheduled heats', () => {
     const lineup = [pilotA.id, pilotB.id];
 
     // Schedule a heat tagged with the round + class + a custom label over the real control path.
-    const ack = await rdControl(director.baseUrl, TOKEN, {
+    const ack = await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: HEAT, lineup, class: klass.id, round: round.id, label: LABEL }
     });
     expect(ack.ok).toBe(true);
 
     // Read the heats list back through the real client helper.
-    const heats = await listHeats(director.baseUrl, PRACTICE_EVENT_ID);
+    const heats = await listHeats(director.baseUrl, director.event);
     const summary = heats.find((h) => h.heat === HEAT);
     expect(summary).toBeDefined();
     expect(summary!.lineup).toEqual(lineup);
@@ -93,20 +91,20 @@ describe('GET /heats serves the round-tagged scheduled heats', () => {
     expect(summary!.is_current).toBe(true);
 
     // #335 rejections over the wire: a dangling round tag is a failed ack …
-    const dangling = await rdControl(director.baseUrl, TOKEN, {
+    const dangling = await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: 'q-bad-round', lineup, round: 'no-such-round' }
     });
     expect(dangling.ok).toBe(false);
 
     // … and a directory pilot who is NOT a member of the round's classes is rejected too.
     const outsider = await createPilot(director.baseUrl, { callsign: 'outsider' }, TOKEN);
-    const nonMember = await rdControl(director.baseUrl, TOKEN, {
+    const nonMember = await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: 'q-bad-member', lineup: [outsider.id], round: round.id }
     });
     expect(nonMember.ok).toBe(false);
 
     // Neither rejected command scheduled anything.
-    const after = await listHeats(director.baseUrl, PRACTICE_EVENT_ID);
+    const after = await listHeats(director.baseUrl, director.event);
     expect(after.some((h) => h.heat === 'q-bad-round' || h.heat === 'q-bad-member')).toBe(false);
   });
 });

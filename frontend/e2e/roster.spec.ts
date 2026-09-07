@@ -24,7 +24,7 @@ test('RD registers a pilot inline and checks it into the event roster', async ({
   //    prior spec. On a fresh load the hash is authoritative (#118), so we land on the hub even when
   //    an event is active; clicking Events then either opens the picker (no event active) or
   //    auto-enters the active event's workspace. Either way we end up in a workspace on Practice. ──
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -131,7 +131,7 @@ test('RD auto-fills a single class and assigns a pilot a channel (persists)', as
   await page.goto('/');
 
   // ── Get into an event (Practice). Same resume-tolerant dance as the spec above. ──
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {

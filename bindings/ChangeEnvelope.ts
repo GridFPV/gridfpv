@@ -7,18 +7,48 @@ import type { ProjectionKind } from "./ProjectionKind";
  * A change envelope (protocol.html §3): one ordered, sequenced update to a single
  * projection.
  *
- * Each envelope carries its monotonic `sequence` [`Cursor`], names the `projection` it
- * touches (as a [`ProjectionKind`] — for a [`Change::FreshValue`] the body also
- * carries the kind, but naming it here keeps deltas and fresh values uniform), and a
- * `change` that is a delta or a fresh value. The client applies envelopes in strictly
- * increasing `sequence` order; re-delivering one already applied is a no-op keyed by
- * sequence (§3 "idempotent application", "at-least-once, deduplicated").
+ * Each envelope carries its monotonic `sequence` [`Cursor`], the `cursor` a reconnect
+ * resumes from once it has been applied, names the `projection` it touches (as a
+ * [`ProjectionKind`] — for a [`Change::FreshValue`] the body also carries the kind, but
+ * naming it here keeps deltas and fresh values uniform), and a `change` that is a delta
+ * or a fresh value. The client applies envelopes in strictly increasing `sequence`
+ * order; re-delivering one already applied is a no-op keyed by sequence (§3 "idempotent
+ * application", "at-least-once, deduplicated").
  */
 export type ChangeEnvelope = { 
 /**
  * This envelope's position in the per-stream sequence.
  */
 sequence: Cursor, 
+/**
+ * **The resume cursor after applying this envelope** (#422): the log offset the body was
+ * folded *through* — exactly what [`Snapshot::cursor`](crate::snapshot::Snapshot) would
+ * carry for a snapshot of the same scope taken at that point. A client stores it and
+ * presents it as the next subscribe's
+ * [`from`](crate::scope::SubscribeRequest::from).
+ *
+ * # Why it is echoed rather than inferred (#422)
+ *
+ * The wire used not to carry it, so the client tracked its resume position by advancing a
+ * cursor `+1` per applied envelope — a deliberate **lower bound**, since one envelope can
+ * span several log offsets and an append that does not move the projection emits no
+ * envelope at all. Every such append (a `SignalHistory` chunk, a marshaling no-op) widened
+ * the drift `d = tail - cursor`, and a reconnect then resubscribed from `tail - d`. That is
+ * *in-window*, so the server replayed rather than rejecting it: the console's live state was
+ * overwritten with an **older fold** — fewer laps — and then climbed back through every
+ * intermediate one. Live lap counts stepped backwards mid-heat with no operator action,
+ * indistinguishable from a marshal voiding a pass.
+ *
+ * An echoed offset makes the cursor exact, so a resume starts precisely where the client
+ * left off and there is no span to replay. (The server also collapses any span it *is*
+ * asked to replay — see [`crate::ws`] — so a client that still resumes from a stale-but-
+ * in-window cursor gets one settled fold rather than a staircase.)
+ *
+ * This makes the log offset no more public than it already was: the snapshot has always
+ * handed the client a log offset as its `cursor`, and `from` has always been one. The
+ * *ordering* contract is still the `sequence` axis; this field is only the resume handle.
+ */
+cursor: Cursor, 
 /**
  * Which projection this change advances.
  */

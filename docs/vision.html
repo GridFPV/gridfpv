@@ -26,7 +26,7 @@
         the principles we will not violate. It deliberately stays at the level of
         intent. Architecture, the timer-adapter spec, the data model, and the phase
         plan live in their own docs (see <em>Architecture</em>, <em>Timer Adapters</em>,
-        and <em>Roadmap</em> — coming soon). When this doc and an architecture
+        and <em>Roadmap</em>). When this doc and an architecture
         decision disagree, the principles here win until we deliberately change them.
       </p>
     </div>
@@ -40,6 +40,17 @@
       streaming and overlays, and pushing results back to the leagues that need them.
       One open application, self-hostable by any chapter, owning the entire race day.
     </p>
+    <div class="callout">
+      <p>
+        <strong>Status at v0.4.0-alpha.1 (2026-07-05):</strong> setup/registration, qualifying
+        (Time Trials), live heats with race audio, deep marshaling, and results/standings are
+        <strong>shipped</strong> — as native desktop portables for Linux/Windows/macOS with the
+        live RotorHazard adapter. Bracket <em>builders</em> are <strong>deliberately deferred</strong>
+        (primitives-first carve, rebuilt post-v1 from <code>tournaments-snapshot</code>; hand-chained
+        seeding covers a quali → top-N final today). Streaming/overlays, the cloud tier, and league
+        push-back remain <strong>future</strong> (v0.6+).
+      </p>
+    </div>
     <p>
       Two kinds of racing are <strong>equal first-class citizens by design, not
       bolt-ons</strong>: real-world (IRL) racing through physical timers, and
@@ -209,15 +220,25 @@
     <h3>Table stakes we must match</h3>
     <p>
       Filling the gap doesn't excuse us from the basics. To be taken seriously, GridFPV
-      has to match what race directors already expect: a guided setup wizard; the common
-      bracket and qualifying formats (round robin, FIA-style single/double elimination);
-      automated advancement, seeding, rotation, and frequency management; championships
-      with automatic standings; live marshaling; and heat/channel push notifications.
-      We are honest that the incumbents lead on some of this polish today — closing that
-      gap, in the open, is the work.
+      has to match what race directors already expect. Where that stands at the alpha:
+      the guided setup wizard, seeding/advancement, frequency management, and
+      <strong>live marshaling ship</strong> — and marshaling has become a
+      <strong>differentiator</strong>, not a table stake: signal-as-evidence RSSI review,
+      re-detection with tune-commit, the shared removal record, a native min-lap floor, and a
+      full audited ruling model that no incumbent matches. The incumbents still lead on the
+      <strong>bracket and qualifying structures</strong> (round robin, FIA-style single/double
+      elimination — ours are deferred by decision, rebuilt post-v1), <strong>championships with
+      automatic standings</strong>, and <strong>heat/channel push notifications</strong>.
+      Closing those, in the open, is the work.
     </p>
 
     <h2 id="defensible-results">7. Defensible results — accountability by design</h2>
+    <p class="phase-meta">
+      <em>This section is no longer aspiration — it shipped in v0.4.0-alpha.1</em>: evidence-backed
+      RSSI review with re-detection, the provisional → official lifecycle with the Final freeze,
+      run-scoped and effectively-once rulings, protests (window optional, OFF by default per the
+      decided model), and the full audit trail.
+    </p>
     <p>
       Every other FPV timing system treats results as disposable — corrections overwrite data,
       nothing records who changed what, and "official" is a verbal convention. GridFPV is the

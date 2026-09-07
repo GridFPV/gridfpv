@@ -50,10 +50,13 @@ use std::time::{Duration, Instant};
 
 use gridfpv_adapters::rotorhazard::RotorHazardAdapter;
 use gridfpv_adapters::rotorhazard::transport::{
-    DIRECTOR_PROTOCOL_VERSION, PluginHello, RotorHazardConnection,
+    DIRECTOR_PROTOCOL_VERSION, NodeTick, PluginHello, RotorHazardConnection,
 };
 use gridfpv_events::{AdapterId, CompetitorRef, Event};
-use gridfpv_server::timers::{PluginPresence, TimerId, TimerRegistry, TimerStatus};
+use gridfpv_server::timers::{
+    CAPTURE_EXIT_DELAY_MS, CONNECT_ATTEMPT_CAP, NodeReading, PendingTimerWrite, PluginPresence,
+    SIGNAL_SAMPLE_INTERVAL, TimerId, TimerRegistry, TimerStatus,
+};
 use tokio::task::JoinHandle;
 
 use super::PassSink;
@@ -105,10 +108,59 @@ const IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// against a stock RH, which then gets the guided-install prompt anyway.
 const PLUGIN_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long to wait, after connecting, for a **stock** RotorHazard to say how many nodes it has
+/// (#412) — the fallback path, when no GridFPV plugin answered the handshake with a seat count.
+///
+/// `connect` asks for `frequency_data` in its warm-up `load_data`, so a healthy RotorHazard answers
+/// within a frame or two and [`wait_for_reported_nodes`] returns as soon as it lands. The timeout
+/// only bounds the case where nothing answers, which leaves GridFPV on its configured width — where
+/// it was before #412 — so it is deliberately short.
+///
+/// [`wait_for_reported_nodes`]: gridfpv_adapters::rotorhazard::transport::RotorHazardConnection::wait_for_reported_nodes
+const NODE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A timer's **friendly name** for an operator log line, falling back to its raw id only if the
+/// registry no longer holds it (CLAUDE.md: friendly names everywhere, raw ids as a last resort).
+///
+/// These lines are what an RD reads when a link drops or a filter could not be cleared, and
+/// `"bench-rotorhazard-xvb27q"` does not tell them which box on the bench to go and look at.
+fn timer_name(timers: &TimerRegistry, id: &TimerId) -> String {
+    timers
+        .get(id)
+        .map(|t| t.name)
+        .unwrap_or_else(|| id.0.clone())
+}
+
+/// One node of a **heat's channel plan** (race redesign Slice 4a, #421): the node the engine
+/// allocated a frequency to, that frequency, and the catalog label to put on RotorHazard's own
+/// screen beside it.
+///
+/// The twin of [`PendingTimerWrite::SetChannel`] for the *heat* write path rather than the Tune
+/// page's bench one, and it carries a label for the same reason: without one RotorHazard's UI shows a bare
+/// `5880` — or worse, keeps the *previous* channel's label against a changed frequency — and the
+/// RD who cross-checks GridFPV against RH's screen cannot tell a display quirk from a node that
+/// never retuned.
+///
+/// `band`/`channel` are `None` for a **custom** raw MHz the catalog has no name for. The emit then
+/// carries the frequency alone (as a bench channel write does): an honest absence, never an
+/// invented label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuneNode {
+    /// The node to tune, 0-based (RotorHazard's `seat_index`) — the pilot's real seat, not their
+    /// lineup position (#412).
+    pub node: u64,
+    /// The centre frequency to tune it to, in raw MHz — what the engine allocated.
+    pub mhz: u16,
+    /// The catalog band to label it with on RotorHazard (`"Raceband"`), if the catalog knows one.
+    pub band: Option<String>,
+    /// The catalog channel label (`"R7"`), if the catalog knows one.
+    pub channel: Option<String>,
+}
+
 /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
-/// `(node_index, frequency_mhz)` assignment the engine allocated for the staging heat, shared from
-/// the async [`RhConnection::tune`] caller to the blocking driver thread. `None` ⇒ nothing pending.
-type TuneSlot = Arc<Mutex<Option<Vec<(u64, u16)>>>>;
+/// channel plan the engine allocated for the staging heat, shared from the async
+/// [`RhConnection::tune`] caller to the blocking driver thread. `None` ⇒ nothing pending.
+type TuneSlot = Arc<Mutex<Option<Vec<TuneNode>>>>;
 
 /// A **pending prepare** the driver applies on its next loop: when a heat is **Staged** the bridge
 /// asks the connection to ready RH for an instant start — zero the current format's staging delays
@@ -122,6 +174,75 @@ type PrepareSlot = Arc<AtomicBool>;
 /// (the laps-attribute fix). Shared from the async [`RhConnection::seat`] caller to the blocking
 /// driver thread; `None` ⇒ nothing pending.
 type SeatSlot = Arc<Mutex<Option<Vec<(u64, String)>>>>;
+
+/// **The queued writes** the driver applies on its next loop (#457) — one queue for every
+/// RD-initiated write to this connection's timer, shared from the async [`RhConnection::queue`]
+/// caller to the blocking driver thread.
+///
+/// One queue rather than the four slots this used to be (a restart flag, a calibration `Vec`, a
+/// capture `Vec` and a channel `Vec`). They are the same thing — an edge the RD asked for that has
+/// to cross onto the socket — and keeping them apart meant every policy fix had to be made four
+/// times: #436 was exactly that, a clear-on-reconnect applied to three of the four slots and
+/// forgotten on the fourth for as long as there were four to forget.
+///
+/// The element type is `gridfpv_server`'s own [`PendingTimerWrite`], not an app-crate twin, so the
+/// **coalescing policy is written once** ([`PendingTimerWrite::queue_into`]) and cannot drift
+/// between the registry's hand-off queue and this one: calibration and channel writes coalesce per
+/// node, a capture never does, a restart is one restart.
+///
+/// What each variant means to the driver:
+///
+/// - **Restart** (#386): emit RotorHazard's `restart_server`; RH re-executes and re-imports its
+///   `plugins/` directory, the socket drops, and the ordinary backoff → reconnect → re-probe path
+///   does the rest.
+/// - **Calibrate** (#355): emit `set_enter_at_level` / `set_exit_at_level`, then ask for the
+///   `enter_and_exit_at_levels` readback — RH echoes neither write, so the readback is the only
+///   confirmation there is.
+/// - **Capture** (#355): emit `cap_enter_at_btn` / `cap_exit_at_btn` and schedule the readback for
+///   after RotorHazard's sampling window. RH *does* broadcast the captured level itself
+///   (`node_enter_at_level`); the readback is the second witness, because a gate's calibration is
+///   not a thing to stake on one unsolicited frame.
+/// - **SetChannel** (#413): emit `set_frequency` carrying the catalog band/channel as well as the
+///   frequency. No readback is needed — every RotorHazard heartbeat already reports each node's
+///   current frequency, so the confirming value is on the feed the Tune page is polling anyway.
+type PendingWriteSlot = Arc<Mutex<Vec<PendingTimerWrite>>>;
+
+/// How long after a capture emit the driver fires the `enter_and_exit_at_levels` readback (#355).
+///
+/// RotorHazard samples for `CAP_ENTER_EXIT_AT_MILLIS` (3000 ms, identical on v4.3.0 and v4.4.0),
+/// then sleeps 25 ms, writes its profile and pushes the level to the hardware. Asking before that is
+/// asking for the old value and would report the capture as not landed while it was still running.
+/// The slack covers the sleep and the write.
+const CAPTURE_READBACK_DELAY: Duration = Duration::from_millis(3_400);
+
+/// How long after `cap_enter_at_btn` the driver fires `cap_exit_at_btn` for the same node (#465) —
+/// [`CAPTURE_EXIT_DELAY_MS`], in the type this loop measures with.
+///
+/// Read from the server crate rather than restated, because the registry stamps its outstanding
+/// exit capture's window from the same number: if the emit and the window it is settled against
+/// drifted apart, GridFPV would decide a capture had not landed while RotorHazard was still
+/// sampling for it.
+const CAPTURE_EXIT_DELAY: Duration = Duration::from_millis(CAPTURE_EXIT_DELAY_MS as u64);
+
+/// The **exit** half of a one-pass capture, waiting for its window to open (#465).
+///
+/// Held in `maintain`'s own loop state rather than on the shared [`PendingWriteSlot`]: it is a
+/// schedule, not a request. A request is something the *route* accepted and the registry is
+/// tracking; this is the driver's own half-finished work, and it exists only for as long as the
+/// connection that made the enter emit does. If the link drops in between, the exit capture is
+/// simply never fired — the registry's outstanding entry then runs out and is reported as a
+/// threshold that did not land, which is what a dropped calibration write does too.
+///
+/// Deliberately **not** a second `PendingTimerWrite`: putting it on the queue would make it
+/// eligible for the clear-on-reconnect (#436/#437) and for coalescing policy it has no business
+/// being subject to, and would let a reconnect fire an exit capture whose enter half never happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingExitCapture {
+    /// The node, 0-based (RotorHazard's `seat_index`).
+    node: u64,
+    /// When `cap_exit_at_btn` should go out — the moment RotorHazard's enter window closes.
+    due: Instant,
+}
 
 /// The RH heat id **seated** for the current arming, if seating succeeded (the laps-attribute fix):
 /// a fresh RH heat built at Stage with the bound pilots assigned + made current, so RH records +
@@ -201,6 +322,18 @@ pub struct RhConnection {
     /// its async teardown used to stomp `Disconnected` over the successor's `Connecting`/
     /// `Connected`, and the failover logic read the healthy new primary as down.
     yield_status: Arc<AtomicBool>,
+    /// Whether this connection's driver has **reached `Connected` and not since dropped** (#437) —
+    /// the one question a queued write has to ask before it can call itself landed.
+    ///
+    /// Set by [`drive`] after the socket is up *and* the previous connection's stale writes have
+    /// been cleared, so there is no window in which a write can be accepted onto a link that is
+    /// about to wipe it; cleared the moment the link drops, and on cancel.
+    ///
+    /// It is deliberately **not** the registry's [`TimerStatus`]: that is one cell per *timer*,
+    /// shared across a supersede hand-off, and the whole of #437 was a write being accepted by a
+    /// brand-new connection while the status cell still read `Connected` from the connection it
+    /// replaced. This is per *connection*, which is the thing the write is actually queued on.
+    connected: Arc<AtomicBool>,
     /// The armed-heat slot: `Some` while a heat is racing on this connection, else `None`.
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     /// A **pending tune** the driver applies on its next loop (race redesign Slice 4a): the per-node
@@ -218,10 +351,19 @@ pub struct RhConnection {
     /// (`(node_index, callsign)`) onto its RH node (`seat_heat`) so RH records + attributes passes
     /// — without it RH races an empty-pilot heat and rejects every crossing ("Pilot not defined").
     seat: SeatSlot,
+    /// **The queued writes** the driver applies on its next loop (#457): everything the RD can ask
+    /// of this live link — a restart (#386), a calibration write (#355), a capture (#355), a
+    /// channel write (#413) — on one queue, pushed by [`queue`](Self::queue) and drained on the
+    /// driver thread. See [`PendingWriteSlot`] for what the driver does with each variant, and why
+    /// this is one queue and not four slots.
+    writes: PendingWriteSlot,
     /// The driver thread's join handle, held so the spawned task is owned by this connection;
     /// teardown is cooperative via the `cancel` flag (the thread is blocking, so it cannot be
     /// aborted) — dropping the connection flips `cancel` and lets the thread exit on its own.
-    _driver: JoinHandle<()>,
+    ///
+    /// Also **read**, by [`driver_finished`](Self::driver_finished): a driver that rested (#462) has
+    /// exited without anyone cancelling it, and the reconciler has no other way to notice.
+    driver: JoinHandle<()>,
 }
 
 impl RhConnection {
@@ -233,17 +375,21 @@ impl RhConnection {
     pub fn open(timer_id: TimerId, url: String, timers: TimerRegistry) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let yield_status = Arc::new(AtomicBool::new(false));
+        let connected = Arc::new(AtomicBool::new(false));
         let armed: Arc<Mutex<Option<ArmedHeat>>> = Arc::new(Mutex::new(None));
         let tune: TuneSlot = Arc::new(Mutex::new(None));
         let prepare: PrepareSlot = Arc::new(AtomicBool::new(false));
         let seat: SeatSlot = Arc::new(Mutex::new(None));
+        let writes: PendingWriteSlot = Arc::new(Mutex::new(Vec::new()));
         let driver = {
             let cancel = cancel.clone();
             let yield_status = yield_status.clone();
+            let connected = connected.clone();
             let armed = armed.clone();
             let tune = tune.clone();
             let prepare = prepare.clone();
             let seat = seat.clone();
+            let writes = writes.clone();
             tokio::task::spawn_blocking(move || {
                 drive(
                     url,
@@ -251,21 +397,25 @@ impl RhConnection {
                     timers,
                     cancel,
                     yield_status,
+                    connected,
                     armed,
                     tune,
                     prepare,
                     seat,
+                    writes,
                 );
             })
         };
         Self {
             cancel,
             yield_status,
+            connected,
             armed,
             tune,
             prepare,
             seat,
-            _driver: driver,
+            writes,
+            driver,
         }
     }
 
@@ -281,10 +431,11 @@ impl RhConnection {
 
     /// **Tune** this connection's nodes to an assigned channel plan (race redesign Slice 4a): the
     /// engine allocates the channels, the adapter applies them (RE §7.3). `assignment` is the
-    /// per-node `(node_index, frequency_mhz)` set for the staging heat; the driver thread emits a
-    /// `set_frequency` per node on its next loop (best-effort — a failed emit on a dropped link is
-    /// logged, not fatal). The bridge calls this when a heat is **Staged**, before it arms/runs.
-    pub fn tune(&self, assignment: Vec<(u64, u16)>) {
+    /// per-node [`TuneNode`] set for the staging heat — frequency **and** its catalog label (#421)
+    /// — and the driver thread emits a `set_frequency` per node on its next loop (best-effort — a
+    /// failed emit on a dropped link is logged, not fatal). The bridge calls this when a heat is
+    /// **Staged**, before it arms/runs.
+    pub fn tune(&self, assignment: Vec<TuneNode>) {
         let mut slot = self.tune.lock().expect("tune lock poisoned");
         *slot = Some(assignment);
     }
@@ -332,9 +483,86 @@ impl RhConnection {
         }
     }
 
+    /// **Queue one RD-initiated write** onto this live connection (#457) — a restart (#386), a
+    /// calibration write (#355), a capture (#355) or a channel write (#413).
+    ///
+    /// One entry point rather than four, because they are one thing: an edge the RD asked for that
+    /// has to reach RotorHazard over the socket this connection is already holding. The driver
+    /// drains the queue on its next loop and emits per variant (see [`PendingWriteSlot`]).
+    ///
+    /// **Nothing is returned, and nothing could be.** RotorHazard does not ack, so there is no
+    /// synchronous outcome to hand back; each variant's *confirmation* is a readback on the feed
+    /// the Tune page already polls — the `enter_and_exit_at_levels` ask behind a threshold or a
+    /// capture, the per-heartbeat frequency behind a channel, the reconnect's own plugin re-probe
+    /// behind a restart. Whether the write reached a live connection **at all** is
+    /// [`RhConnections::deliver`]'s answer, not this one's.
+    ///
+    /// Pushes apply [`PendingTimerWrite`]'s coalescing policy — the same one the registry's
+    /// hand-off queue applies, because it is the same function: calibration and channel writes
+    /// coalesce per node (a slider or dropdown moved twice before the driver's next loop applies
+    /// the latest value **once**, rather than replaying a stale one after it), a capture never
+    /// coalesces (two presses are two measurements the RD flew a pass for), and a restart is one
+    /// restart.
+    ///
+    /// **Refused mid-race by the driver as well as by the route.** A restart is refused outright
+    /// while a heat is armed — restarting RH under a live race takes the timing hardware down with
+    /// the race on it. The three tuning writes are refused only for a **scored** heat: the route
+    /// owns that judgement (it is the layer that can see the event log) and stamps its answer in
+    /// each write's `during_open_practice`, so an open-practice write is passed through — #398
+    /// excludes practice from scoring, and tuning with pilots in the air is the Tune page's whole
+    /// workflow. Both backstops only cover the window between the route's check and the emit.
+    ///
+    /// A calibration write carrying **neither** threshold is dropped here (the route already
+    /// refuses one, so this is only a backstop against queueing an emit with nothing to say).
+    pub fn queue(&self, write: PendingTimerWrite) {
+        if let PendingTimerWrite::Calibrate(w) = &write {
+            if w.enter_at.is_none() && w.exit_at.is_none() {
+                return;
+            }
+        }
+        let mut pending = self.writes.lock().expect("pending-writes lock poisoned");
+        write.queue_into(&mut pending);
+    }
+
+    /// Whether this connection's socket is **up right now** (#437) — it reached `Connected` and
+    /// has not since dropped, and its stale-write clear has already run.
+    ///
+    /// The precondition for a queued write to mean anything. A connection that is still dialling
+    /// will wipe its queue the instant it connects (deliberately — see
+    /// [`clear_writes_that_outlived_the_previous_connection`]), so a write handed to it now is
+    /// *accepted and then silently discarded*, with no readback and no warning. Asking this first
+    /// is what keeps "sent" from becoming indistinguishable from "landed".
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    /// **Test seam:** stand in for [`drive`] having reached `Connected`, so the *positive* half of
+    /// the #437 gate can be asserted without a RotorHazard to dial.
+    ///
+    /// A gate that is only ever tested closed is indistinguishable from a wall — and a wall here
+    /// would silently kill every Tune-page write in the field while every unit test stayed green
+    /// (CLAUDE.md: a check that cannot see the thing it is checking).
+    #[cfg(test)]
+    pub(crate) fn mark_connected_for_test(&self) {
+        self.connected.store(true, Ordering::Relaxed);
+    }
+
+    /// **Test seam:** what is sitting in this connection's write queue, so a test can prove a write
+    /// actually reached the driver rather than merely being reported as landed.
+    #[cfg(test)]
+    pub(crate) fn queued_writes_for_test(&self) -> Vec<PendingTimerWrite> {
+        self.writes
+            .lock()
+            .expect("pending-writes lock poisoned")
+            .clone()
+    }
+
     /// Tear the connection down: stop any race, disconnect, leave the timer `Disconnected`. Called
     /// when the timer is deselected, the active event changes, or the Director shuts down.
     pub fn cancel(&self) {
+        // Stop accepting writes at once, rather than whenever the driver thread next notices: a
+        // write handed to a connection that is on its way out has nowhere to land (#437).
+        self.connected.store(false, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
 
@@ -342,16 +570,67 @@ impl RhConnection {
     /// active-event switch): the exiting driver yields the shared timer status to its successor
     /// (see [`yield_status`](Self::yield_status)).
     pub fn cancel_superseded(&self) {
+        self.connected.store(false, Ordering::Relaxed);
         self.yield_status.store(true, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the driver thread has **exited** (#462).
+    ///
+    /// Nothing in the reconciler's map removes an entry because its thread ended, so a driver that
+    /// gave up dialling ([`CONNECT_ATTEMPT_CAP`] attempts spent, timer left `Unreachable`) would
+    /// otherwise sit in the live map forever, looking healthy: still wanted, same URL, left alone —
+    /// and never reopened, not even when the RD pressed Connect. This is how the reconciler tells a
+    /// corpse from a live link.
+    ///
+    /// A cancelled or superseded driver also finishes, but those entries are removed from the map in
+    /// the same breath as the cancel, so the only entry this is ever asked about is a rested one.
+    ///
+    /// Distinct from [`is_connected`](Self::is_connected), which is the #437 write gate: that says
+    /// *"this link is up right now"*, this says *"this driver is never coming back"*. A dialling
+    /// driver is neither connected nor finished.
+    pub fn driver_finished(&self) -> bool {
+        self.driver.is_finished()
     }
 }
 
 impl Drop for RhConnection {
     fn drop(&mut self) {
         // A dropped connection (the reconcile map removed it) must still tear down on its thread.
+        self.connected.store(false, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
     }
+}
+
+/// Map the transport's latest per-node readings onto the registry's crate-boundary twin (#355 S2a).
+///
+/// A field-for-field copy, and deliberately so: the live socket lives here in `gridfpv-app` and the
+/// registry lives in `gridfpv-server` *below* it, so the two cannot share one type without pointing
+/// the dependency arrow the wrong way. The mapping is the seam, and it is the only place the two
+/// shapes meet.
+///
+/// Since #461 the target [`NodeReading`] is *also* the flattened wire body of `NodeSignal`, so
+/// this is now the only hand-written copy on the path — a field added to the reading reaches the
+/// Tune page without a second mirror to keep in step.
+fn readings(ticks: Vec<NodeTick>) -> Vec<NodeReading> {
+    ticks
+        .into_iter()
+        .map(|tick| NodeReading {
+            seen: tick.seen,
+            rssi: tick.rssi,
+            frequency_mhz: tick.frequency_mhz,
+            loop_time_micros: tick.loop_time_micros,
+            crossing: tick.crossing,
+            crossed_recently: tick.crossed,
+            node_peak_rssi: tick.node_peak_rssi,
+            node_nadir_rssi: tick.node_nadir_rssi,
+            pass_peak_rssi: tick.pass_peak_rssi,
+            pass_nadir_rssi: tick.pass_nadir_rssi,
+            pass_count: tick.pass_count,
+            enter_at: tick.enter_at,
+            exit_at: tick.exit_at,
+        })
+        .collect()
 }
 
 /// The RH node index `node-{n}` encodes, if any. Passes from the adapter carry the stable node seat
@@ -442,12 +721,21 @@ fn drive(
     timers: TimerRegistry,
     cancel: Arc<AtomicBool>,
     yield_status: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
     armed: Arc<Mutex<Option<ArmedHeat>>>,
     tune: TuneSlot,
     prepare: PrepareSlot,
     seat: SeatSlot,
+    writes: PendingWriteSlot,
 ) {
     let mut backoff = RECONNECT_BACKOFF_MIN;
+    // How many times in a row we have failed to **establish** this link (#462).
+    //
+    // Spent attempts rest the timer at `Unreachable` rather than pulsing `Connecting`/`Error` at a
+    // dead address forever. Declared beside `backoff`, and reset beside it at the one place that
+    // matters — the `Connected` line below. That reset is the whole boundary: a link that ever came
+    // up gets its full count back, so a mid-race drop is not rationed by an add-time cap.
+    let mut attempts: u32 = 0;
     // The RH heat id **seated** for the current arming (the laps-attribute fix), if seating
     // succeeded: a fresh RH heat built at Stage with the bound pilots assigned + made current. Lives
     // here in `drive` — **outside** the reconnect loop — so it **survives a mid-race reconnect**: the
@@ -473,17 +761,25 @@ fn drive(
     let mut carry_adapter = Some(RotorHazardAdapter::new());
     while !cancel.load(Ordering::Relaxed) {
         timers.set_status(&timer_id, TimerStatus::Connecting);
-        // Reuse the carried adapter (preserving dedup/last_race_status across reconnects); only on
-        // the first attempt is it `Some` from above — every later iteration re-seeds it from the
-        // adapter recovered out of the previous connection's `disconnect`.
+        // Reuse the carried adapter (preserving dedup/last_race_status across reconnects). It is
+        // `Some` on every iteration: from above on the first, and afterwards re-seeded either from
+        // the previous connection's `disconnect` or — since #435 — from the previous *failed*
+        // attempt, which now hands it back. `unwrap_or_default` is a backstop that no path reaches.
         let adapter = carry_adapter.take().unwrap_or_default();
         let conn = match RotorHazardConnection::connect(&url, adapter) {
             Ok(conn) => conn,
-            Err(e) => {
+            Err((e, recovered)) => {
                 // The connect attempt failed: surface Error, back off, and retry (unless cancelled).
-                // The adapter was consumed by the failed `connect`; start the next attempt fresh.
-                // (A connect failure means no socket and no replayed snapshot, so there is nothing
-                // to dedup against — a fresh adapter is correct and #156 re-seeds on the next race.)
+                //
+                // **Carry the adapter into the next attempt** (#435). A failed connect is not a
+                // fresh start: on a mid-race drop the heat is still armed and RotorHazard will
+                // re-send the whole in-progress `current_laps` snapshot the moment a socket does
+                // come up, so the deduplicator that suppresses it has to survive the attempts in
+                // between. `connect` used to consume the adapter by value and drop it here, and the
+                // retry's `unwrap_or_default()` then started from an empty dedup — so one Wi-Fi
+                // blip plus one failed retry re-minted every lap already flown as a second Pass,
+                // and the lap projection (which does not dedup by sequence) turned those into
+                // duplicate laps in the heat's log.
                 //
                 // Log the full error *chain*, not just `rust_socketio`'s top-level Display: its
                 // `IncompleteResponseFromEngineIo` variant renders as the bare, useless string
@@ -493,9 +789,32 @@ fn drive(
                 // log tells a dead `:5000` apart from a genuine handshake failure at a glance.
                 eprintln!(
                     "gridfpv: RotorHazard connect failed for {:?}: {}",
-                    timer_id.0,
+                    timer_name(&timers, &timer_id),
                     error_chain(&e)
                 );
+                carry_adapter = Some(recovered);
+                attempts += 1;
+                // #462: stop dialling on our own once the cap is spent — UNLESS a heat is armed on
+                // this connection. That is the boundary between the two retries that live in this
+                // one loop. Establishing a link nobody is waiting on (a timer just added, a
+                // Director just started) is capped; keeping alive the link a *running race* needs
+                // is not, and never will be — a heat that has started must reconnect for as long as
+                // it takes. The check is made here, on every failure, so a heat armed while the
+                // driver is already retrying lifts the cap on the spot.
+                let racing = armed.lock().expect("armed-heat lock poisoned").is_some();
+                if attempts >= CONNECT_ATTEMPT_CAP && !racing {
+                    eprintln!(
+                        "gridfpv: RotorHazard {:?} unreachable after {attempts} attempts; resting \
+                         until it is connected from the Timers menu or an event needs it",
+                        timer_name(&timers, &timer_id)
+                    );
+                    // Publish the rest and leave. `return`, not `break`: the tail below would
+                    // overwrite this with `Disconnected`, which promises a retry that is not coming.
+                    // `connected` was never set on this path, so no write can be queued onto the
+                    // dead link (#437) — the orphaned-write line reports them instead.
+                    timers.set_status(&timer_id, TimerStatus::Unreachable);
+                    return;
+                }
                 timers.set_status(&timer_id, TimerStatus::Error);
                 if sleep_unless_cancelled(backoff, &cancel) {
                     break;
@@ -506,15 +825,100 @@ fn drive(
         };
         timers.set_status(&timer_id, TimerStatus::Connected);
         backoff = RECONNECT_BACKOFF_MIN;
+        // The boundary (#462): a link that came up gets its full attempt count back, so the
+        // reconnect after a mid-race drop is never rationed by an add-time cap.
+        attempts = 0;
+        clear_writes_that_outlived_the_previous_connection(&writes);
+        // Only NOW may this connection accept writes (#437) — after the clear, never before it.
+        // Flipping this the other way round would leave a window in which a write is accepted onto
+        // a link that is about to wipe it, which is the whole of the bug: accepted, reported
+        // landed, discarded, no readback, no warning.
+        connected.store(true, Ordering::Relaxed);
 
         // Probe for the GridFPV plugin (D16, S1): `connect` already emitted `gridfpv_hello`, so
         // wait briefly for the `gridfpv_hello_ack`. Present-&-compatible / incompatible / missing
         // drives the Director's required-with-guided-install UX. Re-probed on every (re)connect.
-        let plugin = classify_plugin(conn.wait_for_plugin(PLUGIN_PROBE_TIMEOUT));
+        let hello = conn.wait_for_plugin(PLUGIN_PROBE_TIMEOUT);
+        // **Ask the timer how many nodes it has** (#412), preferring the most direct answer:
+        //
+        //   1. the GridFPV plugin's `gridfpv_hello_ack` — `len(rhapi.interface.seats)`, straight
+        //      off the live interface, and it rides the handshake we already waited for;
+        //   2. `frequency_data.fdata` — one entry per node on stock RotorHazard (identical on
+        //      v4.3.0 and v4.4.0), requested in `connect`'s warm-up `load_data`;
+        //   3. `enter_and_exit_at_levels` — explicitly sliced `[:num_nodes]`, the fallback.
+        //
+        // RotorHazard publishes no `num_nodes` scalar on the socket at all, which is why this is a
+        // length rather than a field.
+        //
+        // It is an **observation**, recorded as one: it never touches `Timer::node_count` or
+        // `Timer::disabled_nodes` (D27 — a value read from a timer is evidence about the timer, not
+        // an input to a decision). A timer that comes back reporting a different width shows up as
+        // `Timer::node_drift` for the RD; a node the RD disabled stays disabled, because nothing on
+        // this path can re-enable one. Re-read on every (re)connect, like the plugin probe itself.
+        let reported = hello
+            .as_ref()
+            .map(|h| h.node_count)
+            .filter(|n| *n > 0)
+            .or_else(|| conn.wait_for_reported_nodes(NODE_DISCOVERY_TIMEOUT));
+        match reported {
+            Some(nodes) => timers.set_reported_nodes(&timer_id, nodes),
+            None => eprintln!(
+                "gridfpv: RotorHazard {:?} did not report a node count; GridFPV keeps its \
+                 configured width",
+                timer_name(&timers, &timer_id)
+            ),
+        }
+
+        // **Make RotorHazard stop refereeing lap length** (#407), before any heat can be armed.
+        //
+        // RH runs its own minimum-lap rule underneath GridFPV's, and its behaviour flag can
+        // *discard* a sub-minimum crossing outright. A discarded crossing never arrives, so
+        // GridFPV's per-round floor (D26/#409) never runs on it, marshaling has nothing to
+        // restore, and #397's rejected-crossing tone stays silent for exactly the crossing the RD
+        // most needs to hear about. D27: GridFPV owns this decision; the timer's copy of it is
+        // neutralised and what GridFPV applied is recorded on GridFPV's side.
+        //
+        // The plugin does this in-process at load (and re-asserts it at every stage), in which
+        // case this is a no-op that just reads the record back. Against a plugin older than
+        // v0.4.0 — the field timer still runs v0.1.0 — the connection does it over the socket
+        // instead. Either way a failure is announced through the adapter diagnostic sink, once,
+        // naming the consequence; it is never a reason to refuse the connection, because a timer
+        // whose filter could not be cleared is precisely one the RD needs to be *told* about.
+        let min_lap = conn.ensure_min_lap_neutral();
+        if min_lap.neutral {
+            eprintln!(
+                "gridfpv: RotorHazard {:?}: min-lap filter neutralised via {:?} (timer had \
+                 MinLapSec={:?}, MinLapBehavior={:?}); GridFPV's per-round floor is the only \
+                 min-lap rule in force",
+                timer_name(&timers, &timer_id),
+                min_lap.route,
+                min_lap.found_secs,
+                min_lap.found_behavior,
+            );
+        }
+
+        let plugin = classify_plugin(hello);
         timers.set_plugin(&timer_id, plugin);
 
         // Maintain the live link until it drops or we are cancelled.
-        let dropped = maintain(&conn, &cancel, &armed, &tune, &prepare, &seat, &seated_heat);
+        let dropped = maintain(
+            &conn,
+            &cancel,
+            ControlSlots {
+                armed: &armed,
+                tune: &tune,
+                prepare: &prepare,
+                seat: &seat,
+                writes: &writes,
+                seated_heat: &seated_heat,
+                timers: &timers,
+                timer_id: &timer_id,
+            },
+        );
+
+        // This connection is over: stop accepting writes before anything else, so a write racing
+        // the teardown is reported not-landed rather than queued onto a socket coming down (#437).
+        connected.store(false, Ordering::Relaxed);
 
         // Stop any in-flight race and disconnect on the way out of this connection. `disconnect`
         // returns the adapter so the next reconnect reuses its dedup state (the #105 fix).
@@ -528,7 +932,7 @@ fn drive(
         if dropped {
             eprintln!(
                 "gridfpv: RotorHazard connection lost for {:?}; reconnecting",
-                timer_id.0
+                timer_name(&timers, &timer_id)
             );
             timers.set_status(&timer_id, TimerStatus::Disconnected);
             if sleep_unless_cancelled(backoff, &cancel) {
@@ -544,6 +948,34 @@ fn drive(
     if !yield_status.load(Ordering::Relaxed) {
         timers.set_status(&timer_id, TimerStatus::Disconnected);
     }
+}
+
+/// Drop every queued write that outlived the **previous** connection — called once by [`drive`]
+/// each time it (re)connects, before anything can be armed on the new link.
+///
+/// The route behind each of these only accepts a request while the timer reads `Connected`, but the
+/// link can drop in the window between that check and the reconciler's drain — and [`maintain`] only
+/// consumes a queued write while a socket is up. Without this the request survives the backoff and
+/// fires on a reconnect minutes later:
+///
+/// - **Restart** (#386) would restart the timer with no one asking: exactly the surprise
+///   [`RhConnection::queue`]'s own contract says cannot happen.
+/// - **Calibrate** (#355) would move a detector nobody asked to move, onto whatever RotorHazard
+///   came back — and the RD would long since have seen the value fail to come back and re-set it
+///   by hand.
+/// - **Capture** (#355), for a sharper version of the same reason: fired minutes later it would
+///   sample a gate with nothing flying through it and set the threshold off the noise floor, a
+///   *worse* outcome than not capturing, because the RD would have no reason to suspect it.
+/// - **SetChannel** (#413) would retune a receiver nobody asked to move — possibly on a different
+///   physical RotorHazard now answering at that URL.
+///
+/// With one queue (#457) this is one `clear()`, and there is no longer a fourth slot to forget —
+/// which is what #436 was: the restart, calibration and capture slots were each cleared here and
+/// the channel one was not, so an RD's channel pick could survive a drop, a backoff and a
+/// reconnect and retune a receiver minutes later with no readback. There is no longer a place for
+/// that asymmetry to live.
+fn clear_writes_that_outlived_the_previous_connection(writes: &PendingWriteSlot) {
+    writes.lock().expect("pending-writes lock poisoned").clear();
 }
 
 /// Classify the GridFPV-plugin handshake result (D16, S1) into the [`PluginPresence`] the timer
@@ -574,15 +1006,45 @@ fn classify_plugin(hello: Option<PluginHello>) -> PluginPresence {
 /// armed heat's log, or discarding them while idle), stage a freshly-armed heat, and probe liveness
 /// when idle. Returns `true` if the link appears to have **dropped** (so the caller reconnects),
 /// `false` if it exited because of cancellation.
-fn maintain(
-    conn: &RotorHazardConnection,
-    cancel: &AtomicBool,
-    armed: &Mutex<Option<ArmedHeat>>,
-    tune: &Mutex<Option<Vec<(u64, u16)>>>,
-    prepare: &AtomicBool,
-    seat: &Mutex<Option<Vec<(u64, String)>>>,
-    seated_heat: &Mutex<Option<u64>>,
-) -> bool {
+/// The per-connection control slots the driver and the outside world share: everything the RD can
+/// ask of a live link. Bundled rather than passed loose because they travel together and always
+/// have — six of [`maintain`]'s arguments were these, which is both noisy and easy to transpose at
+/// a call site (they are mostly the same two or three types).
+struct ControlSlots<'a> {
+    /// The heat currently armed on this connection, if any.
+    armed: &'a Mutex<Option<ArmedHeat>>,
+    /// A pending channel assignment to push to the timer.
+    tune: &'a Mutex<Option<Vec<TuneNode>>>,
+    /// Set when the timer should be prepared for a heat.
+    prepare: &'a AtomicBool,
+    /// A pending seat → pilot binding to push before racing.
+    seat: &'a Mutex<Option<Vec<(u64, String)>>>,
+    /// Everything the RD has queued for this live link (#457): a restart (#386), calibration
+    /// writes and captures (#355), channel writes (#413) — one queue, in request order. Distinct
+    /// from [`tune`](ControlSlots::tune): that is the *heat's* whole-timer channel plan pushed at
+    /// Stage, this is what the RD asked for from the Timers/Tune pages.
+    writes: &'a Mutex<Vec<PendingTimerWrite>>,
+    /// The heat whose seats are currently bound on the timer.
+    seated_heat: &'a Mutex<Option<u64>>,
+    /// The timer registry — where the **tune-telemetry lease** lives (#355 S2a). The registry is
+    /// the one seam this crate and the RD-gated route in `gridfpv-server` already share, exactly as
+    /// it is for the manual connection hold and the restart queue.
+    timers: &'a TimerRegistry,
+    /// Which timer this connection is, for reading that lease and pushing snapshots back.
+    timer_id: &'a TimerId,
+}
+
+fn maintain(conn: &RotorHazardConnection, cancel: &AtomicBool, slots: ControlSlots<'_>) -> bool {
+    let ControlSlots {
+        armed,
+        tune,
+        prepare,
+        seat,
+        writes,
+        seated_heat,
+        timers,
+        timer_id,
+    } = slots;
     let mut last_activity = Instant::now();
     let mut probed_since_activity = false;
     let mut stage_deadline: Option<Instant> = None;
@@ -593,6 +1055,19 @@ fn maintain(
     // stays armed after the RH race is stopped, so the DONE-triggered dense marshal pull lands in
     // the right heat's log before the slot clears. `None` ⇒ no heat is finishing.
     let mut finish_deadline: Option<Instant> = None;
+    // When this connection last sampled the tune-telemetry tap (#355 S2a). Seeded in the past so
+    // the first sample lands on the tick after the subscription opens rather than 200 ms later.
+    let mut last_signal_sample = Instant::now() - SIGNAL_SAMPLE_INTERVAL;
+    // When a **capture's** threshold readback is due (#355). RotorHazard samples for three seconds
+    // before it has a level at all, so unlike the calibration write the readback cannot be fired
+    // beside the emit — asking early would read back the OLD level and report a capture that is
+    // still running as one that did not land. Set to the latest outstanding capture's deadline, so
+    // a batch of presses costs one `load_data` rather than one each. `None` ⇒ nothing outstanding.
+    let mut capture_readback_at: Option<Instant> = None;
+    // The **exit** half of each one-pass capture, waiting for its window (#465). One press arms two
+    // of RotorHazard's captures, and they must not overlap — see [`PendingExitCapture`] and
+    // `CAPTURE_EXIT_DELAY`. A `Vec` because several nodes can be capturing at once.
+    let mut pending_exit_captures: Vec<PendingExitCapture> = Vec::new();
 
     while !cancel.load(Ordering::Relaxed) {
         // The source of truth for a drop (#105): `rust_socketio` runs with `.reconnect(false)`, so a
@@ -602,14 +1077,242 @@ fn maintain(
             return true;
         }
 
+        // ── Everything the RD queued for this live link (#457) ──────────────────────────────
+        //
+        // One queue, drained once per tick and applied **in the order the RD asked for it** — a
+        // restart (#386), a calibration write (#355), a capture (#355), a channel write (#413).
+        // Before #457 these were four slots drained in a fixed restart→level→capture→channel
+        // order regardless of when the RD asked; request order is both simpler and more faithful
+        // (a channel picked before a threshold now lands before it, on the node it was picked for).
+        //
+        // Two backstops run here, and they are deliberately different:
+        //
+        //  * a **restart** is refused outright while any heat is armed. The server route already
+        //    gates it on heat phase, but the request travels route → registry → reconciler → this
+        //    thread and an arm could land in between; restarting RH under a live race takes the
+        //    timing hardware down mid-heat. The RD can ask again once the heat is done.
+        //  * a **tuning write** is refused only for a *scored* heat. The route owns that judgement
+        //    (it is the layer that can see the event log) and stamps its answer on each write;
+        //    this only covers the same route→emit window. Loosening it is not optional: the route
+        //    now ACCEPTS a write during open practice (#398 excludes practice from scoring, and
+        //    tuning with pilots in the air is the Tune page's whole point), and a backstop that
+        //    still dropped it would report a write as dispatched that never landed — the exact
+        //    failure the readback design exists to make impossible.
+        //
+        // A refused write is dropped, never re-queued: it is stale by the time the heat ends.
+        let pending: Vec<PendingTimerWrite> = {
+            let mut slot = writes.lock().expect("pending-writes lock poisoned");
+            std::mem::take(&mut *slot)
+        };
+        if !pending.is_empty() {
+            let heat_armed = armed.lock().expect("armed-heat lock poisoned").is_some();
+            let mut refused_restart = 0usize;
+            let mut refused_calibration = 0usize;
+            let mut refused_capture = 0usize;
+            let mut refused_channel = 0usize;
+            // How many typed levels went out, so ONE `enter_and_exit_at_levels` readback covers
+            // the whole batch, and how many captures started, so one readback is scheduled behind
+            // RotorHazard's sampling window rather than one per press.
+            let mut levels_emitted = 0usize;
+            let mut captures_started = 0usize;
+            for write in &pending {
+                match write {
+                    // One fire-and-forget emit: RH re-execs, the socket drops within a moment, and
+                    // the caller's reconnect loop takes over (marking `Disconnected`, retrying with
+                    // backoff, re-probing the plugin on the new connection). We do NOT return
+                    // `true` here — the drop is caught by the same `is_alive` check as any other,
+                    // so there is one drop path, not two.
+                    PendingTimerWrite::Restart { .. } => {
+                        if heat_armed {
+                            refused_restart += 1;
+                            continue;
+                        }
+                        eprintln!(
+                            "gridfpv: restarting RotorHazard (restart_server) — the connection \
+                             will drop and reconnect on its own, re-probing the GridFPV plugin"
+                        );
+                        if conn.restart_server().is_err() {
+                            // A failed emit on a supposedly-live socket signals a drop; reconnect
+                            // and let the RD retry (the restart may or may not have been taken —
+                            // the reconnect tells us).
+                            return true;
+                        }
+                    }
+                    // The RD moved an enter/exit threshold on the Tune page and it goes to the
+                    // timer now — there is no Apply button, so this is the whole write path, once
+                    // per adjustment.
+                    PendingTimerWrite::Calibrate(w) => {
+                        if heat_armed && !w.during_open_practice {
+                            refused_calibration += 1;
+                            continue;
+                        }
+                        if let Some(level) = w.enter_at {
+                            if conn.set_enter_at_level(u64::from(w.node), level).is_err() {
+                                return true;
+                            }
+                        }
+                        if let Some(level) = w.exit_at {
+                            if conn.set_exit_at_level(u64::from(w.node), level).is_err() {
+                                return true;
+                            }
+                        }
+                        levels_emitted += 1;
+                    }
+                    // The same write path as a typed level, with one difference that shapes the
+                    // rest: **the emit does not produce a value.** RotorHazard opens a
+                    // three-second sampling window at the emit, averages the node's RSSI across
+                    // it, and only then sets the threshold — so the readback is *scheduled*, not
+                    // fired here. The armed-heat backstop applies for exactly the reason it does
+                    // to a typed level: a capture ends by setting a threshold, so it changes what
+                    // counts as a lap under a scored heat just as surely. Open practice is
+                    // allowed, and is the natural moment to capture — the pass a capture needs is
+                    // one a pilot is already flying (#398).
+                    //
+                    // **One arming is two emits** (#465). `cap_enter_at_btn` goes out now, over the
+                    // pass; `cap_exit_at_btn` goes out when that window closes, by which time the
+                    // craft has flown on. They cannot go out together: RotorHazard's two branches
+                    // average the SAME samples over the SAME window
+                    // (`BaseHardwareInterface.process_lap_stats` accumulates both from one
+                    // `node.current_rssi` per iteration), so a simultaneous pair returns
+                    // exit == enter, which is a gate that never closes. See `CAPTURE_EXIT_DELAY_MS`.
+                    PendingTimerWrite::Capture(w) => {
+                        if heat_armed && !w.during_open_practice {
+                            refused_capture += 1;
+                            continue;
+                        }
+                        let node = u64::from(w.node);
+                        if conn.capture_enter_at_level(node).is_err() {
+                            return true;
+                        }
+                        pending_exit_captures.push(PendingExitCapture {
+                            node,
+                            due: Instant::now() + CAPTURE_EXIT_DELAY,
+                        });
+                        captures_started += 1;
+                    }
+                    // The emit carries the catalog **band and channel** as well as the frequency:
+                    // RotorHazard's `on_set_frequency` stores them on the active profile, and
+                    // without them its own UI shows a bare number — which is what the RD is
+                    // looking at when they refresh RH to check this worked. There is deliberately
+                    // no readback: every heartbeat already carries each node's frequency, so the
+                    // confirmation is already on the feed the Tune page polls.
+                    PendingTimerWrite::SetChannel(w) => {
+                        if heat_armed && !w.during_open_practice {
+                            refused_channel += 1;
+                            continue;
+                        }
+                        let label = w.band.as_deref().zip(w.channel.as_deref());
+                        if conn.set_frequency(u64::from(w.node), w.mhz, label).is_err() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            if refused_restart > 0 {
+                eprintln!(
+                    "gridfpv: ignoring {refused_restart} RotorHazard restart request(s) — a heat \
+                     is armed on this connection; restarting mid-race would take the timer down \
+                     with the race on it"
+                );
+            }
+            if refused_calibration > 0 {
+                eprintln!(
+                    "gridfpv: ignoring {refused_calibration} calibration write(s) — a scored heat \
+                     is armed on this connection; moving a detection threshold mid-race changes \
+                     what counts as a lap"
+                );
+            }
+            if refused_capture > 0 {
+                eprintln!(
+                    "gridfpv: ignoring {refused_capture} capture(s) — a scored heat is armed on \
+                     this connection; a capture sets a detection threshold when it finishes, which \
+                     would change what that heat counts as a lap"
+                );
+            }
+            if refused_channel > 0 {
+                eprintln!(
+                    "gridfpv: ignoring {refused_channel} channel write(s) — a scored heat is armed \
+                     on this connection; retuning a node mid-race takes the gate off the channel \
+                     the pilot is flying"
+                );
+            }
+            if levels_emitted > 0 {
+                // The readback, and the reason a typed write is confirmable at all: RotorHazard
+                // emits NOTHING in reply to `set_enter_at_level` / `set_exit_at_level` (verified on
+                // v4.3.0 and v4.4.0), so without this ask the Tune page would never see the level
+                // it just sent come back — and "sent" would be indistinguishable from "landed",
+                // which is the #403 failure class. One `load_data` covers every node in this batch.
+                if conn.request_thresholds().is_err() {
+                    return true;
+                }
+            }
+            if captures_started > 0 {
+                // Schedule the readback past the end of the **last** sampling window — the exit one
+                // (#465), so the delay carries the enter window as well. Asking after only the
+                // first would read the exit threshold back before RotorHazard had measured it, and
+                // `resolve_captures` would then call a running capture `Unchanged`. RH also
+                // broadcasts each captured level itself (`node_enter_at_level` /
+                // `node_exit_at_level`, folded by the transport), so this is the second witness
+                // rather than the only one — but a gate's calibration is not something to stake on
+                // one unsolicited frame, and a capture the RD flew a pass for deserves both.
+                let due = Instant::now() + CAPTURE_EXIT_DELAY + CAPTURE_READBACK_DELAY;
+                capture_readback_at = Some(match capture_readback_at {
+                    Some(existing) if existing > due => existing,
+                    _ => due,
+                });
+            }
+        }
+        // Fire the **exit** half of each armed capture as its window comes due (#465). Deliberately
+        // its own step, three seconds after the enter emit, with this loop turning over every 100 ms
+        // in between: the whole point is that the two sampling windows do not overlap.
+        //
+        // A link that drops in between simply never fires it — the registry's outstanding exit
+        // capture then runs out and resolves `Unchanged`/`Unobserved`, which is the honest outcome
+        // and exactly what a dropped calibration write does.
+        if !pending_exit_captures.is_empty() {
+            let now = Instant::now();
+            let (due_now, still_waiting): (Vec<PendingExitCapture>, Vec<PendingExitCapture>) =
+                pending_exit_captures.iter().partition(|p| now >= p.due);
+            for exit in &due_now {
+                if conn.capture_exit_at_level(exit.node).is_err() {
+                    return true;
+                }
+            }
+            pending_exit_captures = still_waiting;
+        }
+        // …and fire the capture readback when it comes due. Deliberately outside the block above:
+        // the emit and the readback are separated by six seconds of RotorHazard sampling, and
+        // this loop turns over every 100 ms in between.
+        if let Some(due) = capture_readback_at {
+            if Instant::now() >= due {
+                capture_readback_at = None;
+                if conn.request_thresholds().is_err() {
+                    return true;
+                }
+            }
+        }
+
         // Apply a pending tune (race redesign Slice 4a): the bridge requested the device tune its
         // nodes to the staging heat's assigned channels. Emit a `set_frequency` per node; this is
         // best-effort (the engine has already allocated — applying is the adapter's half), so a
         // failed emit on a supposedly-live socket signals a drop the caller reconnects from.
+        //
+        // **This legitimately overwrites anything the Tune page set** (#413): a heat's channel
+        // assignment is the race's, and the bench value does not get to win. The Tune page says so
+        // rather than fighting it.
+        //
+        // The emit carries the catalog **band and channel** alongside the frequency, exactly as the
+        // Tune page's write does (#421). It is resolved once, upstream, through the catalog's single
+        // resolver (`gridfpv_server::channels::label_of`) and threaded here on the plan — nothing is
+        // re-derived at the emit. `set_frequency` translates the catalog code into RotorHazard's own
+        // vocabulary (`"R7"` → `{"b": "R", "c": 7}`); sending the code itself raised `ValueError` in
+        // `on_set_frequency` and aborted the handler, so the frequency was never set at all. A
+        // custom MHz the catalog cannot name travels as a bare frequency, never an invented label.
         let pending_tune = tune.lock().expect("tune lock poisoned").take();
         if let Some(assignment) = pending_tune {
-            for (node, mhz) in assignment {
-                if conn.set_frequency(node, mhz).is_err() {
+            for node in assignment {
+                let label = node.band.as_deref().zip(node.channel.as_deref());
+                if conn.set_frequency(node.node, node.mhz, label).is_err() {
                     return true;
                 }
             }
@@ -648,8 +1351,16 @@ fn maintain(
         // `stop_race`/`discard_laps` don't touch heat rows, but ordering keeps RH idle while we set
         // the current heat). The seated heat is remembered so the finish-time dense save reuses it
         // (it is already current + savable) rather than adding a separate empty heat. Best-effort: a
-        // seating that can't complete (a slow RH) leaves `seated_heat = None` and the flow falls back
-        // to practice mode, which still records via RH's `current_heat is HEAT_ID_NONE` gate branch.
+        // seating that can't complete leaves `seated_heat = None` and the flow falls back to practice
+        // mode, which still records via RH's `current_heat is HEAT_ID_NONE` gate branch.
+        //
+        // Since #423 that `None` has two causes, and the second is the important one: a slow RH that
+        // never answers, **or** a seating RotorHazard did not actually apply. `seat_heat` now reads
+        // the seating back out of RH's own `heat_data` and refuses to hand back a heat it cannot
+        // confirm — because `alter_heat` answers `noself` (excluding the socket that wrote) and
+        // swallows failures into RH's log, so before that a silently-failed seat still arrived here
+        // as `Some(heat)`, and RH's pass gate then dismissed every crossing on the unseated node.
+        // Both causes are announced through the diag sink, the second naming the callsigns.
         let pending_seat = seat.lock().expect("seat lock poisoned").take();
         if let Some(seats) = pending_seat {
             match conn.seat_heat(&seats) {
@@ -834,6 +1545,29 @@ fn maintain(
             }
         }
 
+        // ---------------------------------------------------------------------------------------
+        // Tune telemetry (#355 S2a). Three lines of policy, all of it here on the Director:
+        //
+        //  1. **The lease is the subscription.** Re-read every tick, so a Tune page that stopped
+        //     polling — closed tab, dead browser, lost Wi-Fi — shuts the transport's pre-parse gate
+        //     by itself within `SIGNAL_LEASE`. There is no state a client has to remember to clear.
+        //  2. **Decimate here, not on arrival.** RotorHazard's heartbeat is 10 Hz on a stock timer
+        //     and 100 Hz with its frequency scanner on (`HEARTBEAT_DATA_RATE_FACTOR` 5 → 50), so
+        //     sampling the transport's last-value-wins store on our own fixed cadence is what makes
+        //     the ring's time base mean something.
+        //  3. **All nodes, unfiltered.** These readings go nowhere near `remap` — which drops every
+        //     node outside the armed heat — because an unseated node's signal is exactly what an RD
+        //     is looking for when a gate has stopped detecting.
+        //
+        // Nothing here touches `heat.sink`, and the readings are not `Event`s. There is no code
+        // path from this block to a log.
+        let wanted = timers.signal_wanted(timer_id);
+        conn.set_signal_capture(wanted);
+        if wanted && last_signal_sample.elapsed() >= SIGNAL_SAMPLE_INTERVAL {
+            timers.push_signal(timer_id, &readings(conn.take_signal()));
+            last_signal_sample = Instant::now();
+        }
+
         // Drain whatever the transport has translated since the last tick.
         let drained = conn.events();
         if !drained.is_empty() {
@@ -907,6 +1641,41 @@ mod tests {
 
     fn lineup() -> Vec<CompetitorRef> {
         vec![CompetitorRef("Ace".into()), CompetitorRef("Bee".into())]
+    }
+
+    /// #380: an `eprintln!` **from this module** must land in the Director's log file.
+    ///
+    /// This is the regression guard for the whole issue. The connect-failure diagnostic a few
+    /// hundred lines above — the `error_chain` line that tells a refused TCP connect apart
+    /// from a TLS fault — is a plain `eprintln!`, and on the shipped Windows GUI-subsystem
+    /// build stderr goes nowhere. It only reaches an RD because `crate::logging` shadows
+    /// `eprintln!` for every module declared after it in `lib.rs`, and `macro_rules!` scope is
+    /// *textual*: move that declaration below `pub mod source;`, or add a `use` that shadows
+    /// it back, and this test fails instead of the field session.
+    ///
+    /// It asserts against the real resolved log file (no env mutation — `std::env::set_var` is
+    /// unsafe in edition 2024 and this crate forbids unsafe), reading only the bytes appended
+    /// after the marker is written, so it is safe under a parallel test runner.
+    #[test]
+    fn an_eprintln_from_this_module_reaches_the_log_file() {
+        use std::io::{Seek, SeekFrom};
+
+        let path = crate::logging::init().expect("a log file always resolves");
+        let before = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+        let marker = format!("gridfpv-380-marker-{}", std::process::id());
+        eprintln!("gridfpv: RotorHazard connect failed for {marker:?}: <error chain>");
+
+        let mut file = std::fs::File::open(path).expect("the log file is readable");
+        file.seek(SeekFrom::Start(before)).expect("seekable");
+        let mut tail = String::new();
+        std::io::Read::read_to_string(&mut file, &mut tail).expect("readable tail");
+
+        assert!(
+            tail.contains(&marker),
+            "the eprintln! did not reach {}; tail was {tail:?}",
+            path.display()
+        );
     }
 
     #[test]
@@ -1015,7 +1784,7 @@ mod tests {
         let err =
             match RotorHazardConnection::connect("http://127.0.0.1:1", RotorHazardAdapter::new()) {
                 Ok(_) => panic!("connecting to a dead port must fail"),
-                Err(e) => e,
+                Err((e, _recovered)) => e,
             };
         let chained = error_chain(&err);
         // The top-level Display alone is the useless opaque string...
@@ -1029,6 +1798,215 @@ mod tests {
         assert!(
             lower.contains("refused") || lower.contains("connect"),
             "error_chain should name the refused connect, got {chained:?}"
+        );
+    }
+
+    // ── #435: a failed intermediate reconnect attempt must not cost the dedup ────────────────
+
+    /// RotorHazard's `RACING` status edge (`RaceStatus.RACING == 1`), as the driver folds it.
+    fn racing() -> gridfpv_adapters::rotorhazard::Raw {
+        gridfpv_adapters::rotorhazard::Raw::RaceStatus(
+            gridfpv_adapters::rotorhazard::RawRaceStatus {
+                race_status: 1,
+                race_heat_id: Some(1),
+            },
+        )
+    }
+
+    /// The in-progress `current_laps` snapshot RotorHazard re-sends on **every** new socket while a
+    /// race is running — three laps flown on node 0 before the link dropped. Shaped as
+    /// `build_laps_list` builds it on 4.3.0/4.4.0: `{current: {node_index: [{laps: [...]}]}}`, each
+    /// lap carrying `lap_time_stamp` in cumulative ms since race start.
+    fn in_progress_snapshot() -> gridfpv_adapters::rotorhazard::Raw {
+        use gridfpv_adapters::rotorhazard::{
+            Raw, RawCurrent, RawCurrentLaps, RawLap, RawLapNumber, RawNode,
+        };
+        let lap = |number: u64, stamp: f64| RawLap {
+            lap_index: Some(number as i64),
+            lap_number: RawLapNumber::Counted(number),
+            lap_raw: None,
+            lap_time: None,
+            lap_time_stamp: stamp,
+            late_lap: false,
+            deleted: None,
+        };
+        Raw::CurrentLaps(RawCurrentLaps {
+            current: RawCurrent {
+                node_index: vec![RawNode {
+                    laps: vec![lap(0, 2_000.0), lap(1, 7_000.0), lap(2, 12_000.0)],
+                    pilot: None,
+                }],
+            },
+        })
+    }
+
+    fn passes(events: &[Event]) -> Vec<i64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Pass(p) => Some(p.at.micros),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A failed reconnect attempt must not lose the carried adapter (#435).**
+    ///
+    /// On a mid-race drop [`drive`] carries the adapter out of the dead connection
+    /// (`carry_adapter = Some(conn.disconnect())`) precisely so its dedup and `last_race_status`
+    /// stay continuous: RotorHazard re-sends the whole in-progress `current_laps` snapshot on the
+    /// new socket, and a fresh adapter re-mints every lap of the heat as a new `Pass` — which the
+    /// lap projection, which does not dedup by sequence, turns into duplicate laps.
+    ///
+    /// `RotorHazardConnection::connect` takes the adapter **by value**, so an attempt that *fails*
+    /// — RotorHazard momentarily unreachable, the common case right after the blip that dropped the
+    /// socket — used to drop it in the `Err` branch, and the next iteration's
+    /// `carry_adapter.take().unwrap_or_default()` started from an empty dedup while the heat was
+    /// still armed. One Wi-Fi blip plus one failed retry doubled the heat's lap log.
+    ///
+    /// The fix is in `connect`'s signature: its `Err` hands the adapter back, because
+    /// `rust_socketio::Error` carries nothing that could. The failing connect below is the real one
+    /// (port 1 is refused immediately); the rest is [`drive`]'s own carry, transcribed.
+    #[test]
+    fn a_failed_connect_attempt_must_not_lose_the_carried_dedup_state() {
+        use gridfpv_adapters::Adapter;
+
+        // Mid-race: three laps already flown, already minted, already in the heat's log.
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(racing());
+        assert_eq!(
+            passes(&adapter.translate(in_progress_snapshot())),
+            vec![2_000_000, 7_000_000, 12_000_000],
+            "the laps flown before the drop"
+        );
+
+        // The socket drops. `drive` carries the adapter into the next attempt…
+        let mut carry_adapter = Some(adapter);
+        let attempt = carry_adapter.take().unwrap_or_default();
+        // …and that attempt fails, because RotorHazard has not come back yet. (Port 1 is reserved
+        // and unused on the loopback, so the connect is refused immediately.) `drive`'s Err arm
+        // logs the chain, marks the timer Error, backs off and retries — and puts the RECOVERED
+        // adapter back, which is the whole of the fix.
+        match RotorHazardConnection::connect("http://127.0.0.1:1", attempt) {
+            Ok(_) => panic!("connecting to a dead port must fail"),
+            Err((_, recovered)) => carry_adapter = Some(recovered),
+        }
+        assert!(
+            carry_adapter.is_some(),
+            "the adapter carried into a FAILED connect must survive it — the heat is still armed \
+             and the next attempt needs its dedup to suppress RotorHazard's replayed snapshot"
+        );
+
+        // The retry succeeds and RotorHazard re-sends the in-progress snapshot on the new socket.
+        let mut retried = carry_adapter.take().unwrap_or_default();
+        retried.translate(racing());
+        assert!(
+            passes(&retried.translate(in_progress_snapshot())).is_empty(),
+            "every lap flown before the drop would be minted a SECOND time: the lap projection \
+             does not dedup by sequence, so these become duplicate laps in the heat's log"
+        );
+    }
+
+    /// …and the recovered adapter is the **same** one, not a fresh stand-in that happens to type-
+    /// check (#435).
+    ///
+    /// The failure this guards is subtle and would look identical from the outside: an `Err` arm
+    /// that returned `RotorHazardAdapter::new()` would satisfy the signature, satisfy the test
+    /// above's `is_some()`, and still double-count every lap. So this asserts on state only the
+    /// original carries — `last_race_status` (RACING, folded before the drop), which is what stops
+    /// the re-sent snapshot from looking like a fresh race and resetting the dedup (#156).
+    #[test]
+    fn the_adapter_recovered_from_a_failed_connect_is_the_one_that_went_in() {
+        use gridfpv_adapters::Adapter;
+
+        let mut adapter = RotorHazardAdapter::new();
+        adapter.translate(racing());
+        adapter.translate(in_progress_snapshot());
+
+        let recovered = match RotorHazardConnection::connect("http://127.0.0.1:1", adapter) {
+            Ok(_) => panic!("connecting to a dead port must fail"),
+            Err((_, recovered)) => recovered,
+        };
+
+        // A FRESH adapter would read RotorHazard's re-sent `race_status=RACING` as a READY→RACING
+        // transition, re-emit `SessionStarted`, reset its dedup (#156) and re-mint the snapshot.
+        // The carried one has already seen RACING, so the re-send is not a transition at all.
+        let mut recovered = recovered;
+        assert!(
+            !recovered
+                .translate(racing())
+                .iter()
+                .any(|e| matches!(e, Event::SessionStarted { .. })),
+            "the recovered adapter must still hold last_race_status = RACING; a fresh one would \
+             treat RotorHazard's re-sent status as a new race and reset the dedup (#156)"
+        );
+        assert!(
+            passes(&recovered.translate(in_progress_snapshot())).is_empty(),
+            "and with the dedup intact the replayed snapshot mints nothing"
+        );
+    }
+
+    // ── #436: the connect-success path must clear the channel write too ──────────────────────
+
+    /// One queued write of every kind, as the previous connection left them.
+    fn every_kind_of_write() -> Vec<PendingTimerWrite> {
+        let timer = TimerId("field-rh".into());
+        vec![
+            PendingTimerWrite::Restart {
+                timer: timer.clone(),
+            },
+            PendingTimerWrite::Calibrate(gridfpv_server::timers::PendingCalibration {
+                timer: timer.clone(),
+                node: 0,
+                enter_at: Some(96),
+                exit_at: None,
+                during_open_practice: false,
+            }),
+            PendingTimerWrite::Capture(gridfpv_server::timers::PendingCapture {
+                timer: timer.clone(),
+                node: 0,
+                during_open_practice: false,
+            }),
+            PendingTimerWrite::SetChannel(gridfpv_server::timers::PendingChannel {
+                timer,
+                node: 0,
+                mhz: 5880,
+                band: Some("Raceband".into()),
+                channel: Some("R7".into()),
+                during_open_practice: false,
+            }),
+        ]
+    }
+
+    /// **A reconnect drops every write that outlived the previous connection — the channel one
+    /// included (#436).**
+    ///
+    /// The RD picks a channel on the Tune page while the timer reads Connected; the socket drops
+    /// before the next maintain tick drains it. Minutes later the reconnected driver's first tick
+    /// emits `set_frequency`, retuning a receiver nobody asked to move — possibly on a different
+    /// physical RotorHazard now answering at that URL. That is exactly what the restart,
+    /// calibration and capture writes are cleared to prevent, and exactly what
+    /// `RhConnections::deliver`'s own contract promises cannot happen: "nothing is queued for a
+    /// future connection: a node retuned minutes later on a reconnect would move a receiver nobody
+    /// asked to move".
+    #[test]
+    fn a_reconnect_clears_the_channel_write_like_every_other_stale_one() {
+        let writes: PendingWriteSlot = Arc::new(Mutex::new(every_kind_of_write()));
+
+        // The link dropped and the driver has just reconnected.
+        clear_writes_that_outlived_the_previous_connection(&writes);
+
+        let left = writes.lock().expect("pending-writes lock").clone();
+        assert!(
+            !left
+                .iter()
+                .any(|w| matches!(w, PendingTimerWrite::SetChannel(_))),
+            "a channel write from the previous connection must NOT survive the reconnect — it \
+             would retune a receiver nobody asked to move, minutes later, with no readback"
+        );
+        assert!(
+            left.is_empty(),
+            "no write of any kind outlives its connection; {left:?} did"
         );
     }
 }

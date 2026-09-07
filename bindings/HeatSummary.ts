@@ -3,6 +3,7 @@ import type { ClassId } from "./ClassId";
 import type { CompetitorRef } from "./CompetitorRef";
 import type { HeatId } from "./HeatId";
 import type { HeatPhase } from "./HeatPhase";
+import type { LayoutId } from "./LayoutId";
 import type { RoundId } from "./RoundId";
 
 /**
@@ -16,9 +17,25 @@ import type { RoundId } from "./RoundId";
  */
 export type HeatSummary = { 
 /**
- * The heat's id (its scheduled handle, the same one the live/control path drives).
+ * The heat's id (its scheduled handle, the same one the live/control path drives). A **wire
+ * handle**: [`name`](Self::name) is what a screen shows (repo display rule).
  */
 heat: HeatId, 
+/**
+ * The heat's **friendly display name** — "Qualifying Heat 2", "A-Main", "Practice Heat 2", or
+ * the RD's own typed label.
+ *
+ * Resolved server-side by [`round_engine::heat_name`](crate::round_engine::heat_name), which
+ * is now the ONE place the convention lives (#456): the console consumes this rather than
+ * re-deriving it, because the two derivations had already drifted — the console numbered a
+ * round's extra practice heats and the server did not, so an RD saw "Practice Heat 2" on
+ * screen and a bare "Practice Heat" in every sentence the server wrote.
+ *
+ * Falls back to the raw handle for a heat with **no resolvable round** (a sim / free-text
+ * heat, or one whose round the caller had no meta for) — there is the RD's own typed
+ * identifier, and it is the same last-resort the display rule allows a resolver.
+ */
+name: string, 
 /**
  * The heat's lineup — the competitors from its most recent `HeatScheduled`, in lineup order.
  */
@@ -48,6 +65,24 @@ frequencies?: Array<[CompetitorRef, number]>,
  * heat, which keeps the auto-name. Additive — defaults absent so older logs round-trip.
  */
 label?: string, 
+/**
+ * The **channel layout** this heat flies (#117 S3) — the last
+ * [`HeatLayoutSet`](gridfpv_events::Event::HeatLayoutSet) for it.
+ *
+ * A wire handle: the console resolves it to the layout's **name** against the event's
+ * `channel_layouts` (CLAUDE.md), and uses its `node → channel` mapping as the per-node channel
+ * source a seat resolves through — the value that replaces `available_channels[node]`, which
+ * an allowed set never had any business answering.
+ *
+ * This is the **RD's own bind**, not the layout the heat resolves to: `None` whenever no
+ * `HeatLayoutSet` names one — the RD never picked for this heat (#441: the fill records no
+ * bind, so this is the common case for a generated heat, which follows its round's default),
+ * they cleared their pick, or the round names no layouts at all. The heat's actual per-seat
+ * channels are always on [`frequencies`](Self::frequencies), which is the first source a
+ * console seat resolves through; this only backfills a seat that has none. Additive —
+ * defaults absent so older logs round-trip.
+ */
+layout?: LayoutId, 
 /**
  * The heat's folded loop phase (its derived status: scheduled / running / final / …).
  */

@@ -19,7 +19,12 @@
  * The per-crossing chatter. Useful, but optional — the RD can silence it without losing the
  * procedure tones:
  *   • {@link RaceAudioPlayer.playCrossingBeep} — a very short, higher pip (1760Hz, ~60ms) per
- *     recorded lap, distinct from the procedure family.
+ *     gate **crossing** (#397), distinct from the procedure family. One pip per crossing —
+ *     holeshot, counted lap, and a pass the min-lap floor rejected alike — because "the gate saw
+ *     nothing" and "the gate saw something that didn't count" must stop being the same silence.
+ *     A phantom crossing on an unseated node pips too: that is the point, not noise.
+ *     Consecutive pips are **staggered** on the audio clock (see {@link CROSSING_SPACING_MS}) so a
+ *     pack crossing together reads as N pips rather than one stacked blip.
  * The spoken lap callouts (Web Speech) live in `callouts.ts` and are gated by the same
  * {@link RaceAudioPlayer.muted} preference at the call site. The preference persists to
  * `localStorage` under a **new** key ({@link MUTE_STORAGE_KEY}) — the old start-tone mute pref is
@@ -58,9 +63,25 @@ const COUNTDOWN_MS = 150;
 /** The race-end buzzer (remaining 0): half the countdown pitch, longer — unmistakably "time". */
 const RACE_END_HZ = COUNTDOWN_HZ / 2;
 const RACE_END_MS = 600;
-/** The per-lap crossing pip (informational, mute-scoped): higher + very short, a distinct voice. */
+/** The per-crossing pip (informational, mute-scoped): higher + very short, a distinct voice. */
 const CROSSING_HZ = 1760;
 const CROSSING_MS = 60;
+/**
+ * The minimum gap between two crossing pips on the audio clock. Eight seats can cross within a
+ * second, and Web Audio bursts scheduled at the *same* `currentTime` sum into ONE louder blip
+ * instead of eight countable pips (they also stack toward clipping). So each pip claims the next
+ * free slot at least this far after the previous one. 80ms > the 60ms burst, so the pips are
+ * separated by silence and stay individually countable.
+ */
+const CROSSING_SPACING_MS = 80;
+/**
+ * How far ahead the pip queue may run before further pips are DROPPED. A pip is awareness — "the
+ * gate just saw someone" — and awareness has a shelf life: a pip arriving a second after the
+ * crossing tells the RD nothing and, worse, a long trailing string turns a burst into a
+ * machine-gun the RD has to work through. 600ms of lookahead admits ~8 pips (one full heat's
+ * simultaneous crossings) and drops the rest of a pile-up on the floor.
+ */
+const CROSSING_MAX_LOOKAHEAD_MS = 600;
 
 /** The minimal `AudioContext` surface the player drives (so a test mock implements just this). */
 export interface ToneAudioContext {
@@ -142,6 +163,13 @@ export class RaceAudioPlayer {
   #muted = false;
   #factory: (() => ToneAudioContext) | undefined;
   #ctx: ToneAudioContext | undefined;
+  /**
+   * The next free slot on the audio clock for a **crossing pip** (seconds, in the context's own
+   * time base). Staggering is per-player, not per-call, which is what makes a burst countable —
+   * see {@link CROSSING_SPACING_MS}. Always clamped forward to `currentTime`, so it can never
+   * schedule in the past after a quiet stretch.
+   */
+  #nextPipAt = 0;
 
   constructor(opts?: RaceAudioPlayerOptions) {
     this.#factory = opts?.audioContextFactory ?? platformAudioContext();
@@ -215,9 +243,15 @@ export class RaceAudioPlayer {
     this.#play(RACE_END_HZ, RACE_END_MS, false);
   }
 
-  /** The per-lap crossing pip — **informational**, silenced by the callouts mute. */
+  /**
+   * The per-**crossing** pip — **informational**, silenced by the callouts mute. Fires once per
+   * gate crossing (holeshot / counted / rejected-too-short / voided alike); the caller keys
+   * novelty on the crossing's `pass_ref`, never on a frame arriving. Staggered against the other
+   * pips in flight so a pack reads as separate pips; a pip that would land beyond
+   * {@link CROSSING_MAX_LOOKAHEAD_MS} is dropped rather than trailing the race.
+   */
   playCrossingBeep(): void {
-    this.#play(CROSSING_HZ, CROSSING_MS, true);
+    this.#play(CROSSING_HZ, CROSSING_MS, true, true);
   }
 
   /**
@@ -233,12 +267,12 @@ export class RaceAudioPlayer {
    * first and schedule the note from the resumed clock**. The console also unlocks on the earlier
    * Start gesture / first pointerdown ({@link resume}) so this path is usually instant.
    */
-  #play(hz: number, ms: number, gatedByMute: boolean): void {
+  #play(hz: number, ms: number, gatedByMute: boolean, stagger = false): void {
     if (gatedByMute && this.#muted) return;
     const ctx = this.#context();
     if (!ctx) return;
     if (ctx.state === 'running') {
-      this.#emit(ctx, hz, ms);
+      this.#schedule(ctx, hz, ms, stagger);
       return;
     }
     // Suspended (autoplay policy): resume, then schedule against the *resumed* clock. A mute-gated
@@ -246,17 +280,36 @@ export class RaceAudioPlayer {
     void ctx
       .resume()
       .then(() => {
-        if (!gatedByMute || !this.#muted) this.#emit(ctx, hz, ms);
+        if (!gatedByMute || !this.#muted) this.#schedule(ctx, hz, ms, stagger);
       })
       .catch(() => {
         /* still locked (no gesture yet) — nothing to play; the next gesture unlocks it */
       });
   }
 
+  /**
+   * Pick the burst's start time on the context clock and emit it. A **procedure** tone plays
+   * NOW — it is the race signal and must never be delayed behind chatter. A **staggered** tone
+   * (the crossing pip) takes the next free slot so simultaneous pips do not stack into one blip;
+   * if the queue has already run past {@link CROSSING_MAX_LOOKAHEAD_MS} the pip is dropped (a
+   * stale pip is noise, not awareness).
+   */
+  #schedule(ctx: ToneAudioContext, hz: number, ms: number, stagger: boolean): void {
+    const now = ctx.currentTime;
+    if (!stagger) {
+      this.#emit(ctx, hz, ms, now);
+      return;
+    }
+    const at = Math.max(now, this.#nextPipAt);
+    if (at - now > CROSSING_MAX_LOOKAHEAD_MS / 1000) return;
+    this.#nextPipAt = at + CROSSING_SPACING_MS / 1000;
+    this.#emit(ctx, hz, ms, at);
+  }
+
   /** Build and fire the oscillator → gain → destination burst on a running context. Never throws. */
-  #emit(ctx: ToneAudioContext, hz: number, ms: number): void {
+  #emit(ctx: ToneAudioContext, hz: number, ms: number, at: number): void {
     try {
-      const now = ctx.currentTime;
+      const now = at;
       const dur = Math.max(0.05, ms / 1000);
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -284,5 +337,6 @@ export class RaceAudioPlayer {
       /* ignore */
     }
     this.#ctx = undefined;
+    this.#nextPipAt = 0;
   }
 }

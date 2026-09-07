@@ -27,6 +27,8 @@ import { expect, test } from './observability.js';
 
 const PILOTS = ['Ace', 'Bee', 'Cee'];
 const HEAT_ID = 'q-1';
+/** The round this spec's heat belongs to — see the `ROUND_LABEL` note in the test. */
+const ROUND_LABEL = 'E2E-Race';
 
 test('RD drives a full basic sim race through the console UI', async ({ page, director }) => {
   // ── Open the console: the home hub is the landing screen (#118) ──────────────────────
@@ -38,7 +40,7 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // worker's Director may already have an active event from a prior spec (#90): on a fresh load
   // the hash is authoritative (#118) so we land on the hub even then, and clicking Events either
   // shows the picker (nothing active) or auto-enters the active event's workspace — handle both.
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   await expect(
     page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
@@ -55,8 +57,8 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
       .click();
   }
 
-  // The shell is up: the Live control screen is the default landing screen.
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible();
+  // The shell is up: the Race control screen is the default landing screen.
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible();
   // The live read stream connects against the Director and settles on `live` (it passes
   // through connecting → snapshotting on the way).
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
@@ -66,16 +68,41 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // round/class members in the Rounds & Heats stage (covered by `rounds.spec.ts`). This race
   // spec's focus is *running* a heat, so it schedules one straight over the open control path
   // (the Director is booted with no token configured) — exactly what the Heats UI emits.
-  const ack = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  //
+  // The heat is tagged with a ROUND. That is not decoration: the Results screen lists a scored heat
+  // under the round it belongs to (`Results.svelte`'s view selector walks rounds, then each round's
+  // `Final` heats), so an untagged heat can be run and finalized and its result is simply not
+  // reachable in the UI. Every heat the product builds now comes from a round — the free-text
+  // NewHeat form is retired — so an untagged one is a test-only artefact, and reading results off it
+  // was proving a path that no longer exists.
+  const roundRes = await page.request.post(`${director.eventRoot}/rounds`, {
     headers: { 'Content-Type': 'application/json' },
-    data: { ScheduleHeat: { heat: HEAT_ID, lineup: PILOTS } }
+    data: {
+      label: ROUND_LABEL,
+      classes: [],
+      format: 'timed_qual',
+      params: { rounds: '1' },
+      // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race time,
+      // else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
+      win_condition: 'BestLap',
+      time_limit_secs: 60,
+      seeding: 'FromRoster',
+      channel_mode: 'PerHeat'
+    }
+  });
+  expect(roundRes.ok()).toBeTruthy();
+  const roundId = ((await roundRes.json()) as { id: string }).id;
+
+  const ack = await page.request.post(`${director.eventRoot}/control`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: { ScheduleHeat: { heat: HEAT_ID, lineup: PILOTS, round: roundId } }
   });
   expect(ack.ok()).toBeTruthy();
   // Explicitly focus THIS heat as the current heat (SetCurrentHeat) over the control path. The
   // shared worker Director's `current_heat` stays pinned to whatever heat a prior spec last touched
   // (it never resets between specs), and filling a heat does NOT steal Live focus (current-heat.spec.ts)
   // — so this server-side selection keeps the run independent of spec order.
-  const focused = await page.request.post(`${director.baseUrl}/events/practice/control`, {
+  const focused = await page.request.post(`${director.eventRoot}/control`, {
     headers: { 'Content-Type': 'application/json' },
     data: { SetCurrentHeat: { heat: HEAT_ID } }
   });
@@ -86,12 +113,15 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   // full page reload reads `GET /active-event` and re-enters the workspace directly — the
   // picker's "Choose an event" heading must NOT reappear.
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeHidden();
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   // The heat lands on the timer: current heat + the lineup show, phase Scheduled.
-  await expect(page.locator('.heat-id .value')).toHaveText(HEAT_ID);
+  // The header names the heat by its FRIENDLY name — "‹Round› Heat N" through `heatNameById` — not
+  // its raw id (`CLAUDE.md`). It is round-tagged now, so the name resolves.
+  const HEAT_NAME = `${ROUND_LABEL} Heat 1`;
+  await expect(page.locator('.heat-id .value')).toHaveText(HEAT_NAME);
   const heatSheet = page.getByRole('region', { name: 'Heat sheet' });
   for (const pilot of PILOTS) {
     await expect(heatSheet.getByText(pilot, { exact: true })).toBeVisible();
@@ -141,33 +171,41 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
     const m = /(\d+):(\d+)\.(\d+)/.exec(t ?? '');
     return m ? (+m[1] * 60 + +m[2]) * 1000 + +m[3] : NaN;
   };
-  const hudClockLive = page.locator('.hud-clock .gridfpv-race-clock');
+  // The round is a timed_qual with a 60s race time, so since #504 BOTH clocks count DOWN
+  // ("Time remaining") — the HUD renders the countdown as its primary clock plus the small
+  // companion elapsed subclock, so the locator scopes to the primary (direct child of .clock).
+  const hudClockLive = page.locator('.hud-clock .clock > .gridfpv-race-clock');
   const headerClockLive = page.locator('.ctx-clock .gridfpv-race-clock');
   await expect(hudClockLive).toBeVisible();
   await expect(headerClockLive).toBeVisible();
+  // The countdown's companion elapsed readout is there too (#504) — lap arithmetic at a glance.
+  await expect(page.getByTestId('elapsed-subclock')).toBeVisible();
   // Leave Live (remounting nothing in the header — it is persistent), then return so the HUD clock
   // mounts fresh well after race-go.
   await page.getByRole('button', { name: /Results/ }).click();
   await page.waitForTimeout(1200);
-  await page.getByRole('button', { name: /Live control/ }).click();
+  await page.getByRole('button', { name: /Race control/ }).click();
   await expect(hudClockLive).toBeVisible();
   // Sample both in the same tick: the freshly-mounted HUD must agree with the long-lived header
   // (within one 50ms tick of sampling jitter), NOT lag by the time we were away. This is the bug.
   const hudMid = parseClock(await hudClockLive.textContent());
   const headerMid = parseClock(await headerClockLive.textContent());
   expect(Math.abs(hudMid - headerMid)).toBeLessThan(150);
-  // And it must read the REAL elapsed (well past 0), proving it counted from race-go not arrival.
+  // And the countdown must be genuinely under way (well inside the 60s window, not at a mount-time
+  // 60.0), proving it anchored to race-go not arrival.
   expect(hudMid).toBeGreaterThan(1000);
+  expect(hudMid).toBeLessThan(59_000);
 
-  // ── End the window: ForceEnd is the runtime-clock override (the old manual "Finish") ──
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  // ── End the window: the ForceEnd command, whose button reads **Stop** to the RD (the wire tag is
+  //    unchanged; `actionLabel` renames it) — the runtime-clock override for the old manual "Finish". ──
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial');
 
   // ── The race clock must FREEZE at Unofficial (the rename-regression fix) ───────────────
   // The race has ended (only the result isn't finalized yet), so the heat clock stops at the
   // race-end instant instead of free-running. Read the HUD clock right after the transition, wait,
   // and assert it has NOT advanced. The persistent header clock (#85) mirrors the same source.
-  const hudClock = page.locator('.hud-clock .gridfpv-race-clock');
+  const hudClock = page.locator('.hud-clock .clock > .gridfpv-race-clock');
   const headerClock = page.locator('.ctx-clock .gridfpv-race-clock');
   await expect(hudClock).toBeVisible();
   // The header clock stays VISIBLE on end too — it no longer vanishes the instant the race closes
@@ -206,19 +244,25 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
   await expect(page.locator('.phase').first()).toHaveText('Final');
 
   // ── Read the results: the Results screen shows the pilots, lap counts, and an order ───
+  // The Results screen is one view at a time, chosen from a single "Results view" selector: each
+  // round, an optgroup of that round's `Final` heats, then the event's classes. There is no standing
+  // "Heat leaderboard" table any more — a heat's own result is the `‹heat name› results` table under
+  // its round — so the per-heat view is selected explicitly rather than assumed to be on screen.
   await page.getByRole('button', { name: /Results/ }).click();
   const results = page.getByRole('region', { name: 'Results' });
-  const leaderboard = results.getByRole('table', { name: 'Heat leaderboard' });
-  await expect(leaderboard).toBeVisible();
+  await results.getByLabel('Results view').selectOption({ label: HEAT_NAME });
+  const leaderboard = results.getByRole('table', { name: `${HEAT_NAME} results` });
+  await expect(leaderboard).toBeVisible({ timeout: 15_000 });
 
   // Every pilot appears in the result with a decided finishing order (positions 1..n).
   const rows = leaderboard.locator('tbody tr');
   await expect(rows).toHaveCount(PILOTS.length);
   for (const pilot of PILOTS) {
-    await expect(leaderboard.getByRole('cell', { name: pilot, exact: true })).toBeVisible();
+    await expect(leaderboard.getByText(pilot, { exact: true })).toBeVisible();
   }
-  // The leader (position 1) banked at least one lap — a real, scored result.
-  const leaderLaps = await rows.first().locator('.laps').textContent();
+  // The leader (position 1) banked at least one lap — a real, scored result. Laps is the third
+  // column (Pos · Pilot · Laps · …).
+  const leaderLaps = await rows.first().locator('td').nth(2).textContent();
   expect(parseInt(leaderLaps ?? '0', 10)).toBeGreaterThan(0);
   // Positions are decided and start at 1.
   const firstPos = await rows.first().locator('.pos .badge').textContent();
@@ -226,22 +270,22 @@ test('RD drives a full basic sim race through the console UI', async ({ page, di
 });
 
 /**
- * Friendly names everywhere in Live control — the human-readable-identifiers fix.
+ * Friendly names everywhere in Race control — the human-readable-identifiers fix.
  *
- * The bug: Live control rendered raw ids/refs. This proves the fix end-to-end against a real
+ * The bug: Race control rendered raw ids/refs. This proves the fix end-to-end against a real
  * Director: a heat whose seats are bound (via `Register`) to **directory pilots** renders those
  * pilots' **callsigns** in the lineup/heat-sheet — not the bare competitor refs — and an **on-deck**
  * heat shows its name. The pilots directory + the registration both go over the real REST/control
  * paths; the browser's own live stream drives the render (nothing mocked).
  */
-test('Live control shows pilot callsigns (not refs) and an on-deck heat', async ({
+test('Race control shows pilot callsigns (not refs) and an on-deck heat', async ({
   page,
   director
 }) => {
   await page.goto('/');
 
   // Enter Practice (handle the active-event-resume / picker branches like the main race test).
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await page.getByRole('button', { name: /Events/ }).click();
   await expect(
     page.getByRole('heading', { name: 'Choose an event' }).or(liveNav).first()
@@ -261,7 +305,7 @@ test('Live control shows pilot callsigns (not refs) and an on-deck heat', async 
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
 
   const control = (cmd: unknown) =>
-    page.request.post(`${director.baseUrl}/events/practice/control`, {
+    page.request.post(`${director.eventRoot}/control`, {
       headers: { 'Content-Type': 'application/json' },
       data: cmd
     });
@@ -335,7 +379,7 @@ test('home hub navigates to each page and back, with working breadcrumbs', async
   // hub's Pilots card or the workspace's Live-control nav appears), and if we resumed into the
   // workspace use the brand/logo (a Home root, #118) to return to the hub.
   const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     // Resumed into the workspace — the breadcrumb's Home crumb returns to the hub.
@@ -376,13 +420,17 @@ test('home hub navigates to each page and back, with working breadcrumbs', async
 
   // Home → Events: the picker (former landing), reachable as a page now. The worker's Director may
   // still have an active event from an earlier spec, in which case `currentEvent` is hydrated and
-  // the Events page auto-enters that event's workspace (#118); "Switch event" then returns to the
-  // picker. So we land on the picker whether or not an event was active.
+  // the Events page auto-enters that event's workspace (#118); the breadcrumb's **Events** crumb
+  // then returns to the picker (the "← Switch event" button is gone — `ContextHeader.svelte`). So we
+  // land on the picker whether or not an event was active.
   await page.getByRole('button', { name: /Events/ }).click();
   const picker = page.getByRole('heading', { name: 'Choose an event' });
   await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
-    await page.getByRole('button', { name: /Switch event/ }).click();
+    await page
+      .getByRole('navigation', { name: 'Breadcrumb' })
+      .getByRole('button', { name: 'Events' })
+      .click();
   }
   await expect(picker).toBeVisible({ timeout: 15_000 });
   await page

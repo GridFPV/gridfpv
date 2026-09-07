@@ -16,11 +16,16 @@ function mockFetch(impl: FetchLike) {
   return vi.fn<FetchLike>(impl);
 }
 
+/** The event every control client under test is rooted under — explicit since #414. */
+const EVENT = 'test-event-ab12';
+
 describe('createControlClient', () => {
   it('POSTs the JSON-serialized Command to {baseUrl}/events/{eventId}/control with the bearer token', async () => {
     const fetch = mockFetch(async () => jsonResponse(okAck));
-    // No explicit eventId → the control path is rooted under the default Practice event (#72).
-    const client = createControlClient('http://d.local:8080/', 'tok-123', { fetch });
+    const client = createControlClient('http://d.local:8080/', 'tok-123', {
+      fetch,
+      eventId: EVENT
+    });
     const cmd: Command = { Stage: { heat: 'heat-1' } };
 
     const ack = await client.sendCommand(cmd);
@@ -28,7 +33,7 @@ describe('createControlClient', () => {
     expect(ack).toEqual(okAck);
     expect(fetch).toHaveBeenCalledOnce();
     const [url, init] = fetch.mock.calls[0];
-    expect(url).toBe('http://d.local:8080/events/practice/control');
+    expect(url).toBe(`http://d.local:8080/events/${EVENT}/control`);
     expect(init?.method).toBe('POST');
     const headers = init?.headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer tok-123');
@@ -38,7 +43,7 @@ describe('createControlClient', () => {
 
   it('omits the Authorization header when no token is given', async () => {
     const fetch = mockFetch(async () => jsonResponse(okAck));
-    const client = createControlClient('http://d.local', undefined, { fetch });
+    const client = createControlClient('http://d.local', undefined, { fetch, eventId: EVENT });
     await client.sendCommand({ Start: { heat: 'h' } });
     const headers = fetch.mock.calls[0][1]?.headers as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
@@ -46,7 +51,7 @@ describe('createControlClient', () => {
 
   it('passes through a failed CommandAck (ok:false + ProtocolError) verbatim', async () => {
     const fetch = mockFetch(async () => jsonResponse(failAck, { ok: false, status: 409 }));
-    const client = createControlClient('http://d.local', 't', { fetch });
+    const client = createControlClient('http://d.local', 't', { fetch, eventId: EVENT });
     const ack = await client.sendCommand({ Start: { heat: 'h' } });
     expect(ack.ok).toBe(false);
     expect(ack.error).toEqual({ code: 'BadRequest', message: 'illegal transition' });
@@ -56,7 +61,7 @@ describe('createControlClient', () => {
     const fetch = mockFetch(async () =>
       jsonResponse({ code: 'Unauthorized', message: 'no' }, { ok: false, status: 401 })
     );
-    const client = createControlClient('http://d.local', 't', { fetch });
+    const client = createControlClient('http://d.local', 't', { fetch, eventId: EVENT });
     const ack = await client.sendCommand({ ForceEnd: { heat: 'h' } });
     expect(ack.ok).toBe(false);
     expect(ack.error?.code).toBe('Unauthorized');
@@ -66,7 +71,7 @@ describe('createControlClient', () => {
     const fetch = mockFetch(async () => {
       throw new Error('network down');
     });
-    const client = createControlClient('http://d.local', 't', { fetch });
+    const client = createControlClient('http://d.local', 't', { fetch, eventId: EVENT });
     const ack = await client.sendCommand({ Finalize: { heat: 'h' } });
     expect(ack.ok).toBe(false);
     expect(ack.error?.code).toBe('Internal');

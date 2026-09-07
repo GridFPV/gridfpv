@@ -6,10 +6,11 @@
  *
  * It is *not* the raw log offset — one log append can fan out into several projection
  * changes or none a client subscribes to. The protocol commits to this projection
- * sequence as its public ordering; the log offset stays a private Director/Cloud
- * detail. The snapshot hands the client a starting cursor (§2) and every envelope
- * advances it; on reconnect the client presents its last-applied cursor to resume
- * (§3).
+ * sequence as its public **ordering**; resuming is a separate axis, the log offset the
+ * snapshot hands over as [`Snapshot::cursor`](crate::snapshot::Snapshot) and every
+ * envelope re-states as [`ChangeEnvelope::cursor`] (#422). On reconnect the client
+ * presents that last-applied offset to resume (§3) — not the sequence, which restarts
+ * at 1 on every subscription.
  *
  * Transparent `u64` newtype; `#[ts(as = "f64")]` so it renders as a plain TS
  * `number`. Our cursors/sequences are bounded well below 2^53, so `number` is exact

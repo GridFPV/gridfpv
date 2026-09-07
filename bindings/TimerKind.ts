@@ -4,9 +4,9 @@
  * The kind of a timer — *how* it produces passes (issue #73).
  *
  * Externally tagged so it maps to a TS discriminated union. [`Mock`](TimerKind::Mock) is the
- * synthetic source wired end-to-end in this slice; [`Rotorhazard`](TimerKind::Rotorhazard) is
- * **reserved / config-only** — its `url` is stored and round-trips on the wire and on disk, but
- * nothing connects to it here (that is 2b / #65). A selected RotorHazard timer is a no-op stub.
+ * built-in synthetic source; [`Rotorhazard`](TimerKind::Rotorhazard) is a **real, connected**
+ * timer (#65) — its `url` is stored here and round-trips on the wire and on disk, and the
+ * Director dials it, probes for the GridFPV plugin, and streams its passes.
  */
 export type TimerKind = { "Mock": { 
 /**
@@ -18,6 +18,13 @@ laps: number,
  */
 lap_ms: number, } } | { "Rotorhazard": { 
 /**
- * The RotorHazard server base URL (e.g. `http://rotorhazard.local:5000`).
+ * The RotorHazard server base URL — `http://<host>:5000`, e.g.
+ * `http://rotorhazard.local:5000`.
+ *
+ * Passed **verbatim** to the socket.io client: no trimming, no trailing-slash removal, no
+ * scheme defaulting. [`validate_timer_config`] only rejects empty/whitespace, so a
+ * trailing slash, a missing `http://`, or `https://` against a plain-HTTP RH all reach the
+ * dialer as-is and fail as a connection [`Error`](TimerStatus::Error). The console's URL
+ * field states that shape (#381).
  */
 url: string, } };

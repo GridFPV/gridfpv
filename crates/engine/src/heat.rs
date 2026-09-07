@@ -270,27 +270,32 @@ pub fn heat_state<'a>(
     state
 }
 
-/// The grace window for late crossings after a heat is finished (race-engine.html
-/// §2): "late crossings still count until the heat is finalized; the window is
-/// configurable, default until finalized".
+/// The grace window after the **race window expires**: how long the heat stays `Running` so each
+/// pilot can *finish the lap they were already flying* (#505).
+///
+/// The runtime completion clock reads this at the heat's fixed end (the round's
+/// `time_limit_secs`, or a Timed window): with a non-zero window it appends the `RaceExpired`
+/// marker and holds the heat `Running` until the window elapses — or **earlier**, once every
+/// still-flying pilot has taken their one post-expiry crossing
+/// ([`grace_satisfied`](crate::scoring::grace_satisfied)). The marker's log position is the
+/// scoring boundary: a competitor's first lap-gate pass appended after it still counts; every
+/// later one is auto-voided by the corrected fold (`AfterRaceEnd`), marshal-restorable.
 ///
 /// Derives serde + `ts_rs::TS` so it can be carried as a per-round config
 /// ([`RoundDef::grace_window`](../../server/events/struct.RoundDef.html)) and read by the
-/// frontend. The runtime completion clock (heat-lifecycle Slice 2) reads this to decide how long
-/// to hold the heat in `Running` for trailing pilots after the win condition is met, before
-/// appending the auto `Running → Unofficial`.
+/// frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum GraceWindow {
-    /// Late crossings count for the whole `Unofficial` phase, until the heat is
-    /// `Final`. The default for [`consumes_pass`] (an open window); a *completion-clock* round
-    /// config instead defaults to a bounded [`Duration`](Self::Duration) so the auto-transition
-    /// actually fires.
+    /// The grace has **no time bound**: the heat holds `Running` after expiry until every
+    /// still-flying pilot has taken their post-expiry crossing (or the RD `ForceEnd`s). A
+    /// *completion-clock* round config instead defaults to a bounded
+    /// [`Duration`](Self::Duration) so the auto-transition always fires on its own.
     #[default]
     UntilScored,
-    /// Late crossings count only for `micros` microseconds after the heat finished;
-    /// crossings later than that are not consumed even if the heat is still
-    /// `Unofficial`.
+    /// The heat holds `Running` for at most `micros` microseconds after the race window
+    /// expires. `micros: 0` is the "no grace" spelling — the heat closes at the fixed end and
+    /// no `RaceExpired` marker is appended.
     Duration {
         /// Length of the grace window, in microseconds on the source clock.
         #[ts(type = "number")]
@@ -298,47 +303,32 @@ pub enum GraceWindow {
     },
 }
 
-/// Whether a pass should be consumed by this heat (race-engine.html §2).
+/// The grace window that **actually applies** to a heat raced under `condition` — the round's
+/// configured window for every condition that has one, and *no window at all* for
+/// [`WinCondition::FirstToLaps`] (#471).
 ///
-/// The rule: **passes are consumed only while the heat is `Running`, plus the grace
-/// window after it is `Unofficial`** — by default until the heat is `Final`.
+/// A grace window buys trailing pilots time to bank a lap after the race-end criterion fires. That
+/// makes sense for [`WinCondition::Timed`], where the criterion is a **buzzer**: the window closes
+/// on everyone at once, mid-lap, and the grace is what lets a pilot two metres from the gate finish
+/// the lap they were already flying. It makes no sense for first-to-N, where the criterion is now
+/// "**every** still-flying pilot has reached `n`"
+/// ([`race_end_reached`](crate::scoring::race_end_reached)): by the time it fires there is nobody
+/// left with a lap to bank, so a grace window can only add dead air to the end of a race the
+/// maintainer asked to end immediately — and any crossing it did admit would be a post-target lap
+/// that [`score_first_to_laps`](crate::scoring) refuses to score anyway.
 ///
-/// Inputs:
-/// - `state` — the heat's current [`HeatState`].
-/// - `grace` — the configured [`GraceWindow`].
-/// - `since_finished_micros` — microseconds elapsed since the heat finished, on the
-///   source clock (`pass_time - finished_time`). Only consulted when `state` is
-///   `Unofficial` and `grace` is [`GraceWindow::Duration`]. Pass `None` when the heat
-///   has not finished (the value is irrelevant there); a negative value (a pass at or
-///   before the finish instant) is always within the window.
-///
-/// Behaviour by state:
-/// - `Running` → `true` (the heat is live).
-/// - `Unofficial` → `true` iff still within the grace window:
-///   - [`GraceWindow::UntilScored`]: always `true` (the whole `Unofficial` phase).
-///   - [`GraceWindow::Duration { micros }`]: `true` iff
-///     `since_finished_micros <= micros` (a `None` elapsed is treated as within the
-///     window, since the caller could not place the pass after finish).
-/// - any other state (`Scheduled`, `Staged`, `Armed`, `Final`) → `false`. In
-///   particular, once `Final` the window is closed regardless of `grace`.
-///
-/// Pure: it derives consumption from the supplied values and reads no clock itself.
-pub fn consumes_pass(
-    state: HeatState,
-    grace: GraceWindow,
-    since_finished_micros: Option<i64>,
-) -> bool {
-    match state {
-        HeatState::Running => true,
-        HeatState::Unofficial => match grace {
-            GraceWindow::UntilScored => true,
-            GraceWindow::Duration { micros } => {
-                // Within the window when the elapsed time is unknown (caller could
-                // not place it after finish) or no greater than the configured span.
-                since_finished_micros.is_none_or(|elapsed| elapsed <= micros)
-            }
-        },
-        _ => false,
+/// Returned rather than enforced here so it stays a **pure** rule the runtime clock reads (like
+/// [`grace_satisfied`](crate::scoring::grace_satisfied)), testable without a Director.
+/// `Duration { micros: 0 }` is the "no window"
+/// spelling — an explicit zero-length window, not [`GraceWindow::UntilScored`], which would mean
+/// the opposite (an *open* window) to every reader of this type.
+pub fn effective_grace_window(
+    condition: crate::scoring::WinCondition,
+    configured: GraceWindow,
+) -> GraceWindow {
+    match condition {
+        crate::scoring::WinCondition::FirstToLaps { .. } => GraceWindow::Duration { micros: 0 },
+        _ => configured,
     }
 }
 
@@ -375,7 +365,7 @@ pub enum ProtestWindow {
 /// Whether an `Unofficial` heat's auto-official timer is **due** (marshaling Slice 5): the protest
 /// window has elapsed, so the runtime should append the auto `Finalize` (`Unofficial → Final`).
 ///
-/// Pure — like [`consumes_pass`], it reads no clock: the elapsed time is an **input**. The runtime
+/// Pure — it reads no clock: the elapsed time is an **input**. The runtime
 /// supplies `since_finished_micros` (now − the race-end instant) and emits the `Finalize` itself.
 ///
 /// Inputs:
@@ -758,74 +748,52 @@ mod tests {
     }
 
     #[test]
-    fn grace_running_always_consumes() {
-        assert!(consumes_pass(
-            HeatState::Running,
-            GraceWindow::UntilScored,
-            None
-        ));
-        assert!(consumes_pass(
-            HeatState::Running,
-            GraceWindow::Duration { micros: 0 },
-            Some(1_000_000),
-        ));
-    }
-
-    #[test]
-    fn grace_until_scored_consumes_while_finished() {
-        assert!(consumes_pass(
-            HeatState::Unofficial,
-            GraceWindow::UntilScored,
-            None
-        ));
-        // Default is UntilScored.
+    fn grace_default_is_until_scored() {
+        // The type default stays the open window; a completion-clock round config defaults to a
+        // bounded Duration on its own (`default_grace_window`), so the auto-transition fires.
         assert_eq!(GraceWindow::default(), GraceWindow::UntilScored);
-        assert!(consumes_pass(
-            HeatState::Unofficial,
-            GraceWindow::default(),
-            Some(999_999_999),
-        ));
     }
 
+    // --- the effective grace window (#471) --------------------------------------------
+
     #[test]
-    fn grace_closed_once_scored() {
-        assert!(!consumes_pass(
-            HeatState::Final,
+    fn first_to_laps_has_no_grace_window_whatever_the_round_configured() {
+        use crate::scoring::WinCondition;
+        // #471(c). Every spelling of a configured window collapses to a zero-length one.
+        for configured in [
             GraceWindow::UntilScored,
-            None
-        ));
-        assert!(!consumes_pass(
-            HeatState::Final,
-            GraceWindow::Duration { micros: 1_000_000 },
-            Some(0),
-        ));
+            GraceWindow::Duration { micros: 30_000_000 },
+            GraceWindow::Duration { micros: 0 },
+        ] {
+            assert_eq!(
+                effective_grace_window(WinCondition::FirstToLaps { n: 3 }, configured),
+                GraceWindow::Duration { micros: 0 },
+                "a first-to-N round has no grace window (configured: {configured:?})",
+            );
+        }
     }
 
     #[test]
-    fn grace_duration_bounds_the_window_after_finished() {
-        let grace = GraceWindow::Duration { micros: 2_000_000 };
-        // Within the window — consumed.
-        assert!(consumes_pass(HeatState::Unofficial, grace, Some(1_500_000)));
-        // Exactly at the boundary — consumed (inclusive).
-        assert!(consumes_pass(HeatState::Unofficial, grace, Some(2_000_000)));
-        // Past the window — not consumed.
-        assert!(!consumes_pass(
-            HeatState::Unofficial,
-            grace,
-            Some(2_000_001)
-        ));
-        // A pass at/before the finish instant — within the window.
-        assert!(consumes_pass(HeatState::Unofficial, grace, Some(-5)));
-        // Elapsed unknown — treated as within the window.
-        assert!(consumes_pass(HeatState::Unofficial, grace, None));
-    }
-
-    #[test]
-    fn grace_never_consumes_before_running() {
-        for &state in &[HeatState::Scheduled, HeatState::Staged, HeatState::Armed] {
-            assert!(
-                !consumes_pass(state, GraceWindow::UntilScored, None),
-                "{state:?} must not consume passes",
+    fn every_other_win_condition_keeps_the_round_configured_grace_window() {
+        use crate::scoring::WinCondition;
+        // The exception is first-to-N and ONLY first-to-N: a Timed round's buzzer still buys
+        // trailing pilots the round's window, and the qualifying pair are untouched.
+        let configured = GraceWindow::Duration { micros: 30_000_000 };
+        for condition in [
+            WinCondition::Timed {
+                window_micros: 120_000_000,
+            },
+            WinCondition::BestLap,
+            WinCondition::BestConsecutive { n: 3 },
+        ] {
+            assert_eq!(
+                effective_grace_window(condition, configured),
+                configured,
+                "{condition:?} must keep the round's window",
+            );
+            assert_eq!(
+                effective_grace_window(condition, GraceWindow::UntilScored),
+                GraceWindow::UntilScored,
             );
         }
     }

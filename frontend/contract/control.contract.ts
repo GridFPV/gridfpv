@@ -24,24 +24,23 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { Command, JoinTokenResponse } from '@gridfpv/types';
 
-import { type Director } from '../test-harness/director.ts';
 import {
-  eventRoot,
   openSocket,
   postControl,
   rdControl,
-  startContractDirector,
+  startDirectorWithEvent,
   tryOpenControlWs,
   waitForFrame,
-  wsBase
+  wsBase,
+  type ContractDirector
 } from './harness.ts';
 
 const TOKEN = 'rd-control-contract';
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
-  director = await startContractDirector({ token: TOKEN, simLaps: 1, simLapMs: 40 });
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 1, simLapMs: 40 });
 });
 
 afterAll(async () => {
@@ -50,16 +49,16 @@ afterAll(async () => {
 
 describe('seam 5: control command shape + headers', () => {
   it('ScheduleHeat → CommandAck{ok:true} and the heat becomes snapshot-able', async () => {
-    const ack = await rdControl(director.baseUrl, TOKEN, {
+    const ack = await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: 'h-shape', lineup: ['A', 'B'] }
     });
     expect(ack).toEqual({ ok: true });
-    const res = await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/h-shape`);
+    const res = await fetch(`${director.eventRoot}/snapshot/heat/h-shape`);
     expect(res.status).toBe(200); // it now resolves — the append took effect
   });
 
   it('the heat-loop transitions each ack ok and append in order', async () => {
-    await rdControl(director.baseUrl, TOKEN, { ScheduleHeat: { heat: 'h-loop', lineup: ['A'] } });
+    await rdControl(director, TOKEN, { ScheduleHeat: { heat: 'h-loop', lineup: ['A'] } });
     // Heat-lifecycle Slice 2 collapsed the manual middle steps: `Start` arms the heat, and the
     // `Armed → Running` / `Running → Unofficial` transitions are runtime-clock-driven. This contract
     // drives the FSM deterministically through the **overrides** (`SkipCountdown`/`ForceEnd`) that
@@ -74,7 +73,7 @@ describe('seam 5: control command shape + headers', () => {
       { Finalize: { heat: 'h-loop' } }
     ];
     for (const command of loop) {
-      const ack = await rdControl(director.baseUrl, TOKEN, command);
+      const ack = await rdControl(director, TOKEN, command);
       expect(ack.ok, `command ${JSON.stringify(command)} should ack ok`).toBe(true);
     }
   });
@@ -82,31 +81,31 @@ describe('seam 5: control command shape + headers', () => {
   it('the runtime-clock overrides (SkipCountdown/ForceEnd) ack ok in their state', async () => {
     // Heat-lifecycle Slice 2: SkipCountdown forces Armed → Running, ForceEnd forces Running →
     // Unofficial. Drive Stage → Start to reach Armed, then exercise both overrides.
-    await rdControl(director.baseUrl, TOKEN, { ScheduleHeat: { heat: 'h-ovr', lineup: ['A'] } });
+    await rdControl(director, TOKEN, { ScheduleHeat: { heat: 'h-ovr', lineup: ['A'] } });
     for (const command of [
       { Stage: { heat: 'h-ovr' } },
       { Start: { heat: 'h-ovr' } },
       { SkipCountdown: { heat: 'h-ovr' } },
       { ForceEnd: { heat: 'h-ovr' } }
     ] as Command[]) {
-      const ack = await rdControl(director.baseUrl, TOKEN, command);
+      const ack = await rdControl(director, TOKEN, command);
       expect(ack.ok, `override ${JSON.stringify(command)} should ack ok`).toBe(true);
     }
     // An override out of its state is rejected (ForceEnd is only legal while Running).
-    const illegal = await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: 'h-ovr' } });
+    const illegal = await rdControl(director, TOKEN, { ForceEnd: { heat: 'h-ovr' } });
     expect(illegal.ok).toBe(false);
     expect(illegal.error?.code).toBe('BadRequest');
   });
 
   it('Register + the marshaling adjudications ack ok (heat-voids are run-scoped)', async () => {
-    await rdControl(director.baseUrl, TOKEN, {
+    await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: 'h-marshal', lineup: ['A'] }
     });
-    const register = await rdControl(director.baseUrl, TOKEN, {
+    const register = await rdControl(director, TOKEN, {
       Register: { adapter: 'sim', competitor: 'A', pilot: 'acroace' }
     });
     expect(register.ok).toBe(true);
-    const penalty = await rdControl(director.baseUrl, TOKEN, {
+    const penalty = await rdControl(director, TOKEN, {
       ApplyPenalty: {
         heat: 'h-marshal',
         competitor: 'A',
@@ -116,7 +115,7 @@ describe('seam 5: control command shape + headers', () => {
     expect(penalty.ok).toBe(true);
     // A heat-void is RUN-SCOPED (D25): voiding a heat that never ran is rejected — there is
     // nothing to void, and the inert ruling would block a real void later.
-    const preRun = await rdControl(director.baseUrl, TOKEN, { VoidHeat: { heat: 'h-marshal' } });
+    const preRun = await rdControl(director, TOKEN, { VoidHeat: { heat: 'h-marshal' } });
     expect(preRun.ok).toBe(false);
     expect(preRun.error?.code).toBe('BadRequest');
     // Drive the heat into a run; the void is then legal.
@@ -125,10 +124,10 @@ describe('seam 5: control command shape + headers', () => {
       { Start: { heat: 'h-marshal' } },
       { SkipCountdown: { heat: 'h-marshal' } }
     ]) {
-      const ack = await rdControl(director.baseUrl, TOKEN, cmd);
+      const ack = await rdControl(director, TOKEN, cmd);
       expect(ack.ok).toBe(true);
     }
-    const voidHeat = await rdControl(director.baseUrl, TOKEN, { VoidHeat: { heat: 'h-marshal' } });
+    const voidHeat = await rdControl(director, TOKEN, { VoidHeat: { heat: 'h-marshal' } });
     expect(voidHeat.ok).toBe(true);
   });
 
@@ -137,13 +136,13 @@ describe('seam 5: control command shape + headers', () => {
     // penalty. No real pass/penalty is appended here, so both must be *rejected* with a typed
     // BadRequest (the target validation) — proving the commands route through the handler and
     // are not silent no-ops. (The happy-path fold is covered exhaustively by the Rust tests.)
-    const split = await rdControl(director.baseUrl, TOKEN, {
+    const split = await rdControl(director, TOKEN, {
       SplitLap: { target: 999_999, at: 5_000_000 }
     });
     expect(split.ok).toBe(false);
     expect(split.error?.code).toBe('BadRequest');
 
-    const reverse = await rdControl(director.baseUrl, TOKEN, {
+    const reverse = await rdControl(director, TOKEN, {
       ReverseRuling: { target: 999_999 }
     });
     expect(reverse.ok).toBe(false);
@@ -152,7 +151,7 @@ describe('seam 5: control command shape + headers', () => {
 
   it('a missing Content-Type → a JSON ProtocolError(BadRequest), not a bare-text 4xx', async () => {
     const { status, body } = await postControl(
-      director.baseUrl,
+      director,
       { ScheduleHeat: { heat: 'h-noct', lineup: ['PILOT-A'] } },
       { token: TOKEN, contentType: false }
     );
@@ -169,7 +168,7 @@ describe('seam 5: control command shape + headers', () => {
   it('a malformed JSON body (with the right Content-Type) → a JSON ProtocolError(BadRequest)', async () => {
     // Even with `Content-Type: application/json`, an unparseable body is the same uniform typed
     // error — not a bare-text 4xx. Posted raw so the body really is invalid JSON.
-    const res = await fetch(`${eventRoot(director.baseUrl)}/control`, {
+    const res = await fetch(`${director.eventRoot}/control`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
       body: '{ not valid json'
@@ -180,12 +179,12 @@ describe('seam 5: control command shape + headers', () => {
   });
 
   it('an illegal transition → CommandAck{ok:false, error: ProtocolError(BadRequest)}, HTTP 200', async () => {
-    await rdControl(director.baseUrl, TOKEN, {
+    await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: 'h-illegal', lineup: ['A'] }
     });
     // Start (Staged → Armed) is illegal straight from Scheduled — the heat must Stage first.
     const { status, body } = await postControl(
-      director.baseUrl,
+      director,
       { Start: { heat: 'h-illegal' } },
       { token: TOKEN }
     );
@@ -197,7 +196,7 @@ describe('seam 5: control command shape + headers', () => {
 
   it('a command on an unknown heat → CommandAck{ok:false, error: UnknownScope}', async () => {
     const { body } = await postControl(
-      director.baseUrl,
+      director,
       { Stage: { heat: 'never-scheduled' } },
       { token: TOKEN }
     );
@@ -207,18 +206,16 @@ describe('seam 5: control command shape + headers', () => {
   });
 
   it("a command's resulting change reaches a /stream subscriber on the read path", async () => {
-    await rdControl(director.baseUrl, TOKEN, {
+    await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: 'h-reaches', lineup: ['A'] }
     });
-    const snap = (await (
-      await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/h-reaches`)
-    ).json()) as {
+    const snap = (await (await fetch(`${director.eventRoot}/snapshot/heat/h-reaches`)).json()) as {
       cursor: number;
     };
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: 'h-reaches' } }, from: snap.cursor }));
     // Drive a change over the CONTROL path; it must surface on the READ stream.
-    await rdControl(director.baseUrl, TOKEN, { Stage: { heat: 'h-reaches' } });
+    await rdControl(director, TOKEN, { Stage: { heat: 'h-reaches' } });
     await waitForFrame(frames, (f) =>
       f.some((x) => (x as { Change?: unknown }).Change !== undefined)
     );
@@ -232,7 +229,7 @@ describe('seam 5: control command shape + headers', () => {
   });
 
   it('the bidirectional control WS (with the auth header) acks commands', async () => {
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/control`, {
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/control`, {
       Authorization: `Bearer ${TOKEN}`
     });
     ws.send(JSON.stringify({ ScheduleHeat: { heat: 'h-ws', lineup: ['A'] } }));
@@ -244,7 +241,7 @@ describe('seam 5: control command shape + headers', () => {
 
 describe('seam 6: auth gates control, reads stay open', () => {
   it('control with NO token → 401 ProtocolError(Unauthorized)', async () => {
-    const { status, body } = await postControl(director.baseUrl, {
+    const { status, body } = await postControl(director, {
       ScheduleHeat: { heat: 'h-noauth', lineup: ['PILOT-A'] }
     });
     expect(status).toBe(401);
@@ -253,7 +250,7 @@ describe('seam 6: auth gates control, reads stay open', () => {
 
   it('control with an UNKNOWN/revoked token → 401', async () => {
     const { status } = await postControl(
-      director.baseUrl,
+      director,
       { ScheduleHeat: { heat: 'h-badtok', lineup: ['PILOT-A'] } },
       { token: 'not-a-real-token' }
     );
@@ -261,25 +258,25 @@ describe('seam 6: auth gates control, reads stay open', () => {
   });
 
   it('control with the valid RD token → accepted', async () => {
-    const ack = await rdControl(director.baseUrl, TOKEN, {
+    const ack = await rdControl(director, TOKEN, {
       ScheduleHeat: { heat: 'h-goodtok', lineup: ['PILOT-A'] }
     });
     expect(ack.ok).toBe(true);
   });
 
   it('the control WS upgrade is rejected without the auth header', async () => {
-    const withAuth = await tryOpenControlWs(`${wsBase(eventRoot(director.baseUrl))}/control`, {
+    const withAuth = await tryOpenControlWs(`${wsBase(director.eventRoot)}/control`, {
       Authorization: `Bearer ${TOKEN}`
     });
-    const withoutAuth = await tryOpenControlWs(`${wsBase(eventRoot(director.baseUrl))}/control`);
+    const withoutAuth = await tryOpenControlWs(`${wsBase(director.eventRoot)}/control`);
     expect(withAuth).toBe(true);
     expect(withoutAuth).toBe(false);
   });
 
   it('reads are OPEN — /snapshot and /stream need no token', async () => {
-    const snap = await fetch(`${eventRoot(director.baseUrl)}/snapshot/event/any`);
+    const snap = await fetch(`${director.eventRoot}/snapshot/event/any`);
     expect(snap.status).toBe(200); // no Authorization header sent
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Event: { event: 'any' } }, from: 0 }));
     // It subscribes without auth and does not get an Unauthorized error frame.
     await new Promise((r) => setTimeout(r, 300));
@@ -289,10 +286,10 @@ describe('seam 6: auth gates control, reads stay open', () => {
 
   it('minting a join token requires the RD token — no/bad token → 401 (#63)', async () => {
     // No Authorization → 401.
-    const anon = await fetch(`${eventRoot(director.baseUrl)}/auth/join-token`, { method: 'POST' });
+    const anon = await fetch(`${director.eventRoot}/auth/join-token`, { method: 'POST' });
     expect(anon.status).toBe(401);
     // An unknown token → 401.
-    const bad = await fetch(`${eventRoot(director.baseUrl)}/auth/join-token`, {
+    const bad = await fetch(`${director.eventRoot}/auth/join-token`, {
       method: 'POST',
       headers: { Authorization: 'Bearer not-a-real-token' }
     });
@@ -301,7 +298,7 @@ describe('seam 6: auth gates control, reads stay open', () => {
 
   it('an RD mints a read-only join token that reads but is REJECTED on control (#63)', async () => {
     // The RD trades its RD token for a fresh read-only join token over the wire.
-    const res = await fetch(`${eventRoot(director.baseUrl)}/auth/join-token`, {
+    const res = await fetch(`${director.eventRoot}/auth/join-token`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${TOKEN}` }
     });
@@ -312,14 +309,14 @@ describe('seam 6: auth gates control, reads stay open', () => {
     expect(join).not.toBe(TOKEN); // a distinct, freshly-minted credential
 
     // The minted join token authenticates a READ (reads accept a valid token of either role).
-    const read = await fetch(`${eventRoot(director.baseUrl)}/snapshot/event/any`, {
+    const read = await fetch(`${director.eventRoot}/snapshot/event/any`, {
       headers: { Authorization: `Bearer ${join}` }
     });
     expect(read.status).toBe(200);
 
     // …but it is REJECTED on CONTROL — a spectator can watch, never run the race.
     const { status, body } = await postControl(
-      director.baseUrl,
+      director,
       { ScheduleHeat: { heat: 'h-join-rejected', lineup: ['PILOT-A'] } },
       { token: join }
     );

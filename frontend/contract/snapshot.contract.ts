@@ -15,20 +15,19 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { type Director } from '../test-harness/director.ts';
-import { rdControl, startContractDirector } from './harness.ts';
+import { rdControl, startDirectorWithEvent, type ContractDirector } from './harness.ts';
 
 const TOKEN = 'rd-snapshot-contract';
 const HEAT = 'q-1';
 const LINEUP = ['A', 'B'];
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
-  director = await startContractDirector({ token: TOKEN, simLaps: 2, simLapMs: 40 });
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 2, simLapMs: 40 });
   // A non-empty log so the snapshot cursor is > 0 and the scopes resolve (a heat must be
   // scheduled before /snapshot/heat/{id} returns anything but UnknownScope).
-  const ack = await rdControl(director.baseUrl, TOKEN, {
+  const ack = await rdControl(director, TOKEN, {
     ScheduleHeat: { heat: HEAT, lineup: LINEUP }
   });
   expect(ack.ok).toBe(true);
@@ -51,6 +50,16 @@ async function getSnapshot(path: string): Promise<{ status: number; json: unknow
   return { status: res.status, json, text };
 }
 
+/**
+ * Fetch a snapshot route **under the created event's root** (#414 removed the built-in
+ * `practice` event, so per-event paths name the id the server generated for this run).
+ */
+async function getEventSnapshot(
+  path: string
+): Promise<{ status: number; json: unknown; text: string }> {
+  return getSnapshot(`/events/${encodeURIComponent(director.event)}${path}`);
+}
+
 /** Whether a parsed body is a wire `Snapshot` (`{ cursor: number, body: ProjectionBody }`). */
 function isSnapshot(v: unknown): v is { cursor: number; body: Record<string, unknown> } {
   return (
@@ -64,7 +73,7 @@ function isSnapshot(v: unknown): v is { cursor: number; body: Record<string, unk
 
 describe('seam 1: snapshot routes are path-scoped', () => {
   it('GET /snapshot/event/{id} → 200 LiveRaceState + numeric cursor', async () => {
-    const { status, json } = await getSnapshot('/events/practice/snapshot/event/spring-cup');
+    const { status, json } = await getEventSnapshot('/snapshot/event/spring-cup');
     expect(status).toBe(200);
     expect(isSnapshot(json)).toBe(true);
     const snap = json as { cursor: number; body: Record<string, unknown> };
@@ -73,31 +82,25 @@ describe('seam 1: snapshot routes are path-scoped', () => {
   });
 
   it('GET /snapshot/heat/{id} → 200 LiveRaceState (default projection)', async () => {
-    const { status, json } = await getSnapshot(`/events/practice/snapshot/heat/${HEAT}`);
+    const { status, json } = await getEventSnapshot(`/snapshot/heat/${HEAT}`);
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['LiveRaceState']);
   });
 
   it('GET /snapshot/heat/{id}?projection=laps → 200 LapList', async () => {
-    const { status, json } = await getSnapshot(
-      `/events/practice/snapshot/heat/${HEAT}?projection=laps`
-    );
+    const { status, json } = await getEventSnapshot(`/snapshot/heat/${HEAT}?projection=laps`);
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['LapList']);
   });
 
   it('GET /snapshot/heat/{id}?projection=result → 200 HeatResult', async () => {
-    const { status, json } = await getSnapshot(
-      `/events/practice/snapshot/heat/${HEAT}?projection=result`
-    );
+    const { status, json } = await getEventSnapshot(`/snapshot/heat/${HEAT}?projection=result`);
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['HeatResult']);
   });
 
   it('GET /snapshot/heat/{id}?projection=audit → 200 MarshalingAudit (#55)', async () => {
-    const { status, json } = await getSnapshot(
-      `/events/practice/snapshot/heat/${HEAT}?projection=audit`
-    );
+    const { status, json } = await getEventSnapshot(`/snapshot/heat/${HEAT}?projection=audit`);
     expect(status).toBe(200);
     const body = (json as { body: object }).body;
     expect(Object.keys(body)).toEqual(['MarshalingAudit']);
@@ -106,9 +109,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
   });
 
   it('GET /snapshot/heat/{id}?projection=signal → 200 SignalTrace (marshaling Slice 1)', async () => {
-    const { status, json } = await getSnapshot(
-      `/events/practice/snapshot/heat/${HEAT}?projection=signal`
-    );
+    const { status, json } = await getEventSnapshot(`/snapshot/heat/${HEAT}?projection=signal`);
     expect(status).toBe(200);
     const body = (json as { body: object }).body;
     expect(Object.keys(body)).toEqual(['SignalTrace']);
@@ -122,7 +123,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
   });
 
   it('GET /snapshot/class/{event}/{class} → 200 LiveRaceState', async () => {
-    const { status, json } = await getSnapshot('/events/practice/snapshot/class/spring-cup/open');
+    const { status, json } = await getEventSnapshot('/snapshot/class/spring-cup/open');
     expect(status).toBe(200);
     expect(Object.keys((json as { body: object }).body)).toEqual(['LiveRaceState']);
   });
@@ -130,14 +131,14 @@ describe('seam 1: snapshot routes are path-scoped', () => {
   it('GET /snapshot/pilot/{event}/{pilot} → 200 LapList for a competitor with laps', async () => {
     // The sim emits passes for A/B once the heat runs; drive it so the pilot scope resolves.
     // Start arms the heat; SkipCountdown forces it Running (the override for the runtime auto-start).
-    await rdControl(director.baseUrl, TOKEN, { Stage: { heat: HEAT } });
-    await rdControl(director.baseUrl, TOKEN, { Start: { heat: HEAT } });
-    await rdControl(director.baseUrl, TOKEN, { SkipCountdown: { heat: HEAT } });
+    await rdControl(director, TOKEN, { Stage: { heat: HEAT } });
+    await rdControl(director, TOKEN, { Start: { heat: HEAT } });
+    await rdControl(director, TOKEN, { SkipCountdown: { heat: HEAT } });
     // Poll the pilot snapshot until A has a lap (sim paces in real time).
     const deadline = Date.now() + 8_000;
     let snap: { status: number; json: unknown } | undefined;
     while (Date.now() < deadline) {
-      snap = await getSnapshot('/events/practice/snapshot/pilot/spring-cup/A');
+      snap = await getEventSnapshot('/snapshot/pilot/spring-cup/A');
       if (snap.status === 200) break;
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -154,9 +155,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
     const deadline = Date.now() + 8_000;
     let places: Array<{ metric: Record<string, unknown> }> = [];
     while (Date.now() < deadline) {
-      const { json } = await getSnapshot(
-        `/events/practice/snapshot/heat/${HEAT}?projection=result`
-      );
+      const { json } = await getEventSnapshot(`/snapshot/heat/${HEAT}?projection=result`);
       places = (
         json as { body: { HeatResult: { places: Array<{ metric: Record<string, unknown> }> } } }
       ).body.HeatResult.places;
@@ -171,7 +170,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
 
   it('an unknown SCOPE id → 404 ProtocolError(UnknownScope), not a silent Snapshot', async () => {
     // A real path with a missing id: the contract is a typed 404, not a 200 fallback.
-    const { status, json } = await getSnapshot('/events/practice/snapshot/heat/does-not-exist');
+    const { status, json } = await getEventSnapshot('/snapshot/heat/does-not-exist');
     expect(status).toBe(404);
     expect((json as { code?: string }).code).toBe('UnknownScope');
   });
@@ -209,7 +208,7 @@ describe('seam 1: snapshot routes are path-scoped', () => {
 
 describe('seam 4: wire integers are JSON numbers, never bigint/string', () => {
   it('snapshot cursor is a number > 0 on a non-empty log', async () => {
-    const { json } = await getSnapshot('/events/practice/snapshot/event/spring-cup');
+    const { json } = await getEventSnapshot('/snapshot/event/spring-cup');
     const snap = json as { cursor: number };
     expect(typeof snap.cursor).toBe('number');
     expect(Number.isInteger(snap.cursor)).toBe(true);
@@ -222,7 +221,7 @@ describe('seam 4: wire integers are JSON numbers, never bigint/string', () => {
     const deadline = Date.now() + 8_000;
     let progressed: { laps_completed: unknown; last_lap_micros?: unknown } | undefined;
     while (Date.now() < deadline) {
-      const { json } = await getSnapshot(`/events/practice/snapshot/heat/${HEAT}`);
+      const { json } = await getEventSnapshot(`/snapshot/heat/${HEAT}`);
       const ls = (
         json as { body: { LiveRaceState: { progress?: Array<Record<string, unknown>> } } }
       ).body.LiveRaceState;
@@ -242,7 +241,7 @@ describe('seam 4: wire integers are JSON numbers, never bigint/string', () => {
     const deadline = Date.now() + 8_000;
     let dur: unknown;
     while (Date.now() < deadline) {
-      const { json } = await getSnapshot(`/events/practice/snapshot/heat/${HEAT}?projection=laps`);
+      const { json } = await getEventSnapshot(`/snapshot/heat/${HEAT}?projection=laps`);
       const list = (
         json as {
           body: { LapList: { competitors: Array<{ laps: Array<{ duration_micros: unknown }> }> } };

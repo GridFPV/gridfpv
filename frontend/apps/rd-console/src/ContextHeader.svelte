@@ -45,10 +45,10 @@
 
   // The friendly current-heat name ("‹Round› Heat N") — the persistent header sits on every screen,
   // so the raw heat id leaked "everywhere" until resolved here. We join the live heat id → its
-  // {@link HeatSummary} → that heat's round (off the event) via {@link heatNameById}, the SAME helper
-  // the Live-control title and the Marshaling header use, so the name never drifts. Falls back to the
-  // raw id only when the heat is genuinely unresolvable (a sim / free-text heat, or before the reads
-  // land).
+  // {@link HeatSummary} → the name the server resolved onto it (#456) via {@link heatNameById}, the
+  // SAME helper the Live-control title and the Marshaling header use, so the name never drifts.
+  // Falls back to the raw id only when the heat is genuinely unresolvable (a sim / free-text heat,
+  // or before the reads land).
   //
   // The scheduled-heats read re-runs on `session.currentEvent` AND `session.protocolState` (the
   // #242 cold-load fix mirrored from Marshaling): `listHeats()` resolves `[]` until an event is in
@@ -80,9 +80,7 @@
         heatsError = true;
       });
   });
-  const heatName = $derived(
-    heat ? heatNameById(heat, heats, session.currentEvent?.rounds ?? []) : ''
-  );
+  const heatName = $derived(heat ? heatNameById(heat, heats) : '');
   // The active event's selected timers with their live (polled) connection status (#73, Slice 2b).
   // A compact pill per timer keeps "is the timer still connected?" answerable from any in-event page.
   const timers = $derived(session.selectedTimers);
@@ -123,6 +121,13 @@
   const remainingMs = $derived(
     windowMicros !== undefined ? windowMicros / 1000 - clock.elapsedMs : undefined
   );
+  // The GRACE countdown (#505) — the same derivation the HUD uses: once the server logs the
+  // RaceExpired marker its deadline supersedes the (now-negative) window clock.
+  const graceRemainingMs = $derived(
+    live?.grace_deadline != null && live?.race_started_at != null
+      ? (live.grace_deadline - live.race_started_at) / 1000 - clock.elapsedMs
+      : undefined
+  );
 </script>
 
 <div class="ctx-bar" aria-label="Event context">
@@ -159,7 +164,9 @@
       {/if}
       {#if showClock}
         <span class="ctx-clock">
-          {#if remainingMs !== undefined}
+          {#if graceRemainingMs !== undefined}
+            <RaceClock remainingMs={graceRemainingMs} label="Grace remaining" />
+          {:else if remainingMs !== undefined}
             <RaceClock {remainingMs} label="Time remaining" />
           {:else}
             <RaceClock elapsedMs={clock.elapsedMs} label="Heat time" />

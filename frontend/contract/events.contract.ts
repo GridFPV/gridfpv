@@ -3,13 +3,13 @@
  * event-rooted surface.
  *
  * guards:
- *  - `GET /events` lists the events, with the built-in **Practice** event always present and
- *    listed first (in-memory, non-persistent).
+ *  - `GET /events` on a **fresh** Director is an empty list — there is no built-in event
+ *    (#414), so first run is genuinely "create an event", not "pick the seeded one".
  *  - `POST /events` is RD-gated (no/bad token → 401), auto-generates a unique `id` from the
  *    display `name` (the id is never user-supplied), and returns the new event's `EventMeta`.
  *  - the new event is immediately reachable: a snapshot under `/events/{id}/snapshot/...` is a
  *    200, and a control command under `/events/{id}/control` acks — against THAT event's own
- *    log, independent of Practice (a heat scheduled in one is not visible in the other).
+ *    log, independent of every other event (a heat scheduled in one is invisible in the other).
  *  - an unknown event id → a typed `ProtocolError` 404 (`UnknownScope`), the same shape an
  *    unknown heat/pilot gets.
  *
@@ -102,15 +102,19 @@ async function deleteEvent(id: string, token?: string): Promise<{ status: number
 }
 
 describe('seam 9: events lifecycle API', () => {
-  it('GET /events lists the built-in Practice event first (in-memory, non-persistent)', async () => {
-    const events = await listEvents();
-    expect(events.length).toBeGreaterThanOrEqual(1);
-    const first = events[0];
-    expect(first.id).toBe('practice');
-    expect(first.name).toBe('Practice');
-    expect(first.persistent).toBe(false);
+  it('GET /events on a fresh Director is empty — there is no built-in event (#414)', async () => {
+    // This must run first: the suite creates events below. A brand-new Director holds nothing,
+    // which is the first-run state the console's "create your first event" screen handles.
+    expect(await listEvents()).toEqual([]);
+  });
+
+  it('a created event is persistent and carries a numeric created_at', async () => {
+    const created = (await createEvent('Shape Check', TOKEN)).body as EventMeta;
+    expect(created.persistent).toBe(true);
     // created_at is a plain JSON number (the i64 → number contract), never a bigint/string.
-    expect(typeof first.created_at).toBe('number');
+    expect(typeof created.created_at).toBe('number');
+    const listed = (await listEvents()).find((e) => e.id === created.id);
+    expect(listed?.name).toBe('Shape Check');
   });
 
   it('POST /events requires the RD token — no/bad token → 401', async () => {
@@ -131,14 +135,15 @@ describe('seam 9: events lifecycle API', () => {
     expect(a.name).toBe('Spring Cup 2026!');
     expect(a.persistent).toBe(true);
 
-    // The new event now appears in the listing (after Practice).
+    // Both new events now appear in the listing.
     const ids = (await listEvents()).map((e) => e.id);
-    expect(ids[0]).toBe('practice');
     expect(ids).toContain(a.id);
+    expect(ids).toContain(b.id);
   });
 
-  it('a created event is reachable and independent of Practice', async () => {
+  it('a created event is reachable and independent of every other event', async () => {
     const created = (await createEvent('Race Night', TOKEN)).body as EventMeta;
+    const other = (await createEvent('Club Night', TOKEN)).body as EventMeta;
 
     // Schedule a heat in the created event over ITS OWN control path (`/events/{id}/control`).
     const command: Command = { ScheduleHeat: { heat: 'cn-1', lineup: ['A', 'B'] } };
@@ -154,9 +159,9 @@ describe('seam 9: events lifecycle API', () => {
     const inCreated = await fetch(`${eventRoot(director.baseUrl, created.id)}/snapshot/heat/cn-1`);
     expect(inCreated.status).toBe(200);
 
-    // …but is NOT visible in Practice (per-event logs are independent).
-    const inPractice = await fetch(`${eventRoot(director.baseUrl)}/snapshot/heat/cn-1`);
-    expect(inPractice.status).toBe(404);
+    // …but is NOT visible in the other event (per-event logs are independent).
+    const inOther = await fetch(`${eventRoot(director.baseUrl, other.id)}/snapshot/heat/cn-1`);
+    expect(inOther.status).toBe(404);
   });
 
   it('an unknown event id → 404 ProtocolError(UnknownScope)', async () => {
@@ -189,7 +194,7 @@ describe('seam 9: events lifecycle API', () => {
     expect(heat.status).toBe(404);
   });
 
-  it('DELETE /events/{id} is RD-gated, rejects Practice (400), and unknown ids (404)', async () => {
+  it('DELETE /events/{id} is RD-gated and 404s unknown ids — no event is reserved', async () => {
     // Create a fresh event to attempt an unauthenticated delete against (it must survive).
     const created = (await createEvent('Gated Delete', TOKEN)).body as EventMeta;
     expect((await deleteEvent(created.id)).status).toBe(401);
@@ -197,11 +202,11 @@ describe('seam 9: events lifecycle API', () => {
     // Still present after the rejected deletes.
     expect((await listEvents()).map((e) => e.id)).toContain(created.id);
 
-    // The built-in Practice cannot be deleted → a typed BadRequest (400).
+    // Nothing is undeletable any more (#414): the old built-in `practice` id is simply an
+    // unknown event, so it 404s like any other rather than 400-ing as reserved.
     const practice = await deleteEvent('practice', TOKEN);
-    expect(practice.status).toBe(400);
-    expect((practice.body as { code?: string }).code).toBe('BadRequest');
-    expect((await listEvents())[0].id).toBe('practice');
+    expect(practice.status).toBe(404);
+    expect((practice.body as { code?: string }).code).toBe('UnknownScope');
 
     // An unknown id → a typed 404 (UnknownScope).
     const unknown = await deleteEvent('no-such-event', TOKEN);
@@ -248,8 +253,9 @@ describe('seam 9b: the Director active event (#90)', () => {
   }
 
   it('PUT /active-event is RD-gated — no/bad token → 401', async () => {
-    expect((await putActive('practice')).status).toBe(401);
-    expect((await putActive('practice', 'not-a-real-token')).status).toBe(401);
+    const created = (await createEvent('Gate Check', TOKEN)).body as EventMeta;
+    expect((await putActive(created.id)).status).toBe(401);
+    expect((await putActive(created.id, 'not-a-real-token')).status).toBe(401);
   });
 
   it('PUT /active-event rejects an unknown event with 404 UnknownScope', async () => {
@@ -269,9 +275,10 @@ describe('seam 9b: the Director active event (#90)', () => {
     const active = await getActive();
     expect(active.event?.id).toBe(created.id);
 
-    // And switching it to Practice re-points the Director (last write wins).
-    expect((await putActive('practice', TOKEN)).status).toBe(200);
-    expect((await getActive()).event?.id).toBe('practice');
+    // And switching it to a second event re-points the Director (last write wins).
+    const second = (await createEvent('Resume Me Too', TOKEN)).body as EventMeta;
+    expect((await putActive(second.id, TOKEN)).status).toBe(200);
+    expect((await getActive()).event?.id).toBe(second.id);
   });
 });
 
@@ -385,6 +392,44 @@ describe('seam 10: application-level timers + per-event selection (#73)', () => 
 
     // RD-gated: no token → 401.
     expect((await setEventTimers(event.id, [timer.id])).status).toBe(401);
+  });
+
+  it('refuses to select a RotorHazard timer with no GridFPV plugin (#405)', async () => {
+    // #405: the plugin is REQUIRED to race a RotorHazard timer, and the gate is at event timer
+    // selection. It has to live in the Director, not just in the console's picker — this route is
+    // reachable directly, and this suite mocks nothing, so it proves the wire actually refuses.
+    //
+    // A freshly created RH timer has never been probed (`plugin` absent): presence is only
+    // knowable over a live socket. That is its own case, and its message says "connect it", not
+    // "plugin missing" — different problem, different fix.
+    const rh = (
+      await createTimer(
+        { name: 'Plugin-less RH', kind: { Rotorhazard: { url: 'http://rh.invalid:5000' } } },
+        TOKEN
+      )
+    ).body as Timer;
+    // The wire sends an explicit `null` for "never probed" (the TS binding types it optional, so
+    // a console must treat absent and null alike — `selectionRefusal` keys off falsiness).
+    expect(rh.plugin ?? null).toBeNull();
+
+    const event = (await createEvent('Plugin Gate Event', TOKEN)).body as EventMeta;
+    const refused = await setEventTimers(event.id, [rh.id], TOKEN);
+    expect(refused.status).toBe(400);
+    const err = refused.body as { code?: string; message?: string };
+    expect(err.code).toBe('BadRequest');
+    // Names the timer by its friendly name, never its id (repo display rule), and says what next.
+    expect(err.message).toContain('Plugin-less RH');
+    expect(err.message).toContain('Connect it');
+    expect(err.message).not.toContain(rh.id);
+
+    // Nothing was recorded — the event never picks up the refused timer.
+    const after = (await listEvents()).find((e) => e.id === event.id)!;
+    expect(after.timers).not.toContain(rh.id);
+
+    // A Mock is never gated — the requirement is RotorHazard-specific.
+    const mockOk = await setEventTimers(event.id, ['mock'], TOKEN);
+    expect(mockOk.status).toBe(200);
+    expect((mockOk.body as EventMeta).timers).toEqual(['mock']);
   });
 });
 
@@ -1373,9 +1418,9 @@ describe('race Slice 2a: rounds', () => {
     expect((updated.body as RoundDef).start_procedure).toEqual(replaced);
   });
 
-  it('POST /rounds accepts an open_practice round seeded AllChannels (open-practice format)', async () => {
+  it('POST /rounds accepts an open_practice round seeded ActiveNodes (open-practice format)', async () => {
     // Open practice (open-practice format, Slice 1): a round is `format: "open_practice"` +
-    // `seeding: AllChannels { channels }` (node indices), with no eligible classes — it is keyed on
+    // `seeding: ActiveNodes { nodes }` (node indices), with no eligible classes — it is keyed on
     // active *channels*, not pilots. The round round-trips through the meta with its seeding intact.
     const event = (await createEvent('Open Practice Round', TOKEN)).body as EventMeta;
     // No class selection needed — an open-practice round has an empty classes list.
@@ -1387,7 +1432,7 @@ describe('race Slice 2a: rounds', () => {
         format: 'open_practice',
         params: {},
         win_condition: 'BestLap',
-        seeding: { AllChannels: { channels: [0, 1, 2] } }
+        seeding: { ActiveNodes: { nodes: [0, 1, 2] } }
       },
       TOKEN
     );
@@ -1395,13 +1440,13 @@ describe('race Slice 2a: rounds', () => {
     const round = created.body as RoundDef;
     expect(round.format).toBe('open_practice');
     expect(round.classes).toEqual([]);
-    expect(round.seeding).toEqual({ AllChannels: { channels: [0, 1, 2] } });
+    expect(round.seeding).toEqual({ ActiveNodes: { nodes: [0, 1, 2] } });
 
     // It round-trips through the event meta (the seeding + format survive the persist).
     const list = (await fetch(`${director.baseUrl}/events`).then((r) => r.json())) as EventMeta[];
     const meta = list.find((e) => e.id === event.id)!;
     const stored = (meta.rounds ?? []).find((r) => r.id === round.id)!;
-    expect(stored.seeding).toEqual({ AllChannels: { channels: [0, 1, 2] } });
+    expect(stored.seeding).toEqual({ ActiveNodes: { nodes: [0, 1, 2] } });
   });
 
   it('POST /rounds open_practice with NO win condition + a time limit auto-creates one heat', async () => {
@@ -1416,7 +1461,7 @@ describe('race Slice 2a: rounds', () => {
         classes: [],
         format: 'open_practice',
         // No `win_condition` field at all — additive on the wire.
-        seeding: { AllChannels: { channels: [0, 1] } },
+        seeding: { ActiveNodes: { nodes: [0, 1] } },
         time_limit_secs: 3600
       },
       TOKEN
@@ -1516,7 +1561,7 @@ describe('race Slice 2a: rounds', () => {
     expect(scoring.kind).toBe('enum');
     expect(scoring.options).toEqual(['placement', 'points']);
     expect(scoring.default).toBe('placement');
-    // open_practice declares no params (its active channels are the field, via AllChannels seeding).
+    // open_practice declares no params (its active nodes are the field, via ActiveNodes seeding).
     expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
     // timed_qual declares `rounds` (number, default 3) relabeled "Heats per pilot". It declares NO
     // `metric` param: the qualifying metric is derived from the round's win condition (the qualifying
@@ -1629,7 +1674,13 @@ describe('race Slice 3a: FillRound (round-driven engine)', () => {
     // FillRound draws the field from the class membership and schedules the first heat.
     const ack = await control(eventId, { FillRound: { round: roundId } }, TOKEN);
     expect(ack.status).toBe(200);
-    expect(ack.body).toEqual({ ok: true });
+    expect(ack.body.ok).toBe(true);
+    // #395: the ack now reports WHAT it did, not merely that it was accepted — a fill that
+    // schedules nothing used to be indistinguishable from one that scheduled a heat. Assert the
+    // productive outcome positively rather than pinning the whole envelope, which would break
+    // again on the next additive field.
+    expect(ack.body.outcome?.FillRound?.stopped).toBe('SingleStep');
+    expect(ack.body.outcome?.FillRound?.scheduled).toHaveLength(1);
 
     // The class snapshot now resolves (the round-tagged heat folded into the class scope).
     const classSnap = await fetch(
@@ -1669,7 +1720,9 @@ describe('seam: /about (the build stamp)', () => {
     expect(res.ok).toBe(true);
     const about = await res.json();
     expect(about.name).toBe('GridFPV');
-    // x.y.z with an optional -prerelease tail (the v0.4.0-alpha.1 scheme).
+    // x.y.z with an optional -prerelease tail: a release's standard naming
+    // (0.4.0-alpha.1), or a non-release build's commit stamp (0.4.0-dev-<short hash>,
+    // -dirty appended for an uncommitted tree) — #513.
     expect(about.version).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
     expect(typeof about.contract_version).toBe('number');
   });

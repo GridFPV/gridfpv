@@ -105,6 +105,14 @@ impl ContractVersion {
 /// The contract version this server build speaks. The first wire contract is `1`.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(1);
 
+/// The **product version this build reports** (#513), stamped by `build.rs`: a release build
+/// (HEAD on a clean `v*` tag, or an explicit `GRIDFPV_RELEASE_VERSION`) names itself by its
+/// standard alpha/beta/full version, and every other build names its commit —
+/// `0.4.0-dev-<short hash>` (`-dirty` when the tree had uncommitted changes). This is what
+/// `/about` serves and the console's brand stamp shows; use it in place of
+/// `CARGO_PKG_VERSION` anywhere a human reads a version off a running build.
+pub const BUILD_VERSION: &str = env!("GRIDFPV_BUILD_VERSION");
+
 /// The **oldest** contract version this server still serves (protocol.html §7, §9.7) —
 /// the bottom of the supported band `MIN_SUPPORTED_CONTRACT_VERSION..=CONTRACT_VERSION`.
 ///
@@ -253,5 +261,21 @@ mod tests {
         let json = serde_json::to_string(&reply).unwrap();
         let back: ServerHello = serde_json::from_str(&json).unwrap();
         assert_eq!(reply, back);
+    }
+
+    #[test]
+    fn build_version_is_semver_shaped_whatever_named_this_build() {
+        // The stamp (#513) resolves differently per build (a release tag, a dev commit hash, a
+        // tarball fallback), but every spelling must satisfy the shape the /about contract test
+        // pins: x.y.z with an optional -prerelease tail. This is the compile-time proof the
+        // build.rs emitted SOMETHING sane for the build running these tests.
+        let v = crate::BUILD_VERSION;
+        let (core, _tail) = v.split_once('-').unwrap_or((v, ""));
+        assert_eq!(core.split('.').count(), 3, "MAJOR.MINOR.PATCH core: {v:?}");
+        assert!(
+            core.split('.')
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+            "numeric core: {v:?}"
+        );
     }
 }

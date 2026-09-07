@@ -79,3 +79,47 @@ jobs:
       - name: Contract suite (strict client↔server wire checks)
         run: npm run contract
         working-directory: frontend
+
+  e2e:
+    # The browser click-through against a REAL Director. Split from the job above because it needs
+    # Chromium's system libraries, and kept in CI rather than release-gated because the bugs it
+    # catches — routing, screen lifecycle, subscription teardown across navigation — are shell-level
+    # and have historically reached real hardware before anyone noticed. The dockerized-RotorHazard
+    # live matrix stays separate; that one genuinely needs containers and minutes.
+    #
+    # Locally the same specs run via `cargo xtask e2e`, which borrows Microsoft's Playwright image
+    # so a build box needs no system packages. Same specs, same config, both places.
+    name: Frontend — browser e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install deps
+        run: npm ci
+        working-directory: frontend
+      # The runner CAN install system packages, so no container is needed here.
+      - name: Install Chromium + its system deps
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      # Each worker boots the real binary; the harness would build it on demand, but doing it here
+      # keeps a compile failure out of the middle of a spec.
+      - name: Build Director
+        run: cargo build -p gridfpv-app
+      - name: e2e
+        run: npm run e2e
+        working-directory: frontend
+      # Traces are retained on failure only (playwright.config.ts) — the thing you actually want
+      # when a click-through fails on a machine you cannot see.
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results/
+          retention-days: 7

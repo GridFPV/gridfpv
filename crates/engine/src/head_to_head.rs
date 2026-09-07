@@ -173,9 +173,19 @@ impl Generator for HeadToHead {
     }
 
     fn next(&mut self, completed: &[CompletedHeat]) -> GeneratorStep {
-        // A lone (or empty) field has nothing to race. Otherwise emit every rotation's heats up
-        // front (the grouping is fixed, so the whole schedule is known at fill — points racing
-        // schedules all heats up front, D17) and complete once they are all in.
+        // A lone (or empty) field has nothing to race — head-to-head means racing *someone*.
+        //
+        // This is a REFUSAL, not a completion, and `GeneratorStep` has no way to say so: the
+        // step vocabulary is Run-or-Complete, so the refusal leaves here wearing the same badge
+        // as a finished round. Everything above then renders it as "the round is complete" on a
+        // round where nothing has raced (#394). The reason is declared out-of-band in
+        // [`crate::preconditions::field_shortfall`], which the fill path consults precisely when
+        // a round completes without ever having scheduled a heat — keep the two in step: change
+        // the minimum here and the declared precondition there must change with it.
+        //
+        // Otherwise emit every rotation's heats up front (the grouping is fixed, so the whole
+        // schedule is known at fill — points racing schedules all heats up front, D17) and
+        // complete once they are all in.
         if self.field.len() <= 1 {
             return GeneratorStep::Complete;
         }
@@ -324,6 +334,30 @@ mod tests {
         // 4-up groups: one heat.
         let mut g4 = HeadToHead::new(field(&["A", "B", "C", "D"]), 4, 1, Scoring::Placement);
         assert_eq!(heat_ids(&g4.next(&[])), vec!["h2h-h0"]);
+    }
+
+    /// #394: a field of one is a **refusal**, and `GeneratorStep` can only spell it `Complete`.
+    /// The generator's behaviour is correct and stays as-is — what this pins is that the
+    /// refusal is *declared* in `preconditions`, so the fill path can name it instead of
+    /// rendering "the round is complete" over a round where nothing raced.
+    #[test]
+    fn a_lone_pilot_is_refused_and_the_refusal_is_declared() {
+        let mut g = HeadToHead::new(field(&["A"]), 2, 1, Scoring::Placement);
+        // The step itself is indistinguishable from a finished round — that is the whole bug.
+        assert_eq!(g.next(&[]), GeneratorStep::Complete);
+        // …so the reason lives beside it, keyed by format name + field size.
+        let shortfall = crate::preconditions::field_shortfall(HeadToHead::NAME, 1)
+            .expect("a one-pilot head-to-head field must have a declared shortfall");
+        assert_eq!(shortfall.required, 2);
+        assert_eq!(shortfall.have, 1);
+        // Two pilots is the smallest field the generator actually races, and the declared
+        // minimum agrees — this assertion is what breaks if the two ever drift apart.
+        let mut two = HeadToHead::new(field(&["A", "B"]), 2, 1, Scoring::Placement);
+        assert_eq!(heat_ids(&two.next(&[])), vec!["h2h-h0"]);
+        assert_eq!(
+            crate::preconditions::field_shortfall(HeadToHead::NAME, 2),
+            None
+        );
     }
 
     #[test]

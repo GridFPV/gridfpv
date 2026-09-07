@@ -97,10 +97,16 @@ fn emulated_signal_multi_node_race() {
     let mut events: Vec<Event> = Vec::new();
     std::thread::sleep(Duration::from_secs(2));
 
-    // Disable RH's lap minimum for the sim: the mock CSVs drive short laps that would otherwise
-    // trip RH's 10s default `MIN_LAP_TIME` ("Pass record under lap minimum (10)"). `0` lets every
-    // emulated-signal crossing record cleanly.
-    conn.set_min_lap_time(0).ok();
+    // Neutralise RH's own min-lap filter for the sim: these laps are far closer together than
+    // RotorHazard's 10s default `MinLapSec`, and with `MinLapBehavior` set to discard RH would
+    // throw the crossing away before the adapter could ever see it. This is the same call the
+    // Director makes at every handshake (#407) — it reads, writes BOTH settings, and confirms by
+    // re-reading, so a `neutral: false` here means the timer really is still filtering.
+    assert!(
+        conn.ensure_min_lap_neutral().neutral,
+        "could not clear RotorHazard's own min-lap filter — short laps would be filtered out \
+         before the adapter sees them"
+    );
 
     // Grid owns all timing: prepare RH for an instant start (zero its staging hold/tones + reset to
     // READY), exactly as the Director does at the heat's **Staged** transition — well before "go".
@@ -277,7 +283,16 @@ fn captured_trace_matches_emitted_csv_samples() {
 
     let mut events: Vec<Event> = Vec::new();
     std::thread::sleep(Duration::from_secs(2));
-    conn.set_min_lap_time(0).ok();
+    // Neutralise RH's own min-lap filter for the sim: these laps are far closer together than
+    // RotorHazard's 10s default `MinLapSec`, and with `MinLapBehavior` set to discard RH would
+    // throw the crossing away before the adapter could ever see it. This is the same call the
+    // Director makes at every handshake (#407) — it reads, writes BOTH settings, and confirms by
+    // re-reading, so a `neutral: false` here means the timer really is still filtering.
+    assert!(
+        conn.ensure_min_lap_neutral().neutral,
+        "could not clear RotorHazard's own min-lap filter — short laps would be filtered out \
+         before the adapter sees them"
+    );
     conn.stop_race().ok();
     conn.discard_laps().expect("discard_laps");
     std::thread::sleep(Duration::from_secs(2));
@@ -417,7 +432,16 @@ fn dense_marshal_history_supersedes_coarse_stream() {
 
     let mut events: Vec<Event> = Vec::new();
     std::thread::sleep(Duration::from_secs(2));
-    conn.set_min_lap_time(0).ok();
+    // Neutralise RH's own min-lap filter for the sim: these laps are far closer together than
+    // RotorHazard's 10s default `MinLapSec`, and with `MinLapBehavior` set to discard RH would
+    // throw the crossing away before the adapter could ever see it. This is the same call the
+    // Director makes at every handshake (#407) — it reads, writes BOTH settings, and confirms by
+    // re-reading, so a `neutral: false` here means the timer really is still filtering.
+    assert!(
+        conn.ensure_min_lap_neutral().neutral,
+        "could not clear RotorHazard's own min-lap filter — short laps would be filtered out \
+         before the adapter sees them"
+    );
     conn.stop_race().ok();
     conn.discard_laps().expect("discard_laps");
     // RotorHazard only persists (and thus exposes) a race's dense history for a SAVED heat — its

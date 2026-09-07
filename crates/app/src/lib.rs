@@ -16,6 +16,17 @@
 //! harness exercises.
 #![forbid(unsafe_code)]
 
+// **Declared first, and with `#[macro_use]`, on purpose** (#380).
+//
+// `logging` defines a `macro_rules! eprintln` that shadows the std prelude's, routing every
+// diagnostic in this crate into an always-on **log file** as well as stderr. `macro_rules!`
+// scope is *textual*, so the shadow only reaches modules declared **after** this line — which
+// is why `director` and `source` (and `source::rotorhazard`, whose RotorHazard connect error
+// chain is the diagnostic #380 was filed over) come below it. Moving this declaration down
+// would silently un-file those messages on the shipped desktop build.
+#[macro_use]
+pub mod logging;
+
 pub mod director;
 pub mod source;
 

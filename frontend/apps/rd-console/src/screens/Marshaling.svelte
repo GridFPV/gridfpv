@@ -32,9 +32,9 @@
     LapList,
     LogRef,
     Pilot,
-    PilotId,
     PilotProgress,
     SignalTraceView,
+    VoidedPass,
     VoidReason
   } from '@gridfpv/types';
   import { formatMicros, Select, toast } from '@gridfpv/components';
@@ -47,9 +47,8 @@
     summaryTargetRef,
     type AuditRenderInputs
   } from '../lib/auditRender.js';
-  import { channelLabel } from '../lib/channels.js';
-  import { createCompetitorNameResolver } from '../lib/competitorName.js';
-  import { heatNameById } from '../lib/heats.js';
+  import { buildCompetitorNames } from '../lib/competitorName.js';
+  import { heatNameById, isOpenPracticeRound } from '../lib/heats.js';
   import {
     adjustLapCommand,
     applyPenaltyCommand,
@@ -75,6 +74,14 @@
     officialPasses,
     previewRows
   } from '../lib/redetect.js';
+  import {
+    applySummary,
+    applyTuneGate,
+    calibrationFor,
+    confirmCalibration,
+    type ApplyOutcome
+  } from '../lib/applyTune.js';
+  import { phaseLabel, phaseTone } from '../lib/tuning.js';
   import { commandForAction } from '../lib/transitions.js';
   import type { Session } from '../lib/session.svelte.js';
   import { useProtestClock, formatProtest } from '../lib/protestClock.svelte.js';
@@ -215,8 +222,7 @@
       .catch(() => (catalog = []));
   });
 
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  // A competitor ref → its explicitly-bound pilot id, from the heat's **durable** registration
+  // The heat's **durable** registration bindings, as `progress` rows for the shared builder.
   // binding (`progress.pilot`). Sourced from the MARSHALED heat's own live-state fold
   // (`session.heatLiveState`, `?projection=live` over that heat's window — pulled by
   // `refreshMarshaling`), NOT the global live stream's current heat (`session.liveState`). The
@@ -226,37 +232,41 @@
   // so a bound `node-0 → pilot` resolves its callsign for ANY heat (the raw-ref bug, #214 follow-up).
   // The global stream's progress is merged underneath as a fallback so the current heat still
   // resolves immediately on first mount, before the heat-scope snapshot lands.
-  const explicitPilotByRef = $derived.by(() => {
-    const map = new Map<CompetitorRef, PilotId>();
-    const add = (progress: readonly PilotProgress[] | undefined): void => {
-      for (const p of progress ?? []) if (p.pilot != null) map.set(p.competitor, p.pilot);
-    };
+  // Later rows win, so the order here IS the precedence.
+  const bindingProgress = $derived.by<PilotProgress[]>(() => {
+    const rows: PilotProgress[] = [];
     // Fallback: the global stream — but ONLY when its current heat IS the marshaled heat. Node-seat
     // refs (`node-0`) are reused across heats, so merging the live heat's bindings while marshaling
     // a DIFFERENT heat captioned this heat's laps with the other heat's pilots (worse than raw).
-    if (session.liveState?.current_heat === heat) add(session.liveState?.progress);
+    if (session.liveState?.current_heat === heat) rows.push(...(session.liveState?.progress ?? []));
     // Authoritative: the marshaled heat's durable binding — but only once the heat-scope fold is for
     // THIS heat (a stale fold from a just-deselected heat could re-bind a reused `node-0` ref wrong).
-    if (session.heatLiveState?.current_heat === heat) add(session.heatLiveState?.progress);
-    return map;
-  });
-  // The current heat's competitor ref → channel-label map (for the open-practice `node-{i}` seat
-  // fallback), joined off the heat's `frequencies` like Live control's channels panel.
-  const currentChannels = $derived.by(() => {
-    const summary = heats.find((h) => h.heat === heat);
-    const map = new Map<CompetitorRef, string>();
-    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
+    if (session.heatLiveState?.current_heat === heat)
+      rows.push(...(session.heatLiveState?.progress ?? []));
+    return rows;
   });
 
-  // The shared competitor → callsign resolver (same rule as Live control).
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef: currentChannels })
+  // The SHARED name builder — one assembly of the inputs, the same one Live control and the Rounds
+  // & Heats stage use (#416). Three screens each building these by hand is what put `node-6` on one
+  // screen against `Node 7` on another for the same seat.
+  const names = $derived(
+    buildCompetitorNames({
+      pilots,
+      progress: bindingProgress,
+      heat: heats.find((h) => h.heat === heat),
+      catalog,
+      timer: session.primaryTimer,
+      membership: session.currentEvent?.classes_membership,
+      // #117 S3: the event's channel layouts. Paired with the heat's own `layout`, they are
+      // the per-node channel mapping a `node-{i}` seat resolves through — the source that
+      // used to be `available_channels[node]`, which carried no per-node meaning at all.
+      layouts: session.currentEvent?.channel_layouts
+    })
   );
-  // The current heat's friendly "<Round> Heat N" / "Open Practice Heat" name (the raw id otherwise).
-  const heatName = $derived(
-    heat ? heatNameById(heat, heats, session.currentEvent?.rounds ?? []) : ''
-  );
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
+  // The current heat's friendly "<Round> Heat N" / "Practice Heat" name (the raw id otherwise), as
+  // the server resolved it onto the summary (#456).
+  const heatName = $derived(heat ? heatNameById(heat, heats) : '');
 
   // Drive the marshaling reads off the live stream: whenever the current heat (or the stream's
   // cursor — a new appended event, e.g. a correction we or another client made) changes, re-pull
@@ -389,11 +399,30 @@
   // Role-gated by `canControl` like every other correction (the parent only renders these when the
   // session may control; the Director re-checks).
 
+  /**
+   * The timing source a competitor's corrections must be addressed to.
+   *
+   * The projection keys laps on `(adapter, competitor)`, so an insert sent under the wrong
+   * adapter lands on a DIFFERENT competitor and splits the pilot into two lap-list entries.
+   * Read the real source off the heat's own projections — the lap list first (every competitor
+   * in the heat's lineup is there, including one the timer never detected, #388), then the
+   * signal trace — and fall back to the `adapter` prop only when neither knows the ref (a sim
+   * heat with no trace and no passes).
+   */
+  function adapterFor(competitor: CompetitorRef): string {
+    const fromLaps = laps?.competitors.find((c) => c.competitor.competitor === competitor);
+    if (fromLaps) return fromLaps.competitor.adapter;
+    const fromTrace = signalTrace?.competitors.find((c) => c.competitor.competitor === competitor);
+    return fromTrace?.competitor.adapter ?? adapter;
+  }
+
   /** Add a lap for a competitor at an exact source-clock time (µs) — the graph's button path. */
   function insertLap(competitor: CompetitorRef, at: number): Promise<void> {
     return submitCorrection(async () => {
       if (!canControl || resultLocked || !heat) return;
-      const ack = await session.send(insertLapCommand(adapter, competitor, Math.round(at), heat));
+      const ack = await session.send(
+        insertLapCommand(adapterFor(competitor), competitor, Math.round(at), heat)
+      );
       if (ack.ok) await afterCorrection();
     });
   }
@@ -414,9 +443,9 @@
   }
 
   /** RESTORE a removed pass. A marshal-voided pass is undone by void-the-void (targeting the
-   *  standing removal event); a floor-suppressed pass (UnderMinLap, D26) is BLESSED by an
-   *  AdjustLap re-asserting its own raw instant — an explicit ruling outranks the floor, so
-   *  the fold exempts it and the pass returns to the chain. */
+   *  standing removal event); an AUTO-suppressed pass (SamePassBounce, #517; UnderMinLap, D26;
+   *  AfterRaceEnd, #505) is BLESSED by an AdjustLap re-asserting its own raw instant — an explicit
+   *  ruling outranks all three rules, so the fold exempts it and the pass returns to the chain. */
   function doRestorePass(v: {
     void_ref: number;
     pass_ref: number;
@@ -425,12 +454,69 @@
   }): Promise<void> {
     return submitCorrection(async () => {
       const ack = await session.send(
-        v.reason === 'UnderMinLap'
-          ? adjustLapCommand(v.pass_ref, v.at)
-          : voidDetectionCommand(v.void_ref)
+        v.reason === 'Marshal'
+          ? voidDetectionCommand(v.void_ref)
+          : adjustLapCommand(v.pass_ref, v.at)
       );
       if (ack.ok) await afterCorrection();
     });
+  }
+
+  /** The removal record's row text: WHY the pass is off the chain, by its `VoidReason`.
+   *
+   *  Every arm is spelled out rather than leaning on the `default:` — a new reason landing here
+   *  silently would read as "stays removed", which is a different claim about a different kind of
+   *  removal, and the RD would have no way to tell it was wrong. */
+  function voidedRowLabel(v: { at: number; reason: VoidReason }): string {
+    const at = `${formatMicros(v.at)}s`;
+    switch (v.reason) {
+      case 'SamePassBounce':
+        return `crossing at ${at} — same pass (gate bounce), auto-removed`;
+      case 'UnderMinLap':
+        return `crossing at ${at} — under min lap, auto-removed`;
+      case 'AfterRaceEnd':
+        return `crossing at ${at} — after race end, auto-removed`;
+      default:
+        return `removed pass at ${at} — stays removed`;
+    }
+  }
+
+  /** Is this removal a gate bounce — the fold's "same physical pass, seen twice" (#517)?
+   *
+   *  The one removal kind that gets COLLAPSED in the lap list rather than given its own row. A
+   *  bouncy gate puts three or four of these between every pair of real laps, and they carry no
+   *  information individually: the RD wants to know a burst happened, not to read it out. Every
+   *  other reason — a real crossing under the floor, a marshal void, a post-race crossing — keeps
+   *  its full row, because each of those is a distinct thing that happened. */
+  function isBounce(v: { reason: VoidReason }): boolean {
+    return v.reason === 'SamePassBounce';
+  }
+
+  /** The removals that belong in `lap`'s slot: after the previous lap, before this one. Hoisted
+   *  out of the markup because the burst and the full rows both need it, and `{@const}` cannot
+   *  live everywhere it would have to. */
+  function removalsBefore(voided: VoidedPass[], laps: Lap[], lap: Lap): VoidedPass[] {
+    return voided.filter(
+      (v) => v.at < lap.at && !laps.some((o) => o.number < lap.number && o.at > v.at)
+    );
+  }
+
+  /** The removals after the LAST lap — and, for a competitor with no laps at all, their whole
+   *  record. Both cases need the burst indicator: a run whose every crossing bounced is exactly
+   *  the finding an RD came to marshaling to see. */
+  function removalsAfterLast(voided: VoidedPass[], laps: Lap[]): VoidedPass[] {
+    return voided.filter((v) => laps.length === 0 || v.at >= laps[laps.length - 1].at);
+  }
+
+  /** Which lap rows have their bounce burst expanded. Keyed by the burst's owning lap `end_ref`
+   *  (and `-1` for a burst that trails the last lap), so it survives a refold — a re-fold keeps
+   *  each pass's offset, which is exactly why the removal record is keyed on offsets too. */
+  let expandedBursts = $state(new Set<number>());
+
+  function toggleBurst(key: number): void {
+    const next = new Set(expandedBursts);
+    if (!next.delete(key)) next.add(key);
+    expandedBursts = next;
   }
 
   /** Remove (void) a lap straight from its row — the one-click removal on the lap list. */
@@ -664,9 +750,9 @@
   // previewing the resulting lap list + the diff against the current official passes. NOTHING is
   // sent while adjusting: an explicit Commit turns the diff into the existing marshaling primitives
   // (a `VoidDetection` per removed pass, a heat-tagged `InsertLap` per added one). The thresholds
-  // themselves are a UI/preview concern only — they are NEVER written back to the timer; pushing
-  // calibration to RotorHazard via the plugin is a separate future feature. Scoped to the shown
-  // pilot (the "Marshal pilot" picker already selects exactly one).
+  // themselves stay a preview concern *here*; writing them to the gate is the separate, explicit
+  // "Apply to timer" action below (#470), which never rides along with a commit. Scoped to the
+  // shown pilot (the "Marshal pilot" picker already selects exactly one).
   const tuneTrace = $derived<CompetitorTrace | undefined>(
     signalTrace?.competitors.find((c) => c.competitor.competitor === shownPilot)
   );
@@ -719,6 +805,18 @@
   // The LIVE preview: re-detect at the tuned levels, diff against the current official passes
   // (lap 1's opening pass + every lap's closing pass, from the marshaling-corrected lap list).
   const tuneValid = $derived(tuneEnter > tuneExit);
+  // The marshaled heat's round's **minimum-lap floor** (D26, `RoundDef.min_lap_secs`) in µs, or 0
+  // when the round sets none / the heat carries no round tag. Re-detection is an AUTOMATED path,
+  // so it is held to the floor (#469): the commit inserts marshal-created passes, which the
+  // corrected-passes fold exempts from the floor, so a sub-floor crossing had to be refused in the
+  // math or nothing downstream could strip it. The RD's own "Add lap" is deliberately NOT held to
+  // it — an explicit ruling still outranks the floor.
+  const minLapMicros = $derived.by<number>(() => {
+    const roundId = heats.find((h) => h.heat === heat)?.round;
+    if (!roundId) return 0;
+    const secs = (session.currentEvent?.rounds ?? []).find((r) => r.id === roundId)?.min_lap_secs;
+    return typeof secs === 'number' && secs > 0 ? secs * 1_000_000 : 0;
+  });
   // Flatten across entries: the shown pilot can hold several lap-list entries (one per
   // adapter after a mid-heat failover) — the tune diff must see ALL their official passes.
   const shownPilotLaps = $derived<Lap[]>((shownLaps?.competitors ?? []).flatMap((c) => c.laps));
@@ -739,7 +837,8 @@
       officialPasses(shownPilotLaps),
       detectedPassTimes,
       DEFAULT_MATCH_TOLERANCE_MICROS,
-      shownVoidedAt
+      shownVoidedAt,
+      minLapMicros
     )
   );
   const redetectDirty = $derived(redetectDiff.added.length > 0 || redetectDiff.removed.length > 0);
@@ -751,7 +850,8 @@
       officialPasses(shownPilotLaps),
       detectedPassTimes,
       DEFAULT_MATCH_TOLERANCE_MICROS,
-      shownVoidedAt
+      shownVoidedAt,
+      minLapMicros
     )
   );
   const previewLapCount = $derived(
@@ -820,6 +920,98 @@
       }
     } finally {
       committing = false;
+    }
+  }
+
+  // ── Apply a discovered tune to the timer (#470) ───────────────────────────────────────────────
+  // Committing the re-detection fixes THIS heat's laps. It does nothing about the gate, which will
+  // get the next heat wrong the same way — the RD used to have to memorise the levels and retype
+  // them on the Tune page. This writes them straight to the node the competitor flew, through the
+  // same `POST /timers/{id}/calibration` path the Tune page uses, and confirms them the same way:
+  // by a READBACK on the signal feed, because RotorHazard never acknowledges a level set
+  // (CLAUDE.md). The gate and the confirmation both live in `applyTune.ts`.
+
+  /** Whether the heat currently ON THE TIMER is open practice or a scored one (the write gate). */
+  const liveHeatKind = $derived.by<'practice' | 'competition' | undefined>(() => {
+    const current = session.liveState?.current_heat;
+    if (!current) return undefined;
+    const summary = heats.find((h) => h.heat === current);
+    const round = summary?.round
+      ? session.currentEvent?.rounds?.find((r) => r.id === summary.round)
+      : undefined;
+    if (!round) return 'competition';
+    return isOpenPracticeRound(round) ? 'practice' : 'competition';
+  });
+
+  /** The marshaled heat's lineup — the seat order the node index is read out of (see applyTune.ts). */
+  const marshalLineup = $derived<CompetitorRef[] | undefined>(
+    heats.find((h) => h.heat === heat)?.lineup
+  );
+
+  /** May these levels be written, and to which node? Re-evaluated as the RD drags. */
+  const applyGate = $derived(
+    shownPilot === undefined
+      ? undefined
+      : applyTuneGate({
+          canControl,
+          timer: session.primaryTimer,
+          lineup: marshalLineup,
+          competitor: shownPilot,
+          enter: tuneEnter,
+          exit: tuneExit,
+          livePhase: session.liveState?.phase,
+          liveHeatKind,
+          catalog,
+          // The node's channel through the SHARED resolver — never re-derived here (CLAUDE.md).
+          nodeMhz: names.mhzFor(shownPilot)
+        })
+  );
+
+  /** Where the last apply got to, or `undefined` before one is tried. Mirrors the Tune page's phases. */
+  let applyState = $state<ApplyOutcome | undefined>(undefined);
+  let applying = $state(false);
+
+  async function doApplyTune(): Promise<void> {
+    const gate = applyGate;
+    if (applying || !gate?.allowed || shownPilot === undefined) return;
+    const { timer, node, nodeName } = gate.target;
+    const body = calibrationFor(node, tuneEnter, tuneExit);
+    const who = competitorName(shownPilot);
+
+    applying = true;
+    applyState = { phase: 'sent' };
+    try {
+      // Accepted, not applied — the Director answers for the dispatch, never for the hardware.
+      // The resolved value is deliberately ignored: this is a VOID write, so a success and a
+      // cancelled token prompt both resolve `undefined` and cannot be told apart here. That is
+      // fine, because the readback below is what decides either way — a cancelled prompt wrote
+      // nothing, so the levels never come back and it reports "Not taken", which is true.
+      await session.setCalibration(timer, body);
+      // THE READBACK. Marshaling holds no signal subscription of its own, so this opens one for the
+      // few polls it needs and stops it after (the lease is the backstop if the stop is lost).
+      try {
+        applyState = await confirmCalibration(
+          {
+            fetchSignal: () => session.timerSignal(timer),
+            sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+            now: () => Date.now()
+          },
+          node,
+          body.enter_at!,
+          body.exit_at!
+        );
+      } finally {
+        await session.stopTimerSignal(timer).catch(() => {});
+      }
+      const summary = applySummary(applyState, nodeName, who);
+      if (applyState.phase === 'confirmed') toast.success(summary);
+      else toast.error(summary);
+    } catch (e) {
+      // The Director's refusals are already phrased for the RD, so they are surfaced verbatim.
+      applyState = { phase: 'failed', detail: e instanceof Error ? e.message : String(e) };
+      toast.error(applySummary(applyState, nodeName, who));
+    } finally {
+      applying = false;
     }
   }
 
@@ -904,13 +1096,11 @@
           >
             <option value=""
               >Current heat (live){currentHeat
-                ? ` — ${heatNameById(currentHeat, heats, session.currentEvent?.rounds ?? [])}`
+                ? ` — ${heatNameById(currentHeat, heats)}`
                 : ''}</option
             >
             {#each heats as h (h.heat)}
-              <option value={h.heat}
-                >{heatNameById(h.heat, heats, session.currentEvent?.rounds ?? [])}</option
-              >
+              <option value={h.heat}>{heatNameById(h.heat, heats)}</option>
             {/each}
           </Select>
         </div>
@@ -973,8 +1163,7 @@
 
       {#if canControl && hasShownTrace && tuneTrace && shownPilot !== undefined}
         <!-- Tune detection (RH-style re-detection): move the levels, watch the preview, COMMIT to
-             make it official. The levels are a preview concern only — never written to the timer
-             (pushing calibration to RotorHazard via the plugin is a separate future feature). -->
+             make it official — and, separately, APPLY the levels to the gate itself (#470). -->
         <fieldset class="tune-detection">
           <legend>Tune detection — {competitorName(shownPilot)}</legend>
           <p class="muted hint">
@@ -1018,7 +1207,43 @@
                     ? 'No change to commit — the re-detection matches the official passes'
                     : undefined}>Commit re-detection</button
             >
+            <!-- Apply to timer (#470): the LEVELS themselves, written to the gate this competitor
+                 flew. Deliberately independent of Commit — correcting this heat's laps and stopping
+                 the gate getting the NEXT heat wrong are two different jobs, and an RD often wants
+                 the second without the first. A disabled state always carries its reason (#405). -->
+            <button
+              type="button"
+              class="apply-tune"
+              data-testid="apply-tune"
+              onclick={doApplyTune}
+              disabled={!applyGate?.allowed || applying}
+              title={applyGate?.allowed
+                ? `Write enter ${tuneEnter} / exit ${tuneExit} to ${applyGate.target.nodeName}`
+                : applyGate?.reason}>{applying ? 'Applying…' : 'Apply to timer'}</button
+            >
           </div>
+          <!-- Where the write stands, in the Tune page's own vocabulary (`phaseLabel`/`phaseTone`):
+               "Sending…" while the readback is outstanding, "On timer" only once the timer has
+               actually reported the levels back, "Not taken" when it never did. Accepted is not
+               applied, and this must never claim otherwise (#403). -->
+          {#if applyState}
+            <p class="apply-state" role="status" data-testid="apply-tune-state">
+              <span class="apply-badge" data-tone={phaseTone(applyState.phase)}
+                >{phaseLabel(applyState.phase)}</span
+              >
+              {#if applyGate?.allowed}<span class="apply-where">{applyGate.target.nodeName}</span
+                >{/if}
+              {#if applyState.detail}<span class="apply-detail">{applyState.detail}</span>{/if}
+            </p>
+          {:else if applyGate && !applyGate.allowed && tuneValid}
+            <!-- The refusal is said on the panel, not only in a tooltip: a disabled control with no
+                 visible explanation is exactly the dead end #405 exists to prevent.
+                 Suppressed while the levels are invalid, because `.tune-invalid` below already says
+                 that — and saying it twice on one panel is noise, not emphasis. -->
+            <p class="apply-blocked" role="status" data-testid="apply-tune-blocked">
+              {applyGate.reason}
+            </p>
+          {/if}
           {#if !tuneValid}
             <p class="tune-invalid" role="status">
               Enter must be above exit — these levels detect nothing.
@@ -1031,6 +1256,8 @@
               (+{redetectDiff.added.length} added, −{redetectDiff.removed.length} removed{redetectDiff
                 .suppressed.length > 0
                 ? `, ${redetectDiff.suppressed.length} voided by you stay removed`
+                : ''}{redetectDiff.refused.length > 0
+                ? `, ${redetectDiff.refused.length} under the ${minLapMicros / 1_000_000}s min lap refused`
                 : ''})
             </p>
           {/if}
@@ -1075,6 +1302,18 @@
                           >crossing at {formatMicros(row.at)}s — voided by you, stays removed</span
                         >
                       </li>
+                    {:else if row.status === 'refused'}
+                      <!-- The floor REFUSED this crossing (#469): re-detection is automated, and
+                           an automated path may not mint a lap under the round's min lap. Shown
+                           rather than hidden — the trace really does see something there, and the
+                           RD can still add the lap by hand if they rule it real. -->
+                      <li class="voided">
+                        <span class="mark" aria-hidden="true">∅</span>
+                        <span class="what"
+                          >crossing at {formatMicros(row.at)}s — under the {minLapMicros /
+                            1_000_000}s min lap, not added</span
+                        >
+                      </li>
                     {:else}
                       <li class={row.status}>
                         <span class="mark" aria-hidden="true"
@@ -1091,29 +1330,60 @@
                   <p class="empty">No laps yet.</p>
                 {:else}
                   {@const voidedSorted = [...(cl.voided ?? [])].sort((a, b) => a.at - b.at)}
+                  {#snippet removalRow(v: VoidedPass)}
+                    <li class="voided-row">
+                      <span class="mark" aria-hidden="true">∅</span>
+                      <span class="what">{voidedRowLabel(v)}</span>
+                      {#if canCorrect}
+                        <button
+                          type="button"
+                          class="lap-restore"
+                          onclick={() => doRestorePass(v)}
+                          disabled={busy}
+                          title="Restore this removed pass (undo the removal)"
+                          aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
+                          >Restore</button
+                        >
+                      {/if}
+                    </li>
+                  {/snippet}
+                  <!-- A gate-bounce burst (#517) collapses to ONE muted line instead of a row per
+                       crossing: a bouncy gate puts three or four of these between every pair of
+                       real laps, and individually they say nothing — the RD needs to know a burst
+                       happened, not to read it out. Expanding reveals the same rows every other
+                       removal gets, each with its own Restore. There is deliberately NO bulk
+                       restore: restoring a whole burst is never what anyone wants, and one
+                       misclick would add that many phantom laps. -->
+                  {#snippet bounceBurst(bounces: VoidedPass[], key: number)}
+                    {#if bounces.length > 0}
+                      <li class="bounce-row">
+                        <span class="mark" aria-hidden="true">∅</span>
+                        <button
+                          type="button"
+                          class="bounce-toggle"
+                          onclick={() => toggleBurst(key)}
+                          aria-expanded={expandedBursts.has(key)}
+                        >
+                          {bounces.length} same-pass crossing{bounces.length === 1 ? '' : 's'} (gate bounce)
+                          <span class="chev" aria-hidden="true"
+                            >{expandedBursts.has(key) ? '▾' : '▸'}</span
+                          >
+                        </button>
+                      </li>
+                      {#if expandedBursts.has(key)}
+                        {#each bounces as v (v.pass_ref)}
+                          {@render removalRow(v)}
+                        {/each}
+                      {/if}
+                    {/if}
+                  {/snippet}
                   <ol>
                     {#each cl.laps as lap (lap.end_ref)}
-                      {#each voidedSorted.filter((v) => v.at < lap.at && !cl.laps.some((o) => o.number < lap.number && o.at > v.at)) as v (v.pass_ref)}
-                        <li class="voided-row">
-                          <span class="mark" aria-hidden="true">∅</span>
-                          <span class="what"
-                            >{v.reason === 'UnderMinLap'
-                              ? `crossing at ${formatMicros(v.at)}s — under min lap, auto-removed`
-                              : `removed pass at ${formatMicros(v.at)}s — stays removed`}</span
-                          >
-                          {#if canCorrect}
-                            <button
-                              type="button"
-                              class="lap-restore"
-                              onclick={() => doRestorePass(v)}
-                              disabled={busy}
-                              title="Restore this removed pass (undo the removal)"
-                              aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
-                              >Restore</button
-                            >
-                          {/if}
-                        </li>
+                      {@const slot = removalsBefore(voidedSorted, cl.laps, lap)}
+                      {#each slot.filter((v) => !isBounce(v)) as v (v.pass_ref)}
+                        {@render removalRow(v)}
                       {/each}
+                      {@render bounceBurst(slot.filter(isBounce), lap.end_ref)}
                       <li class="lap-row">
                         <button
                           type="button"
@@ -1177,29 +1447,17 @@
                         </li>
                       {/if}
                     {/each}
-                    {#each voidedSorted.filter((v) => cl.laps.length === 0 || v.at >= cl.laps[cl.laps.length - 1].at) as v (v.pass_ref)}
-                      <!-- The RD's removal record, kept visible where the lap was: the shared
-                           data that also stops re-detection from re-proposing the crossing. -->
-                      <li class="voided-row">
-                        <span class="mark" aria-hidden="true">∅</span>
-                        <span class="what"
-                          >{v.reason === 'UnderMinLap'
-                            ? `crossing at ${formatMicros(v.at)}s — under min lap, auto-removed`
-                            : `removed pass at ${formatMicros(v.at)}s — stays removed`}</span
-                        >
-                        {#if canCorrect}
-                          <button
-                            type="button"
-                            class="lap-restore"
-                            onclick={() => doRestorePass(v)}
-                            disabled={busy}
-                            title="Restore this removed pass (undo the removal)"
-                            aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
-                            >Restore</button
-                          >
-                        {/if}
-                      </li>
+                    <!-- The trailing slot: removals after the last lap, plus the whole record for
+                         a competitor with no laps at all. The burst is keyed `-1` — there is no
+                         owning lap row to key it by, and a competitor whose every crossing bounced
+                         still needs the indicator, because that IS the finding. -->
+                    {#each removalsAfterLast(voidedSorted, cl.laps).filter((v) => !isBounce(v)) as v (v.pass_ref)}
+                      {@render removalRow(v)}
                     {/each}
+                    {@render bounceBurst(
+                      removalsAfterLast(voidedSorted, cl.laps).filter(isBounce),
+                      -1
+                    )}
                   </ol>
                 {/if}
                 {#if canCorrect}
@@ -1755,9 +2013,17 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  /* The void-heat box. Its fill is composited against `--gf-elevated` (the base `fieldset` rule)
+     rather than left as a translucent wash over it (#476): `--gf-danger-soft` is
+     `red-400 @ 16% / transparent`, so mixing it into `--gf-elevated` here yields the SAME colour
+     with no alpha channel — nothing about how it looks changes.
+     What changes is that a large box is no longer an alpha layer the compositor re-blends. On
+     Linux/WebKitGTK under a virtualized GPU that re-blend is what flickers, and this is one of the
+     two boxes it was reported on. Matches `.official-lock` just above, which already fills this
+     way. Unverified against the actual VM — see the issue. */
   .danger-zone {
     border-color: color-mix(in srgb, var(--gf-danger) 45%, var(--gf-border));
-    background: var(--gf-danger-soft);
+    background: color-mix(in srgb, var(--gf-red-400) 16%, var(--gf-elevated));
   }
   /* Tune detection: the live re-detection panel. Big readable summary — the "+A / −R" is what
      the marshal decides on, outdoors on a laptop (the field-readability bar). */
@@ -1785,6 +2051,54 @@
   .commit {
     border: 1px solid var(--gf-accent);
     background: var(--gf-accent-soft);
+  }
+  /* Apply to timer (#470). Deliberately NOT styled as the primary action: Commit is what the
+     marshal came here to do; writing the gate is the useful extra. */
+  .apply-tune {
+    border: 1px solid var(--gf-border-strong);
+  }
+  .apply-state,
+  .apply-blocked {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--gf-space-2);
+    margin: var(--gf-space-2) 0 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  .apply-blocked {
+    color: var(--gf-text-muted);
+  }
+  .apply-badge {
+    font-size: var(--gf-font-size-2xs);
+    font-weight: var(--gf-font-weight-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    padding: 0.05rem var(--gf-space-2);
+    border-radius: var(--gf-radius-sm);
+    border: 1px solid currentColor;
+  }
+  .apply-badge[data-tone='success'] {
+    color: var(--gf-success);
+  }
+  .apply-badge[data-tone='info'] {
+    color: var(--gf-accent);
+  }
+  .apply-badge[data-tone='warn'] {
+    color: var(--gf-warn);
+  }
+  .apply-badge[data-tone='danger'] {
+    color: var(--gf-danger);
+  }
+  .apply-where {
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-2xs);
+    color: var(--gf-text-muted);
+  }
+  .apply-detail {
+    flex-basis: 100%;
+    color: var(--gf-text-muted);
   }
   .commit:hover:not(:disabled) {
     background: var(--gf-accent);
@@ -1835,6 +2149,36 @@
     text-decoration: line-through;
     list-style: none;
     padding: var(--gf-space-1) 0;
+  }
+  /* The collapsed gate-bounce burst (#517). Deliberately the QUIETEST thing in the lap list: it
+     is an annotation on the run, not an event in it, and the whole point of collapsing was that
+     these were drowning the laps. No strike-through — nothing here is a removed lap; it is a
+     count of detections that were never separate crossings in the first place. */
+  .bounce-row {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    color: var(--gf-text-faint);
+    list-style: none;
+    padding: 0;
+    font-size: var(--gf-font-size-sm);
+  }
+  .bounce-toggle {
+    background: none;
+    border: 0;
+    padding: var(--gf-space-1) 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .bounce-toggle:hover,
+  .bounce-toggle:focus-visible {
+    color: var(--gf-text);
+    text-decoration: underline;
+  }
+  .bounce-row .chev {
+    margin-left: var(--gf-space-1);
   }
   /* Region heads: the two scopes of this page (pilot vs heat), RD-requested after the
      lap-editor consolidation made the seam invisible. The divider is deliberately HEAVY —

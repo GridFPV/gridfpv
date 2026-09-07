@@ -30,7 +30,7 @@ test('Classes page lists the locked built-ins (org badges, not removable) and fu
   // The worker's Director may have an active event left by a prior spec (#90): if we resumed into
   // the workspace, use the breadcrumb Home to get back to the hub.
   const classesCard = page.getByRole('heading', { name: 'Classes' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(classesCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     await page
@@ -96,7 +96,7 @@ test('RD selects a built-in class onto the event and it persists', async ({ page
   //    prior spec. On a fresh load the hash is authoritative (#118), so we land on the hub even when
   //    an event is active; clicking Events then either opens the picker (no event active) or
   //    auto-enters the active event's workspace. Either way we end up in a workspace on Practice. ──
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -171,7 +171,7 @@ test('RD hides a class on the Classes page; it drops out of the event picker; un
 
   // ── Get back to the home hub (a prior spec may have left an active event) ────────────────────
   const classesCard = page.getByRole('heading', { name: 'Classes' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(classesCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     await page

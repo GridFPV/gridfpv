@@ -3,8 +3,8 @@
 //! Drives a full heat against a **real dockerized RotorHazard** via the shared
 //! [`common::run_mock_heat`] harness, then asserts — structurally — that the heat
 //! ran the whole loop to `Final`, that the recorded transitions appear in canonical
-//! order, and that the timer crossings were collected only while the heat was live
-//! (cross-checked against [`consumes_pass`]). This is the first consumer of the
+//! order, and that the timer crossings were collected only while the heat was
+//! `Running` (the bridge's emission rule). This is the first consumer of the
 //! reusable harness; #30 (scoring), #31 (marshaling), #33–37 fold the same log.
 //!
 //! Local-only class (needs Docker). Run via `cargo xtask live` or:
@@ -18,7 +18,7 @@ mod common;
 
 use common::{DEFAULT_PORT, run_mock_heat};
 
-use gridfpv_engine::heat::{GraceWindow, HeatState, consumes_pass, heat_state, next_state};
+use gridfpv_engine::heat::{HeatState, heat_state, next_state};
 use gridfpv_events::{Event, HeatId, HeatTransition};
 use gridfpv_testkit::{NodeCsv, node_csv};
 
@@ -96,10 +96,11 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
     );
 
     // --- passes were collected, and only between Running and Finished ---
-    // Replay the log: walk the heat's state, and at each Pass cross-check that the
-    // state-it-sits-in actually consumes passes (consumes_pass == true). Because the
-    // harness interleaves passes only between the Running and Finished transitions,
-    // every pass must land while the heat is Running.
+    // Replay the log: walk the heat's state and assert every Pass landed while the heat
+    // was Running — the bridge's rule (`source.rs` tears down pass emission the moment a
+    // heat leaves `Running`, and the grace window holds `Running` rather than reopening a
+    // closed heat, #505). The harness interleaves passes only between the Running and
+    // Finished transitions, so any leak past Finished fails here.
     let mut state: Option<HeatState> = None;
     let mut pass_count = 0usize;
     for event in &log {
@@ -123,10 +124,6 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
                     HeatState::Running,
                     "passes must be interleaved only while the heat is Running"
                 );
-                assert!(
-                    consumes_pass(current, GraceWindow::default(), None),
-                    "a pass collected mid-heat must be consumable (state {current:?})"
-                );
             }
             _ => {}
         }
@@ -134,14 +131,6 @@ fn mock_heat_runs_to_scored_with_passes_only_while_live() {
     assert!(
         pass_count >= 1,
         "the harness must have collected at least one timer crossing"
-    );
-
-    // Sanity on the boundary rule the harness relies on: a pass is NOT consumed once
-    // the heat is Final — so any crossing that leaked past Finished/Final would have
-    // failed the in-loop check above (it never reaches here as Running).
-    assert!(
-        !consumes_pass(HeatState::Final, GraceWindow::default(), None),
-        "the grace window is closed once Final"
     );
 
     println!(

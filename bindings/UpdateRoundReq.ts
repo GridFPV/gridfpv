@@ -2,6 +2,7 @@
 import type { ChannelMode } from "./ChannelMode";
 import type { ClassId } from "./ClassId";
 import type { GraceWindow } from "./GraceWindow";
+import type { LayoutId } from "./LayoutId";
 import type { ProtestWindow } from "./ProtestWindow";
 import type { SeedingRule } from "./SeedingRule";
 import type { StartProcedure } from "./StartProcedure";
@@ -48,6 +49,11 @@ time_limit_secs?: number,
  * default ([`ChannelMode::default_for_format`]); supply it to override.
  */
 channel_mode?: ChannelMode, 
+/**
+ * The new **channel layouts** this round's heats may fly (#117 S3), replaced wholesale.
+ * Optional — omit for none (the auto-pick). Each must name a layout this event has.
+ */
+layouts?: Array<LayoutId>, 
 /**
  * The new staging timer in seconds (heat-lifecycle Slice 2). Optional — omit for the
  * [`default_staging_timer_secs`] (300).

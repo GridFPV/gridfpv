@@ -14,6 +14,15 @@ import type { CompetitorRef } from "./CompetitorRef";
  * projection **prefers** this dense history over the coarse [`SignalChunk`] samples for a
  * competitor when both are present (the dense trace supersedes the streaming approximation).
  *
+ * # Whole trace or slice — [`base`](SignalHistory::base) says which (#392)
+ *
+ * The GridFPV plugin streams this trace **live**, every 0.5 s, so a `SignalHistory` is not always a
+ * whole trace: [`base`](SignalHistory::base) is the sample offset its `times`/`rssi` start at, and
+ * the fold replaces at `0`, appends at the trace's current length, and skips anything else. Sending
+ * the accumulated whole on every tick made the per-tick cost grow with heat length (O(n) per tick,
+ * O(n²) per heat, per seat): it flooded the heat's log and re-woke every projection subscriber
+ * twice a second with nothing new in hand (#392).
+ *
  * # Why explicit per-sample times (not a uniform cadence)
  *
  * [`SignalChunk`] assumes a fixed `period_micros` because the live stream emits on a regular
@@ -42,4 +51,22 @@ times: number[],
 /**
  * The dense per-tick RSSI samples (filtered ADC counts), parallel to `times`.
  */
-rssi: Array<number>, };
+rssi: Array<number>, 
+/**
+ * The index of this event's **first** sample within the competitor's full trace — the offset
+ * the fold applies `times`/`rssi` at (#392). Named for the plugin's own `gridfpv_signal` field,
+ * whose semantics it carries onto the canonical wire unchanged.
+ *
+ * - `base == 0` — a **full snapshot**: it *replaces* the competitor's trace. The post-race
+ *   `current_marshal_data` pull, the `race_details` fold and the plugin's end-of-race flush
+ *   each send one, so a finished heat's marshaling trace is always whole.
+ * - `base ==` the trace's current length — a **contiguous append**: `times`/`rssi` extend it.
+ *   This is the live path, and it is what keeps the per-tick cost independent of heat length.
+ * - anything else — **out of sync**: the fold skips the event rather than splice a gap or a
+ *   duplicate into the trace. The next full snapshot resynchronises it.
+ *
+ * Additive on the wire: `#[serde(default)]` reads a pre-#392 log — which only ever carried
+ * whole traces — back as `base = 0`, i.e. exactly the replace semantics it was written with.
+ * Renders as TS `number` (a sample count, bounded far below 2^53), not a `bigint`.
+ */
+base: number, };

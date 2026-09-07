@@ -17,7 +17,7 @@ import { expect, test } from './observability.js';
 
 /** Get the shared worker Director into the Practice event's workspace. */
 async function enterPractice(page: import('@playwright/test').Page) {
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   const eventsCard = page.getByRole('button', { name: /Events/ });
   await expect(liveNav.or(eventsCard).first()).toBeVisible({ timeout: 15_000 });
   if (!(await liveNav.isVisible().catch(() => false))) {
@@ -80,7 +80,10 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
   await form.getByLabel('Format').selectOption('timed_qual');
   // The eligible class is a single-select dropdown (Rounds form redesign item 6).
   await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
-  await form.getByLabel('Win condition').selectOption('BestLap');
+  // Best lap is the converged **Best-of-N with N = 1** (9705af5) — it still serialises to `BestLap`
+  // on the wire, but the picker no longer carries a separate "Best lap" option.
+  await form.getByLabel('Win condition').selectOption('BestOfN');
+  await form.getByLabel('Laps', { exact: true }).fill('1');
   // Heat-lifecycle config (Slice 3): a 3:30 staging window + a 1.5–3.5s randomized start hold (the
   // start-procedure delays are entered in seconds — Rounds form redesign item 3).
   await form.getByLabel('Staging minutes').fill('3');
@@ -103,7 +106,7 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
 
   // ── It persisted on the Director: a reload resumes into the event with the round listed ─────
   await page.reload();
-  await expect(page.getByRole('button', { name: /Live control/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
   await openTab(page, 'Rounds & Heats');
   const rowAfter = page.getByRole('list').getByRole('listitem').filter({ hasText: LABEL });
   await expect(rowAfter).toBeVisible({ timeout: 15_000 });
@@ -126,9 +129,10 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
     page.getByRole('list').getByRole('listitem').filter({ hasText: newLabel })
   ).toBeVisible({ timeout: 15_000 });
 
-  // ── Remove the round ────────────────────────────────────────────────────────────────────────
+  // ── Remove the round (two-step confirm since #499 — removal discards Scheduled heats) ───────
   const editedRow = page.getByRole('list').getByRole('listitem').filter({ hasText: newLabel });
   await editedRow.getByRole('button', { name: 'Remove' }).click();
+  await editedRow.getByRole('button', { name: /Confirm/ }).click();
   await expect(
     page.getByRole('list').getByRole('listitem').filter({ hasText: newLabel })
   ).toHaveCount(0, { timeout: 15_000 });
@@ -152,22 +156,27 @@ test('RD defines a round (class, format, seeding), it persists, then edits and r
 /**
  * **Multi-select seeding source rounds** (issue #51) — the deliverable proof for aggregated seeding.
  *
- * Enter Practice, select the Open Class, then add two qualifying rounds and a `single_elim` bracket
+ * Enter Practice, select the Open Class, then add two qualifying rounds and a **Head-to-Head** round
  * seeded `FromRanking`. The seeding control reveals a **checkbox multi-select** of the prior rounds;
- * tick both quals and add the bracket. Assert the persisted bracket carries `source_rounds` with
+ * tick both quals and add the finals round. Assert the persisted round carries `source_rounds` with
  * BOTH qual ids (the server aggregates best-per-pilot across them). Cleans up after itself.
+ *
+ * NOTE: the seeded round used to be a `single_elim` bracket. The tournament generators were carved
+ * out for the primitives-first v0.4 (71d49f2; back with #68–#70), so the server 400s that key. The
+ * subject here is the **FromRanking multi-select**, which is format-agnostic — so it is exercised on
+ * Head-to-Head, a surviving format that seeds from a prior round's ranking exactly the same way.
  */
-test('RD seeds a bracket from multiple source rounds via the multi-select', async ({
+test('RD seeds a round from multiple source rounds via the multi-select', async ({
   page,
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const stamp = Date.now();
   const QUAL_A = `E2E-QualA-${stamp}`;
   const QUAL_B = `E2E-QualB-${stamp}`;
-  const BRACKET = `E2E-Bracket-${stamp}`;
+  const FINALS = `E2E-Finals-${stamp}`;
   await page.goto('/');
   await enterPractice(page);
 
@@ -200,7 +209,9 @@ test('RD seeds a bracket from multiple source rounds via the multi-select', asyn
     await form.getByLabel('Label').fill(label);
     await form.getByLabel('Format').selectOption('timed_qual');
     await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
-    await form.getByLabel('Win condition').selectOption('BestLap');
+    // Best lap = the converged Best-of-N with N = 1 (9705af5).
+    await form.getByLabel('Win condition').selectOption('BestOfN');
+    await form.getByLabel('Laps', { exact: true }).fill('1');
     await page.getByRole('button', { name: 'Add round', exact: true }).click();
     await expect(
       page.getByRole('list').getByRole('listitem').filter({ hasText: label })
@@ -209,12 +220,12 @@ test('RD seeds a bracket from multiple source rounds via the multi-select', asyn
   await addQual(QUAL_A);
   await addQual(QUAL_B);
 
-  // Add a single_elim bracket seeded FromRanking from BOTH quals via the checkbox multi-select.
+  // Add a head_to_head round seeded FromRanking from BOTH quals via the checkbox multi-select.
   await page.getByRole('button', { name: '+ Add round' }).click();
   const form = page.getByRole('form', { name: 'Add round' });
   await expect(form).toBeVisible();
-  await form.getByLabel('Label').fill(BRACKET);
-  await form.getByLabel('Format').selectOption('single_elim');
+  await form.getByLabel('Label').fill(FINALS);
+  await form.getByLabel('Format').selectOption('head_to_head');
   await form.getByLabel('Eligible class').selectOption({ label: 'Open Class' });
   await form.getByLabel('Seeding').selectOption('FromRanking');
   // The source-rounds multi-select reveals as a checkbox per prior round (issue #51); tick both.
@@ -223,7 +234,7 @@ test('RD seeds a bracket from multiple source rounds via the multi-select', asyn
   await form.getByLabel('Top N').fill('2');
   await page.getByRole('button', { name: 'Add round', exact: true }).click();
   await expect(
-    page.getByRole('list').getByRole('listitem').filter({ hasText: BRACKET })
+    page.getByRole('list').getByRole('listitem').filter({ hasText: FINALS })
   ).toBeVisible({ timeout: 15_000 });
 
   // It persisted on the Director with `source_rounds` carrying BOTH qual ids.
@@ -232,20 +243,20 @@ test('RD seeds a bracket from multiple source rounds via the multi-select', asyn
       id: string;
       rounds?: Array<{ id: string; label: string; seeding: unknown }>;
     }>;
-    return events.find((e) => e.id === 'practice')?.rounds ?? [];
+    return events.find((e) => e.id === director.event)?.rounds ?? [];
   };
   const rounds = await practiceRounds();
   const qualAId = rounds.find((r) => r.label === QUAL_A)?.id;
   const qualBId = rounds.find((r) => r.label === QUAL_B)?.id;
-  const bracket = rounds.find((r) => r.label === BRACKET);
+  const finals = rounds.find((r) => r.label === FINALS);
   expect(qualAId).toBeTruthy();
   expect(qualBId).toBeTruthy();
-  const seeding = bracket?.seeding as { FromRanking?: { source_rounds: string[]; top_n: number } };
+  const seeding = finals?.seeding as { FromRanking?: { source_rounds: string[]; top_n: number } };
   expect(seeding?.FromRanking?.top_n).toBe(2);
   expect(new Set(seeding?.FromRanking?.source_rounds)).toEqual(new Set([qualAId, qualBId]));
 
   // ── Clean up: remove the three rounds + deselect the class. ─────────────────────────────────
-  for (const label of [BRACKET, QUAL_A, QUAL_B]) {
+  for (const label of [FINALS, QUAL_A, QUAL_B]) {
     const id = (await practiceRounds()).find((r) => r.label === label)?.id;
     if (id) await page.request.delete(`${ev}/rounds/${id}`);
   }
@@ -267,7 +278,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const LABEL = `E2E-Guided-${Date.now()}`;
   await page.goto('/');
@@ -322,7 +333,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
       id: string;
       rounds?: Array<{ label: string; params: Record<string, string>; channel_mode?: string }>;
     }>;
-    return events.find((e) => e.id === 'practice')?.rounds?.find((r) => r.label === LABEL);
+    return events.find((e) => e.id === director.event)?.rounds?.find((r) => r.label === LABEL);
   };
   await expect
     .poll(async () => (await practiceRound())?.params?.rounds, { timeout: 15_000 })
@@ -336,7 +347,7 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
     rounds?: Array<{ id: string; label: string }>;
   }>;
   const roundId = rounds
-    .find((e) => e.id === 'practice')
+    .find((e) => e.id === director.event)
     ?.rounds?.find((r) => r.label === LABEL)?.id;
   expect(created).toBeTruthy();
   if (roundId) await page.request.delete(`${ev}/rounds/${roundId}`);
@@ -348,13 +359,13 @@ test('RD adds a round with a guided param and a Static channel mode', async ({
  *
  * The prerequisites (a class with two members, a round) are set up over the real REST/control path
  * (the same writes the Roster/Classes/Rounds stages emit), then the test drives the new UI: it
- * clicks **Fill next heat** and asserts a heat appears in that round's list with the resolved
+ * clicks **Generate heats** and asserts a heat appears in that round’s list with the resolved
  * pilot callsigns + the round tag, and then **builds a heat by hand** from the round's eligible
  * members and asserts it lists too. Nothing about the Heats UI is mocked.
  */
 test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page, director }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Heat-Ace-${SUFFIX}`;
@@ -395,7 +406,10 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
         classes: [classId],
         format: 'timed_qual',
         params: {},
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -420,16 +434,18 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
   await expect(filledRow.getByText(ACE)).toBeVisible();
   await expect(filledRow.getByText(BEE)).toBeVisible();
 
-  // ── Build a heat by hand from the round's eligible members ────────────────────────────────────
-  // No id is typed — the heat id is auto-generated (round-scoped + collision-safe); the RD only
-  // picks a round and a lineup.
+  // ── Add a heat by hand from the round's eligible members ──────────────────────────────────────
+  // No id is typed — the heat id is auto-generated (round-scoped + collision-safe) — and no round
+  // is picked either: "Add heat" lives ON the round, so the builder opens already scoped to it.
   // The build-heat form is a modal Dialog (ux(rounds)): open it, then fill from inside.
-  await page.getByRole('button', { name: '+ Build heat' }).click();
+  await heatRound.getByRole('button', { name: 'Add heat' }).click();
   const buildDialog = page.getByRole('dialog');
   await expect(buildDialog).toBeVisible();
   const buildForm = buildDialog.getByRole('form', { name: 'Build heat' });
   await expect(buildForm).toBeVisible();
-  await buildForm.getByLabel('Build round').selectOption({ label: ROUND_LABEL });
+  await expect(
+    buildDialog.getByRole('heading', { name: `Add a heat to ${ROUND_LABEL}` })
+  ).toBeVisible();
   await buildForm.getByLabel(`Select ${ACE}`).check();
   await buildForm.getByLabel(`Select ${BEE}`).check();
   await page.getByRole('button', { name: 'Schedule heat' }).click();
@@ -454,23 +470,28 @@ test('RD fills a round and builds a heat by hand in the Heats UI', async ({ page
 /**
  * **Generate heats** — fill a whole deterministic round in one action (#216).
  *
- * Set up a class with **four** members and a `round_robin` round (`heat_size: 2`) over the real
+ * Set up a class with **four** members and a `head_to_head` round (`group_size: 2`) over the real
  * write paths — a deterministic format whose field partitions into **two** heats. Then in the Heats
  * UI click the single **Generate heats** control and assert **both** heats appear from that one
  * action (where the old single-step would have drawn only the first). Nothing mocked.
+ *
+ * NOTE: this used to use `round_robin` (`heat_size: 2`) for the same 4-into-2 partition. That
+ * generator was carved out for the primitives-first v0.4 (71d49f2; back with #68–#70) and the server
+ * now 400s the key. Head-to-Head with `group_size: 2` gives the identical deterministic 4 → 2 split,
+ * which is all this spec needs — the subject is fill-all, not the structure.
  */
 test('RD generates a whole round of heats in one action (Generate heats, #216)', async ({
   page,
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ROUND_LABEL = `E2E-GenAll-${SUFFIX}`;
   const CALLS = ['A', 'B', 'C', 'D'].map((c) => `E2E-Gen-${c}-${SUFFIX}`);
 
-  // ── Set up over the real write paths: the Open Class, four rostered members, a round_robin round.
+  // ── Set up over the real write paths: the Open Class, four rostered members, a head_to_head round.
   const classes = (await (await page.request.get(`${base}/classes`)).json()) as Array<{
     id: string;
     name: string;
@@ -492,16 +513,19 @@ test('RD generates a whole round of heats in one action (Generate heats, #216)',
     ...json,
     data: { pilots: pilotIds }
   });
-  // A round_robin round, heat_size 2 → 4 members partition into 2 heats in one round's worth.
+  // A head_to_head round, group_size 2 / rotations 1 → 4 members partition into 2 heats, one pass.
   const round = (await (
     await page.request.post(`${ev}/rounds`, {
       ...json,
       data: {
         label: ROUND_LABEL,
         classes: [classId],
-        format: 'round_robin',
-        params: { rounds: '1', heat_size: '2' },
+        format: 'head_to_head',
+        params: { group_size: '2', rotations: '1' },
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -541,14 +565,16 @@ test('RD generates a whole round of heats in one action (Generate heats, #216)',
  * (Flexible: pick a couple of catalog channels + add a **custom raw-MHz** entry, set the node
  * count), and save. Then set up a class + two members + a round over the real write paths, fill a
  * heat, and assert each pilot's lineup row shows a resolved **channel label** (a band+channel from
- * the catalog) — the assignment the primary (Mock) timer's available channels drive. Nothing mocked.
+ * the catalog) — the assignment drawn from the primary (Mock) timer's available channels. Which
+ * channels the automatic assignment picks is the IMD picker's call and deliberately not pinned here.
+ * Nothing mocked.
  */
 test('RD configures a timer’s channels and a filled heat shows channel labels', async ({
   page,
   director
 }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Chan-Ace-${SUFFIX}`;
@@ -613,7 +639,10 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
         classes: [classId],
         format: 'timed_qual',
         params: {},
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -630,10 +659,23 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
   const filledRow = heatRound.locator('.heat-row').first();
   await expect(filledRow).toBeVisible({ timeout: 15_000 });
-  // The two pilots are assigned the first two available channels (Raceband R1, R2) and the lineup
-  // shows their band+channel labels — the per-heat channel display resolving the raw MHz.
-  await expect(filledRow.locator('.lineup-chan').filter({ hasText: 'Raceband R1' })).toBeVisible();
-  await expect(filledRow.locator('.lineup-chan').filter({ hasText: 'Raceband R2' })).toBeVisible();
+  // Each pilot's lineup row shows a resolved band+channel label — the per-heat channel display
+  // turning the assigned raw MHz back into a name.
+  //
+  // WHICH channels is not pinned, and used to be: this asserted "Raceband R1 and R2, the first two
+  // available". The automatic assignment is IMD-aware now, so from a Raceband pool it picks a
+  // well-separated pair (R1 + R8 on the run that caught this), which is a better answer than the
+  // first two — pinning the old pair would have pinned the worse behaviour. What the display owes
+  // the RD is a real, distinct, resolved channel per seat, so that is what is asserted.
+  const chans = filledRow.locator('.lineup-chan');
+  await expect(chans).toHaveCount(2);
+  const labels = (await chans.allTextContents()).map((t) => t.trim());
+  for (const label of labels) {
+    // A band + channel from the catalog, never the bare MHz and never "unknown" (#416: unknown is a
+    // real state, but not this one — these seats were just assigned).
+    expect(label).toMatch(/^(Raceband|Fatshark|Boscam [ABE]) \S+/);
+  }
+  expect(new Set(labels).size, 'the two seats get different channels').toBe(2);
   if (process.env.GRIDFPV_SHOTS)
     await heatRound.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/heat-channel-labels.png` });
 
@@ -656,23 +698,23 @@ test('RD configures a timer’s channels and a filled heat shows channel labels'
 });
 
 /**
- * **Results (per-class standings) + Advance to bracket** (race redesign Slice 5/6b) — the deliverable
- * proof.
+ * **Results — per-class standings** (race redesign Slice 5/6b) — the deliverable proof.
  *
  * The prerequisites (a class with two members + a `timed_qual` round, its heat filled) are set up
  * over the real REST/control path; then the test drives the **UI**: it runs the filled heat to
- * **Final** (Stage → Arm → Start, lets the sim emit laps, Finish → Finalize), opens **Results** and
- * asserts the **per-class standings populate** with the two pilots, then back in **Rounds & Heats**
- * **Advances to bracket** — asserting a `single_elim` round is created seeded `FromRanking`, and its
- * filled heat's lineup matches the round ranking's top-N. Nothing about the standings/advance UI is
- * mocked.
+ * **Final** (Stage → Start, lets the sim emit laps, Stop → Finalize), opens **Results** and
+ * asserts the **per-class standings populate** with the two pilots — the scored result folding all
+ * the way through to the class standing. Nothing about the standings UI is mocked.
+ *
+ * NOTE: this test also used to click **Advance to bracket** and assert a `single_elim` round was
+ * created seeded `FromRanking`. Both the button and the bracket generator were carved out for the
+ * primitives-first v0.4 (71d49f2) — the advance affordance returns with the tournament builder
+ * (#68–#70), and its coverage belongs with it. The standings half is unchanged and still current, so
+ * only the advance half was dropped rather than rewriting it onto a format it never described.
  */
-test('RD reads per-class standings, then advances a round to a seeded bracket', async ({
-  page,
-  director
-}) => {
+test('RD reads per-class standings off a scored round', async ({ page, director }) => {
   const base = director.baseUrl;
-  const ev = `${base}/events/practice`;
+  const ev = director.eventRoot;
   const json = { headers: { 'Content-Type': 'application/json' } };
   const SUFFIX = Date.now();
   const ACE = `E2E-Std-Ace-${SUFFIX}`;
@@ -708,7 +750,10 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
         classes: [classId],
         format: 'timed_qual',
         params: { rounds: '1' },
+        // Best-lap only RANKS — it never ends a heat — so a scored round must also carry a race
+        // time, else POST /rounds is a 400 (`events.rs`). The rounds form always sends one.
         win_condition: 'BestLap',
+        time_limit_secs: 60,
         seeding: 'FromRoster',
         channel_mode: 'PerHeat'
       }
@@ -734,7 +779,7 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   });
   expect(focused.ok()).toBeTruthy();
 
-  // ── Drive the heat to Final through Live control ─────────────────────────────────────────────
+  // ── Drive the heat to Final through Race control ─────────────────────────────────────────────
   await page.goto('/');
   await enterPractice(page);
   await expect(page.locator('.conn-label')).toHaveText('live', { timeout: 15_000 });
@@ -744,7 +789,8 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
     timeout: 15_000
   });
   // Heat-lifecycle Slices 1–3: Stage → Start (arms; the runtime auto-advances to Running after a
-  // randomized hold). No manual Arm/Start→Running button; ForceEnd is the end-window override.
+  // randomized hold). No manual Arm/Start→Running button; the Stop button (the ForceEnd command
+  // — the label changed, the wire tag did not) is the end-window override.
   await page.getByRole('button', { name: 'Stage', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Staged');
   await page.getByRole('button', { name: 'Start', exact: true }).click();
@@ -759,13 +805,20 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
   };
   await expect.poll(totalLaps, { timeout: 30_000 }).toBeGreaterThan(1);
 
-  await page.getByRole('button', { name: 'ForceEnd', exact: true }).click();
+  await page.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Unofficial', { timeout: 15_000 });
   await page.getByRole('button', { name: 'Finalize', exact: true }).click();
   await expect(page.locator('.phase').first()).toHaveText('Final');
 
   // ── Results → the per-class standings populate with both pilots ───────────────────────────────
+  // The Results screen shows ONE view at a time, chosen from the "Results view" selector (each
+  // round, that round's scored heats, then the event's classes). Having just finalized a heat, the
+  // screen defaults to that round's standings — so the class view is selected explicitly.
   await openTab(page, 'Results');
+  await page
+    .getByRole('region', { name: 'Results' })
+    .getByLabel('Results view')
+    .selectOption({ label: 'Open Class' });
   const standings = page.getByRole('table', { name: /Open Class standings/i });
   await expect(standings).toBeVisible({ timeout: 15_000 });
   await expect(standings.getByText(ACE)).toBeVisible();
@@ -775,59 +828,21 @@ test('RD reads per-class standings, then advances a round to a seeded bracket', 
       .getByRole('region', { name: 'Results' })
       .screenshot({ path: `${process.env.GRIDFPV_SHOTS}/class-standings.png` });
 
-  // ── Rounds & Heats → Advance the qualifying round to a seeded bracket ─────────────────────────
+  // ── Rounds & Heats → the scored round's own heat still lists under it (the round survived the
+  //    score + fold, and its heat resolves to the friendly "<Round> Heat N" name). ───────────────
   await openTab(page, 'Rounds & Heats');
   const heatRound = page.getByRole('region', { name: `Heats for ${ROUND_LABEL}` });
   await expect(heatRound).toBeVisible({ timeout: 15_000 });
-  await heatRound.getByRole('button', { name: 'Advance to bracket' }).click();
-  const advanceForm = page.getByRole('form', { name: `Advance ${ROUND_LABEL} to bracket` });
-  await expect(advanceForm).toBeVisible();
-  // The top_n defaults to the largest power-of-two ≤ the 2-pilot field → 2.
-  await expect(advanceForm.getByLabel('Top N advance')).toHaveValue('2');
-  if (process.env.GRIDFPV_SHOTS)
-    await advanceForm.screenshot({ path: `${process.env.GRIDFPV_SHOTS}/advance-to-bracket.png` });
-  await page.getByRole('button', { name: 'Create & fill bracket' }).click();
-  await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
-
-  // A new single_elim bracket round was created on the Director, seeded FromRanking from the source.
-  // (`GET /events` is the events list; pick the Practice event off it to read its rounds.)
-  const practiceRounds = async (): Promise<
-    Array<{ id: string; format: string; seeding: unknown }>
-  > => {
-    const events = (await (await page.request.get(`${base}/events`)).json()) as Array<{
-      id: string;
-      rounds?: Array<{ id: string; format: string; seeding: unknown }>;
-    }>;
-    return events.find((e) => e.id === 'practice')?.rounds ?? [];
-  };
-  await expect
-    .poll(
-      async () =>
-        (await practiceRounds()).find(
-          (r) =>
-            r.format === 'single_elim' &&
-            typeof r.seeding === 'object' &&
-            r.seeding !== null &&
-            'FromRanking' in (r.seeding as Record<string, unknown>)
-        ),
-      { timeout: 15_000 }
-    )
-    .toBeTruthy();
-
-  // Its seeded bracket heat lists with the ranking's top-N (the two pilots) in the lineup.
-  const bracketLabel = `${ROUND_LABEL} — Bracket`;
-  const bracketRound = page.getByRole('region', { name: `Heats for ${bracketLabel}` });
-  await expect(bracketRound).toBeVisible({ timeout: 15_000 });
-  const bracketHeat = bracketRound.locator('.heat-row').first();
-  await expect(bracketHeat).toBeVisible({ timeout: 15_000 });
-  await expect(bracketHeat.getByText(ACE)).toBeVisible();
-  await expect(bracketHeat.getByText(BEE)).toBeVisible();
-  if (process.env.GRIDFPV_SHOTS)
-    await bracketRound.screenshot({
-      path: `${process.env.GRIDFPV_SHOTS}/seeded-bracket-heats.png`
-    });
+  await expect(heatRound.getByText(`${ROUND_LABEL} Heat 1`)).toBeVisible({ timeout: 15_000 });
 
   // ── Clean up the shared Director's event back to empty. ───────────────────────────────────────
+  const practiceRounds = async (): Promise<Array<{ id: string }>> => {
+    const events = (await (await page.request.get(`${base}/events`)).json()) as Array<{
+      id: string;
+      rounds?: Array<{ id: string }>;
+    }>;
+    return events.find((e) => e.id === director.event)?.rounds ?? [];
+  };
   for (const r of await practiceRounds()) await page.request.delete(`${ev}/rounds/${r.id}`);
   await page.request.put(`${ev}/classes/${classId}/membership`, {
     ...json,

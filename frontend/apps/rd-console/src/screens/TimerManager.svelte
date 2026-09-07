@@ -35,13 +35,19 @@
     CreateTimerRequest,
     Timer,
     TimerKind,
+    TimerNodes,
     UpdateTimerRequest
   } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import {
     DEFAULT_MOCK_LAPS,
     DEFAULT_MOCK_LAP_MS,
+    connectActionLabel,
+    connectionHint,
     isBuiltInMock,
+    isConnectable,
+    isManuallyHeld,
+    isTimerConnected,
     kindLabel,
     kindSummary,
     kindTag,
@@ -49,23 +55,39 @@
     type TimerKindTag
   } from '../lib/timers.js';
   import {
+    bandSelection,
     capabilityTag,
     channelLabel,
     fixedAllowed,
     groupByBand,
     isPlausibleMhz,
-    type CapabilityTag
+    toggleBandSelection,
+    type CapabilityTag,
+    type ChannelBand
   } from '../lib/channels.js';
+  import {
+    DEFAULT_NODE_COUNT,
+    clampExplanation,
+    clampNodeCount,
+    maxNodeCount,
+    nodeCountHint,
+    timerDrifts,
+    timerNodeSummary,
+    timerWidth
+  } from '../lib/timerNodes.js';
   import PluginCallout from './PluginCallout.svelte';
+  import TimerNodesDialog from './TimerNodesDialog.svelte';
 
   let {
     session,
     timers = $bindable([]),
     onchange,
     rowLead,
+    rowNote,
     listHeader,
     listFooter,
-    rowChecked
+    rowChecked,
+    ontune
   }: {
     session: Session;
     /** The latest loaded registry, exposed so a selection owner can reconcile its working set. */
@@ -74,12 +96,28 @@
     onchange?: (timers: Timer[]) => void;
     /** Rendered at the **start** of each row (e.g. the per-event selection checkbox). */
     rowLead?: Snippet<[Timer]>;
+    /**
+     * Rendered **inside** the row, under its config lines — the per-embedder sentence about *this*
+     * timer (e.g. #405's "why this one can't be selected for the event, and what to do about it").
+     * Kept a snippet because the reason is the embedder's business: the standalone Timers page has
+     * no event to refuse a selection for.
+     */
+    rowNote?: Snippet<[Timer]>;
     /** Rendered **above** the list (e.g. nothing today; reserved for selection chrome). */
     listHeader?: Snippet;
     /** Rendered **below** the list (e.g. the selection count + Save). */
     listFooter?: Snippet;
     /** Whether a row is currently selected — drives the row's "checked" highlight in select mode. */
     rowChecked?: (timer: Timer) => boolean;
+    /**
+     * Open the per-timer **Tune** page for a timer (#355). Both hosts offer it, and the *route* they
+     * navigate to is the tuning **scope** (#411): the app-level Timers page opens the timer's own
+     * baseline, the in-event screen opens that event's tune and returns into the event. Optional
+     * still: an embedder with nowhere to navigate to (the setup wizard's embedded Timer step) simply
+     * doesn't offer the action rather than offering one that goes nowhere. The row decides *which*
+     * timers get it (see the button's `{#if}`).
+     */
+    ontune?: (timer: Timer) => void;
   } = $props();
 
   type LoadState =
@@ -118,13 +156,27 @@
       .catch(() => (catalog = []));
   });
 
-  /** A timer's available channels, summarised as band+channel labels (e.g. "Raceband R1, F4 …"). */
+  /**
+   * A timer's **allowed** channels, summarised as band+channel labels (e.g. "Raceband R1, F4 …").
+   *
+   * An empty set is a **configuration gap, not a capability statement** (#117 S1). This line used to
+   * read "No channels available", which is false on exactly the timers it fires for: every real
+   * RotorHazard is `Flexible` — it can tune all 52 catalog channels — and lists none only because
+   * nobody has ticked any yet. Worse, it read as *"nothing to do here"* when it is precisely the
+   * thing to do: with an empty allowed set the server now refuses to seat a heat on this timer
+   * (`NoChannelsAllowed`), and this row's picker is where the RD fixes it.
+   */
   function channelSummary(timer: Timer): string {
     const list = timer.available_channels ?? [];
-    if (list.length === 0) return 'No channels available';
+    if (list.length === 0) return 'No channels chosen — heats cannot be seated on this timer';
     const labels = list.map((mhz) => channelLabel(mhz, catalog));
     const shown = labels.slice(0, 4).join(', ');
     return labels.length > 4 ? `${shown} +${labels.length - 4} more` : shown;
+  }
+
+  /** Whether a timer has no allowed channels chosen — the summary above reads as a warning. */
+  function channelsUnset(timer: Timer): boolean {
+    return (timer.available_channels ?? []).length === 0;
   }
 
   /**
@@ -136,12 +188,15 @@
    */
   const displayTimers = $derived.by(() => {
     if (loadState.kind !== 'ready') return [];
-    // Overlay the poll-fresh, in-memory fields (connection `status` AND `plugin` presence) from the
-    // live-polled list; both are driven by the live connection and only refreshed there.
+    // Overlay the poll-fresh, in-memory fields (connection `status`, `plugin` presence AND the
+    // node count the timer REPORTED) from the live-polled list; all three are driven by the live
+    // connection and only refreshed there. `reported_nodes` (#412) is learned on connect, so
+    // without it here a timer that has just come up would keep reading "no drift" until the
+    // manager happened to reload — hiding exactly the disagreement the RD needs to see.
     const live = new Map(session.timers.map((t) => [t.id, t]));
     return loadState.timers.map((t) => {
       const l = live.get(t.id);
-      return l ? { ...t, status: l.status, plugin: l.plugin } : t;
+      return l ? { ...t, status: l.status, plugin: l.plugin, reported_nodes: l.reported_nodes } : t;
     });
   });
 
@@ -149,6 +204,108 @@
   async function reload() {
     await load();
     if (loadState.kind === 'ready') onchange?.(loadState.timers);
+  }
+
+  // ── Manual connect / disconnect (issue #383) ────────────────────────────────
+  // The RD's "is this timer even reachable?" control. It is deliberately usable **with no active
+  // event**: that is the whole point of #383 — setting up at a venue, the RD needs to know whether
+  // a URL is right and whether the plugin is installed *before* an event exists to select it for.
+  // `POST /timers/{id}/connect` sets a server-side hold and the Director's reconciler dials it on
+  // its next tick, publishing the same `status` + `plugin` the event-driven path does — so the
+  // StatusPill and PluginCallout already on the row are the readout; nothing new is needed there.
+
+  /**
+   * How often this screen re-reads `GET /timers` while a manual hold is up (#383).
+   *
+   * The session's own timer poll only runs **inside an event** ({@link Session.selectEvent} starts
+   * it), so outside one nothing would ever refresh `status` — the RD would press Connect and watch
+   * a pill that never moved. This screen therefore polls for itself whenever a hold exists, which
+   * is exactly the window where a moving status is the answer the RD is waiting for. Brisker than
+   * the session poll because the RD is actively watching this row.
+   */
+  const HOLD_POLL_MS = 1500;
+
+  /**
+   * How long after a create/edit to take the second look that catches the reconciler's automatic
+   * dial (#462): comfortably past its 1.5s sweep interval, short enough that the RD watching the
+   * fresh row sees it move.
+   */
+  const AUTO_DIAL_REFRESH_MS = 2500;
+
+  /**
+   * Whether any timer is currently manually held — the screen self-polls while one is.
+   *
+   * Reads the loaded list (kept fresh by the poll below and by {@link applyTimer}) **and** the
+   * session's in-event list, so a hold another console placed still starts our poll.
+   */
+  const anyHeld = $derived(
+    (loadState.kind === 'ready' && loadState.timers.some(isManuallyHeld)) ||
+      session.timers.some(isManuallyHeld) ||
+      // A row mid-dial keeps the poll alive even before any hold is visible in the snapshot —
+      // "Connecting" is exactly the status an RD is standing there waiting to see move (#462).
+      (loadState.kind === 'ready' && loadState.timers.some((t) => t.status === 'Connecting'))
+  );
+
+  $effect(() => {
+    if (!anyHeld) return;
+    const handle = setInterval(() => void refreshQuietly(), HOLD_POLL_MS);
+    return () => clearInterval(handle);
+  });
+
+  /**
+   * Re-read the registry **without** flipping back to the loading state — a poll must not blank the
+   * list the RD is reading. A failed poll keeps the last good list; the next tick retries.
+   */
+  async function refreshQuietly() {
+    try {
+      const list = await session.listTimers();
+      if (loadState.kind === 'ready') loadState = { kind: 'ready', timers: list };
+      timers = list;
+    } catch {
+      /* keep the last good list; the next tick retries */
+    }
+  }
+
+  /** Fold one server-authoritative {@link Timer} back into the loaded list, in place. */
+  function applyTimer(updated: Timer) {
+    if (loadState.kind !== 'ready') return;
+    const next = loadState.timers.map((t) => (t.id === updated.id ? updated : t));
+    loadState = { kind: 'ready', timers: next };
+    timers = next;
+  }
+
+  /** The timer whose connect/disconnect call is in flight (its row's button shows the spinner). */
+  let connecting = $state<string | undefined>(undefined);
+
+  /**
+   * Toggle the manual connection hold on a timer. The response is the updated `Timer`, so the
+   * button flips immediately — `status` follows a tick later once the reconciler acts, which the
+   * hold poll above picks up.
+   */
+  async function toggleConnection(timer: Timer) {
+    if (connecting) return;
+    const held = isManuallyHeld(timer);
+    connecting = timer.id;
+    try {
+      const updated = held
+        ? await session.disconnectTimer(timer.id)
+        : await session.connectTimer(timer.id);
+      if (updated === undefined) {
+        // The RD cancelled the token prompt on a gated Director — the hold is unchanged.
+        toast.info(`A control token is required to ${held ? 'disconnect' : 'connect'} a timer.`);
+        return;
+      }
+      applyTimer(updated);
+      toast.success(held ? `Disconnected “${updated.name}”.` : `Connecting to “${updated.name}”…`);
+    } catch (err) {
+      // A Mock answers 400 (nothing to dial) — it should never reach here, since the control is
+      // only offered for a RotorHazard timer, but say something useful rather than raw HTTP.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/\b400\b/.test(msg)) toast.error(`“${timer.name}” has no connection to test.`);
+      else toast.error(msg);
+    } finally {
+      connecting = undefined;
+    }
   }
 
   // ── The add / edit dialog ──────────────────────────────────────────────────
@@ -165,13 +322,43 @@
   let saving = $state(false);
   let formError = $state<string | undefined>(undefined);
 
+  /**
+   * The gate-bounce window this form OFFERS a new timer, and the ceiling it accepts — in seconds
+   * (#517).
+   *
+   * **The server is authoritative** (`timers::MAX_SAME_PASS_WINDOW_MICROS`, and it refuses rather
+   * than clamps); these are the field's affordances — a spinner that stops in the right place and
+   * a hint that says why — exactly as `maxNodeCount` is for the width. They are not on the wire, so
+   * a change to the Rust cap must be echoed here; the refusal message is the backstop if it is not.
+   */
+  const DEFAULT_SAME_PASS_WINDOW_SECS = 1;
+  const MAX_SAME_PASS_WINDOW_SECS = 2;
+
   // ── Channel config (race redesign Slice 4b) ──────────────────────────────────
   // The capability (Fixed | Flexible), node count, and the chosen available channels. The chosen set
   // is held as a `Set<number>` of raw MHz (catalog picks + custom entries); for a Fixed timer it is
   // limited to the timer's built-in allowed set (`Fixed.channels`); a Flexible timer can add custom.
-  const DEFAULT_NODE_COUNT = 8;
   let formCapability = $state<CapabilityTag>('Flexible');
   let formNodeCount = $state(String(DEFAULT_NODE_COUNT));
+  /**
+   * The width the Node-count field was **seeded** with, so submit can tell "the RD set a width"
+   * from "the RD never touched this field" (#412).
+   *
+   * `node_count` is an *override*: sending it pins the width, and a pinned width that disagrees
+   * with the hardware is precisely the bug #412 was filed for. Before #412 this form always sent
+   * it, so editing a timer's name would silently pin its width and undo "follow the timer". Now it
+   * is only sent when it actually changed — clearing the override, and per-node enable/disable,
+   * live in the Nodes dialog, which is the surface that can express them.
+   */
+  let seededNodeCount = $state(String(DEFAULT_NODE_COUNT));
+  /**
+   * The gate-bounce window, in **seconds** for the field (the wire is µs) — #517.
+   *
+   * Seconds because that is how an RD thinks about it and how the sibling setting (a round's min
+   * lap) is already expressed; the conversion happens once, on submit. `'0'` is a real value here,
+   * not an empty field: it spells "no bounce rule", which is what a timer that never bounces wants.
+   */
+  let formSamePassWindow = $state('0');
   let formChannels = $state<Set<number>>(new Set());
   // A Fixed timer's built-in allowed set (its physically-supported channels); the picker offers
   // exactly these, and `formChannels` is the subset the RD makes available. Empty ⇒ all catalog.
@@ -194,10 +381,19 @@
 
   function resetChannelForm(timer?: Timer) {
     formCapability = capabilityTag(timer?.channel_capability);
-    formNodeCount = String(timer?.node_count ?? DEFAULT_NODE_COUNT);
+    // The EFFECTIVE width (override → reported → fallback), not the raw override: showing a blank
+    // or a stale 8 for a timer that is following its hardware would misreport the heat-size cap.
+    formNodeCount = String(timer ? timerWidth(timer) : DEFAULT_NODE_COUNT);
+    seededNodeCount = formNodeCount;
     formChannels = new Set(timer?.available_channels ?? []);
     formFixedAllowed = fixedAllowed(timer?.channel_capability);
     formCustomMhz = '';
+    // A NEW timer is offered the 1s default; an existing one shows what it actually has, including
+    // `0` for a timer the RD deliberately left without a rule. Unlike the node-count override there
+    // is nothing to disambiguate — the field always sends, because `0` is a meaningful answer.
+    formSamePassWindow = timer
+      ? String((timer.same_pass_window_micros ?? 0) / 1_000_000)
+      : String(DEFAULT_SAME_PASS_WINDOW_SECS);
   }
 
   export function openAdd() {
@@ -236,6 +432,29 @@
     if (next.has(mhz)) next.delete(mhz);
     else next.add(mhz);
     formChannels = next;
+  }
+
+  /**
+   * Select or clear a whole band (#429) — the realistic unit of the decision. An RD running
+   * Raceband ticks all eight and nothing else; doing that a chip at a time is eight clicks for one
+   * choice, on a screen #117 S1 made load-bearing (an empty allowed set now refuses a heat fill).
+   *
+   * Both of these read `group.entries` — the entries the picker **offered** — so a Fixed timer's
+   * band box ticks only what that timer can actually tune, never the raw catalog.
+   */
+  function toggleBand(group: ChannelBand) {
+    // The full offer (every offered band's entries) rides along so clearing a band cannot delete
+    // a frequency another band still holds — Raceband R7 and Fatshark F8 share 5880 (#464).
+    formChannels = toggleBandSelection(
+      group.entries,
+      formChannels,
+      offeredBands.flatMap((b) => b.entries)
+    );
+  }
+
+  /** How this band's box reads: checked / unchecked / indeterminate. */
+  function bandState(group: ChannelBand) {
+    return bandSelection(group.entries, formChannels);
   }
 
   /** Add a custom raw-MHz channel (Flexible only). Validates a plausible 5.8 GHz centre. */
@@ -283,7 +502,14 @@
 
   /** The available channels the request carries, ordered by the catalog then custom ascending. */
   function buildAvailable(): number[] {
-    const order = new Map(catalog.map((e, i) => [e.mhz, i]));
+    // FIRST index wins for a coincident frequency. `new Map(catalog.map(...))` would keep the LAST,
+    // and 5880 is both Raceband R7 (index 6) and Fatshark F8 (index 15) — so R7 sorted as if it
+    // were F8 and landed after R8. Same rule `channelLabel` documents: the first catalog entry
+    // whose MHz matches wins, which is why the picker calls 5880 "Raceband R7" in the first place.
+    const order = new Map<number, number>();
+    catalog.forEach((e, i) => {
+      if (!order.has(e.mhz)) order.set(e.mhz, i);
+    });
     return [...formChannels].sort((a, b) => {
       const ai = order.get(a);
       const bi = order.get(b);
@@ -322,14 +548,37 @@
       formError = built.problem;
       return;
     }
-    const nodeCount = Number(formNodeCount);
-    if (!Number.isFinite(nodeCount) || nodeCount < 1) {
+    const typedNodeCount = Number(formNodeCount);
+    if (!Number.isFinite(typedNodeCount) || typedNodeCount < 1) {
       formError = 'Node count must be at least 1.';
       return;
     }
+    // #463: never wider than the timer said it is. The `max` on the input stops the spinner, but a
+    // typed digit walks straight past it — so the clamp is applied here, and the RD is TOLD what
+    // happened rather than watching their number silently change. A never-reported timer (a Mock, a
+    // RotorHazard nobody has dialed) has no ceiling: offline setup keeps its free override.
+    const clamp = editing
+      ? clampNodeCount(editing, Math.round(typedNodeCount))
+      : { value: Math.round(typedNodeCount), clamped: false };
+    if (clamp.clamped && editing) {
+      formNodeCount = String(clamp.value);
+      formError = clampExplanation(editing, Math.round(typedNodeCount));
+      return;
+    }
+    const nodeCount = clamp.value;
     const channel_capability = buildCapability();
     const available_channels = buildAvailable();
-    const node_count = Math.round(nodeCount);
+    // Only carried when the RD actually set a width — see `seededNodeCount`. Omitted otherwise, so
+    // an unrelated edit never pins an override the RD did not ask for.
+    const node_count = String(formNodeCount) === seededNodeCount ? undefined : nodeCount;
+    // Seconds on screen, µs on the wire. Always sent: unlike the width override, `0` here is a real
+    // answer ("this gate does not bounce"), so there is no "untouched" state to preserve.
+    const windowSecs = Number(formSamePassWindow);
+    if (!Number.isFinite(windowSecs) || windowSecs < 0 || windowSecs > MAX_SAME_PASS_WINDOW_SECS) {
+      formError = `Same-pass window must be between 0 and ${MAX_SAME_PASS_WINDOW_SECS} seconds (0 turns it off).`;
+      return;
+    }
+    const same_pass_window_micros = Math.round(windowSecs * 1_000_000);
     saving = true;
     formError = undefined;
     try {
@@ -339,7 +588,8 @@
           kind: built.kind,
           channel_capability,
           node_count,
-          available_channels
+          available_channels,
+          same_pass_window_micros
         };
         const updated = await session.updateTimer(editing.id, req);
         if (!updated) {
@@ -353,7 +603,8 @@
           kind: built.kind,
           channel_capability,
           node_count,
-          available_channels
+          available_channels,
+          same_pass_window_micros
         };
         const created = await session.createTimer(req);
         if (!created) {
@@ -364,11 +615,55 @@
       }
       formOpen = false;
       await reload();
+      // #462 follow-up (field, 2026-08-28): the reconciler grants a new RotorHazard timer its
+      // automatic dial on its NEXT sweep — AFTER this reload's snapshot. Without a second look
+      // the screen shows no hold, so the hold-poll below never starts and the row sits stale on
+      // its pre-dial status until the RD navigates away and back. One delayed quiet refresh sees
+      // the auto-hold land; the ordinary hold-poll takes over from there.
+      setTimeout(() => void refreshQuietly(), AUTO_DIAL_REFRESH_MS);
     } catch (err) {
       formError = err instanceof Error ? err.message : String(err);
     } finally {
       saving = false;
     }
+  }
+
+  // ── Node configuration (#412) ───────────────────────────────────────────────
+  // The row's node reading is a BUTTON, because it is the only place an RD can see reported vs
+  // configured and fix a timer that GridFPV has the wrong width for. The dialog owns the read and
+  // the write; this screen only re-folds the timer it hands back, so the row updates without a
+  // full reload (which would blank the list under an RD mid-setup).
+  let nodesTimer = $state<Timer | undefined>(undefined);
+  let nodesOpen = $state(false);
+
+  function openNodes(timer: Timer) {
+    nodesTimer = timer;
+    nodesOpen = true;
+  }
+
+  /**
+   * Fold an accepted node write back into the loaded row. The `PUT` answers with a `TimerNodes`
+   * view rather than a `Timer`, so the row's three inputs are reconstructed from it — the width
+   * override, the observation, and the disabled set (the complement of `enabled`, which is what
+   * the registry stores).
+   */
+  function applyNodes(view: TimerNodes) {
+    if (loadState.kind !== 'ready') return;
+    const enabled = new Set(view.enabled);
+    const disabled_nodes = view.nodes.map((n) => n.node).filter((n) => !enabled.has(n));
+    const next = loadState.timers.map((t) =>
+      t.id === view.timer
+        ? {
+            ...t,
+            node_count: view.configured ?? undefined,
+            reported_nodes: view.reported ?? undefined,
+            disabled_nodes
+          }
+        : t
+    );
+    loadState = { kind: 'ready', timers: next };
+    timers = next;
+    onchange?.(next);
   }
 
   // ── Remove ──────────────────────────────────────────────────────────────────
@@ -433,15 +728,67 @@
               <Badge tone="neutral" variant="outline"
                 >{capabilityTag(timer.channel_capability)}</Badge
               >
-              <span class="nodes" title="Node count — the heat-size cap">
-                {timer.node_count ?? DEFAULT_NODE_COUNT} nodes
-              </span>
-              <span class="channel-summary">{channelSummary(timer)}</span>
+              <!-- The node reading is the entry point to the node config (#412): this is where an
+                   RD sees "reported 4, configured 8" and where they clear it. -->
+              <button
+                type="button"
+                class="nodes"
+                title={`Configure the nodes on “${timer.name}” — the heat-size cap`}
+                onclick={() => openNodes(timer)}
+              >
+                {timerNodeSummary(timer)}
+              </button>
+              {#if timerDrifts(timer)}
+                <Badge tone="danger" variant="outline">Timer reports {timer.reported_nodes}</Badge>
+              {/if}
+              <span class="channel-summary" class:unset={channelsUnset(timer)}
+                >{channelSummary(timer)}</span
+              >
             </div>
+            <!-- The manual-hold readout (#383): only while a hold is up, and only when there is
+                 something to say beyond the pill — "Reachable", or what to check when it isn't. -->
+            {#if connectionHint(timer)}
+              <span class="connect-hint" role="status">{connectionHint(timer)}</span>
+            {/if}
+            {@render rowNote?.(timer)}
           </div>
           <StatusPill status={timer.status} label={timer.status} size="sm" />
-          <PluginCallout {timer} baseUrl={session.baseUrl} />
+          <!-- `session` is what unlocks the guided install's Restart-timer action (#386);
+               without it the callout degrades to chip + guide + download and step 4 points
+               at a button that never renders. -->
+          <PluginCallout {timer} baseUrl={session.baseUrl} {session} />
           <div class="timer-actions">
+            <!-- Connect / Disconnect (#383) — RotorHazard only (a Mock has nothing to dial), and
+                 usable with NO active event: the RD tests a URL where timers are configured. -->
+            {#if isConnectable(timer)}
+              <Button
+                variant={isManuallyHeld(timer) ? 'secondary' : 'primary'}
+                size="sm"
+                loading={connecting === timer.id}
+                title={`${connectActionLabel(timer)} “${timer.name}”`}
+                onclick={() => toggleConnection(timer)}
+              >
+                {connectActionLabel(timer)}
+              </Button>
+            {/if}
+            <!-- Tune (#355) — the entry point to the per-timer gate-tuning page. Offered on the
+                 timers that HAVE a gate to tune: the built-in Mock has no radio, and a timer this
+                 console can't dial has nothing to read. Disabled (not hidden) while disconnected,
+                 so the RD learns the action exists and what it needs, rather than wondering where
+                 tuning went. -->
+            {#if ontune && isConnectable(timer)}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={!isTimerConnected(timer)}
+                title={isTimerConnected(timer)
+                  ? `Tune the gate thresholds on “${timer.name}”`
+                  : `Connect “${timer.name}” first — tuning reads its live signal.`}
+                onclick={() => ontune(timer)}
+              >
+                Tune
+              </Button>
+            {/if}
             <Button variant="ghost" size="sm" onclick={() => openEdit(timer)}>Edit</Button>
             {#if !isBuiltInMock(timer)}
               <Button
@@ -496,7 +843,15 @@
         </Field>
       </div>
     {:else}
-      <Field label="URL" hint="Stored now; the live connection lands in a later slice (2b).">
+      <!--
+        The URL is dialed verbatim by the RH connector — no trimming, no scheme defaulting — so the
+        hint names the exact shape. A trailing slash, a missing scheme, or https against a
+        plain-HTTP RH all fail with the same opaque connection error (#381).
+      -->
+      <Field
+        label="URL"
+        hint={'The RotorHazard server’s base URL — http://<host>:5000. Dialed exactly as entered: use plain http (not https), and no trailing slash.'}
+      >
         <Input
           type="url"
           bind:value={formUrl}
@@ -521,10 +876,38 @@
           <option value="Fixed">Fixed (built-in set)</option>
         </Select>
       </Field>
-      <Field label="Node count" hint="Slots on the timer — caps a heat's size.">
-        <Input type="number" min="1" step="1" bind:value={formNodeCount} aria-label="Node count" />
+      <!-- #463: the ceiling is what the timer reported. `max` stops the spinner and the hint says
+           why; a typed digit is caught (and explained) on submit. A never-reported timer gets no
+           ceiling at all, so configuring one offline still works. -->
+      <Field label="Node count" hint={nodeCountHint(editing)}>
+        <Input
+          type="number"
+          min="1"
+          step="1"
+          max={editing ? maxNodeCount(editing) : undefined}
+          bind:value={formNodeCount}
+          aria-label="Node count"
+        />
       </Field>
     </div>
+
+    <!-- #517. This is GATE config, not race config: how long after a crossing this timer keeps
+         re-detecting the same quad. It sits with the hardware settings and NOT with the round's
+         min-lap floor, which is a competition rule and lives on the round. The hint says which is
+         which, because conflating them is exactly what this issue was filed about. -->
+    <Field
+      label="Same-pass window (seconds)"
+      hint="Two crossings closer together than this are one physical pass — a gate bounce, not a lap. 0 turns it off. This is about the gate's antenna; the round's min lap time is the racing rule."
+    >
+      <Input
+        type="number"
+        min="0"
+        max={MAX_SAME_PASS_WINDOW_SECS}
+        step="0.1"
+        bind:value={formSamePassWindow}
+        aria-label="Same-pass window in seconds"
+      />
+    </Field>
 
     <Field
       label="Available channels"
@@ -542,7 +925,18 @@
         {:else}
           {#each offeredBands as group (group.band)}
             <div class="channel-band">
-              <span class="band-name">{group.band}</span>
+              <!-- Tri-state band box (#429): checked = every offered channel, indeterminate = a
+                   partial band (a normal state, not an error), unchecked = none. -->
+              <label class="band-head">
+                <input
+                  type="checkbox"
+                  checked={bandState(group) === 'all'}
+                  indeterminate={bandState(group) === 'some'}
+                  onchange={() => toggleBand(group)}
+                  aria-label={`All ${group.band} channels`}
+                />
+                <span class="band-name">{group.band}</span>
+              </label>
               <div class="band-channels">
                 {#each group.entries as entry (entry.mhz + '-' + entry.channel)}
                   <label class="channel-chip" class:on={formChannels.has(entry.mhz)}>
@@ -603,6 +997,12 @@
     </Button>
   {/snippet}
 </Dialog>
+
+<!-- Node configuration (#412), stacked the same way the add/edit dialog is. Mounted lazily: it
+     reads `GET /timers/{id}/nodes` on open, and there is nothing to read until the RD asks. -->
+{#if nodesTimer}
+  <TimerNodesDialog {session} timer={nodesTimer} bind:open={nodesOpen} onapplied={applyNodes} />
+{/if}
 
 <style>
   .timer-manager {
@@ -695,7 +1095,10 @@
   /* When the manager is embedded in select mode, the chosen rows read as "on". */
   .timer-row.checked {
     border-color: var(--gf-accent);
-    background: var(--gf-accent-soft);
+    /* Flattened against the row's own surface rather than --gf-accent-soft's translucent wash:
+       the background TRANSITIONS on check, and animating an alpha layer over a large box is the
+       WebKitGTK compositing path #476 implicates. Same idiom as Marshaling's .danger-zone. */
+    background: color-mix(in srgb, var(--gf-accent) 16%, var(--gf-surface));
   }
   .timer-main {
     display: flex;
@@ -724,6 +1127,13 @@
     gap: var(--gf-space-2);
     flex-shrink: 0;
   }
+  /* The manual-hold readout (#383) — sits under the row's config lines, sized like real data
+     (not chrome) because at a venue this sentence is what the RD is squinting at in sunlight. */
+  .connect-hint {
+    margin-top: 2px;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
 
   .timer-form {
     display: flex;
@@ -747,15 +1157,39 @@
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
   }
+  /* The node reading is a control, not a label (#412) — styled to read as the row's other data
+     while still being obviously pressable (underline on hover, a real focus ring). */
   .timer-channels .nodes {
+    font: inherit;
     font-weight: var(--gf-font-weight-semibold);
     color: var(--gf-text);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: var(--gf-border-strong);
+    text-underline-offset: 3px;
+  }
+  .timer-channels .nodes:hover {
+    text-decoration-color: var(--gf-accent);
+    color: var(--gf-accent);
+  }
+  .timer-channels .nodes:focus-visible {
+    outline: none;
+    border-radius: var(--gf-radius-xs);
+    box-shadow: var(--gf-focus-ring);
   }
   .channel-summary {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* An empty allowed set is a gap the RD has to close before a heat can be seated (#117 S1) —
+     it reads as a warning, not as neutral config. */
+  .channel-summary.unset {
+    color: var(--gf-warn);
   }
 
   .form-rule {
@@ -784,6 +1218,17 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-2);
+  }
+  .band-head {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    align-self: flex-start;
+    cursor: pointer;
+    user-select: none;
+  }
+  .band-head input {
+    margin: 0;
   }
   .band-name {
     font-size: var(--gf-font-size-xs);

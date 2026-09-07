@@ -110,3 +110,43 @@ describe('EventPicker — selectable event-name box in the delete dialog', () =>
     await waitFor(() => expect(confirm).toBeEnabled());
   });
 });
+
+describe('EventPicker — the empty picker is a first run, not an empty list (#414)', () => {
+  /** Render the picker against a Director that holds NO events — a brand-new install. */
+  function renderEmptyPicker() {
+    const { session } = makeTestSession({
+      noEnter: true,
+      listEventsImpl: vi.fn(async () => []),
+      getActiveEventImpl: vi.fn(async () => ({ event: null }))
+    });
+    render(EventPicker, { session, onhome: noop });
+  }
+
+  it('offers a create-your-first-event call to action when no events exist', async () => {
+    renderEmptyPicker();
+    // A heading + a primary button, not a dashed "nothing here" apology: with the built-in
+    // Practice event gone, creating an event is the whole job of a first run.
+    expect(
+      await screen.findByRole('heading', { name: 'Create your first event' })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create your first event' })).toBeInTheDocument();
+  });
+
+  it('the call to action opens the SAME create dialog the header button does', async () => {
+    renderEmptyPicker();
+    const cta = await screen.findByRole('button', { name: 'Create your first event' });
+    await fireEvent.click(cta);
+    const form = await screen.findByRole('form', { name: 'New event' });
+    // "Set up event after creating" is ticked by default, so creating hands straight off to the
+    // existing setup wizard (#97) — there is no second wizard here.
+    const setup = screen.getByRole('checkbox', { name: 'Set up event after creating' });
+    expect(setup).toBeChecked();
+    expect(within(form).getByLabelText('Event name')).toBeInTheDocument();
+  });
+
+  it('shows no Practice row — the built-in event is gone', async () => {
+    renderEmptyPicker();
+    await screen.findByRole('heading', { name: 'Create your first event' });
+    expect(screen.queryByRole('button', { name: /Practice/ })).toBeNull();
+  });
+});

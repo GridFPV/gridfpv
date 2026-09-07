@@ -20,17 +20,14 @@ import type {
   HeatId,
   HeatSummary,
   Pilot,
-  PilotId,
-  PilotProgress,
   RoundDef
 } from '@gridfpv/types';
 import type { Session } from './session.svelte.js';
 import { RaceAudioPlayer } from './raceAudio.js';
 import { CalloutQueue, lapCalloutText } from './callouts.js';
 import { useEndOfRaceTones } from './endTones.svelte.js';
-import { useLapCallouts } from './lapCallouts.svelte.js';
-import { createCompetitorNameResolver } from './competitorName.js';
-import { channelLabel } from './channels.js';
+import { useCrossingTones, useLapCallouts } from './lapCallouts.svelte.js';
+import { buildCompetitorNames } from './competitorName.js';
 import { fixedEndWindowMicros } from './raceWindow.js';
 
 /** The shared controller surface the pages use (the Live page's Callouts toggle). */
@@ -124,25 +121,24 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
   const toneCue = $derived(currentRound?.start_procedure?.tone);
   const windowMicros = $derived(fixedEndWindowMicros(currentRound));
 
-  // The shared callsign resolver (friendly-names rule) — roster binding first, explicit
-  // register second, channel label for a bare node seat, raw ref last.
-  const pilotById = $derived(new Map<PilotId, Pilot>(pilots.map((p) => [p.id, p])));
-  const explicitPilotByRef = $derived(
-    new Map<CompetitorRef, PilotId>(
-      (live?.progress ?? [])
-        .filter((p): p is PilotProgress & { pilot: PilotId } => p.pilot != null)
-        .map((p) => [p.competitor, p.pilot])
-    )
+  // The shared callsign resolver (friendly-names rule) — roster binding first, explicit register
+  // second, the `"Node 7 · Raceband R7"` seat label for a bare node seat, raw ref last. Built from
+  // the ONE shared input assembly every screen uses (#416).
+  const names = $derived(
+    buildCompetitorNames({
+      pilots,
+      progress: live?.progress,
+      heat: heats.find((h) => h.heat === heat),
+      catalog,
+      timer: session.primaryTimer,
+      membership: session.currentEvent?.classes_membership,
+      // #117 S3: the event's channel layouts. Paired with each heat's own `layout`, they are the
+      // per-node channel mapping a `node-{i}` seat resolves through — the source that used to be
+      // `available_channels[node]`, which carried no per-node meaning at all.
+      layouts: session.currentEvent?.channel_layouts
+    })
   );
-  const channelByRef = $derived.by(() => {
-    const summary = heats.find((h) => h.heat === heat);
-    const map = new Map<CompetitorRef, string>();
-    for (const [ref, mhz] of summary?.frequencies ?? []) map.set(ref, channelLabel(mhz, catalog));
-    return map;
-  });
-  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() =>
-    createCompetitorNameResolver({ pilotById, explicitPilotByRef, channelByRef })
-  );
+  const competitorName = $derived.by<(ref: CompetitorRef) => string>(() => names.name);
 
   // ── Start tone: fire on an OBSERVED transition into Running, never a late join ────────────
   // (Unchanged logic — see the original Live-page comment block. Hoisted here, "late join"
@@ -179,22 +175,46 @@ export function mountRaceDayAudio(session: Session): RaceDayAudio {
     }
   );
 
-  // ── Lap callouts (informational layer — mute-scoped) ──────────────────────────────────────
+  // ── Crossing tones (informational layer — mute-scoped) ────────────────────────────────────
+  // The TONE half, and the whole of #397: one pip per gate CROSSING — holeshot, counted lap, and
+  // a pass the min-lap floor rejected alike — where the console used to pip only per recorded
+  // *lap* and so was silent for exactly the crossings an RD most needs to hear. A pip on a seat
+  // nobody is flying is the point, not a bug: that is how a too-sensitive gate becomes audible.
+  //
+  // Novelty is the crossing's `pass_ref`, never the arrival of a frame (see the detector); the
+  // player self-gates on the callouts mute, so the mute has one owner and cannot drift.
+  useCrossingTones(
+    () => session.currentEvent?.id,
+    () => phase,
+    () => live?.crossings,
+    () => audio.playCrossingBeep()
+  );
+
+  // ── Spoken lap callouts (informational layer — mute-scoped) ────────────────────────────────
+  // The VOICE half, still driven by recorded laps: a lap number and a lap time are the payload
+  // of a callout, and a holeshot or a rejected pass has neither to say. So the tone fires per
+  // crossing and the speech per lap — no crossing is both pipped twice and no lap is spoken
+  // twice. (The pip that used to fire from here moved to the crossing feed above; leaving it
+  // would double-pip every counted lap.)
+  //
+  // Both detectors now read the SAME feed and key on the same `pass_ref` (#417): a lap is spoken
+  // by the pass that closed it, never by a count that moved. `progress` still rides along, purely
+  // so the callout can carry the lap time.
   useLapCallouts(
     () => phase,
     () => heat,
     () => live?.race_started_at,
+    () => live?.crossings,
     () => live?.progress,
     (crossing) => {
       if (audio.muted) return;
-      audio.playCrossingBeep();
-      const name = competitorName(crossing.ref);
+      // Spoken, not printed: a seat label carries its channel after a "·" separator, which reads
+      // as punctuation on screen and as noise out loud — so the callout speaks the node alone.
+      // A ref that resolved to nothing but itself is still skipped rather than spelled out.
+      const resolved = competitorName(crossing.ref);
+      const name = resolved === crossing.ref ? undefined : resolved.split(' · ')[0];
       callouts.enqueue({
-        text: lapCalloutText(
-          name === crossing.ref ? undefined : name,
-          crossing.lap,
-          crossing.lastLapMicros
-        ),
+        text: lapCalloutText(name, crossing.lap, crossing.lastLapMicros),
         key: crossing.ref
       });
     }

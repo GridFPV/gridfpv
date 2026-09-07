@@ -14,28 +14,29 @@
  *    must converge.
  *  - seam 7 → version negotiation: a subscribe carrying an unsupported `contract_version` is
  *    answered with a `VersionMismatch` error frame + close; an absent version streams normally.
+ *  - seam 8 (#422) → resume: an envelope states the log offset it was folded through, and a
+ *    resume — from that offset or from a stale one — never hands the client an older fold.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { connect } from '../packages/protocol-client/dist/index.js';
-import { type Director } from '../test-harness/director.ts';
 import {
-  eventRoot,
   openSocket,
   rdControl,
-  startContractDirector,
+  startDirectorWithEvent,
   waitForFrame,
-  wsBase
+  wsBase,
+  type ContractDirector
 } from './harness.ts';
 
 const TOKEN = 'rd-stream-contract';
 const HEAT = 'q-1';
 
-let director: Director;
+let director: ContractDirector;
 
 beforeAll(async () => {
-  director = await startContractDirector({ token: TOKEN, simLaps: 2, simLapMs: 40 });
-  const ack = await rdControl(director.baseUrl, TOKEN, {
+  director = await startDirectorWithEvent({ token: TOKEN, simLaps: 2, simLapMs: 40 });
+  const ack = await rdControl(director, TOKEN, {
     ScheduleHeat: { heat: HEAT, lineup: ['A', 'B'] }
   });
   expect(ack.ok).toBe(true);
@@ -51,7 +52,7 @@ afterAll(async () => {
  * event (#72) here.
  */
 async function snapshotCursor(path: string): Promise<number> {
-  const res = await fetch(`${eventRoot(director.baseUrl)}${path}`);
+  const res = await fetch(`${director.eventRoot}${path}`);
   const snap = (await res.json()) as { cursor: number };
   return snap.cursor;
 }
@@ -59,11 +60,11 @@ async function snapshotCursor(path: string): Promise<number> {
 describe('seam 2: stream frames are externally-tagged StreamMessage', () => {
   it('a control append produces a `{ Change: ChangeEnvelope }` frame, not a bare envelope', async () => {
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
 
     // A heat-state change after the subscribe re-folds the scope and pushes one envelope.
-    await rdControl(director.baseUrl, TOKEN, { Stage: { heat: HEAT } });
+    await rdControl(director, TOKEN, { Stage: { heat: HEAT } });
     await waitForFrame(frames, (f) => f.length > 0);
 
     const frame = frames[0] as Record<string, unknown>;
@@ -81,13 +82,11 @@ describe('seam 2: stream frames are externally-tagged StreamMessage', () => {
     // Push the log tail far past the retained window (256), then resume from offset 1: that
     // offset is below the window, so the server sends the terminal ReSnapshotRequired signal.
     for (let i = 0; i < 300; i++) {
-      await rdControl(director.baseUrl, TOKEN, {
+      await rdControl(director, TOKEN, {
         Register: { adapter: 'sim', competitor: `x${i}`, pilot: `p${i}` }
       });
     }
-    const { ws, frames, closed } = await openSocket(
-      `${wsBase(eventRoot(director.baseUrl))}/stream`
-    );
+    const { ws, frames, closed } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: 1 }));
     await waitForFrame(frames, (f) => f.length > 0);
 
@@ -103,9 +102,9 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
     expect(cursor).toBeGreaterThan(0); // the cursor axis is well past 1
 
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
-    await rdControl(director.baseUrl, TOKEN, { Start: { heat: HEAT } });
+    await rdControl(director, TOKEN, { Start: { heat: HEAT } });
     await waitForFrame(frames, (f) => f.length > 0);
 
     const seq = (frames[0] as { Change: { sequence: number } }).Change.sequence;
@@ -119,11 +118,15 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
     // Subscribe with the real client to a non-empty log (cursor > 0). If it conflated cursor
     // and sequence it would treat sequence 1,2,3 (<= cursor) as duplicates and freeze. It must
     // instead converge to the running heat with climbing laps.
-    const client = connect({ baseUrl: director.baseUrl, scope: { Heat: { heat: HEAT } } });
+    const client = connect({
+      baseUrl: director.baseUrl,
+      eventId: director.event,
+      scope: { Heat: { heat: HEAT } }
+    });
     try {
       await waitForState(client, (s) => s.body !== undefined);
       // SkipCountdown forces Armed → Running (the override standing in for the runtime auto-start).
-      await rdControl(director.baseUrl, TOKEN, { SkipCountdown: { heat: HEAT } });
+      await rdControl(director, TOKEN, { SkipCountdown: { heat: HEAT } });
       await waitForState(
         client,
         (s) => {
@@ -145,9 +148,7 @@ describe('seam 3: sequence and cursor are distinct axes; the client converges', 
 
 describe('seam 7: contract-version negotiation', () => {
   it('an out-of-band contract_version → VersionMismatch refresh signal + close', async () => {
-    const { ws, frames, closed } = await openSocket(
-      `${wsBase(eventRoot(director.baseUrl))}/stream`
-    );
+    const { ws, frames, closed } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, contract_version: 999 }));
     await waitForFrame(frames, (f) => f.length > 0);
     const frame = frames[0] as { code?: string };
@@ -157,15 +158,119 @@ describe('seam 7: contract-version negotiation', () => {
 
   it('an absent contract_version subscribes and streams normally', async () => {
     const cursor = await snapshotCursor(`/snapshot/heat/${HEAT}`);
-    const { ws, frames } = await openSocket(`${wsBase(eventRoot(director.baseUrl))}/stream`);
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
     // No contract_version field at all — treated as this build's version, streams fine.
     ws.send(JSON.stringify({ scope: { Heat: { heat: HEAT } }, from: cursor }));
-    await rdControl(director.baseUrl, TOKEN, { ForceEnd: { heat: HEAT } });
+    await rdControl(director, TOKEN, { ForceEnd: { heat: HEAT } });
     await waitForFrame(frames, (f) =>
       f.some((x) => (x as { Change?: unknown }).Change !== undefined)
     );
     expect((frames[0] as { code?: string }).code).not.toBe('VersionMismatch');
     ws.close();
+  });
+});
+
+describe('seam 8 (#422): the resume cursor is stated by the server, and a resume never goes backwards', () => {
+  const RESUME_HEAT = 'q-422';
+
+  /** Every `Change` envelope a raw frame array has collected. */
+  const envelopesOf = (frames: unknown[]): Array<{ sequence: number; cursor: number }> =>
+    frames
+      .map((f) => (f as { Change?: { sequence: number; cursor: number } }).Change)
+      .filter((e): e is { sequence: number; cursor: number } => e !== undefined);
+
+  /** The heat phase a `Change` envelope's fresh-value body reports. */
+  const phaseOfEnvelope = (frame: unknown): string | undefined =>
+    (
+      frame as {
+        Change?: { change?: { FreshValue?: { LiveRaceState?: { phase: string } } } };
+      }
+    ).Change?.change?.FreshValue?.LiveRaceState?.phase;
+
+  /**
+   * Wait until `frames` stops growing for `quietMs` — the log is quiescent and the stream has
+   * delivered everything it is going to. The Director's simulator keeps appending passes while a
+   * heat runs, so "the tail" is only a fixed number once the run has settled.
+   */
+  const settle = async (frames: unknown[], quietMs = 400): Promise<void> => {
+    let seen = -1;
+    while (seen !== frames.length) {
+      seen = frames.length;
+      await new Promise((r) => setTimeout(r, quietMs));
+    }
+  };
+
+  it('an envelope states the log offset it was folded through — not the sequence, not a +1 count', async () => {
+    const ack = await rdControl(director, TOKEN, {
+      ScheduleHeat: { heat: RESUME_HEAT, lineup: ['R', 'S'] }
+    });
+    expect(ack.ok).toBe(true);
+    const base = await snapshotCursor(`/snapshot/heat/${RESUME_HEAT}`);
+
+    const { ws, frames } = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: base }));
+
+    // Appends that move NO projection for this scope — the drift-wideners. They emit nothing,
+    // so a client counting applied envelopes can never see them.
+    for (let i = 0; i < 5; i++) {
+      await rdControl(director, TOKEN, {
+        Register: { adapter: 'sim', competitor: `r${i}`, pilot: `rp${i}` }
+      });
+    }
+    // …then one that does.
+    await rdControl(director, TOKEN, { Stage: { heat: RESUME_HEAT } });
+    await waitForFrame(frames, (f) => f.some((x) => phaseOfEnvelope(x) === 'Staged'));
+    ws.close();
+
+    const seen = envelopesOf(frames);
+    expect(seen[0].sequence).toBe(1); // the ordering axis restarts, as ever
+    const last = seen.at(-1)!;
+    // The drift, stated on the wire: the log advanced by MORE offsets than this stream emitted
+    // envelopes, because the appends in between moved no projection. `cursor - base` is the true
+    // advance; `seen.length` is everything a +1-per-applied-envelope tracker could ever count.
+    expect(last.cursor - base).toBeGreaterThan(seen.length);
+    expect(last.cursor).not.toBe(last.sequence);
+  });
+
+  it('a resume from the stated cursor replays nothing; a resume from a stale one gets ONE settled fold', async () => {
+    const stale = await snapshotCursor(`/snapshot/heat/${RESUME_HEAT}`);
+
+    // Run the heat from a live subscription, let the simulator's passes land, and keep the cursor
+    // the last envelope states — this client's exact position.
+    const live = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    live.ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: stale }));
+    await rdControl(director, TOKEN, { Start: { heat: RESUME_HEAT } });
+    await rdControl(director, TOKEN, { SkipCountdown: { heat: RESUME_HEAT } });
+    await waitForFrame(live.frames, (f) => f.some((x) => phaseOfEnvelope(x) === 'Running'));
+    await settle(live.frames);
+    const stated = envelopesOf(live.frames).at(-1)!.cursor;
+    live.ws.close();
+
+    // 1. Resuming from the STATED cursor: the client is exactly where the server left it, so the
+    //    server has nothing to replay. The next real change is the first thing it sends.
+    const exact = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    exact.ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: stated }));
+    await new Promise((r) => setTimeout(r, 400));
+    expect(envelopesOf(exact.frames)).toHaveLength(0);
+    await rdControl(director, TOKEN, { ForceEnd: { heat: RESUME_HEAT } });
+    await waitForFrame(exact.frames, (f) => envelopesOf(f).length > 0);
+    expect(phaseOfEnvelope(exact.frames[0])).toBe('Unofficial');
+    await settle(exact.frames);
+    exact.ws.close();
+
+    // 2. Resuming from the STALE cursor — the drifted position the old client would have
+    //    presented. It is in-window, so the server replays rather than refusing; that replay must
+    //    be ONE settled fold at the tail, not an envelope per offset ending there. The staircase
+    //    is what made a live lap count step backwards on screen after a socket blip.
+    const drifted = await openSocket(`${wsBase(director.eventRoot)}/stream`);
+    drifted.ws.send(JSON.stringify({ scope: { Heat: { heat: RESUME_HEAT } }, from: stale }));
+    await waitForFrame(drifted.frames, (f) => envelopesOf(f).length > 0);
+    await settle(drifted.frames);
+    const replayed = envelopesOf(drifted.frames);
+    expect(replayed).toHaveLength(1);
+    // …and that one fold is the CURRENT state, never an intermediate phase the heat has left.
+    expect(phaseOfEnvelope(drifted.frames[0])).toBe('Unofficial');
+    drifted.ws.close();
   });
 });
 

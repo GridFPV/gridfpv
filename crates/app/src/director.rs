@@ -17,14 +17,17 @@
 //! drive the exact same router over an in-memory log via `tower::ServiceExt::oneshot`,
 //! with no real socket and no dependency on a built frontend `dist/`.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use axum::Router;
 use axum::http::StatusCode;
+use axum::response::Response;
 #[cfg(not(feature = "embed-assets"))]
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
+use axum::routing::get;
+use axum::{Json, Router};
 use gridfpv_events::AdapterId;
 use gridfpv_server::app::{router, smart_fallback};
 use gridfpv_server::events::EventRegistry;
@@ -118,6 +121,11 @@ pub struct DirectorReady {
     pub rd_token: Option<String>,
     /// A one-line description of the active lap source (for the startup banner).
     pub source_desc: String,
+    /// The always-on diagnostics log file this process is writing (#380), or `None` if no
+    /// writable log directory could be resolved. Reported here so **every** caller — the
+    /// `gridfpv` banner and the Tauri shell alike — can tell the operator where it is without
+    /// re-deriving the path.
+    pub log_file: Option<PathBuf>,
 }
 
 /// Run the GridFPV Director server to completion: open the event registry, register an
@@ -152,6 +160,12 @@ where
     R: FnOnce(&DirectorReady),
     S: Future<Output = ()> + Send + 'static,
 {
+    // Open the diagnostics log FIRST, before anything can fail (#380). Every entry point goes
+    // through here, so this one line is what guarantees "the Director always writes a log
+    // file, every platform, no flags" — including the Windows GUI-subsystem build, where
+    // stderr goes nowhere and this file is the only surviving record.
+    let log_file = crate::logging::init().map(Path::to_path_buf);
+
     // Events are first-class containers (#72): the built-in Practice event is always present
     // (in-memory); created events persist as a SQLite file under `data_dir` when set.
     let registry = EventRegistry::new(data_dir)?;
@@ -183,6 +197,7 @@ where
         bound,
         rd_token,
         source_desc,
+        log_file,
     });
 
     axum::serve(listener, app)
@@ -235,11 +250,74 @@ pub fn default_assets_dir() -> PathBuf {
 /// disk exactly as before, keeping the hosted dev loop's rebuild-dist-only workflow intact.
 pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
     router(registry)
+        // Where the diagnostics log is (#380). Mounted HERE rather than in the protocol
+        // router because the log file is an *app*-level concern (`crate::logging` owns it)
+        // and `gridfpv-server` knows nothing about it.
+        .route("/diagnostics", get(diagnostics))
         // Anything the protocol router does not handle falls through to `smart_fallback`:
         // a mistyped API path → a typed `ProtocolError` 404 (#64), any other path → the SPA.
         .fallback_service(smart_fallback(spa_service(assets)))
+        // SPA cache policy. Vite content-hashes every asset, so `assets/*` may be cached forever —
+        // a changed file gets a new name. `index.html` must NOT be: it is the one file that names
+        // those hashes, and it keeps its URL across every build.
+        //
+        // Without this the shell was served with only `last-modified`, which browsers cache
+        // HEURISTICALLY. The RD then kept loading a stale `index.html` pointing at the previous
+        // bundle, so a rebuilt console looked unchanged and even a hard reload was unreliable —
+        // hours were lost to "is the new version up?" during a live bench session.
+        .layer(axum::middleware::from_fn(spa_cache_headers))
         // Permissive CORS so the cross-origin Tauri RD app can reach the API + WS.
         .layer(CorsLayer::permissive())
+}
+
+/// `GET /diagnostics` — **where the log file is** (#380).
+///
+/// A log nobody can find is not a fix. On the shipped desktop build the RD has no console,
+/// no terminal and no idea what `%LOCALAPPDATA%` means, so the console has to be able to tell
+/// them: this is the endpoint it reads to render the path (in About / on a timer's `Error`
+/// state) and the string they paste into a bug report.
+///
+/// ```json
+/// { "log_file": "…/GridFPV/logs/gridfpv.log", "log_dir": "…/GridFPV/logs" }
+/// ```
+///
+/// Both fields are `null` if no writable log directory could be resolved at all — which the
+/// temp-dir fallback in [`crate::logging`] makes effectively unreachable, but the console
+/// should render "unavailable" rather than an empty path if it ever happens.
+///
+/// The response is a `BTreeMap` rather than a `serde_json::json!` literal so this endpoint
+/// adds **no dependency** to `gridfpv-app` (`serde_json` is only a dev-dependency here);
+/// `BTreeMap` serializes as a JSON object with stable key order.
+async fn diagnostics() -> Json<BTreeMap<&'static str, Option<String>>> {
+    let path = |p: Option<&Path>| p.map(|p| p.display().to_string());
+    Json(BTreeMap::from([
+        ("log_file", path(crate::logging::log_file())),
+        ("log_dir", path(crate::logging::log_dir())),
+    ]))
+}
+
+/// Attach the SPA cache policy (see `build_app`): immutable for content-hashed assets, always
+/// revalidate for everything else — above all `index.html`, the file that names the hashes.
+///
+/// Applied as a response middleware rather than per-service so it covers the `ServeDir` hit, the
+/// `index.html` fallback and the embedded-assets build identically. API responses pass through
+/// untouched except for the no-cache default, which is what they want anyway.
+async fn spa_cache_headers(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let hashed = req.uri().path().starts_with("/assets/");
+    let mut resp = next.run(req).await;
+    let value = if hashed {
+        // Safe precisely because the name changes when the bytes do.
+        "public, max-age=31536000, immutable"
+    } else {
+        // `no-cache` is "revalidate", not "do not store": the browser still keeps it and a 304
+        // costs nothing, but it can never serve a stale shell without asking.
+        "no-cache"
+    };
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static(value),
+    );
+    resp
 }
 
 /// Build the SPA-serving service the Director composes into its `smart_fallback`.

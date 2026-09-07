@@ -71,7 +71,8 @@
       The in-process mechanics were spiked against the harness image
       (<code>cruwaller/rotorhazard:latest</code> = RH&nbsp;4.0.0-beta.4) and the API surface verified
       against the <strong>v4.3.0</strong> and <strong>v4.4.0</strong> source. A plugin is a directory
-      under RH's <code>plugins/</code> with an <code>__init__.py</code> exposing
+      under RH's <code>plugins/</code> (<a href="#plugins-dir">where that is</a>) with an
+      <code>__init__.py</code> exposing
       <code>initialize(rhapi)</code> and a <code>manifest.json</code> declaring
       <code>required_rhapi_version</code> (gated by the loader at 1.3+); RH imports it and hands over the
       <code>rhapi</code> object. From there:
@@ -96,11 +97,13 @@
       <dd>Real, sanctioned methods at 1.3+ (in RHAPI&nbsp;1.0 they were <code>pass</code> stubs
       monkeypatched at runtime — the floor avoids that). This is the clean start/stop, no socket
       <code>stage_race</code> / <code>alter_race_format</code> dance.</dd>
-      <dt>Calibration write — <code>rhapi.db.frequencyset_alter(enter_ats=, exit_ats=)</code></dt>
-      <dd>The sanctioned, persisted threshold write-path (per-channel enter/exit levels on the frequency
-      set). <strong>Note:</strong> <code>rhapi.interface</code> stays <em>read-only</em> even at 1.4
-      (<code>seats</code> + <code>add</code> only), so an <em>immediate, live</em> threshold change uses
-      the internal interface setter via <code>RaceContext</code> (semi-private, stable). For
+      <dt>Calibration write — <strong>not RHAPI at all</strong>:
+      <code>set_enter_at_level</code> / <code>set_exit_at_level</code> on the socket</dt>
+      <dd>There is <strong>no supported RHAPI calibration path</strong> on 1.3 or 1.4 —
+      <code>rhapi.interface</code> is read-only in both (1.4 adds only <code>add()</code>). The working
+      write is RotorHazard's own stock socket.io handler, on the connection the Grid adapter already
+      holds — so <strong>calibration needs no plugin at all</strong>, which is what lets the Tune page
+      (#355) work on a bone-stock RH. See the correction below for the shape and the two traps. For
       <a href="marshaling-plan.html">#3 recalc</a> we mostly need the dense trace (below), not a live
       setter — see §3.</dd>
       <dt>Seating — <code>rhapi.db</code> + <code>rhapi.race.slots</code></dt>
@@ -115,13 +118,138 @@
       second transport.</dd>
     </dl>
 
+    <div class="callout" id="calibration-correction">
+      <p>
+        <strong>⚠ Correction (2026-08-25, #355): the <code>frequencyset_alter</code> calibrate route
+        this document used to specify cannot work.</strong> It maps to
+        <code>RHData.alter_profile</code>, which writes <code>profile.enter_ats</code> /
+        <code>exit_ats</code> to the database, commits, and fires <code>Evt.PROFILE_ALTER</code> — and
+        <strong>never calls <code>interface.set_enter_at_level</code></strong>. The value persists and
+        the timing hardware keeps detecting at the old threshold: a calibration that silently does
+        nothing. It was never built; every mention of it below has been corrected.
+      </p>
+      <p>
+        <strong>What actually works</strong>, verified against RotorHazard <strong>v4.3.0</strong> (the
+        D16 floor, and what the field timers run) <strong>and v4.4.0</strong> source —
+        <code>server.py::on_set_enter_at_level</code> / <code>on_set_exit_at_level</code> and
+        <code>calibration.py</code>:
+      </p>
+      <ul>
+        <li><strong>Events:</strong> <code>set_enter_at_level</code> and
+        <code>set_exit_at_level</code>.</li>
+        <li><strong>Payload:</strong> <code>{ node, enter_at_level }</code> and
+        <code>{ node, exit_at_level }</code>, where <code>node</code> is the <strong>0-based seat
+        index</strong>.</li>
+        <li><strong>Identical on v4.3.0 and v4.4.0</strong> — same event names, same payload keys.
+        v4.4.0 differs only by an <code>int(… or 0)</code> coercion around the value, so one code path
+        covers both and no version branch is needed.</li>
+        <li><strong>No socket-level auth.</strong> The <code>@requires_auth</code> decorators in
+        <code>server.py</code> guard Flask HTTP routes; <em>zero</em> socket handlers carry them.</li>
+        <li><strong>It reaches the hardware.</strong> <code>calibration.py</code> writes the profile
+        row, calls <code>interface.set_enter_at_level</code>, <em>and</em> fires
+        <code>Evt.ENTER_AT_LEVEL_SET</code> — all three, which is exactly what
+        <code>frequencyset_alter</code> does not do.</li>
+        <li><strong>No echo.</strong> Neither handler emits anything in reply, so a write cannot be
+        confirmed synchronously. The readback is <code>load_data</code> with
+        <code>{"load_types": ["enter_and_exit_at_levels"]}</code>, which answers with an
+        <code>enter_and_exit_at_levels</code> emit. Grid fires it after every write and the Tune page
+        confirms by seeing the level come back — never by trusting the write's own response.</li>
+      </ul>
+      <p><strong>Two traps that cost a field day if they are rediscovered the hard way:</strong></p>
+      <ul>
+        <li><strong><code>0</code> is falsy.</strong> <code>calibration.py</code> tests the incoming
+        level for <em>truthiness</em> (<code>if not enter_at_level:</code>), so a <code>0</code> means
+        “ignore me and re-read the level off the node” rather than “set it to zero”. The old threshold
+        survives while the write looks perfectly accepted. Clamp the minimum to <strong>1</strong>.</li>
+        <li><strong><code>255</code> writes the profile but never reaches the detector.</strong>
+        <code>Node.is_valid_rssi</code> is <code>value &gt; 0 and value &lt; max_rssi_value</code> —
+        <em>strictly</em> less — and <code>max_rssi_value</code> is <code>255</code> at node API
+        level ≥ 18. So <code>RHInterface.set_enter_at_level</code> drops it, while
+        <code>calibration.py</code> has <em>already</em> written the profile row. And because
+        <code>RHUI.emit_enter_and_exit_at_levels</code> serialises that <strong>profile row, not the
+        node</strong>, the readback cheerfully confirms a level the detector never received. The
+        readback proves “RotorHazard took it”, one step short of “the detector holds it”; staying
+        inside <code>1..=254</code> is what closes the gap.</li>
+      </ul>
+    </div>
+
+    <div class="callout" id="capture-route">
+      <p>
+        <strong>Capture — letting the timer <em>measure</em> the level (#355).</strong> The write
+        above needs the RD to already know a number. An RD with a badly-tuned timer and no saved
+        profile (#411) does not, and
+        Grid deliberately ships <em>no</em> fabricated default — the right level depends on craft, VTX
+        power, antenna and gate geometry, and a default would also change the hardware on first
+        connect, the surprise D27's drift rule exists to prevent. Capture is the only non-guessing
+        bootstrap: it measures the RD's own craft on their own gate.
+      </p>
+      <p>
+        Also stock RotorHazard, also no plugin, and verified <strong>byte-identical on v4.3.0 and
+        v4.4.0</strong> across <code>server.py</code>, <code>calibration.py</code> and
+        <code>interface/BaseHardwareInterface.py</code>:
+      </p>
+      <ul>
+        <li><strong>Events:</strong> <code>cap_enter_at_btn</code> and
+        <code>cap_exit_at_btn</code> (<code>server.py::on_cap_enter_at_btn</code> /
+        <code>on_cap_exit_at_btn</code>).</li>
+        <li><strong>Payload:</strong> <code>{ node_index }</code>, the 0-based seat index.
+        <strong>Note the key.</strong> It is <code>node_index</code> here and <code>node</code> on
+        <code>set_enter_at_level</code> — same socket, same node, two names. A wrong key raises a
+        <code>KeyError</code> that <code>@catchLogExcWithDBWrapper</code> swallows into the log, so the
+        emit “succeeds” and nothing is captured.</li>
+        <li><strong>No auth</strong>, like every other socket handler in that file.</li>
+        <li><strong>No preconditions.</strong> It needs no race, no crossing and no seated pilot — it
+        works on a wholly idle timer, which is the entire point.</li>
+      </ul>
+      <p><strong>What it actually does — which is not what the name suggests:</strong></p>
+      <ul>
+        <li><strong>The window opens at the emit, not at the pass.</strong>
+        <code>start_capture_enter_at_level</code> arms a sampling window of
+        <code>CAP_ENTER_EXIT_AT_MILLIS</code> = <strong>3000&nbsp;ms</strong> starting <em>now</em>.
+        RotorHazard does not look back at a lap already flown. Any UI wording along the lines of “fly a
+        lap, then capture” sends the RD to the gate three seconds too late — the control has to say
+        that the timer starts watching the moment it is pressed.</li>
+        <li><strong>It averages; it does not take the peak.</strong> Over the window the RSSI loop
+        accumulates <code>current_rssi</code> and a sample count, and at the deadline the level becomes
+        <code>round(total / count)</code>. For the <em>enter</em> threshold only there is then one
+        correction: if <code>node_peak_rssi - level &lt; ENTER_AT_PEAK_MARGIN</code> (5), the level is
+        pulled down to <code>node_peak_rssi - 5</code>. The exit branch has no such margin.</li>
+        <li><strong>It is refused in complete silence.</strong>
+        <code>start_capture_*_at_level</code> returns <code>False</code> — emitting nothing — when a
+        capture of that threshold is <em>already running</em> on that node, or when the node's
+        <code>api_valid_flag</code> is clear (nothing answering at that seat). An out-of-range
+        <code>node_index</code> is an <code>IndexError</code> the exception wrapper logs and drops.
+        This is the same hazard as the three writes RotorHazard silently ignored
+        (#423), so Grid refuses a
+        second capture of an in-flight threshold itself rather than dispatching one that will vanish,
+        and treats “no new level came back” as a failure rather than a success.</li>
+        <li><strong>This one <em>does</em> echo.</strong> Unlike the direct level set: when the window
+        closes, <code>new_enter_or_exit_at_callback</code> calls
+        <code>calibration.set_enter_at_level</code> (profile row, hardware push,
+        <code>Evt.ENTER_AT_LEVEL_SET</code>) <em>and</em> <code>rhui.emit_enter_at_level(node)</code>,
+        broadcasting <code>node_enter_at_level</code> <code>{ node_index, level }</code> roughly
+        3.0–3.1&nbsp;s after the emit. Grid folds that into the tune tap, and <em>also</em> fires the
+        ordinary <code>enter_and_exit_at_levels</code> readback once the window has elapsed — a gate's
+        calibration is not a thing to stake on one unsolicited broadcast.</li>
+        <li><strong>Confirmation is still by poll.</strong> Either way the level reaches the console as
+        <code>NodeSignal.enter_at</code> / <code>exit_at</code> on <code>GET /timers/{id}/signal</code>,
+        exactly as a typed level does. Grid records a captured level on <code>Timer.calibration</code>
+        <em>only</em> once it has actually observed it (D27): recording one it never saw arrive would be
+        the fabricated success this whole path exists to remove.</li>
+      </ul>
+    </div>
+
     <h2>3. The Grid&harr;plugin protocol</h2>
     <p>
       A versioned <code>gridfpv_*</code> event namespace the plugin registers on RH's existing socket.io
       server (the same host/port RH already serves, default <code>:5000</code>, and the same connection
-      the Grid adapter already holds): socket.io <strong>acks</strong> carry request/response control,
-      <strong>broadcasts</strong> carry the live push (passes, signal, lifecycle). JSON encoding,
-      versioned in the <code>gridfpv_hello</code> handshake. The two directions:
+      the Grid adapter already holds). JSON encoding, versioned in the <code>gridfpv_hello</code>
+      handshake. <strong>As shipped, request/response uses paired events, not socket.io acks</strong>
+      (the hello is answered by a separate <code>gridfpv_hello_ack</code> broadcast); the ack model
+      below is the original sketch — don't build against acks. Shipped channels:
+      <code>gridfpv_hello</code>/<code>gridfpv_hello_ack</code>, <code>gridfpv_signal</code>,
+      <code>gridfpv_pass</code>; everything else in the lists is <strong>unbuilt design</strong>
+      (S3+). The two directions:
     </p>
     <dl class="entities">
       <dt>Control · Grid &rarr; plugin (<code>gridfpv_*</code> with ack)</dt>
@@ -129,8 +257,12 @@
       node count) · <code>gridfpv_clock_sync</code> (NTP-style exchange — RH's monotonic clock demands
       it) · <code>gridfpv_seat</code> (assign node&nbsp;&rarr;&nbsp;{raw RH pilot id, callsign,
       frequency/channel}) · <code>gridfpv_start</code> / <code>gridfpv_stop</code> (Grid's go/finish —
-      maps to <code>race.stage()</code> / <code>race.stop()</code>) · <code>gridfpv_calibrate</code>
-      (write per-channel enter/exit via <code>frequencyset_alter</code>).</dd>
+      maps to <code>race.stage()</code> / <code>race.stop()</code>).
+      <strong>There is no <code>gridfpv_calibrate</code>:</strong> calibration does not go through the
+      plugin at all — Grid writes <code>set_enter_at_level</code> / <code>set_exit_at_level</code> on
+      the stock socket it already holds (see the
+      <a href="#calibration-correction">correction above</a>), which is what lets the Tune page work on
+      a plugin-less RH.</dd>
       <dt>Data · plugin &rarr; Grid (<code>gridfpv_*</code> broadcast)</dt>
       <dd><code>gridfpv_session</code> (stage/start/finish/stop edges) · <code>gridfpv_competitor_seen</code>
       (a node seat went active) · <code>gridfpv_pass</code> (the atom: node seat, source timestamp,
@@ -144,8 +276,10 @@
         detection at new thresholds" call, so the draggable-threshold recalculate is a <em>computation
         over the stored dense trace</em> (the <code>history_values</code> Grid captured in S2): replay RH's
         enter/exit hysteresis at the marshal's chosen levels and <em>propose</em> the resulting laps. It
-        needs the trace + a faithful copy of the detection rule — not a live setter. Committing a new
-        calibration optionally writes it back via <code>gridfpv_calibrate</code>.
+        needs the trace + a faithful copy of the detection rule — not a live setter. Pushing a
+        marshal-chosen level forward onto the timer is the ordinary calibration write
+        (<code>set_enter_at_level</code>, <a href="#calibration-correction">above</a>), not a plugin
+        route.
       </p>
     </div>
     <p>
@@ -163,7 +297,7 @@ flowchart LR
     nm["Node manager&lt;br/&gt;dense RSSI · thresholds"]
     rms["RMS · race lifecycle"]
     subgraph plug["GridFPV plugin (in-process, RHAPI 1.3+)"]
-      hooks["events.on / interface.seats&lt;br/&gt;race.stage·stop · frequencyset_alter"]
+      hooks["events.on / interface.seats&lt;br/&gt;race.stage·stop"]
       ch["socket_listen / socket_broadcast&lt;br/&gt;gridfpv_* namespace"]
     end
     nm --> hooks
@@ -175,7 +309,8 @@ flowchart LR
     canon{{"Canonical events&lt;br/&gt;Pass · signal · lifecycle"}}
   end
   ch -->|"broadcast: pass · signal · session"| adp
-  adp -->|"ack: seat · start · stop · calibrate"| ch
+  adp -->|"ack: seat · start · stop"| ch
+  adp -->|"set_enter_at_level / set_exit_at_level&lt;br/&gt;(stock socket, no plugin)"| nm
   adp --> canon
 
   classDef sot fill:#eaf7e1,stroke:#43b301,stroke-width:2px;
@@ -189,14 +324,309 @@ flowchart LR
         <tr><th>Socket workaround (today)</th><th>Native plugin path</th><th>Retires in</th></tr>
       </thead>
       <tbody>
-        <tr><td><strong>save-then-pull</strong> dense RSSI (<code>save_laps</code>&rarr;<code>load_data</code>&rarr;<code>get_pilotrace</code>)</td><td><code>interface.seats[i].history_values</code> read live</td><td>S2</td></tr>
-        <tr><td><strong><code>alter_race_format</code> staging-zero</strong> hack</td><td>plugin owns the format + calls <code>race.stage()</code></td><td>S3</td></tr>
-        <tr><td><strong><code>add_pilot</code>/<code>alter_heat</code> seating dance</strong></td><td><code>rhapi.db</code> + <code>race.slots</code> in-process</td><td>S3</td></tr>
+        <tr><td><strong>save-then-pull</strong> dense RSSI (<code>save_laps</code>&rarr;<code>load_data</code>&rarr;<code>get_pilotrace</code>)</td><td><code>interface.seats[i].history_values</code> read live</td><td>S2 ✅ (pull suppressed when live signal is active; retained as the stock-RH fallback)</td></tr>
+        <tr><td><strong><code>alter_race_format</code> staging-zero</strong> hack</td><td>plugin owns the format + calls <code>race.stage()</code></td><td>S3 ◐ (not yet — socket path still production)</td></tr>
+        <tr><td><strong><code>add_pilot</code>/<code>alter_heat</code> seating dance</strong></td><td><code>rhapi.db</code> + <code>race.slots</code> in-process</td><td>S3 ◐ (not yet — seating dance still production)</td></tr>
         <tr><td><strong>un-zeroable ~0.9&nbsp;s prestage</strong> (<code>RACE_START_DELAY_EXTRA_SECS</code>)</td><td>plugin <strong>zeroes it via <code>rhapi.config</code></strong> at load — shipped independently of the control rewrite, so <code>stage_race</code> reaches RACING immediately</td><td>done</td></tr>
-        <tr><td>per-pass RSSI only via <code>node_data</code></td><td>full <code>current_rssi</code>/<code>pass_peak_rssi</code>/levels every heartbeat</td><td>S2</td></tr>
-        <tr><td><strong>no signal write-back</strong> (blocks #3 recalc)</td><td>re-detection over the stored dense trace + <code>frequencyset_alter</code> calibrate</td><td>S4</td></tr>
+        <tr><td>per-pass RSSI only via <code>node_data</code></td><td>full <code>current_rssi</code>/<code>pass_peak_rssi</code>/levels every heartbeat</td><td>S2 ✅</td></tr>
+        <tr><td><strong>no signal write-back</strong> (blocks #3 recalc)</td><td>re-detection over the stored dense trace; the calibrate write is <strong>stock-socket, not plugin</strong> (<code>set_enter_at_level</code>)</td><td>S4 ● (re-detection shipped Grid-side; the calibration write path shipped in #355, with no plugin involved)</td></tr>
       </tbody>
     </table>
+
+    <h2 id="emit-audit">4b. The socket-emit audit (#423)</h2>
+    <p>
+      Grid drives RotorHazard by emitting <strong>internal socket handler names</strong> — reverse
+      engineered, not a supported API. Three of those writes shipped doing <em>nothing</em>, each
+      returning success and each found by hand on the race director's bench <em>after</em> shipping:
+      <code>set_min_lap_time</code> wrote an option RotorHazard does not have; <code>frequencyset_alter</code>
+      wrote the threshold to the database and never pushed it to the detector; <code>set_frequency</code>'s label sent
+      <code>"R8"</code> where RH does <code>int(data['channel'])</code>, aborting the whole handler on a
+      <code>ValueError</code>. A fire-and-forget emit has no failure signal, so
+      <strong>a dead write that reports success is the failure mode this audit exists to find.</strong>
+    </p>
+    <p>
+      Every row below was checked by reading RotorHazard's own source on <strong>both</strong> supported
+      versions — v4.3.0 from the running container (the RHAPI 1.3 floor, and what the field timer runs)
+      and the v4.4.0 tag — never inferred from a handler's name. A name is evidence of nothing:
+      <code>MIN_LAP_TIME</code> named an option RotorHazard has never had, and
+      <code>unlimited_time</code> is stored in a column called <code>race_mode</code>.
+    </p>
+    <div class="callout">
+      <p>
+        <strong>One correction the audit owes the record.</strong> &ldquo;<code>unlimited_time</code>
+        means the opposite of what it says&rdquo; has been repeated in three issues, and against these
+        two versions it is <strong>not true</strong>. On 4.3.0 and 4.4.0 alike,
+        <code>RHRace</code> reads <code>unlimited_time == 0</code> as &ldquo;count down&rdquo; and
+        <code>== 1</code> as &ldquo;no time limit&rdquo; — the attribute is honest, and Grid's
+        <code>unlimited_time: 1</code> lands correctly. What is confusing is one layer down: the ORM
+        maps it onto a DB column still named <code>race_mode</code>
+        (<code>DB.Column('race_mode', …)</code>), with a deprecated <code>race_mode</code> property
+        kept beside it that logs a warning. So the hazard is real but it is a <em>column</em> name,
+        not the field Grid writes. Restating the stronger claim would have been the same mistake this
+        audit exists to stop.
+      </p>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>The headline: RHAPI 1.3 and 1.4 are the same API for every one of these.</strong> The
+        whole 1.3&rarr;1.4 diff is four additions — <code>ui.register_function_binding</code>,
+        <code>interface.add</code>, <code>server.set_min_mocks</code>,
+        <code>server.set_restart_required</code> — and not one of them touches an emit in this table.
+        &ldquo;Verify against 1.3 <em>and</em> 1.4&rdquo; therefore collapses to a single answer
+        everywhere, and &ldquo;newer&rdquo; was never a reason to move.
+      </p>
+    </div>
+
+    <p>
+      <strong>Legend.</strong> <em>Lands?</em> = does the emit actually reach a handler and take effect.
+      <em>Readback</em> = how Grid confirms it, since <em>none</em> of RotorHazard's write handlers
+      returns a value and several deliberately exclude the writing socket from their echo
+      (<code>noself=True</code>). <em>RHAPI verdict</em> = would routing this through the plugin be
+      genuinely better, not merely newer.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Emit</th><th>What it really does (RH source)</th><th>Lands?</th><th>4.3.0 vs 4.4.0</th><th>RHAPI verdict</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>load_data</code><br><small>node_data, enter_and_exit_at_levels, race_status, frequency_data, heat_data, pilot_data, min_lap, race_list</small></td>
+          <td>Dispatches to the matching <code>RHUI.emit_*</code> with <code>nobroadcast=True</code> — i.e. addressed to <strong>this</strong> socket. Every readback in the system rides on it.</td>
+          <td>Yes. All 8 types exist on both.</td>
+          <td><strong>Byte-identical</strong> handler on both versions.</td>
+          <td><strong>Keep.</strong> RHAPI has no &ldquo;serialise this to my socket&rdquo; equivalent; the plugin would have to re-implement each emitter. This is the load-bearing readback path — moving it would cost readbacks to gain nothing.</td>
+        </tr>
+        <tr>
+          <td><code>add_heat</code></td>
+          <td><code>rhdata.add_heat()</code>, then broadcasts <code>heat_data</code> + <code>race_status</code> (no <code>noself</code>, so we do see it).</td>
+          <td>Yes.</td>
+          <td>Same, bar a <code>data['group']</code> truthiness guard on a key Grid never sends.</td>
+          <td><strong>Defer to clean_control.</strong> <code>db.heat_add()</code> <em>returns the row</em>, retiring the &ldquo;emit, wait for a broadcast, take the highest id&rdquo; heuristic and its 3&nbsp;s timeout. A real win — but it needs a plugin capability plus a socket fallback for the v0.3.0 field plugin, which is the clean_control slice, not a doc-fix.</td>
+        </tr>
+        <tr>
+          <td><code>add_pilot</code></td>
+          <td><code>rhdata.add_pilot()</code>, then broadcasts <code>pilot_data</code> + <code>heat_data</code>.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Defer to clean_control</strong> — same argument, and stronger: <code>db.pilot_add(callsign=…)</code> returns the pilot <em>and</em> names it in one call, so it retires the <code>alter_pilot</code> round below as well.</td>
+        </tr>
+        <tr>
+          <td><code>alter_pilot</code> <span class="tag">not in the original list</span></td>
+          <td>Renames the pilot to the Grid callsign. Answers <code>emit_pilot_data(<strong>noself=True</strong>)</code> — <code>include_self=False</code>, so <strong>the writer never sees it</strong>.</td>
+          <td>Yes, but unverifiable from its own echo.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep</strong> (cosmetic — it only decides what RH's own screen calls the pilot). Its silence is why the seating chain needed an explicit readback.</td>
+        </tr>
+        <tr>
+          <td><code>alter_heat</code> <span class="tag">not in the original list</span></td>
+          <td><strong>The seating write.</strong> Assigns a pilot to a <code>HeatNode</code> slot. Answers <code>emit_heat_data(<strong>noself=True</strong>)</code>, and <code>@catchLogExcWithDBWrapper</code> swallows a failure into RH's log.</td>
+          <td>Yes — but it was <strong>completely unconfirmed</strong>. See the finding below.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep the emit, add the readback.</strong> Done: <code>load_data{heat_data}</code> now checks each slot's <code>pilot_id</code> before the heat may be selected.</td>
+        </tr>
+        <tr>
+          <td><code>set_current_heat</code></td>
+          <td><code>race.set_heat(id)</code>, then a full <code>emit_race_status()</code> broadcast.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.heat = id</code> calls the same <code>race.set_heat</code>. Routing it Director&rarr;plugin&rarr;RHAPI adds a hop and a version gate to reach the identical call.</td>
+        </tr>
+        <tr>
+          <td><code>stage_race</code></td>
+          <td><code>race.stage()</code>.</td>
+          <td>Yes.</td>
+          <td>4.4.0 additionally re-emits <code>race_status</code> when staging is refused, and its <code>RHRace.stage</code> gains <code>immediate=</code> / <code>from_scheduler=</code> — <strong>4.4.0-only</strong>, so unusable at the floor.</td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.stage()</code> is literally the handler's body. Observable either way via the <code>race_status</code> stream.</td>
+        </tr>
+        <tr>
+          <td><code>stop_race</code></td>
+          <td><code>race.stop()</code>.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep</strong> — same reasoning as <code>stage_race</code>.</td>
+        </tr>
+        <tr>
+          <td><code>save_laps</code></td>
+          <td><code>race.save()</code>. ⚠️ While <code>current_heat == HEAT_ID_NONE</code> (practice mode) it <strong>discards</strong> rather than saves.</td>
+          <td>Yes — but a no-op-that-deletes without a current heat, which is why the savable-heat step exists.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep</strong> — <code>race.save()</code> is the same call, with the same practice-mode trapdoor.</td>
+        </tr>
+        <tr>
+          <td><code>discard_laps</code></td>
+          <td><code>race.discard_laps(**kwargs)</code>. Note the signature: it takes <strong>keyword args only</strong>, so Grid's zero-arg emit is correct and sending a payload dict would be a <code>TypeError</code>.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.clear()</code> is a thin alias for the same method.</td>
+        </tr>
+        <tr>
+          <td><code>current_race_marshal</code></td>
+          <td>Asks for the aggregate dense post-race trace (<code>current_marshal_data</code>).</td>
+          <td><strong>4.4.0: yes. v4.3.0: NO — nothing at all.</strong></td>
+          <td><strong>The one real divergence.</strong> Neither the handler nor <code>RHUI.emit_race_marshal_data</code> exists anywhere in the v4.3.0 tree. Socket.IO discards an emit with no handler, so on the floor version it returns <code>Ok</code>, replies nothing, and logs nothing.</td>
+          <td><strong>No RHAPI equivalent</strong> (the plugin reads <code>interface.seats[i].history_values</code> live instead, which is what supersedes this entirely). Kept, with the per-pilotrace route driven alongside it on every version.</td>
+        </tr>
+        <tr>
+          <td><code>get_pilotrace</code></td>
+          <td>Answers <code>race_details</code> with one saved seat's <code>history_values</code>/<code>history_times</code>. <strong>The only dense route on v4.3.0.</strong></td>
+          <td>Yes.</td>
+          <td>Same shape; 4.4.0 adds a per-lap <code>peak_rssi</code> and a <code>marshal_type</code>, both ignored.</td>
+          <td><strong>Keep.</strong> <code>db.pilotruns_by_race()</code> exposes the same rows, but needs a <code>race_id</code> Grid does not hold and buys no readback the socket route lacks.</td>
+        </tr>
+        <tr>
+          <td><code>set_race_format</code></td>
+          <td>Selects the current format. Refused unless <code>race_status == READY</code>.</td>
+          <td>Yes, when READY.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep as the fallback.</strong> RHAPI's <code>race.raceformat</code> setter is monkey-patched to <em>this exact handler</em> (<code>RHAPI.race._raceformat_set = on_set_race_format</code>, both versions) — so it is the same code, and the plugin already uses it on the owned-format path. Note the handler guards its UI re-emits behind <code>if request:</code>, so an RHAPI call made <em>outside</em> a request context (a load-time hook, a background greenlet) selects the format while broadcasting nothing — which is why the plugin confirms by re-reading <code>race.raceformat.id</code> rather than by any echo.</td>
+        </tr>
+        <tr>
+          <td><code>alter_race_format</code> <span class="tag">not in the original list</span></td>
+          <td>The legacy in-place neutralisation — zeroes staging on the RD's <em>own</em> format row.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep as the announced fallback.</strong> Superseded by the Grid-owned format for any plugin ≥ <code>owned_format</code>; still the only path for older plugin builds, and already loud when engaged.</td>
+        </tr>
+        <tr>
+          <td><code>set_frequency</code></td>
+          <td>Writes the active profile's <code>b</code>/<code>c</code>/<code>f</code> arrays <strong>and</strong> retunes the receiver via <code>interface.set_frequency</code>. Echoes <code>frequency_data</code>.</td>
+          <td>Yes.</td>
+          <td>Same handler; 4.4.0 additionally passes <code>band, channel</code> through to the interface, so the label reaches the hardware layer there. <code>int(data['channel'])</code> on <strong>both</strong> — the <code>ValueError</code> trap that ate the whole handler.</td>
+          <td><strong>Keep.</strong> <code>db.frequencyset_alter(frequencies=…)</code> <em>does</em> push to the hardware — but only for the active profile, by rewriting the <strong>whole</strong> array and re-pushing <strong>every</strong> node, and without firing <code>Evt.FREQUENCY_SET</code>. Trading a per-node write that fires the event for a whole-set write that does not is a regression, not a migration.</td>
+        </tr>
+        <tr>
+          <td><code>set_enter_at_level</code> / <code>set_exit_at_level</code> <span class="tag">not in the original list</span></td>
+          <td><code>calibration.set_*_at_level</code>: writes the profile row, <strong>pushes the level to the timing hardware</strong>, fires the event. No echo at all.</td>
+          <td>Yes — but <code>0</code> is falsy to <code>calibration.py</code> and silently re-reads the node's own level instead. Callers clamp to ≥ 1.</td>
+          <td>Same; 4.4.0 adds an <code>int(… or 0)</code> coercion.</td>
+          <td><strong>Keep — RHAPI is strictly worse, and provably so.</strong> The <em>same</em> <code>frequencyset_alter</code> that pushes <code>frequencies</code> to the hardware does <strong>not</strong> push <code>enter_ats</code>/<code>exit_ats</code>: it writes the profile row and stops, on 1.3 and 1.4 alike. That asymmetry inside one function is exactly the shipped dead write of #423 — the threshold persisted, the detector kept its old level. Migrating here would re-create the bug by name. Readback is <code>load_data{enter_and_exit_at_levels}</code>.</td>
+        </tr>
+        <tr>
+          <td><code>cap_enter_at_btn</code> / <code>cap_exit_at_btn</code> <span class="tag">not in the original list</span></td>
+          <td>Arms a <strong>3-second</strong> sampling window <em>starting now</em>; the level becomes the window's mean. Refusals (capture already running, invalid node, out-of-range index) are all <strong>silent on the socket</strong>.</td>
+          <td>Yes — and the payload key is <code>node_index</code>, not <code>node</code> as its neighbours use. A wrong key is a swallowed <code>KeyError</code>.</td>
+          <td><strong>Byte-identical</strong> across <code>server.py</code>, <code>calibration.py</code> and <code>BaseHardwareInterface.py</code>.</td>
+          <td><strong>Keep.</strong> No RHAPI surface exists for the capture path. Confirmed by the <code>node_enter_at_level</code> echo the finished window emits, plus a threshold readback.</td>
+        </tr>
+        <tr>
+          <td><code>set_min_lap</code></td>
+          <td>Writes the <code>MinLapSec</code> <strong>DB option</strong>. Answers <code>emit_min_lap(<strong>noself=True</strong>)</code> — the writer does not get the echo.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong> (4.4.0 adds an unrelated <code>set_min_first_crossing</code> sibling.)</td>
+          <td><strong>Already migrated (#407), correctly.</strong> The plugin does it in-process through <code>db.option_set</code> and re-asserts per stage; this socket route is the announced fallback for older plugin builds, confirmed by a <code>load_data{min_lap}</code> re-read rather than by the write.</td>
+        </tr>
+        <tr>
+          <td><code>set_min_lap_behavior</code></td>
+          <td>Writes <code>serverconfig</code> <code>TIMING</code>/<code>MinLapBehavior</code> — a <strong>different store</strong> from <code>MinLapSec</code>, which is why neutralising the filter takes two writes.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Already migrated (#407), correctly</strong> — <code>config.set("TIMING", "MinLapBehavior", 0)</code>, same fallback shape.</td>
+        </tr>
+        <tr>
+          <td><code>simulate_lap</code></td>
+          <td>Fires <code>CROSSING_EXIT</code> and <code>interface.intf_simulate_lap</code> — a synthetic pass down the <strong>real detector path</strong>. Test driver only.</td>
+          <td>Yes.</td>
+          <td><strong>Identical.</strong></td>
+          <td><strong>Keep.</strong> RHAPI's <code>race.lap_add()</code> is <em>not</em> the same thing — it injects a lap record, bypassing the detection path the harness exists to exercise. Migrating would make the test prove less.</td>
+        </tr>
+        <tr>
+          <td><code>restart_server</code></td>
+          <td>Re-executes the RH process so it re-imports plugins. No authentication (<code>@requires_auth</code> guards Flask HTTP routes, not socket handlers).</td>
+          <td>Yes.</td>
+          <td>Same; 4.4.0 first emits <code>server_restarting</code> and honours a configurable <code>restart_sleep_secs</code>.</td>
+          <td><strong>Keep — no RHAPI equivalent exists.</strong> (1.4's <code>server.set_restart_required</code> only <em>flags</em> that a restart is needed.) Observable by the socket dropping and the reconnect re-probing the plugin.</td>
+        </tr>
+        <tr>
+          <td><code>gridfpv_hello</code> <span class="tag">not in the original list</span> / <code>gridfpv_select_format</code></td>
+          <td>Grid's own plugin protocol, registered through <code>ui.socket_listen</code>. Both answer with an explicit ack carrying the outcome.</td>
+          <td>Yes, where the plugin is loaded; nothing on a stock RH, which <em>is</em> the probe's answer.</td>
+          <td>N/A — plugin-side, and <code>socket_listen</code> is identical on RHAPI 1.3 and 1.4.</td>
+          <td><strong>Already RHAPI.</strong> The only two emits in the system with a real acknowledgement, which is exactly why they are the model for the rest.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      <strong>The original enumeration listed 17 emits; there are 25.</strong> Missing from it were
+      <code>alter_pilot</code>, <code>alter_heat</code>, <code>alter_race_format</code>,
+      <code>set_enter_at_level</code>, <code>set_exit_at_level</code>, <code>cap_enter_at_btn</code>,
+      <code>cap_exit_at_btn</code> and <code>gridfpv_hello</code> — and <code>alter_heat</code>, the one
+      that turned out to carry the unconfirmed write below, was among them.
+    </p>
+
+    <div class="callout">
+      <p>
+        <strong>The fourth dead write: <code>current_race_marshal</code> does not exist on v4.3.0.</strong>
+        Not &ldquo;behaves differently&rdquo; — <em>absent</em>. Grid's own code called the two dense
+        routes &ldquo;newer RH&rdquo; and &ldquo;older RH&rdquo; without ever naming which, and drove both,
+        so the gap never showed in behaviour. It was invisible because it was driven, not because the
+        emit worked. Both routes stay; the version each one serves is now stated where it is emitted,
+        and <code>request_marshal_data()</code> — which previously sent <em>only</em> the 4.4.0 event and
+        was therefore a silent no-op against the floor — now drives both.
+      </p>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>The fifth, and the expensive one: the seating chain was never confirmed.</strong>
+        <code>seat_heat</code> emitted <code>add_pilot</code> &rarr; <code>alter_pilot</code> &rarr;
+        <code>alter_heat</code> per seat and then selected the heat as current — with
+        <strong>no readback on the assignment at all</strong>. It could not have had one by accident:
+        <code>alter_heat</code> answers <code>noself=True</code>, so its echo is delivered to every
+        socket <em>except</em> the one that wrote, and <code>@catchLogExcWithDBWrapper</code> turns a
+        handler exception into a log line. If a seat did not take, RH then held a current heat with an
+        empty node — and its pass gate
+        (<code>pilot_id is not None and pilot_id != PILOT_ID_NONE</code>) <strong>dismisses every
+        crossing on that node</strong>, losing that pilot's entire run, while Grid reported a seated
+        heat. That is the exact shape of the three writes that already cost bench time, with the largest
+        blast radius of any of them.
+      </p>
+      <p>
+        And it is <strong>reachable, not theoretical</strong>. <code>RHData.alter_heat</code> resolves the
+        slot as <code>HeatNode.query.get(slot_id)</code> — a bare primary-key lookup,
+        <strong>not scoped to the heat</strong> — and then assigns <code>slot.pilot_id</code>
+        unconditionally. A slot id that no longer exists gives an <code>AttributeError</code> on
+        <code>None</code>, straight into the swallow. Worse, a slot id belonging to a <em>different</em>
+        heat seats the pilot happily — on the wrong heat — while the heat Grid then makes current stays
+        empty. Grid can produce exactly that: the slot ids come from &ldquo;the freshest heat in whatever
+        <code>heat_data</code> arrives&rdquo;, and RotorHazard dispatches every socket event on its own
+        greenlet, so a pre-<code>add_heat</code> snapshot is a legal thing to receive.
+      </p>
+      <p>
+        Fixed: after seating, Grid re-reads <code>load_data{heat_data}</code> and checks each slot's
+        <code>pilot_id</code> <strong>on the heat it is about to race</strong> — which closes the
+        wrong-heat case as well as the failed-write one. Every intended seat must be confirmed; anything
+        less falls back to practice mode (no current heat), which still records every lap through RH's
+        <code>current_heat is HEAT_ID_NONE</code> branch and costs only the dense RSSI trace — and says
+        so, naming the <strong>callsigns</strong> that did not seat. The check re-asks until it confirms
+        or times out, for the same greenlet reason: a single ask could read the pre-write snapshot and
+        condemn a perfectly good heat.
+      </p>
+      <p>
+        ⚠️ The readback itself needed care, because <code>RHUtils.PILOT_ID_NONE</code> is
+        <strong><code>0</code> on v4.3.0 and <code>None</code> on v4.4.0</strong>. Checking for one
+        sentinel would have made every 4.4.0 slot read as seated — a confirmation step that confirms
+        nothing, which is worse than the blind write it replaced. Both collapse to &ldquo;empty&rdquo; in
+        one place, and a test pins both.
+      </p>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>Noted, not fixed: the same sentinel split shows up on the way in.</strong>
+        <code>HEAT_ID_NONE</code> moved <code>0</code>&nbsp;&rarr;&nbsp;<code>None</code> alongside
+        <code>PILOT_ID_NONE</code>, so a practice-mode race (no current heat) reports
+        <code>race_heat_id: 0</code> from a v4.3.0 timer and <code>null</code> from a v4.4.0 one. Grid's
+        <code>session_id</code> turns those into <code>heat-0</code> and <code>race</code> — two names
+        for one state, the first naming a heat that does not exist. It is left alone on purpose: it is
+        consistent within a connection (a timer does not change version mid-event), it is an inbound
+        decode rather than an emit, and <code>SessionId</code> is keyed on outside the adapter crate,
+        so normalising it is a wider change than this audit's remit. Recorded where the code is, with
+        the fix named, so the next person meets it as a decision rather than a surprise.
+      </p>
+    </div>
 
     <h2>5. Onboarding — required, with a guided install</h2>
     <p>
@@ -210,22 +640,71 @@ flowchart LR
       the URL — CLAUDE.md.)</dd>
       <dt>Missing</dt>
       <dd>The handshake times out (no <code>gridfpv_*</code> handler registered). Grid shows a
-      <strong>guided one-step install</strong>: the plugin is a small folder dropped into RH's
+      <strong>guided install</strong>: the plugin is a small folder dropped into RH's
       <code>plugins/</code> directory followed by an RH restart. Grid offers the versioned plugin bundle
-      to download plus the copy-and-restart steps; where Grid runs on the same host as RH it can automate
-      the copy. This is a <em>prompt</em>, not a hard error. (An RH older than v4.3.0 fails the same way
-      and is told to update RH first.)</dd>
+      to download plus the unzip-copy-and-restart steps (as shipped: download
+      <code>gridfpv-plugin.zip</code> from the Director, <strong>unzip it</strong>, copy the inner
+      <code>gridfpv/</code> folder, restart RH — the same-host copy automation is a possible future
+      nicety, not built). This is a <em>prompt</em>, not a hard error. (An RH older than v4.3.0 fails
+      the same way and is told to update RH first.)</dd>
       <dt>Present but incompatible</dt>
-      <dd>The handshake version is outside Grid's supported range. Grid offers the matching plugin
+      <dd>The handshake <code>protocol_version</code> differs from the Director's (compatibility is
+      exact-equality today, widening to a band only if the protocol ever needs it). Grid offers the matching plugin
       version and explains the mismatch in plain language.</dd>
     </dl>
+    <div class="callout" id="plugins-dir">
+      <p>
+        <strong>Where RH's <code>plugins/</code> directory actually is.</strong> The guided install's
+        last step is the one that stops people (field session, 2026-08-24). User plugins live at
+        <code>DATA_DIR/plugins</code> — <em>not</em> <code>PROGRAM_DIR/bundled_plugins</code>, which is
+        RH's own bundled set. <code>DATA_DIR</code> resolves through a six-step cascade
+        (<code>--data</code> argument → <code>datapath.ini</code> in <code>PROGRAM_DIR</code> → an
+        <em>already existing</em> <code>~/rh-data</code> → <code>PROGRAM_DIR</code> if
+        <code>config.json</code> sits there → the CWD if <code>config.json</code> sits there →
+        <code>~/rh-data</code>, created), so no single hardcoded path is right for everyone:
+      </p>
+      <ul>
+        <li><strong>Modern default install — <code>~/rh-data/plugins/</code></strong> (on a Pi,
+        <code>/home/pi/rh-data/plugins/</code>). The usual answer, but a <em>typical default</em>, not
+        a guarantee.</li>
+        <li><strong>Legacy in-place install — <code>&lt;RotorHazard&gt;/src/server/plugins/</code>.</strong>
+        RH v4.x actively prompts users to migrate off this, so both layouts are in the wild.</li>
+        <li><strong>Vendor / custom rigs</strong> (e.g. a <strong>NuclearHazard</strong> timer, confirmed
+        in the field) sit somewhere else again. Whatever the layout, it is the <code>plugins/</code>
+        folder beside RH's <code>config.json</code> / <code>database.db</code>, and RH logs
+        <code>Data path: &lt;DATA_DIR&gt;</code> at startup.</li>
+      </ul>
+      <p>
+        <strong>And it frequently does not exist.</strong> RH only scans <code>DATA_DIR/plugins</code>
+        <em>if present</em> (logging "No user plugins directory found." otherwise), so on a fresh
+        install there is no folder to hunt for — it has to be created. This was the actual sticking
+        point in the field.
+      </p>
+      <p>
+        The final layout is <code>&lt;DATA_DIR&gt;/plugins/gridfpv/</code> holding
+        <code>__init__.py</code> + <code>manifest.json</code> <em>directly</em> — no wrapper folder
+        (the bundle is a zip, so it must be unzipped first). Rather than restate RH's own rules, the
+        console links
+        <a href="https://github.com/RotorHazard/RotorHazard/blob/v4.3.0/doc/Plugins.md"
+        target="_blank" rel="noreferrer">RotorHazard <code>doc/Plugins.md</code></a>.
+      </p>
+      <p>
+        <strong>Guidance only — no auto-detection.</strong> Reporting RH's real <code>data_dir</code>
+        through <code>gridfpv_hello_ack</code> (RHAPI exposes it) was considered and dropped: the value
+        is reachable only once the plugin is <em>loaded</em>, so it cannot help the first install —
+        exactly the moment the RD is lost. It would add protocol surface for people who no longer have
+        the problem.
+      </p>
+    </div>
     <div class="callout">
       <p>
         <strong>Transition:</strong> while the plugin rolls out, the existing socket transport stays as
         a <em>fallback</em> behind the same adapter — a stock RH without the plugin still works at
         reduced fidelity (no live dense signal, no recalc), and Grid nudges toward the install. Once the
         plugin is the assumed path, the socket-workaround code (the save-then-pull, the
-        <code>alter_race_format</code> hack, the seating dance) is deleted (S3).
+        <code>alter_race_format</code> hack, the seating dance) is deleted (S3's remaining work —
+        as of v0.4.0-alpha.1 those are still the production control path; the save-then-pull is
+        already suppressed whenever live signal is active).
       </p>
     </div>
 
@@ -233,8 +712,10 @@ flowchart LR
     <div class="principle">
       <p><span class="name">Floor on RHAPI 1.3 (RH v4.3.0+); use the new features.</span> The plugin
       requires <strong>RH&nbsp;v4.3.0+</strong> (RHAPI&nbsp;1.3, verified to carry <code>socket_listen</code>/
-      <code>socket_broadcast</code>, real <code>race.stage()/stop()</code>, <code>frequencyset_alter</code>,
-      and <code>manifest.json</code> + <code>required_rhapi_version</code> gating). Current RH is v4.4.0
+      <code>socket_broadcast</code>, real <code>race.stage()/stop()</code>, and
+      <code>manifest.json</code> + <code>required_rhapi_version</code> gating — <em>not</em>
+      calibration, which has no RHAPI path at any version and rides RH's stock socket instead; see the
+      <a href="#calibration-correction">correction</a>). Current RH is v4.4.0
       (RHAPI&nbsp;1.4). The <code>manifest.json</code> declares <code>required_rhapi_version</code> 1.3 so
       RH's own loader refuses to load us into a too-old server, and Grid surfaces "update RH to v4.3.0+"
       as part of the guided install. We are comfortable making users update RH — every serious RMS
@@ -242,12 +723,12 @@ flowchart LR
     </div>
     <div class="callout">
       <p>
-        <strong>Harness reality:</strong> <code>cruwaller/rotorhazard:latest</code> is stale at
+        <strong>Harness reality (built, S0):</strong> <code>cruwaller/rotorhazard:latest</code> is stale at
         <strong>4.0.0-beta.4</strong> (only <code>:latest</code> is published) — below our floor. So the
-        harness bump (S0) is <em>not</em> a tag swap: we build a mock-node image ourselves from the
-        RotorHazard <strong>v4.4.0</strong> source. The <code>MockInterface</code> reads RSSI/history from
-        a <code>mock_data</code> CSV, so the emulated-signal slice (S2) is testable against the mock once
-        the image is current.
+        harness is <em>not</em> a tag swap: <code>docker/rotorhazard/</code> builds a mock-node image
+        from the RotorHazard <strong>v4.4.0</strong> source (<code>MOCK_NODE_SIGNAL=1</code> required).
+        The <code>MockInterface</code> reads RSSI/history from a <code>mock_data</code> CSV, and the
+        emulated-signal slice (S2) was validated against it.
       </p>
     </div>
 
@@ -259,35 +740,70 @@ flowchart LR
       leaves the socket fallback intact until S3 deletes it.
     </p>
     <dl class="entities">
-      <dt>Slice 0 — Current-RH plugin dev harness</dt>
+      <dt>Slice 0 — Current-RH plugin dev harness ✅ SHIPPED</dt>
       <dd>Build a <code>docker/rotorhazard/</code> image from <strong>RH v4.4.0</strong> with
       <code>MockInterface</code> + an emulated-signal CSV, and extend <code>cargo xtask live</code> /
       <code>rh-mock</code> to mount the GridFPV plugin into the container's <code>plugins/</code> dir.
-      Unblocks testing every later slice against current RH. <em>(A local
-      <code>rh-plugin-dev-env</code> image already exists — fold it in.)</em></dd>
-      <dt>Slice 1 — Plugin skeleton + handshake + guided-install UX</dt>
+      Unblocks testing every later slice against current RH. Built — plus the
+      <code>gridfpv_mock</code> test plugin and the <code>race-day</code> autopilot harness on top.</dd>
+      <dt>Slice 1 — Plugin skeleton + handshake + guided-install UX ✅ SHIPPED</dt>
       <dd><code>plugins/gridfpv/__init__.py</code> (+ <code>manifest.json</code>, <code>required_rhapi_version</code>&nbsp;1.3)
       registering <code>gridfpv_hello</code> via <code>socket_listen</code> (version/capabilities). Grid-side: the handshake probe, the
       <strong>required-with-guided-install</strong> flow (§5), and the adapter learning to prefer the
       plugin transport (socket fallback retained). Ships: Grid recognizes a plugin-equipped RH and walks
-      a missing one through install.</dd>
-      <dt>Slice 2 — Live dense RSSI &rarr; replace the save-then-pull</dt>
+      a missing one through install. As built: the bundle is <strong>embedded in the Director at
+      compile time</strong> and served at <code>GET /plugin/gridfpv.zip</code> (always matches the
+      running Director); the handshake replies via a separate <code>gridfpv_hello_ack</code> event
+      (not a socket.io ack) carrying <code>protocol_version</code> (checked for <strong>exact
+      equality</strong>) and <code>prestage_secs_was</code>.</dd>
+      <dt>Slice 2 — Live dense RSSI &rarr; replace the save-then-pull ✅ SHIPPED</dt>
       <dd>Plugin broadcasts per-node signal over the <code>gridfpv_signal</code> channel (<code>current_rssi</code> heartbeat +
       per-pass <code>history_values</code> window); Grid consumes it as the pass's signal context and the
       heat's trace. Retires the path-2 <code>save_laps</code>&rarr;<code>load_data</code>&rarr;<code>get_pilotrace</code>
-      pull. Validated against the emulated-signal harness. <strong>Headline marshaling-fidelity win.</strong></dd>
-      <dt>Slice 3 — Clean start/stop + per-node passes &rarr; retire the socket hacks</dt>
+      pull. Validated against the emulated-signal harness. <strong>Headline marshaling-fidelity win.</strong>
+      As built, richer than sketched: <code>gridfpv_signal</code> is <strong>incremental</strong>
+      (per-node <code>base</code> index, append-vs-replace, a <code>final</code> full flush on race
+      stop, a 20k-sample window cap, 2&nbsp;Hz decimation) — which resolves risk #5 (volume). The
+      save-then-pull is <em>suppressed</em> while live signal is active and retained as the stock-RH
+      fallback.</dd>
+      <dt>Slice 3 — Clean start/stop + per-node passes ◐ PARTIAL</dt>
       <dd>Plugin executes <code>seat</code> (via <code>rhapi.db</code>), <code>start</code>
       (<code>race.stage()</code>), <code>stop</code> (<code>race.stop()</code>), and emits passes from
-      <code>RACE_LAP_RECORDED</code> attributed by node seat. Grid still owns the timing. Deletes the
-      <code>alter_race_format</code> staging-zero, the <code>add_pilot</code>/<code>alter_heat</code>
-      dance, and the prestage fight. The socket fallback's workaround code is removed here.</dd>
-      <dt>Slice 4 — Draggable-threshold recalculate (<a href="marshaling-plan.html">#3</a>)</dt>
+      <code>RACE_LAP_RECORDED</code> attributed by node seat. Grid still owns the timing. Status: <code>live_pass</code> (native <code>RACE_LAP_RECORDED</code> passes, deduped against
+      <code>current_laps</code>) <strong>shipped</strong>; the prestage zeroing shipped
+      (<code>zero_prestage_pad</code>). <strong>Clean start/stop has not</strong> — the Stage-time
+      socket prepare/seat flow (staging-zero, seating dance) is still the production control path,
+      recently hardened rather than deleted (effective-format re-prepare, 5&nbsp;s stage retry,
+      per-arming pass gating). Deleting those workarounds is this slice's remaining work.
+      <p>
+        <strong>#423 narrows what is left, and it is not what the slice's name says.</strong> The
+        <em>start/stop</em> half has no case: <code>on_stage_race</code> and <code>on_stop_race</code>
+        <em>are</em> <code>race.stage()</code> and <code>race.stop()</code>, byte-for-byte the calls
+        RHAPI would make, identical on 4.3.0 and 4.4.0 — so routing them Director&rarr;plugin&rarr;RHAPI
+        adds a hop and a capability gate to arrive at the same line of Python. Building it would be
+        &ldquo;newer&rdquo; standing in for &ldquo;better&rdquo;.
+      </p>
+      <p>
+        The <em>seating</em> half does have a case, and a specific one: <code>db.heat_add()</code> and
+        <code>db.pilot_add()</code> <strong>return the row they created</strong>. The socket dance
+        cannot — it emits, waits up to 3&nbsp;s for a broadcast, and infers the new id as &ldquo;the
+        highest&rdquo; / &ldquo;the one above the floor&rdquo;, a heuristic that is wrong the moment
+        anything else touches RH's heats or pilots concurrently. That is the piece worth building, it
+        needs a socket fallback for the v0.3.0 field plugin, and until then the readback added in #423
+        is what keeps the dance honest.
+      </p></dd>
+      <dt>Slice 4 — Draggable-threshold recalculate ◐ DELIVERED GRID-SIDE</dt>
       <dd>A <code>recalculate</code> that replays detection over the stored dense trace at marshal-chosen
       enter/exit levels and <em>proposes</em> lap changes (Grid/marshal commits; RH truth is not mutated
-      under the RD), plus an optional <code>gridfpv_calibrate</code> write-back via
-      <code>frequencyset_alter</code>. The marshaling graph gets draggable thresholds over the captured
-      trace. The payoff feature owning-the-stack was for — delivered on RH's detection.</dd>
+      under the RD), plus an optional write-back of the chosen levels onto the timer. The marshaling
+      graph gets draggable thresholds over the captured trace. The payoff feature owning-the-stack was for. <strong>Shipped ahead of the plugin
+      slice, Grid-side</strong>: re-detection re-runs the enter/exit hysteresis over the captured
+      trace in the console (preview-only; committed via the ordinary marshaling rulings) — resolving
+      open decision #3 in favour of a faithful Grid-side reimplementation. The <strong>forward</strong>
+      write-back landed in #355 — but as <code>set_enter_at_level</code> on the stock socket, with
+      <strong>no plugin route and no <code>gridfpv_calibrate</code></strong> (see the
+      <a href="#calibration-correction">correction</a>); pushing a <em>marshaling</em> panel's levels
+      through it is the remaining follow-up.</dd>
     </dl>
 
     <pre class="mermaid">
@@ -308,20 +824,22 @@ flowchart LR
       an RH plugin). Any future non-RH timer is a protocol <em>adapter</em>, not a plugin host, and the
       canonical event model already provides that seam — so we build concretely for RH and do not design
       a speculative cross-RMS plugin protocol.</li>
-      <li>Pass attribution across the pilot gate — <strong>verify in S3</strong> that
-      <code>RACE_LAP_RECORDED</code> attributes by node seat regardless of RH's seated-pilot gate (so we
-      need no socket-era seating just to make passes count), or seat via <code>rhapi.db</code> if RH
-      still gates.</li>
-      <li><strong>Recalc detection fidelity (load-bearing).</strong> The #3 recalculate replays RH's
-      enter/exit hysteresis over the stored trace — its credibility depends on that replay matching RH's
-      real detector. Either reimplement RH's crossing algorithm faithfully (and pin it to an RH version)
-      or run the recalc <em>in the plugin</em> against RH's own detection code. Decide in S4; verify a
-      recalc at RH's actual thresholds reproduces RH's actual laps on a captured trace.</li>
-      <li>Recalc must be <strong>deterministic and non-destructive</strong> — re-running detection over a
-      stored trace yields the same result every time and proposes (never silently rewrites) laps, per the
-      <a href="marshaling.html">Marshaling</a> commit/reversibility model.</li>
-      <li>Live-signal volume — <code>history_values</code> can be large; bound the streamed window and
-      decimate the heartbeat so the broadcast stays cheap on a Pi.</li>
+      <li><span class="resolved">Answered — pass attribution across the pilot gate.</span> RH's pass
+      gate rejects crossings on unseated nodes ("Pilot not defined") and <code>RACE_LAP_RECORDED</code>
+      only fires for laps RH records — so seating remains required even with <code>live_pass</code>.
+      The Stage-time socket seating stays until S3 replaces it with in-plugin
+      <code>rhapi.db</code> seating.</li>
+      <li><span class="resolved">Resolved — recalc detection fidelity.</span> Decided in favour of a
+      <strong>faithful Grid-side reimplementation</strong> of RH's enter/exit hysteresis, shipped in
+      the console's re-detection (<code>redetect.ts</code>) over the captured trace — preview-only,
+      committed through the ordinary marshaling rulings. In-plugin recalc is off the table.</li>
+      <li><span class="resolved">Satisfied — recalc is deterministic and non-destructive.</span>
+      The shipped re-detection proposes (never silently rewrites) laps, commits via
+      void/insert rulings, and shares the marshal's removal record so a removed crossing is never
+      re-proposed (<a href="marshaling.html">Marshaling</a>, D25).</li>
+      <li><span class="resolved">Resolved — live-signal volume.</span> Shipped bounded: incremental
+      per-node <code>base</code>-indexed appends, a 20k-sample window cap, 2&nbsp;Hz decimation, and a
+      full flush only at race stop.</li>
       <li>Install automation vs. instructions — same-host Grid can copy the plugin folder directly;
       remote RH gets download + copy-and-restart steps. Pick the same-host automation as the happy path.</li>
     </ol>

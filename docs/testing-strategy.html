@@ -94,8 +94,8 @@
       <tbody>
         <tr><td>A recorded Velocidrone WebSocket message stream</td><td>Velocidrone</td><td>The exact ordered <code>Pass</code> / lifecycle / <code>CompetitorSeen</code> events, with split indices and source timestamps</td></tr>
         <tr><td>A recorded RotorHazard Socket.IO frame log</td><td>RotorHazard</td><td>Passes with per-node signal context attached, calibration/lifecycle events</td></tr>
-        <tr><td>A recorded LapRF binary serial capture</td><td>LapRF</td><td>Passes from <code>PassingRecord</code> + RSSI stats, device-clock timestamps</td></tr>
-        <tr><td>A scripted sequence of manual UI entries</td><td>Manual</td><td>Passes with wall-clock timestamps, no signal/calibration</td></tr>
+        <tr><td>A recorded LapRF binary serial capture</td><td>LapRF</td><td>Passes from <code>PassingRecord</code> + RSSI stats, device-clock timestamps <em>(aspirational — no LapRF adapter exists)</em></td></tr>
+        <tr><td>A scripted sequence of manual UI entries</td><td>Manual</td><td>Passes with wall-clock timestamps, no signal/calibration <em>(aspirational — no manual adapter exists)</em></td></tr>
       </tbody>
     </table>
     <p>
@@ -309,7 +309,18 @@ flowchart LR
       canonical-log fixtures (§4).</p>
     </div>
 
-    <h3>5.2 The interactive mock-signal harness — <code>cargo xtask rh-mock</code></h3>
+    <h3>5.2 The plugin-era hands-on harnesses</h3>
+    <p>
+      Since the D16 plugin pivot the primary hands-on layer is the <strong>plugin-equipped RH
+      rig</strong>: <code>docker/rotorhazard/</code> builds RH <strong>v4.4.0 from source</strong>
+      with the <code>gridfpv</code> plugin plus the test-only <code>gridfpv_mock</code> plugin, and
+      <strong><code>cargo xtask race-day</code></strong> runs the autopilot (scenario personalities
+      <code>clean / varied / messy / pack</code>) that emulates the seated nodes whenever the
+      Director stages a heat — see <a href="mock-race-day.md">mock-race-day</a>. The older
+      <code>rh-mock</code> harness below remains for low-level signal poking.
+    </p>
+
+    <h3>5.3 The interactive mock-signal harness — <code>cargo xtask rh-mock</code></h3>
     <p>
       The same emulated-signal mechanism (§5.1) is also a <strong>runnable, interactive tool</strong>
       for hands-on marshaling testing: drive a <em>real</em> dockerized RotorHazard with a controllable
@@ -352,7 +363,7 @@ cargo run -p gridfpv-app --features live
 #    a heat left only Staged never races, so it records no laps).
 
 # 4. After the heat, dump the captured signal values for that heat:
-cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
+cargo xtask rh-mock dump http://localhost:8080 practice q-1</pre>
     <div class="principle">
       <p><span class="name">Stage <em>and</em> Start — and seat a pilot on a fed node.</span>
       The two ways a mock-feed heat silently records <strong>no laps</strong>: (a) the heat never
@@ -400,6 +411,33 @@ cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
       surfaces immediately in the console capture instead of presenting as a silent blank page.</p>
     </div>
 
+    <h3>6.1 The browser suite — <code>cargo xtask e2e</code></h3>
+    <p>
+      Above the contract suite sits the <strong>browser</strong> layer: Playwright specs driving the
+      real console against a real Director, in Microsoft's
+      <code>mcr.microsoft.com/playwright:v1.61.0-noble</code> image. It is containerized for a
+      practical reason — the dev box is headless and has no browser deps — and for a better one:
+      <strong>the image CI runs is the image the maintainer runs</strong>, so "green locally, red in
+      CI" is not a category of failure we have to debug. The container runs the
+      <em>host-built</em> Director binary, which works because the image's glibc is newer than the
+      host's, not by accident; if that ever inverts, the binary must be built inside the image too.
+    </p>
+    <div class="principle">
+      <p><span class="name">A suite that is not a gate rots.</span> The browser specs existed for
+      months and ran only when someone remembered to ask. By the time anyone looked,
+      <strong>38 of 46 were dead</strong> — a nav rename ("Live control" → "Race control",
+      <code>8ad6344</code>) had invalidated sixty hardcoded locators in one commit, and nothing
+      reported it. The suite had been silently green-by-absence the entire time. It is now a
+      required CI job (~20 min); that is the only thing that keeps it honest.</p>
+    </div>
+    <p>
+      The corollary for spec authorship: a UI string that appears in sixty locators is a
+      <strong>shared input, not sixty independent facts</strong> — the same rule the
+      <a href="conventions.html">friendly-name resolvers</a> enforce in the app. Nav labels and
+      other cross-cutting copy belong in one place the specs import, so a rename fails one
+      assertion loudly instead of sixty identically.
+    </p>
+
     <h2>7. Testing the format generators</h2>
     <p>
       Format / qualifying generators are a pure function of state too
@@ -414,7 +452,7 @@ cargo xtask rh-mock dump http://localhost:3000 practice q-1</pre>
       assert exactly who moves up, who is eliminated, and the seeds of the next heats.</li>
       <li><strong>Completion &amp; final ranking.</strong> Given the last results, assert the
       generator declares the format complete and exposes the correct final ordering.</li>
-      <li><strong>The dynamic case.</strong> ZippyQ / rolling is the honesty-forcing format
+      <li><strong>The dynamic case.</strong> ZippyQ / rolling was the honesty-forcing format (built then shelved, D10; the structure generators live on <code>tournaments-snapshot</code> — the shipping registry is the three primitives)
       (<a href="race-engine.html">Race Engine</a> §3) — a table that adds rounds on demand and
       asserts the generator produces sensible next heats from current state, never a
       precomputed schedule.</li>

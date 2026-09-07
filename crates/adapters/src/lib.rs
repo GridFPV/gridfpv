@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod clock;
 pub mod dedup;
+pub mod diag;
 pub mod rotorhazard;
 pub mod velocidrone;
 

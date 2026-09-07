@@ -35,6 +35,7 @@
   import TimersPage from './screens/TimersPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
+  import TunePage from './screens/TunePage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
   import EventSetupWizard from './screens/EventSetupWizard.svelte';
   import EventTimers from './screens/EventTimers.svelte';
@@ -45,6 +46,7 @@
   import Results from './screens/Results.svelte';
   import EventAudit from './screens/EventAudit.svelte';
   import { openAudit } from './lib/auditFilter.svelte.js';
+  import type { Timer } from '@gridfpv/types';
   import {
     parseHash,
     formatHash,
@@ -96,6 +98,23 @@
   // Page navigations (hub cards, breadcrumbs, page "Home" crumbs).
   const goPage = (page: AppPage) => navigate({ kind: 'page', page });
   const goHome = () => goPage('home');
+  /**
+   * Open the per-timer Tune page (#355) on the **timer's own** scope — `#/timers/<id>/tune`,
+   * entered from the app-level Timers page. This is the primary case: it must work before an event
+   * exists at all, which is the state an untuned timer is in.
+   */
+  const goTune = (timer: string) => navigate({ kind: 'tune', timer });
+  /**
+   * Open the same page on the **event's** scope (#411) — `#/events/<eventId>/timers/<id>/tune`,
+   * entered from the in-event Timers screen. The route carries the event so the page can name what
+   * it is editing and so back lands in the event workspace, not on the global Timers page.
+   */
+  const goEventTune = (timer: string) => {
+    const event = session.currentEvent?.id;
+    navigate(event ? { kind: 'tune', timer, event } : { kind: 'tune', timer });
+  };
+  /** Back out of an event-scoped tune: the event workspace's Timers tab — where the RD came from. */
+  const goEventTimersTab = () => navigate({ kind: 'workspace', tab: 'timers' });
   // The workspace's app-route concept is "Events" (where event entry/switch happens).
   const route$page = $derived(route.kind === 'page' ? route.page : 'home');
 
@@ -103,8 +122,60 @@
   // route from the hash. Reconcile against the live active event so a workspace hash with no event
   // doesn't render a broken workspace.
   function onHashChange() {
-    route = reconcileRoute(parseHash(location.hash), !!session.currentEvent);
+    route = reconcileRoute(
+      parseHash(location.hash),
+      !!session.currentEvent,
+      timerKnown,
+      eventKnown
+    );
   }
+
+  // ── The tune route's timer (#355) ───────────────────────────────────────────────────────────
+  // `#/timers/<id>/tune` is the first route that names an entity, so the shell has to resolve it
+  // before it can render: the Tune page takes a `Timer`, not an id (a page that only knew the id
+  // could not put a name in its own title without re-deriving one). The registry is read lazily —
+  // only a tune route needs it — and a link to a timer that has since been removed reconciles to
+  // the Timers page rather than rendering a tune view over nothing.
+  let tuneTimers = $state<Timer[] | undefined>(undefined);
+  const timerKnown = (id: string) => tuneTimers?.some((t) => t.id === id) ?? true;
+  const tuneTimer = $derived.by(() => {
+    if (route.kind !== 'tune') return undefined;
+    const id = route.timer;
+    return tuneTimers?.find((t) => t.id === id);
+  });
+
+  // ── The tune route's event SCOPE (#411) ─────────────────────────────────────────────────────
+  // The event-scoped route names the event whose tune is being edited. The event in play is the
+  // Director's active event (server state, #90) — the same one the workspace shows — so a route
+  // naming any other event has no workspace to return to and no event to honestly name. While the
+  // active event is still resolving nothing is known yet, so we answer "known" and let the route
+  // stand: bouncing there would flash a deep link on its way in, exactly as it would for the timer.
+  const eventKnown = (id: string) =>
+    session.resolvingActiveEvent ? true : id === session.currentEvent?.id;
+  /** The event to name on the page — resolved to the EventMeta, so the page shows its name. */
+  const tuneEvent = $derived(
+    route.kind === 'tune' && route.event && route.event === session.currentEvent?.id
+      ? session.currentEvent
+      : undefined
+  );
+
+  $effect(() => {
+    if (route.kind !== 'tune' || tuneTimers !== undefined) return;
+    void session
+      .listTimers()
+      .then((list) => (tuneTimers = list))
+      .catch(() => (tuneTimers = []));
+  });
+
+  // Once the registry is known, a tune route naming a timer that is gone falls back to Timers; once
+  // the active event is known, an event-scoped route naming a different event drops the scope (and
+  // keeps tuning on the timer's own route). Both predicates answer "keep the route" while their
+  // source is still unknown, so this only ever fires on a genuine mismatch.
+  $effect(() => {
+    if (route.kind !== 'tune') return;
+    const next = reconcileRoute(route, !!session.currentEvent, timerKnown, eventKnown);
+    if (next !== route) navigate(next);
+  });
 
   // The lazy token prompt: register a provider that opens the TokenDialog and resolves
   // with the entered token (or undefined if cancelled). This is the only auth surface left.
@@ -125,7 +196,7 @@
     resumed = true;
     void (async () => {
       await session.resolveActiveEvent();
-      navigate(resolveInitialRoute(location.hash, !!session.currentEvent));
+      navigate(resolveInitialRoute(location.hash, !!session.currentEvent, undefined, eventKnown));
     })();
   });
 
@@ -230,16 +301,9 @@
   }
 
   // ── Settings (the RD token, set/cleared up front) ──────────────────────────
-  // The running Director's identity for the footer build-stamp (alpha field-support: a bug
-  // report should quote the version). Same-origin fetch — the console is always served BY the
-  // Director; a failed read leaves the footer blank rather than lying.
-  let about = $state<{ version: string } | undefined>(undefined);
-  $effect(() => {
-    fetch('/about')
-      .then((r) => (r.ok ? r.json() : undefined))
-      .then((a) => (about = a))
-      .catch(() => {});
-  });
+  // The `/about` read that fed the corner build-stamp now lives in `lib/buildVersion.svelte.ts`
+  // and is consumed by Brand.svelte (#467) — the brand mounts on six screens and this component
+  // owns only one of them.
 
   // v1 keeps NO manual settings surface: the control token is requested automatically by
   // TokenDialog when a privileged action needs one (loopback needs none at all), and the
@@ -258,6 +322,30 @@
       <span>Resuming…</span>
     </div>
   </div>
+{:else if route.kind === 'tune'}
+  <!-- The per-timer Tune page (#355). Rendered OUTSIDE the workspace shell in both scopes: it is a
+       full-width two-location surface (set a level, walk to the gate, read the graph on a phone),
+       and it must also work with no event at all — a timer is tuned before an event exists. The
+       event-scoped route (#411) changes what the page NAMES and where its back crumb goes, not
+       where it renders. -->
+  <div class="gridfpv-root gridfpv-dense">
+    {#if tuneTimer}
+      <TunePage
+        {session}
+        timer={tuneTimer}
+        scopeEvent={tuneEvent}
+        onhome={goHome}
+        ontimers={() => goPage('timers')}
+        onevent={goEventTimersTab}
+      />
+    {:else}
+      <!-- Resolving the registry (or bouncing to Timers because the timer is gone). -->
+      <div class="resume-loading" role="status">
+        <span class="resume-spinner" aria-hidden="true"></span>
+        <span>Resuming…</span>
+      </div>
+    {/if}
+  </div>
 {:else if route.kind === 'page'}
   <!-- App-level routes (#118): the home hub, or one of its three pages. The view is driven by the
        hash, not just `session.currentEvent` — an explicit page hash (e.g. `#/pilots`) shows that
@@ -275,7 +363,7 @@
     {:else if route$page === 'events'}
       <EventPicker {session} onhome={goHome} onsetup={() => (pendingWizard = true)} />
     {:else if route$page === 'timers'}
-      <TimersPage {session} onhome={goHome} />
+      <TimersPage {session} onhome={goHome} ontune={goTune} />
     {:else if route$page === 'pilots'}
       <PilotsPage {session} onhome={goHome} />
     {:else if route$page === 'classes'}
@@ -338,7 +426,9 @@
 
       <main class="content">
         {#if active === 'timers'}
-          <EventTimers {session} />
+          <!-- Tuning is reachable from INSIDE the event (#411): the row's Tune action takes the
+               event-scoped route, so back returns to this tab rather than the global Timers page. -->
+          <EventTimers {session} ontune={goEventTune} />
         {:else if active === 'classes-roster'}
           <EventClassesRoster {session} />
         {:else if active === 'rounds'}
@@ -386,25 +476,13 @@
 <!-- The lazy token prompt lives above any screen (the ONLY token surface in v1). -->
 <TokenDialog bind:this={tokenDialog} />
 
-{#if about}
-  <footer class="build-stamp" aria-label="Build version">GridFPV v{about.version}</footer>
-{/if}
+<!-- The build stamp used to be a fixed watermark in this corner (#467). It is now the third line
+     of the brand block in the top left — see Brand.svelte, which reads it from the shared
+     `buildVersion` module so every screen that mounts the brand carries it. -->
 
 <ToastHost />
 
 <style>
-  .build-stamp {
-    position: fixed;
-    right: var(--gf-space-3);
-    bottom: var(--gf-space-2);
-    z-index: 5;
-    font-family: var(--gf-font-family);
-    font-size: var(--gf-font-size-2xs);
-    color: var(--gf-text-muted);
-    opacity: 0.7;
-    pointer-events: none;
-  }
-
   /* The active-event resume loading state (#90). */
   .resume-loading {
     display: flex;

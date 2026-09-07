@@ -24,6 +24,15 @@
 //! relative calls to the protocol API (`/snapshot/...`, `/control/...`) and opens the
 //! realtime WS — those only work if the page and the API share an origin, which they do
 //! when the window loads the Director directly.
+//!
+//! # Diagnostics (#380)
+//!
+//! `main.rs` sets `windows_subsystem = "windows"` on release builds, so the shipped Windows
+//! executable is a **GUI-subsystem process with no console**: stderr writes are discarded by
+//! the OS, and even `gridfpv-desktop.exe > log.txt 2>&1` produces an *empty file*. Every
+//! `eprintln!` below therefore goes through [`gridfpv_app::logging`], which opens and writes a
+//! real **log file** itself — see the `eprintln!` shadow declared at the top of this module,
+//! and [`gridfpv_app::logging`]'s own docs for why this is not `tauri-plugin-log`.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -31,11 +40,132 @@ use std::path::PathBuf;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::oneshot;
 
+/// Route this crate's diagnostics into the Director's always-on log file (#380).
+///
+/// `gridfpv_app` shadows `eprintln!` for its own modules; this shell is a separate crate, so
+/// it declares the same shadow at its crate root — otherwise the three most important lines
+/// the desktop app prints (which data dir it chose, the ready URL, and a Director that exited
+/// with an error) would keep vanishing into a nonexistent console on Windows. `macro_rules!`
+/// scope is textual: this must stay above every use below.
+macro_rules! eprintln {
+    ($($arg:tt)*) => { gridfpv_app::logging::record(::std::format_args!($($arg)*)) };
+}
+
+/// The env var that opts into the Linux WebKitGTK rendering workarounds (#476).
+///
+/// Accepts (case-insensitive, comma-separated):
+///  - `dmabuf`      → `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+///  - `compositing` → `WEBKIT_DISABLE_COMPOSITING_MODE=1`
+///  - `all`         → both
+///  - unset / `off` / `0` → nothing (the default)
+const GPU_WORKAROUND_ENV: &str = "GRIDFPV_LINUX_GPU_WORKAROUND";
+
+/// Apply the opt-in WebKitGTK rendering workarounds on Linux (#476).
+///
+/// # Why this is opt-in and not just switched on
+///
+/// GridFPV on Linux renders through WebKitGTK, whose accelerated compositing is a known source of
+/// flicker and blank windows on virtualized and NVIDIA GPUs — the colour flicker reported in large
+/// filled boxes on Ubuntu 24 **in a VM** has exactly that shape. Both variables below are the
+/// standard mitigations, and both are real downgrades: `WEBKIT_DISABLE_DMABUF_RENDERER` gives up
+/// the fast rendering path, and `WEBKIT_DISABLE_COMPOSITING_MODE` gives up hardware-accelerated
+/// compositing outright. Tauri's own Linux graphics guidance is explicit about the cost:
+///
+/// > *"Only ship an unconditional override like this if you have verified your app is affected.
+/// > It disables a faster path for everyone, including users on working setups."*
+///
+/// It has **not** been verified here: the flicker has only ever been seen in a VM, GridFPV's
+/// primary RD machine targets are unaffected so far, and nobody has reproduced it on bare-metal
+/// Linux. Forcing either variable on every Linux user to fix a cosmetic glitch on one virtualized
+/// desktop would slow down every RD who does not have the problem — so the default is unchanged
+/// behaviour, and this is the switch that makes the two mitigations testable **without a rebuild**:
+///
+/// ```text
+/// GRIDFPV_LINUX_GPU_WORKAROUND=dmabuf       ./GridFPV     # try this FIRST — the cheaper one
+/// GRIDFPV_LINUX_GPU_WORKAROUND=compositing  ./GridFPV     # the heavier hammer
+/// GRIDFPV_LINUX_GPU_WORKAROUND=all          ./GridFPV
+/// ```
+///
+/// `dmabuf` is listed first deliberately: upstream treats disabling the DMA-BUF renderer as the
+/// targeted fix for exactly this class of glitch, and disabling compositing entirely as a last
+/// resort. If one of these turns out to fix the VM flicker, that result is what would justify
+/// switching it on by default (ideally narrowed to a detected virtualized GPU) — this function is
+/// the experiment, not the conclusion.
+///
+/// A variable the user has already exported **always wins**: this never overwrites an explicit
+/// choice, so `WEBKIT_DISABLE_COMPOSITING_MODE=0` in a shell profile stays honoured.
+///
+/// No-op on every non-Linux platform.
+#[cfg(target_os = "linux")]
+fn apply_linux_gpu_workaround() {
+    let Ok(raw) = std::env::var(GPU_WORKAROUND_ENV) else {
+        return;
+    };
+    let request = raw.trim().to_ascii_lowercase();
+    if request.is_empty() || request == "off" || request == "0" {
+        return;
+    }
+
+    let wanted: Vec<&str> = request.split(',').map(str::trim).collect();
+    let all = wanted.contains(&"all");
+    let mut applied: Vec<&str> = Vec::new();
+
+    for (token, var) in [
+        ("dmabuf", "WEBKIT_DISABLE_DMABUF_RENDERER"),
+        ("compositing", "WEBKIT_DISABLE_COMPOSITING_MODE"),
+    ] {
+        if !(all || wanted.contains(&token)) {
+            continue;
+        }
+        // Never clobber an explicit choice the user already exported.
+        if std::env::var_os(var).is_some() {
+            eprintln!("gridfpv-desktop: {var} already set in the environment — leaving it alone");
+            continue;
+        }
+        // SAFETY: single-threaded. This runs before the tokio runtime is built and before Tauri
+        // (and so WebKitGTK) starts, so no other thread can be reading the environment. Setting it
+        // any later would also be pointless: WebKitGTK reads these once, at webview init.
+        unsafe { std::env::set_var(var, "1") };
+        applied.push(var);
+    }
+
+    if applied.is_empty() {
+        eprintln!(
+            "gridfpv-desktop: {GPU_WORKAROUND_ENV}={raw} matched no known workaround \
+             (expected: dmabuf, compositing, all)"
+        );
+    } else {
+        eprintln!(
+            "gridfpv-desktop: Linux GPU workaround active — set {} (from {GPU_WORKAROUND_ENV}={raw}). \
+             This disables a faster rendering path; unset it if the display is fine without it.",
+            applied.join(", ")
+        );
+    }
+}
+
+/// No-op off Linux — the WebKitGTK workarounds have no meaning on WebView2 / WKWebView.
+#[cfg(not(target_os = "linux"))]
+fn apply_linux_gpu_workaround() {}
+
 /// The Tauri application entry point, invoked by `main.rs` (and re-exported for the mobile
 /// `tauri::mobile_entry_point` shape, should a mobile shell ever be added).
 pub fn run() {
+    // Open the log file before ANYTHING else, so a failure during Tauri's own setup (or a
+    // panic — `logging` installs a hook that files the panic + backtrace) is still recorded.
+    // On a GUI-subsystem build this is the only record that survives.
+    let log_file = gridfpv_app::logging::init();
+    eprintln!(
+        "gridfpv-desktop: GridFPV {} starting — log file: {}",
+        env!("CARGO_PKG_VERSION"),
+        log_file
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unavailable — no writable log dir)".to_string())
+    );
+
+    // Before the webview exists — see `apply_linux_gpu_workaround`.
+    apply_linux_gpu_workaround();
+
     tauri::Builder::default()
-        .plugin(tauri_plugin_log_shim())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -120,12 +250,6 @@ pub fn run() {
 /// Owns the tokio runtime hosting the in-process Director; held in Tauri-managed state so it
 /// (and the serve task) live for the whole app lifetime.
 struct DirectorRuntime(#[allow(dead_code)] tokio::runtime::Runtime);
-
-/// The bundled-log plugin is optional; this returns a no-op shim plugin so the builder chain
-/// reads cleanly and a real logging plugin can slot in later without restructuring `setup`.
-fn tauri_plugin_log_shim() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    tauri::plugin::Builder::new("gridfpv-noop").build()
-}
 
 /// Resolve the data directory for created events' SQLite files (created if needed).
 ///

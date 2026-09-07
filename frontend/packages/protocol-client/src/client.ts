@@ -19,8 +19,14 @@
 
 import type {
   ActiveEvent,
+  CalibrationRequest,
+  CaptureDispatch,
+  CaptureRequest,
   ChangeEnvelope,
   ChannelCatalogEntry,
+  ChannelDispatch,
+  ChannelLayouts,
+  ChannelRequest,
   Class,
   ClassId,
   ClassStandings,
@@ -34,7 +40,10 @@ import type {
   EventMeta,
   FormatSchema,
   HeatSummary,
+  ImdReading,
+  LayoutId,
   MemberSlot,
+  NewChannelLayoutRequest,
   NewRoundReq,
   Pilot,
   PilotId,
@@ -43,13 +52,18 @@ import type {
   RankEntry,
   RoundDef,
   RoundId,
+  RoundIssue,
   RoundStanding,
   Scope,
+  SetChannelLayoutRequest,
   SetClassHiddenRequest,
+  SetTimerNodesRequest,
   Snapshot,
   SubscribeRequest,
   Timer,
   TimerId,
+  TimerNodes,
+  TimerSignal,
   UpdateClassRequest,
   UpdatePilotRequest,
   UpdateRoundReq,
@@ -109,11 +123,11 @@ export interface ConnectOptions {
   baseUrl: string;
   /**
    * The **event** this connection's scope lives in (issue #72). Every read/realtime surface
-   * is rooted under `/events/{eventId}/…`, so the client targets one event's own log. Defaults
-   * to the built-in `practice` event when omitted, so an un-migrated caller still connects to
-   * a working event.
+   * is rooted under `/events/{eventId}/…`, so the client targets one event's own log.
+   * **Required** — there is no built-in event to fall back to (#414), and silently defaulting
+   * to a magic id would connect a caller to something it never chose.
    */
-  eventId?: EventId;
+  eventId: EventId;
   /** The resource this connection is scoped to (protocol.html §4). */
   scope: Scope;
   /** Optional bearer token (sent as `Authorization: Bearer …` and on the WS URL). */
@@ -169,6 +183,140 @@ const isProtocolError = (v: unknown): v is ProtocolError =>
   'message' in v &&
   typeof (v as ProtocolError).message === 'string';
 
+// ── Request failures: the Director's own words, and the status carried structurally ───────────
+//
+// Every non-2xx response in this file rejects through `requestFailed` (#433) — from `apiRequest`,
+// the single call site every endpoint now shares (#459). Before #433, each of ~40 call sites
+// formatted its own `METHOD /events/{id}/rounds/{id} failed: HTTP 400` line and threw the
+// Director's typed body away — which put two raw ids on screen (the repo display rule forbids
+// exactly that) *and* discarded the one sentence worth showing.
+
+/**
+ * The rejection every non-2xx response in this client produces (#433).
+ *
+ * `status` is carried **structurally**, not spelled into the message, so a caller branches on the
+ * number (`isAuthFailure` in the console keys on 401/403) while the *words* stay free to be the
+ * Director's own sentence. Matching a status out of prose was how `evt-401` in a 500's message
+ * used to open the token dialog.
+ */
+export interface RequestFailure extends Error {
+  /** The HTTP status the Director answered with. */
+  status: number;
+  /** The Director's branchable {@link ProtocolError} category, when it sent a typed body. */
+  code?: ProtocolError['code'];
+}
+
+/** Whether a thrown value is a {@link RequestFailure} — i.e. it carries an HTTP `status`. */
+export function isRequestFailure(e: unknown): e is RequestFailure {
+  return e instanceof Error && typeof (e as Partial<RequestFailure>).status === 'number';
+}
+
+/** The `message` of a typed error body, trimmed, or `''` when the body carries no usable one. */
+function bodyMessage(v: unknown): string {
+  if (typeof v !== 'object' || v === null || !('message' in v)) return '';
+  const m = (v as { message: unknown }).message;
+  return typeof m === 'string' ? m.trim() : '';
+}
+
+/**
+ * Build the error a failed request rejects with: **the Director's typed refusal, verbatim.**
+ *
+ * The Director's `ProtocolError` body is already phrased for the RD and names heats, timers, nodes
+ * and channels by their **friendly** names — deliberately, precisely so it can be shown:
+ *
+ * > this round has a heat in progress (Practice Heat) — finalize or reset it before removing the
+ * > round
+ *
+ * That is the message the RD can act on, so it is thrown as-is. Wrapping it in a route line would
+ * both bury it and put the raw ids from the path in front of a user, which the repo display rule
+ * forbids.
+ *
+ * Only a response with **no usable body** falls back, and the fallback says what was *attempted*
+ * in words — `attempted` is an infinitive phrase like `'remove the round'` — never the method and
+ * URL. A bodyless 500 is a poor message, but an honest one; it must never be a silent one.
+ *
+ * The status is attached to the error rather than spelled into it (see {@link RequestFailure}).
+ */
+async function requestFailed(resp: Response, attempted: string): Promise<RequestFailure> {
+  let body: unknown;
+  try {
+    body = await resp.json();
+  } catch {
+    // No body, a truncated one, or an HTML error page from something in front of the Director.
+  }
+  const detail = bodyMessage(body);
+  const err = new Error(
+    detail || `The Director could not ${attempted} (HTTP ${resp.status}).`
+  ) as RequestFailure;
+  err.status = resp.status;
+  if (isProtocolError(body)) err.code = body.code;
+  return err;
+}
+
+/**
+ * The per-call knobs every endpoint in this file shares (#459).
+ *
+ * `token` is the caller's optional bearer credential — an open (unconfigured) Director needs none,
+ * so every endpoint sends it only when held. `fetch` is the injection seam tests and Node use.
+ * `body` is the value to serialise (its presence is what adds `Content-Type`), and `method` is
+ * omitted entirely for a GET so the init object stays exactly what it was per endpoint.
+ */
+interface RequestOptions {
+  /** The HTTP method; omitted for a GET. */
+  method?: string;
+  /** The value to send as a JSON body. Its **presence** is what sets `Content-Type`. */
+  body?: unknown;
+  /** Bearer token, sent as `Authorization: Bearer …` only when held. */
+  token?: string;
+  /** Abandon a request in flight (the Tune page's signal/node polls). */
+  signal?: AbortSignal;
+  /** Inject a `fetch` (defaults to the global). Used by tests and Node. */
+  fetch?: FetchLike;
+}
+
+/**
+ * **The one request path.** Every endpoint below routes through here: it resolves the injected
+ * `fetch`, builds the headers (Accept always; `Content-Type` when there is a body; `Authorization`
+ * when a token is held), issues the call, and funnels **every** non-2xx through {@link requestFailed}
+ * — which is what keeps the Director's typed refusal verbatim and the `status` structural (#433).
+ *
+ * Before this, ~50 endpoints each re-typed that preamble, which is how a cross-cutting change (a new
+ * header, an `AbortSignal`) became a 50-site edit and how one endpoint drifted from the rest.
+ *
+ * Returns the raw {@link Response}: the handful of endpoints whose 2xx carries **no content**
+ * (the DELETEs, `setCalibration`, `stopTimerSignal`) must not parse a body that isn't there.
+ * Everything that answers with JSON goes through {@link apiJson}.
+ */
+async function apiRequest(
+  baseUrl: string,
+  path: string,
+  options: RequestOptions,
+  attempted: string
+): Promise<Response> {
+  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const init: RequestInit = { headers };
+  if (options.method) init.method = options.method;
+  if (options.body !== undefined) init.body = JSON.stringify(options.body);
+  if (options.signal) init.signal = options.signal;
+  const resp = await fetchImpl(`${trimSlash(baseUrl)}${path}`, init);
+  if (!resp.ok) throw await requestFailed(resp, attempted);
+  return resp;
+}
+
+/** {@link apiRequest} plus the JSON parse — the shape all but a handful of endpoints want. */
+async function apiJson<T>(
+  baseUrl: string,
+  path: string,
+  options: RequestOptions,
+  attempted: string
+): Promise<T> {
+  const resp = await apiRequest(baseUrl, path, options, attempted);
+  return (await resp.json()) as T;
+}
+
 const isChangeEnvelope = (v: unknown): v is ChangeEnvelope =>
   typeof v === 'object' && v !== null && 'sequence' in v && 'projection' in v && 'change' in v;
 
@@ -216,24 +364,17 @@ function snapshotPath(eventId: string, scope: Scope): string {
   )}`;
 }
 
-/** The built-in Practice event id — the default the client connects to when none is given. */
-export const PRACTICE_EVENT_ID = 'practice';
-
 /**
  * List every event the server knows (`GET /events`) — issue #72. Reads are open on the LAN,
  * so no token is needed; an optional token is sent when present. Resolves to the events'
- * {@link EventMeta} (Practice first), or rejects on a transport/HTTP failure.
+ * {@link EventMeta} in id order — **possibly empty**, which is a fresh Director's first-run
+ * state (#414), not an error — or rejects on a transport/HTTP failure.
  */
 export async function listEvents(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<EventMeta[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, { headers });
-  if (!resp.ok) throw new Error(`GET /events failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta[];
+  return apiJson<EventMeta[]>(baseUrl, '/events', options, 'list the events');
 }
 
 /**
@@ -243,7 +384,7 @@ export async function listEvents(
  * a token lazily and retries. The body carries the display `name` plus any optional descriptive
  * `fields` (`date`/`location`/`description`/`organizer`); the id is auto-generated server-side.
  * Resolves to the new event's {@link EventMeta}, or rejects on a non-2xx / transport failure
- * (the HTTP status is in the error message so the caller can branch on 401/403).
+ * (a {@link RequestFailure} carrying the status, so the caller can branch on 401/403).
  */
 export async function createEvent(
   baseUrl: string,
@@ -251,20 +392,13 @@ export async function createEvent(
   token?: string,
   options: { fetch?: FetchLike; fields?: Omit<CreateEventRequest, 'name'> } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const body: CreateEventRequest = { name, ...(options.fields ?? {}) };
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body)
-  });
-  if (!resp.ok) throw new Error(`POST /events failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    '/events',
+    { method: 'POST', body, token, fetch: options.fetch },
+    'create the event'
+  );
 }
 
 /**
@@ -282,14 +416,12 @@ export async function deleteEvent(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/events/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw new Error(`DELETE /events/${id} failed: HTTP ${resp.status}`);
+  await apiRequest(
+    baseUrl,
+    `/events/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the event'
+  );
 }
 
 /**
@@ -303,12 +435,7 @@ export async function getActiveEvent(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ActiveEvent> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/active-event`, { headers });
-  if (!resp.ok) throw new Error(`GET /active-event failed: HTTP ${resp.status}`);
-  return (await resp.json()) as ActiveEvent;
+  return apiJson<ActiveEvent>(baseUrl, '/active-event', options, 'read the active event');
 }
 
 /**
@@ -317,7 +444,7 @@ export async function getActiveEvent(
  * answers **401/403** and the caller obtains a token and retries). The body carries the event
  * `id`; the server validates it names a known event (else **404**) and persists the selection so
  * it survives a Director restart. Resolves to the now-active event's {@link EventMeta}, or rejects
- * on a non-2xx / transport failure (the HTTP status is in the error message for branching).
+ * on a non-2xx / transport failure (a {@link RequestFailure} carrying the status for branching).
  */
 export async function setActiveEvent(
   baseUrl: string,
@@ -325,19 +452,12 @@ export async function setActiveEvent(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/active-event`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ id })
-  });
-  if (!resp.ok) throw new Error(`PUT /active-event failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    '/active-event',
+    { method: 'PUT', body: { id }, token, fetch: options.fetch },
+    'set the active event'
+  );
 }
 
 /**
@@ -351,12 +471,7 @@ export async function listTimers(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<Timer[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers`, { headers });
-  if (!resp.ok) throw new Error(`GET /timers failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Timer[];
+  return apiJson<Timer[]>(baseUrl, '/timers', options, 'list the timers');
 }
 
 /**
@@ -364,7 +479,7 @@ export async function listTimers(
  * accepts it tokenless; a gated one answers **401/403** and the caller obtains a token and
  * retries). The body carries the display `name` plus the {@link CreateTimerRequest['kind']} config
  * (a `Sim` or a reserved `Rotorhazard`); the id is auto-generated server-side. Resolves to the new
- * {@link Timer}, or rejects on a non-2xx / transport failure (the HTTP status is in the message).
+ * {@link Timer}, or rejects on a non-2xx / transport failure (a {@link RequestFailure}).
  */
 export async function createTimer(
   baseUrl: string,
@@ -372,19 +487,12 @@ export async function createTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Timer> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw new Error(`POST /timers failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Timer;
+  return apiJson<Timer>(
+    baseUrl,
+    '/timers',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the timer'
+  );
 }
 
 /**
@@ -400,25 +508,318 @@ export async function updateTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Timer> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw new Error(`PUT /timers/${id} failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Timer;
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the timer'
+  );
+}
+
+/**
+ * **Hold** a live connection to a RotorHazard timer (`POST /timers/{id}/connect`) — issue #383.
+ * RD-gated. The hold is independent of any event: the Director's connection reconciler dials the
+ * timer on its next tick whether or not an event exists, so the Timers screen can answer "is this
+ * URL right? does it have the plugin?" while an RD is setting up at a venue. The hold is explicit
+ * and lasts until {@link disconnectTimer}.
+ *
+ * The built-in **Mock has nothing to dial** and answers **400**; an unknown id answers **404**.
+ * Resolves to the updated {@link Timer} (its `manual_connect` now `true`), or rejects on a
+ * non-2xx / transport failure (a {@link RequestFailure} carrying the status for branching).
+ */
+export async function connectTimer(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return setTimerConnection(baseUrl, id, 'connect', token, options);
+}
+
+/**
+ * **Release** a manually-held RotorHazard connection (`POST /timers/{id}/disconnect`) — issue #383.
+ * RD-gated. Clears the hold; the reconciler drops the link on its next tick — unless the active
+ * event also selects the timer, in which case that connection stays up (the two inputs are held
+ * separately on purpose). An unknown id answers **404**. Resolves to the updated {@link Timer}
+ * (its `manual_connect` now `false`), or rejects on a non-2xx / transport failure.
+ */
+export async function disconnectTimer(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return setTimerConnection(baseUrl, id, 'disconnect', token, options);
+}
+
+/**
+ * Restart a RotorHazard timer's server (`POST /timers/{id}/restart`) — issue #386.
+ *
+ * The guided plugin install's last step: RotorHazard imports plugins **once at startup**, so the
+ * `plugins/gridfpv/` folder the RD just dropped in stays inert until RH re-executes. The Director
+ * emits RotorHazard's `restart_server` on the socket it already holds, so the whole install stays
+ * inside GridFPV. RD-gated.
+ *
+ * The Director **refuses** (a **400**) while a race is in progress on the timer — the message names
+ * the heat — and for a Mock or a timer that is not connected; an unknown id answers **404**.
+ * Resolves to the {@link Timer}, or rejects on a non-2xx / transport failure (a
+ * {@link RequestFailure} whose message is the Director's own refusal).
+ *
+ * What follows a success is an **expected** drop → reconnect: RotorHazard re-executes, the timer
+ * passes through `Disconnected`/`Error` for a few seconds, and the Director's reconnect re-probes
+ * the plugin — which is what flips `plugin` from `Missing` to `Present`. That window is a restart in
+ * progress, not a fault, and the console presents it as such.
+ */
+export async function restartTimer(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/restart`,
+    { method: 'POST', token, fetch: options.fetch },
+    'restart the timer'
+  );
+}
+
+/**
+ * Read a timer's **live tuning signal** (`GET /timers/{id}/signal`) — issue #355.
+ *
+ * **The call is the subscription.** The Director streams a timer's telemetry only while somebody is
+ * looking at it: the first call opens the stream and *every* call renews a short lease on it
+ * (`SIGNAL_LEASE`). Stop calling and the stream stops by itself — which is what makes a closed tab,
+ * a crashed browser or a dropped network safe, and why nothing here has to say goodbye. A caller
+ * that wants the plot to keep moving must therefore poll well inside that lease, not merely inside
+ * it; see the Tune page's `holdsLease`.
+ *
+ * RD-gated (a token-gated Director answers **401** without one). A Mock is a **400** — it has no
+ * signal to read — and an unknown id a **404**. Pass `options.signal` to abandon a poll in flight.
+ *
+ * Nothing this touches is an event or a log: it is a bounded in-memory window that exists only
+ * while an RD is watching it.
+ */
+export async function timerSignal(
+  baseUrl: string,
+  id: TimerId,
+  options: { token?: string; fetch?: FetchLike; signal?: AbortSignal } = {}
+): Promise<TimerSignal> {
+  return apiJson<TimerSignal>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/signal`,
+    options,
+    'read the timer signal'
+  );
+}
+
+/**
+ * End a timer's tuning stream now (`POST /timers/{id}/signal/stop`) — issue #355.
+ *
+ * The lease {@link timerSignal} renews already guarantees the stream stops on its own; this makes
+ * it stop *promptly*, the moment the RD closes the Tune view, instead of seconds later with the
+ * timer still parsing telemetry nobody is reading. Idempotent, and harmless on a timer that was
+ * never streaming. RD-gated; an unknown id answers **404**.
+ */
+export async function stopTimerSignal(
+  baseUrl: string,
+  id: TimerId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/signal/stop`,
+    { method: 'POST', token, fetch: options.fetch },
+    'stop the signal feed'
+  );
+}
+
+/**
+ * Set a node's enter/exit detection thresholds (`POST /timers/{id}/calibration`) — issue #355.
+ *
+ * The write half of the Tune page. RD-gated exactly like {@link restartTimer}, so a token-gated
+ * Director answers **401** without one — which is a different failure from "the timer refused" and
+ * has to reach the RD as one.
+ *
+ * **The response is deliberately not read.** RotorHazard does not echo a level set synchronously;
+ * it broadcasts `enter_and_exit_at_levels`, which surfaces as `NodeSignal.enter_at` / `exit_at` on
+ * a later `GET /timers/{id}/signal`. The route answers with what it *dispatched*, which is not a
+ * readback and must never be treated as one — so nothing here consumes it, and a resolved promise
+ * means *accepted*, never *applied*. The caller confirms by polling the feed it is already reading.
+ *
+ * The Director **refuses** (a **400**) for a Mock, a timer that is not connected, or a node the
+ * timer does not have; an unknown id answers **404**. Rejects on any non-2xx / transport failure.
+ */
+export async function setCalibration(
+  baseUrl: string,
+  id: TimerId,
+  request: CalibrationRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/calibration`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'save the calibration'
+  );
+}
+
+/**
+ * Start a **capture** of one node's thresholds (`POST /timers/{id}/capture`) — issues #355, #465.
+ *
+ * The Tune page's third write, and the only one that does not carry a number: RotorHazard measures
+ * the levels instead of being told them. That is the honest bootstrap for a timer nobody has ever
+ * tuned — GridFPV ships no fabricated default because the right level depends on craft, VTX power,
+ * antenna and gate geometry (#411), so the only non-guessing starting point is the RD's own craft
+ * flown through their own gate.
+ *
+ * **One request, one pass, both thresholds** (#465). The body names only the node. The Director runs
+ * both of RotorHazard's captures over the single pass — enter while the craft is at the gate, exit
+ * once it has cleared — sequenced `exit_delay_ms` apart, because RotorHazard averages both capture
+ * branches off the same samples and a simultaneous pair returns exit == enter.
+ *
+ * **The window starts now.** RotorHazard samples for `window_ms` (3000 on every version we support)
+ * from the moment each emit lands and averages what it sees — it does not look back at a lap already
+ * flown, and it does not take the peak. The dispatch is returned (unlike {@link setCalibration}'s)
+ * precisely so the caller can count those windows down and tell the RD to fly *now*, and then to
+ * stay clear.
+ *
+ * **The response is a dispatch, not a readback** — one step stronger than {@link setCalibration}'s,
+ * because neither level exists yet when this resolves. The captured levels arrive as
+ * `NodeSignal.enter_at` / `exit_at` on a later `GET /timers/{id}/signal`, each after its own window.
+ * A level that never comes back did not land, and must be reported as such rather than shown as a
+ * success: RotorHazard refuses a capture (a node not answering, one already capturing) in complete
+ * silence. The two halves settle independently, so one can land and the other not.
+ *
+ * RD-gated exactly like {@link setCalibration}, so a token-gated Director answers **401** without
+ * one. The Director **refuses** (a **400**) for a Mock, a timer that is not connected, a node the
+ * timer does not have or the RD has disabled, a scored heat in progress, or a capture already
+ * running on that node; an unknown id answers **404**.
+ */
+export async function captureLevel(
+  baseUrl: string,
+  id: TimerId,
+  request: CaptureRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CaptureDispatch> {
+  return apiJson<CaptureDispatch>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/capture`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'start the capture'
+  );
+}
+
+/**
+ * Read a timer's **node set** (`GET /timers/{id}/nodes`) — issue #412.
+ *
+ * What the timer reported, what GridFPV is configured for, the effective `width`, every node with
+ * its **1-based display label** and enabled flag, the `enabled` indices in seat order, and any
+ * `drift` between the two. This is the shared answer to "which gates exist, and which may be
+ * used?" — a console that re-derives it from `Timer.node_count` / `disabled_nodes` is one
+ * off-by-one away from offering a node the hardware does not have.
+ *
+ * An **open read** (no token needed; it is the same information `GET /timers` already carries,
+ * resolved). An unknown id answers **404**.
+ */
+export async function timerNodes(
+  baseUrl: string,
+  id: TimerId,
+  options: { token?: string; fetch?: FetchLike; signal?: AbortSignal } = {}
+): Promise<TimerNodes> {
+  return apiJson<TimerNodes>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/nodes`,
+    options,
+    'read the timer nodes'
+  );
+}
+
+/**
+ * Write a timer's node configuration (`PUT /timers/{id}/nodes`), answering with the resulting view.
+ *
+ * RD-gated. The Director **refuses** (a **400**, whose message is already phrased for the RD) a
+ * `node_count` of `0` and any edit that would leave no node enabled — both cap every heat to no
+ * pilots. Those refusals are surfaced verbatim rather than as an HTTP line, because they say the
+ * useful thing ("at least one node must stay enabled").
+ */
+export async function setTimerNodes(
+  baseUrl: string,
+  id: TimerId,
+  request: SetTimerNodesRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<TimerNodes> {
+  return apiJson<TimerNodes>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/nodes`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the node change'
+  );
+}
+
+/**
+ * Set one node's **channel** (`POST /timers/{id}/channel`) — issue #413.
+ *
+ * The Tune page's other write: a gate cannot be tuned meaningfully until its node is listening on
+ * the channel it will race. RD-gated exactly like {@link setCalibration}, so a token-gated Director
+ * answers **401** without one.
+ *
+ * **Send the band and channel, not just the MHz.** RotorHazard's `on_set_frequency` stores the
+ * label on its active profile when it is given, and the RD validates a channel change *by
+ * refreshing RotorHazard's own page* — where a bare frequency with no `R7` beside it reads as "it
+ * half worked". The Director validates the label against its own catalog, so an invented band name
+ * never reaches the timer.
+ *
+ * **The response is a dispatch, not a readback** (same rule as {@link setCalibration}): a resolved
+ * promise means *accepted*, never *applied*. The confirmation is the next `GET /timers/{id}/signal`
+ * showing `NodeSignal.frequency_mhz` holding what was sent — RotorHazard's heartbeat carries it, so
+ * the feed the caller is already polling is the confirmation. The `ChannelDispatch` body *is* worth
+ * reading for one thing the caller cannot know: whether the node's stored thresholds were tuned on
+ * a different channel.
+ *
+ * The Director **refuses** (a **400**) for a Mock, a timer that is not connected, a **scored** heat
+ * running on it (open practice is allowed), a node beyond the timer's width or one the RD has
+ * disabled, and a frequency a Fixed timer cannot tune to; an unknown id answers **404**.
+ */
+export async function setNodeChannel(
+  baseUrl: string,
+  id: TimerId,
+  request: ChannelRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelDispatch> {
+  return apiJson<ChannelDispatch>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/channel`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'set the node channel'
+  );
+}
+
+/** The shared body of {@link connectTimer} / {@link disconnectTimer} — same shape, same errors. */
+async function setTimerConnection(
+  baseUrl: string,
+  id: TimerId,
+  action: 'connect' | 'disconnect',
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/${action}`,
+    { method: 'POST', token, fetch: options.fetch },
+    action === 'connect' ? 'connect to that timer' : 'disconnect from that timer'
+  );
 }
 
 /**
  * Delete a timer (`DELETE /timers/{id}`) — issue #73. RD-gated. The built-in **Mock cannot be
  * deleted** (a **400**); an unknown id answers **404**. Resolves once the delete succeeds, or
- * rejects on a non-2xx / transport failure (the HTTP status is in the message for branching).
+ * rejects on a non-2xx / transport failure (a {@link RequestFailure} carrying the status).
  */
 export async function deleteTimer(
   baseUrl: string,
@@ -426,14 +827,12 @@ export async function deleteTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw new Error(`DELETE /timers/${id} failed: HTTP ${resp.status}`);
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the timer'
+  );
 }
 
 /**
@@ -449,19 +848,12 @@ export async function setEventTimers(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/timers`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ ids })
-  });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/timers failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/timers`,
+    { method: 'PUT', body: { ids }, token, fetch: options.fetch },
+    'save the event timers'
+  );
 }
 
 /**
@@ -479,19 +871,12 @@ export async function setPrimaryTimer(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/primary-timer`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ id })
-  });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/primary-timer failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/primary-timer`,
+    { method: 'PUT', body: { id }, token, fetch: options.fetch },
+    'set the primary timer'
+  );
 }
 
 /**
@@ -505,12 +890,7 @@ export async function listPilots(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<Pilot[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots`, { headers });
-  if (!resp.ok) throw new Error(`GET /pilots failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Pilot[];
+  return apiJson<Pilot[]>(baseUrl, '/pilots', options, 'list the pilots');
 }
 
 /**
@@ -525,19 +905,12 @@ export async function createPilot(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Pilot> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw new Error(`POST /pilots failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Pilot;
+  return apiJson<Pilot>(
+    baseUrl,
+    '/pilots',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the pilot'
+  );
 }
 
 /**
@@ -553,19 +926,12 @@ export async function updatePilot(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Pilot> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw new Error(`PUT /pilots/${id} failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Pilot;
+  return apiJson<Pilot>(
+    baseUrl,
+    `/pilots/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the pilot'
+  );
 }
 
 /**
@@ -579,14 +945,12 @@ export async function deletePilot(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/pilots/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw new Error(`DELETE /pilots/${id} failed: HTTP ${resp.status}`);
+  await apiRequest(
+    baseUrl,
+    `/pilots/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the pilot'
+  );
 }
 
 /**
@@ -603,19 +967,12 @@ export async function setEventRoster(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/roster`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ pilot_ids: pilotIds })
-  });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/roster failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/roster`,
+    { method: 'PUT', body: { pilot_ids: pilotIds }, token, fetch: options.fetch },
+    'save the roster'
+  );
 }
 
 /**
@@ -630,16 +987,12 @@ export async function addToRoster(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
-    { method: 'POST', headers }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
+    { method: 'POST', token, fetch: options.fetch },
+    'add that pilot to the roster'
   );
-  if (!resp.ok)
-    throw new Error(`POST /events/${eventId}/roster/${pilotId} failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
 }
 
 /**
@@ -654,16 +1007,12 @@ export async function removeFromRoster(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
-    { method: 'DELETE', headers }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/roster/${encodeURIComponent(pilotId)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove that pilot from the roster'
   );
-  if (!resp.ok)
-    throw new Error(`DELETE /events/${eventId}/roster/${pilotId} failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
 }
 
 /**
@@ -676,12 +1025,7 @@ export async function listClasses(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<Class[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes`, { headers });
-  if (!resp.ok) throw new Error(`GET /classes failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Class[];
+  return apiJson<Class[]>(baseUrl, '/classes', options, 'list the classes');
 }
 
 /**
@@ -696,19 +1040,12 @@ export async function createClass(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Class> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw new Error(`POST /classes failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Class;
+  return apiJson<Class>(
+    baseUrl,
+    '/classes',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the class'
+  );
 }
 
 /**
@@ -725,19 +1062,12 @@ export async function updateClass(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Class> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw new Error(`PUT /classes/${id} failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Class;
+  return apiJson<Class>(
+    baseUrl,
+    `/classes/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the class'
+  );
 }
 
 /**
@@ -752,14 +1082,12 @@ export async function deleteClass(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-    headers
-  });
-  if (!resp.ok) throw new Error(`DELETE /classes/${id} failed: HTTP ${resp.status}`);
+  await apiRequest(
+    baseUrl,
+    `/classes/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the class'
+  );
 }
 
 /**
@@ -778,20 +1106,13 @@ export async function setClassHidden(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<Class> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
   const body: SetClassHiddenRequest = { hidden };
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/classes/${encodeURIComponent(id)}/hidden`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(body)
-  });
-  if (!resp.ok) throw new Error(`PUT /classes/${id}/hidden failed: HTTP ${resp.status}`);
-  return (await resp.json()) as Class;
+  return apiJson<Class>(
+    baseUrl,
+    `/classes/${encodeURIComponent(id)}/hidden`,
+    { method: 'PUT', body, token, fetch: options.fetch },
+    'change the class visibility'
+  );
 }
 
 /**
@@ -808,19 +1129,12 @@ export async function setEventClasses(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/classes`, {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify({ ids })
-  });
-  if (!resp.ok) throw new Error(`PUT /events/${eventId}/classes failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/classes`,
+    { method: 'PUT', body: { ids }, token, fetch: options.fetch },
+    'save the event classes'
+  );
 }
 
 /**
@@ -843,28 +1157,15 @@ export async function setClassMembership(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/membership`,
-    {
-      method: 'PUT',
-      headers,
-      // The wire shape carries member **slots** (`{ pilot, channel? }`) — race redesign Slice 7a.
-      // The server accepts a bare pilot-id element too (legacy shim), so a plain id here sets a
-      // channel-less slot while a `MemberSlot` carries the pilot's fixed channel (Slice 7b).
-      body: JSON.stringify({ pilots: members })
-    }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/membership`,
+    // The wire shape carries member **slots** (`{ pilot, channel? }`) — race redesign Slice 7a.
+    // The server accepts a bare pilot-id element too (legacy shim), so a plain id here sets a
+    // channel-less slot while a `MemberSlot` carries the pilot's fixed channel (Slice 7b).
+    { method: 'PUT', body: { pilots: members }, token, fetch: options.fetch },
+    'save the class membership'
   );
-  if (!resp.ok)
-    throw new Error(
-      `PUT /events/${eventId}/classes/${classId}/membership failed: HTTP ${resp.status}`
-    );
-  return (await resp.json()) as EventMeta;
 }
 
 /**
@@ -878,12 +1179,7 @@ export async function listFormatSchemas(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<FormatSchema[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/formats`, { headers });
-  if (!resp.ok) throw new Error(`GET /formats failed: HTTP ${resp.status}`);
-  return (await resp.json()) as FormatSchema[];
+  return apiJson<FormatSchema[]>(baseUrl, '/formats', options, 'list the formats');
 }
 
 /**
@@ -911,12 +1207,36 @@ export async function listChannels(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ChannelCatalogEntry[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}/channels`, { headers });
-  if (!resp.ok) throw new Error(`GET /channels failed: HTTP ${resp.status}`);
-  return (await resp.json()) as ChannelCatalogEntry[];
+  return apiJson<ChannelCatalogEntry[]>(baseUrl, '/channels', options, 'list the channels');
+}
+
+/**
+ * Rate a candidate **channel set** (`GET /channels/imd?channels=…`) — #117 S4. An open read (no
+ * token): IMDTabler's 0–100 rating for those channels flown together, plus the worst offending
+ * two-tone mixing product — or no offender at all, when nothing lands within 35 MHz of a channel
+ * somebody is flying.
+ *
+ * The Director owns the metric, and this is the **only** implementation of it in the system. That
+ * is #430's whole point: an RD must read the same number off GridFPV that they read off
+ * RotorHazard for the same channels, and a second port of the algorithm in the console is exactly
+ * how that stops being true. Pure over its query — no event, no timer, no state — so it is safe to
+ * call as fast as an RD can tick a dropdown.
+ *
+ * Order and repeats do not matter (a set is a set). Resolves to the `ImdReading`, or rejects on a
+ * non-2xx / transport failure.
+ */
+export async function rateChannels(
+  baseUrl: string,
+  channels: readonly number[],
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<ImdReading> {
+  const query = encodeURIComponent(channels.join(','));
+  return apiJson<ImdReading>(
+    baseUrl,
+    `/channels/imd?channels=${query}`,
+    options,
+    'rate those channels'
+  );
 }
 
 /**
@@ -933,19 +1253,12 @@ export async function createRound(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<RoundDef> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request)
-  });
-  if (!resp.ok) throw new Error(`POST /events/${eventId}/rounds failed: HTTP ${resp.status}`);
-  return (await resp.json()) as RoundDef;
+  return apiJson<RoundDef>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the round'
+  );
 }
 
 /**
@@ -963,23 +1276,12 @@ export async function updateRound(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<RoundDef> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json'
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
-    {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify(request)
-    }
+  return apiJson<RoundDef>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the round'
   );
-  if (!resp.ok)
-    throw new Error(`PUT /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
-  return (await resp.json()) as RoundDef;
 }
 
 /**
@@ -994,19 +1296,111 @@ export async function deleteRound(
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<EventMeta> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
-    {
-      method: 'DELETE',
-      headers
-    }
+  return apiJson<EventMeta>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove the round'
   );
-  if (!resp.ok)
-    throw new Error(`DELETE /events/${eventId}/rounds/${roundId} failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventMeta;
+}
+
+// ── Event channel layouts (#117 S2) ──────────────────────────────────────────────────────────────
+//
+// A **layout** is one complete tuning of the event's timer — one channel per enabled node, drawn
+// from the timer's *allowed* set. Layouts are **event** state: they live on the event's meta beside
+// `timers` / `roster` / `classes`, so editing one never touches the global timer record (which is
+// what the Timers-page checkboxes do, and the bug this slice closes).
+//
+// Every write answers with the whole {@link ChannelLayouts} view — the layouts *and* the advisory
+// cross-layout `overlaps` — not just the layout that changed, because an overlap is a property of the
+// set. The console renders what the Director computed rather than re-deriving the rule.
+
+/**
+ * List an event's **channel layouts** (`GET /events/{id}/layouts`) — #117 S2. A read (open, no token):
+ * the layouts in definition order plus the advisory `overlaps` between them. Resolves the
+ * {@link ChannelLayouts} view, or rejects on a non-2xx / transport failure; an unknown event is 404.
+ */
+export async function listChannelLayouts(
+  baseUrl: string,
+  eventId: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<ChannelLayouts> {
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts`,
+    options,
+    'list the channel layouts'
+  );
+}
+
+/**
+ * Define a **channel layout** on an event (`POST /events/{id}/layouts`) — #117 S2. RD-gated; the layout
+ * id is generated server-side (never in the body).
+ *
+ * **Omitting `nodes` seeds the layout from the timer's allowed set** — the global→event seam: what
+ * the RD ticked on the Timers page is the default an event starts from, and from here on the layout
+ * is event-local. A tuning that puts two nodes on one channel, names a channel the timer is not
+ * allowed to use, names a disabled/out-of-range node, or leaves an enabled node untuned is a
+ * **400** whose message is thrown verbatim (it is already written for the RD). Cross-layout channel
+ * reuse is **not** a refusal — it comes back in `overlaps` on a 200. Resolves the whole updated
+ * {@link ChannelLayouts} view.
+ */
+export async function createChannelLayout(
+  baseUrl: string,
+  eventId: EventId,
+  request: NewChannelLayoutRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelLayouts> {
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the channel layout'
+  );
+}
+
+/**
+ * Replace a **channel layout**'s name and mapping (`PUT /events/{id}/layouts/{layout}`) — #117 S2.
+ * RD-gated; the layout id is the path segment (not editable) and the name plus the whole node →
+ * channel mapping are replaced wholesale, re-validated exactly as on create. An unknown event or
+ * layout is **404**; an invalid tuning is a **400** thrown verbatim. Resolves the whole updated
+ * {@link ChannelLayouts} view.
+ */
+export async function updateChannelLayout(
+  baseUrl: string,
+  eventId: EventId,
+  layoutId: LayoutId,
+  request: SetChannelLayoutRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelLayouts> {
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'save the channel layout'
+  );
+}
+
+/**
+ * Remove a **channel layout** (`DELETE /events/{id}/layouts/{layout}`) — #117 S2. RD-gated; an unknown
+ * event or layout is **404** (not a silent success). Resolves the whole updated
+ * {@link ChannelLayouts} view.
+ */
+export async function deleteChannelLayout(
+  baseUrl: string,
+  eventId: EventId,
+  layoutId: LayoutId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ChannelLayouts> {
+  return apiJson<ChannelLayouts>(
+    baseUrl,
+    `${eventRoot(eventId)}/layouts/${encodeURIComponent(layoutId)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the channel layout'
+  );
 }
 
 /**
@@ -1021,12 +1415,35 @@ export async function listHeats(
   eventId: EventId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<HeatSummary[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/heats`, { headers });
-  if (!resp.ok) throw new Error(`GET /events/${eventId}/heats failed: HTTP ${resp.status}`);
-  return (await resp.json()) as HeatSummary[];
+  return apiJson<HeatSummary[]>(baseUrl, `${eventRoot(eventId)}/heats`, options, 'list the heats');
+}
+
+/**
+ * List an event's **round issues** (`GET /events/{id}/round-issues`) — #416. A read (open, no
+ * token): every stored round whose open-practice seating names a node that cannot record a lap —
+ * one beyond the primary timer's width, one the RD has disabled, or one beyond what the timer
+ * reported.
+ *
+ * #412 refuses an impossible seat when a round is *written*; this is the same rule applied to what
+ * is already stored, because the rounds already on disk are the ones that predate the fix. Each
+ * entry carries the round's label, the timer's name, the 1-based node label and the RD-facing
+ * sentence, so the console renders the server's explanation rather than re-deriving one.
+ *
+ * An **empty list means nothing is wrong** — including for an event with no resolvable primary
+ * timer, which has no node set to check against. Rejects on a non-2xx / transport failure; an
+ * unknown event is a 404.
+ */
+export async function listRoundIssues(
+  baseUrl: string,
+  eventId: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<RoundIssue[]> {
+  return apiJson<RoundIssue[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/round-issues`,
+    options,
+    'check the rounds for issues'
+  );
 }
 
 /**
@@ -1041,12 +1458,12 @@ export async function eventAudit(
   eventId: EventId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<EventAuditEntry[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(`${trimSlash(baseUrl)}${eventRoot(eventId)}/audit`, { headers });
-  if (!resp.ok) throw new Error(`GET /events/${eventId}/audit failed: HTTP ${resp.status}`);
-  return (await resp.json()) as EventAuditEntry[];
+  return apiJson<EventAuditEntry[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/audit`,
+    options,
+    'read the event audit log'
+  );
 }
 
 /**
@@ -1062,16 +1479,12 @@ export async function roundRanking(
   roundId: RoundId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<RankEntry[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/ranking`,
-    { headers }
+  return apiJson<RankEntry[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/ranking`,
+    options,
+    'read the round ranking'
   );
-  if (!resp.ok)
-    throw new Error(`GET /events/${eventId}/rounds/${roundId}/ranking failed: HTTP ${resp.status}`);
-  return (await resp.json()) as RankEntry[];
 }
 
 /**
@@ -1088,18 +1501,12 @@ export async function roundStandings(
   roundId: RoundId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<RoundStanding[]> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/standings`,
-    { headers }
+  return apiJson<RoundStanding[]>(
+    baseUrl,
+    `${eventRoot(eventId)}/rounds/${encodeURIComponent(roundId)}/standings`,
+    options,
+    'read the round standings'
   );
-  if (!resp.ok)
-    throw new Error(
-      `GET /events/${eventId}/rounds/${roundId}/standings failed: HTTP ${resp.status}`
-    );
-  return (await resp.json()) as RoundStanding[];
 }
 
 /**
@@ -1116,18 +1523,12 @@ export async function classStandings(
   classId: ClassId,
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<ClassStandings> {
-  const fetchImpl: FetchLike = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const resp = await fetchImpl(
-    `${trimSlash(baseUrl)}${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/standings`,
-    { headers }
+  return apiJson<ClassStandings>(
+    baseUrl,
+    `${eventRoot(eventId)}/classes/${encodeURIComponent(classId)}/standings`,
+    options,
+    'read the class standings'
   );
-  if (!resp.ok)
-    throw new Error(
-      `GET /events/${eventId}/classes/${classId}/standings failed: HTTP ${resp.status}`
-    );
-  return (await resp.json()) as ClassStandings;
 }
 
 /**
@@ -1150,16 +1551,16 @@ export function connect(options: ConnectOptions): ProtocolClient {
   const wsBase = trimSlash(toWebSocketBase(options.baseUrl));
   const scope = options.scope;
   const token = options.token;
-  // The event this connection is rooted under (issue #72); defaults to Practice.
-  const eventId = options.eventId ?? PRACTICE_EVENT_ID;
+  // The event this connection is rooted under (issue #72). Always explicit — see ConnectOptions.
+  const eventId = options.eventId;
 
   // ── Mutable connection state ───────────────────────────────────────────────
   let body: ProjectionBody | undefined;
   // The resume cursor: a log offset (protocol.html §2/§3 "as built") used ONLY as the
   // `from:` resume point — it is not the stream's ordering counter. Seeded by each
-  // snapshot and ADVANCED by one per applied envelope (see `applyEnvelope`), so a
-  // reconnect resumes from the last-applied position instead of replaying the whole
-  // backlog from the snapshot's original offset.
+  // snapshot and re-seeded from each applied envelope's own `cursor` (see
+  // `applyEnvelope`), so a reconnect resumes EXACTLY where this client left off instead
+  // of replaying the whole backlog from the snapshot's original offset.
   let cursor: Cursor | undefined;
   // The per-stream `sequence` axis (protocol.html §3/§9.5): starts at 1 on each
   // subscription, distinct from `cursor`. Reset to 0 on every (re)subscribe so the
@@ -1261,15 +1662,26 @@ export function connect(options: ConnectOptions): ProtocolClient {
     }
     body = change.FreshValue;
     streamSeq = seq;
-    // Advance the RESUME cursor alongside the stream. The resume `from` is a log
-    // offset the wire does not echo per envelope, but every applied envelope
-    // corresponds to at least one log append past the current cursor, so a +1
-    // advance is a conservative (at-or-behind the true offset) tracker. Without
-    // it a reconnect re-presented the ORIGINAL snapshot's offset and replayed the
-    // entire backlog through onState — or fell out of the retained window
-    // (StaleCursor). Any short remainder behind the true offset replays as
-    // idempotent fresh values, and the re-snapshot path reconciles any drift.
-    cursor = (cursor ?? 0) + 1;
+    // Re-seed the RESUME cursor from the envelope's own `cursor` — the log offset the
+    // server folded this body through (#422). It is exact, so a reconnect resubscribes
+    // from precisely the position this client is at and the server has nothing to replay.
+    //
+    // This used to be `cursor = (cursor ?? 0) + 1`: the wire echoed no offset, so the
+    // client advanced one per APPLIED envelope and called it "conservative (at-or-behind
+    // the true offset)". It was conservative and it was wrong — every append that moved
+    // no projection (a SignalHistory chunk, a CompetitorSeen, a marshaling no-op) emitted
+    // no envelope and widened the drift. A reconnect then resumed from `tail - drift`,
+    // which is inside the server's retained window, so the stream REPLAYED: `body` was
+    // overwritten with an older fold carrying fewer laps and then climbed back through
+    // every intermediate one. Live lap counts stepped backwards on screen, mid-race,
+    // looking exactly like a marshal voiding a pass. Nothing here may re-derive the
+    // offset; it is the server's to state.
+    //
+    // Fallback: a Director too old to echo the field leaves `cursor` undefined here, so
+    // keep the old lower-bound advance for it rather than losing the resume position
+    // outright. Its stream still replays on reconnect — that is the bug this field fixes —
+    // but the client degrades instead of re-snapshotting on every blip.
+    cursor = typeof env.cursor === 'number' ? env.cursor : (cursor ?? 0) + 1;
     return 'applied';
   }
 

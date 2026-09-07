@@ -25,7 +25,7 @@ test('RD adds, edits (clearing color + country), and removes a directory pilot',
   // The worker's Director may have an active event left by a prior spec (#90): if we resumed into
   // the workspace, use the breadcrumb Home to get back to the hub.
   const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
-  const liveNav = page.getByRole('button', { name: /Live control/ });
+  const liveNav = page.getByRole('button', { name: /Race control/ });
   await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
   if (await liveNav.isVisible().catch(() => false)) {
     await page

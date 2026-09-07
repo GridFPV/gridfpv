@@ -16,10 +16,10 @@ const CLASSES: Class[] = [
 ];
 const EVENTS: EventMeta[] = [
   {
-    id: 'practice',
+    id: 'practice-ab12',
     name: 'Practice',
     created_at: 0,
-    persistent: false,
+    persistent: true,
     timers: ['mock'],
     roster: [],
     classes: []
@@ -42,7 +42,10 @@ const TIMERS: Timer[] = [
     status: 'Ready',
     channel_capability: 'Flexible',
     node_count: 8,
-    available_channels: []
+    available_channels: [],
+    manual_connect: false,
+    calibration: [],
+    disabled_nodes: []
   },
   {
     id: 'rh-1',
@@ -52,7 +55,10 @@ const TIMERS: Timer[] = [
     status: 'Connected',
     channel_capability: 'Flexible',
     node_count: 8,
-    available_channels: []
+    available_channels: [],
+    manual_connect: false,
+    calibration: [],
+    disabled_nodes: []
   },
   {
     id: 'rh-2',
@@ -62,7 +68,10 @@ const TIMERS: Timer[] = [
     status: 'Configured',
     channel_capability: 'Flexible',
     node_count: 8,
-    available_channels: []
+    available_channels: [],
+    manual_connect: false,
+    calibration: [],
+    disabled_nodes: []
   }
 ];
 

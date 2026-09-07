@@ -12,17 +12,34 @@ const MOCK: Timer = {
   status: 'Ready',
   channel_capability: 'Flexible',
   node_count: 8,
-  available_channels: []
+  available_channels: [],
+  manual_connect: false,
+  calibration: [],
+  disabled_nodes: []
 };
+/**
+ * A **healthy** RotorHazard timer: connected, and its GridFPV plugin probed `Present`. Since #405
+ * that is the only state in which an event may select an RH timer, so it is what the ordinary
+ * selection tests use; the gate's own tests build the unhealthy variants from it.
+ */
 const RH: Timer = {
   id: 'rh-1',
   name: 'Track RH',
   kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
-  status: 'Configured',
+  status: 'Connected',
   channel_capability: 'Flexible',
   node_count: 8,
-  available_channels: []
+  available_channels: [],
+  manual_connect: false,
+  calibration: [],
+  disabled_nodes: [],
+  plugin: { Present: { plugin_version: '0.1.0', rhapi_version: '1.4', capabilities: ['hello'] } }
 };
+
+/** The same RH timer with a given plugin presence — the #405 gate's three refusal cases. */
+function rhWithPlugin(plugin: Timer['plugin']): Timer {
+  return { ...RH, plugin };
+}
 
 /** A created event selecting only the Mock timer (so its checkbox seeds checked). */
 const EVENT: EventMeta = {
@@ -147,7 +164,10 @@ describe('EventTimers (in-event CRUD + selection)', () => {
       status: 'Ready',
       channel_capability: 'Flexible',
       node_count: 8,
-      available_channels: []
+      available_channels: [],
+      manual_connect: false,
+      calibration: [],
+      disabled_nodes: []
     };
     let calls = 0;
     const listTimersImpl = vi.fn(async () => (calls++ === 0 ? [MOCK] : [MOCK, created]));
@@ -179,6 +199,34 @@ describe('EventTimers (in-event CRUD + selection)', () => {
     expect(within(rows[0]).getByRole('button', { name: 'Edit' })).toBeInTheDocument();
     expect(within(rows[0]).queryByRole('button', { name: 'Remove' })).toBeNull();
     expect(within(rows[1]).getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+  });
+
+  // Tuning has to be reachable from INSIDE the event (#411): mid-event, with a heat waiting, this
+  // screen is where the RD stands when a gate is missing laps. The shell owns the route; this screen
+  // is the entry point, and it hands back the timer's id for the event-scoped route to carry.
+  it('offers Tune on a tunable row and reports the timer it was asked for', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    const ontune = vi.fn();
+    render(EventTimers, { session, ontune });
+
+    const list = await screen.findByRole('list', { name: 'Configured timers' });
+    const rows = within(list).getAllByRole('listitem');
+    // The built-in Mock has no radio to tune; the connected RH does.
+    expect(within(rows[0]).queryByRole('button', { name: 'Tune' })).toBeNull();
+    await fireEvent.click(within(rows[1]).getByRole('button', { name: 'Tune' }));
+    expect(ontune).toHaveBeenCalledWith('rh-1');
+  });
+
+  it('offers no Tune action at all when the embedder has nowhere to navigate', async () => {
+    // The setup wizard embeds this screen with no route to hand off to — better no action than one
+    // that goes nowhere.
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    await screen.findByLabelText('Use Track RH');
+    expect(screen.queryByRole('button', { name: 'Tune' })).toBeNull();
   });
 
   it('hides timer roles when only one timer is selected', async () => {
@@ -241,5 +289,131 @@ describe('EventTimers (in-event CRUD + selection)', () => {
         (screen.getByLabelText('Make Track RH the primary timer') as HTMLInputElement).checked
       ).toBe(true)
     );
+  });
+});
+
+/**
+ * The **GridFPV-plugin selection gate** (#405): a RotorHazard timer without a loaded, compatible
+ * plugin cannot be selected for an event. The Director enforces the same rule on
+ * `PUT /events/{id}/timers`; these cover the console half — which must render the *reason* on the
+ * unselectable row, not merely disable it, because a dead end with no explanation is the failure
+ * this gate exists to prevent.
+ */
+describe('EventTimers — the GridFPV-plugin selection gate (#405)', () => {
+  it('lets a Present-plugin RotorHazard timer be selected normally', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const setEventTimersImpl = vi.fn(async () => ({ ...EVENT, timers: ['mock', 'rh-1'] }));
+    const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    const rhBox = (await screen.findByLabelText('Use Track RH')) as HTMLInputElement;
+    expect(rhBox.disabled).toBe(false);
+    await fireEvent.click(rhBox);
+    await waitFor(() => expect(setEventTimersImpl).toHaveBeenCalledTimes(1));
+  });
+
+  it('refuses a never-probed timer with “connect it first”, not “plugin missing”', async () => {
+    // `plugin: undefined` is a different problem with a different fix: presence is only knowable
+    // over a live socket, so this is the normal state of a freshly added timer.
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWithPlugin(undefined)]);
+    const setEventTimersImpl = vi.fn(async () => EVENT);
+    const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    const rhBox = (await screen.findByLabelText('Use Track RH')) as HTMLInputElement;
+    expect(rhBox.disabled).toBe(true);
+    // The reason is ON the row, naming the timer, and pointing at connecting — not installing.
+    const reason = screen.getByText(/hasn’t been connected yet/);
+    expect(reason.textContent).toContain('Track RH');
+    expect(reason.textContent).toContain('Connect it');
+    expect(reason.textContent).not.toContain('rh-1');
+    expect(screen.queryByText(/which Grid requires to race a RotorHazard timer/)).toBeNull();
+
+    // Even a forced click never reaches the wire.
+    await fireEvent.click(rhBox);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(setEventTimersImpl).not.toHaveBeenCalled();
+  });
+
+  it('refuses a Missing plugin with the install instruction', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWithPlugin('Missing')]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    expect(((await screen.findByLabelText('Use Track RH')) as HTMLInputElement).disabled).toBe(
+      true
+    );
+    const reason = screen.getByText(/which Grid requires to race a RotorHazard timer/);
+    expect(reason.textContent).toContain('Track RH');
+    expect(reason.textContent).toContain('Install it');
+  });
+
+  it('refuses an Incompatible plugin with the update instruction', async () => {
+    const listTimersImpl = vi.fn(async () => [
+      MOCK,
+      rhWithPlugin({
+        Incompatible: { plugin_version: '0.0.1', protocol_version: 99, reason: 'protocol 99' }
+      })
+    ]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+
+    expect(((await screen.findByLabelText('Use Track RH')) as HTMLInputElement).disabled).toBe(
+      true
+    );
+    const reason = screen.getByText(/speaks a protocol this Director doesn’t/);
+    expect(reason.textContent).toContain('Track RH');
+    expect(reason.textContent).toContain('Update it');
+  });
+
+  it('never gates a Mock timer', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWithPlugin('Missing')]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT });
+    render(EventTimers, { session });
+    expect(((await screen.findByLabelText('Use Mock')) as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it('keeps an ALREADY-selected plugin-less timer tickable, and warns on its row', async () => {
+    // A pre-#405 event may already select a plugin-less RH timer, and a plugin can go away after a
+    // valid selection. The Director grandfathers the existing selection, so the box must stay live
+    // — the RD has to be able to untick it — and the row surfaces the presence change instead.
+    const listTimersImpl = vi.fn(async () => [MOCK, rhWithPlugin('Missing')]);
+    const setEventTimersImpl = vi.fn(async () => EVENT_2);
+    const { session } = makeTestSession({ listTimersImpl, setEventTimersImpl, event: EVENT_2 });
+    render(EventTimers, { session });
+
+    const rhBox = (await screen.findByLabelText('Use Track RH')) as HTMLInputElement;
+    expect(rhBox.checked).toBe(true);
+    expect(rhBox.disabled).toBe(false);
+    const warning = screen.getByText(/its GridFPV plugin has gone away/);
+    expect(warning.textContent).toContain('Track RH');
+    expect(warning.textContent).toContain('arming a heat is refused');
+
+    // Unticking it saves the reduced selection — the event stays editable.
+    await fireEvent.click(rhBox);
+    await waitFor(() => expect(setEventTimersImpl).toHaveBeenCalledTimes(1));
+    expect(setEventTimersImpl).toHaveBeenCalledWith('http://d.local', 'e2', ['mock'], 'tok');
+  });
+});
+
+describe('the Simulator warning (#491)', () => {
+  it('shows the standing banner while a Simulator timer is selected, and drops it when unticked', async () => {
+    const listTimersImpl = vi.fn(async () => [MOCK, RH]);
+    const { session } = makeTestSession({ listTimersImpl, event: EVENT }); // EVENT selects 'mock'
+    render(EventTimers, { session });
+
+    // Selected Simulator → the banner states the behavior in words, as a status the RD can't
+    // miss. Anchored on the banner's own closing sentence — "fly themselves" also appears in the
+    // Simulator ROW's summary, which stays put whether or not the banner shows.
+    const banner = await screen.findByText(/Untick it before racing/);
+    expect(banner.closest('[role="status"]')).not.toBeNull();
+    expect(banner.textContent).toMatch(/Simulator/);
+    expect(banner.textContent).toMatch(/fly\s+themselves/);
+
+    // Unticking the Simulator removes the banner — the warning tracks the SELECTION, not the
+    // timer's existence in the registry (whose row keeps its own warning summary).
+    const mockBox = (await screen.findByLabelText('Use Mock')) as HTMLInputElement;
+    await fireEvent.click(mockBox);
+    await waitFor(() => expect(screen.queryByText(/Untick it before racing/)).toBeNull());
   });
 });

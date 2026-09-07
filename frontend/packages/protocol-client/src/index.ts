@@ -14,6 +14,7 @@
 
 export {
   connect,
+  isRequestFailure,
   listEvents,
   createEvent,
   deleteEvent,
@@ -23,6 +24,16 @@ export {
   createTimer,
   updateTimer,
   deleteTimer,
+  connectTimer,
+  disconnectTimer,
+  restartTimer,
+  setCalibration,
+  captureLevel,
+  setNodeChannel,
+  timerNodes,
+  setTimerNodes,
+  timerSignal,
+  stopTimerSignal,
   setEventTimers,
   setPrimaryTimer,
   listPilots,
@@ -42,18 +53,24 @@ export {
   listFormats,
   listFormatSchemas,
   listChannels,
+  rateChannels,
   createRound,
   updateRound,
   deleteRound,
+  listChannelLayouts,
+  createChannelLayout,
+  updateChannelLayout,
+  deleteChannelLayout,
   listHeats,
+  listRoundIssues,
   eventAudit,
   roundRanking,
   roundStandings,
-  classStandings,
-  PRACTICE_EVENT_ID
+  classStandings
 } from './client.js';
 export type {
   ConnectOptions,
+  RequestFailure,
   ProtocolClient,
   ProtocolState,
   ConnectionStatus,
@@ -62,3 +79,42 @@ export type {
   WebSocketFactory,
   FetchLike
 } from './client.js';
+
+/**
+ * The outbound calibration body for {@link setCalibration}, re-exported so a caller has one import
+ * site for the call and its payload. The definition is the ts-rs binding generated from the
+ * Director's own route — this package hand-writes no wire shape of its own (see the module note
+ * above), so the page and the Director cannot disagree about it.
+ */
+export type { CalibrationRequest } from '@gridfpv/types';
+
+/**
+ * The **capture** wire shapes (#355) — the outbound body for {@link captureLevel} and the dispatch
+ * it answers with. Re-exported for the same reason {@link CalibrationRequest} is: one import site
+ * for the call and its payload, and a definition that is the ts-rs binding rather than a
+ * hand-written guess.
+ */
+export type { CaptureDispatch, CaptureRequest, CaptureThreshold } from '@gridfpv/types';
+
+/**
+ * The outbound channel body for {@link setNodeChannel} and the dispatch it answers with (#413),
+ * re-exported for the same reason {@link CalibrationRequest} is: one import site for the call and
+ * its payload, and a definition that is the ts-rs binding rather than a hand-written guess.
+ */
+export type { ChannelDispatch, ChannelRequest } from '@gridfpv/types';
+
+/**
+ * The channel-layout wire shapes (#117 S2) — the view every layout read/write answers with, and the
+ * two request bodies. Re-exported for the same reason {@link CalibrationRequest} is: one import
+ * site for the call and its payload, and a definition that is the ts-rs binding rather than a
+ * hand-written guess.
+ */
+export type {
+  ChannelLayout,
+  ChannelLayouts,
+  LayoutId,
+  LayoutNode,
+  LayoutOverlap,
+  NewChannelLayoutRequest,
+  SetChannelLayoutRequest
+} from '@gridfpv/types';
