@@ -862,6 +862,75 @@ describe('Marshaling (Slice 3)', () => {
       expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 13, at: 43_000_000 } });
     });
 
+    it('collapses a gate-bounce burst to one line, and expands to per-crossing Restore (#517)', async () => {
+      // The complaint this issue came from: a bouncy gate put a row per reflection between every
+      // pair of real laps, and the laps became the minority of the list. Collapsed, the burst is
+      // one muted line; the individual crossings — and their Restores — are one click away.
+      const bouncy: LapList = {
+        competitors: [
+          {
+            competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+            laps: [
+              { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
+            ],
+            voided: [
+              { at: 41_061_000, pass_ref: 13, void_ref: 13, reason: 'SamePassBounce' as const },
+              { at: 41_193_000, pass_ref: 14, void_ref: 14, reason: 'SamePassBounce' as const },
+              { at: 41_254_000, pass_ref: 15, void_ref: 15, reason: 'SamePassBounce' as const }
+            ]
+          }
+        ]
+      };
+      const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: bouncy });
+      render(Marshaling, { session });
+
+      // Collapsed: one summary, and none of the three crossings has a row of its own.
+      expect(screen.getByText(/3 same-pass crossings/)).toBeInTheDocument();
+      expect(screen.queryByText(/crossing at 41\.061s/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /Restore removed pass at 41\.061s/ })
+      ).not.toBeInTheDocument();
+
+      // Expanded: the ordinary removal rows, each with its own Restore. No bulk action exists.
+      await fireEvent.click(screen.getByRole('button', { name: /3 same-pass crossings/ }));
+      expect(
+        screen.getByText(/crossing at 41\.061s — same pass \(gate bounce\), auto-removed/)
+      ).toBeInTheDocument();
+      await fireEvent.click(
+        screen.getByRole('button', { name: /Restore removed pass at 41\.061s/ })
+      );
+      expect(sendSpy).toHaveBeenCalledWith({ AdjustLap: { target: 13, at: 41_061_000 } });
+    });
+
+    it('a bounce burst does NOT collapse a genuinely short crossing beside it (#517)', async () => {
+      // The distinction the whole issue turns on. Both were `UnderMinLap` before #517, so the
+      // console could not hide one without hiding the other. The 3s crossing is a real pass the
+      // pilot made — it keeps its own row and its own Restore, at full prominence.
+      const mixed: LapList = {
+        competitors: [
+          {
+            competitor: { adapter: 'rh-1', competitor: 'ALICE' },
+            laps: [
+              { number: 1, duration_micros: 41_000_000, at: 41_000_000, start_ref: 10, end_ref: 12 }
+            ],
+            voided: [
+              { at: 41_061_000, pass_ref: 13, void_ref: 13, reason: 'SamePassBounce' as const },
+              { at: 44_000_000, pass_ref: 14, void_ref: 14, reason: 'UnderMinLap' as const }
+            ]
+          }
+        ]
+      };
+      const { session } = makeTestSession({ live: liveRunning, laps: mixed });
+      render(Marshaling, { session });
+      expect(screen.getByText(/1 same-pass crossing\b/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/crossing at 44\.000s — under min lap, auto-removed/)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: /Restore removed pass at 44\.000s/ })
+      ).toBeInTheDocument();
+    });
+
     it('Restore on a removed pass sends void-the-void at the STANDING removal event', async () => {
       const { session, sendSpy } = makeTestSession({ live: liveRunning, laps: voidedLapList });
       render(Marshaling, { session });

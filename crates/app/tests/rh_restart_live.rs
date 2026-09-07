@@ -143,6 +143,7 @@ async fn restarting_a_timer_reexecutes_rotorhazard_and_the_director_reconnects_a
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         })
         .expect("create RH timer");
     registry

@@ -34,6 +34,7 @@
     Pilot,
     PilotProgress,
     SignalTraceView,
+    VoidedPass,
     VoidReason
   } from '@gridfpv/types';
   import { formatMicros, Select, toast } from '@gridfpv/components';
@@ -442,9 +443,9 @@
   }
 
   /** RESTORE a removed pass. A marshal-voided pass is undone by void-the-void (targeting the
-   *  standing removal event); an AUTO-suppressed pass (UnderMinLap, D26; AfterRaceEnd, #505) is
-   *  BLESSED by an AdjustLap re-asserting its own raw instant — an explicit ruling outranks
-   *  both rules, so the fold exempts it and the pass returns to the chain. */
+   *  standing removal event); an AUTO-suppressed pass (SamePassBounce, #517; UnderMinLap, D26;
+   *  AfterRaceEnd, #505) is BLESSED by an AdjustLap re-asserting its own raw instant — an explicit
+   *  ruling outranks all three rules, so the fold exempts it and the pass returns to the chain. */
   function doRestorePass(v: {
     void_ref: number;
     pass_ref: number;
@@ -461,10 +462,16 @@
     });
   }
 
-  /** The removal record's row text: WHY the pass is off the chain, by its `VoidReason`. */
+  /** The removal record's row text: WHY the pass is off the chain, by its `VoidReason`.
+   *
+   *  Every arm is spelled out rather than leaning on the `default:` — a new reason landing here
+   *  silently would read as "stays removed", which is a different claim about a different kind of
+   *  removal, and the RD would have no way to tell it was wrong. */
   function voidedRowLabel(v: { at: number; reason: VoidReason }): string {
     const at = `${formatMicros(v.at)}s`;
     switch (v.reason) {
+      case 'SamePassBounce':
+        return `crossing at ${at} — same pass (gate bounce), auto-removed`;
       case 'UnderMinLap':
         return `crossing at ${at} — under min lap, auto-removed`;
       case 'AfterRaceEnd':
@@ -472,6 +479,44 @@
       default:
         return `removed pass at ${at} — stays removed`;
     }
+  }
+
+  /** Is this removal a gate bounce — the fold's "same physical pass, seen twice" (#517)?
+   *
+   *  The one removal kind that gets COLLAPSED in the lap list rather than given its own row. A
+   *  bouncy gate puts three or four of these between every pair of real laps, and they carry no
+   *  information individually: the RD wants to know a burst happened, not to read it out. Every
+   *  other reason — a real crossing under the floor, a marshal void, a post-race crossing — keeps
+   *  its full row, because each of those is a distinct thing that happened. */
+  function isBounce(v: { reason: VoidReason }): boolean {
+    return v.reason === 'SamePassBounce';
+  }
+
+  /** The removals that belong in `lap`'s slot: after the previous lap, before this one. Hoisted
+   *  out of the markup because the burst and the full rows both need it, and `{@const}` cannot
+   *  live everywhere it would have to. */
+  function removalsBefore(voided: VoidedPass[], laps: Lap[], lap: Lap): VoidedPass[] {
+    return voided.filter(
+      (v) => v.at < lap.at && !laps.some((o) => o.number < lap.number && o.at > v.at)
+    );
+  }
+
+  /** The removals after the LAST lap — and, for a competitor with no laps at all, their whole
+   *  record. Both cases need the burst indicator: a run whose every crossing bounced is exactly
+   *  the finding an RD came to marshaling to see. */
+  function removalsAfterLast(voided: VoidedPass[], laps: Lap[]): VoidedPass[] {
+    return voided.filter((v) => laps.length === 0 || v.at >= laps[laps.length - 1].at);
+  }
+
+  /** Which lap rows have their bounce burst expanded. Keyed by the burst's owning lap `end_ref`
+   *  (and `-1` for a burst that trails the last lap), so it survives a refold — a re-fold keeps
+   *  each pass's offset, which is exactly why the removal record is keyed on offsets too. */
+  let expandedBursts = $state(new Set<number>());
+
+  function toggleBurst(key: number): void {
+    const next = new Set(expandedBursts);
+    if (!next.delete(key)) next.add(key);
+    expandedBursts = next;
   }
 
   /** Remove (void) a lap straight from its row — the one-click removal on the lap list. */
@@ -1285,25 +1330,60 @@
                   <p class="empty">No laps yet.</p>
                 {:else}
                   {@const voidedSorted = [...(cl.voided ?? [])].sort((a, b) => a.at - b.at)}
+                  {#snippet removalRow(v: VoidedPass)}
+                    <li class="voided-row">
+                      <span class="mark" aria-hidden="true">∅</span>
+                      <span class="what">{voidedRowLabel(v)}</span>
+                      {#if canCorrect}
+                        <button
+                          type="button"
+                          class="lap-restore"
+                          onclick={() => doRestorePass(v)}
+                          disabled={busy}
+                          title="Restore this removed pass (undo the removal)"
+                          aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
+                          >Restore</button
+                        >
+                      {/if}
+                    </li>
+                  {/snippet}
+                  <!-- A gate-bounce burst (#517) collapses to ONE muted line instead of a row per
+                       crossing: a bouncy gate puts three or four of these between every pair of
+                       real laps, and individually they say nothing — the RD needs to know a burst
+                       happened, not to read it out. Expanding reveals the same rows every other
+                       removal gets, each with its own Restore. There is deliberately NO bulk
+                       restore: restoring a whole burst is never what anyone wants, and one
+                       misclick would add that many phantom laps. -->
+                  {#snippet bounceBurst(bounces: VoidedPass[], key: number)}
+                    {#if bounces.length > 0}
+                      <li class="bounce-row">
+                        <span class="mark" aria-hidden="true">∅</span>
+                        <button
+                          type="button"
+                          class="bounce-toggle"
+                          onclick={() => toggleBurst(key)}
+                          aria-expanded={expandedBursts.has(key)}
+                        >
+                          {bounces.length} same-pass crossing{bounces.length === 1 ? '' : 's'} (gate bounce)
+                          <span class="chev" aria-hidden="true"
+                            >{expandedBursts.has(key) ? '▾' : '▸'}</span
+                          >
+                        </button>
+                      </li>
+                      {#if expandedBursts.has(key)}
+                        {#each bounces as v (v.pass_ref)}
+                          {@render removalRow(v)}
+                        {/each}
+                      {/if}
+                    {/if}
+                  {/snippet}
                   <ol>
                     {#each cl.laps as lap (lap.end_ref)}
-                      {#each voidedSorted.filter((v) => v.at < lap.at && !cl.laps.some((o) => o.number < lap.number && o.at > v.at)) as v (v.pass_ref)}
-                        <li class="voided-row">
-                          <span class="mark" aria-hidden="true">∅</span>
-                          <span class="what">{voidedRowLabel(v)}</span>
-                          {#if canCorrect}
-                            <button
-                              type="button"
-                              class="lap-restore"
-                              onclick={() => doRestorePass(v)}
-                              disabled={busy}
-                              title="Restore this removed pass (undo the removal)"
-                              aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
-                              >Restore</button
-                            >
-                          {/if}
-                        </li>
+                      {@const slot = removalsBefore(voidedSorted, cl.laps, lap)}
+                      {#each slot.filter((v) => !isBounce(v)) as v (v.pass_ref)}
+                        {@render removalRow(v)}
                       {/each}
+                      {@render bounceBurst(slot.filter(isBounce), lap.end_ref)}
                       <li class="lap-row">
                         <button
                           type="button"
@@ -1367,25 +1447,17 @@
                         </li>
                       {/if}
                     {/each}
-                    {#each voidedSorted.filter((v) => cl.laps.length === 0 || v.at >= cl.laps[cl.laps.length - 1].at) as v (v.pass_ref)}
-                      <!-- The RD's removal record, kept visible where the lap was: the shared
-                           data that also stops re-detection from re-proposing the crossing. -->
-                      <li class="voided-row">
-                        <span class="mark" aria-hidden="true">∅</span>
-                        <span class="what">{voidedRowLabel(v)}</span>
-                        {#if canCorrect}
-                          <button
-                            type="button"
-                            class="lap-restore"
-                            onclick={() => doRestorePass(v)}
-                            disabled={busy}
-                            title="Restore this removed pass (undo the removal)"
-                            aria-label={`Restore removed pass at ${formatMicros(v.at)}s`}
-                            >Restore</button
-                          >
-                        {/if}
-                      </li>
+                    <!-- The trailing slot: removals after the last lap, plus the whole record for
+                         a competitor with no laps at all. The burst is keyed `-1` — there is no
+                         owning lap row to key it by, and a competitor whose every crossing bounced
+                         still needs the indicator, because that IS the finding. -->
+                    {#each removalsAfterLast(voidedSorted, cl.laps).filter((v) => !isBounce(v)) as v (v.pass_ref)}
+                      {@render removalRow(v)}
                     {/each}
+                    {@render bounceBurst(
+                      removalsAfterLast(voidedSorted, cl.laps).filter(isBounce),
+                      -1
+                    )}
                   </ol>
                 {/if}
                 {#if canCorrect}
@@ -2077,6 +2149,36 @@
     text-decoration: line-through;
     list-style: none;
     padding: var(--gf-space-1) 0;
+  }
+  /* The collapsed gate-bounce burst (#517). Deliberately the QUIETEST thing in the lap list: it
+     is an annotation on the run, not an event in it, and the whole point of collapsing was that
+     these were drowning the laps. No strike-through — nothing here is a removed lap; it is a
+     count of detections that were never separate crossings in the first place. */
+  .bounce-row {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    color: var(--gf-text-faint);
+    list-style: none;
+    padding: 0;
+    font-size: var(--gf-font-size-sm);
+  }
+  .bounce-toggle {
+    background: none;
+    border: 0;
+    padding: var(--gf-space-1) 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .bounce-toggle:hover,
+  .bounce-toggle:focus-visible {
+    color: var(--gf-text);
+    text-decoration: underline;
+  }
+  .bounce-row .chev {
+    margin-left: var(--gf-space-1);
   }
   /* Region heads: the two scopes of this page (pilot vs heat), RD-requested after the
      lap-editor consolidation made the seam invisible. The divider is deliberately HEAVY —

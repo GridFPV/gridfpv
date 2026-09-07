@@ -146,9 +146,23 @@ pub enum VoidReason {
     #[default]
     Marshal,
     /// The corrected fold suppressed it: it would close a lap under the round's minimum lap
-    /// time (D26 — a gate reflection / double-detection; timers are dumb emitters, GridFPV
-    /// owns lap semantics).
+    /// time (D26 — timers are dumb emitters, GridFPV owns lap semantics). A **real** crossing
+    /// that came too soon to count as a lap — the pilot did cross the gate.
     UnderMinLap,
+    /// The corrected fold suppressed it as a **gate bounce** (#517): it landed within the timer's
+    /// `same_pass_window` of the last surviving crossing, so it is not a second crossing at all —
+    /// it is the *same physical pass*, detected twice by a gate whose near field caught the quad
+    /// more than once.
+    ///
+    /// **Distinct from [`UnderMinLap`](Self::UnderMinLap) on purpose.** That one is a competition
+    /// rule ("too soon to count"); this is a hardware fact ("that did not happen twice"). They were
+    /// one variant until #517, which is exactly why a reflection burst and a genuinely short lap
+    /// were indistinguishable in the marshaling list — and why the console could not collapse the
+    /// former without hiding the latter.
+    ///
+    /// Checked **before** the floor, because it is the narrower claim. Marshal-restorable like the
+    /// others; an explicit ruling always outranks the rule.
+    SamePassBounce,
     /// The corrected fold suppressed it under the **grace rule** (#505): the competitor had
     /// already taken their one allowed crossing after the run's `RaceExpired` marker ("finish
     /// the lap you had started; once you cross after the end-of-race tone, no more laps
@@ -458,12 +472,13 @@ where
 pub fn corrected_passes_with_floor<'a, I>(
     events: I,
     min_lap_micros: Option<i64>,
+    same_pass_window: Option<i64>,
     race_expired: Option<u64>,
 ) -> Vec<(u64, Pass)>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    corrected_and_voided_passes_with_floor(events, min_lap_micros, race_expired).0
+    corrected_and_voided_passes_with_floor(events, min_lap_micros, same_pass_window, race_expired).0
 }
 
 /// The offset of `heat`'s standing **`RaceExpired` marker** within `window` — the grace rule's
@@ -485,6 +500,44 @@ where
         }
     }
     found
+}
+
+/// The **gate-bounce window** (µs) pinned for `heat`'s current run, or `None` for no bounce rule
+/// (#517).
+///
+/// Reads the latest [`Event::HeatDetectionPinned`] tagged for this heat: **last one wins**, so a
+/// heat aborted and re-armed races under the window in force at the *new* arm, and every earlier
+/// pin is dead. A heat that never armed, or one armed before the pin existed, resolves `None` and
+/// the fold judges crossings on the round's min-lap floor alone — bit-identical to before.
+///
+/// # Why the whole log, not the run window
+///
+/// The pin is appended at the **arm**, and `current_run_start` opens a run's window at `Running` —
+/// so the pin sits *below* the window and a window-scoped scan would never see it. That is fine,
+/// because this resolves a **value**, not a boundary: unlike [`race_expired_offset`], whose answer
+/// *is* a log position and therefore has to come from the window, a window here would be an
+/// obstacle rather than a scope.
+///
+/// So it is resolved the way the D26 floor is resolved — at the call site, from the full log, and
+/// handed to the fold as a parameter (`min_lap_micros_of` ∘ `round_def_of_heat` does exactly this).
+/// One resolver, every scope, same answer.
+pub fn same_pass_window_of_heat<'a, I>(events: I, heat: &gridfpv_events::HeatId) -> Option<i64>
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    let mut found = None;
+    for event in events {
+        if let Event::HeatDetectionPinned {
+            heat: h,
+            same_pass_window_micros,
+        } = event
+        {
+            if h == heat {
+                found = *same_pass_window_micros;
+            }
+        }
+    }
+    found.filter(|w| *w > 0)
 }
 
 /// One removed pass as the fold emits it:
@@ -730,6 +783,11 @@ where
 /// After the marshaling corrections fold, each competitor's surviving chain is walked
 /// chronologically:
 ///
+/// - **The bounce window** (#517): a **raw, unruled** pass landing within `same_pass_window` of
+///   the last surviving crossing is AUTO-SUPPRESSED as [`VoidReason::SamePassBounce`] — not a
+///   crossing that came too soon, but the *same physical pass* seen twice. Checked **before** the
+///   floor because it is the narrower claim, and reported separately so the console can collapse a
+///   reflection burst without also hiding a genuinely short lap.
 /// - **The floor**: a **raw, unruled** pass that would close a lap shorter than
 ///   `min_lap_micros` is AUTO-SUPPRESSED — moved onto the removal record with
 ///   [`VoidReason::UnderMinLap`] (its restore target is itself; a marshal re-time exempts it).
@@ -748,6 +806,7 @@ where
 pub fn corrected_and_voided_passes_with_floor<'a, I>(
     events: I,
     min_lap_micros: Option<i64>,
+    same_pass_window: Option<i64>,
     race_expired: Option<u64>,
 ) -> (Vec<(u64, Pass)>, Vec<VoidedEmit>)
 where
@@ -759,7 +818,8 @@ where
     let pairs: Vec<(u64, &Event)> = events.into_iter().collect();
     let (surviving, mut voided) = corrected_and_voided_passes(pairs.iter().copied());
     let floor = min_lap_micros.filter(|f| *f > 0);
-    if floor.is_none() && race_expired.is_none() {
+    let bounce = same_pass_window.filter(|w| *w > 0);
+    if floor.is_none() && bounce.is_none() && race_expired.is_none() {
         return (surviving, voided);
     }
 
@@ -795,9 +855,19 @@ where
         let mut post_expiry_taken = false;
         for (offset, pass) in chain {
             let ruled = exempt.contains(&offset);
-            let too_close = floor.is_some_and(|floor| {
-                last_kept.is_some_and(|prev| pass.at.micros.saturating_sub(prev.micros) < floor)
-            });
+            // Both rules measure from the LAST SURVIVING crossing, never from the previous
+            // observation: a suppressed pass does not extend the window it was suppressed by, so a
+            // burst collapses against one anchor instead of ratcheting forward off its own echoes.
+            let since_kept = last_kept.map(|prev| pass.at.micros.saturating_sub(prev.micros));
+            // Bounce first — it is the narrower claim, and a pass inside the bounce window is not a
+            // short lap to be judged by the floor, it is not a separate crossing at all.
+            let bounced = bounce.is_some_and(|w| since_kept.is_some_and(|since| since < w));
+            if bounced && !ruled {
+                voided.push((offset, offset, pass, VoidReason::SamePassBounce));
+                continue;
+            }
+            let too_close =
+                floor.is_some_and(|floor| since_kept.is_some_and(|since| since < floor));
             if too_close && !ruled {
                 voided.push((offset, offset, pass, VoidReason::UnderMinLap));
                 continue;
@@ -843,21 +913,23 @@ pub fn lap_list_marshaled<'a, I>(events: I) -> LapList
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    lap_list_marshaled_with_floor(events, None, None)
+    lap_list_marshaled_with_floor(events, None, None, None)
 }
 
-/// [`lap_list_marshaled`] under a round's **auto-suppression rules**: the minimum-lap floor
-/// (D26) and the grace rule against `race_expired` (#505) — suppressed passes land on each
-/// competitor's removal record with [`VoidReason::UnderMinLap`] / [`VoidReason::AfterRaceEnd`].
+/// [`lap_list_marshaled`] under a run's **auto-suppression rules**: the gate-bounce window
+/// (#517), the minimum-lap floor (D26) and the grace rule against `race_expired` (#505) —
+/// suppressed passes land on each competitor's removal record with
+/// [`VoidReason::SamePassBounce`] / [`VoidReason::UnderMinLap`] / [`VoidReason::AfterRaceEnd`].
 pub fn lap_list_marshaled_with_floor<'a, I>(
     events: I,
     min_lap_micros: Option<i64>,
+    same_pass_window: Option<i64>,
     race_expired: Option<u64>,
 ) -> LapList
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    CorrectedWindow::of(events, min_lap_micros, race_expired).into_lap_list()
+    CorrectedWindow::of(events, min_lap_micros, same_pass_window, race_expired).into_lap_list()
 }
 
 /// One window's **correction fold, folded once** — the shared input to both views of it: the
@@ -881,9 +953,15 @@ pub struct CorrectedWindow {
 }
 
 impl CorrectedWindow {
-    /// Fold `events` (a window of `(offset, event)` pairs) under the D26 floor and the #505
-    /// grace rule (`race_expired` — the run's marker offset, [`race_expired_offset`]).
-    pub fn of<'a, I>(events: I, min_lap_micros: Option<i64>, race_expired: Option<u64>) -> Self
+    /// Fold `events` (a window of `(offset, event)` pairs) under the #517 bounce window
+    /// (`same_pass_window` — the run's pinned value, [`same_pass_window_of_heat`]), the D26 floor,
+    /// and the #505 grace rule (`race_expired` — the run's marker offset, [`race_expired_offset`]).
+    pub fn of<'a, I>(
+        events: I,
+        min_lap_micros: Option<i64>,
+        same_pass_window: Option<i64>,
+        race_expired: Option<u64>,
+    ) -> Self
     where
         I: IntoIterator<Item = (u64, &'a Event)>,
     {
@@ -898,6 +976,7 @@ impl CorrectedWindow {
         let (surviving, voided) = corrected_and_voided_passes_with_floor(
             pairs.iter().copied(),
             min_lap_micros,
+            same_pass_window,
             race_expired,
         );
         Self {
@@ -975,7 +1054,7 @@ fn lap_list_of_corrected(
 /// So a disposition is a **position in the corrected pass chain**, or the removal record the fold
 /// already keeps — never a new logged fact.
 ///
-/// The two removal-side variants map 1:1 onto the only two [`VoidReason`]s that exist.
+/// Every removal-side variant maps 1:1 onto the [`VoidReason`] that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum CrossingDisposition {
@@ -986,10 +1065,19 @@ pub enum CrossingDisposition {
     /// A crossing that **closed a lap** (chain position `n >= 1` closes lap `n`).
     Counted,
     /// The corrected fold **auto-suppressed** it under the round's minimum-lap floor (D26 —
-    /// [`VoidReason::UnderMinLap`]): a gate reflection / double-detection. It records no lap and
-    /// today reaches no live consumer at all, which is the gap #397 exists to close — a
-    /// too-sensitive gate is as broken as an insensitive one, and nothing surfaces it live.
+    /// [`VoidReason::UnderMinLap`]): a real crossing that came too soon to close a lap. It records
+    /// no lap, but it still **tones** (#397) — a too-sensitive gate is as broken as an insensitive
+    /// one, and a table of laps will never show an RD the difference.
     RejectedTooShort,
+    /// The corrected fold **auto-suppressed** it as a **gate bounce** (#517 —
+    /// [`VoidReason::SamePassBounce`]): the same physical pass, detected twice.
+    ///
+    /// This is the one disposition that is deliberately **silent**. Every other crossing tones,
+    /// because every other crossing is a thing that happened; a bounce is the gate stuttering over
+    /// a thing that happened once. Before #517 the console suppressed these with its own private
+    /// timer (`CROSSING_TONE_COOLDOWN_MICROS`) — one concept, two owners, and no way for the
+    /// marshaling list to agree with the speaker. Now the fold decides once and both read it.
+    RejectedSamePass,
     /// A marshal explicitly removed it after the fact ([`VoidReason::Marshal`]). It was a real
     /// observed crossing when it happened; the removal is a later ruling over it.
     VoidedByMarshal,
@@ -1006,6 +1094,7 @@ impl CrossingDisposition {
         match reason {
             VoidReason::Marshal => Self::VoidedByMarshal,
             VoidReason::UnderMinLap => Self::RejectedTooShort,
+            VoidReason::SamePassBounce => Self::RejectedSamePass,
             VoidReason::AfterRaceEnd => Self::RejectedAfterRaceEnd,
         }
     }
@@ -1066,12 +1155,13 @@ pub struct DispositionedPass {
 pub fn dispositioned_passes<'a, I>(
     events: I,
     min_lap_micros: Option<i64>,
+    same_pass_window: Option<i64>,
     race_expired: Option<u64>,
 ) -> Vec<DispositionedPass>
 where
     I: IntoIterator<Item = (u64, &'a Event)>,
 {
-    CorrectedWindow::of(events, min_lap_micros, race_expired).crossings(None)
+    CorrectedWindow::of(events, min_lap_micros, same_pass_window, race_expired).crossings(None)
 }
 
 impl CorrectedWindow {
@@ -2239,6 +2329,172 @@ mod marshaling_tests {
         assert!(cl.voided.is_empty());
     }
 
+    /// A pin event for `heat`, as the arm appends it (#517).
+    fn pinned(heat: &str, window: Option<i64>) -> Event {
+        Event::HeatDetectionPinned {
+            heat: gridfpv_events::HeatId(heat.into()),
+            same_pass_window_micros: window,
+        }
+    }
+
+    #[test]
+    fn the_pinned_window_is_the_latest_one_for_that_heat() {
+        // Last one wins, per heat. A heat armed, aborted, the RD retuned the gate, re-armed: the
+        // run races under the window set for THAT arm, and the earlier pin is dead. A pin for a
+        // different heat never leaks across.
+        let heat = gridfpv_events::HeatId("q-1".into());
+        let log = [
+            pinned("q-1", Some(1_000_000)),
+            pinned("q-2", Some(2_000_000)),
+            pinned("q-1", Some(400_000)),
+        ];
+        assert_eq!(same_pass_window_of_heat(log.iter(), &heat), Some(400_000));
+    }
+
+    #[test]
+    fn an_unpinned_heat_resolves_to_no_bounce_rule() {
+        // Three ways to have no rule, all of which must read the same: never armed, armed before
+        // #517 existed (no pin on the log at all), and armed on a timer with the setting unset
+        // (a pin carrying `None`). A `0` is normalized away for the same reason.
+        let heat = gridfpv_events::HeatId("q-1".into());
+        assert_eq!(same_pass_window_of_heat([].iter(), &heat), None);
+        assert_eq!(
+            same_pass_window_of_heat([pinned("q-2", Some(1_000_000))].iter(), &heat),
+            None,
+            "another heat's pin is not this heat's"
+        );
+        assert_eq!(
+            same_pass_window_of_heat([pinned("q-1", None)].iter(), &heat),
+            None
+        );
+        assert_eq!(
+            same_pass_window_of_heat([pinned("q-1", Some(0))].iter(), &heat),
+            None
+        );
+    }
+
+    #[test]
+    fn the_bounce_window_labels_a_reflection_burst_apart_from_a_short_lap() {
+        // #517, and the whole reason the window exists. The RD runs a 10s floor and a 1s bounce
+        // window. Two suppressions land in the same run and they are NOT the same thing:
+        //
+        //   * a 132ms echo — the gate stuttering over one physical pass;
+        //   * a 3s crossing — the pilot really did cross the gate again, far too soon to score.
+        //
+        // Before this both read `UnderMinLap`, so the console could not collapse the first without
+        // also hiding the second. Now the fold says which is which.
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)),  // offset 0 — holeshot, kept
+            pass("rh", "A", 1_132_000, Some(2)),  // offset 1 — +132ms: bounce
+            pass("rh", "A", 4_000_000, Some(3)),  // offset 2 — +3s: real, but under the floor
+            pass("rh", "A", 21_000_000, Some(4)), // offset 3 — +20s: a genuine lap
+        ];
+        let (surviving, voided) = corrected_and_voided_passes_with_floor(
+            tagged(&events),
+            Some(10_000_000),
+            Some(1_000_000),
+            None,
+        );
+        // Only the holeshot and the genuine lap survive; both suppressions measured from the
+        // holeshot, because a suppressed pass never becomes the anchor.
+        assert_eq!(
+            surviving.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+            vec![0, 3]
+        );
+        assert_eq!(
+            voided
+                .iter()
+                .map(|(offset, _, _, reason)| (*offset, *reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, VoidReason::SamePassBounce),
+                (2, VoidReason::UnderMinLap),
+            ],
+            "the echo is a bounce; the 3s crossing is a real pass under the floor"
+        );
+    }
+
+    #[test]
+    fn the_bounce_window_measures_from_the_last_surviving_pass_not_the_last_crossing() {
+        // A burst walks forward in ~0.9s steps. Measured crossing-to-crossing every one would be
+        // "within 1s of the previous" and the whole burst would collapse forever. Measured from the
+        // last SURVIVING pass — the rule the audio's cooldown already used, anchoring on the last
+        // *sounded* tone — the third step is 1.8s off the anchor and stops being a bounce.
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)), // offset 0 — kept, the anchor
+            pass("rh", "A", 1_900_000, Some(2)), // offset 1 — +0.9s: bounce
+            pass("rh", "A", 2_800_000, Some(3)), // offset 2 — +1.8s from the ANCHOR: not a bounce
+        ];
+        let (_, voided) =
+            corrected_and_voided_passes_with_floor(tagged(&events), None, Some(1_000_000), None);
+        assert_eq!(
+            voided
+                .iter()
+                .map(|(offset, _, _, reason)| (*offset, *reason))
+                .collect::<Vec<_>>(),
+            vec![(1, VoidReason::SamePassBounce)],
+            "an absorbed crossing must not ratchet the window forward off its own echo"
+        );
+    }
+
+    #[test]
+    fn the_bounce_window_works_with_no_min_lap_floor_at_all() {
+        // The floor is a per-round competition rule and an RD may simply not set one. The bounce
+        // window is hardware truth and must still apply — this is what lets the console stop
+        // keeping its own private cooldown, which used to be the ONLY bounce rule in that case.
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)), // offset 0 — kept
+            pass("rh", "A", 1_050_000, Some(2)), // offset 1 — 50ms echo
+        ];
+        let (surviving, voided) =
+            corrected_and_voided_passes_with_floor(tagged(&events), None, Some(1_000_000), None);
+        assert_eq!(surviving.len(), 1);
+        assert_eq!(voided.len(), 1);
+        assert_eq!(voided[0].3, VoidReason::SamePassBounce);
+    }
+
+    #[test]
+    fn a_marshal_ruling_exempts_a_pass_from_the_bounce_window() {
+        // Same exemption the floor honours: an explicit ruling outranks an automatic rule. An RD
+        // who re-times a pass into the bounce window has decided it is a real crossing, and the
+        // fold does not get to overrule them.
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)), // offset 0 — kept
+            pass("rh", "A", 1_100_000, Some(2)), // offset 1 — would bounce…
+            adjusted(1, 1_100_000),              // offset 2 — …but the RD re-asserted it
+        ];
+        let (surviving, voided) =
+            corrected_and_voided_passes_with_floor(tagged(&events), None, Some(1_000_000), None);
+        assert_eq!(surviving.len(), 2, "the ruled pass stands");
+        assert!(voided.is_empty());
+    }
+
+    #[test]
+    fn no_bounce_window_folds_bit_identically_to_before() {
+        // The additive guarantee: a run with no pinned window (every heat armed before #517, and
+        // every timer with the setting unset) must fold exactly as it always did.
+        let events = vec![
+            pass("rh", "A", 1_000_000, Some(1)),
+            pass("rh", "A", 1_004_000, Some(2)),
+            pass("rh", "A", 30_000_000, Some(3)),
+        ];
+        let with_none =
+            lap_list_marshaled_with_floor(tagged(&events), Some(10_000_000), None, None);
+        let with_zero =
+            lap_list_marshaled_with_floor(tagged(&events), Some(10_000_000), Some(0), None);
+        assert_eq!(with_none, with_zero, "0 normalizes to no rule");
+        let reasons: Vec<VoidReason> = with_none
+            .competitors
+            .iter()
+            .flat_map(|c| c.voided.iter().map(|v| v.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![VoidReason::UnderMinLap],
+            "without a window the echo is still judged by the floor alone, as before"
+        );
+    }
+
     #[test]
     fn min_lap_floor_suppresses_the_phantom_double_detection() {
         // The live bug (Audit Shakedown): every pilot got TWO passes 4ms apart at race start —
@@ -2251,7 +2507,7 @@ mod marshaling_tests {
             pass("vd", "A", 7_208_000, Some(3)), // offset 2 — real lap 1
             pass("vd", "A", 13_500_000, Some(4)), // offset 3 — real lap 2
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None, None);
         let cl = result
             .competitors
             .iter()
@@ -2273,7 +2529,7 @@ mod marshaling_tests {
             }]
         );
         // No floor ⇒ bit-identical to the plain fold (rounds predating the setting).
-        let unfloored = lap_list_marshaled_with_floor(tagged(&events), None, None);
+        let unfloored = lap_list_marshaled_with_floor(tagged(&events), None, None, None);
         let plain = lap_list_marshaled(tagged(&events));
         assert_eq!(unfloored, plain);
         assert_eq!(plain.competitors[0].laps.len(), 3);
@@ -2297,7 +2553,7 @@ mod marshaling_tests {
         // The marker is resolved from the window exactly as the server call sites do.
         let marker = race_expired_offset(tagged(&log), &heat);
         assert_eq!(marker, Some(2));
-        let result = lap_list_marshaled_with_floor(tagged(&log), None, marker);
+        let result = lap_list_marshaled_with_floor(tagged(&log), None, None, marker);
         let cl = result
             .competitors
             .iter()
@@ -2319,7 +2575,7 @@ mod marshaling_tests {
         );
         // No marker ⇒ bit-identical to the plain fold (a run that never expired).
         assert_eq!(
-            lap_list_marshaled_with_floor(tagged(&log), None, None),
+            lap_list_marshaled_with_floor(tagged(&log), None, None, None),
             lap_list_marshaled(tagged(&log))
         );
     }
@@ -2338,7 +2594,7 @@ mod marshaling_tests {
             // spend A's one allowed crossing (that was offset 4).
             inserted("rh", "A", 10_000_000),
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), None, Some(3));
+        let result = lap_list_marshaled_with_floor(tagged(&events), None, None, Some(3));
         let a = result
             .competitors
             .iter()
@@ -2375,7 +2631,8 @@ mod marshaling_tests {
             pass("rh", "A", 35_193_000, Some(5)), // offset 4 — reflection: UnderMinLap
             pass("rh", "A", 52_000_000, Some(6)), // offset 5 — real next lap: AfterRaceEnd
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(10_000_000), Some(1));
+        let result =
+            lap_list_marshaled_with_floor(tagged(&events), Some(10_000_000), None, Some(1));
         let cl = result
             .competitors
             .iter()
@@ -2432,7 +2689,7 @@ mod marshaling_tests {
             pass("vd", "A", 9_000_000, Some(3)), // offset 2
             adjusted(1, 3_000_000),              // offset 3 — marshal: "that 2s lap is real"
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None, None);
         let cl = result
             .competitors
             .iter()
@@ -2458,7 +2715,7 @@ mod marshaling_tests {
             pass("vd", "A", 10_000_000, Some(2)), // offset 1
             inserted("vd", "A", 2_500_000),       // offset 2 — a 1.5s lap, by ruling
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None, None);
         let cl = result
             .competitors
             .iter()
@@ -2479,7 +2736,7 @@ mod marshaling_tests {
             pass("vd", "A", 1_030_000, Some(4)), // echo — suppressed
             pass("vd", "A", 8_000_000, Some(5)), // real — kept (7s from last kept)
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None, None);
         let cl = result
             .competitors
             .iter()
@@ -2506,7 +2763,7 @@ mod marshaling_tests {
             pass("vd", "A", 8_000_000, Some(3)), // offset 2 — real lap
             voided(0),                           // offset 3
         ];
-        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None);
+        let result = lap_list_marshaled_with_floor(tagged(&events), Some(5_000_000), None, None);
         let cl = result
             .competitors
             .iter()
@@ -3845,7 +4102,7 @@ mod marshaling_tests {
         log.push(voided(10));
 
         let floor = Some(5_000_000);
-        let window = CorrectedWindow::of(tagged(&log), floor, None);
+        let window = CorrectedWindow::of(tagged(&log), floor, None, None);
         let full = window.crossings(None);
         assert!(
             full.len() > 8,
@@ -3877,7 +4134,7 @@ mod marshaling_tests {
         assert!(window.crossings(Some(0)).is_empty());
 
         // And the free function still answers the whole run.
-        assert_eq!(dispositioned_passes(tagged(&log), floor, None), full);
+        assert_eq!(dispositioned_passes(tagged(&log), floor, None, None), full);
     }
 
     /// **One fold, two views.** The lap list and the crossing feed are now read off a single
@@ -3896,14 +4153,14 @@ mod marshaling_tests {
             pass("rh", "node-0", 60_000_000, None),
         ];
         let floor = Some(5_000_000);
-        let window = CorrectedWindow::of(tagged(&log), floor, None);
+        let window = CorrectedWindow::of(tagged(&log), floor, None, None);
         assert_eq!(
             window.crossings(None),
-            dispositioned_passes(tagged(&log), floor, None)
+            dispositioned_passes(tagged(&log), floor, None, None)
         );
         assert_eq!(
             window.into_lap_list(),
-            lap_list_marshaled_with_floor(tagged(&log), floor, None)
+            lap_list_marshaled_with_floor(tagged(&log), floor, None, None)
         );
     }
 

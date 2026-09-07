@@ -156,6 +156,7 @@ async fn director_connects_rotorhazard_on_selection_and_keeps_it_connected_throu
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         })
         .expect("create RH timer");
     // A freshly-configured RH timer rests at `Configured` until the Director connects it.
@@ -550,6 +551,7 @@ async fn director_fails_over_from_a_dropped_rh_primary_to_a_mock_alternate() {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         })
         .expect("create RH timer");
 
@@ -718,6 +720,7 @@ async fn editing_a_live_timers_url_in_place_re_dials_without_a_restart() {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         })
         .expect("create RH timer at the wrong URL");
     registry

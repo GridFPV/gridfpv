@@ -322,6 +322,18 @@
   let saving = $state(false);
   let formError = $state<string | undefined>(undefined);
 
+  /**
+   * The gate-bounce window this form OFFERS a new timer, and the ceiling it accepts — in seconds
+   * (#517).
+   *
+   * **The server is authoritative** (`timers::MAX_SAME_PASS_WINDOW_MICROS`, and it refuses rather
+   * than clamps); these are the field's affordances — a spinner that stops in the right place and
+   * a hint that says why — exactly as `maxNodeCount` is for the width. They are not on the wire, so
+   * a change to the Rust cap must be echoed here; the refusal message is the backstop if it is not.
+   */
+  const DEFAULT_SAME_PASS_WINDOW_SECS = 1;
+  const MAX_SAME_PASS_WINDOW_SECS = 2;
+
   // ── Channel config (race redesign Slice 4b) ──────────────────────────────────
   // The capability (Fixed | Flexible), node count, and the chosen available channels. The chosen set
   // is held as a `Set<number>` of raw MHz (catalog picks + custom entries); for a Fixed timer it is
@@ -339,6 +351,14 @@
    * live in the Nodes dialog, which is the surface that can express them.
    */
   let seededNodeCount = $state(String(DEFAULT_NODE_COUNT));
+  /**
+   * The gate-bounce window, in **seconds** for the field (the wire is µs) — #517.
+   *
+   * Seconds because that is how an RD thinks about it and how the sibling setting (a round's min
+   * lap) is already expressed; the conversion happens once, on submit. `'0'` is a real value here,
+   * not an empty field: it spells "no bounce rule", which is what a timer that never bounces wants.
+   */
+  let formSamePassWindow = $state('0');
   let formChannels = $state<Set<number>>(new Set());
   // A Fixed timer's built-in allowed set (its physically-supported channels); the picker offers
   // exactly these, and `formChannels` is the subset the RD makes available. Empty ⇒ all catalog.
@@ -368,6 +388,12 @@
     formChannels = new Set(timer?.available_channels ?? []);
     formFixedAllowed = fixedAllowed(timer?.channel_capability);
     formCustomMhz = '';
+    // A NEW timer is offered the 1s default; an existing one shows what it actually has, including
+    // `0` for a timer the RD deliberately left without a rule. Unlike the node-count override there
+    // is nothing to disambiguate — the field always sends, because `0` is a meaningful answer.
+    formSamePassWindow = timer
+      ? String((timer.same_pass_window_micros ?? 0) / 1_000_000)
+      : String(DEFAULT_SAME_PASS_WINDOW_SECS);
   }
 
   export function openAdd() {
@@ -545,6 +571,14 @@
     // Only carried when the RD actually set a width — see `seededNodeCount`. Omitted otherwise, so
     // an unrelated edit never pins an override the RD did not ask for.
     const node_count = String(formNodeCount) === seededNodeCount ? undefined : nodeCount;
+    // Seconds on screen, µs on the wire. Always sent: unlike the width override, `0` here is a real
+    // answer ("this gate does not bounce"), so there is no "untouched" state to preserve.
+    const windowSecs = Number(formSamePassWindow);
+    if (!Number.isFinite(windowSecs) || windowSecs < 0 || windowSecs > MAX_SAME_PASS_WINDOW_SECS) {
+      formError = `Same-pass window must be between 0 and ${MAX_SAME_PASS_WINDOW_SECS} seconds (0 turns it off).`;
+      return;
+    }
+    const same_pass_window_micros = Math.round(windowSecs * 1_000_000);
     saving = true;
     formError = undefined;
     try {
@@ -554,7 +588,8 @@
           kind: built.kind,
           channel_capability,
           node_count,
-          available_channels
+          available_channels,
+          same_pass_window_micros
         };
         const updated = await session.updateTimer(editing.id, req);
         if (!updated) {
@@ -568,7 +603,8 @@
           kind: built.kind,
           channel_capability,
           node_count,
-          available_channels
+          available_channels,
+          same_pass_window_micros
         };
         const created = await session.createTimer(req);
         if (!created) {
@@ -854,6 +890,24 @@
         />
       </Field>
     </div>
+
+    <!-- #517. This is GATE config, not race config: how long after a crossing this timer keeps
+         re-detecting the same quad. It sits with the hardware settings and NOT with the round's
+         min-lap floor, which is a competition rule and lives on the round. The hint says which is
+         which, because conflating them is exactly what this issue was filed about. -->
+    <Field
+      label="Same-pass window (seconds)"
+      hint="Two crossings closer together than this are one physical pass — a gate bounce, not a lap. 0 turns it off. This is about the gate's antenna; the round's min lap time is the racing rule."
+    >
+      <Input
+        type="number"
+        min="0"
+        max={MAX_SAME_PASS_WINDOW_SECS}
+        step="0.1"
+        bind:value={formSamePassWindow}
+        aria-label="Same-pass window in seconds"
+      />
+    </Field>
 
     <Field
       label="Available channels"

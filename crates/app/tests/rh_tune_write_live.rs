@@ -142,6 +142,7 @@ async fn bench(port: u16) -> Bench {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         })
         .expect("create RH timer")
         .id;

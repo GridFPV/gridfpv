@@ -573,7 +573,17 @@ fn live_state_core(
     // of the window, so a Restarted heat can never inherit a stale marker).
     let race_expired =
         gridfpv_projection::race_expired_offset(run_window.iter().copied(), &current_heat);
-    let corrected = CorrectedWindow::of(run_window.iter().copied(), min_lap_micros, race_expired);
+    // The bounce window (#517): the value pinned at this heat's arm. Resolved over the WHOLE log,
+    // not `run_window` — the pin is appended at the arm and `current_run_start` opens the window at
+    // Running, so a window-scoped scan would never find it. Unlike the marker above, this resolves
+    // a value rather than a boundary, so a wider scan costs nothing and a narrower one loses it.
+    let same_pass_window = gridfpv_projection::same_pass_window_of_heat(events, &current_heat);
+    let corrected = CorrectedWindow::of(
+        run_window.iter().copied(),
+        min_lap_micros,
+        same_pass_window,
+        race_expired,
+    );
     // The crossing feed (#397) — the same run window, read as *crossings* rather than *laps*, so
     // the holeshot and a floor-rejected pass (neither of which derives a lap) are visible live.
     // Bounded to the most recent `MAX_LIVE_CROSSINGS`: the tail is kept and the head dropped, so

@@ -2614,6 +2614,7 @@ mod tests {
             manual_connect: false,
             calibration: Vec::new(),
             node_channels: Vec::new(),
+            same_pass_window_micros: None,
         }
     }
 

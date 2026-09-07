@@ -72,6 +72,23 @@ pub const DEFAULT_NODE_COUNT: u32 = 8;
 /// connect spends the count back to zero.
 pub const CONNECT_ATTEMPT_CAP: u32 = 3;
 
+/// The **default gate-bounce window** (µs) offered for a new timer: 1 second (#517).
+///
+/// Comfortably over a reflection burst's spread (tens to low hundreds of milliseconds) and
+/// comfortably under any lap anybody has ever flown, so it collapses a multi-detection without
+/// coming near a real crossing. It is only a *default* — the RD tunes it per gate, which is the
+/// whole point of the setting living on the timer.
+pub const DEFAULT_SAME_PASS_WINDOW_MICROS: i64 = 1_000_000;
+
+/// The **hard cap** on [`Timer::same_pass_window_micros`] (µs): 2 seconds (#517).
+///
+/// This cap is what makes the window safe to edit at all. A lap under two seconds is not a lap —
+/// no course is that short and no quad is that fast — so whatever the RD types here, the rule can
+/// only ever collapse repeat detections of one physical pass. It can never swallow a lap somebody
+/// actually flew, which is what lets the setting stay editable instead of freezing like the
+/// round's min-lap floor does (`events.rs`, the raced-round freeze).
+pub const MAX_SAME_PASS_WINDOW_MICROS: i64 = 2_000_000;
+
 /// The file name (under the data dir) the timer registry is persisted to (issue #73).
 pub const TIMERS_FILE: &str = "timers.json";
 
@@ -615,6 +632,34 @@ pub struct Timer {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<NodeChannel>>", optional)]
     pub node_channels: Vec<NodeChannel>,
+    /// The **gate-bounce window** (µs): two lap-gate crossings by the same competitor closer
+    /// together than this are **the same physical pass**, detected twice (#517).
+    ///
+    /// A quad in the gate's near field fires the detector several times per crossing — antenna
+    /// reflections milliseconds apart. That is a property of *this gate*: its antenna, its RSSI
+    /// thresholds, where it sits on the track. So it lives on the timer, not on the round.
+    ///
+    /// **Not the same thing as the min-lap floor.** `RoundDef::min_lap_secs` is a *competition
+    /// rule* — "a lap shorter than this does not count" — and it is the round's to set. This is a
+    /// *hardware fact* — "that was not a second crossing at all". Conflating them is what made a
+    /// reflection burst indistinguishable from a genuinely short lap in the marshaling list.
+    ///
+    /// `None` (the default, and what an older `timers.json` restores with) means no bounce rule:
+    /// every crossing stands on its own and only the round's floor judges it.
+    ///
+    /// Capped at [`MAX_SAME_PASS_WINDOW_MICROS`] and normalized so `0` reads as `None`. The cap is
+    /// what makes the setting safe to change: no real lap can be that short, so the window can only
+    /// ever collapse a multi-detection of one pass, never eat a lap somebody flew.
+    ///
+    /// **Read at the arm, not at the fold.** The value in force when a heat arms is stamped onto
+    /// the log ([`Event::HeatDetectionPinned`](gridfpv_events::Event::HeatDetectionPinned)) and the
+    /// corrected fold reads it from there — so editing this never re-judges a race that has already
+    /// run. See #518 for the general rule.
+    // A window is capped at 2s, so it is bounded far below 2^53: render it as a plain TS `number`
+    // rather than a `bigint`, the same call `Pass::sequence` and `RaceExpired::deadline` make.
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub same_pass_window_micros: Option<i64>,
 }
 
 /// The words one Tune write's refusals use — the only thing that differs between the three
@@ -1140,6 +1185,12 @@ pub struct CreateTimerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub available_channels: Option<Vec<u16>>,
+    /// The new timer's **gate-bounce window** in µs (#517) — see
+    /// [`Timer::same_pass_window_micros`]. Optional; omit it (or send `0`) for no bounce rule.
+    /// [`DEFAULT_SAME_PASS_WINDOW_MICROS`] is what the console offers, not what the server assumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub same_pass_window_micros: Option<i64>,
 }
 
 /// The body of `PUT /timers/{id}` — the editable fields of a timer (issue #73).
@@ -1173,6 +1224,12 @@ pub struct UpdateTimerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub available_channels: Option<Vec<u16>>,
+    /// A new **gate-bounce window** in µs (#517), or `None` to leave it unchanged. Send `0` to turn
+    /// the bounce rule off — unlike the node-count override this needs no separate clear route,
+    /// because zero already spells "no window" (the same idiom `RoundDef::min_lap_secs` uses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub same_pass_window_micros: Option<i64>,
 }
 
 /// The body of `PUT /events/{id}/timers` — the timer ids an event selects (issue #73), and
@@ -2171,6 +2228,9 @@ impl TimerRegistry {
             manual_connect: false,
             calibration: Vec::new(),
             node_channels: Vec::new(),
+            // No bounce rule: the Mock synthesizes clean passes, so there are no reflections to
+            // collapse and a window here would only ever be a lie about a gate that does not exist.
+            same_pass_window_micros: None,
         };
         timers.insert(sim.id.clone(), sim);
 
@@ -2266,6 +2326,7 @@ impl TimerRegistry {
             manual_connect: false,
             calibration: Vec::new(),
             node_channels: Vec::new(),
+            same_pass_window_micros: normalize_same_pass_window(request.same_pass_window_micros),
         };
         reg.timers.insert(id, timer.clone());
         reg.persist()?;
@@ -2290,6 +2351,12 @@ impl TimerRegistry {
         if let Some(node_count) = request.node_count {
             // #463: a width above what the timer reported is refused, not surfaced as drift.
             if let Some(refusal) = timer.width_override_refusal(node_count) {
+                return Err(TimerError(refusal));
+            }
+        }
+        if let Some(window) = request.same_pass_window_micros {
+            // #517: refused here, with the same before-any-write discipline as the width override.
+            if let Err(refusal) = validate_same_pass_window(window) {
                 return Err(TimerError(refusal));
             }
         }
@@ -2321,6 +2388,11 @@ impl TimerRegistry {
         }
         if let Some(available) = &request.available_channels {
             timer.available_channels = available.clone();
+        }
+        if let Some(window) = request.same_pass_window_micros {
+            // `0` spells "no bounce rule" and normalizes to `None`, so the one field both sets and
+            // clears the window — see [`UpdateTimerRequest::same_pass_window_micros`].
+            timer.same_pass_window_micros = normalize_same_pass_window(Some(window));
         }
         let updated = timer.clone();
         reg.persist()?;
@@ -3316,6 +3388,36 @@ pub const MAX_MOCK_LAPS: u32 = 1000;
 /// [`MAX_MOCK_LAPS`] (a runaway sim). `node_count` is passed in so the merged value can be checked
 /// on a partial edit; `None` (#412 — follow whatever the timer reports) is always fine, since a
 /// discovered width can never be zero.
+/// Refuse a **gate-bounce window** outside its allowed range (#517).
+///
+/// Negative is meaningless (a window is a duration) and above
+/// [`MAX_SAME_PASS_WINDOW_MICROS`] is refused rather than clamped: silently accepting a number
+/// and then applying a different one is how a setting stops meaning what it says. `0` is legal
+/// and spells "no bounce rule" — [`normalize_same_pass_window`] turns it into `None`.
+///
+/// Mirrors `events::validate_min_lap`, deliberately: the two settings are siblings, and an RD who
+/// mistypes one should get the same shape of answer from the other.
+pub fn validate_same_pass_window(micros: i64) -> Result<(), String> {
+    if micros < 0 {
+        return Err("same_pass_window_micros cannot be negative".to_string());
+    }
+    if micros > MAX_SAME_PASS_WINDOW_MICROS {
+        return Err(format!(
+            "same_pass_window_micros must be at most {MAX_SAME_PASS_WINDOW_MICROS} \
+             ({}s) — a longer window could suppress a lap somebody actually flew",
+            MAX_SAME_PASS_WINDOW_MICROS / 1_000_000
+        ));
+    }
+    Ok(())
+}
+
+/// `0` (and anything below it, which [`validate_same_pass_window`] has already refused) means
+/// **no bounce rule**, stored as `None` so the fold's "is there a window at all" test is a plain
+/// `Option` check rather than a magic zero. Same normalization `RoundDef::min_lap_secs` applies.
+pub fn normalize_same_pass_window(micros: Option<i64>) -> Option<i64> {
+    micros.filter(|m| *m > 0)
+}
+
 pub fn validate_timer_config(kind: &TimerKind, node_count: Option<u32>) -> Result<(), String> {
     if node_count == Some(0) {
         return Err(
@@ -3397,6 +3499,7 @@ mod tests {
                 channel_capability: None,
                 node_count: None,
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .expect("timer created")
             .id;
@@ -3772,6 +3875,7 @@ mod tests {
                     channel_capability: None,
                     node_count: None,
                     available_channels: None,
+                    same_pass_window_micros: None,
                 })
                 .expect("timer created")
                 .id;
@@ -4040,6 +4144,7 @@ mod tests {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         }
     }
 
@@ -4052,6 +4157,7 @@ mod tests {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         }
     }
 
@@ -4386,6 +4492,7 @@ mod tests {
                     channel_capability: Some(fixed.clone()),
                     node_count: Some(4),
                     available_channels: Some(vec![5658, 5695, 5732, 5769]),
+                    same_pass_window_micros: None,
                 })
                 .unwrap();
             assert_eq!(created.channel_capability, fixed);
@@ -4456,6 +4563,7 @@ mod tests {
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         })
         .unwrap()
     }
@@ -4496,6 +4604,7 @@ mod tests {
                 channel_capability: None,
                 node_count: Some(8),
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         reg.set_reported_nodes(&rh.id, 4);
@@ -4672,6 +4781,7 @@ mod tests {
                 channel_capability: None,
                 node_count: Some(8),
                 available_channels: None,
+                same_pass_window_micros: None,
             })
             .unwrap();
         reg.set_reported_nodes(&rh.id, 4);

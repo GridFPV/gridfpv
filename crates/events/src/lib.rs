@@ -833,6 +833,37 @@ pub enum Event {
         #[ts(optional, type = "number")]
         deadline: Option<i64>,
     },
+    /// The **detection config in force for this run**, pinned at the arm (#517).
+    ///
+    /// The gate-bounce window (`Timer::same_pass_window_micros`) is *timer* config, and a timer is
+    /// editable at any time — unlike a round, which freezes the moment it races. Read live, the
+    /// corrected fold would therefore re-judge finished races every time an RD nudged a slider on
+    /// the Timers page. So the value in force is written here, **once, when the heat arms**, and
+    /// the fold reads it from the log instead: an edit changes the next run, never a past one.
+    ///
+    /// Same shape as [`HeatStarting`](Event::HeatStarting) / [`HeatFinalizing`](Event::HeatFinalizing)
+    /// / [`RaceExpired`](Event::RaceExpired) — the runtime resolves a value once, at emission time,
+    /// and logs it as a fact so a replay reads the same answer instead of re-deriving it. Same idea
+    /// as [`HeatLayoutSet`](Event::HeatLayoutSet), too, which pins the resolved channel layout at
+    /// the *stage* for exactly this reason (#478). The general rule is #518.
+    ///
+    /// **Why the arm and not the stage:** arming is the moment the gate opens to detections, and it
+    /// is the last point before a pass can arrive. `(Staged, Start) -> Armed` is the only arm in the
+    /// heat FSM (`heat::apply`), so every run passes through here exactly once — and a re-arm after
+    /// an Abort or Restart re-pins, which is correct: it is a new run.
+    ///
+    /// **Absent means no bounce rule** — a heat armed before this existed, or one whose timer has
+    /// no window set. The fold then judges crossings on the round's min-lap floor alone, exactly as
+    /// it did before, so an older log folds bit-identically.
+    HeatDetectionPinned {
+        /// The heat this config was pinned for (it is entering `Armed`).
+        heat: HeatId,
+        /// The **gate-bounce window** (µs) in force for this run: two lap-gate crossings by the
+        /// same competitor closer together than this are one physical pass. `None` for no rule.
+        #[serde(default)]
+        #[ts(optional, type = "number")]
+        same_pass_window_micros: Option<i64>,
+    },
     /// Marshaling: void a previously-detected pass, referenced by log offset. The
     /// projection folds it out as if it never happened — the raw [`Pass`] stays in
     /// the log untouched.

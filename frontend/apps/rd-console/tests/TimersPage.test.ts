@@ -39,6 +39,16 @@ const RH: Timer = {
   disabled_nodes: []
 };
 
+/**
+ * The gate-bounce window the add/edit form sends (#517), in µs.
+ *
+ * The field always sends — unlike the node-count override there is no "the RD did not touch this"
+ * state to preserve, because `0` is itself a real answer ("this gate does not bounce"). A NEW
+ * timer is offered the 1s default; the fixtures here have the setting unset, so an EDIT of one
+ * sends `0`. Both are covered below.
+ */
+const SAME_PASS_DEFAULT_MICROS = 1_000_000;
+
 describe('TimersPage (app-level timer registry)', () => {
   it('lists the registry on mount, with the built-in Mock undeletable', async () => {
     const listTimersImpl = vi.fn(async () => [MOCK, RH]);
@@ -113,7 +123,8 @@ describe('TimersPage (app-level timer registry)', () => {
         kind: { Mock: { laps: 3, lap_ms: 30000 } },
         channel_capability: 'Flexible',
         node_count: undefined,
-        available_channels: []
+        available_channels: [],
+        same_pass_window_micros: SAME_PASS_DEFAULT_MICROS
       },
       'tok'
     );
@@ -149,7 +160,8 @@ describe('TimersPage (app-level timer registry)', () => {
         kind: { Rotorhazard: { url: 'http://rh.local:5000' } },
         channel_capability: 'Flexible',
         node_count: undefined,
-        available_channels: []
+        available_channels: [],
+        same_pass_window_micros: 0 // the fixture timer has no window set; the field sends 0 = no rule
       },
       'tok'
     );
@@ -208,7 +220,8 @@ describe('TimersPage (app-level timer registry)', () => {
         channel_capability: 'Flexible',
         node_count: 6,
         // Catalog channels in catalog order, then the custom MHz.
-        available_channels: [5658, 5800, 5685]
+        available_channels: [5658, 5800, 5685],
+        same_pass_window_micros: SAME_PASS_DEFAULT_MICROS
       },
       'tok'
     );
@@ -261,7 +274,8 @@ describe('TimersPage (app-level timer registry)', () => {
         channel_capability: { Fixed: { channels: [5658, 5695] } },
         // Untouched, so the width override is left exactly as it was (#412).
         node_count: undefined,
-        available_channels: [5658, 5695]
+        available_channels: [5658, 5695],
+        same_pass_window_micros: 0 // the fixture timer has no window set; the field sends 0 = no rule
       },
       'tok'
     );

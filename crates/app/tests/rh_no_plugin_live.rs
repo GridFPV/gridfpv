@@ -194,6 +194,7 @@ async fn a_plugin_less_rotorhazard_connects_but_grid_refuses_to_race_it_and_says
             channel_capability: None,
             node_count: None,
             available_channels: None,
+            same_pass_window_micros: None,
         })
         .expect("create the RH timer");
 

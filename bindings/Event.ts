@@ -112,7 +112,16 @@ heat: HeatId,
  * unbounded grace (the engine's `GraceWindow::UntilScored`): the heat then closes only
  * on the all-crossed rule or the RD's `ForceEnd`.
  */
-deadline?: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, 
+deadline?: number, } } | { "HeatDetectionPinned": { 
+/**
+ * The heat this config was pinned for (it is entering `Armed`).
+ */
+heat: HeatId, 
+/**
+ * The **gate-bounce window** (µs) in force for this run: two lap-gate crossings by the
+ * same competitor closer together than this are one physical pass. `None` for no rule.
+ */
+same_pass_window_micros?: number, } } | { "DetectionVoided": { target: LogRef, } } | { "LapInserted": { adapter: AdapterId, competitor: CompetitorRef, at: SourceTime, 
 /**
  * The heat the inserted lap belongs to. Unlike a raw [`Pass`] (an untagged wire
  * observation attributed positionally), an insertion is an RD statement **about a
