@@ -170,6 +170,25 @@ impl TimerKind {
         }
     }
 
+    /// Whether this kind **tunes receivers** — i.e. whether assigning video channels to a heat on
+    /// it means anything.
+    ///
+    /// False for Velocidrone, and not as a configuration gap: a simulator has no receivers, no
+    /// frequencies and no video link at all, which is exactly what the adapter's `Capabilities`
+    /// already declares (`frequency_mgmt: false`). Channel assignment on such a timer is not
+    /// "unconfigured", it is *inapplicable* — so the fill skips it rather than refusing a heat for
+    /// a setting the RD could never supply.
+    ///
+    /// The built-in Mock says **true**: it has no real receivers either, but it stands in for one
+    /// and its heats carry channel plans the console renders. Changing that is #498's business,
+    /// not this predicate's.
+    pub fn manages_frequencies(&self) -> bool {
+        match self {
+            TimerKind::Mock { .. } | TimerKind::Rotorhazard { .. } => true,
+            TimerKind::Velocidrone { .. } => false,
+        }
+    }
+
     /// Whether this kind is a **dialled** timer — one the Director opens a persistent connection to.
     ///
     /// True for RotorHazard and Velocidrone, false for the built-in Mock (which produces its own

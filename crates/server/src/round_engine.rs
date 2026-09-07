@@ -381,6 +381,15 @@ pub fn assign_frequencies(
             nodes,
         });
     }
+    // A timer with no receivers has no channels to assign, and that is a FACT ABOUT THE TIMER, not
+    // a configuration gap (#484). Velocidrone is a simulator: no video link, no frequencies,
+    // nothing an RD could ever pick on the Timers page. Refusing the fill here — which is what the
+    // empty-allowed-set rule below did — made a sim heat impossible to schedule at all, and told
+    // the RD to go and configure something that does not exist. The size cap above still applies
+    // (the sim seats 8 pilots at once); only the channel half is skipped.
+    if !timer.kind.manages_frequencies() {
+        return Ok(Vec::new());
+    }
     // The allowed set, filtered by what the hardware can actually tune (#117 S1): `Fixed` restricts
     // to its declared set, `Flexible` restricts nothing. De-duplicated so the IMD picker chooses
     // among distinct channels and the TooFewChannels count below is the real distinct supply.
@@ -5992,5 +6001,55 @@ mod tests {
             "Shootout",
             "an RD-typed label wins and is trimmed"
         );
+    }
+    /// **A simulator has no channels, and that must not block its heats (#484).**
+    ///
+    /// Velocidrone has no receivers at all — no frequencies, no video link — so an empty
+    /// `available_channels` on it is not the RD failing to configure something, it is the truth
+    /// about the timer. The empty-set rule refused the *fill* outright, so a Velocidrone heat could
+    /// never be scheduled and the refusal told the RD to go and pick channels on the Timers page
+    /// for hardware that does not exist.
+    #[test]
+    fn a_velocidrone_timer_assigns_no_channels_instead_of_refusing_the_heat() {
+        let mut timer = timer_with(8, vec![]);
+        timer.kind = TimerKind::Velocidrone {
+            url: "ws://192.168.1.20:60003/velocidrone".into(),
+        };
+        assert_eq!(
+            assign_frequencies(&timer, &lineup(&["A", "B"])),
+            Ok(Vec::new()),
+            "a sim heat carries no channel plan, and that is not an error"
+        );
+    }
+
+    /// The size cap still applies: the sim seats 8 pilots at once, and a ninth is still refused.
+    #[test]
+    fn a_velocidrone_timer_still_enforces_its_seat_capacity() {
+        let mut timer = timer_with(8, vec![]);
+        timer.kind = TimerKind::Velocidrone {
+            url: "ws://192.168.1.20:60003/velocidrone".into(),
+        };
+        let nodes = timer.seat_capacity();
+        let over: Vec<CompetitorRef> = (0..nodes + 1)
+            .map(|i| CompetitorRef(format!("p{i}")))
+            .collect();
+        assert!(matches!(
+            assign_frequencies(&timer, &over),
+            Err(AssignError::TooManyForNodes { .. })
+        ));
+    }
+
+    /// A RotorHazard with nothing configured must STILL refuse — that rule (#117 S1) is about a
+    /// real configuration gap, and this change must not have widened it into "never refuse".
+    #[test]
+    fn a_rotorhazard_with_no_channels_still_refuses() {
+        let mut timer = timer_with(8, vec![]);
+        timer.kind = TimerKind::Rotorhazard {
+            url: "http://rh.local:5000".into(),
+        };
+        assert!(matches!(
+            assign_frequencies(&timer, &lineup(&["A"])),
+            Err(AssignError::NoChannelsAllowed { .. })
+        ));
     }
 }
