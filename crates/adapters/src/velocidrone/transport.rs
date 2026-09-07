@@ -8,8 +8,28 @@
 //! in `Raw`/`translate`; this file only moves bytes.
 //!
 //! Unlike RotorHazard, Velocidrone is **not** Socket.IO — it is a plain WebSocket
-//! emitting one JSON object per text frame, plus a periodic empty-string keep-alive
+//! emitting one JSON object per frame, plus a periodic empty-string keep-alive
 //! ping (~5-10s). We mirror that ping back and skip empty frames on read.
+//!
+//! ## KNOWN BROKEN against the real game — two wire facts from the 1.17.13 binary (#484)
+//!
+//! The 2026-08-29 decompile of the game's server (`WSServer.WSClient.SendData` in
+//! `Assembly-CSharp.dll` 1.17.13; full receipts in the RE workspace's
+//! `velocidrone-websocket/docs/ws-spec.md`) established:
+//!
+//! 1. **Every server→client message is a BINARY frame (opcode 0x2)** whose payload is
+//!    UTF-8 JSON — the game never sends text frames. [`run_reader`] below matches
+//!    `Message::Text` and discards `Message::Binary`, so against a real game it
+//!    connects cleanly and then drops **100% of the feed**, silently. (The in-process
+//!    mock this transport is tested against sent text frames, which is why the test was
+//!    green — the exact "check that could not see the thing" shape.)
+//! 2. The vendor-blessed keep-alive on ≥ Jan-2026 builds is `{"command":"ping"}`; the
+//!    empty-string frame we send does still work (it is echoed at frame level and never
+//!    reaches the game's command layer), but the ping command is the documented form.
+//!
+//! The fix belongs to the #483/#484 adapter work: decode `Message::Binary` payloads as
+//! JSON text, send the ping command, and point the integration test at the wire-faithful
+//! `gridfpv_testkit::vd_mock` server (which sends binary frames like the game).
 //!
 //! ## Threading model
 //!

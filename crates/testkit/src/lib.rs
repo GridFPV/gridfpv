@@ -49,6 +49,8 @@
 //! (image `gridfpv-rotorhazard:<version>`, built on demand by [`ensure_rh_image`]);
 //! [`PLUGIN_ENV`] names a plugin dir to mount, and unset means stock RotorHazard.
 
+pub mod vd_mock;
+
 use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};

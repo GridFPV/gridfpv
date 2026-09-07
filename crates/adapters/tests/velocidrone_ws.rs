@@ -7,9 +7,17 @@
 //! asserts the translated [`Event`]s match exactly what the pure adapter produces
 //! for those same frames (lifecycle, CompetitorSeen, Passes).
 //!
+//! **Fidelity caveat (#484):** this file's inline tungstenite mock sends **text** frames,
+//! and the transport under test only decodes text frames — but the real 1.17.13 game
+//! sends every message as a **binary** frame (see the KNOWN BROKEN note in
+//! `src/velocidrone/transport.rs`). So this test proves the plumbing and the translation,
+//! *not* real-game compatibility. When the #483 adapter work fixes the transport, switch
+//! the server here to the wire-faithful `gridfpv_testkit::vd_mock` (binary frames, game
+//! handshake, host gating) and this caveat disappears.
+//!
 //! Gated behind the `live` feature (it needs the transport), but **not** `#[ignore]`
-//! — the mock server is in-process, so it needs no external service and runs in the
-//! `live` test class:
+//! — the mock server is in-process, so it needs no external service; `cargo xtask test`
+//! runs it explicitly (the `test_vd_ws` leg):
 //!
 //! ```sh
 //! cargo test -p gridfpv-adapters --features live --test velocidrone_ws

@@ -7,6 +7,7 @@
 
 mod race_day;
 mod rh_mock;
+mod vd_mock;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
@@ -121,6 +122,27 @@ fn test_live_units() -> bool {
     )
 }
 
+/// Run the Velocidrone WS integration target (`tests/velocidrone_ws.rs`) — the one live
+/// target that needs **no Docker** (its mock server is in-process), which for a long time
+/// meant it was compiled by [`live_check`] and executed by *nothing* (#484): `cargo test
+/// --all` doesn't enable `live`, [`test_live_units`] is `--lib`, and the `cargo xtask
+/// live` matrix legs are all RotorHazard. Running it here puts it in `ci` proper.
+fn test_vd_ws() -> bool {
+    run_env(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "gridfpv-adapters",
+            "--features",
+            "live",
+            "--test",
+            "velocidrone_ws",
+        ],
+        &[("TS_RS_EXPORT_DIR", &workspace_root())],
+    )
+}
+
 fn test() -> bool {
     // `cargo test --all` also runs ts-rs's generated export tests, which write the
     // `.ts` files. Pin `TS_RS_EXPORT_DIR` to the workspace root so they land in the
@@ -131,6 +153,7 @@ fn test() -> bool {
         &["test", "--all"],
         &[("TS_RS_EXPORT_DIR", &workspace_root())],
     ) && test_live_units()
+        && test_vd_ws()
 }
 
 /// Regenerate the Rust→TypeScript bindings (#4, #40).
@@ -947,6 +970,9 @@ fn main() {
         // The interactive RotorHazard mock-signal harness (marshaling testing). Needs Docker to
         // `feed`; `dump`/`list` are plain HTTP/std. See `rh_mock.rs`.
         "rh-mock" => rh_mock::run(&args[1..]),
+        // The wire-faithful Velocidrone mock server (#484) — no Docker; the testkit's
+        // `vd_mock` IS the server. See `vd_mock.rs`.
+        "vd-mock" => vd_mock::run(&args[1..]),
         // The mock race-day autopilot: emulate races via the gridfpv_mock plugin while you drive
         // the Director. See `race_day.rs`.
         "race-day" => race_day::run(&args[1..]),
@@ -956,7 +982,7 @@ fn main() {
         other => {
             eprintln!("unknown task: {other}");
             eprintln!(
-                "usage: cargo xtask [ci|fmt|lint|test|gen|barrel|live|rh-mock|race-day|version]"
+                "usage: cargo xtask [ci|fmt|lint|test|gen|barrel|live|rh-mock|vd-mock|race-day|version]"
             );
             false
         }
