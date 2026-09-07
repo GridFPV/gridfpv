@@ -479,7 +479,7 @@ impl VelocidroneConnection {
         self.commands.send(command).is_ok()
     }
 
-    /// Seat exactly `uids`: everyone to spectator, then activate the heat, then read back.
+    /// Seat exactly `uids`: everyone to spectator, activate the heat, lock the room, then read back.
     ///
     /// This is the write that puts the right pilots in the air, so it follows the
     /// foreign-system rule in full. `activate` has **no positive ack** and an
@@ -510,6 +510,12 @@ impl VelocidroneConnection {
         }
         self.send(VdCommand::AllSpectate);
         self.send(VdCommand::Activate(usable.clone()));
+        // Close the room to joins (#524): the sim's "the field is set". Without it someone can
+        // wander into the lobby mid-heat and change the field under a race that is already seated.
+        // Host-gated and silently dropped like every other control command, so nothing confirms it
+        // on its own — it rides with the seating whose readback we DO check, rather than being
+        // reported separately as though it had landed.
+        self.send(VdCommand::Lock);
         self.send(VdCommand::GetPilots);
 
         // Listen for complaints. There is nothing to wait *for* on the happy path — the

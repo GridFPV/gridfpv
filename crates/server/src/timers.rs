@@ -196,6 +196,27 @@ impl TimerKind {
         }
     }
 
+    /// Whether the **source**, not the Director, decides what the race is and when it ends
+    /// (#483, #522).
+    ///
+    /// True for Velocidrone and false for everything else. The sim's race mode, lap count, track
+    /// and class are set by the host inside the game before the room exists, there is no command
+    /// to change any of them, and the sim decides when the race is over. The Director may request
+    /// a seating and a start; the rest it can only read.
+    ///
+    /// **This is the server-side twin of
+    /// [`Capability::SourceOwnsRace`](gridfpv_adapters::Capability::SourceOwnsRace).** The two live
+    /// in crates that cannot see each other — the timer registry sits *below* the adapters — so the
+    /// fact is stated twice by necessity. `gridfpv-app` sees both and carries the test that they
+    /// agree, so the pair cannot drift silently; the same arrangement as
+    /// [`manages_frequencies`](TimerKind::manages_frequencies).
+    pub fn source_owns_race(&self) -> bool {
+        match self {
+            TimerKind::Velocidrone { .. } => true,
+            TimerKind::Mock { .. } | TimerKind::Rotorhazard { .. } => false,
+        }
+    }
+
     /// Whether this kind is a **dialled** timer — one the Director opens a persistent connection to.
     ///
     /// True for RotorHazard and Velocidrone, false for the built-in Mock (which produces its own

@@ -1382,6 +1382,35 @@ async fn set_event_timers(
             ));
         }
     }
+    // #522: an event must not mix a **race-owning** source (a Velocidrone sim, which decides its
+    // own mode, lap count and race-end) with a Director-owned timer. The two cannot fail over to
+    // each other in any meaningful sense — neither can stand in for the other's race — and it is
+    // the only selection for which "does this event own its race?" has no answer, which is the
+    // question the whole event UI is derived from. Refusing it keeps that derivation total.
+    {
+        let mut owns: Vec<String> = Vec::new();
+        let mut directed: Vec<String> = Vec::new();
+        for id in &body.ids {
+            if let Some(timer) = timers.get(id) {
+                if timer.kind.source_owns_race() {
+                    owns.push(timer.name.clone());
+                } else {
+                    directed.push(timer.name.clone());
+                }
+            }
+        }
+        if let (Some(sim), Some(other)) = (owns.first(), directed.first()) {
+            return Err(ProtocolError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "{sim:?} runs its own race — it sets the mode, the lap count and when the race \
+                     ends — so it cannot share an event with {other:?}, which GridFPV drives. \
+                     Neither can stand in for the other if one drops. Use one or the other for \
+                     this event."
+                ),
+            ));
+        }
+    }
     // The plugin gate (#405), applied only to *newly* selected ids. An unknown event has no
     // selection to compare against and no reason to be gated — `set_timers` below reports it as
     // the typed 404 it already is, and reporting a plugin problem on a non-existent event would
@@ -6885,6 +6914,86 @@ mod tests {
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         (status, bytes.to_vec())
+    }
+
+    /// Create a Velocidrone timer in `registry` named `name` — a **race-owning** source.
+    fn create_vd_timer(registry: &EventRegistry, name: &str) -> Timer {
+        registry
+            .timers()
+            .create(&CreateTimerRequest {
+                name: name.into(),
+                kind: TimerKind::Velocidrone {
+                    host: "192.168.1.10".into(),
+                },
+                channel_capability: None,
+                node_count: None,
+                available_channels: None,
+                same_pass_window_micros: None,
+            })
+            .unwrap()
+    }
+
+    /// **#522: an event may not mix a race-owning source with a Director-owned timer.**
+    ///
+    /// A Velocidrone sim sets its own mode and lap count and decides when its race is over; a
+    /// RotorHazard is driven by the Director. Neither can stand in for the other if one drops, so
+    /// failover between them is meaningless — and it is the one selection for which "does this
+    /// event own its race?" has no answer, which is the question the whole event UI is derived
+    /// from. Refusing it keeps that derivation total.
+    #[tokio::test]
+    async fn an_event_cannot_mix_a_race_owning_sim_with_a_driven_timer() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = registry
+            .create(&CreateEventRequest::named("Mixed"))
+            .unwrap();
+        let vd = create_vd_timer(&registry, "Ryan's sim");
+        let rh = create_rh_timer(&registry, "Field RH");
+
+        let (status, bytes) = put_event_timers(
+            registry.clone(),
+            &event.id.0,
+            vec![vd.id.clone(), rh.id.clone()],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // The refusal must name BOTH timers by their friendly names and say why — an RD reading it
+        // has to know which two things conflict and which one to drop.
+        let message = refusal(&bytes);
+        assert!(message.contains("Ryan's sim"), "{message}");
+        assert!(message.contains("Field RH"), "{message}");
+        assert!(message.contains("runs its own race"), "{message}");
+        // Never a raw id (CLAUDE.md).
+        assert!(!message.contains(&vd.id.0), "{message}");
+        assert!(!message.contains(&rh.id.0), "{message}");
+    }
+
+    /// The refusal is about *mixing*, not about Velocidrone — a sim on its own is fine.
+    #[tokio::test]
+    async fn a_velocidrone_timer_alone_is_selectable() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = registry.create(&CreateEventRequest::named("Sim")).unwrap();
+        let vd = create_vd_timer(&registry, "Ryan's sim");
+        let (status, _) = put_event_timers(registry, &event.id.0, vec![vd.id]).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// …and so are two Director-owned timers together: that pairing IS meaningful failover, and
+    /// this rule must not have quietly outlawed it.
+    #[tokio::test]
+    async fn two_driven_timers_may_still_share_an_event() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = registry.create(&CreateEventRequest::named("Pair")).unwrap();
+        let mock = crate::timers::TimerId(crate::timers::MOCK_TIMER_ID.to_string());
+        let rh = create_rh_timer(&registry, "Field RH");
+        // The plugin gate (#405) refuses an unprobed RH, so this asserts on the MIX rule only:
+        // whatever the outcome, it must not be the race-ownership refusal.
+        let (_, bytes) = put_event_timers(registry, &event.id.0, vec![mock, rh.id]).await;
+        let message = String::from_utf8_lossy(&bytes);
+        assert!(
+            !message.contains("runs its own race"),
+            "two driven timers are not a mix: {message}"
+        );
     }
 
     /// Create a RotorHazard timer in `registry` named `name` (unprobed — `plugin: None`).

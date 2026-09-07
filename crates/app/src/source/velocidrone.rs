@@ -96,6 +96,11 @@ pub struct VdSeat {
 struct VdArmedHeat {
     /// The sink (the event's log) translated passes are appended through while armed.
     sink: PassSink,
+    /// The round's grace window in microseconds, as the completion driver reads it: `Some(0)`
+    /// closes the heat at once, `Some(n)` holds for `n`, `None` is `UntilScored` (unbounded).
+    /// Carried here so the sim's race-end opens the SAME grace the round configured — the sim
+    /// deciding *when* the race ended must not also decide how long trailing pilots get.
+    grace: Option<i64>,
     /// Set once this arming has complained that it can attribute nothing, so the warning is said
     /// once rather than ten times a second.
     warned_unattributed: bool,
@@ -198,7 +203,12 @@ impl VdConnection {
     ///
     /// Seating, when it does run, *overwrites* this with the uid-confirmed map — the roster pairing
     /// is authoritative and a callsign guess is not.
-    pub fn arm_heat(&self, sink: PassSink, fallback: Vec<(String, CompetitorRef)>) {
+    pub fn arm_heat(
+        &self,
+        sink: PassSink,
+        fallback: Vec<(String, CompetitorRef)>,
+        grace: Option<i64>,
+    ) {
         {
             let mut map = self
                 .attribution
@@ -211,6 +221,7 @@ impl VdConnection {
         let mut slot = self.armed.lock().expect("vd-armed lock poisoned");
         *slot = Some(VdArmedHeat {
             sink,
+            grace,
             warned_unattributed: false,
             started: false,
             finishing: false,
@@ -477,6 +488,10 @@ fn service_arming(ctx: &DriverCtx, conn: &VelocidroneConnection) {
             if still_racing {
                 conn.send(VdCommand::AbortRace);
             }
+            // Re-open the room (#524): the field is no longer set, so pilots may join for the next
+            // heat. Unconditional — locking is part of seating, so unlocking belongs to letting go,
+            // and an unlock on an already-open room is a no-op in the game.
+            conn.send(VdCommand::Unlock);
             heat.finished_at = Some(Instant::now());
         }
         // Keep routing the last in-flight snapshot into this heat's sink, then let go.
@@ -515,7 +530,15 @@ fn deliver(ctx: &DriverCtx, events: Vec<Event>) {
     let mut passes = 0usize;
     let mut appended = 0usize;
     let mut unknown: Vec<String> = Vec::new();
+    // The sim's own race-end (#523). Velocidrone OWNS its race — it set the mode and the lap count
+    // before the room existed, and `racestatus: "race finished"` is it saying the race is over.
+    // Until now this was dropped on the floor by `remap`, so the Director ended a sim heat on its
+    // OWN win condition and grace, racing the sim with a second clock that does not agree.
+    let mut source_ended = false;
     for event in events {
+        if matches!(event, Event::SessionEnded { .. }) {
+            source_ended = true;
+        }
         if let Event::Pass(p) = &event {
             passes += 1;
             let name = p.competitor.0.clone();
@@ -530,6 +553,17 @@ fn deliver(ctx: &DriverCtx, events: Vec<Event>) {
         if let Err(e) = heat.sink.append_event(event) {
             eprintln!("gridfpv: velocidrone: could not append a pass: {e:?}");
         }
+    }
+
+    // The sim has finished the race: open the grace window on this heat. The completion driver
+    // adopts the marker and closes the heat when grace is satisfied — so a trailing crossing after
+    // "race finished" still lands, which is the whole point of #505's grace.
+    if source_ended && !heat.finishing && heat.sink.declare_race_over(heat.grace) {
+        eprintln!(
+            "gridfpv: velocidrone: {} reports the race finished — closing the heat on the sim's \
+             call, not on GridFPV's win condition (the sim owns this race).",
+            timer_name(&ctx.timers, &ctx.timer_id),
+        );
     }
 
     // Crossings are arriving and NONE of them belong to anyone we know. Say so once per arming.

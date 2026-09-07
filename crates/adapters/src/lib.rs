@@ -41,7 +41,33 @@ pub enum Capability {
     /// Manages frequencies / channels for its nodes.
     FrequencyMgmt,
     /// Exposes its own race/heat lifecycle (start/stop).
+    ///
+    /// **This does not mean the source is in charge of the race** — RotorHazard declares it too,
+    /// and there the Director drives the lifecycle and RotorHazard follows. It says only that the
+    /// source reports session boundaries of its own. For authority, see [`SourceOwnsRace`].
+    ///
+    /// [`SourceOwnsRace`]: Capability::SourceOwnsRace
     SourceLifecycle,
+    /// **The source, not the Director, decides what the race is and when it ends** (#483, #522).
+    ///
+    /// The inverse of the RotorHazard relationship. With RH the Director owns the race: it assigns
+    /// frequencies, stages, starts, stops, and applies its own win condition. Velocidrone is the
+    /// other way round — the race mode, lap count, track and class are set by the host inside the
+    /// game before the room exists, there is **no command to change any of them**, and the sim
+    /// decides when the race is over (`racestatus: "race finished"`). The Director may request a
+    /// seating and a start; everything else it can only read.
+    ///
+    /// Two authorities move together under this one flag, because for a source that has one it
+    /// invariably has the other:
+    ///
+    /// - **config authority** — who decides laps / mode / track / class;
+    /// - **race-end authority** — who decides the heat is over.
+    ///
+    /// What it drives: the Director defers to the source's race-end rather than racing it with its
+    /// own win condition; the surfaces for things the source owns are *absent* rather than shown
+    /// and refused; and an event may not mix a race-owning source with a Director-owned timer,
+    /// because neither can stand in for the other on failover.
+    SourceOwnsRace,
 }
 
 /// What a source can do. A plain set of flags; construct with [`Capabilities::none`]
@@ -74,6 +100,8 @@ pub struct Capabilities {
     pub frequency_mgmt: bool,
     /// Exposes its own race/heat lifecycle.
     pub source_lifecycle: bool,
+    /// The source, not the Director, decides what the race is and when it ends.
+    pub source_owns_race: bool,
 }
 
 impl Capabilities {
@@ -92,6 +120,7 @@ impl Capabilities {
             Capability::SignalRecovery => self.signal_recovery,
             Capability::FrequencyMgmt => self.frequency_mgmt,
             Capability::SourceLifecycle => self.source_lifecycle,
+            Capability::SourceOwnsRace => self.source_owns_race,
         }
     }
 
@@ -106,6 +135,7 @@ impl Capabilities {
             SignalRecovery,
             FrequencyMgmt,
             SourceLifecycle,
+            SourceOwnsRace,
         ]
         .into_iter()
         .filter(|&c| self.has(c))
@@ -145,6 +175,12 @@ impl Capabilities {
     /// Declares a source race lifecycle.
     pub fn with_source_lifecycle(mut self) -> Self {
         self.source_lifecycle = true;
+        self
+    }
+    /// Declares that the **source** owns the race: its configuration and its end
+    /// ([`Capability::SourceOwnsRace`]).
+    pub fn with_source_owns_race(mut self) -> Self {
+        self.source_owns_race = true;
         self
     }
 }

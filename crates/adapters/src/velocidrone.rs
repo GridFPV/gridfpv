@@ -612,12 +612,15 @@ impl Adapter for VelocidroneAdapter {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // Sim: live passes, splits, and its own race lifecycle; no signal/calibration/
-        // frequency. Mirrors the capability matrix in `docs/timer-adapters.html` §5/§7.
+        // Sim: live passes, splits, its own race lifecycle — and it OWNS that race. There is no
+        // command to set the mode, lap count, track or class (the host sets them in the game's
+        // lobby before the room exists), and the sim decides when the race is over. No
+        // signal/calibration/frequency. Mirrors `docs/timer-adapters.html` §5/§7.
         Capabilities::none()
             .with_live_passes()
             .with_gates_splits()
             .with_source_lifecycle()
+            .with_source_owns_race()
     }
 
     fn translate(&mut self, raw: Self::Raw) -> Vec<Event> {

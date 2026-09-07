@@ -135,13 +135,14 @@ impl VdConnections {
         timer: &TimerId,
         sink: PassSink,
         fallback: Vec<(String, CompetitorRef)>,
+        grace: Option<i64>,
     ) -> bool {
         let map = self.inner.lock().expect("vd-connections lock poisoned");
         if let Some(live) = map
             .get(&(Some(event.clone()), timer.clone()))
             .filter(|live| live.conn.is_connected())
         {
-            live.conn.arm_heat(sink, fallback);
+            live.conn.arm_heat(sink, fallback, grace);
             true
         } else {
             drop(map);

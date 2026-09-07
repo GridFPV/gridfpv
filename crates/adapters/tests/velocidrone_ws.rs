@@ -162,6 +162,19 @@ fn a_1_17_13_heat_seats_starts_and_finishes() {
     let sent: Vec<String> = mock.commands().iter().map(|c| c.command.clone()).collect();
     assert!(sent.contains(&"allspectate".to_string()));
     assert!(sent.contains(&"activate".to_string()));
+    // #524: seating also closes the room, so nobody wanders in and changes the field under a heat
+    // that is already seated.
+    assert!(
+        sent.contains(&"lock".to_string()),
+        "seating must lock the lobby: {sent:?}"
+    );
+    // …and in that order — locking before the field is set would be pointless.
+    let lock_at = sent.iter().position(|c| c == "lock").expect("a lock");
+    let activate_at = sent
+        .iter()
+        .position(|c| c == "activate")
+        .expect("an activate");
+    assert!(activate_at < lock_at, "activate then lock, not the reverse");
 
     conn.send(VdCommand::StartRace);
     let events = drain_until(&conn, Duration::from_secs(20), ended);

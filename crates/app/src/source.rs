@@ -206,6 +206,58 @@ impl PassSink {
         self
     }
 
+    /// Declare, on behalf of a source that **owns its race**, that the race is over (#523).
+    ///
+    /// Appends the heat-tagged [`RaceExpired`](Event::RaceExpired) marker the completion driver
+    /// adopts — opening the grace window rather than closing the heat outright, because a crossing
+    /// arriving after the sim says "race finished" is exactly the case the grace window (#505)
+    /// exists for.
+    ///
+    /// Checked, and for the same reason every other completion append is: the heat must still be
+    /// `Running` at fire time, or an `Abort`/`ForceEnd` that landed a moment earlier would get a
+    /// stale marker written over it. Idempotent — a second call while a marker for this run already
+    /// stands is a no-op, so a source that re-sends its race-end (or a reconnect that replays it)
+    /// cannot open the grace twice.
+    ///
+    /// Returns whether a marker was actually appended.
+    #[cfg(feature = "live")]
+    pub(crate) fn declare_race_over(&self, grace: Option<i64>) -> bool {
+        let Some(heat) = self.heat.clone() else {
+            return false;
+        };
+        if !self.feeds() {
+            return false;
+        }
+        let deadline = grace.map(|micros| now_micros().saturating_add(micros.max(0)));
+        let h = heat.clone();
+        let still_running_and_unmarked = move |events: &[Event]| {
+            if gridfpv_engine::heat::heat_state(events, &h)
+                != Some(gridfpv_engine::heat::HeatState::Running)
+            {
+                return false;
+            }
+            // Only after the heat's latest transition: an older run's marker must not suppress
+            // this one (the re-race case `latest_transition_offset` exists for).
+            let since = latest_transition_offset(events, &h).unwrap_or(0);
+            !events
+                .iter()
+                .skip(since)
+                .any(|e| matches!(e, Event::RaceExpired { heat: m, .. } if m == &h))
+        };
+        match self.state.append_checked(
+            Event::RaceExpired { heat, deadline },
+            None,
+            still_running_and_unmarked,
+        ) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                eprintln!("gridfpv: could not append the source's race-end: {e:?}");
+                false
+            }
+        }
+    }
+
     /// Whether this sink may append right now: an unbound sink always may; a gated sink may only
     /// while its owning timer is the active source (issue #112).
     fn feeds(&self) -> bool {
@@ -1125,6 +1177,13 @@ fn handle_transition(
                 // only where the uid-confirmed roster pairing did not reach — a heat whose pilots
                 // have no Velocidrone id would otherwise record nothing at all.
                 let vd_fallback = vd_callsigns(state, registry, &heat);
+                // The round's grace, in the completion driver's own terms, so a race-owning source
+                // opens exactly the window the round configured (#523).
+                let vd_grace =
+                    match heat_clock_config(state, registry, event_id, &heat).grace_window {
+                        GraceWindow::Duration { micros } => Some(micros.max(0)),
+                        GraceWindow::UntilScored => None,
+                    };
                 let mut armed = Vec::new();
                 for timer_id in selected_vd_timers(registry, timers, event_id) {
                     let sink = PassSink::gated(
@@ -1134,7 +1193,13 @@ fn handle_transition(
                         timer_id.clone(),
                     )
                     .for_heat(heat.clone());
-                    if vd_connections.arm_heat(event_id, &timer_id, sink, vd_fallback.clone()) {
+                    if vd_connections.arm_heat(
+                        event_id,
+                        &timer_id,
+                        sink,
+                        vd_fallback.clone(),
+                        vd_grace,
+                    ) {
                         armed.push(timer_id);
                     }
                 }
@@ -1866,6 +1931,29 @@ fn spawn_completion_driver(
                 continue;
             }
 
+            // ── Stage 1a: has something ELSE already declared the race over? (#523)
+            //
+            // `RaceExpired` is a logged, heat-tagged fact meaning "the race-end criterion is met,
+            // grace is open" — and this driver is no longer the only thing that can know it. For a
+            // source that OWNS its race (a Velocidrone sim: it sets the mode and the lap count, and
+            // it decides when the race is finished), the sim's `race finished` is authoritative and
+            // this driver's own win condition is at best a second opinion arriving at a different
+            // time. The source appends the marker; we adopt it here rather than racing it.
+            //
+            // Adopting rather than re-appending is what keeps the grace window (#505) intact: the
+            // marker is the scoring boundary `grace_satisfied` reads, so there must be exactly one
+            // of them per run, whoever wrote it.
+            if let Some((marker, deadline_at)) = adopted_expiry(&state, &heat, spawn_watermark) {
+                expired = Some((
+                    marker,
+                    deadline_at.map(|at| {
+                        let remaining = at.saturating_sub(now_micros()).max(0) as u64;
+                        tokio::time::Instant::now() + Duration::from_micros(remaining)
+                    }),
+                ));
+                continue;
+            }
+
             // ── Stage 1: is the race over? The fixed end on the wall clock (time limit from
             // race-go; a Timed window from the first observed pass — if nobody crosses again
             // after the buzzer the pass-based criterion alone would never fire), or the pure
@@ -1938,6 +2026,38 @@ fn spawn_completion_driver(
             }
         }
     })
+}
+
+/// A [`RaceExpired`](Event::RaceExpired) marker for `heat` belonging to **this run**, if one has
+/// been appended — by this driver or by anything else (#523).
+///
+/// Returns its log offset (the scoring boundary [`grace_satisfied`] reads) and its logged deadline.
+///
+/// "This run" is the point of `watermark`: a heat that was Force-Ended and re-raced has an older
+/// run's marker sitting in the log, and adopting *that* would close the new race the instant it
+/// started. So only a marker appended after the heat's latest transition counts — the same
+/// same-state-vs-state-again distinction [`latest_transition_offset`] exists for.
+///
+/// [`grace_satisfied`]: gridfpv_engine::scoring::grace_satisfied
+fn adopted_expiry(
+    state: &AppState,
+    heat: &HeatId,
+    watermark: Option<usize>,
+) -> Option<(u64, Option<i64>)> {
+    let events: Vec<Event> = read_tail(state, 0)
+        .ok()?
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect();
+    let since = watermark.unwrap_or(0);
+    events
+        .iter()
+        .enumerate()
+        .skip(since)
+        .find_map(|(i, e)| match e {
+            Event::RaceExpired { heat: h, deadline } if h == heat => Some((i as u64, *deadline)),
+            _ => None,
+        })
 }
 
 /// The offset of `heat`'s LATEST `HeatStateChanged` — the spawn-time watermark a driver
@@ -2188,6 +2308,224 @@ mod tests {
         let mut list = registry.list();
         assert_eq!(list.len(), 1, "one created event per bridge-test registry");
         EventId(list.remove(0).id.0)
+    }
+
+    // --- #523: a race-owning source declares the race over -------------------------------------
+
+    /// Build a log holding a heat that reached `Running`, and return its state.
+    ///
+    /// The full transition chain, not a bare `Running`: `heat_state` folds forward from
+    /// `HeatScheduled` and ignores a transition on a heat it has never seen scheduled, so a
+    /// shortcut here yields a heat in no state at all — and every assertion below would then pass
+    /// or fail for the wrong reason.
+    fn running_heat(registry: &EventRegistry, heat: &HeatId) -> AppState {
+        let event = event_of(registry);
+        let state = registry.resolve(&event).unwrap();
+        state
+            .append(
+                Event::HeatScheduled {
+                    heat: heat.clone(),
+                    lineup: vec![CompetitorRef("A".into())],
+                    class: None,
+                    round: None,
+                    frequencies: vec![],
+                    label: None,
+                },
+                None,
+            )
+            .expect("schedule the heat");
+        for transition in [
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: heat.clone(),
+                        transition,
+                    },
+                    None,
+                )
+                .expect("drive the heat to Running");
+        }
+        assert_eq!(
+            gridfpv_engine::heat::heat_state(
+                &read_tail(&state, 0)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, e)| e)
+                    .collect::<Vec<_>>(),
+                heat
+            ),
+            Some(gridfpv_engine::heat::HeatState::Running),
+            "the fixture must really be Running, or these tests prove nothing"
+        );
+        state
+    }
+
+    /// The completion driver must adopt a `RaceExpired` **anyone** appended for this run — that is
+    /// what lets a race-owning source (a Velocidrone sim, which decides when its race is over) end
+    /// the heat instead of racing our win condition with a second clock (#523).
+    #[test]
+    fn an_externally_appended_race_expired_is_adopted() {
+        let registry = test_registry();
+        let heat = HeatId("h1".into());
+        let state = running_heat(&registry, &heat);
+        let watermark = latest_transition_offset(
+            &read_tail(&state, 0)
+                .unwrap()
+                .into_iter()
+                .map(|(_, e)| e)
+                .collect::<Vec<_>>(),
+            &heat,
+        );
+
+        assert_eq!(
+            adopted_expiry(&state, &heat, watermark),
+            None,
+            "nothing to adopt before the source says anything"
+        );
+
+        state
+            .append(
+                Event::RaceExpired {
+                    heat: heat.clone(),
+                    deadline: Some(1_234),
+                },
+                None,
+            )
+            .expect("append RaceExpired");
+
+        let (_offset, deadline) =
+            adopted_expiry(&state, &heat, watermark).expect("the marker must be adopted");
+        assert_eq!(deadline, Some(1_234), "the logged deadline is carried");
+    }
+
+    /// A marker belonging to a PREVIOUS run must not be adopted. A heat that was Force-Ended and
+    /// re-raced has an older `RaceExpired` sitting in its log, and adopting that would close the
+    /// new race the instant it started — the same same-state-vs-state-again trap the transition
+    /// watermark exists for.
+    #[test]
+    fn a_previous_runs_race_expired_is_not_adopted() {
+        let registry = test_registry();
+        let heat = HeatId("h1".into());
+        let state = running_heat(&registry, &heat);
+        state
+            .append(
+                Event::RaceExpired {
+                    heat: heat.clone(),
+                    deadline: None,
+                },
+                None,
+            )
+            .expect("the first run's marker");
+        // Re-race: Finished → Restarted → … → Running, so there is a NEW transition past the old
+        // marker for the watermark to land on.
+        for transition in [
+            HeatTransition::Finished,
+            HeatTransition::Restarted,
+            HeatTransition::Staged,
+            HeatTransition::Armed,
+            HeatTransition::Running,
+        ] {
+            state
+                .append(
+                    Event::HeatStateChanged {
+                        heat: heat.clone(),
+                        transition,
+                    },
+                    None,
+                )
+                .expect("re-race");
+        }
+
+        let events: Vec<Event> = read_tail(&state, 0)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect();
+        let watermark = latest_transition_offset(&events, &heat);
+        assert_eq!(
+            adopted_expiry(&state, &heat, watermark),
+            None,
+            "the stale marker belongs to the run that ended, not to this one"
+        );
+    }
+
+    /// A marker for a DIFFERENT heat is not this heat's business.
+    #[test]
+    fn another_heats_race_expired_is_not_adopted() {
+        let registry = test_registry();
+        let heat = HeatId("h1".into());
+        let state = running_heat(&registry, &heat);
+        state
+            .append(
+                Event::RaceExpired {
+                    heat: HeatId("h2".into()),
+                    deadline: None,
+                },
+                None,
+            )
+            .expect("another heat's marker");
+        assert_eq!(adopted_expiry(&state, &heat, Some(0)), None);
+    }
+
+    /// `declare_race_over` opens the grace **once**: a source that re-sends its race-end, or a
+    /// reconnect that replays it, must not open a second grace window over the first.
+    #[test]
+    fn declaring_the_race_over_is_idempotent_within_a_run() {
+        let registry = test_registry();
+        let heat = HeatId("h1".into());
+        let state = running_heat(&registry, &heat);
+        let sink =
+            PassSink::new(state.clone(), AdapterId("velocidrone".into())).for_heat(heat.clone());
+
+        assert!(
+            sink.declare_race_over(Some(5_000_000)),
+            "the first call marks"
+        );
+        assert!(
+            !sink.declare_race_over(Some(5_000_000)),
+            "a repeat must not open a second grace"
+        );
+        let markers = read_tail(&state, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, e)| matches!(e, Event::RaceExpired { .. }))
+            .count();
+        assert_eq!(markers, 1);
+    }
+
+    /// A heat that is no longer `Running` cannot be marked: an Abort or ForceEnd that landed a
+    /// moment earlier must not get a stale race-end written over it.
+    #[test]
+    fn declaring_the_race_over_is_refused_once_the_heat_has_left_running() {
+        let registry = test_registry();
+        let heat = HeatId("h1".into());
+        let state = running_heat(&registry, &heat);
+        state
+            .append(
+                Event::HeatStateChanged {
+                    heat: heat.clone(),
+                    transition: HeatTransition::Finished,
+                },
+                None,
+            )
+            .expect("the RD force-ended it");
+        let sink =
+            PassSink::new(state.clone(), AdapterId("velocidrone".into())).for_heat(heat.clone());
+        assert!(!sink.declare_race_over(None));
+    }
+
+    /// A sink with no heat bound has nothing to declare over.
+    #[test]
+    fn declaring_the_race_over_needs_a_bound_heat() {
+        let registry = test_registry();
+        let heat = HeatId("h1".into());
+        let state = running_heat(&registry, &heat);
+        let sink = PassSink::new(state, AdapterId("velocidrone".into()));
+        assert!(!sink.declare_race_over(None));
     }
 
     /// A registry holding exactly one **created** event — the fixture that replaced the built-in
