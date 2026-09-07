@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-adapters"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "gridfpv-events",
  "native-tls",
@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-app"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "axum",
  "gridfpv-adapters",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-desktop"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "gridfpv-app",
  "tauri",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-engine"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "gridfpv-events",
  "gridfpv-projection",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-events"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "ts-rs",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-projection"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "gridfpv-events",
  "serde",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-server"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "axum",
  "getrandom 0.3.4",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-storage"
-version = "0.4.0-alpha.1"
+version = "0.4.0"
 dependencies = [
  "gridfpv-events",
  "rusqlite",

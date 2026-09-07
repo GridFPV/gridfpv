@@ -52,10 +52,9 @@ id reaching the screen as a bug.
 
 ## Pre-release: break things freely, and do not write migrations
 
-**GridFPV has never been released publicly.** There are no users but the maintainer,
-and no deployed data anyone depends on. Until the first public release, a breaking
-change is **free** — and paying for backwards compatibility is a real cost with no
-benefit.
+**This holds until v1.0.0.** There are no users but the maintainer, and no deployed
+data anyone depends on. Until then a breaking change is **free** — and paying for
+backwards compatibility is a real cost with no benefit.
 
 So, by default:
 
@@ -81,10 +80,16 @@ The maintainer will say so when they want data preserved. Ask only when the data
 
 ### When this flips
 
-At the **first public release**. From then on: additive changes, `#[serde(default)]`
-on every new field, and a real migration for anything that moves. Delete this section
-when that happens — a stale "break things freely" rule is exactly the kind of note
-that outlives its truth and does damage.
+At **v1.0.0**, and not before. Named as a version rather than as "the first public
+release", because that phrasing already cost one round of deciding what counted:
+v0.4.0 is a real, tagged, non-prerelease build and it does **not** flip this. The
+test is not whether a build has been published — it is whether anyone's data depends
+on it, and until 1.0 nobody's does.
+
+From v1.0.0 on: additive changes, `#[serde(default)]` on every new field, and a real
+migration for anything that moves. Delete this section when that happens — a stale
+"break things freely" rule is exactly the kind of note that outlives its truth and
+does damage.
 
 ## Talking to RotorHazard: read its source, and prove the write landed
 
