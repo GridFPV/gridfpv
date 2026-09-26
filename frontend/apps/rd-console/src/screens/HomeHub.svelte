@@ -17,19 +17,23 @@
   import type { Timer } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
   import { isTimerConnected } from '../lib/timers.js';
+  import { isRaceGowEvent } from '../lib/racegow.js';
 
   let {
     session,
     onpilots,
     onclasses,
     onevents,
-    ontimers
+    ontimers,
+    onracegow
   }: {
     session: Session;
     onpilots: () => void;
     onclasses: () => void;
     onevents: () => void;
     ontimers: () => void;
+    /** The RaceGOW page — the solo track-run preset (`lib/racegow.ts`). */
+    onracegow: () => void;
   } = $props();
 
   // Each summary loads independently and best-effort; `undefined` while loading, `null` on a
@@ -37,6 +41,7 @@
   let pilotCount = $state<number | undefined | null>(undefined);
   let classCount = $state<number | undefined | null>(undefined);
   let eventCount = $state<number | undefined | null>(undefined);
+  let raceGowCount = $state<number | undefined | null>(undefined);
   let timerCount = $state<number | undefined | null>(undefined);
   let connectedTimers = $state<number | undefined | null>(undefined);
 
@@ -58,8 +63,14 @@
       .catch(() => (classCount = null));
     void session
       .listEvents()
-      .then((events) => (eventCount = events.length))
-      .catch(() => (eventCount = null));
+      .then((events) => {
+        eventCount = events.length;
+        raceGowCount = events.filter(isRaceGowEvent).length;
+      })
+      .catch(() => {
+        eventCount = null;
+        raceGowCount = null;
+      });
     void session
       .listTimers()
       .then((timers) => {
@@ -120,6 +131,34 @@
               <p class="card-summary">
                 <span class="count">{fmt(eventCount)}</span>
                 <span class="unit">{eventCount === 1 ? 'event' : 'events'}</span>
+              </p>
+              <span class="card-go" aria-hidden="true">→</span>
+            </div>
+          </Card>
+        </button>
+      </div>
+
+      <!-- RaceGOW (the solo track-run preset): the other "go fly" action, so it sits with Events
+           rather than among the configuration pages. -->
+      <div class="events-row">
+        <button type="button" class="hub-card racegow feature" onclick={onracegow}>
+          <Card elevation="md">
+            <div class="card-body">
+              <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M4 16.5C4 13 7 11 12 11s8 2 8 5.5M12 11V5M9 5h6M6 20h12"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <h2 class="card-title">RaceGOW</h2>
+              <p class="card-summary">
+                <span class="count">{fmt(raceGowCount)}</span>
+                <span class="unit">{raceGowCount === 1 ? 'track run' : 'track runs'}</span>
+                <span class="connected">· time your best 3 laps at home</span>
               </p>
               <span class="card-go" aria-hidden="true">→</span>
             </div>

@@ -99,13 +99,15 @@ describe('HomeHub (app-level landing, #118)', () => {
     const onclasses = vi.fn();
     const onevents = vi.fn();
     const ontimers = vi.fn();
-    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers });
+    const onracegow = vi.fn();
+    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers, onracegow });
 
-    // Four navigable cards.
+    // Five navigable cards: the four pages, plus RaceGOW (the solo track-run preset).
     expect(screen.getByRole('heading', { name: 'Pilots' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Classes' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Events' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Timers' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'RaceGOW' })).toBeInTheDocument();
 
     // Summaries settle per card (count + unit are separate spans): 2 pilots, 3 classes, 2 events,
     // 3 timers · 2 connected (Mock is Ready + the live RH is Connected; the Configured RH is excluded).
@@ -119,6 +121,10 @@ describe('HomeHub (app-level landing, #118)', () => {
     expect(within(classesCard).getByText('classes')).toBeInTheDocument();
     await waitFor(() => expect(within(eventsCard).getByText('2')).toBeInTheDocument());
     expect(within(eventsCard).getByText('events')).toBeInTheDocument();
+    // RaceGOW counts only the events the preset made: neither of these two carries the marker.
+    const raceGowCard = screen.getByRole('heading', { name: 'RaceGOW' }).closest('button')!;
+    await waitFor(() => expect(within(raceGowCard).getByText('0')).toBeInTheDocument());
+    expect(within(raceGowCard).getByText('track runs')).toBeInTheDocument();
     await waitFor(() => expect(within(timersCard).getByText('timers')).toBeInTheDocument());
     expect(within(timersCard).getByText(/2 connected/)).toBeInTheDocument();
   });
@@ -129,7 +135,8 @@ describe('HomeHub (app-level landing, #118)', () => {
     const onclasses = vi.fn();
     const onevents = vi.fn();
     const ontimers = vi.fn();
-    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers });
+    const onracegow = vi.fn();
+    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers, onracegow });
 
     await fireEvent.click(screen.getByRole('heading', { name: 'Pilots' }).closest('button')!);
     await fireEvent.click(screen.getByRole('heading', { name: 'Classes' }).closest('button')!);
@@ -155,7 +162,8 @@ describe('HomeHub (app-level landing, #118)', () => {
       onpilots: vi.fn(),
       onclasses: vi.fn(),
       onevents: vi.fn(),
-      ontimers: vi.fn()
+      ontimers: vi.fn(),
+      onracegow: vi.fn()
     });
 
     const timersCard = screen.getByRole('heading', { name: 'Timers' }).closest('button')!;

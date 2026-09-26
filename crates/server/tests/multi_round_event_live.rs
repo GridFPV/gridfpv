@@ -607,6 +607,7 @@ async fn build_event(
             location: None,
             description: None,
             organizer: None,
+            preset: None,
         },
     )
     .await;

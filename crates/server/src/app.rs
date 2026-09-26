@@ -4381,6 +4381,7 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
+                preset: None,
             })
             .unwrap();
         assert!(registry.resolve(&created.id).is_some());
@@ -4420,6 +4421,7 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
+                preset: None,
             })
             .unwrap();
         let (status, _) = delete_event_req(registry.clone(), &created.id.0, None).await;

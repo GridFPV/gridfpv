@@ -45,6 +45,10 @@
   import Marshaling from './screens/Marshaling.svelte';
   import Results from './screens/Results.svelte';
   import EventAudit from './screens/EventAudit.svelte';
+  import RaceGowPage from './screens/RaceGowPage.svelte';
+  import RaceGowRun from './screens/RaceGowRun.svelte';
+  import RaceGowOverlay from './screens/RaceGowOverlay.svelte';
+  import { isRaceGowEvent } from './lib/racegow.js';
   import { openAudit } from './lib/auditFilter.svelte.js';
   import type { Timer } from '@gridfpv/types';
   import {
@@ -115,6 +119,11 @@
   };
   /** Back out of an event-scoped tune: the event workspace's Timers tab — where the RD came from. */
   const goEventTimersTab = () => navigate({ kind: 'workspace', tab: 'timers' });
+  // The RaceGOW preset's two surfaces: the page that starts a run, and the solo run screen for
+  // the active one. Both are app-level routes (no workspace shell) — a pilot alone in a garage
+  // wants a start button, not a race director's console; the workspace stays one click away.
+  const goRaceGow = () => navigate({ kind: 'racegow' });
+  const goRaceGowRun = () => navigate({ kind: 'racegow-run' });
   // The workspace's app-route concept is "Events" (where event entry/switch happens).
   const route$page = $derived(route.kind === 'page' ? route.page : 'home');
 
@@ -346,6 +355,38 @@
       </div>
     {/if}
   </div>
+{:else if route.kind === 'overlay'}
+  <!-- An OBS browser source: rendered bare (no shell, no chrome) on a transparent page. It follows
+       the Director's active event through the same session as everything else. -->
+  <div class="gridfpv-root">
+    <RaceGowOverlay {session} />
+  </div>
+{:else if route.kind === 'racegow'}
+  <div class="gridfpv-root gridfpv-dense">
+    <RaceGowPage {session} onhome={goHome} onrun={goRaceGowRun} ontimers={() => goPage('timers')} />
+  </div>
+{:else if route.kind === 'racegow-run'}
+  <!-- The solo run screen wants the ACTIVE event to be a RaceGOW run. Any other active event (a
+       club night the console was left in) falls back to the RaceGOW page, where the pilot picks or
+       starts the run they meant; the route itself already reconciled the no-event case. -->
+  <div class="gridfpv-root gridfpv-dense">
+    {#if isRaceGowEvent(session.currentEvent)}
+      <RaceGowRun
+        {session}
+        onhome={goHome}
+        onback={goRaceGow}
+        onconsole={() => navigate({ kind: 'workspace', tab: 'live' })}
+        ontimers={() => goPage('timers')}
+      />
+    {:else}
+      <RaceGowPage
+        {session}
+        onhome={goHome}
+        onrun={goRaceGowRun}
+        ontimers={() => goPage('timers')}
+      />
+    {/if}
+  </div>
 {:else if route.kind === 'page'}
   <!-- App-level routes (#118): the home hub, or one of its three pages. The view is driven by the
        hash, not just `session.currentEvent` — an explicit page hash (e.g. `#/pilots`) shows that
@@ -359,6 +400,7 @@
         onclasses={() => goPage('classes')}
         onevents={() => goPage('events')}
         ontimers={() => goPage('timers')}
+        onracegow={goRaceGow}
       />
     {:else if route$page === 'events'}
       <EventPicker {session} onhome={goHome} onsetup={() => (pendingWizard = true)} />

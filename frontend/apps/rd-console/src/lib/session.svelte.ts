@@ -1826,6 +1826,17 @@ export class Session {
   }
 
   /**
+   * One-shot read of a heat's **lap list** (`?projection=laps`) — the RaceGOW run screen and its
+   * overlay read the current run's laps this way on every stream tick, and each finished run's
+   * once. Unlike {@link refreshMarshaling} it stores nothing on the session: a solo surface keeps
+   * the laps of several runs side by side, so it owns them. Open to read; `undefined` on any
+   * failure (the caller keeps what it had).
+   */
+  fetchHeatLaps(heat: HeatId): Promise<LapList | undefined> {
+    return this.#fetchHeatProjection<LapList>(heat, 'laps', 'LapList');
+  }
+
+  /**
    * Pull the current heat's marshaling projections — the lap list (`?projection=laps`) and the
    * audit trail (`?projection=audit`, #55) — and store them on {@link lapList} / {@link marshalingAudit}.
    *

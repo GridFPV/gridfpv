@@ -308,6 +308,23 @@ flowchart LR
     </dl>
     <p>Each gets a fuller spec as it is built; the list confirms the protocol exposes what they need.</p>
 
+    <div class="callout">
+      <p>
+        <strong>As built (2026-09-26): the first overlay is the RaceGOW timer,
+        <code>#/overlay/racegow</code>.</strong> It is a route of the RD console SPA rather than a
+        separate app — the "one codebase, profiled three ways" frontend — rendered bare, on a
+        transparent document (<code>html[data-overlay]</code> lifts the console canvas), in the
+        <code>.gridfpv-overlay</code> token context. It is exactly the §2 shape: a read-only
+        client on the same session as the console, <em>following the program</em> (§2.1) — the
+        Director's active event — with no binding of its own, because a solo pilot has one
+        run open. It shows the run clock, the last few laps off the served lap-list
+        projection, and the best 3-consecutive window this run and today (the served round
+        standings). It exists because RaceGOW's rules require a <em>timer in view</em> in the
+        submitted video; the pilot adds it to OBS as a browser source over their DVR. Nothing
+        in §3 (broadcast control) is built.
+      </p>
+    </div>
+
     <h3>5.1 Theming &amp; chapter branding</h3>
     <div class="principle">
       <p><span class="name">Theming is presentation, never data.</span> Overlays render from
