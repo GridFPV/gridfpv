@@ -56,6 +56,15 @@ description?: string,
  */
 organizer?: string, 
 /**
+ * The **console preset** that created this event, when one did — `"racegow"` for a solo
+ * RaceGOW track run. A preset is a ready-made event shape (timer, roster, one round, its win
+ * condition) built by the console through the ordinary create/configure commands; the marker
+ * only records *which* preset shaped it, so the console can open the event on the preset's
+ * own surface (the solo run screen) instead of the full workspace. Free-text on the wire and
+ * absent for an ordinary event; nothing server-side consults it. Omitted when unset.
+ */
+preset?: string, 
+/**
  * The application-level timers this event **selects** (issue #73) — the per-event reference
  * into the app-level [`TimerRegistry`](crate::timers::TimerRegistry). Additive
  * (`#[serde(default)]`) so an event persisted before #73 reads back with an empty list; new

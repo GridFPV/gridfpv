@@ -125,6 +125,22 @@ flowchart LR
         <code>GET /about</code> + the console build-stamp; <code>CONTRACT_VERSION</code> stays
         the independent wire integer).
       </p>
+      <p>
+        <strong>Status (2026-09-26): v0.4.0 is released</strong> (the non-prerelease
+        <a href="https://github.com/GridFPV/gridfpv/releases/tag/v0.4.0">v0.4.0</a>, 2026-09-07),
+        and the first work after it is a <strong>preset</strong>, not a phase:
+        <strong>RaceGOW at home</strong> — a solo track-run surface over the existing
+        engine. An event marked <code>EventMeta.preset = "racegow"</code> is built by the
+        console through the wizard's own commands (Whoop class, one pilot with a fixed channel,
+        an open-ended Time Trials round scored by best 3 consecutive laps, a 10-minute
+        ceiling), then driven from one screen (<code>#/racegow/run</code>: fill → stage → start,
+        stop → finalize) with its result as a copy-and-paste submission line. It also ships the
+        first overlay of the <a href="streaming.html">streaming</a> design,
+        <code>#/overlay/racegow</code>, because the competition requires a timer in the video.
+        The point of building it as a preset: it proves the primitives carry a real
+        competition's rules with <em>zero</em> engine change, and every RaceGOW run remains an
+        ordinary event with marshaling, audit and results behind it.
+      </p>
     </div>
 
     <h3>v0.1 — Walking skeleton</h3>

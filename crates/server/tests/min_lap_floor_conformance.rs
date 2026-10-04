@@ -135,6 +135,7 @@ fn rig() -> Rig {
             location: None,
             description: None,
             organizer: None,
+            preset: None,
         })
         .expect("event created");
     let event = meta.id.clone();

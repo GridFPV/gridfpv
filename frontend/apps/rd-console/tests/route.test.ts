@@ -333,3 +333,65 @@ describe('resolveInitialRoute (hash is authoritative; #118)', () => {
     }
   });
 });
+
+describe('RaceGOW + overlay routes', () => {
+  it('parses the RaceGOW page, its run screen, and the overlay', () => {
+    expect(parseHash('#/racegow')).toEqual({ kind: 'racegow' });
+    expect(parseHash('#/racegow/run')).toEqual({ kind: 'racegow-run' });
+    expect(parseHash('#/RaceGOW/Run')).toEqual({ kind: 'racegow-run' });
+    expect(parseHash('#/overlay/racegow')).toEqual({ kind: 'overlay', overlay: 'racegow' });
+  });
+
+  it('parses the overlay theme: /light is the light panel, anything else is the dark default', () => {
+    expect(parseHash('#/overlay/racegow/light')).toEqual({
+      kind: 'overlay',
+      overlay: 'racegow',
+      theme: 'light'
+    });
+    expect(parseHash('#/overlay/racegow/LIGHT')).toEqual({
+      kind: 'overlay',
+      overlay: 'racegow',
+      theme: 'light'
+    });
+    // An explicit `dark`, or a typo, still renders the overlay — never bounces the scene to the hub.
+    expect(parseHash('#/overlay/racegow/dark')).toEqual({ kind: 'overlay', overlay: 'racegow' });
+    expect(parseHash('#/overlay/racegow/lite')).toEqual({ kind: 'overlay', overlay: 'racegow' });
+  });
+
+  it('degrades a malformed RaceGOW sub-route to the page, and an unknown overlay to the hub', () => {
+    expect(parseHash('#/racegow/whatever')).toEqual({ kind: 'racegow' });
+    expect(parseHash('#/overlay')).toEqual(DEFAULT_ROUTE);
+    expect(parseHash('#/overlay/leaderboard')).toEqual(DEFAULT_ROUTE);
+  });
+
+  it('round-trips each through formatHash', () => {
+    const routes: Route[] = [
+      { kind: 'racegow' },
+      { kind: 'racegow-run' },
+      { kind: 'overlay', overlay: 'racegow' },
+      { kind: 'overlay', overlay: 'racegow', theme: 'light' }
+    ];
+    for (const r of routes) expect(parseHash(formatHash(r))).toEqual(r);
+    expect(formatHash({ kind: 'overlay', overlay: 'racegow', theme: 'light' })).toBe(
+      '#/overlay/racegow/light'
+    );
+    expect(formatHash({ kind: 'overlay', overlay: 'racegow', theme: 'dark' })).toBe(
+      '#/overlay/racegow'
+    );
+    expect(formatHash({ kind: 'racegow' })).toBe('#/racegow');
+    expect(formatHash({ kind: 'racegow-run' })).toBe('#/racegow/run');
+    expect(formatHash({ kind: 'overlay', overlay: 'racegow' })).toBe('#/overlay/racegow');
+  });
+
+  it('reconciles the run screen to the RaceGOW page with no active event, and keeps the rest', () => {
+    expect(reconcileRoute({ kind: 'racegow-run' }, false)).toEqual({ kind: 'racegow' });
+    expect(reconcileRoute({ kind: 'racegow-run' }, true)).toEqual({ kind: 'racegow-run' });
+    expect(reconcileRoute({ kind: 'racegow' }, false)).toEqual({ kind: 'racegow' });
+    // An overlay sits in an OBS scene whether or not a run is on: never bounced.
+    expect(reconcileRoute({ kind: 'overlay', overlay: 'racegow' }, false)).toEqual({
+      kind: 'overlay',
+      overlay: 'racegow'
+    });
+    expect(resolveInitialRoute('#/racegow/run', false)).toEqual({ kind: 'racegow' });
+  });
+});

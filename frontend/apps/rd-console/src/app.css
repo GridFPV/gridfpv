@@ -50,6 +50,15 @@ body::before {
     );
 }
 
+/* An OBS browser-source overlay (`#/overlay/<name>`) keys on a transparent page: the shell sets
+ * `data-overlay` on <html> while one is mounted, and the dark canvas + its wash step aside. */
+html[data-overlay] body {
+  background: transparent;
+}
+html[data-overlay] body::before {
+  display: none;
+}
+
 :focus-visible {
   outline: none;
 }

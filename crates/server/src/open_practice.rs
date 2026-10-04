@@ -127,6 +127,7 @@ mod tests {
             location: None,
             description: None,
             organizer: None,
+            preset: None,
             timers: vec![],
             primary_timer: None,
             roster: vec![],
