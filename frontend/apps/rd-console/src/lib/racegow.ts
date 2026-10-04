@@ -35,6 +35,7 @@ import type {
   TimerId
 } from '@gridfpv/types';
 import type { Session } from './session.svelte.js';
+import { formatHash, type OverlayTheme } from './route.js';
 
 /** The `EventMeta.preset` marker a RaceGOW run carries. */
 export const RACEGOW_PRESET = 'racegow';
@@ -193,9 +194,16 @@ export function servedBestMicros(standings: readonly RoundStanding[]): number | 
   return undefined;
 }
 
-/** The OBS browser-source URL for the RaceGOW overlay, from the console's own location. */
-export function overlayUrl(loc: { origin: string; pathname: string }): string {
-  return `${loc.origin}${loc.pathname}#/overlay/racegow`;
+/**
+ * The OBS browser-source URL for the RaceGOW overlay, from the console's own location. `theme`
+ * picks the panel's contrast for the footage underneath — light text on a dark panel (default)
+ * or dark text on a light one (`#/overlay/racegow/light`, see `route.ts`).
+ */
+export function overlayUrl(
+  loc: { origin: string; pathname: string },
+  theme: OverlayTheme = 'dark'
+): string {
+  return `${loc.origin}${loc.pathname}${formatHash({ kind: 'overlay', overlay: 'racegow', theme })}`;
 }
 
 /** What the submission line needs — everything a RaceGOW form asks beside the clip. */

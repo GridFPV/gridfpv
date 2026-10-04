@@ -24,6 +24,7 @@
  *   - `#/racegow`            → the RaceGOW page (your track runs; start a new one)
  *   - `#/racegow/run`        → the solo run screen for the active RaceGOW event
  *   - `#/overlay/racegow`    → the RaceGOW OBS browser-source overlay (transparent, read-only)
+ *   - `#/overlay/racegow/light` → the same overlay, dark text on a light panel
  *
  * **The route IS the tuning scope (#411).** Tuning is layered — a timer has its own baseline
  * calibration, and an event will eventually carry its own tune over the top — and an RD dragging a
@@ -101,12 +102,18 @@ export type Route =
    * follows the Director's active event (streaming.html §2.1, "follow the program"). Never
    * reconciled away — with nothing on the timer it renders idle, which is what a browser source
    * sitting in a scene should do.
+   *
+   * `theme` picks the panel's contrast for the footage it sits over: light text on a dark panel
+   * (the default, `#/overlay/<name>`) or dark text on a light one (`#/overlay/<name>/light`).
+   * Absent means dark; it is only ever present as `'light'`, so a route compares structurally.
    */
-  | { kind: 'overlay'; overlay: OverlayName };
+  | { kind: 'overlay'; overlay: OverlayName; theme?: OverlayTheme };
 
 /** The overlay pages the console serves (streaming.html §2). */
 export type OverlayName = 'racegow';
 const OVERLAYS: readonly OverlayName[] = ['racegow'];
+/** An overlay's contrast: light text over a dark panel, or dark text over a light one. */
+export type OverlayTheme = 'dark' | 'light';
 
 export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
   'classes-roster',
@@ -197,12 +204,17 @@ export function parseHash(hash: string): Route {
     return segments[1]?.toLowerCase() === 'run' ? { kind: 'racegow-run' } : { kind: 'racegow' };
   }
 
-  // `#/overlay/<name>` — an OBS browser source. An unknown overlay name is the hub, not a blank
-  // page: there is nothing overlay-shaped to land on.
+  // `#/overlay/<name>[/light]` — an OBS browser source. An unknown overlay name is the hub, not a
+  // blank page: there is nothing overlay-shaped to land on. The optional third segment picks the
+  // light panel; anything else (including an explicit `dark`) is the default dark panel, so a
+  // mistyped theme still renders an overlay rather than bouncing the scene to the hub.
   if (head === 'overlay') {
     const name = segments[1]?.toLowerCase();
     if (name && (OVERLAYS as readonly string[]).includes(name)) {
-      return { kind: 'overlay', overlay: name as OverlayName };
+      const overlay = name as OverlayName;
+      return segments[2]?.toLowerCase() === 'light'
+        ? { kind: 'overlay', overlay, theme: 'light' }
+        : { kind: 'overlay', overlay };
     }
     return DEFAULT_ROUTE;
   }
@@ -223,7 +235,11 @@ export function formatHash(route: Route): string {
   if (route.kind === 'workspace') return `#/event/${route.tab}`;
   if (route.kind === 'racegow') return '#/racegow';
   if (route.kind === 'racegow-run') return '#/racegow/run';
-  if (route.kind === 'overlay') return `#/overlay/${route.overlay}`;
+  if (route.kind === 'overlay') {
+    return route.theme === 'light'
+      ? `#/overlay/${route.overlay}/light`
+      : `#/overlay/${route.overlay}`;
+  }
   if (route.kind === 'tune') {
     const timer = encodeURIComponent(route.timer);
     // The scope is the route (#411): an event-scoped tune nests under its event, so the trail back

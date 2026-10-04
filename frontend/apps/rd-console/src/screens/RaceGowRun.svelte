@@ -41,6 +41,7 @@
     RACEGOW_LAPS,
     type ConsecutiveWindow
   } from '../lib/racegow.js';
+  import { formatHash, type OverlayTheme } from '../lib/route.js';
 
   let {
     session,
@@ -287,8 +288,13 @@
     });
   });
 
+  // The overlay's contrast, chosen here so the copied URL carries it: light text on a dark panel
+  // for goggle DVR, dark text on a light panel for a bright room camera (`route.ts`).
+  let overlayTheme = $state<OverlayTheme>('dark');
   const overlay = $derived(
-    typeof location !== 'undefined' ? overlayUrl(location) : '#/overlay/racegow'
+    typeof location !== 'undefined'
+      ? overlayUrl(location, overlayTheme)
+      : formatHash({ kind: 'overlay', overlay: 'racegow', theme: overlayTheme })
   );
 
   async function copy(text: string, what: string): Promise<void> {
@@ -495,6 +501,26 @@
             over your goggles’ DVR or a camera on the track, and record. It shows the clock, the laps
             and the best 3 so far, on a transparent background.
           </p>
+          <div class="theme-pick" role="radiogroup" aria-label="Overlay colors">
+            <button
+              type="button"
+              class="theme-opt"
+              role="radio"
+              aria-checked={overlayTheme === 'dark'}
+              onclick={() => (overlayTheme = 'dark')}
+            >
+              Light text on dark
+            </button>
+            <button
+              type="button"
+              class="theme-opt"
+              role="radio"
+              aria-checked={overlayTheme === 'light'}
+              onclick={() => (overlayTheme = 'light')}
+            >
+              Dark text on light
+            </button>
+          </div>
           <code class="url" aria-label="Overlay URL">{overlay}</code>
           <div class="row-actions">
             <Button size="sm" variant="secondary" onclick={() => copy(overlay, 'Overlay URL')}>
@@ -725,6 +751,31 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-3);
+  }
+  .theme-pick {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--gf-radius-sm);
+    border: 1px solid var(--gf-border);
+    background: var(--gf-surface-sunken);
+    align-self: flex-start;
+  }
+  .theme-opt {
+    appearance: none;
+    border: 0;
+    border-radius: calc(var(--gf-radius-sm) - 2px);
+    padding: var(--gf-space-1) var(--gf-space-3);
+    background: transparent;
+    color: var(--gf-text-muted);
+    font: inherit;
+    font-size: var(--gf-font-size-sm);
+    cursor: pointer;
+  }
+  .theme-opt[aria-checked='true'] {
+    background: var(--gf-elevated);
+    color: var(--gf-text);
+    font-weight: 600;
   }
   .open-link {
     color: var(--gf-accent);

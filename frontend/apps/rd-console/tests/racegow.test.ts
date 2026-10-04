@@ -214,4 +214,10 @@ describe('submissionText / overlayUrl', () => {
       'http://192.168.1.20:8080/#/overlay/racegow'
     );
   });
+
+  it('carries the light theme in the overlay URL, and leaves the dark default bare', () => {
+    const loc = { origin: 'http://192.168.1.20:8080', pathname: '/' };
+    expect(overlayUrl(loc, 'light')).toBe('http://192.168.1.20:8080/#/overlay/racegow/light');
+    expect(overlayUrl(loc, 'dark')).toBe('http://192.168.1.20:8080/#/overlay/racegow');
+  });
 });

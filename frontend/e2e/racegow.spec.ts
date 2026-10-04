@@ -141,6 +141,12 @@ test('a pilot sets up a track run, flies two runs, and gets a submission line', 
   await expect(page.locator('html')).toHaveAttribute('data-overlay', 'racegow');
   await expect(page.locator('body')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
 
+  // The light variant: same overlay, dark text on a light panel, still transparent underneath.
+  await page.goto(`${director.baseUrl}/#/overlay/racegow/light`);
+  await expect(page.getByLabel('RaceGOW overlay')).toHaveAttribute('data-theme', 'light');
+  await expect(page.getByText(`${TRACK} · ${PILOT}`)).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('body')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+
   // ── Back on the RaceGOW page, the run is listed and reopens ─────────────────────────────
   await page.goto(`${director.baseUrl}/#/racegow`);
   const runs = page.getByRole('list', { name: 'Your runs' });

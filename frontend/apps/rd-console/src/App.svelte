@@ -359,7 +359,7 @@
   <!-- An OBS browser source: rendered bare (no shell, no chrome) on a transparent page. It follows
        the Director's active event through the same session as everything else. -->
   <div class="gridfpv-root">
-    <RaceGowOverlay {session} />
+    <RaceGowOverlay {session} theme={route.theme ?? 'dark'} />
   </div>
 {:else if route.kind === 'racegow'}
   <div class="gridfpv-root gridfpv-dense">

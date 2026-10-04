@@ -11,6 +11,11 @@
    *
    * It renders idle — the brand and "waiting for a run" — with no RaceGOW event active, which is
    * what a browser source sitting in a scene should do rather than an error.
+   *
+   * `theme` is the panel's contrast for the footage it sits over: light text on a dark glass
+   * panel (the default — reads over most DVR), or dark text on a light one for a bright room
+   * camera. The light variant is the component library's `data-theme="light"` token set scoped to
+   * this page, plus this page's own glass values flipped.
    */
   import { RaceClock, formatMicros } from '@gridfpv/components';
   import type { HeatId, Lap, LiveRaceState, Pilot, RoundStanding } from '@gridfpv/types';
@@ -26,7 +31,9 @@
     type ConsecutiveWindow
   } from '../lib/racegow.js';
 
-  let { session }: { session: Session } = $props();
+  import type { OverlayTheme } from '../lib/route.js';
+
+  let { session, theme = 'dark' }: { session: Session; theme?: OverlayTheme } = $props();
 
   // The page keys on transparency: flag the document while mounted (app.css lifts the canvas).
   $effect(() => {
@@ -101,7 +108,12 @@
   }
 </script>
 
-<div class="overlay gridfpv-overlay" data-flying={flying} aria-label="RaceGOW overlay">
+<div
+  class="overlay gridfpv-overlay"
+  data-flying={flying}
+  data-theme={theme}
+  aria-label="RaceGOW overlay"
+>
   <div class="panel">
     <div class="head">
       <span class="brand">Grid<span class="fpv">FPV</span></span>
@@ -265,5 +277,24 @@
     background: rgba(255, 255, 255, 0.12);
     color: #fff;
     font-weight: 700;
+  }
+
+  /* Dark text on a light panel (`#/overlay/racegow/light`). The semantic tokens flip through the
+   * library's `[data-theme='light']` set; only this page's own glass values need restating. */
+  .overlay[data-theme='light'] .panel {
+    background: rgba(255, 255, 255, 0.82);
+    border-color: rgba(0, 0, 0, 0.14);
+    text-shadow: none;
+  }
+  .overlay[data-theme='light'] .clock-row :global(.gridfpv-race-clock) {
+    color: var(--gf-text);
+  }
+  .overlay[data-theme='light'] .fpv,
+  .overlay[data-theme='light'][data-flying='true'] .phase {
+    color: var(--gf-brand-600);
+  }
+  .overlay[data-theme='light'] .lap.in-window {
+    background: rgba(0, 0, 0, 0.08);
+    color: var(--gf-text);
   }
 </style>

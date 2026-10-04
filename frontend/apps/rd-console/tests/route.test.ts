@@ -342,6 +342,22 @@ describe('RaceGOW + overlay routes', () => {
     expect(parseHash('#/overlay/racegow')).toEqual({ kind: 'overlay', overlay: 'racegow' });
   });
 
+  it('parses the overlay theme: /light is the light panel, anything else is the dark default', () => {
+    expect(parseHash('#/overlay/racegow/light')).toEqual({
+      kind: 'overlay',
+      overlay: 'racegow',
+      theme: 'light'
+    });
+    expect(parseHash('#/overlay/racegow/LIGHT')).toEqual({
+      kind: 'overlay',
+      overlay: 'racegow',
+      theme: 'light'
+    });
+    // An explicit `dark`, or a typo, still renders the overlay — never bounces the scene to the hub.
+    expect(parseHash('#/overlay/racegow/dark')).toEqual({ kind: 'overlay', overlay: 'racegow' });
+    expect(parseHash('#/overlay/racegow/lite')).toEqual({ kind: 'overlay', overlay: 'racegow' });
+  });
+
   it('degrades a malformed RaceGOW sub-route to the page, and an unknown overlay to the hub', () => {
     expect(parseHash('#/racegow/whatever')).toEqual({ kind: 'racegow' });
     expect(parseHash('#/overlay')).toEqual(DEFAULT_ROUTE);
@@ -352,9 +368,16 @@ describe('RaceGOW + overlay routes', () => {
     const routes: Route[] = [
       { kind: 'racegow' },
       { kind: 'racegow-run' },
-      { kind: 'overlay', overlay: 'racegow' }
+      { kind: 'overlay', overlay: 'racegow' },
+      { kind: 'overlay', overlay: 'racegow', theme: 'light' }
     ];
     for (const r of routes) expect(parseHash(formatHash(r))).toEqual(r);
+    expect(formatHash({ kind: 'overlay', overlay: 'racegow', theme: 'light' })).toBe(
+      '#/overlay/racegow/light'
+    );
+    expect(formatHash({ kind: 'overlay', overlay: 'racegow', theme: 'dark' })).toBe(
+      '#/overlay/racegow'
+    );
     expect(formatHash({ kind: 'racegow' })).toBe('#/racegow');
     expect(formatHash({ kind: 'racegow-run' })).toBe('#/racegow/run');
     expect(formatHash({ kind: 'overlay', overlay: 'racegow' })).toBe('#/overlay/racegow');

@@ -209,9 +209,14 @@ describe('RaceGowRun', () => {
     expect(submission.value).toContain('Run 2 of 2, laps 1–3');
   });
 
-  it('offers the overlay URL for OBS', async () => {
+  it('offers the overlay URL for OBS, in either contrast', async () => {
     const { session } = setup({});
     render(RaceGowRun, { session, ...props });
-    expect(await screen.findByLabelText('Overlay URL')).toHaveTextContent('#/overlay/racegow');
+    const url = await screen.findByLabelText('Overlay URL');
+    expect(url).toHaveTextContent(/#\/overlay\/racegow$/);
+    await fireEvent.click(screen.getByRole('radio', { name: 'Dark text on light' }));
+    expect(url).toHaveTextContent(/#\/overlay\/racegow\/light$/);
+    await fireEvent.click(screen.getByRole('radio', { name: 'Light text on dark' }));
+    expect(url).toHaveTextContent(/#\/overlay\/racegow$/);
   });
 });
