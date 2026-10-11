@@ -46,12 +46,15 @@
   let {
     session,
     onhome,
+    onevents,
     onback,
     onconsole,
     ontimers
   }: {
     session: Session;
     onhome: () => void;
+    /** The Events page, where this run lists with the other events (leaves the run locally). */
+    onevents: () => void;
     /** Back to the RaceGOW page (all runs, start another track). */
     onback: () => void;
     /** Open this event in the full RD console (Race control). */
@@ -334,6 +337,7 @@
     <Breadcrumbs
       crumbs={[
         { label: 'Home', onclick: onhome },
+        { label: 'Events', onclick: onevents },
         { label: 'RaceGOW', onclick: onback },
         { label: event?.name ?? 'Run' }
       ]}

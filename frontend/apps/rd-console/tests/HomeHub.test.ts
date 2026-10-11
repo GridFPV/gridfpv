@@ -99,15 +99,15 @@ describe('HomeHub (app-level landing, #118)', () => {
     const onclasses = vi.fn();
     const onevents = vi.fn();
     const ontimers = vi.fn();
-    const onracegow = vi.fn();
-    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers, onracegow });
+    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers });
 
-    // Five navigable cards: the four pages, plus RaceGOW (the solo track-run preset).
+    // Four navigable cards — the four pages. RaceGOW (the solo track-run preset) is NOT a card:
+    // a track run is an event, so it starts from the Events page and lists there with a badge.
     expect(screen.getByRole('heading', { name: 'Pilots' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Classes' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Events' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Timers' })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'RaceGOW' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'RaceGOW' })).toBeNull();
 
     // Summaries settle per card (count + unit are separate spans): 2 pilots, 3 classes, 2 events,
     // 3 timers · 2 connected (Mock is Ready + the live RH is Connected; the Configured RH is excluded).
@@ -121,10 +121,6 @@ describe('HomeHub (app-level landing, #118)', () => {
     expect(within(classesCard).getByText('classes')).toBeInTheDocument();
     await waitFor(() => expect(within(eventsCard).getByText('2')).toBeInTheDocument());
     expect(within(eventsCard).getByText('events')).toBeInTheDocument();
-    // RaceGOW counts only the events the preset made: neither of these two carries the marker.
-    const raceGowCard = screen.getByRole('heading', { name: 'RaceGOW' }).closest('button')!;
-    await waitFor(() => expect(within(raceGowCard).getByText('0')).toBeInTheDocument());
-    expect(within(raceGowCard).getByText('track runs')).toBeInTheDocument();
     await waitFor(() => expect(within(timersCard).getByText('timers')).toBeInTheDocument());
     expect(within(timersCard).getByText(/2 connected/)).toBeInTheDocument();
   });
@@ -135,8 +131,7 @@ describe('HomeHub (app-level landing, #118)', () => {
     const onclasses = vi.fn();
     const onevents = vi.fn();
     const ontimers = vi.fn();
-    const onracegow = vi.fn();
-    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers, onracegow });
+    render(HomeHub, { session, onpilots, onclasses, onevents, ontimers });
 
     await fireEvent.click(screen.getByRole('heading', { name: 'Pilots' }).closest('button')!);
     await fireEvent.click(screen.getByRole('heading', { name: 'Classes' }).closest('button')!);
@@ -162,8 +157,7 @@ describe('HomeHub (app-level landing, #118)', () => {
       onpilots: vi.fn(),
       onclasses: vi.fn(),
       onevents: vi.fn(),
-      ontimers: vi.fn(),
-      onracegow: vi.fn()
+      ontimers: vi.fn()
     });
 
     const timersCard = screen.getByRole('heading', { name: 'Timers' }).closest('button')!;

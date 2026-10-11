@@ -5,8 +5,12 @@
    * In the two-level IA the home hub is the landing and this is the **Events page** (Home ›
    * Events) — the select/create surface. On load it reads the open event list (`listEvents()`,
    * no token) and renders the events the RD has created. Selecting one enters its workspace.
-   * "+ New event" opens a name `Dialog` → `createEvent(name)` (which obtains the RD token
-   * lazily) → enters it, then hands off to the guided setup wizard (#97).
+   * "+ New event" opens a `Dialog` that first asks **what kind** of event: a **club race** (a name
+   * → `createEvent(name)`, which obtains the RD token lazily → enters it, then hands off to the
+   * guided setup wizard, #97), or a **RaceGOW track run** (the solo preset, `lib/racegow.ts`),
+   * which hands off to the RaceGOW page's own short form. A RaceGOW run is an ordinary event, so
+   * it lists here like any other — with a badge — and entering one opens the solo run screen
+   * (the shell routes on the preset marker) rather than the race director's workspace.
    *
    * **The list can be empty, and that is a first run, not an error** (#414): the built-in
    * in-memory Practice event is gone, so a brand-new Director genuinely has zero events. The
@@ -28,14 +32,18 @@
   import type { Session, CreateEventFields } from '../lib/session.svelte.js';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
+  import { isRaceGowEvent } from '../lib/racegow.js';
 
   let {
     session,
     onhome,
+    onracegow,
     onsetup = undefined
   }: {
     session: Session;
     onhome: () => void;
+    /** The RaceGOW page — where a track run (the solo preset) is set up and started. */
+    onracegow: () => void;
     /** Called after a brand-new event is created + entered, when the RD opted to set it up (the
      *  guided wizard, race redesign Slice 7). The shell opens the wizard once the workspace mounts. */
     onsetup?: () => void;
@@ -108,6 +116,13 @@
   // The "new event" dialog. Name-only is the one-click default (#72, Slice 1b C); the
   // optional descriptive fields live behind a collapsible "Add details" section.
   let newOpen = $state(false);
+  /**
+   * What the dialog is making: a club **race** (the default — the name form and the wizard), or
+   * a RaceGOW **track run**, which the RaceGOW page's own form sets up. The choice sits at the
+   * top of the one dialog rather than behind a second button, so the club path stays one click.
+   */
+  type NewKind = 'race' | 'racegow';
+  let newKind = $state<NewKind>('race');
   let newName = $state('');
   let newDate = $state('');
   let newLocation = $state('');
@@ -179,6 +194,7 @@
   }
 
   function openNew() {
+    newKind = 'race';
     newName = '';
     newDate = '';
     newLocation = '';
@@ -200,8 +216,18 @@
     return Object.keys(fields).length > 0 ? fields : undefined;
   }
 
+  /** The RaceGOW choice: close the dialog and hand off to the RaceGOW page's form. */
+  function startRaceGow() {
+    newOpen = false;
+    onracegow();
+  }
+
   async function submitNew(e: Event) {
     e.preventDefault();
+    if (newKind === 'racegow') {
+      startRaceGow();
+      return;
+    }
     const name = newName.trim();
     if (!name || creating) return;
     creating = true;
@@ -279,6 +305,10 @@
                     <span class="event-name">{ev.name}</span>
                     <span class="event-sub">{rowSubtitle(ev)}</span>
                   </span>
+                  {#if isRaceGowEvent(ev)}
+                    <!-- A track run the RaceGOW preset built: it opens on the solo run screen. -->
+                    <span class="kind-pill"><Badge tone="accent">RaceGOW</Badge></span>
+                  {/if}
                   {#if ev.id === activeEventId}
                     <span class="active-pill"><Badge tone="success" dot>Active</Badge></span>
                   {/if}
@@ -304,65 +334,109 @@
 
 <Dialog bind:open={newOpen} title="New event" onclose={() => (newError = undefined)}>
   <form class="new-form" onsubmit={submitNew} aria-label="New event">
-    <Field label="Event name" error={newError}>
-      <Input
-        bind:value={newName}
-        placeholder="e.g. Friday Night Series"
-        aria-label="Event name"
-        autocomplete="off"
-      />
-    </Field>
-    <!-- Optional details behind a collapsible section — name-only stays one-click (#72 C). -->
-    <details class="details" bind:open={detailsOpen}>
-      <summary>Add details (optional)</summary>
-      <div class="details-grid">
-        <Field label="Date">
-          <Input type="date" bind:value={newDate} aria-label="Event date" />
-        </Field>
-        <Field label="Location">
-          <Input
-            bind:value={newLocation}
-            placeholder="e.g. Main field"
-            aria-label="Event location"
-            autocomplete="off"
-          />
-        </Field>
-        <Field label="Organizer">
-          <Input
-            bind:value={newOrganizer}
-            placeholder="e.g. City FPV Club"
-            aria-label="Event organizer"
-            autocomplete="off"
-          />
-        </Field>
-        <Field label="Description">
-          <Input
-            bind:value={newDescription}
-            placeholder="A short note about the event"
-            aria-label="Event description"
-            autocomplete="off"
-          />
-        </Field>
-      </div>
-    </details>
+    <!-- What kind of event: a club race, or a RaceGOW track run (the solo preset). Two big
+         radio cards — field-readable, and the club race stays the default so the usual path is
+         still name → Create & enter. -->
+    <fieldset class="kind">
+      <legend class="kind-legend">What are you setting up?</legend>
+      <label class="kind-opt" class:selected={newKind === 'race'}>
+        <input
+          type="radio"
+          name="new-kind"
+          value="race"
+          bind:group={newKind}
+          aria-label="Club race"
+        />
+        <span class="kind-text">
+          <span class="kind-title">Club race</span>
+          <span class="kind-sub">Pilots, classes, rounds, and heats — a race day.</span>
+        </span>
+      </label>
+      <label class="kind-opt" class:selected={newKind === 'racegow'}>
+        <input
+          type="radio"
+          name="new-kind"
+          value="racegow"
+          bind:group={newKind}
+          aria-label="RaceGOW track run"
+        />
+        <span class="kind-text">
+          <span class="kind-title">RaceGOW track run</span>
+          <span class="kind-sub">Time your best 3 laps in a row at home, solo.</span>
+        </span>
+      </label>
+    </fieldset>
 
-    <!-- Opt into the guided setup wizard after creating (race redesign Slice 7) — a first-pass over
+    {#if newKind === 'racegow'}
+      <p class="kind-hint">
+        The RaceGOW page asks only which track, who is flying, and on what timer and channel — it
+        builds the event for you and opens the run screen.
+      </p>
+    {:else}
+      <Field label="Event name" error={newError}>
+        <Input
+          bind:value={newName}
+          placeholder="e.g. Friday Night Series"
+          aria-label="Event name"
+          autocomplete="off"
+        />
+      </Field>
+      <!-- Optional details behind a collapsible section — name-only stays one-click (#72 C). -->
+      <details class="details" bind:open={detailsOpen}>
+        <summary>Add details (optional)</summary>
+        <div class="details-grid">
+          <Field label="Date">
+            <Input type="date" bind:value={newDate} aria-label="Event date" />
+          </Field>
+          <Field label="Location">
+            <Input
+              bind:value={newLocation}
+              placeholder="e.g. Main field"
+              aria-label="Event location"
+              autocomplete="off"
+            />
+          </Field>
+          <Field label="Organizer">
+            <Input
+              bind:value={newOrganizer}
+              placeholder="e.g. City FPV Club"
+              aria-label="Event organizer"
+              autocomplete="off"
+            />
+          </Field>
+          <Field label="Description">
+            <Input
+              bind:value={newDescription}
+              placeholder="A short note about the event"
+              aria-label="Event description"
+              autocomplete="off"
+            />
+          </Field>
+        </div>
+      </details>
+
+      <!-- Opt into the guided setup wizard after creating (race redesign Slice 7) — a first-pass over
          the event's stages (classes, roster, timer, first round). Everything stays editable later. -->
-    <label class="setup-opt">
-      <input type="checkbox" bind:checked={setUpAfter} aria-label="Set up event after creating" />
-      <span class="setup-opt-text">
-        <span class="setup-opt-title">Set up event</span>
-        <span class="setup-opt-sub"
-          >Walk classes, roster, timer, and a first round after creating.</span
-        >
-      </span>
-    </label>
+      <label class="setup-opt">
+        <input type="checkbox" bind:checked={setUpAfter} aria-label="Set up event after creating" />
+        <span class="setup-opt-text">
+          <span class="setup-opt-title">Set up event</span>
+          <span class="setup-opt-sub"
+            >Walk classes, roster, timer, and a first round after creating.</span
+          >
+        </span>
+      </label>
+    {/if}
   </form>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (newOpen = false)} disabled={creating}>Cancel</Button>
-    <Button variant="primary" onclick={submitNew} disabled={!newName.trim() || creating}>
-      {creating ? 'Creating…' : 'Create & enter'}
-    </Button>
+    {#if newKind === 'racegow'}
+      <Button variant="primary" onclick={startRaceGow}>Set up track run</Button>
+    {:else}
+      <Button variant="primary" onclick={submitNew} disabled={!newName.trim() || creating}>
+        {creating ? 'Creating…' : 'Create & enter'}
+      </Button>
+    {/if}
   {/snippet}
 </Dialog>
 
@@ -602,8 +676,10 @@
     color: var(--gf-text-faint);
     font-size: var(--gf-font-size-xs);
   }
-  /* The "Active" pill (#91): sits between the name and the arrow, never shrinking. */
-  .active-pill {
+  /* The "Active" pill (#91) and the RaceGOW kind pill: between the name and the arrow, never
+     shrinking. */
+  .active-pill,
+  .kind-pill {
     flex-shrink: 0;
   }
   .event-main {
@@ -697,6 +773,72 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-3);
+  }
+  /* The kind chooser: two radio cards side by side (stacked when narrow), the chosen one with
+     the accent border. The native radio stays visible — it is the control, not decoration. */
+  .kind {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: var(--gf-space-3);
+    margin: 0;
+    padding: 0;
+    border: none;
+    min-width: 0;
+  }
+  .kind-legend {
+    grid-column: 1 / -1;
+    padding: 0;
+    margin-bottom: var(--gf-space-1);
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-medium);
+    color: var(--gf-text-secondary);
+  }
+  .kind-opt {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--gf-space-3);
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface-alt);
+    cursor: pointer;
+    transition:
+      border-color var(--gf-motion-fast) var(--gf-ease-out),
+      background var(--gf-motion-fast) var(--gf-ease-out);
+  }
+  .kind-opt:hover {
+    border-color: var(--gf-accent);
+  }
+  .kind-opt.selected {
+    border-color: var(--gf-accent);
+    background: var(--gf-accent-soft);
+  }
+  .kind-opt input {
+    width: 1.1rem;
+    height: 1.1rem;
+    margin-top: 0.15rem;
+    accent-color: var(--gf-accent);
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+  .kind-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .kind-title {
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-semibold);
+    color: var(--gf-text);
+  }
+  .kind-sub {
+    font-size: var(--gf-font-size-xs);
+    color: var(--gf-text-muted);
+  }
+  .kind-hint {
+    margin: 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
   }
   .details {
     border-top: 1px solid var(--gf-border-subtle);

@@ -90,7 +90,13 @@ function setup(opts: {
   return { ...t, listHeatsImpl, roundStandingsImpl };
 }
 
-const props = { onhome: vi.fn(), onback: vi.fn(), onconsole: vi.fn(), ontimers: vi.fn() };
+const props = {
+  onhome: vi.fn(),
+  onevents: vi.fn(),
+  onback: vi.fn(),
+  onconsole: vi.fn(),
+  ontimers: vi.fn()
+};
 
 describe('RaceGowRun', () => {
   it('idle: "Start run" draws the next heat, focuses it, stages and starts it', async () => {

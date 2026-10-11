@@ -67,7 +67,7 @@ function setup(opts: { pilots?: Pilot[]; timers?: Timer[]; events?: EventMeta[] 
     ])
   });
   vi.spyOn(session, 'listEvents').mockResolvedValue(opts.events ?? [OLD_RUN, CLUB]);
-  const props = { onhome: vi.fn(), onrun: vi.fn(), ontimers: vi.fn() };
+  const props = { onhome: vi.fn(), onevents: vi.fn(), onrun: vi.fn(), ontimers: vi.fn() };
   return { session, props };
 }
 

@@ -122,6 +122,7 @@
   // The RaceGOW preset's two surfaces: the page that starts a run, and the solo run screen for
   // the active one. Both are app-level routes (no workspace shell) — a pilot alone in a garage
   // wants a start button, not a race director's console; the workspace stays one click away.
+  // The page is reached from the Events page ("+ New event" → RaceGOW track run), not the hub.
   const goRaceGow = () => navigate({ kind: 'racegow' });
   const goRaceGowRun = () => navigate({ kind: 'racegow-run' });
   // The workspace's app-route concept is "Events" (where event entry/switch happens).
@@ -214,9 +215,16 @@
   // the active event appears while we're on the Events page, flip the route into the workspace so
   // the hash becomes `#/event/live`. This is the routing counterpart of the old `route = 'events'`
   // → workspace transition that used to be implicit in `{#if session.currentEvent}`.
+  //
+  // A RaceGOW track run is an ordinary event in that list, but its surface is the solo run screen:
+  // the preset marker on the meta is what sends it to `#/racegow/run` instead of the workspace
+  // (the workspace stays one click away from there, via "Open in console").
   $effect(() => {
-    if (session.currentEvent && route.kind === 'page' && route.page === 'events') {
-      navigate({ kind: 'workspace', tab: 'live' });
+    const current = session.currentEvent;
+    if (current && route.kind === 'page' && route.page === 'events') {
+      navigate(
+        isRaceGowEvent(current) ? { kind: 'racegow-run' } : { kind: 'workspace', tab: 'live' }
+      );
     }
   });
 
@@ -284,7 +292,9 @@
   function leaveToPicker() {
     session.leaveEvent();
     // Close the wizard if open, and land back on the Events page (the app route the "Switch event"
-    // action conceptually returns to). Setting the hash to `#/events` keeps the URL honest.
+    // action conceptually returns to). Setting the hash to `#/events` keeps the URL honest. The
+    // RaceGOW surfaces' Events crumb takes this same path: with the run still active locally, the
+    // Events page would route straight back into the run screen.
     wizardOpen = false;
     goPage('events');
   }
@@ -363,7 +373,13 @@
   </div>
 {:else if route.kind === 'racegow'}
   <div class="gridfpv-root gridfpv-dense">
-    <RaceGowPage {session} onhome={goHome} onrun={goRaceGowRun} ontimers={() => goPage('timers')} />
+    <RaceGowPage
+      {session}
+      onhome={goHome}
+      onevents={leaveToPicker}
+      onrun={goRaceGowRun}
+      ontimers={() => goPage('timers')}
+    />
   </div>
 {:else if route.kind === 'racegow-run'}
   <!-- The solo run screen wants the ACTIVE event to be a RaceGOW run. Any other active event (a
@@ -374,6 +390,7 @@
       <RaceGowRun
         {session}
         onhome={goHome}
+        onevents={leaveToPicker}
         onback={goRaceGow}
         onconsole={() => navigate({ kind: 'workspace', tab: 'live' })}
         ontimers={() => goPage('timers')}
@@ -382,6 +399,7 @@
       <RaceGowPage
         {session}
         onhome={goHome}
+        onevents={leaveToPicker}
         onrun={goRaceGowRun}
         ontimers={() => goPage('timers')}
       />
@@ -400,10 +418,14 @@
         onclasses={() => goPage('classes')}
         onevents={() => goPage('events')}
         ontimers={() => goPage('timers')}
-        onracegow={goRaceGow}
       />
     {:else if route$page === 'events'}
-      <EventPicker {session} onhome={goHome} onsetup={() => (pendingWizard = true)} />
+      <EventPicker
+        {session}
+        onhome={goHome}
+        onracegow={goRaceGow}
+        onsetup={() => (pendingWizard = true)}
+      />
     {:else if route$page === 'timers'}
       <TimersPage {session} onhome={goHome} ontune={goTune} />
     {:else if route$page === 'pilots'}

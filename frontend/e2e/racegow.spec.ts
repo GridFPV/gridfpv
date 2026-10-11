@@ -1,6 +1,7 @@
 /**
  * RaceGOW — the solo track-run loop, end to end, in real headless chromium against a real
- * Director: hub → RaceGOW page → set up a run on the Simulator → Start run → laps climb → Stop
+ * Director: hub → Events → "+ New event" → RaceGOW track run → set up a run on the Simulator →
+ * Start run → laps climb → Stop
  * run → the best 3-lap window and the submission line → Fly again → two runs in the table. Then
  * the OBS overlay page renders the same run, read-only, on a transparent document.
  *
@@ -38,9 +39,16 @@ test('a pilot sets up a track run, flies two runs, and gets a submission line', 
 }) => {
   await page.goto(director.baseUrl);
 
-  // ── Hub → RaceGOW ────────────────────────────────────────────────────────────────────────
-  await expect(page.getByRole('heading', { name: 'RaceGOW' })).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('heading', { name: 'RaceGOW' }).click();
+  // ── Hub → Events → "+ New event" → RaceGOW track run ───────────────────────────────────
+  //    There is no RaceGOW card on the hub: a track run is an event, so it starts where events
+  //    do. A fresh Director has none, so the first-run call to action is the way in.
+  await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('heading', { name: 'RaceGOW' })).toHaveCount(0);
+  await page.getByRole('heading', { name: 'Events' }).click();
+  await page.getByRole('button', { name: 'Create your first event' }).click();
+  const newEvent = page.getByRole('form', { name: 'New event' });
+  await newEvent.getByRole('radio', { name: 'RaceGOW track run' }).check();
+  await page.getByRole('button', { name: 'Set up track run' }).click();
   await expect(page).toHaveURL(/#\/racegow$/);
   const form = page.getByRole('form', { name: 'New track run' });
   await expect(form).toBeVisible();
@@ -147,7 +155,27 @@ test('a pilot sets up a track run, flies two runs, and gets a submission line', 
   await expect(page.getByText(`${TRACK} · ${PILOT}`)).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('body')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
 
-  // ── Back on the RaceGOW page, the run is listed and reopens ─────────────────────────────
+  // ── The run's Events crumb leaves the run and lands on the Events page, where the run lists
+  //    with its badge; entering it there opens the run screen again (not the workspace): the
+  //    preset marker routes it. ──────────────────────────────────────────────────────────────
+  await page.goto(`${director.baseUrl}/#/racegow/run`);
+  await expect(page.getByRole('heading', { name: TRACK })).toBeVisible({ timeout: 15_000 });
+  await page
+    .getByRole('navigation', { name: 'Breadcrumb' })
+    .getByRole('button', { name: 'Events' })
+    .click();
+  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
+    timeout: 15_000
+  });
+  // Anchored: the row's delete button is named "Delete <track>" and would match a loose regex.
+  const row = page.getByRole('button', { name: new RegExp(`^${TRACK}`) });
+  await expect(row).toBeVisible();
+  await expect(row.getByText('RaceGOW', { exact: true })).toBeVisible();
+  await row.click();
+  await expect(page).toHaveURL(/#\/racegow\/run$/, { timeout: 15_000 });
+  await expect(page.getByRole('heading', { name: TRACK })).toBeVisible();
+
+  // ── The RaceGOW page still lists every run and reopens one ──────────────────────────────
   await page.goto(`${director.baseUrl}/#/racegow`);
   const runs = page.getByRole('list', { name: 'Your runs' });
   await expect(runs.getByRole('listitem')).toHaveCount(1, { timeout: 15_000 });

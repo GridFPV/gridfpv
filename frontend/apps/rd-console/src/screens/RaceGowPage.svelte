@@ -2,8 +2,9 @@
   /**
    * RaceGowPage — the RaceGOW landing (`#/racegow`): start a new track run, or reopen one.
    *
-   * An app-level page like Pilots / Timers, reached from the hub. It does not need an event; it
-   * *creates* one. The form asks only what the preset cannot decide for itself — which track,
+   * An app-level page like Pilots / Timers, reached from the Events page ("+ New event" → RaceGOW
+   * track run). It does not need an event; it *creates* one, and that event then lists on the
+   * Events page like any other. The form asks only what the preset cannot decide for itself — which track,
    * who is flying, on which timer and channel — and {@link createRaceGowRun} builds the rest
    * through the ordinary event commands (see `lib/racegow.ts`). Every run it made before is listed
    * below the form so a pilot coming back for another pack reopens the same track.
@@ -22,11 +23,14 @@
   let {
     session,
     onhome,
+    onevents,
     onrun,
     ontimers
   }: {
     session: Session;
     onhome: () => void;
+    /** The Events page — where this page is reached from, and where its runs are listed. */
+    onevents: () => void;
     /** Called once a run is created (or reopened) and entered — the shell shows the run screen. */
     onrun: () => void;
     /** The Timers page — where a timer's channels are configured when it offers none. */
@@ -175,7 +179,13 @@
 <div class="page">
   <div class="page-inner">
     <div class="brand-row"><Brand onclick={onhome} /></div>
-    <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'RaceGOW' }]} />
+    <Breadcrumbs
+      crumbs={[
+        { label: 'Home', onclick: onhome },
+        { label: 'Events', onclick: onevents },
+        { label: 'RaceGOW' }
+      ]}
+    />
 
     <header class="page-head">
       <div class="page-titles">
