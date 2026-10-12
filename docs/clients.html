@@ -166,8 +166,11 @@ flowchart TB
       The console's <strong>release form</strong> is a <strong>Tauri 2 desktop app</strong>
       (<code>src-tauri/</code>) that <strong>embeds the Director in-process</strong>. On launch it
       runs the <em>same</em> <code>gridfpv_app::director::run_director</code> the hosted
-      <code>gridfpv</code> binary runs, on a tokio task bound to a <strong>loopback ephemeral
-      port</strong> (<code>127.0.0.1:0</code>), then opens a native window pointed at
+      <code>gridfpv</code> binary runs, on a tokio task bound to a <strong>fixed loopback
+      port</strong> (<code>127.0.0.1:8080</code>, <code>GRIDFPV_ADDR</code> to override; it was
+      an ephemeral <code>127.0.0.1:0</code> until 2026-10-12, which broke every OBS browser source
+      holding an overlay URL on each restart — an ephemeral port is now only the fallback when the
+      fixed one is taken), then opens a native window pointed at
       <code>http://127.0.0.1:&lt;port&gt;/</code>. The window loads the Director's own HTTP origin
       directly, so the SPA's same-origin API (<code>/snapshot/…</code>, <code>/control/…</code>) and
       the realtime WebSocket work with no cross-origin shims. Because it is

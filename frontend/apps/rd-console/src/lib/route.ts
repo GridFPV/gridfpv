@@ -20,7 +20,11 @@
  *   - `#/events/<eventId>/timers/<timerId>/tune`
  *                            → the same Tune page, scoped to an **event** (#411)
  *   - `#/event/<tab>`        → the in-event workspace on `<tab>`
- *                              (tab ∈ classes-roster | rounds | live | marshaling | results | audit | timers)
+ *                              (tab ∈ classes-roster | rounds | live | marshaling | results | audit |
+ *                              timers | overlays)
+ *   - `#/overlay/race`       → the race OBS browser-source overlay (transparent, read-only; follows
+ *                              the Director's active event, whatever kind of event it is)
+ *   - `#/overlay/race/light` → the same overlay, dark text on a light panel
  *
  * **The route IS the tuning scope (#411).** Tuning is layered — a timer has its own baseline
  * calibration, and an event will eventually carry its own tune over the top — and an RD dragging a
@@ -58,7 +62,8 @@ export type WorkspaceTab =
   | 'marshaling'
   | 'results'
   | 'audit'
-  | 'timers';
+  | 'timers'
+  | 'overlays';
 
 /**
  * A parsed route. Either an app-level page (no event), or the in-event workspace on a tab. This is
@@ -81,7 +86,28 @@ export type Route =
    *   - present → `#/events/<eventId>/timers/<timerId>/tune`, that event's tune, entered from
    *     inside the event workspace and returning there.
    */
-  | { kind: 'tune'; timer: TimerId; event?: EventId };
+  | { kind: 'tune'; timer: TimerId; event?: EventId }
+  /**
+   * An OBS browser-source overlay (`#/overlay/<name>`): a transparent, read-only page that
+   * follows the Director's active event (streaming.html §2.1, "follow the program") — **any**
+   * event, in any format; an overlay is not tied to a kind of event. Never reconciled away — with
+   * nothing on the timer it renders idle, which is what a browser source sitting in a scene
+   * should do.
+   *
+   * `theme` picks the panel's contrast for the footage it sits over: light text on a dark panel
+   * (the default, `#/overlay/<name>`) or dark text on a light one (`#/overlay/<name>/light`).
+   * Absent means dark; it is only ever present as `'light'`, so a route compares structurally.
+   */
+  | { kind: 'overlay'; overlay: OverlayName; theme?: OverlayTheme };
+
+/**
+ * The overlay pages the console serves (streaming.html §2). `race` is the race timer: the clock,
+ * the phase, and the current heat's pilots with their laps — the one overlay built so far.
+ */
+export type OverlayName = 'race';
+export const OVERLAYS: readonly OverlayName[] = ['race'];
+/** An overlay's contrast: light text over a dark panel, or dark text over a light one. */
+export type OverlayTheme = 'dark' | 'light';
 
 export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
   'classes-roster',
@@ -90,7 +116,8 @@ export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
   'marshaling',
   'results',
   'audit',
-  'timers'
+  'timers',
+  'overlays'
 ];
 
 const APP_PAGES: readonly AppPage[] = ['home', 'events', 'timers', 'pilots', 'classes'];
@@ -166,6 +193,21 @@ export function parseHash(hash: string): Route {
     return { kind: 'tune', timer };
   }
 
+  // `#/overlay/<name>[/light]` — an OBS browser source. An unknown overlay name is the hub, not a
+  // blank page: there is nothing overlay-shaped to land on. The optional third segment picks the
+  // light panel; anything else (including an explicit `dark`) is the default dark panel, so a
+  // mistyped theme still renders an overlay rather than bouncing the scene to the hub.
+  if (head === 'overlay') {
+    const name = segments[1]?.toLowerCase();
+    if (name && (OVERLAYS as readonly string[]).includes(name)) {
+      const overlay = name as OverlayName;
+      return segments[2]?.toLowerCase() === 'light'
+        ? { kind: 'overlay', overlay, theme: 'light' }
+        : { kind: 'overlay', overlay };
+    }
+    return DEFAULT_ROUTE;
+  }
+
   if ((APP_PAGES as readonly string[]).includes(head)) {
     return { kind: 'page', page: head as AppPage };
   }
@@ -180,6 +222,11 @@ export function parseHash(hash: string): Route {
  */
 export function formatHash(route: Route): string {
   if (route.kind === 'workspace') return `#/event/${route.tab}`;
+  if (route.kind === 'overlay') {
+    return route.theme === 'light'
+      ? `#/overlay/${route.overlay}/light`
+      : `#/overlay/${route.overlay}`;
+  }
   if (route.kind === 'tune') {
     const timer = encodeURIComponent(route.timer);
     // The scope is the route (#411): an event-scoped tune nests under its event, so the trail back

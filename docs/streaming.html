@@ -308,6 +308,28 @@ flowchart LR
     </dl>
     <p>Each gets a fuller spec as it is built; the list confirms the protocol exposes what they need.</p>
 
+    <div class="callout">
+      <p>
+        <strong>As built (2026-09-26, generalised 2026-10-12): the first overlay is the race
+        timer, <code>#/overlay/race</code>.</strong> It is a route of the RD console SPA rather
+        than a separate app — the "one codebase, profiled three ways" frontend — rendered bare, on
+        a transparent document (<code>html[data-overlay]</code> lifts the console canvas), in the
+        <code>.gridfpv-overlay</code> token context. It is exactly the §2 shape: a read-only
+        client on the same session as the console, <em>following the program</em> (§2.1) — the
+        Director's active event, <strong>whatever kind of event it is</strong> — with no binding
+        of its own yet. It shows the race clock (a countdown when the round has a fixed end, as
+        the console's clocks do), the phase, the current heat's friendly name, and a row per pilot
+        off the served lap-list projection (laps, last, best — or the best <em>n</em> in a row when
+        the round scores <code>BestConsecutive</code>, plus the served round-wide best); a
+        one-pilot heat gets the long form with its recent laps. It began life as the RaceGOW
+        timer, tied to a solo-run preset; the preset was removed (an ordinary event does the job
+        better) and the overlay was made to follow <em>any</em> event. The console reaches it from
+        the event workspace's <strong>Overlays</strong> tab (<code>#/event/overlays</code>): the
+        catalogue, each page's URL with a contrast picker, and a live preview frame of the same
+        route. Nothing in §3 (broadcast control) is built.
+      </p>
+    </div>
+
     <h3>5.1 Theming &amp; chapter branding</h3>
     <div class="principle">
       <p><span class="name">Theming is presentation, never data.</span> Overlays render from

@@ -333,3 +333,66 @@ describe('resolveInitialRoute (hash is authoritative; #118)', () => {
     }
   });
 });
+
+describe('overlay routes', () => {
+  it('parses the race overlay, case-insensitively', () => {
+    expect(parseHash('#/overlay/race')).toEqual({ kind: 'overlay', overlay: 'race' });
+    expect(parseHash('#/Overlay/RACE')).toEqual({ kind: 'overlay', overlay: 'race' });
+  });
+
+  it('parses the overlay theme: /light is the light panel, anything else is the dark default', () => {
+    expect(parseHash('#/overlay/race/light')).toEqual({
+      kind: 'overlay',
+      overlay: 'race',
+      theme: 'light'
+    });
+    expect(parseHash('#/overlay/race/LIGHT')).toEqual({
+      kind: 'overlay',
+      overlay: 'race',
+      theme: 'light'
+    });
+    // An explicit `dark`, or a typo, still renders the overlay — never bounces the scene to the hub.
+    expect(parseHash('#/overlay/race/dark')).toEqual({ kind: 'overlay', overlay: 'race' });
+    expect(parseHash('#/overlay/race/lite')).toEqual({ kind: 'overlay', overlay: 'race' });
+  });
+
+  it('degrades a bare or unknown overlay to the hub', () => {
+    expect(parseHash('#/overlay')).toEqual(DEFAULT_ROUTE);
+    expect(parseHash('#/overlay/leaderboard')).toEqual(DEFAULT_ROUTE);
+  });
+
+  it('round-trips each through formatHash', () => {
+    const routes: Route[] = [
+      { kind: 'overlay', overlay: 'race' },
+      { kind: 'overlay', overlay: 'race', theme: 'light' }
+    ];
+    for (const r of routes) expect(parseHash(formatHash(r))).toEqual(r);
+    expect(formatHash({ kind: 'overlay', overlay: 'race', theme: 'light' })).toBe(
+      '#/overlay/race/light'
+    );
+    expect(formatHash({ kind: 'overlay', overlay: 'race', theme: 'dark' })).toBe('#/overlay/race');
+    expect(formatHash({ kind: 'overlay', overlay: 'race' })).toBe('#/overlay/race');
+  });
+
+  it('never reconciles an overlay away — it sits in an OBS scene whether or not a race is on', () => {
+    expect(reconcileRoute({ kind: 'overlay', overlay: 'race' }, false)).toEqual({
+      kind: 'overlay',
+      overlay: 'race'
+    });
+    expect(resolveInitialRoute('#/overlay/race/light', false)).toEqual({
+      kind: 'overlay',
+      overlay: 'race',
+      theme: 'light'
+    });
+  });
+
+  it('has an Overlays workspace tab, reached like any other tab', () => {
+    expect(parseHash('#/event/overlays')).toEqual({ kind: 'workspace', tab: 'overlays' });
+    expect(formatHash({ kind: 'workspace', tab: 'overlays' })).toBe('#/event/overlays');
+    // With no active event the tab reconciles to Events like every workspace route.
+    expect(reconcileRoute({ kind: 'workspace', tab: 'overlays' }, false)).toEqual({
+      kind: 'page',
+      page: 'events'
+    });
+  });
+});

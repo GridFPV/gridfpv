@@ -1826,6 +1826,16 @@ export class Session {
   }
 
   /**
+   * One-shot read of a heat's **lap list** (`?projection=laps`) — the race overlay reads the
+   * current heat's laps this way on every stream tick. Unlike {@link refreshMarshaling} it stores
+   * nothing on the session: an overlay is a read-only client that owns what it shows. Open to
+   * read; `undefined` on any failure (the caller keeps what it had).
+   */
+  fetchHeatLaps(heat: HeatId): Promise<LapList | undefined> {
+    return this.#fetchHeatProjection<LapList>(heat, 'laps', 'LapList');
+  }
+
+  /**
    * Pull the current heat's marshaling projections — the lap list (`?projection=laps`) and the
    * audit trail (`?projection=audit`, #55) — and store them on {@link lapList} / {@link marshalingAudit}.
    *

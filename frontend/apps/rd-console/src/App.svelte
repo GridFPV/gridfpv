@@ -45,6 +45,8 @@
   import Marshaling from './screens/Marshaling.svelte';
   import Results from './screens/Results.svelte';
   import EventAudit from './screens/EventAudit.svelte';
+  import EventOverlays from './screens/EventOverlays.svelte';
+  import RaceOverlay from './screens/RaceOverlay.svelte';
   import { openAudit } from './lib/auditFilter.svelte.js';
   import type { Timer } from '@gridfpv/types';
   import {
@@ -59,8 +61,11 @@
 
   const session = new Session();
   // App-wide race-day audio: tones + lap callouts follow the live stream on EVERY page (the
-  // race must be audible while the RD is on rounds/marshaling/results, not just Live control).
-  mountRaceDayAudio(session);
+  // race must be audible while the RD is on rounds/marshaling/results, not just Live control) —
+  // except an **overlay**. An overlay is a browser source inside OBS (or the Overlays tab's
+  // preview frame): a second copy of the start tones and callouts coming out of the stream, a
+  // beat behind the console's, is exactly what a transparent timer panel must not do.
+  if (parseHash(location.hash).kind !== 'overlay') mountRaceDayAudio(session);
 
   // Role seam (#55/#80): a `?role=readonly` query selects the read-only-pilot tier, which hides
   // every mutating control (the Marshaling actions, etc.). The Director is the enforced boundary;
@@ -218,7 +223,8 @@
     | 'live'
     | 'marshaling'
     | 'results'
-    | 'audit';
+    | 'audit'
+    | 'overlays';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     {
       id: 'classes-roster',
@@ -248,6 +254,14 @@
       label: 'Timers',
       key: '6',
       icon: 'M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
+    },
+    // The OBS browser-source pages (streaming.html §2): their URLs, colors and a live preview. A
+    // broadcast surface sits with the equipment, after Timers; key '8', the next free digit.
+    {
+      id: 'overlays',
+      label: 'Overlays',
+      key: '8',
+      icon: 'M3 5h18v11H3zM8 20h8M12 16v4'
     }
   ];
   // The active workspace tab is derived from the route (the hash is the source of truth, #118):
@@ -345,6 +359,13 @@
         <span>Resuming…</span>
       </div>
     {/if}
+  </div>
+{:else if route.kind === 'overlay'}
+  <!-- An OBS browser source: rendered bare (no shell, no chrome) on a transparent page. It follows
+       the Director's active event — whatever event that is — through the same session as everything
+       else. One overlay exists so far (`race`); the route's name picks the page. -->
+  <div class="gridfpv-root">
+    <RaceOverlay {session} theme={route.theme ?? 'dark'} />
   </div>
 {:else if route.kind === 'page'}
   <!-- App-level routes (#118): the home hub, or one of its three pages. The view is driven by the
@@ -453,6 +474,8 @@
           />
         {:else if active === 'audit'}
           <EventAudit {session} />
+        {:else if active === 'overlays'}
+          <EventOverlays {session} />
         {/if}
       </main>
     </div>

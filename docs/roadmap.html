@@ -125,6 +125,20 @@ flowchart LR
         <code>GET /about</code> + the console build-stamp; <code>CONTRACT_VERSION</code> stays
         the independent wire integer).
       </p>
+      <p>
+        <strong>Status (2026-10-12): v0.4.0 is released</strong> (the non-prerelease
+        <a href="https://github.com/GridFPV/gridfpv/releases/tag/v0.4.0">v0.4.0</a>, 2026-09-07),
+        and the first work after it is the first piece of the
+        <a href="streaming.html">streaming</a> design: the <strong>race overlay</strong>
+        (<code>#/overlay/race</code>), an OBS browser source that follows the active event — any
+        event — and puts the clock, the heat and every pilot's laps in the video, reached from the
+        event workspace's new <strong>Overlays</strong> tab. It was first built as a "RaceGOW"
+        solo-run preset with its own screens; that mode was dropped (an ordinary event with one
+        pilot and a best-3-consecutive time-trial round is the better shape, and needs nothing new)
+        and the overlay kept and generalised. The desktop app also moved from an ephemeral port to
+        a <strong>fixed</strong> one (<code>127.0.0.1:8080</code>), because a browser source holds
+        the Director's address.
+      </p>
     </div>
 
     <h3>v0.1 — Walking skeleton</h3>
