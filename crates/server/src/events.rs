@@ -105,15 +105,6 @@ pub struct EventMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub organizer: Option<String>,
-    /// The **console preset** that created this event, when one did — `"racegow"` for a solo
-    /// RaceGOW track run. A preset is a ready-made event shape (timer, roster, one round, its win
-    /// condition) built by the console through the ordinary create/configure commands; the marker
-    /// only records *which* preset shaped it, so the console can open the event on the preset's
-    /// own surface (the solo run screen) instead of the full workspace. Free-text on the wire and
-    /// absent for an ordinary event; nothing server-side consults it. Omitted when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub preset: Option<String>,
     /// The application-level timers this event **selects** (issue #73) — the per-event reference
     /// into the app-level [`TimerRegistry`](crate::timers::TimerRegistry). Additive
     /// (`#[serde(default)]`) so an event persisted before #73 reads back with an empty list; new
@@ -1636,10 +1627,6 @@ pub struct CreateEventRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub organizer: Option<String>,
-    /// Optional **preset marker**, stored on [`EventMeta::preset`] (e.g. `"racegow"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub preset: Option<String>,
 }
 
 impl CreateEventRequest {
@@ -1653,7 +1640,6 @@ impl CreateEventRequest {
             location: None,
             description: None,
             organizer: None,
-            preset: None,
         }
     }
 }
@@ -3044,7 +3030,6 @@ impl EventRegistry {
             location: normalize_optional(&request.location),
             description: normalize_optional(&request.description),
             organizer: normalize_optional(&request.organizer),
-            preset: normalize_optional(&request.preset),
             timers: default_timer_selection(),
             primary_timer: None,
             roster: Vec::new(),
@@ -4436,7 +4421,6 @@ mod tests {
                     location: None,
                     description: None,
                     organizer: None,
-                    preset: None,
                 })
                 .unwrap();
             event_id = created.id.clone();
@@ -4479,7 +4463,6 @@ mod tests {
                     location: Some("Main field".to_string()),
                     description: None,
                     organizer: Some("GridFPV Club".to_string()),
-                    preset: Some("racegow".to_string()),
                 })
                 .unwrap();
             created_id = created.id.clone();
@@ -4520,10 +4503,6 @@ mod tests {
         assert_eq!(restored.date.as_deref(), Some("2026-06-20"));
         assert_eq!(restored.location.as_deref(), Some("Main field"));
         assert_eq!(restored.organizer.as_deref(), Some("GridFPV Club"));
-        // The preset marker is ordinary meta: stored on create, restored on reload (the console
-        // opens a `racegow` event on the solo run screen, so losing it would demote a track run
-        // to a plain event after a restart).
-        assert_eq!(restored.preset.as_deref(), Some("racegow"));
         assert_eq!(
             restored.timers,
             vec![TimerId("rh-1".into()), TimerId(MOCK_TIMER_ID.into())]

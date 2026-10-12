@@ -4281,7 +4281,6 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
-                preset: None,
             })
             .unwrap()
             .id;
@@ -4431,7 +4430,6 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
-                preset: None,
             })
             .unwrap()
             .id;
@@ -5199,7 +5197,6 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
-                preset: None,
             })
             .unwrap()
             .id;
@@ -5514,7 +5511,6 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
-                preset: None,
             })
             .unwrap()
             .id;
@@ -5982,7 +5978,6 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
-                preset: None,
             })
             .unwrap()
             .id;
@@ -6156,7 +6151,6 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
-                preset: None,
             })
             .unwrap()
             .id;
@@ -6240,7 +6234,6 @@ mod tests {
                 location: None,
                 description: None,
                 organizer: None,
-                preset: None,
             })
             .unwrap()
             .id;

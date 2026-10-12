@@ -334,64 +334,65 @@ describe('resolveInitialRoute (hash is authoritative; #118)', () => {
   });
 });
 
-describe('RaceGOW + overlay routes', () => {
-  it('parses the RaceGOW page, its run screen, and the overlay', () => {
-    expect(parseHash('#/racegow')).toEqual({ kind: 'racegow' });
-    expect(parseHash('#/racegow/run')).toEqual({ kind: 'racegow-run' });
-    expect(parseHash('#/RaceGOW/Run')).toEqual({ kind: 'racegow-run' });
-    expect(parseHash('#/overlay/racegow')).toEqual({ kind: 'overlay', overlay: 'racegow' });
+describe('overlay routes', () => {
+  it('parses the race overlay, case-insensitively', () => {
+    expect(parseHash('#/overlay/race')).toEqual({ kind: 'overlay', overlay: 'race' });
+    expect(parseHash('#/Overlay/RACE')).toEqual({ kind: 'overlay', overlay: 'race' });
   });
 
   it('parses the overlay theme: /light is the light panel, anything else is the dark default', () => {
-    expect(parseHash('#/overlay/racegow/light')).toEqual({
+    expect(parseHash('#/overlay/race/light')).toEqual({
       kind: 'overlay',
-      overlay: 'racegow',
+      overlay: 'race',
       theme: 'light'
     });
-    expect(parseHash('#/overlay/racegow/LIGHT')).toEqual({
+    expect(parseHash('#/overlay/race/LIGHT')).toEqual({
       kind: 'overlay',
-      overlay: 'racegow',
+      overlay: 'race',
       theme: 'light'
     });
     // An explicit `dark`, or a typo, still renders the overlay — never bounces the scene to the hub.
-    expect(parseHash('#/overlay/racegow/dark')).toEqual({ kind: 'overlay', overlay: 'racegow' });
-    expect(parseHash('#/overlay/racegow/lite')).toEqual({ kind: 'overlay', overlay: 'racegow' });
+    expect(parseHash('#/overlay/race/dark')).toEqual({ kind: 'overlay', overlay: 'race' });
+    expect(parseHash('#/overlay/race/lite')).toEqual({ kind: 'overlay', overlay: 'race' });
   });
 
-  it('degrades a malformed RaceGOW sub-route to the page, and an unknown overlay to the hub', () => {
-    expect(parseHash('#/racegow/whatever')).toEqual({ kind: 'racegow' });
+  it('degrades a bare or unknown overlay to the hub', () => {
     expect(parseHash('#/overlay')).toEqual(DEFAULT_ROUTE);
     expect(parseHash('#/overlay/leaderboard')).toEqual(DEFAULT_ROUTE);
   });
 
   it('round-trips each through formatHash', () => {
     const routes: Route[] = [
-      { kind: 'racegow' },
-      { kind: 'racegow-run' },
-      { kind: 'overlay', overlay: 'racegow' },
-      { kind: 'overlay', overlay: 'racegow', theme: 'light' }
+      { kind: 'overlay', overlay: 'race' },
+      { kind: 'overlay', overlay: 'race', theme: 'light' }
     ];
     for (const r of routes) expect(parseHash(formatHash(r))).toEqual(r);
-    expect(formatHash({ kind: 'overlay', overlay: 'racegow', theme: 'light' })).toBe(
-      '#/overlay/racegow/light'
+    expect(formatHash({ kind: 'overlay', overlay: 'race', theme: 'light' })).toBe(
+      '#/overlay/race/light'
     );
-    expect(formatHash({ kind: 'overlay', overlay: 'racegow', theme: 'dark' })).toBe(
-      '#/overlay/racegow'
-    );
-    expect(formatHash({ kind: 'racegow' })).toBe('#/racegow');
-    expect(formatHash({ kind: 'racegow-run' })).toBe('#/racegow/run');
-    expect(formatHash({ kind: 'overlay', overlay: 'racegow' })).toBe('#/overlay/racegow');
+    expect(formatHash({ kind: 'overlay', overlay: 'race', theme: 'dark' })).toBe('#/overlay/race');
+    expect(formatHash({ kind: 'overlay', overlay: 'race' })).toBe('#/overlay/race');
   });
 
-  it('reconciles the run screen to the RaceGOW page with no active event, and keeps the rest', () => {
-    expect(reconcileRoute({ kind: 'racegow-run' }, false)).toEqual({ kind: 'racegow' });
-    expect(reconcileRoute({ kind: 'racegow-run' }, true)).toEqual({ kind: 'racegow-run' });
-    expect(reconcileRoute({ kind: 'racegow' }, false)).toEqual({ kind: 'racegow' });
-    // An overlay sits in an OBS scene whether or not a run is on: never bounced.
-    expect(reconcileRoute({ kind: 'overlay', overlay: 'racegow' }, false)).toEqual({
+  it('never reconciles an overlay away — it sits in an OBS scene whether or not a race is on', () => {
+    expect(reconcileRoute({ kind: 'overlay', overlay: 'race' }, false)).toEqual({
       kind: 'overlay',
-      overlay: 'racegow'
+      overlay: 'race'
     });
-    expect(resolveInitialRoute('#/racegow/run', false)).toEqual({ kind: 'racegow' });
+    expect(resolveInitialRoute('#/overlay/race/light', false)).toEqual({
+      kind: 'overlay',
+      overlay: 'race',
+      theme: 'light'
+    });
+  });
+
+  it('has an Overlays workspace tab, reached like any other tab', () => {
+    expect(parseHash('#/event/overlays')).toEqual({ kind: 'workspace', tab: 'overlays' });
+    expect(formatHash({ kind: 'workspace', tab: 'overlays' })).toBe('#/event/overlays');
+    // With no active event the tab reconciles to Events like every workspace route.
+    expect(reconcileRoute({ kind: 'workspace', tab: 'overlays' }, false)).toEqual({
+      kind: 'page',
+      page: 'events'
+    });
   });
 });

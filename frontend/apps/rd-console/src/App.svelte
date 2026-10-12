@@ -45,10 +45,8 @@
   import Marshaling from './screens/Marshaling.svelte';
   import Results from './screens/Results.svelte';
   import EventAudit from './screens/EventAudit.svelte';
-  import RaceGowPage from './screens/RaceGowPage.svelte';
-  import RaceGowRun from './screens/RaceGowRun.svelte';
-  import RaceGowOverlay from './screens/RaceGowOverlay.svelte';
-  import { isRaceGowEvent } from './lib/racegow.js';
+  import EventOverlays from './screens/EventOverlays.svelte';
+  import RaceOverlay from './screens/RaceOverlay.svelte';
   import { openAudit } from './lib/auditFilter.svelte.js';
   import type { Timer } from '@gridfpv/types';
   import {
@@ -63,8 +61,11 @@
 
   const session = new Session();
   // App-wide race-day audio: tones + lap callouts follow the live stream on EVERY page (the
-  // race must be audible while the RD is on rounds/marshaling/results, not just Live control).
-  mountRaceDayAudio(session);
+  // race must be audible while the RD is on rounds/marshaling/results, not just Live control) —
+  // except an **overlay**. An overlay is a browser source inside OBS (or the Overlays tab's
+  // preview frame): a second copy of the start tones and callouts coming out of the stream, a
+  // beat behind the console's, is exactly what a transparent timer panel must not do.
+  if (parseHash(location.hash).kind !== 'overlay') mountRaceDayAudio(session);
 
   // Role seam (#55/#80): a `?role=readonly` query selects the read-only-pilot tier, which hides
   // every mutating control (the Marshaling actions, etc.). The Director is the enforced boundary;
@@ -119,12 +120,6 @@
   };
   /** Back out of an event-scoped tune: the event workspace's Timers tab — where the RD came from. */
   const goEventTimersTab = () => navigate({ kind: 'workspace', tab: 'timers' });
-  // The RaceGOW preset's two surfaces: the page that starts a run, and the solo run screen for
-  // the active one. Both are app-level routes (no workspace shell) — a pilot alone in a garage
-  // wants a start button, not a race director's console; the workspace stays one click away.
-  // The page is reached from the Events page ("+ New event" → RaceGOW track run), not the hub.
-  const goRaceGow = () => navigate({ kind: 'racegow' });
-  const goRaceGowRun = () => navigate({ kind: 'racegow-run' });
   // The workspace's app-route concept is "Events" (where event entry/switch happens).
   const route$page = $derived(route.kind === 'page' ? route.page : 'home');
 
@@ -215,16 +210,9 @@
   // the active event appears while we're on the Events page, flip the route into the workspace so
   // the hash becomes `#/event/live`. This is the routing counterpart of the old `route = 'events'`
   // → workspace transition that used to be implicit in `{#if session.currentEvent}`.
-  //
-  // A RaceGOW track run is an ordinary event in that list, but its surface is the solo run screen:
-  // the preset marker on the meta is what sends it to `#/racegow/run` instead of the workspace
-  // (the workspace stays one click away from there, via "Open in console").
   $effect(() => {
-    const current = session.currentEvent;
-    if (current && route.kind === 'page' && route.page === 'events') {
-      navigate(
-        isRaceGowEvent(current) ? { kind: 'racegow-run' } : { kind: 'workspace', tab: 'live' }
-      );
+    if (session.currentEvent && route.kind === 'page' && route.page === 'events') {
+      navigate({ kind: 'workspace', tab: 'live' });
     }
   });
 
@@ -235,7 +223,8 @@
     | 'live'
     | 'marshaling'
     | 'results'
-    | 'audit';
+    | 'audit'
+    | 'overlays';
   const SCREENS: { id: ScreenId; label: string; key: string; icon: string }[] = [
     {
       id: 'classes-roster',
@@ -265,6 +254,14 @@
       label: 'Timers',
       key: '6',
       icon: 'M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
+    },
+    // The OBS browser-source pages (streaming.html §2): their URLs, colors and a live preview. A
+    // broadcast surface sits with the equipment, after Timers; key '8', the next free digit.
+    {
+      id: 'overlays',
+      label: 'Overlays',
+      key: '8',
+      icon: 'M3 5h18v11H3zM8 20h8M12 16v4'
     }
   ];
   // The active workspace tab is derived from the route (the hash is the source of truth, #118):
@@ -292,9 +289,7 @@
   function leaveToPicker() {
     session.leaveEvent();
     // Close the wizard if open, and land back on the Events page (the app route the "Switch event"
-    // action conceptually returns to). Setting the hash to `#/events` keeps the URL honest. The
-    // RaceGOW surfaces' Events crumb takes this same path: with the run still active locally, the
-    // Events page would route straight back into the run screen.
+    // action conceptually returns to). Setting the hash to `#/events` keeps the URL honest.
     wizardOpen = false;
     goPage('events');
   }
@@ -367,43 +362,10 @@
   </div>
 {:else if route.kind === 'overlay'}
   <!-- An OBS browser source: rendered bare (no shell, no chrome) on a transparent page. It follows
-       the Director's active event through the same session as everything else. -->
+       the Director's active event — whatever event that is — through the same session as everything
+       else. One overlay exists so far (`race`); the route's name picks the page. -->
   <div class="gridfpv-root">
-    <RaceGowOverlay {session} theme={route.theme ?? 'dark'} />
-  </div>
-{:else if route.kind === 'racegow'}
-  <div class="gridfpv-root gridfpv-dense">
-    <RaceGowPage
-      {session}
-      onhome={goHome}
-      onevents={leaveToPicker}
-      onrun={goRaceGowRun}
-      ontimers={() => goPage('timers')}
-    />
-  </div>
-{:else if route.kind === 'racegow-run'}
-  <!-- The solo run screen wants the ACTIVE event to be a RaceGOW run. Any other active event (a
-       club night the console was left in) falls back to the RaceGOW page, where the pilot picks or
-       starts the run they meant; the route itself already reconciled the no-event case. -->
-  <div class="gridfpv-root gridfpv-dense">
-    {#if isRaceGowEvent(session.currentEvent)}
-      <RaceGowRun
-        {session}
-        onhome={goHome}
-        onevents={leaveToPicker}
-        onback={goRaceGow}
-        onconsole={() => navigate({ kind: 'workspace', tab: 'live' })}
-        ontimers={() => goPage('timers')}
-      />
-    {:else}
-      <RaceGowPage
-        {session}
-        onhome={goHome}
-        onevents={leaveToPicker}
-        onrun={goRaceGowRun}
-        ontimers={() => goPage('timers')}
-      />
-    {/if}
+    <RaceOverlay {session} theme={route.theme ?? 'dark'} />
   </div>
 {:else if route.kind === 'page'}
   <!-- App-level routes (#118): the home hub, or one of its three pages. The view is driven by the
@@ -420,12 +382,7 @@
         ontimers={() => goPage('timers')}
       />
     {:else if route$page === 'events'}
-      <EventPicker
-        {session}
-        onhome={goHome}
-        onracegow={goRaceGow}
-        onsetup={() => (pendingWizard = true)}
-      />
+      <EventPicker {session} onhome={goHome} onsetup={() => (pendingWizard = true)} />
     {:else if route$page === 'timers'}
       <TimersPage {session} onhome={goHome} ontune={goTune} />
     {:else if route$page === 'pilots'}
@@ -517,6 +474,8 @@
           />
         {:else if active === 'audit'}
           <EventAudit {session} />
+        {:else if active === 'overlays'}
+          <EventOverlays {session} />
         {/if}
       </main>
     </div>

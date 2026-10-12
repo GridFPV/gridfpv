@@ -101,13 +101,11 @@ describe('HomeHub (app-level landing, #118)', () => {
     const ontimers = vi.fn();
     render(HomeHub, { session, onpilots, onclasses, onevents, ontimers });
 
-    // Four navigable cards — the four pages. RaceGOW (the solo track-run preset) is NOT a card:
-    // a track run is an event, so it starts from the Events page and lists there with a badge.
+    // Four navigable cards.
     expect(screen.getByRole('heading', { name: 'Pilots' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Classes' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Events' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Timers' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'RaceGOW' })).toBeNull();
 
     // Summaries settle per card (count + unit are separate spans): 2 pilots, 3 classes, 2 events,
     // 3 timers · 2 connected (Mock is Ready + the live RH is Connected; the Configured RH is excluded).

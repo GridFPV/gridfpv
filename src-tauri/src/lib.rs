@@ -9,15 +9,31 @@
 //!
 //! 1. Builds a multi-thread tokio runtime and spawns the **same** Director the hosted
 //!    `gridfpv` binary runs — via the shared [`gridfpv_app::director::run_director`] — as a
-//!    background task. It binds **loopback on an ephemeral free port** (`127.0.0.1:0`), uses
-//!    a **true-portable data dir** (`gridfpv-data/` beside the running executable, with a
+//!    background task. It binds **loopback on a fixed, well-known port**
+//!    ([`DEFAULT_ADDR`], `127.0.0.1:8080`, overridable with `GRIDFPV_ADDR`), uses a
+//!    **true-portable data dir** (`gridfpv-data/` beside the running executable, with a
 //!    per-user app-data fallback when the exe dir isn't writable) for created events, and
 //!    serves the `rd-console` SPA **embedded into the binary** (`gridfpv-app`'s `embed-assets`
 //!    feature) — so this executable is self-contained, with no external dist folder beside it.
 //!    Loopback ⇒ the control path is open (no auth), per the GridFPV auth model (loopback =
 //!    trusted).
-//! 2. Waits (briefly) for the Director to report the OS-assigned port, then opens the main
+//! 2. Waits (briefly) for the Director to report the port it bound, then opens the main
 //!    window pointed at `http://127.0.0.1:<port>/`.
+//!
+//! # Why a fixed port, not an ephemeral one
+//!
+//! The app used to bind `127.0.0.1:0` and let the OS pick. That is fine for the window — the
+//! shell learns the port and points the webview at it — and wrong for everything else that
+//! holds the Director's address: an **OBS browser source** carrying an overlay URL
+//! (`#/overlay/race`), a bookmark, a second browser tab. Every restart handed out a new port
+//! and silently broke each of them, so the overlay in the pilot's recording went blank until
+//! they re-pasted a URL. The address is now stable across restarts, like the hosted binary's.
+//!
+//! If the fixed port is **taken** (another Director, a dev server), the app still comes up: it
+//! falls back to an ephemeral port and says so in the log, loudly, rather than refusing to
+//! start — a window with a one-off port beats no window. `GRIDFPV_ADDR` picks a different
+//! fixed port (or a LAN bind, for OBS on another machine — mind the auth model: off loopback,
+//! set `GRIDFPV_RD_TOKEN` to gate control).
 //!
 //! Pointing the webview at the Director's HTTP origin (rather than loading the bundled
 //! assets over the `tauri://` protocol) is deliberate: the SPA makes **same-origin**
@@ -36,6 +52,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::oneshot;
@@ -49,6 +66,35 @@ use tokio::sync::oneshot;
 /// scope is textual: this must stay above every use below.
 macro_rules! eprintln {
     ($($arg:tt)*) => { gridfpv_app::logging::record(::std::format_args!($($arg)*)) };
+}
+
+/// The address the embedded Director binds by default: **loopback, port 8080** — the same
+/// port the hosted `gridfpv` binary defaults to, so the console's address is the one every
+/// guide already prints, and it is the **same after every restart** (see the module docs for
+/// why that matters: OBS browser sources hold the overlay URL).
+pub const DEFAULT_ADDR: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+
+/// The env var that overrides [`DEFAULT_ADDR`] — the same name the hosted binary honours.
+pub const ADDR_ENV: &str = "GRIDFPV_ADDR";
+
+/// Resolve the address to bind: `GRIDFPV_ADDR` when set and valid, else [`DEFAULT_ADDR`]. An
+/// unparsable value is reported and ignored rather than aborting the launch — the fixed
+/// default is always a usable answer.
+fn requested_addr() -> SocketAddr {
+    match std::env::var(ADDR_ENV) {
+        Ok(value) => match value.trim().parse::<SocketAddr>() {
+            Ok(addr) => addr,
+            Err(err) => {
+                eprintln!(
+                    "gridfpv-desktop: {ADDR_ENV}={value:?} is not a valid socket address ({err}) — \
+                     using {DEFAULT_ADDR}"
+                );
+                DEFAULT_ADDR
+            }
+        },
+        Err(_) => DEFAULT_ADDR,
+    }
 }
 
 /// The env var that opts into the Linux WebKitGTK rendering workarounds (#476).
@@ -187,33 +233,63 @@ pub fn run() {
                 .build()
                 .expect("failed to build the Director tokio runtime");
 
-            // `oneshot` carries the OS-assigned ephemeral port from the Director's
-            // `on_ready` (inside the runtime) back out to the setup thread so we can open the
-            // window at the right URL.
+            // `oneshot` carries the port the Director actually bound from its `on_ready`
+            // (inside the runtime) back out to the setup thread so we can open the window at
+            // the right URL. Shared between the first attempt and the fallback below.
             let (port_tx, port_rx) = oneshot::channel::<u16>();
+            let port_tx = Arc::new(Mutex::new(Some(port_tx)));
 
-            // Spawn the Director on the runtime. Bind `127.0.0.1:0` ⇒ loopback + ephemeral
-            // free port (no auth, per the auth model). It runs until the process exits; the
-            // app quitting tears the runtime (and the server) down.
+            // Spawn the Director on the runtime, on the FIXED loopback address (no auth, per
+            // the auth model) — the same one after every restart, so an OBS browser source
+            // holding an overlay URL keeps working. It runs until the process exits; the app
+            // quitting tears the runtime (and the server) down.
+            let requested = requested_addr();
             runtime.spawn(async move {
-                let mut port_tx = Some(port_tx);
-                let result = gridfpv_app::director::run_director(
-                    SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                    Some(data_dir),
-                    assets_dir,
-                    move |ready| {
-                        // Hand the bound ephemeral port back to the setup thread.
-                        if let Some(tx) = port_tx.take() {
-                            let _ = tx.send(ready.bound.port());
+                let serve = |addr: SocketAddr, data_dir: PathBuf, assets_dir: PathBuf| {
+                    let port_tx = port_tx.clone();
+                    gridfpv_app::director::run_director(
+                        addr,
+                        Some(data_dir),
+                        assets_dir,
+                        move |ready| {
+                            // Hand the bound port back to the setup thread.
+                            if let Some(tx) = port_tx.lock().unwrap().take() {
+                                let _ = tx.send(ready.bound.port());
+                            }
+                        },
+                        // No graceful-shutdown trigger: the server lives for the app's
+                        // lifetime and is torn down when the process exits.
+                        std::future::pending::<()>(),
+                    )
+                };
+                let bound_fixed = port_tx.clone();
+                // The error is flattened to a `String` before the next `.await`: `Box<dyn Error>`
+                // is not `Send`, and holding it across the fallback's await would make this
+                // future unspawnable.
+                let result = serve(requested, data_dir.clone(), assets_dir.clone())
+                    .await
+                    .map_err(|err| err.to_string());
+                // `run_director` returns early only on a failure. If it never reported a port,
+                // the bind itself failed (the port is taken, or the address is not local):
+                // fall back to an ephemeral port so the window still opens — and say so, since
+                // every URL anyone pasted elsewhere is now wrong until the port is freed.
+                let never_bound = bound_fixed.lock().unwrap().is_some();
+                match result {
+                    Err(err) if never_bound => {
+                        eprintln!(
+                            "gridfpv-desktop: could not bind {requested} ({err}). Falling back to \
+                             an EPHEMERAL loopback port — the console's address will differ from \
+                             the usual one until whatever holds {requested} is stopped (or set \
+                             {ADDR_ENV} to another fixed port). OBS browser sources pointing at \
+                             the usual address will not connect in this session."
+                        );
+                        let fallback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+                        if let Err(err) = serve(fallback, data_dir, assets_dir).await {
+                            eprintln!("gridfpv-desktop: Director exited with error: {err}");
                         }
-                    },
-                    // No graceful-shutdown trigger: the server lives for the app's lifetime
-                    // and is torn down when the process exits.
-                    std::future::pending::<()>(),
-                )
-                .await;
-                if let Err(err) = result {
-                    eprintln!("gridfpv-desktop: Director exited with error: {err}");
+                    }
+                    Err(err) => eprintln!("gridfpv-desktop: Director exited with error: {err}"),
+                    Ok(()) => {}
                 }
             });
 
@@ -222,6 +298,12 @@ pub fn run() {
             let port = port_rx
                 .blocking_recv()
                 .expect("the embedded Director failed to report its bound port");
+            if port != requested.port() {
+                eprintln!(
+                    "gridfpv-desktop: NOTE — serving on port {port}, not the configured \
+                     {requested}; see the bind failure above"
+                );
+            }
 
             let url = format!("http://{}:{port}/", Ipv4Addr::LOCALHOST);
             eprintln!("gridfpv-desktop: embedded Director ready — opening {url}");

@@ -20,11 +20,11 @@
  *   - `#/events/<eventId>/timers/<timerId>/tune`
  *                            → the same Tune page, scoped to an **event** (#411)
  *   - `#/event/<tab>`        → the in-event workspace on `<tab>`
- *                              (tab ∈ classes-roster | rounds | live | marshaling | results | audit | timers)
- *   - `#/racegow`            → the RaceGOW page (your track runs; start a new one)
- *   - `#/racegow/run`        → the solo run screen for the active RaceGOW event
- *   - `#/overlay/racegow`    → the RaceGOW OBS browser-source overlay (transparent, read-only)
- *   - `#/overlay/racegow/light` → the same overlay, dark text on a light panel
+ *                              (tab ∈ classes-roster | rounds | live | marshaling | results | audit |
+ *                              timers | overlays)
+ *   - `#/overlay/race`       → the race OBS browser-source overlay (transparent, read-only; follows
+ *                              the Director's active event, whatever kind of event it is)
+ *   - `#/overlay/race/light` → the same overlay, dark text on a light panel
  *
  * **The route IS the tuning scope (#411).** Tuning is layered — a timer has its own baseline
  * calibration, and an event will eventually carry its own tune over the top — and an RD dragging a
@@ -62,7 +62,8 @@ export type WorkspaceTab =
   | 'marshaling'
   | 'results'
   | 'audit'
-  | 'timers';
+  | 'timers'
+  | 'overlays';
 
 /**
  * A parsed route. Either an app-level page (no event), or the in-event workspace on a tab. This is
@@ -87,21 +88,11 @@ export type Route =
    */
   | { kind: 'tune'; timer: TimerId; event?: EventId }
   /**
-   * The RaceGOW page (`#/racegow`): your track runs, and the form that starts a new one. An
-   * app-level page like Pilots / Timers — it needs no event, it *creates* one.
-   */
-  | { kind: 'racegow' }
-  /**
-   * The solo run screen (`#/racegow/run`) for the **active** RaceGOW event — the one-page
-   * start / fly / stop / result surface. Reconciles to the RaceGOW page when nothing is active;
-   * the shell falls back to that page itself when the active event is not a RaceGOW run.
-   */
-  | { kind: 'racegow-run' }
-  /**
    * An OBS browser-source overlay (`#/overlay/<name>`): a transparent, read-only page that
-   * follows the Director's active event (streaming.html §2.1, "follow the program"). Never
-   * reconciled away — with nothing on the timer it renders idle, which is what a browser source
-   * sitting in a scene should do.
+   * follows the Director's active event (streaming.html §2.1, "follow the program") — **any**
+   * event, in any format; an overlay is not tied to a kind of event. Never reconciled away — with
+   * nothing on the timer it renders idle, which is what a browser source sitting in a scene
+   * should do.
    *
    * `theme` picks the panel's contrast for the footage it sits over: light text on a dark panel
    * (the default, `#/overlay/<name>`) or dark text on a light one (`#/overlay/<name>/light`).
@@ -109,9 +100,12 @@ export type Route =
    */
   | { kind: 'overlay'; overlay: OverlayName; theme?: OverlayTheme };
 
-/** The overlay pages the console serves (streaming.html §2). */
-export type OverlayName = 'racegow';
-const OVERLAYS: readonly OverlayName[] = ['racegow'];
+/**
+ * The overlay pages the console serves (streaming.html §2). `race` is the race timer: the clock,
+ * the phase, and the current heat's pilots with their laps — the one overlay built so far.
+ */
+export type OverlayName = 'race';
+export const OVERLAYS: readonly OverlayName[] = ['race'];
 /** An overlay's contrast: light text over a dark panel, or dark text over a light one. */
 export type OverlayTheme = 'dark' | 'light';
 
@@ -122,7 +116,8 @@ export const WORKSPACE_TABS: readonly WorkspaceTab[] = [
   'marshaling',
   'results',
   'audit',
-  'timers'
+  'timers',
+  'overlays'
 ];
 
 const APP_PAGES: readonly AppPage[] = ['home', 'events', 'timers', 'pilots', 'classes'];
@@ -198,12 +193,6 @@ export function parseHash(hash: string): Route {
     return { kind: 'tune', timer };
   }
 
-  // `#/racegow` and `#/racegow/run` — the RaceGOW page and its solo run screen. Any other
-  // sub-segment degrades to the page, the way a malformed timers route degrades to Timers.
-  if (head === 'racegow') {
-    return segments[1]?.toLowerCase() === 'run' ? { kind: 'racegow-run' } : { kind: 'racegow' };
-  }
-
   // `#/overlay/<name>[/light]` — an OBS browser source. An unknown overlay name is the hub, not a
   // blank page: there is nothing overlay-shaped to land on. The optional third segment picks the
   // light panel; anything else (including an explicit `dark`) is the default dark panel, so a
@@ -233,8 +222,6 @@ export function parseHash(hash: string): Route {
  */
 export function formatHash(route: Route): string {
   if (route.kind === 'workspace') return `#/event/${route.tab}`;
-  if (route.kind === 'racegow') return '#/racegow';
-  if (route.kind === 'racegow-run') return '#/racegow/run';
   if (route.kind === 'overlay') {
     return route.theme === 'light'
       ? `#/overlay/${route.overlay}/light`
@@ -277,11 +264,6 @@ export function reconcileRoute(
 ): Route {
   if (route.kind === 'workspace' && !hasActiveEvent) {
     return { kind: 'page', page: 'events' };
-  }
-  // The solo run screen shows the ACTIVE event's run; with nothing active there is no run to
-  // show, so land on the RaceGOW page (where a run is started) rather than the generic picker.
-  if (route.kind === 'racegow-run' && !hasActiveEvent) {
-    return { kind: 'racegow' };
   }
   // A tune route names a timer that may be gone (removed since the link was made / bookmarked, or a
   // hand-edited id). Fall back to the Timers page — the surface that can explain the absence and

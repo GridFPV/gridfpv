@@ -10,10 +10,6 @@
    * count (`GET /events`), and timer count + how many are connected (`GET /timers`). A failed read
    * just shows a dash — the hub never blocks on a summary.
    *
-   * There is deliberately no RaceGOW card here: a RaceGOW track run is an ordinary event, so it
-   * starts from the Events page ("+ New event" → RaceGOW track run) and its runs sit in the Events
-   * list with a badge, rather than the hub growing a card per preset.
-   *
    * Big text + dark surfaces by design: this hub is glanced at on a laptop outdoors in the sun, so
    * the cards are large, high-contrast tap targets ("readable in sunlight?" is the gate).
    */

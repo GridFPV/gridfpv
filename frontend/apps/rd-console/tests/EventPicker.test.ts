@@ -38,7 +38,7 @@ function renderPicker() {
     getActiveEventImpl: vi.fn(async () => ({ event: null })),
     deleteEventImpl: vi.fn(async () => undefined)
   });
-  render(EventPicker, { session, onhome: noop, onracegow: noop });
+  render(EventPicker, { session, onhome: noop });
 }
 
 /** Open the hard-delete dialog for EVENT and return its scope. */
@@ -63,7 +63,7 @@ describe('EventPicker — the brand home root (#118)', () => {
       listEventsImpl: vi.fn(async () => [EVENT]),
       getActiveEventImpl: vi.fn(async () => ({ event: null }))
     });
-    render(EventPicker, { session, onhome, onracegow: noop });
+    render(EventPicker, { session, onhome });
     // The button's accessible name comes from its wordmark content; the title is the tooltip.
     const brand = await screen.findByTitle('Home — GridFPV hub');
     await fireEvent.click(brand);
@@ -119,7 +119,7 @@ describe('EventPicker — the empty picker is a first run, not an empty list (#4
       listEventsImpl: vi.fn(async () => []),
       getActiveEventImpl: vi.fn(async () => ({ event: null }))
     });
-    render(EventPicker, { session, onhome: noop, onracegow: noop });
+    render(EventPicker, { session, onhome: noop });
   }
 
   it('offers a create-your-first-event call to action when no events exist', async () => {
@@ -148,66 +148,5 @@ describe('EventPicker — the empty picker is a first run, not an empty list (#4
     renderEmptyPicker();
     await screen.findByRole('heading', { name: 'Create your first event' });
     expect(screen.queryByRole('button', { name: /Practice/ })).toBeNull();
-  });
-});
-
-/**
- * RaceGOW lives on the Events page, not the hub: "+ New event" asks club race vs track run, and a
- * run the preset built lists here with a badge. The club path must stay one click — the kind
- * chooser defaults to a race, with the name form already up.
- */
-describe('EventPicker — a RaceGOW track run is a kind of new event', () => {
-  const RUN: EventMeta = {
-    id: 'track1-run',
-    name: 'RaceGOW6 Track 1',
-    created_at: 1000,
-    persistent: true,
-    preset: 'racegow',
-    timers: ['rh-1'],
-    roster: ['p1'],
-    classes: ['mgp-whoop']
-  };
-
-  function renderWithRun() {
-    const onracegow = vi.fn();
-    const { session } = makeTestSession({
-      noEnter: true,
-      listEventsImpl: vi.fn(async () => [EVENT, RUN]),
-      getActiveEventImpl: vi.fn(async () => ({ event: null }))
-    });
-    render(EventPicker, { session, onhome: noop, onracegow });
-    return { onracegow };
-  }
-
-  it('badges the run the preset built, and only that one', async () => {
-    renderWithRun();
-    // Anchored: the delete button's name is "Delete <name>", and a loose match would hit both.
-    const runRow = await screen.findByRole('button', { name: /^RaceGOW6 Track 1/ });
-    expect(within(runRow).getByText('RaceGOW')).toBeInTheDocument();
-    const clubRow = screen.getByRole('button', { name: /^Friday Night Series/ });
-    expect(within(clubRow).queryByText('RaceGOW')).toBeNull();
-  });
-
-  it('the new-event dialog defaults to a club race, with the name form up', async () => {
-    renderWithRun();
-    await fireEvent.click(await screen.findByRole('button', { name: '+ New event' }));
-    const form = await screen.findByRole('form', { name: 'New event' });
-    expect(within(form).getByRole('radio', { name: 'Club race' })).toBeChecked();
-    expect(within(form).getByRole('radio', { name: 'RaceGOW track run' })).not.toBeChecked();
-    expect(within(form).getByLabelText('Event name')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Create & enter' })).toBeInTheDocument();
-  });
-
-  it('choosing a track run swaps the form for a hand-off to the RaceGOW page', async () => {
-    const { onracegow } = renderWithRun();
-    await fireEvent.click(await screen.findByRole('button', { name: '+ New event' }));
-    const form = await screen.findByRole('form', { name: 'New event' });
-    await fireEvent.click(within(form).getByRole('radio', { name: 'RaceGOW track run' }));
-    // The name form steps aside: the RaceGOW page's own form asks what a run needs.
-    await waitFor(() => expect(within(form).queryByLabelText('Event name')).toBeNull());
-    expect(screen.queryByRole('button', { name: 'Create & enter' })).toBeNull();
-    await fireEvent.click(screen.getByRole('button', { name: 'Set up track run' }));
-    expect(onracegow).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 });

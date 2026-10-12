@@ -29,8 +29,4 @@ description?: string,
 /**
  * Optional organizer name, stored on [`EventMeta::organizer`].
  */
-organizer?: string, 
-/**
- * Optional **preset marker**, stored on [`EventMeta::preset`] (e.g. `"racegow"`).
- */
-preset?: string, };
+organizer?: string, };
