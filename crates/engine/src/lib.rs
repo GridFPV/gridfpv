@@ -12,6 +12,8 @@
 //!   whether its completion rule says it is done (§5.4, §5.5).
 //! - [`phase`] — the phase tree: fields, seat references, combined rankings, completion and
 //!   inherited formats (§5.2 – §5.6).
+//! - [`presets`] — generators that write plain phases: a double elimination bracket, and
+//!   mains stacked with bump-ups (§6).
 //!
 //! Penalties, false starts, protests and locking are added on top of these.
 #![forbid(unsafe_code)]
@@ -19,4 +21,5 @@
 pub mod heat;
 pub mod laps;
 pub mod phase;
+pub mod presets;
 pub mod race;

@@ -53,6 +53,9 @@ pub enum SeatWho {
     Pilot(PilotId),
     /// Nobody named (practice).
     Open,
+    /// Nobody: the seat points at a position its source phase finished without. A bracket
+    /// built for eight with six pilots entered leaves seats like this.
+    Nobody,
     /// Still waiting on another phase: "position N of that phase". The UI shows the phase's
     /// label, never its id.
     Waiting { phase: PhaseId, position: u32 },
@@ -232,15 +235,16 @@ impl Eval<'_> {
             let who = match &seat.source {
                 SeatSource::Pilot(pilot) => SeatWho::Pilot(pilot.clone()),
                 SeatSource::Open => SeatWho::Open,
-                SeatSource::FromPhase { phase, position } => {
-                    match self.phase(phase).and_then(|source| source.at(*position)) {
+                SeatSource::FromPhase { phase, position } => match self.phase(phase) {
+                    Some(source) if source.complete => match source.at(*position) {
                         Some(pilot) => SeatWho::Pilot(pilot.clone()),
-                        None => SeatWho::Waiting {
-                            phase: phase.clone(),
-                            position: *position,
-                        },
-                    }
-                }
+                        None => SeatWho::Nobody,
+                    },
+                    _ => SeatWho::Waiting {
+                        phase: phase.clone(),
+                        position: *position,
+                    },
+                },
             };
             match &who {
                 // A pilot can only hold one seat; a second reference to them is ignored
@@ -262,13 +266,17 @@ impl Eval<'_> {
         let format = self.tree.format_for(&def.id).unwrap_or(&fallback);
         let races = self.inputs.saved_races(&def.id);
         let standings = heat_standings(&out.field, &races, format);
+        // A heat whose seats have all resolved to nobody has nothing to race: it is done.
+        let nobody_to_race =
+            !out.lineup.is_empty() && out.lineup.iter().all(|seat| seat.who == SeatWho::Nobody);
         out.complete = !out.waiting
-            && heat_complete(
-                &format.completion,
-                &standings,
-                races.len(),
-                self.inputs.director_done(&def.id),
-            );
+            && (nobody_to_race
+                || heat_complete(
+                    &format.completion,
+                    &standings,
+                    races.len(),
+                    self.inputs.director_done(&def.id),
+                ));
         out.ranking = standings
             .into_iter()
             .map(|standing| Placed {
