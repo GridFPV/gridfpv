@@ -395,6 +395,110 @@ pub enum RemovalReason {
     Other,
 }
 
+// --- Rules as data (docs/primitives.md §5.5, §5.6) ----------------------------
+// A format, its race rules, its completion rule and its ranking rule are plain data. The
+// named rules Grid ships are values of these types, not special code, so a rule editor can
+// come later with no engine change.
+
+/// How one race ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum EndCondition {
+    /// The race is won by the first pilot to finish this many laps.
+    FirstToLaps(u32),
+    /// The race runs for a fixed time, then a grace window to finish the lap in progress.
+    Timed {
+        #[ts(type = "number")]
+        micros: i64,
+        #[ts(type = "number")]
+        grace_micros: i64,
+    },
+    /// The race runs until the director stops it.
+    Open,
+}
+
+/// The settings for one race. They are never set on a race: they come from the format in
+/// force for its heat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RaceRules {
+    /// How the race ends.
+    pub end: EndCondition,
+    /// The length of the staging countdown before the start tone, in microseconds.
+    #[ts(type = "number")]
+    pub staging_micros: i64,
+    /// The shortest time a lap may take, in microseconds. A faster crossing is filtered out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub min_lap_micros: Option<i64>,
+}
+
+/// One number Grid folds for a pilot from the saved races of a heat. Rules are built from
+/// these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum Measure {
+    /// Races won. More is better.
+    Wins,
+    /// Points scored across the races, from the format's points table. More is better.
+    Points,
+    /// The most laps flown in one race. More is better.
+    Laps,
+    /// The fastest single lap in any race. Less is better.
+    BestLap,
+    /// The fastest run of this many laps in a row in any race. Less is better.
+    BestConsecutive(u32),
+    /// The best finishing position in any race. Less is better.
+    BestFinish,
+    /// The finishing position in the latest race. Less is better.
+    LastFinish,
+}
+
+/// How a heat's results become an order: the measures to sort by, first one first. Every
+/// ranking then ends the same way — pilots who never flew go below those who did, and the
+/// last tie-break is seed — so a ranking is always a strict order of the whole field.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RankingRule {
+    pub sort: Vec<Measure>,
+}
+
+/// When a heat is done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum CompletionRule {
+    /// After this many saved races.
+    SavedRaces(u32),
+    /// When any pilot's value for a measure reaches a level ("any pilot's wins ≥ 2").
+    AnyPilotReaches {
+        measure: Measure,
+        #[ts(type = "number")]
+        at_least: i64,
+    },
+    /// When the director says so.
+    DirectorDecides,
+}
+
+/// A named, reusable bundle of rules. It is set on a phase and applies to every heat
+/// beneath it; a phase lower down can set its own, and the nearest one wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct Format {
+    /// The director's name for it ("2 minute qualifying", "Chase the Ace").
+    pub name: String,
+    /// The settings for each race.
+    pub race: RaceRules,
+    /// When a heat under this format is done.
+    pub completion: CompletionRule,
+    /// How a heat under this format is ranked. `None` for an unranked heat (practice).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ranking: Option<RankingRule>,
+    /// Points by finishing position, first place first. A position past the end scores 0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<u32>,
+}
+
 /// A canonical event in the append-only log.
 ///
 /// Adapters append **raw observations** (lifecycle, [`SeatSeen`](Event::SeatSeen),
@@ -831,5 +935,37 @@ mod tests {
                 note: None,
             }
         );
+    }
+
+    #[test]
+    fn a_format_round_trips_and_is_plain_data() {
+        let chase_the_ace = Format {
+            name: "Chase the Ace".into(),
+            race: RaceRules {
+                end: EndCondition::FirstToLaps(3),
+                staging_micros: 5_000_000,
+                min_lap_micros: Some(2_000_000),
+            },
+            completion: CompletionRule::AnyPilotReaches {
+                measure: Measure::Wins,
+                at_least: 2,
+            },
+            ranking: Some(RankingRule {
+                sort: vec![Measure::Wins, Measure::LastFinish],
+            }),
+            points: vec![],
+        };
+        let json = serde_json::to_string(&chase_the_ace).unwrap();
+        let back: Format = serde_json::from_str(&json).unwrap();
+        assert_eq!(chase_the_ace, back);
+
+        // Practice: no ranking, no points, done when the director says so.
+        let practice: Format = serde_json::from_str(
+            r#"{"name":"Practice","race":{"end":"Open","staging_micros":0},"completion":"DirectorDecides"}"#,
+        )
+        .unwrap();
+        assert_eq!(practice.ranking, None);
+        assert!(practice.points.is_empty());
+        assert_eq!(practice.race.min_lap_micros, None);
     }
 }

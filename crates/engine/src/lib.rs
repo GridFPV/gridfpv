@@ -5,10 +5,15 @@
 //! facts to append or the reason it is refused. Nothing in this crate reads a clock, talks
 //! to a timer or touches storage, so every rule can be tested by replaying events.
 //!
-//! Built so far: the [`race`] — one start-to-stop flight, the atom (§5.1) — and its [`laps`],
-//! with the lap rulings (§5.7). Heats, phases,
-//! ranking and completion rules, formats and rulings are added on top of it.
+//! Built so far:
+//! - [`race`] — one start-to-stop flight, the atom (§5.1).
+//! - [`laps`] — a race's laps per seat, with the lap rulings (§5.7).
+//! - [`heat`] — a race's finishing order, a heat's standings under a ranking rule, and
+//!   whether its completion rule says it is done (§5.4, §5.5).
+//!
+//! Phases, formats set on the tree, penalties and protests are added on top of these.
 #![forbid(unsafe_code)]
 
+pub mod heat;
 pub mod laps;
 pub mod race;
