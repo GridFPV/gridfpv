@@ -61,6 +61,7 @@ export type * from '@bindings/PilotId';
 export type * from '@bindings/ProtocolError';
 export type * from '@bindings/RaceId';
 export type * from '@bindings/RaceSetup';
+export type * from '@bindings/RemovalReason';
 export type * from '@bindings/SeatRef';
 export type * from '@bindings/ServerHello';
 export type * from '@bindings/SessionId';

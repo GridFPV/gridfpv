@@ -382,12 +382,25 @@ pub enum DiscardReason {
     Other,
 }
 
+/// Why a lap was removed. Optional, one tap to pick, and **a label only**: it never changes
+/// what the removal does (`docs/primitives.md` §5.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum RemovalReason {
+    /// The timer saw a crossing that did not happen.
+    FalseDetection,
+    /// A real crossing, but the lap it ended should not stand.
+    IncorrectLap,
+    /// Anything else.
+    Other,
+}
+
 /// A canonical event in the append-only log.
 ///
 /// Adapters append **raw observations** (lifecycle, [`SeatSeen`](Event::SeatSeen),
 /// [`Pass`], signal). The Director appends the **race facts** of `docs/primitives.md` §5.1.
-/// The rest of the competition vocabulary (phases, rulings) is added as those primitives are
-/// built. Raw observations are never mutated; a correction is a
+/// and the **lap rulings** of §5.7. The rest of the competition vocabulary (phases, penalties,
+/// protests) is added as those primitives are built. Raw observations are never mutated; a correction is a
 /// new appended event.
 ///
 /// Externally tagged (the default serde representation): each variant serialises as
@@ -468,6 +481,42 @@ pub enum Event {
         #[ts(optional)]
         note: Option<String>,
     },
+
+    // --- lap rulings (docs/primitives.md §5.7) ---
+    // A ruling is a human decision. Each names its race, and targets a **crossing** by the
+    // log offset of the fact that made it: a `Pass`, or a `LapInserted`.
+    /// Remove the lap that `crossing` ended. The crossing is ignored, so the lap before it
+    /// stays as it was and the lap after it starts where that one ended.
+    LapRemoved {
+        race: RaceId,
+        crossing: LogRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        reason: Option<RemovalReason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
+    /// Undo a removal: the crossing counts again.
+    LapRestored { race: RaceId, crossing: LogRef },
+    /// Add a crossing the timer missed. Inside an existing lap this splits it in two.
+    LapInserted {
+        race: RaceId,
+        adapter: AdapterId,
+        seat: SeatRef,
+        at: SourceTime,
+    },
+    /// Move a crossing to a different time on the timer's clock.
+    LapAdjusted {
+        race: RaceId,
+        crossing: LogRef,
+        at: SourceTime,
+    },
+    /// Mark the lap that `crossing` ended as a **restart**: it has no lap time, the laps
+    /// either side keep theirs, and a run of consecutive laps may not span it.
+    RestartMarked { race: RaceId, crossing: LogRef },
+    /// Undo a restart mark.
+    RestartUnmarked { race: RaceId, crossing: LogRef },
 }
 
 #[cfg(test)]
@@ -725,6 +774,62 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&open).unwrap(),
             r#"{"adapter":"oft","seat":"seat-2"}"#
+        );
+    }
+
+    #[test]
+    fn lap_rulings_round_trip() {
+        let race = RaceId("race-1".into());
+        let events = vec![
+            Event::LapRemoved {
+                race: race.clone(),
+                crossing: LogRef(12),
+                reason: Some(RemovalReason::FalseDetection),
+                note: None,
+            },
+            Event::LapRestored {
+                race: race.clone(),
+                crossing: LogRef(12),
+            },
+            Event::LapInserted {
+                race: race.clone(),
+                adapter: AdapterId("oft".into()),
+                seat: SeatRef("seat-0".into()),
+                at: SourceTime::from_micros(9_000_000),
+            },
+            Event::LapAdjusted {
+                race: race.clone(),
+                crossing: LogRef(14),
+                at: SourceTime::from_micros(9_100_000),
+            },
+            Event::RestartMarked {
+                race: race.clone(),
+                crossing: LogRef(15),
+            },
+            Event::RestartUnmarked {
+                race,
+                crossing: LogRef(15),
+            },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: Event = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, back);
+        }
+    }
+
+    #[test]
+    fn a_removal_needs_no_reason() {
+        let removed: Event =
+            serde_json::from_str(r#"{"LapRemoved":{"race":"r","crossing":7}}"#).unwrap();
+        assert_eq!(
+            removed,
+            Event::LapRemoved {
+                race: RaceId("r".into()),
+                crossing: LogRef(7),
+                reason: None,
+                note: None,
+            }
         );
     }
 }
