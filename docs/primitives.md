@@ -1,9 +1,9 @@
 # Grid primitives
 
-**Status:** revision 5 (2026-11-09), final for now: this is the design to build against. Revision 1 was written
+**Status:** revision 6 (2026-11-09): the design to build against, with build progress in §8
+and new questions in §9. Revision 1 was written
 from the design discussion of that day; revisions 2 to 5 fold in Ryan's notes and answers. Sections marked **Agreed**
-record what Ryan decided. Nothing is left marked as only proposed, and §9 has no open
-questions.
+record what Ryan decided.
 
 **This is the current design.** Every other doc in this folder is either marked old or marked
 under review (§10). Where another doc disagrees with this one, this one wins.
@@ -527,16 +527,29 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
 | Server: rounds, heats, channels, control | Rebuild; keep auth, streaming, timers, pilots |
 | Console screens | Rebuild; take the Run, Tune and Marshal designs from grid-rh |
 
-**Order** (Ryan left this to Claude):
+**Order** (Ryan left this to Claude), with progress as of 2026-11-09:
 
-1. Settle this doc. Done at revision 3.
-2. Audit the docs marked under review, section by section, so each banner says exactly which
-   sections are old. Fix the ones that are pure design (vision, architecture) now.
-3. Cut the code down to a skeleton that still builds and passes CI: the Director starts,
-   serves the console shell, connects a timer and logs passes.
-4. Grow the primitives upward from the race, each with tests. CI stays green at every commit.
-5. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
-   rebuilt, not before. Rewriting them now would mean inventing wire shapes ahead of the code.
+1. Settle this doc. **Done.**
+2. Audit the docs marked under review. **Done**; wholly old docs are in `docs/archive/`.
+3. Cut the code down to a skeleton that still builds and passes CI. **Done.**
+   `docs/port-list.md` lists what was removed that is worth porting back.
+4. Grow the primitives upward from the race, each with tests. **The engine is built**
+   (`crates/engine`, pure, about 80 tests):
+   - `race`: the race states and checked commands (§5.1).
+   - `laps`: laps per seat, with remove, restore, insert, adjust and restart (§5.7).
+   - `heat`: a race's finishing order, heat standings, completion rules (§5.4, §5.5).
+   - `phase`: the tree, fields, seat references, combined rankings, inherited formats.
+   - `presets`: double elimination and stacked mains, checked against §6.1.
+   - `rulings`: false starts, disqualification, locking, protests (§5.7, §5.8).
+5. **Next:** wire the engine into the Director (commands over HTTP, the live stream ported
+   back from `devel`), then the Run page, then the OFT adapter. Nothing in the app uses the
+   engine yet.
+6. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
+   rebuilt, not before.
+
+**Not built yet in the engine:** time and points penalties, the position override, class
+standings across a class's phases (§5.3), keeping a pilot's channel between heats (§5.4),
+the run queue (§5.9), and the "ignore crossings before" filter.
 
 **OFT in tests** (Agreed): the OFT repos will live on GitHub eventually. Until then Grid
 uses the local checkout at `~/development/fpv/open-fpv-timer`, and tests that need a fake
@@ -564,8 +577,32 @@ round and heat model that this doc replaces.
 
 ## 9. Open questions for Ryan
 
-None open. Every question from revisions 1 to 4 is answered and folded in above. Add new ones
-here, or as `//NOTE:` lines anywhere, as they come up.
+These came up while building the engine. Each has what the code does today, so "yes" is
+enough where you agree.
+
+1. **A disqualified pilot's bump-up spot.** Today a disqualified pilot drops to the bottom
+   of every heat beneath the phase they are out of. So if they had won the D-Main, the next
+   pilot becomes its winner and takes the bump-up to the C-Main. Is that right, or should
+   the spot stay empty?
+
+2. **The first crossing is the hole shot.** Today a seat's first crossing in a race starts
+   lap 1 and has no lap time. Timing lap 1 from the start tone is the other convention.
+   Should that be a race rule the format can choose, or is hole shot always right?
+
+3. **Bracket shapes.** The one bracket preset so far is the eight-pilot double elimination
+   with four-pilot heats: round 1 seeded 1-4-5-8 against 2-3-6-7, top two advance, bottom
+   two drop to the losers side. Which other shapes do you run (16 pilots, six-pilot heats,
+   single elimination)? Point me at the charts you use.
+
+4. **A heat with one pilot in a bracket.** If byes leave one pilot alone in a heat, they
+   must still fly and save a race today. Should a lone pilot advance without flying?
+
+5. **Time and points penalties, and the position override.** Not built yet. For the
+   override: does a set position stick even if later rulings would move the pilot, until
+   the director removes it?
+
+6. **Ignore crossings before.** The start-side lap filter needs the start tone on the
+   timer's clock. It will come with the OFT adapter, which can line the two clocks up.
 
 ---
 
