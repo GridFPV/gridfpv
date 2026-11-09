@@ -4,6 +4,7 @@ members = [
     "crates/events",
     "crates/storage",
     "crates/adapters",
+    "crates/engine",
     "crates/server",
     "crates/app",
     "xtask",
@@ -34,6 +35,7 @@ rust-version = "1.85"
 gridfpv-events = { path = "crates/events" }
 gridfpv-storage = { path = "crates/storage" }
 gridfpv-adapters = { path = "crates/adapters" }
+gridfpv-engine = { path = "crates/engine" }
 gridfpv-server = { path = "crates/server" }
 
 # Third-party.

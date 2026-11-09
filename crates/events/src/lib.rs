@@ -34,13 +34,13 @@ use ts_rs::TS;
 #[ts(export, export_to = "bindings/")]
 pub struct AdapterId(pub String);
 
-/// A source-local competitor handle: a node seat, a sim player name, a transponder
-/// id. Bound to a GridFPV pilot later by the Director — never by the adapter. The
-/// adapter only reports the refs it sees.
+/// A **seat** on a timer, by the timer's own handle for it: a receiver slot, a sim player
+/// name, a transponder id (`docs/primitives.md` §3.2). A seat is linked to a pilot only by a
+/// race's lineup ([`LineupEntry`]) — never by the adapter, which just reports what it sees.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
 #[ts(export, export_to = "bindings/")]
-pub struct CompetitorRef(pub String);
+pub struct SeatRef(pub String);
 
 /// A source's own race/heat identifier, where it exposes one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
@@ -48,7 +48,7 @@ pub struct CompetitorRef(pub String);
 #[ts(export, export_to = "bindings/")]
 pub struct SessionId(pub String);
 
-/// A GridFPV pilot's stable identity — the person a source-local [`CompetitorRef`] is
+/// A GridFPV pilot's stable identity — the person a source-local [`SeatRef`] is
 /// *bound* to by the Director, never by the adapter.
 ///
 /// This is the canonical pilot handle the whole stack shares: the log and the wire
@@ -136,7 +136,7 @@ pub struct SignalContext {
 /// streams its node RSSI continuously, so chunks append as the run proceeds and interleave
 /// deterministically with the [`Pass`]es in the same log — a single buffered-until-heat-end
 /// event would be lost on an abort. Each chunk is a window of `rssi` samples beginning at
-/// `from` on the source clock, one every `period_micros`; concatenating a competitor's chunks
+/// `from` on the source clock, one every `period_micros`; concatenating a seat's chunks
 /// in append order reconstructs the whole trace (a fold's job).
 ///
 /// `rssi` is kept as `u16` — RotorHazard's filtered ADC counts are integers, so this is
@@ -157,8 +157,8 @@ pub struct SignalContext {
 pub struct SignalChunk {
     /// The timing source that produced this trace.
     pub adapter: AdapterId,
-    /// The source-local competitor (node seat) the trace belongs to.
-    pub competitor: CompetitorRef,
+    /// The source-local seat the trace belongs to.
+    pub seat: SeatRef,
     /// The source-clock timestamp of the **first** sample in `rssi`.
     pub from: SourceTime,
     /// Microseconds between consecutive samples (the capture cadence).
@@ -172,14 +172,14 @@ pub struct SignalChunk {
 /// the levels the RSSI crosses to open/close a pass (RotorHazard `enter_at_level` /
 /// `exit_at_level`). Captured **once** alongside the [`SignalChunk`] trace so a marshal can
 /// see *why* the timer called (or missed) a lap against the visible signal. One-shot per
-/// `(adapter, competitor)`; a later one supersedes (a fold keeps the last).
+/// `(adapter, seat)`; a later one supersedes (a fold keeps the last).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SignalThresholds {
     /// The timing source these thresholds belong to.
     pub adapter: AdapterId,
-    /// The source-local competitor (node seat) the thresholds apply to.
-    pub competitor: CompetitorRef,
+    /// The source-local seat the thresholds apply to.
+    pub seat: SeatRef,
     /// The **enter** threshold: RSSI rising above this opens a pass.
     pub enter: u16,
     /// The **exit** threshold: RSSI falling below this closes the pass.
@@ -194,7 +194,7 @@ pub struct SignalThresholds {
 /// per-tick sample the node recorded, with its **own** sample time. A signal-capable adapter pulls
 /// it once when a heat reaches `DONE` and appends one `SignalHistory` per node. A fold over the
 /// trace should **prefer** this dense history over the coarse [`SignalChunk`] samples for a
-/// competitor when both are present (the dense trace supersedes the streaming approximation).
+/// seat when both are present (the dense trace supersedes the streaming approximation).
 ///
 /// # Whole trace or slice — [`base`](SignalHistory::base) says which (#392)
 ///
@@ -219,8 +219,8 @@ pub struct SignalThresholds {
 pub struct SignalHistory {
     /// The timing source that produced this history.
     pub adapter: AdapterId,
-    /// The source-local competitor (node seat) the history belongs to.
-    pub competitor: CompetitorRef,
+    /// The source-local seat the history belongs to.
+    pub seat: SeatRef,
     /// The source-clock timestamp (race-relative µs) of each sample, parallel to `rssi`. Same
     /// length as `rssi`; `times[i]` is when `rssi[i]` was recorded. Renders as TS `number[]`
     /// (bounded far below 2^53).
@@ -228,11 +228,11 @@ pub struct SignalHistory {
     pub times: Vec<i64>,
     /// The dense per-tick RSSI samples (filtered ADC counts), parallel to `times`.
     pub rssi: Vec<u16>,
-    /// The index of this event's **first** sample within the competitor's full trace — the offset
+    /// The index of this event's **first** sample within the seat's full trace — the offset
     /// the fold applies `times`/`rssi` at (#392). Named for the plugin's own `gridfpv_signal` field,
     /// whose semantics it carries onto the canonical wire unchanged.
     ///
-    /// - `base == 0` — a **full snapshot**: it *replaces* the competitor's trace. The post-race
+    /// - `base == 0` — a **full snapshot**: it *replaces* the seat's trace. The post-race
     ///   `current_marshal_data` pull, the `race_details` fold and the plugin's end-of-race flush
     ///   each send one, so a finished heat's marshaling trace is always whole.
     /// - `base ==` the trace's current length — a **contiguous append**: `times`/`rssi` extend it.
@@ -254,8 +254,8 @@ pub struct SignalHistory {
 pub struct Pass {
     /// Which timing source produced this pass.
     pub adapter: AdapterId,
-    /// The source's own competitor handle.
-    pub competitor: CompetitorRef,
+    /// The source's own seat handle.
+    pub seat: SeatRef,
     /// When the crossing happened, in the source's clock.
     pub at: SourceTime,
     /// A source-provided monotonic sequence number, where one exists. Disambiguates
@@ -313,12 +313,81 @@ pub struct ClassId(pub String);
 #[ts(export, export_to = "bindings/", as = "f64")]
 pub struct LogRef(pub u64);
 
+/// Identifies one **heat**: a lineup that is raced one or more times — the leaf phase
+/// (`docs/primitives.md` §5.4).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct HeatId(pub String);
+
+/// One place in a race's lineup: a seat on a timer, and the pilot flying on it.
+///
+/// The lineup **is** the link between a pilot and a seat; there is no separate registration
+/// step (`docs/primitives.md` §3.2). `pilot` is `None` for an open seat, which only an
+/// unranked phase such as practice allows (§5.4).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct LineupEntry {
+    /// The timer the seat is on.
+    pub adapter: AdapterId,
+    /// The seat, by the timer's own handle.
+    pub seat: SeatRef,
+    /// The pilot on the seat, or `None` for an open seat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pilot: Option<PilotId>,
+}
+
+/// Who owned the start of a race (`docs/primitives.md` §3.1). Timers differ: Grid starts a
+/// race on a timer that always listens, Grid starts it and tells a timer that needs telling,
+/// or the source starts it and Grid follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum StartOwner {
+    /// Grid started the race and told the timer nothing (OFT).
+    Grid,
+    /// Grid started the race and told the timer to start (RotorHazard).
+    GridCommandsTimer,
+    /// The source started the race and Grid followed (Velocidrone).
+    Source,
+}
+
+/// Everything fixed about a race when it starts: which heat it is a race of, who is on which
+/// seat, and who owned the start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RaceSetup {
+    /// The race's own id. Every race has one, including a re-run of the same heat.
+    pub race: RaceId,
+    /// The heat this is a race of.
+    pub heat: HeatId,
+    /// Who is on which seat.
+    pub lineup: Vec<LineupEntry>,
+    /// Who owned the start.
+    pub owner: StartOwner,
+}
+
+/// Why a race was discarded. Optional, and one tap to pick (`docs/primitives.md` §5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum DiscardReason {
+    /// A pilot left before the start tone. The pilot is named by a separate false start
+    /// ruling, so it can be counted.
+    FalseStart,
+    /// A crash or an obstruction on the track.
+    CrashOrObstruction,
+    /// The timer misbehaved.
+    TimerProblem,
+    /// Anything else.
+    Other,
+}
+
 /// A canonical event in the append-only log.
 ///
-/// Adapters append **raw observations** (lifecycle, [`CompetitorSeen`](Event::CompetitorSeen),
-/// [`Pass`], signal). This is the skeleton vocabulary: the competition facts of
-/// `docs/primitives.md` §5 (race started / stopped / saved / discarded, rulings) are added
-/// here as the primitives are built. Raw observations are never mutated; a correction is a
+/// Adapters append **raw observations** (lifecycle, [`SeatSeen`](Event::SeatSeen),
+/// [`Pass`], signal). The Director appends the **race facts** of `docs/primitives.md` §5.1.
+/// The rest of the competition vocabulary (phases, rulings) is added as those primitives are
+/// built. Raw observations are never mutated; a correction is a
 /// new appended event.
 ///
 /// Externally tagged (the default serde representation): each variant serialises as
@@ -342,29 +411,63 @@ pub enum Event {
         adapter: AdapterId,
         session: SessionId,
     },
-    /// A source-local competitor reference appeared (a node seat went active, a sim
+    /// A source-local seat reference appeared (a node seat went active, a sim
     /// player joined). Gives the Director the list to bind pilots against; the binding
     /// itself is never an adapter event.
-    CompetitorSeen {
-        adapter: AdapterId,
-        competitor: CompetitorRef,
-    },
+    SeatSeen { adapter: AdapterId, seat: SeatRef },
     /// A gate crossing — the atom (see [`Pass`]).
     Pass(Pass),
 
     /// A chunk of captured per-node RSSI trace. An **immutable raw observation** like
     /// [`Pass`]: a signal-capable adapter appends these incrementally as a race runs, and a
-    /// fold joins a competitor's chunks back into a contiguous trace. A timer with no signal
+    /// fold joins a seat's chunks back into a contiguous trace. A timer with no signal
     /// (a simulator) never emits this, so the signal layer is simply absent there.
     SignalChunk(SignalChunk),
     /// The one-shot enter/exit detection thresholds for a node (see [`SignalThresholds`]).
     /// Captured alongside the trace so the evidence carries the levels the timer detected
-    /// against; the last one per `(adapter, competitor)` wins.
+    /// against; the last one per `(adapter, seat)` wins.
     SignalThresholds(SignalThresholds),
     /// The **dense, full-fidelity** per-node RSSI history for a heat, pulled from RotorHazard's
     /// request-driven `current_marshal_data` at heat end (see [`SignalHistory`]). Supersedes the
-    /// coarse streaming [`SignalChunk`] samples for its competitor.
+    /// coarse streaming [`SignalChunk`] samples for its seat.
     SignalHistory(SignalHistory),
+
+    // --- race facts (docs/primitives.md §5.1) ---
+    /// Staging began for a race: the countdown every console and overlay shares. `tone_at`
+    /// is the planned start tone, in microseconds on the server clock. Optional — a race the
+    /// source starts has no staging and begins at [`Event::RaceStarted`].
+    RaceStarting {
+        setup: RaceSetup,
+        #[ts(type = "number")]
+        tone_at: i64,
+    },
+    /// A race started (logged at the tone). Carries the full setup, so it stands alone
+    /// whether or not a [`Event::RaceStarting`] came first.
+    RaceStarted { setup: RaceSetup },
+    /// A race stopped. It is now undecided until the director saves or discards it.
+    RaceStopped { race: RaceId },
+    /// The director saved a stopped race: it counts. A saved race is provisional until a
+    /// phase that contains it is locked.
+    RaceSaved {
+        race: RaceId,
+        /// Flags the race for the marshal's to-do list.
+        #[serde(default)]
+        needs_marshal: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
+    /// The director discarded a race: it stays in the log and counts toward nothing. A
+    /// restart is a discard followed by the next race of the same heat.
+    RaceDiscarded {
+        race: RaceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        reason: Option<DiscardReason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -374,7 +477,7 @@ mod tests {
     fn sample_pass() -> Pass {
         Pass {
             adapter: AdapterId("velocidrone".into()),
-            competitor: CompetitorRef("AcroAce".into()),
+            seat: SeatRef("AcroAce".into()),
             at: SourceTime::from_micros(12_500_000),
             sequence: Some(3),
             gate: GateIndex::LAP,
@@ -443,20 +546,20 @@ mod tests {
         let events = vec![
             Event::SignalChunk(SignalChunk {
                 adapter: AdapterId("rotorhazard".into()),
-                competitor: CompetitorRef("node-0".into()),
+                seat: SeatRef("node-0".into()),
                 from: SourceTime::from_micros(2_215_296),
                 period_micros: 100_000,
                 rssi: vec![70, 72, 150, 148, 71, 70],
             }),
             Event::SignalThresholds(SignalThresholds {
                 adapter: AdapterId("rotorhazard".into()),
-                competitor: CompetitorRef("node-0".into()),
+                seat: SeatRef("node-0".into()),
                 enter: 90,
                 exit: 80,
             }),
             Event::SignalHistory(SignalHistory {
                 adapter: AdapterId("rotorhazard".into()),
-                competitor: CompetitorRef("node-0".into()),
+                seat: SeatRef("node-0".into()),
                 times: vec![0, 50_000, 100_000, 150_000],
                 rssi: vec![70, 88, 150, 71],
                 base: 0,
@@ -464,7 +567,7 @@ mod tests {
             // The same fact as a live slice: `base` is the sample offset it starts at (#392).
             Event::SignalHistory(SignalHistory {
                 adapter: AdapterId("rotorhazard".into()),
-                competitor: CompetitorRef("node-0".into()),
+                seat: SeatRef("node-0".into()),
                 times: vec![200_000, 250_000],
                 rssi: vec![90, 71],
                 base: 4,
@@ -483,13 +586,12 @@ mod tests {
         // variants. They are a purely additive extension of the externally-tagged `Event` enum, so
         // every pre-existing serialized event still deserializes unchanged — and a Velocidrone/sim
         // log (which never emits the signal facts) is byte-identical to a pre-Slice-1 log.
-        let legacy_pass =
-            r#"{"Pass":{"adapter":"velocidrone","competitor":"AcroAce","at":12500000}}"#;
+        let legacy_pass = r#"{"Pass":{"adapter":"velocidrone","seat":"AcroAce","at":12500000}}"#;
         assert_eq!(
             serde_json::from_str::<Event>(legacy_pass).unwrap(),
             Event::Pass(Pass {
                 adapter: AdapterId("velocidrone".into()),
-                competitor: CompetitorRef("AcroAce".into()),
+                seat: SeatRef("AcroAce".into()),
                 at: SourceTime::from_micros(12_500_000),
                 sequence: None,
                 gate: GateIndex::LAP,
@@ -498,12 +600,12 @@ mod tests {
             })
         );
         // And the new facts themselves deserialize from their on-the-wire shape.
-        let chunk = r#"{"SignalChunk":{"adapter":"rotorhazard","competitor":"node-1","from":5000000,"period_micros":100000,"rssi":[60,120,61]}}"#;
+        let chunk = r#"{"SignalChunk":{"adapter":"rotorhazard","seat":"node-1","from":5000000,"period_micros":100000,"rssi":[60,120,61]}}"#;
         assert_eq!(
             serde_json::from_str::<Event>(chunk).unwrap(),
             Event::SignalChunk(SignalChunk {
                 adapter: AdapterId("rotorhazard".into()),
-                competitor: CompetitorRef("node-1".into()),
+                seat: SeatRef("node-1".into()),
                 from: SourceTime::from_micros(5_000_000),
                 period_micros: 100_000,
                 rssi: vec![60, 120, 61],
@@ -513,15 +615,15 @@ mod tests {
 
     #[test]
     fn legacy_signal_history_without_base_reads_back_as_a_full_snapshot() {
-        // `base` is additive (#392). A history written before it existed was always the competitor's
+        // `base` is additive (#392). A history written before it existed was always the seat's
         // whole trace, folded last-writer-wins — and `base = 0` is exactly that rule, so an old log
         // replays unchanged rather than being mistaken for a slice.
-        let legacy = r#"{"SignalHistory":{"adapter":"rotorhazard","competitor":"node-0","times":[0,50000],"rssi":[70,88]}}"#;
+        let legacy = r#"{"SignalHistory":{"adapter":"rotorhazard","seat":"node-0","times":[0,50000],"rssi":[70,88]}}"#;
         assert_eq!(
             serde_json::from_str::<Event>(legacy).unwrap(),
             Event::SignalHistory(SignalHistory {
                 adapter: AdapterId("rotorhazard".into()),
-                competitor: CompetitorRef("node-0".into()),
+                seat: SeatRef("node-0".into()),
                 times: vec![0, 50_000],
                 rssi: vec![70, 88],
                 base: 0,
@@ -531,12 +633,98 @@ mod tests {
         // unknown keys still parses a slice-shaped history.
         let json = serde_json::to_string(&Event::SignalHistory(SignalHistory {
             adapter: AdapterId("rotorhazard".into()),
-            competitor: CompetitorRef("node-0".into()),
+            seat: SeatRef("node-0".into()),
             times: vec![100_000],
             rssi: vec![150],
             base: 2,
         }))
         .unwrap();
         assert!(json.contains(r#""base":2"#), "{json}");
+    }
+
+    fn sample_setup() -> RaceSetup {
+        RaceSetup {
+            race: RaceId("race-1".into()),
+            heat: HeatId("heat-a".into()),
+            lineup: vec![
+                LineupEntry {
+                    adapter: AdapterId("oft-3fa2".into()),
+                    seat: SeatRef("seat-0".into()),
+                    pilot: Some(PilotId("ryan".into())),
+                },
+                LineupEntry {
+                    adapter: AdapterId("oft-3fa2".into()),
+                    seat: SeatRef("seat-1".into()),
+                    pilot: None,
+                },
+            ],
+            owner: StartOwner::Grid,
+        }
+    }
+
+    #[test]
+    fn race_facts_round_trip() {
+        let race = RaceId("race-1".into());
+        let events = vec![
+            Event::RaceStarting {
+                setup: sample_setup(),
+                tone_at: 1_700_000_000_000_000,
+            },
+            Event::RaceStarted {
+                setup: sample_setup(),
+            },
+            Event::RaceStopped { race: race.clone() },
+            Event::RaceSaved {
+                race: race.clone(),
+                needs_marshal: true,
+                note: Some("seat 1 looked late".into()),
+            },
+            Event::RaceDiscarded {
+                race,
+                reason: Some(DiscardReason::FalseStart),
+                note: None,
+            },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: Event = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, back);
+        }
+    }
+
+    #[test]
+    fn a_plain_save_and_a_plain_discard_carry_no_optional_fields() {
+        let saved = Event::RaceSaved {
+            race: RaceId("r".into()),
+            needs_marshal: false,
+            note: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&saved).unwrap(),
+            r#"{"RaceSaved":{"race":"r","needs_marshal":false}}"#
+        );
+        // The reason is optional: a discard with nothing picked is still a whole fact.
+        let discarded: Event = serde_json::from_str(r#"{"RaceDiscarded":{"race":"r"}}"#).unwrap();
+        assert_eq!(
+            discarded,
+            Event::RaceDiscarded {
+                race: RaceId("r".into()),
+                reason: None,
+                note: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_open_seat_omits_the_pilot_on_the_wire() {
+        let open = LineupEntry {
+            adapter: AdapterId("oft".into()),
+            seat: SeatRef("seat-2".into()),
+            pilot: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&open).unwrap(),
+            r#"{"adapter":"oft","seat":"seat-2"}"#
+        );
     }
 }

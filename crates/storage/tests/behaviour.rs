@@ -4,7 +4,7 @@
 //! and SQLite backends — that equivalence is the whole point of the trait. Each
 //! `#[test]` builds a fresh backend and runs the same suite against it.
 
-use gridfpv_events::{AdapterId, CompetitorRef, Event, GateIndex, Pass, SessionId, SourceTime};
+use gridfpv_events::{AdapterId, Event, GateIndex, Pass, SeatRef, SessionId, SourceTime};
 use gridfpv_storage::{EventLog, InMemoryLog, SqliteLog, StoredEvent};
 
 /// A representative spread of events covering every `Event` variant.
@@ -18,13 +18,13 @@ fn sample_events() -> Vec<Event> {
             adapter: adapter.clone(),
             session: SessionId("heat-1".into()),
         },
-        Event::CompetitorSeen {
+        Event::SeatSeen {
             adapter: adapter.clone(),
-            competitor: CompetitorRef("AcroAce".into()),
+            seat: SeatRef("AcroAce".into()),
         },
         Event::Pass(Pass {
             adapter: adapter.clone(),
-            competitor: CompetitorRef("AcroAce".into()),
+            seat: SeatRef("AcroAce".into()),
             at: SourceTime::from_micros(12_500_000),
             sequence: Some(1),
             gate: GateIndex::LAP,
@@ -33,7 +33,7 @@ fn sample_events() -> Vec<Event> {
         }),
         Event::Pass(Pass {
             adapter: adapter.clone(),
-            competitor: CompetitorRef("AcroAce".into()),
+            seat: SeatRef("AcroAce".into()),
             at: SourceTime::from_micros(25_000_000),
             sequence: Some(2),
             gate: GateIndex(2),

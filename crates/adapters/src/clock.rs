@@ -157,7 +157,7 @@ pub const fn source_interval_micros(earlier: SourceTime, later: SourceTime) -> i
 /// - `at` is the final tie-break in every case, keeping equal keys deterministic.
 ///
 /// Use with a **stable** sort so passes with fully equal keys keep their original log
-/// order. Mixing sequenced and unsequenced passes for one competitor is not expected
+/// order. Mixing sequenced and unsequenced passes for one seat is not expected
 /// from a real source (a source either numbers its passes or it does not); this rule
 /// just keeps ordering total and deterministic if it happens.
 pub fn pass_order_key(pass: &Pass) -> (bool, Option<u64>, SourceTime) {
@@ -175,12 +175,12 @@ pub fn compare_passes(a: &Pass, b: &Pass) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex};
+    use gridfpv_events::{AdapterId, GateIndex, SeatRef};
 
     fn pass(at: i64, sequence: Option<u64>) -> Pass {
         Pass {
             adapter: AdapterId("vd".into()),
-            competitor: CompetitorRef("A".into()),
+            seat: SeatRef("A".into()),
             at: SourceTime::from_micros(at),
             sequence,
             gate: GateIndex::LAP,
