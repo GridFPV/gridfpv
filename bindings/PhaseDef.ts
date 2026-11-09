@@ -21,6 +21,11 @@ parent?: PhaseId, kind: PhaseKind,
  */
 format?: Format, 
 /**
+ * How many false starts a pilot may make across every race beneath this phase. On
+ * reaching it Grid proposes a disqualification, which the director confirms.
+ */
+false_start_limit?: number, 
+/**
  * A layout name for views and overlays ("double-elimination", "mains-ladder"). The
  * engine never reads it.
  */

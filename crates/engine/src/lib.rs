@@ -14,8 +14,10 @@
 //!   inherited formats (§5.2 – §5.6).
 //! - [`presets`] — generators that write plain phases: a double elimination bracket, and
 //!   mains stacked with bump-ups (§6).
+//! - [`rulings`] — false starts counted against a phase's limit, disqualification, locking
+//!   and protests (§5.7, §5.8).
 //!
-//! Penalties, false starts, protests and locking are added on top of these.
+//! Still to come: time and points penalties, and the director's position override.
 #![forbid(unsafe_code)]
 
 pub mod heat;
@@ -23,3 +25,4 @@ pub mod laps;
 pub mod phase;
 pub mod presets;
 pub mod race;
+pub mod rulings;

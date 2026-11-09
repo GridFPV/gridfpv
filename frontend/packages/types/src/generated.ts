@@ -67,6 +67,8 @@ export type * from '@bindings/PhaseId';
 export type * from '@bindings/PhaseKind';
 export type * from '@bindings/Pilot';
 export type * from '@bindings/PilotId';
+export type * from '@bindings/ProtestId';
+export type * from '@bindings/ProtestOutcome';
 export type * from '@bindings/ProtocolError';
 export type * from '@bindings/RaceId';
 export type * from '@bindings/RaceRules';

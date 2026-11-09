@@ -3,6 +3,11 @@ import type { AdapterId } from "./AdapterId";
 import type { DiscardReason } from "./DiscardReason";
 import type { LogRef } from "./LogRef";
 import type { Pass } from "./Pass";
+import type { PhaseDef } from "./PhaseDef";
+import type { PhaseId } from "./PhaseId";
+import type { PilotId } from "./PilotId";
+import type { ProtestId } from "./ProtestId";
+import type { ProtestOutcome } from "./ProtestOutcome";
 import type { RaceId } from "./RaceId";
 import type { RaceSetup } from "./RaceSetup";
 import type { RemovalReason } from "./RemovalReason";
@@ -18,8 +23,8 @@ import type { SourceTime } from "./SourceTime";
  *
  * Adapters append **raw observations** (lifecycle, [`SeatSeen`](Event::SeatSeen),
  * [`Pass`], signal). The Director appends the **race facts** of `docs/primitives.md` §5.1.
- * and the **lap rulings** of §5.7. The rest of the competition vocabulary (phases, penalties,
- * protests) is added as those primitives are built. Raw observations are never mutated; a correction is a
+ * the **lap rulings** of §5.7, and the phase tree with its rulings (false starts,
+ * disqualification, locking, protests). Raw observations are never mutated; a correction is a
  * new appended event.
  *
  * Externally tagged (the default serde representation): each variant serialises as
@@ -30,4 +35,4 @@ export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "Adapter
 /**
  * Flags the race for the marshal's to-do list.
  */
-needs_marshal: boolean, note?: string, } } | { "RaceDiscarded": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "LapRemoved": { race: RaceId, crossing: LogRef, reason?: RemovalReason, note?: string, } } | { "LapRestored": { race: RaceId, crossing: LogRef, } } | { "LapInserted": { race: RaceId, adapter: AdapterId, seat: SeatRef, at: SourceTime, } } | { "LapAdjusted": { race: RaceId, crossing: LogRef, at: SourceTime, } } | { "RestartMarked": { race: RaceId, crossing: LogRef, } } | { "RestartUnmarked": { race: RaceId, crossing: LogRef, } };
+needs_marshal: boolean, note?: string, } } | { "RaceDiscarded": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "LapRemoved": { race: RaceId, crossing: LogRef, reason?: RemovalReason, note?: string, } } | { "LapRestored": { race: RaceId, crossing: LogRef, } } | { "LapInserted": { race: RaceId, adapter: AdapterId, seat: SeatRef, at: SourceTime, } } | { "LapAdjusted": { race: RaceId, crossing: LogRef, at: SourceTime, } } | { "RestartMarked": { race: RaceId, crossing: LogRef, } } | { "RestartUnmarked": { race: RaceId, crossing: LogRef, } } | { "PhaseDefined": { def: PhaseDef, } } | { "PhaseRemoved": { phase: PhaseId, } } | { "HeatDone": { heat: PhaseId, } } | { "HeatReopened": { heat: PhaseId, } } | { "FalseStart": { race: RaceId, pilot: PilotId, } } | { "FalseStartCleared": { race: RaceId, pilot: PilotId, } } | { "Disqualified": { phase: PhaseId, pilot: PilotId, reason?: string, } } | { "Reinstated": { phase: PhaseId, pilot: PilotId, } } | { "PhaseLocked": { phase: PhaseId, } } | { "PhaseUnlocked": { phase: PhaseId, } } | { "ProtestFiled": { protest: ProtestId, race: RaceId, by?: PilotId, note?: string, } } | { "ProtestResolved": { protest: ProtestId, outcome: ProtestOutcome, note?: string, } };

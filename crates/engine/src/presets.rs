@@ -53,6 +53,7 @@ fn heat(
                 .collect(),
         },
         format,
+        false_start_limit: None,
         display_hint: None,
     }
 }
@@ -123,6 +124,7 @@ pub fn double_elimination(spec: DoubleElimination) -> Vec<PhaseDef> {
             combine: CombineRule::Stack,
         },
         format: Some(format),
+        false_start_limit: None,
         display_hint: Some(HINT_DOUBLE_ELIMINATION.to_owned()),
     };
     // Children are listed best first: that is the order the bracket stacks them in.
@@ -235,6 +237,7 @@ pub fn mains(spec: Mains) -> Vec<PhaseDef> {
             combine: CombineRule::Stack,
         },
         format: None,
+        false_start_limit: None,
         display_hint: Some(HINT_MAINS.to_owned()),
     }];
     let direct = 8 - bump.min(8);
@@ -552,6 +555,7 @@ mod tests {
                 combine: CombineRule::Stack,
             },
             format: Some(one_race()),
+            false_start_limit: None,
             display_hint: None,
         });
         // One heat that never needs flying keeps the group honest about being complete.
@@ -567,6 +571,7 @@ mod tests {
                 }],
             },
             format: None,
+            false_start_limit: None,
             display_hint: None,
         });
         tree
@@ -603,6 +608,7 @@ mod tests {
                 combine: CombineRule::Stack,
             },
             format: Some(one_race()),
+            false_start_limit: None,
             display_hint: None,
         });
         tree.put(PhaseDef {
@@ -617,6 +623,7 @@ mod tests {
                 }],
             },
             format: None,
+            false_start_limit: None,
             display_hint: None,
         });
         tree.put(PhaseDef {
@@ -631,6 +638,7 @@ mod tests {
                 }],
             },
             format: None,
+            false_start_limit: None,
             display_hint: None,
         });
         tree

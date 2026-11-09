@@ -587,6 +587,11 @@ pub struct PhaseDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub format: Option<Format>,
+    /// How many false starts a pilot may make across every race beneath this phase. On
+    /// reaching it Grid proposes a disqualification, which the director confirms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub false_start_limit: Option<u32>,
     /// A layout name for views and overlays ("double-elimination", "mains-ladder"). The
     /// engine never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,12 +599,27 @@ pub struct PhaseDef {
     pub display_hint: Option<String>,
 }
 
+/// Identifies one protest.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(transparent)]
+#[ts(export, export_to = "bindings/")]
+pub struct ProtestId(pub String);
+
+/// How a protest ended. A protest is resolved once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum ProtestOutcome {
+    Upheld,
+    Denied,
+    Withdrawn,
+}
+
 /// A canonical event in the append-only log.
 ///
 /// Adapters append **raw observations** (lifecycle, [`SeatSeen`](Event::SeatSeen),
 /// [`Pass`], signal). The Director appends the **race facts** of `docs/primitives.md` §5.1.
-/// and the **lap rulings** of §5.7. The rest of the competition vocabulary (phases, penalties,
-/// protests) is added as those primitives are built. Raw observations are never mutated; a correction is a
+/// the **lap rulings** of §5.7, and the phase tree with its rulings (false starts,
+/// disqualification, locking, protests). Raw observations are never mutated; a correction is a
 /// new appended event.
 ///
 /// Externally tagged (the default serde representation): each variant serialises as
@@ -716,6 +736,55 @@ pub enum Event {
     RestartMarked { race: RaceId, crossing: LogRef },
     /// Undo a restart mark.
     RestartUnmarked { race: RaceId, crossing: LogRef },
+
+    // --- the phase tree and its rulings (docs/primitives.md §5.2, §5.7, §5.8) ---
+    /// A phase was added to the event's tree, or changed.
+    PhaseDefined { def: PhaseDef },
+    /// A phase was taken out of the tree.
+    PhaseRemoved { phase: PhaseId },
+    /// The director said a heat is done. Only this completes a "director decides" heat.
+    HeatDone { heat: PhaseId },
+    /// The director took that back.
+    HeatReopened { heat: PhaseId },
+    /// A pilot false started in a race. Recorded against the pilot so it can be counted;
+    /// the race itself is discarded and re-run.
+    FalseStart { race: RaceId, pilot: PilotId },
+    /// A false start was taken back.
+    FalseStartCleared { race: RaceId, pilot: PilotId },
+    /// The director disqualified a pilot from a phase: they are dropped from its later
+    /// lineups and ranked below everyone who kept racing.
+    Disqualified {
+        phase: PhaseId,
+        pilot: PilotId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        reason: Option<String>,
+    },
+    /// A disqualification was lifted.
+    Reinstated { phase: PhaseId, pilot: PilotId },
+    /// The director locked a phase: its results, and everything beneath it, are official.
+    PhaseLocked { phase: PhaseId },
+    /// The director unlocked a phase.
+    PhaseUnlocked { phase: PhaseId },
+    /// A protest was filed against a race.
+    ProtestFiled {
+        protest: ProtestId,
+        race: RaceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        by: Option<PilotId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
+    /// A protest was resolved.
+    ProtestResolved {
+        protest: ProtestId,
+        outcome: ProtestOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -1088,6 +1157,7 @@ mod tests {
                 ],
             },
             format: None,
+            false_start_limit: None,
             display_hint: None,
         };
         let group = PhaseDef {
@@ -1110,6 +1180,7 @@ mod tests {
                 combine: CombineRule::Stack,
             },
             format: None,
+            false_start_limit: Some(2),
             display_hint: Some("double-elimination".into()),
         };
         for def in [heat, group] {

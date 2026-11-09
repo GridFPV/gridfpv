@@ -36,6 +36,11 @@ pub trait Inputs {
     fn saved_races(&self, heat: &PhaseId) -> Vec<Vec<RaceEntry>>;
     /// Whether the director has said this heat is done.
     fn director_done(&self, heat: &PhaseId) -> bool;
+    /// The pilots the director has disqualified from exactly this phase. A disqualification
+    /// also covers every phase beneath it.
+    fn disqualified(&self, _phase: &PhaseId) -> Vec<PilotId> {
+        Vec::new()
+    }
 }
 
 /// One seat of a heat's lineup, as far as it can be resolved now.
@@ -67,6 +72,9 @@ pub struct Placed {
     pub pilot: PilotId,
     /// 1 for the top. Every pilot in the field has a different position.
     pub position: u32,
+    /// Whether the pilot is disqualified from this phase (here or in a phase above). A
+    /// disqualified pilot ranks below everyone who kept racing.
+    pub disqualified: bool,
     /// The numbers behind the place: for a heat, its standing; for a phase that holds
     /// phases, every race the pilot flew beneath it, pooled.
     pub result: Standing,
@@ -170,6 +178,39 @@ impl Tree {
         None
     }
 
+    /// Apply one logged event: a phase defined or removed. Other events are ignored.
+    pub fn apply(&mut self, event: &gridfpv_events::Event) {
+        match event {
+            gridfpv_events::Event::PhaseDefined { def } => self.put(def.clone()),
+            gridfpv_events::Event::PhaseRemoved { phase } => {
+                self.defs.remove(phase);
+                self.order.retain(|id| id != phase);
+            }
+            _ => {}
+        }
+    }
+
+    /// A phase and every phase above it, nearest first. Stops at a loop of parents.
+    pub fn with_ancestors<'a>(&'a self, id: &PhaseId) -> Vec<&'a PhaseDef> {
+        let mut out: Vec<&PhaseDef> = Vec::new();
+        let mut at = self.defs.get(id);
+        while let Some(def) = at {
+            if out.iter().any(|seen| seen.id == def.id) {
+                break;
+            }
+            out.push(def);
+            at = def.parent.as_ref().and_then(|parent| self.defs.get(parent));
+        }
+        out
+    }
+
+    /// Whether `phase` is `ancestor` or sits somewhere beneath it.
+    pub fn is_under(&self, phase: &PhaseId, ancestor: &PhaseId) -> bool {
+        self.with_ancestors(phase)
+            .iter()
+            .any(|def| &def.id == ancestor)
+    }
+
     /// Every heat beneath a phase (or the phase itself, if it is a heat), in tree order.
     fn heats_under(&self, id: &PhaseId, out: &mut Vec<PhaseId>, seen: &mut BTreeSet<PhaseId>) {
         if !seen.insert(id.clone()) {
@@ -211,6 +252,15 @@ struct Eval<'a> {
 }
 
 impl Eval<'_> {
+    /// The pilots disqualified from a phase: by a ruling on it, or on any phase above it.
+    fn disqualified(&self, id: &PhaseId) -> BTreeSet<PilotId> {
+        self.tree
+            .with_ancestors(id)
+            .iter()
+            .flat_map(|def| self.inputs.disqualified(&def.id))
+            .collect()
+    }
+
     /// The result for a phase, working it out first if needed. `None` when the phase does
     /// not exist or is part of a loop.
     fn phase(&mut self, id: &PhaseId) -> Option<&PhaseResult> {
@@ -231,6 +281,8 @@ impl Eval<'_> {
 
     fn heat(&mut self, def: &PhaseDef, seats: &[gridfpv_events::HeatSeat]) -> PhaseResult {
         let mut out = PhaseResult::default();
+        let disqualified = self.disqualified(&def.id);
+        let races = self.inputs.saved_races(&def.id);
         for seat in seats {
             let who = match &seat.source {
                 SeatSource::Pilot(pilot) => SeatWho::Pilot(pilot.clone()),
@@ -245,6 +297,14 @@ impl Eval<'_> {
                         position: *position,
                     },
                 },
+            };
+            // A disqualified pilot is dropped from later lineups: a heat with no saved race
+            // yet loses them. A heat already raced keeps its lineup as it was flown.
+            let who = match who {
+                SeatWho::Pilot(pilot) if races.is_empty() && disqualified.contains(&pilot) => {
+                    SeatWho::Nobody
+                }
+                other => other,
             };
             match &who {
                 // A pilot can only hold one seat; a second reference to them is ignored
@@ -264,7 +324,6 @@ impl Eval<'_> {
 
         let fallback = no_format();
         let format = self.tree.format_for(&def.id).unwrap_or(&fallback);
-        let races = self.inputs.saved_races(&def.id);
         let standings = heat_standings(&out.field, &races, format);
         // A heat whose seats have all resolved to nobody has nothing to race: it is done.
         let nobody_to_race =
@@ -277,14 +336,7 @@ impl Eval<'_> {
                     races.len(),
                     self.inputs.director_done(&def.id),
                 ));
-        out.ranking = standings
-            .into_iter()
-            .map(|standing| Placed {
-                pilot: standing.pilot.clone(),
-                position: standing.position,
-                result: standing,
-            })
-            .collect();
+        out.ranking = place(standings, &disqualified, |_, _| Ordering::Equal);
         out
     }
 
@@ -355,7 +407,7 @@ impl Eval<'_> {
         let mut heats = Vec::new();
         self.tree
             .heats_under(&def.id, &mut heats, &mut BTreeSet::new());
-        let mut pooled: Vec<Standing> = out
+        let pooled: Vec<Standing> = out
             .field
             .iter()
             .enumerate()
@@ -370,37 +422,19 @@ impl Eval<'_> {
                 Some((index, placed.position))
             })
         };
-        pooled.sort_by(|a, b| {
-            b.flew
-                .cmp(&a.flew)
-                .then_with(|| match combine {
-                    CombineRule::Stack => {
-                        let key = |s: &Standing| {
-                            place_in_children(&s.pilot).unwrap_or((usize::MAX, u32::MAX))
-                        };
-                        key(a).cmp(&key(b))
-                    }
-                    CombineRule::ByHeatPosition => {
-                        let key =
-                            |s: &Standing| place_in_children(&s.pilot).map_or(u32::MAX, |(_, p)| p);
-                        key(a).cmp(&key(b))
-                    }
-                    CombineRule::Measures(rule) => by_measures(rule, a, b),
-                })
-                .then_with(|| a.seed.cmp(&b.seed))
+        let disqualified = self.disqualified(&def.id);
+        out.ranking = place(pooled, &disqualified, |a, b| match combine {
+            CombineRule::Stack => {
+                let key =
+                    |s: &Standing| place_in_children(&s.pilot).unwrap_or((usize::MAX, u32::MAX));
+                key(a).cmp(&key(b))
+            }
+            CombineRule::ByHeatPosition => {
+                let key = |s: &Standing| place_in_children(&s.pilot).map_or(u32::MAX, |(_, p)| p);
+                key(a).cmp(&key(b))
+            }
+            CombineRule::Measures(rule) => by_measures(rule, a, b),
         });
-        out.ranking = pooled
-            .into_iter()
-            .enumerate()
-            .map(|(index, mut result)| {
-                result.position = index as u32 + 1;
-                Placed {
-                    pilot: result.pilot.clone(),
-                    position: result.position,
-                    result,
-                }
-            })
-            .collect();
 
         out.complete = !out.waiting
             && !children.is_empty()
@@ -409,6 +443,43 @@ impl Eval<'_> {
                 .all(|child| self.done.get(child).is_some_and(|result| result.complete));
         out
     }
+}
+
+/// Put results in their final order and number them 1 to n. The order is: pilots still in
+/// the phase above disqualified pilots, pilots who flew above pilots who never did, then
+/// `rule`, then seed. For a heat `results` arrive already sorted by its ranking rule, and
+/// the stable sort keeps that order within each group.
+fn place(
+    mut results: Vec<Standing>,
+    disqualified: &BTreeSet<PilotId>,
+    rule: impl Fn(&Standing, &Standing) -> Ordering,
+) -> Vec<Placed> {
+    let out = |s: &Standing| disqualified.contains(&s.pilot);
+    let presorted: BTreeMap<PilotId, usize> = results
+        .iter()
+        .enumerate()
+        .map(|(index, s)| (s.pilot.clone(), index))
+        .collect();
+    results.sort_by(|a, b| {
+        out(a)
+            .cmp(&out(b))
+            .then_with(|| b.flew.cmp(&a.flew))
+            .then_with(|| rule(a, b))
+            .then_with(|| presorted[&a.pilot].cmp(&presorted[&b.pilot]))
+    });
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut result)| {
+            result.position = index as u32 + 1;
+            Placed {
+                pilot: result.pilot.clone(),
+                position: result.position,
+                disqualified: disqualified.contains(&result.pilot),
+                result,
+            }
+        })
+        .collect()
 }
 
 /// One pilot's numbers pooled across several heats.
@@ -600,6 +671,7 @@ mod tests {
                     .collect(),
             },
             format: None,
+            false_start_limit: None,
             display_hint: None,
         }
     }
@@ -616,6 +688,7 @@ mod tests {
             parent: parent.map(pid),
             kind: PhaseKind::Group { field, combine },
             format: None,
+            false_start_limit: None,
             display_hint: None,
         }
     }
