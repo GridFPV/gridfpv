@@ -2,7 +2,7 @@
 import type { AdapterId } from "./AdapterId";
 import type { CompetitorRef } from "./CompetitorRef";
 import type { GateIndex } from "./GateIndex";
-import type { HeatId } from "./HeatId";
+import type { RaceId } from "./RaceId";
 import type { SignalContext } from "./SignalContext";
 import type { SourceTime } from "./SourceTime";
 
@@ -37,11 +37,8 @@ gate?: GateIndex,
  */
 signal?: SignalContext, 
 /**
- * The heat this pass was recorded **for** — stamped by the Director's bridge at append
- * time (the adapter doesn't know the heat; the bridge does, since it only routes passes
- * while a heat is Running). `None` on a legacy log (pre-tagging), which attributes
- * positionally as before. The tag makes attribution robust against heat-span events
- * landing mid-race: scheduling/filling another heat used to close the running heat's
- * positional span and silently drop its remaining laps from the result.
+ * The race this pass was recorded **for** — stamped by the Director at append time
+ * (the adapter doesn't know the race; the Director does). `None` for a pass logged
+ * while no race was running. See `docs/primitives.md` §5.10.
  */
-heat?: HeatId, };
+race?: RaceId, };

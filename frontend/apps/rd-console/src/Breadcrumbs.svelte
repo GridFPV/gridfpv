@@ -2,14 +2,14 @@
   /**
    * Breadcrumbs — the app-level trail for the two-level IA (#118).
    *
-   * The console is now a **home hub of pages** (Pilots / Events / Timers) plus the in-event
-   * workspace. This slim trail sits at the top of every app-level page (and the workspace's
-   * context bar) so the RD always knows where they are and can get **Home** from anywhere:
+   * The console is a **home hub of pages** (Events / Pilots / Classes) plus the open event's
+   * page. This slim trail sits at the top of every page so the RD always knows where they are
+   * and can get **Home** from anywhere:
    *
-   *   Home › Timers
    *   Home › Pilots
-   *   Home › Events            (the picker)
-   *   Home › Events › Friday Night Series   (the workspace, event name as the leaf)
+   *   Home › Classes
+   *   Home › Events
+   *   Home › Events › Friday Night Series   (the open event, its name as the leaf)
    *
    * `Home` is always a button (the hub root); intermediate crumbs may be buttons (navigable)
    * or plain text; the **current** crumb (last) is rendered as plain, aria-current text. The

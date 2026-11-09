@@ -3,14 +3,13 @@
  *
  * Hands-on, full-stack debugging without a test: boot the real Director (serving the built RD
  * console SPA) with the same harness the e2e uses, stream its server log live to this terminal,
- * and print the console URL + RD token so you can open a browser and drive a sim race by hand —
+ * and print the console URL + RD token so you can open a browser and drive the console by hand —
  * server log here, browser console in the browser devtools, side by side.
  *
  * Run it via the frontend-root `observe` npm script:  `npm run observe`
  * (build the SPA first — `npm run build` — or the Director serves the API only).
  *
- * Env passthrough: GRIDFPV_RD_TOKEN, GRIDFPV_ADDR's port (GRIDFPV_PORT), GRIDFPV_SIM_LAPS,
- * GRIDFPV_SIM_LAP_MS all override the defaults below.
+ * Env passthrough: GRIDFPV_RD_TOKEN and the port (GRIDFPV_PORT) override the defaults below.
  */
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,18 +30,15 @@ async function main(): Promise<void> {
   const director = await startDirector({
     port,
     token,
-    assets: dist,
-    simLaps: process.env.GRIDFPV_SIM_LAPS ? Number(process.env.GRIDFPV_SIM_LAPS) : 4,
-    simLapMs: process.env.GRIDFPV_SIM_LAP_MS ? Number(process.env.GRIDFPV_SIM_LAP_MS) : 600
+    assets: dist
   });
 
   console.log('');
   console.log('────────────────────────────────────────────────────────────────────');
   console.log(`  RD console : ${director.baseUrl}/`);
   console.log(`  RD token   : ${director.token}`);
-  console.log('  Open the console URL, sign in with the address + token above, and');
-  console.log('  drive a heat by hand. Server log streams below; open browser');
-  console.log('  devtools for the browser console.');
+  console.log('  Open the console URL; enter the token above if a write asks for one.');
+  console.log('  Server log streams below; open browser devtools for the browser console.');
   console.log('  Ctrl-C to stop.');
   console.log('────────────────────────────────────────────────────────────────────');
   console.log('');

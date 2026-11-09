@@ -2,7 +2,7 @@
 
 /**
  * A source-local competitor handle: a node seat, a sim player name, a transponder
- * id. Bound to a GridFPV pilot later by a *registration* action — never by the
- * adapter (see Architecture §9). The adapter only reports the refs it sees.
+ * id. Bound to a GridFPV pilot later by the Director — never by the adapter. The
+ * adapter only reports the refs it sees.
  */
 export type CompetitorRef = string;

@@ -1,48 +1,40 @@
-//! Auth & authorization — the policy gate in front of the read/realtime/control
-//! contract (protocol.html §5, §9.4) — issue #44.
+//! Auth & authorization — the policy gate in front of the HTTP API.
 //!
-//! §5 fixes the shape of the gate, not its credential format ("the exact token/session
-//! format … is deliberately left open"): the **read** half is open or lightly-tokened
-//! on the LAN, while **control** "requires the RD's authenticated role and runs only
-//! against the Director". §9.4 resolves the open auth decisions this module implements:
+//! The **read** half is open on the LAN, while every **write** requires the RD's
+//! authenticated role once a token is configured. The pieces:
 //!
 //! - **Opaque bearer tokens** back a server-side [`Session`] carrying a [`Role`]. They
 //!   are opaque random strings (not self-describing JWTs) so the server is the only
 //!   authority and a token is **revoked** by deleting its session — no key rotation, no
 //!   token blacklist, instant effect ([`TokenStore::revoke`]).
 //! - A lightweight **read-only join-token** (QR/URL-friendly) authenticates a
-//!   [`Role::ReadOnly`] session for LAN reads but is **never** accepted on control — a
-//!   spectator who scans the venue QR can watch, never run the race ([`Role::can_control`]).
+//!   [`Role::ReadOnly`] session but is **never** accepted on a write — a spectator who
+//!   scans the venue QR can watch, never run the race ([`Role::can_control`]).
 //!
-//! # How control is gated (the one chokepoint)
+//! # How writes are gated (the one chokepoint)
 //!
-//! [`ControlAuth`](crate::control_handler::ControlAuth) is the single extractor every
-//! control route demands first. Its body calls [`TokenStore::authenticate_control`] with
-//! the request's `Authorization: Bearer …`: a valid **RD-role** token yields the marker,
-//! anything else (no header, a read-only/join token, a revoked or unknown token) is
-//! [`ProtocolError`] of [`ErrorCode::Unauthorized`] → HTTP 401 / a failed ack. The
-//! handlers never see the credential; gating both `GET`+`POST /control` is one call.
+//! [`ControlAuth`] is the single extractor every RD-gated route demands first. Its body
+//! calls [`TokenStore::authenticate_control`] with the request's `Authorization: Bearer …`:
+//! a valid **RD-role** token yields the marker, anything else (no header, a read-only/join
+//! token, a revoked or unknown token) is [`ProtocolError`] of [`ErrorCode::Unauthorized`]
+//! → HTTP 401. The handlers never see the credential.
+//!
+//! With **no RD token configured** the gate is open (full trust — the loopback / trusted
+//! LAN default); see [`TokenStore::has_control_credential`].
 //!
 //! # How reads are treated
 //!
-//! Reads stay **open on the LAN** (the §5 default): the snapshot `GET`s and the `/stream`
-//! WS subscribe do not *require* a token, matching the pre-#44 behaviour and the "a phone
-//! on the venue Wi-Fi just watches" use case. A read-only **join-token** is *accepted*
-//! where presented (it authenticates a [`Role::ReadOnly`] session) so the same surface
-//! works unchanged when a deployment chooses to gate reads, but absence of a token is not
-//! an error on a read path. Authority only ever *narrows* on control. (The Cloud's
-//! account gate in front of the identical read contract is a later, separate concern.)
+//! Reads stay **open on the LAN**: no `GET` requires a token, matching the "a phone on the
+//! venue Wi-Fi just watches" use case. [`TokenStore::authenticate_read`] is the read-side
+//! policy (a token is optional, but a present one must be valid); no route in the skeleton
+//! applies it yet.
 //!
 //! # Deferred (noted, not built)
 //!
 //! - **Persistence.** The [`TokenStore`] is in-memory: tokens live for the process and a
-//!   restart invalidates every session (the RD re-issues). Durable sessions are a later
-//!   concern when the Director gains a config/identity store.
-//! - **Real signing.** The join-token is an opaque random string, not yet an
-//!   HMAC/JWT-signed capability — it is validated by store lookup like the bearer token.
-//!   Self-validating signed join-tokens (so an offline relay can verify one without the
-//!   issuing store) land with the Cloud/broadcast work; the wire surface (a token string
-//!   on the subscribe) does not change when it does.
+//!   restart invalidates every session (the RD re-issues).
+//! - **Real signing.** The join-token is an opaque random string, not an HMAC/JWT-signed
+//!   capability — it is validated by store lookup like the bearer token.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -54,8 +46,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::error::{ErrorCode, ProtocolError};
+use crate::events::EventRegistry;
 
-/// The body of a successful `POST /auth/join-token` (protocol.html §5, §9.4) — issue #63.
+/// The body of a successful `POST /events/{event_id}/auth/join-token`.
 ///
 /// A freshly-minted **read-only** join token, returned to an authenticated RD so it can
 /// hand it (e.g. as a venue QR / share URL) to a spectator. The token authenticates LAN
@@ -112,8 +105,7 @@ pub struct Session {
 /// [`issue_join_token`](TokenStore::issue_join_token)) and **revocable**
 /// ([`revoke`](TokenStore::revoke)) — revocation is instant because the token carries no
 /// authority of its own, only a key into this map. Cloning shares the one store (it is an
-/// `Arc<RwLock<…>>`), so every axum handler and the [`AppState`](crate::app::AppState) it
-/// rides on consult the same sessions.
+/// `Arc<RwLock<…>>`), so every axum handler consults the same sessions.
 ///
 /// In-memory by design for v0.4 (persistence deferred — see the module docs).
 #[derive(Clone, Default)]
@@ -223,10 +215,8 @@ impl TokenStore {
     /// - **A control credential IS configured** ⇒ control is **gated**: a present control token
     ///   is validated (unknown/revoked or read-only ⇒ rejected); no token ⇒ rejected.
     ///
-    /// This is the whole control policy in one place; [`ControlAuth`] is the only caller
-    /// (see [`crate::control_handler`]). The loopback/remote split is #80 (not built here).
-    ///
-    /// [`ControlAuth`]: crate::control_handler::ControlAuth
+    /// This is the whole control policy in one place; [`ControlAuth`] is the only caller.
+    /// The loopback/remote split is #80 (not built here).
     pub fn authenticate_control(&self, token: Option<&str>) -> Result<Session, ProtocolError> {
         // Full-trust first: when no control credential is configured, control is OPEN —
         // admit as RD regardless of any token presented. A leftover/stale token (e.g. from
@@ -327,26 +317,33 @@ pub fn bearer_token(parts: &Parts) -> Option<String> {
     }
 }
 
-/// An axum extractor that resolves the caller's [`Session`] from the bearer token, for
-/// **read** paths that want to know the caller's role (open if absent).
+/// The **auth chokepoint** for every RD-gated write.
 ///
-/// `Some(session)` for a valid token of either role; `None` for an anonymous (no-token)
-/// caller, which reads allow (protocol.html §5). A *present but invalid* token is a
-/// rejection — so a stale join-token surfaces as [`ErrorCode::Unauthorized`] rather than
-/// silently downgrading to anonymous.
-#[derive(Debug, Clone)]
-pub struct ReadAuth(pub Option<Session>);
+/// An axum extractor a gated route demands *before* its handler runs: it reads the
+/// caller's `Authorization: Bearer <token>` and requires a token resolving to a
+/// **control-authorized** ([`Role::Rd`]) session in the shared [`TokenStore`]. A valid RD
+/// token yields the marker; anything else — no header, a read-only/join token, an unknown
+/// or revoked token — is rejected with [`ErrorCode::Unauthorized`] (HTTP 401). The whole
+/// policy lives in [`TokenStore::authenticate_control`]; this extractor is just where it is
+/// applied.
+#[derive(Debug, Clone, Copy)]
+pub struct ControlAuth {
+    // A private field so `ControlAuth` can only be minted by the extractor (the auth
+    // chokepoint), never constructed ad hoc by a handler that wants to skip the check.
+    _private: (),
+}
 
-impl FromRequestParts<crate::app::AppState> for ReadAuth {
+impl FromRequestParts<EventRegistry> for ControlAuth {
     type Rejection = ProtocolError;
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &crate::app::AppState,
+        registry: &EventRegistry,
     ) -> Result<Self, Self::Rejection> {
+        // The token store is Director-wide, so one RD token authorizes every write.
         let token = bearer_token(parts);
-        let session = state.tokens().authenticate_read(token.as_deref())?;
-        Ok(ReadAuth(session))
+        registry.tokens().authenticate_control(token.as_deref())?;
+        Ok(ControlAuth { _private: () })
     }
 }
 

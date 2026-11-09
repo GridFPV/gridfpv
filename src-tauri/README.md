@@ -8,7 +8,7 @@ Director and opens the RD console in a native window. It is **purely additive** 
 > unchanged:
 >
 > ```sh
-> cargo build -p gridfpv-app --features live   # builds the `gridfpv` Director binary
+> cargo build -p gridfpv-app   # builds the `gridfpv` Director binary
 > ./target/debug/gridfpv                        # serves API + RD console on :8080
 > ```
 >

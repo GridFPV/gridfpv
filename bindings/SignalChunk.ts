@@ -5,7 +5,7 @@ import type { SourceTime } from "./SourceTime";
 
 /**
  * A contiguous run of per-tick RSSI samples captured from a signal-capable timer
- * (RotorHazard first — marshaling.html §3.2, the signal-as-evidence layer).
+ * (RotorHazard first).
  *
  * The trace is the **evidence** a marshal later reviews a call against. It is captured
  * **chunked and append-incrementally** rather than one fat per-heat blob: a hardware timer
@@ -13,8 +13,7 @@ import type { SourceTime } from "./SourceTime";
  * deterministically with the [`Pass`]es in the same log — a single buffered-until-heat-end
  * event would be lost on an abort. Each chunk is a window of `rssi` samples beginning at
  * `from` on the source clock, one every `period_micros`; concatenating a competitor's chunks
- * in append order reconstructs the whole trace (the projection's job, see
- * `gridfpv_projection::signal_trace`).
+ * in append order reconstructs the whole trace (a fold's job).
  *
  * `rssi` is kept as `u16` — RotorHazard's filtered ADC counts are integers, so this is
  * compact, exact, and free of the float-equality hazards a `f32` trace would carry into the
@@ -28,7 +27,7 @@ import type { SourceTime } from "./SourceTime";
  * subscribe to). So a chunk captured from the live stream samples at the emit cadence — one
  * `rssi` value per `node_data` tick — which is faithful to *what RH exposes live*, but is
  * coarser than the detector's internal sampling. This is the load-bearing fidelity bound
- * (marshaling.html §4) to confirm on real hardware.
+ * to confirm on real hardware.
  */
 export type SignalChunk = { 
 /**

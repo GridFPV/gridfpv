@@ -29,7 +29,7 @@ fn sample_events() -> Vec<Event> {
             sequence: Some(1),
             gate: GateIndex::LAP,
             signal: None,
-            heat: None,
+            race: None,
         }),
         Event::Pass(Pass {
             adapter: adapter.clone(),
@@ -38,7 +38,7 @@ fn sample_events() -> Vec<Event> {
             sequence: Some(2),
             gate: GateIndex(2),
             signal: None,
-            heat: None,
+            race: None,
         }),
         Event::SessionEnded {
             adapter: adapter.clone(),

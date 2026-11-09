@@ -141,7 +141,8 @@ about RH's behaviour — that file is the record.
 `cargo xtask ci` = `fmt` → `lint` → `test` → `live-check` → `gen` → `barrel`. The
 frontend adds `build`/`check`/`lint`/`test`/`contract`, and `cargo xtask e2e` runs the
 browser suite in Microsoft's Playwright image. **CI runs all of it**, including the e2e
-job (~20 min).
+job. (After the 2026-11 cut to a skeleton the e2e suite is 9 tests and takes seconds, and
+`live-check` is a no-op until there is a live target again. Both grow back with the rebuild.)
 
 Each of those last few gates exists because something slipped through, and the pattern
 is always the same shape — *a check that could not see the thing it was supposed to check*:

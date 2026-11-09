@@ -4,14 +4,13 @@ import type { CompetitorRef } from "./CompetitorRef";
 
 /**
  * The **dense, full-fidelity** per-node RSSI history for a heat — the detector's own internal
- * sampling, pulled from RotorHazard's request-driven `current_marshal_data` at heat end
- * (marshaling.html §3.2, the "RSSI fidelity" risk in §4).
+ * sampling, pulled from RotorHazard's request-driven `current_marshal_data` at heat end.
  *
  * Unlike the live-streamed [`SignalChunk`] (one aggregate sample per `node_data` heartbeat emit,
  * the *coarse* trace), this is the trace RotorHazard's own marshal page reviews against: every
  * per-tick sample the node recorded, with its **own** sample time. A signal-capable adapter pulls
- * it once when a heat reaches `DONE` and appends one `SignalHistory` per node. The `signal_trace`
- * projection **prefers** this dense history over the coarse [`SignalChunk`] samples for a
+ * it once when a heat reaches `DONE` and appends one `SignalHistory` per node. A fold over the
+ * trace should **prefer** this dense history over the coarse [`SignalChunk`] samples for a
  * competitor when both are present (the dense trace supersedes the streaming approximation).
  *
  * # Whole trace or slice — [`base`](SignalHistory::base) says which (#392)
@@ -29,7 +28,7 @@ import type { CompetitorRef } from "./CompetitorRef";
  * heartbeat. The detector's internal history is **not** guaranteed uniform — RotorHazard reports a
  * parallel `history_times`/`history_values` pair — so this carries the per-sample times directly
  * (`times[i]` is the source-clock instant of `rssi[i]`), preserving native fidelity with **no
- * resampling** (the load-bearing fidelity caution, marshaling.html §4). Times are race-relative
+ * resampling** (the load-bearing fidelity caution). Times are race-relative
  * microseconds on the same clock as [`Pass::at`] and the chunk time base, so lap markers and the
  * dense trace align.
  */

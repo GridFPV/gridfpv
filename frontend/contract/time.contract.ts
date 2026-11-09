@@ -1,13 +1,13 @@
 /**
  * `GET /time` contract: the **clock-skew keystone**.
  *
- * The RD console runs on a separate device from the Director, so every UI clock derives from
- * `session.serverNowMs()` — an offset measured against `GET /time` (`Date.now() + offset`),
- * never the local `Date.now()` alone. That whole scheme hangs off this one tiny response
- * shape: `{ now_micros }`, the server wall clock in **microseconds** since the Unix epoch as
- * a plain JSON `number` (the i64 → number wire rule, seam 4). If the field were renamed,
- * nested, stringified, or switched to milliseconds, every countdown/race clock in the console
- * would silently skew — so the shape is pinned here against the real Director.
+ * The RD console runs on a separate device from the Director, so a console clock must count
+ * from the server's time: an offset measured against `GET /time`, never the local `Date.now()`
+ * alone. That scheme hangs off this one tiny response shape: `{ now_micros }`, the server wall
+ * clock in **microseconds** since the Unix epoch as a plain JSON `number` (the i64 → number wire
+ * rule). If the field were renamed, nested, stringified, or switched to milliseconds, every
+ * clock built on it would silently skew — so the shape is pinned here against the real Director.
+ * (No console screen reads it right now; the race clock that did is on the port list.)
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -41,7 +41,7 @@ describe('GET /time serves the server wall clock as { now_micros }', () => {
     const { status, json } = await getTime();
     expect(status).toBe(200);
 
-    // Exactly the one field, a plain JSON number (never bigint/string — seam 4),
+    // Exactly the one field, a plain JSON number (never bigint/string),
     // and a safe integer (cursors/times are bounded well below 2^53).
     expect(Object.keys(json as object)).toEqual(['now_micros']);
     const now = (json as { now_micros: unknown }).now_micros;

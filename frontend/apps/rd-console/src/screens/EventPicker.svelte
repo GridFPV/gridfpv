@@ -1,26 +1,18 @@
 <script lang="ts">
   /**
-   * EventPicker — the home hub's **Events** page (#118; was the landing screen, #72 Slice 1b).
+   * EventPicker — the home hub's **Events** page (#118).
    *
-   * In the two-level IA the home hub is the landing and this is the **Events page** (Home ›
-   * Events) — the select/create surface. On load it reads the open event list (`listEvents()`,
-   * no token) and renders the events the RD has created. Selecting one enters its workspace.
-   * "+ New event" opens a name `Dialog` → `createEvent(name)` (which obtains the RD token
-   * lazily) → enters it, then hands off to the guided setup wizard (#97).
+   * The select/create/delete surface for events (Home › Events). On load it reads the open event
+   * list (`listEvents()`, no token) and renders the events the RD has created. Selecting one
+   * makes it the Director's active event and opens it. "+ New event" opens a `Dialog` →
+   * `createEventAndEnter(name)` → opens the new event.
    *
-   * **The list can be empty, and that is a first run, not an error** (#414): the built-in
-   * in-memory Practice event is gone, so a brand-new Director genuinely has zero events. The
-   * empty state is therefore the *primary* call to action — "Create your first event" — and it
-   * opens the same create dialog, whose "Set up event after creating" default walks the RD
-   * straight into the wizard. An RD who wants a practice session creates an event with an open-practice round;
-   * that event persists, takes a roster, and can be marshaled afterwards.
+   * **The list can be empty, and that is a first run, not an error** (#414): a brand-new Director
+   * has zero events. The empty state is therefore the *primary* call to action — "Create your
+   * first event" — and it opens the same create dialog.
    *
-   * The old picker-header "Timers" modal entry is **gone** — app-level timer management is now its
-   * own page in the hub ({@link TimersPage}). Breadcrumbs (Home › Events) + a Home button get you
-   * back to the hub from here.
-   *
-   * Auth is lazy here: listing/browsing needs no token; only **creating** an event prompts
-   * for the RD token (handled by the session's token provider). The Director address is the
+   * Auth is lazy here: listing needs no token; a write prompts for the RD token only when the
+   * Director refuses it (handled by the session's token provider). The Director address is the
    * page's own origin — there is no address to type.
    */
   import { Badge, Button, Card, Dialog, Field, Input, toast } from '@gridfpv/components';
@@ -29,17 +21,7 @@
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
 
-  let {
-    session,
-    onhome,
-    onsetup = undefined
-  }: {
-    session: Session;
-    onhome: () => void;
-    /** Called after a brand-new event is created + entered, when the RD opted to set it up (the
-     *  guided wizard, race redesign Slice 7). The shell opens the wizard once the workspace mounts. */
-    onsetup?: () => void;
-  } = $props();
+  let { session, onhome }: { session: Session; onhome: () => void } = $props();
 
   type LoadState =
     | { kind: 'loading' }
@@ -50,8 +32,8 @@
 
   /**
    * The id of the Director's **active event** (#91), if any — the event currently live. Read on
-   * load (open, no token) so the picker can mark it with an "Active" pill, even when this console
-   * is browsing the picker after a "Switch event" (which leaves the server's active event set).
+   * load (open, no token) so the page can mark it with an "Active" pill, even when this console
+   * does not have it open (leaving an event here leaves the server's active event set).
    * `undefined` when nothing is active or the read fails: no pill, never blocks the list.
    */
   let activeEventId = $state<string | undefined>(undefined);
@@ -105,7 +87,7 @@
     }
   }
 
-  // The "new event" dialog. Name-only is the one-click default (#72, Slice 1b C); the
+  // The "new event" dialog. Name-only is the one-click default; the
   // optional descriptive fields live behind a collapsible "Add details" section.
   let newOpen = $state(false);
   let newName = $state('');
@@ -116,9 +98,6 @@
   let detailsOpen = $state(false);
   let creating = $state(false);
   let newError = $state<string | undefined>(undefined);
-  // Offer the guided setup wizard for a brand-new event (race redesign Slice 7), default on — a new
-  // event has nothing configured, so walking the stages is the natural next step. Editable later.
-  let setUpAfter = $state(true);
 
   async function load() {
     loadState = { kind: 'loading' };
@@ -155,8 +134,8 @@
   }
 
   /**
-   * The subtle row subtitle: show the RD-supplied **date** and **location** where present
-   * (#72, Slice 1b C), falling back to the created date. The full context header is #85.
+   * The subtle row subtitle: show the RD-supplied **date** and **location** where present,
+   * falling back to the created date.
    */
   function rowSubtitle(ev: EventMeta): string {
     const parts: string[] = [];
@@ -168,8 +147,8 @@
 
   async function enter(meta: EventMeta) {
     // Persist the choice as the Director's active event (#90) so a reload/another client resumes
-    // into it, then enter. A gated Director may prompt for the RD token (handled in the session);
-    // a cancelled prompt or a transport error surfaces as a toast and stays on the picker.
+    // into it, then open it. A gated Director may prompt for the RD token (handled in the session);
+    // a cancelled prompt or a transport error surfaces as a toast and stays on this page.
     try {
       const chosen = await session.chooseEvent(meta);
       if (!chosen) toast.info('A control token is required to switch the active event.');
@@ -186,7 +165,6 @@
     newOrganizer = '';
     detailsOpen = false;
     newError = undefined;
-    setUpAfter = true;
     newOpen = true;
   }
 
@@ -215,9 +193,6 @@
       }
       newOpen = false;
       toast.success(`Created “${meta.name}”.`);
-      // Opt-in: kick off the guided setup wizard for the freshly-created event. The shell defers
-      // opening it until the workspace mounts (the embedded stages need the active event).
-      if (setUpAfter) onsetup?.();
     } catch (err) {
       newError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -228,8 +203,8 @@
 
 <div class="picker">
   <div class="picker-inner">
-    <!-- The brand is the home root here too (#118): the directory pages carry the same
-         top-left GridFPV mark as the workspace sidebar, leaving for the hub. -->
+    <!-- The brand is the home root (#118): every page carries the same top-left GridFPV mark,
+         leaving for the hub. -->
     <div class="brand-row"><Brand onclick={onhome} /></div>
     <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Events' }]} />
 
@@ -257,14 +232,13 @@
       <section class="created" aria-label="Events">
         {#if events.length === 0}
           <!-- First run (#414): no events exist yet, so this is the whole screen's job. It is a
-               call to action, not an "empty list" apology — creating an event is step one, and
-               the dialog's "Set up event after creating" default continues into the wizard (#97). -->
+               call to action, not an "empty list" apology — creating an event is step one. -->
           <div class="first-run">
             <span class="first-run-icon" aria-hidden="true">◆</span>
             <h2 class="first-run-title">Create your first event</h2>
             <p class="first-run-sub">
-              An event holds your pilots, classes, rounds, and results — including a practice round
-              to warm up on. Setting one up takes a minute, and you can change everything later.
+              An event is one race day. Give it a name to get started — the date, location and other
+              details are optional.
             </p>
             <Button variant="primary" onclick={openNew}>Create your first event</Button>
           </div>
@@ -312,7 +286,7 @@
         autocomplete="off"
       />
     </Field>
-    <!-- Optional details behind a collapsible section — name-only stays one-click (#72 C). -->
+    <!-- Optional details behind a collapsible section — name-only stays one-click. -->
     <details class="details" bind:open={detailsOpen}>
       <summary>Add details (optional)</summary>
       <div class="details-grid">
@@ -345,18 +319,6 @@
         </Field>
       </div>
     </details>
-
-    <!-- Opt into the guided setup wizard after creating (race redesign Slice 7) — a first-pass over
-         the event's stages (classes, roster, timer, first round). Everything stays editable later. -->
-    <label class="setup-opt">
-      <input type="checkbox" bind:checked={setUpAfter} aria-label="Set up event after creating" />
-      <span class="setup-opt-text">
-        <span class="setup-opt-title">Set up event</span>
-        <span class="setup-opt-sub"
-          >Walk classes, roster, timer, and a first round after creating.</span
-        >
-      </span>
-    </label>
   </form>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (newOpen = false)} disabled={creating}>Cancel</Button>
@@ -373,9 +335,8 @@
     <div class="delete-body" aria-label="Delete event confirmation">
       <p class="delete-warning">
         This <strong>permanently deletes</strong> the event
-        <strong>“{deleteTarget.name}”</strong> and <strong>all of its data</strong> — every heat,
-        registration, lap, result, and round. This <strong>cannot be undone</strong> and the data is
-        <strong>unrecoverable</strong>.
+        <strong>“{deleteTarget.name}”</strong> and <strong>all of its data</strong>. This
+        <strong>cannot be undone</strong> and the data is <strong>unrecoverable</strong>.
       </p>
       <!-- The exact name to type, in a dedicated selectable box. `user-select: all` means one click
            (or triple-click) highlights the WHOLE name, so the RD can copy it by hand. This only makes
@@ -718,37 +679,5 @@
     flex-direction: column;
     gap: var(--gf-space-3);
     margin-top: var(--gf-space-3);
-  }
-  .setup-opt {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--gf-space-3);
-    padding: var(--gf-space-3);
-    border: 1px solid var(--gf-border-subtle);
-    border-radius: var(--gf-radius-md);
-    background: var(--gf-surface-alt);
-    cursor: pointer;
-  }
-  .setup-opt input {
-    width: 1.1rem;
-    height: 1.1rem;
-    margin-top: 0.15rem;
-    accent-color: var(--gf-accent);
-    flex-shrink: 0;
-    cursor: pointer;
-  }
-  .setup-opt-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .setup-opt-title {
-    font-size: var(--gf-font-size-sm);
-    font-weight: var(--gf-font-weight-semibold);
-    color: var(--gf-text);
-  }
-  .setup-opt-sub {
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
   }
 </style>

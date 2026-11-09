@@ -7,20 +7,7 @@
 # including any actual vulnerability — therefore breaks CI until it is handled.
 
 [advisories]
-ignore = [
-    # `backoff` is unmaintained (RUSTSEC-2025-0012). It is pulled in ONLY as a
-    # transitive dependency of `rust_socketio` 0.6.0 (the latest published
-    # release), behind the optional `live` feature of `gridfpv-adapters` used by
-    # the dockerized-RotorHazard e2e suite — never in shipped/default builds.
-    # No patched version exists and 0.6.0 is upstream's newest release, so there
-    # is no `cargo update` fix available. This is an unmaintained warning, not a
-    # vulnerability. Revisit when `rust_socketio` cuts a release that drops the
-    # `backoff` dependency (or when we replace the `live` socket.io client).
-    "RUSTSEC-2025-0012",
-
-    # `instant` is unmaintained (RUSTSEC-2024-0384). Transitive dependency of
-    # `backoff` (see above) → `rust_socketio` 0.6.0, same optional `live`-only
-    # code path. No patched version; resolved automatically once the `backoff`
-    # chain is dropped upstream. Unmaintained warning, not a vulnerability.
-    "RUSTSEC-2024-0384",
-]
+# Nothing is accepted right now. (The two `rust_socketio` → `backoff` → `instant`
+# unmaintained warnings left with the RotorHazard transport; if the rewritten adapter
+# brings that client back, they need triaging again.)
+ignore = []

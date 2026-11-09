@@ -2,8 +2,8 @@
 import type { EventId } from "./EventId";
 
 /**
- * The body of `PUT /active-event` — the id of the event to make the Director's active one
- * (issue #90). The id must name a known event, else a typed 404 (`UnknownScope`).
+ * The body of `PUT /active-event` — the id of the event to make the Director's active one.
+ * The id must name a known event, else a typed 404 (`UnknownScope`).
  */
 export type SetActiveEventRequest = { 
 /**

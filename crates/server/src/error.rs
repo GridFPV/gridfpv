@@ -1,7 +1,6 @@
 //! The single shared error shape (protocol.html §9.8, "Error model").
 //!
-//! The contract uses **one** error type across every path — HTTP snapshot reads, the
-//! WS change stream, and control acknowledgements — defined once in Rust like the
+//! The contract uses **one** error type across every path, defined once in Rust like the
 //! rest of the wire contract. A client therefore handles auth failure, an unknown
 //! scope, a stale cursor, or a version mismatch through a single uniform shape rather
 //! than a different envelope per surface.
@@ -25,22 +24,23 @@ use ts_rs::TS;
 #[ts(export, export_to = "bindings/")]
 pub enum ErrorCode {
     /// The caller is not authenticated, or not authorized for this scope / action
-    /// (protocol.html §5). Covers a missing/invalid read token and an unprivileged
-    /// client attempting the control path.
+    /// (protocol.html §5). Covers a missing/invalid token and an unprivileged client
+    /// attempting a write.
     Unauthorized,
-    /// The requested [`Scope`](crate::scope::Scope) does not exist or addresses
-    /// nothing the server can serve (an unknown heat id, a pilot not in the event).
+    /// The addressed thing does not exist (an unknown event, pilot or class id), or the
+    /// path matches no API route.
     UnknownScope,
-    /// The client presented a resume [`Cursor`](crate::stream::Cursor) older than the
-    /// server's retained window (protocol.html §3): the gap cannot be replayed and the
-    /// client must **re-snapshot**. The distinguished "go re-snapshot" signal.
+    /// The client presented a resume cursor older than the server's retained window
+    /// (protocol.html §3): the gap cannot be replayed and the client must **re-snapshot**.
+    /// Nothing in the skeleton returns this yet — there is no change stream — but the code
+    /// stays in the contract for when the stream is ported back.
     StaleCursor,
     /// The client's [`ContractVersion`](crate::ContractVersion) falls outside the band
     /// the server serves (protocol.html §7) — the "too old / too new, please refresh"
     /// signal as an error on a path that cannot carry a [`ServerHello`](crate::ServerHello).
     VersionMismatch,
-    /// The request was malformed — an unparseable body, an illegal command for the
-    /// current state, a bad scope expression.
+    /// The request was malformed or not allowed — a blank required field, an edit to a
+    /// read-only built-in.
     BadRequest,
     /// An unexpected server-side failure. The catch-all an older client also maps an
     /// unknown future code onto.
@@ -49,9 +49,8 @@ pub enum ErrorCode {
 
 /// The one error shape every protocol surface returns (protocol.html §9.8).
 ///
-/// Carried in an HTTP error body, a WS error frame, and a failed
-/// [`CommandAck`](crate::control::CommandAck) alike. `code` is the branchable
-/// category; `message` is the human-readable detail for logs and the RD console.
+/// `code` is the branchable category; `message` is the human-readable detail for logs
+/// and the RD console.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct ProtocolError {

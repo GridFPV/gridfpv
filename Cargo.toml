@@ -3,10 +3,7 @@ resolver = "3"
 members = [
     "crates/events",
     "crates/storage",
-    "crates/projection",
     "crates/adapters",
-    "crates/engine",
-    "crates/testkit",
     "crates/server",
     "crates/app",
     "xtask",
@@ -36,11 +33,8 @@ rust-version = "1.85"
 # Internal crates (path deps; versioned together).
 gridfpv-events = { path = "crates/events" }
 gridfpv-storage = { path = "crates/storage" }
-gridfpv-projection = { path = "crates/projection" }
 gridfpv-adapters = { path = "crates/adapters" }
-gridfpv-engine = { path = "crates/engine" }
 gridfpv-server = { path = "crates/server" }
-gridfpv-testkit = { path = "crates/testkit" }
 
 # Third-party.
 serde = { version = "1", features = ["derive"] }

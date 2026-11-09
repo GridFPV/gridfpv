@@ -1,13 +1,10 @@
 /**
  * Pure presentational formatters shared across the component library.
  *
- * Durations on the wire are microseconds (a plain `number`, source clock — see
- * `@bindings/SourceTime` / `Lap.duration_micros`); these turn them into the
+ * Durations on the wire are microseconds (a plain `number`, on the source's clock); these turn them into the
  * compact strings the widgets show. Kept framework-pure so components and tests
  * share one source of truth for "how a lap time reads".
  */
-
-import type { Metric } from '@gridfpv/types';
 
 /**
  * Format a clock duration in **milliseconds** as `M:SS.mmm` (e.g. `1:23.456`). A negative value —
@@ -38,23 +35,6 @@ export function formatMicros(micros: number | null | undefined): string {
   const seconds = Math.floor(totalMs / 1000);
   const millis = totalMs % 1000;
   return `${seconds}.${String(millis).padStart(3, '0')}`;
-}
-
-/**
- * Render a scoring [`Metric`] for display — the condition-specific deciding
- * value carried on a `Placement`. Durations become `S.mmm`; the time-of-event
- * metrics (`LastLapAt`, `ReachedAt`) carry a source timestamp we surface as a
- * coarse marker rather than inventing a wall-clock format here.
- */
-export function formatMetric(metric: Metric): string {
-  if ('BestLapMicros' in metric) return formatMicros(metric.BestLapMicros);
-  if ('BestConsecutiveMicros' in metric) return formatMicros(metric.BestConsecutiveMicros);
-  if ('LastLapAt' in metric) return metric.LastLapAt === null ? '—' : 'banked';
-  if ('ReachedAt' in metric) return metric.ReachedAt === null ? '—' : 'reached';
-  // Version skew: a NEWER Director may score under a metric variant this console build
-  // doesn't model. The pilot HAS a value — an em dash would read as DNF/no-time, so label
-  // the gap instead.
-  return 'unsupported';
 }
 
 /** The medal token name for a 1-based finishing position, or `null` past 3rd. */

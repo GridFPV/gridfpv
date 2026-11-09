@@ -2,11 +2,9 @@
   /**
    * PilotsPage — the app-level **Pilots** page (#118 / #74).
    *
-   * A real route in the two-level IA's home hub (Home › Pilots). It hosts the shared
-   * {@link PilotManager} (directory CRUD: the add / edit / remove registration form), mirroring how
-   * {@link TimersPage} hosts {@link TimerManager} — the manager is reusable; only its host differs
-   * (a routed page here; the in-event Roster will embed the same component with per-event selection
-   * layered on next). `Breadcrumbs` + the brand root get you home from here.
+   * A real route in the two-level IA's home hub (Home › Pilots). It hosts the
+   * {@link PilotManager} (directory CRUD: the add / edit / remove form). `Breadcrumbs` + the brand
+   * root get you home from here.
    */
   import { Button, Card, InfoTip } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
@@ -26,8 +24,8 @@
 
 <div class="page">
   <div class="page-inner">
-    <!-- The brand is the home root here too (#118): the directory pages carry the same
-         top-left GridFPV mark as the workspace sidebar, leaving for the hub. -->
+    <!-- The brand is the home root (#118): every page carries the same top-left GridFPV mark,
+         leaving for the hub. -->
     <div class="brand-row"><Brand onclick={onhome} /></div>
     <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Pilots' }]} />
 
@@ -39,7 +37,7 @@
                the required marker on the field itself. -->
           <InfoTip
             label="About the pilot directory"
-            text="The application-level pilot directory — maintained once here, rostered per event. Each pilot needs only a callsign; the rest (team, country, colour, VTX, IDs) is optional."
+            text="The application-level pilot directory — maintained once here, shared by every event. Each pilot needs only a callsign; the rest (team, country, colour, VTX, IDs) is optional."
           />
         </div>
       </div>

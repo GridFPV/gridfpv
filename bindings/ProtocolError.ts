@@ -4,9 +4,8 @@ import type { ErrorCode } from "./ErrorCode";
 /**
  * The one error shape every protocol surface returns (protocol.html §9.8).
  *
- * Carried in an HTTP error body, a WS error frame, and a failed
- * [`CommandAck`](crate::control::CommandAck) alike. `code` is the branchable
- * category; `message` is the human-readable detail for logs and the RD console.
+ * `code` is the branchable category; `message` is the human-readable detail for logs
+ * and the RD console.
  */
 export type ProtocolError = { 
 /**

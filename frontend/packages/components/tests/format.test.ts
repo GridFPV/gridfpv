@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatClock, formatMicros, formatMetric, medalFor } from '../src/format.js';
-import type { Metric } from '@gridfpv/types';
+import { formatClock, formatMicros, medalFor } from '../src/format.js';
 
 describe('formatClock', () => {
   it('formats milliseconds as M:SS.mmm', () => {
@@ -26,21 +25,6 @@ describe('formatMicros', () => {
   it('renders null/undefined as an em dash', () => {
     expect(formatMicros(null)).toBe('—');
     expect(formatMicros(undefined)).toBe('—');
-  });
-});
-
-describe('formatMetric', () => {
-  it('formats each win-condition metric variant', () => {
-    expect(formatMetric({ BestLapMicros: 41_250_000 } as Metric)).toBe('41.250');
-    expect(formatMetric({ BestConsecutiveMicros: 120_000_000 } as Metric)).toBe('2:00.000');
-    expect(formatMetric({ BestLapMicros: null } as Metric)).toBe('—');
-    expect(formatMetric({ LastLapAt: 5 } as Metric)).toBe('banked');
-    expect(formatMetric({ ReachedAt: null } as Metric)).toBe('—');
-  });
-  it('labels a metric variant this build does not model (version skew), not a DNF dash', () => {
-    expect(formatMetric({ FastestThreeMicros: 99_000_000 } as unknown as Metric)).toBe(
-      'unsupported'
-    );
   });
 });
 

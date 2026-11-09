@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * TokenDialog — the lazy RD-token prompt (#72, Slice 1b).
+   * TokenDialog — the lazy RD-token prompt (#72).
    *
    * Reading and browsing events needs no token; the RD token is requested **only when a
    * privileged action needs it** (create event, or the first control command). The shell

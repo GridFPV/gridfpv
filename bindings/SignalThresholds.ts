@@ -6,9 +6,8 @@ import type { CompetitorRef } from "./CompetitorRef";
  * The enter/exit detection thresholds a signal-capable timer is configured with for a node —
  * the levels the RSSI crosses to open/close a pass (RotorHazard `enter_at_level` /
  * `exit_at_level`). Captured **once** alongside the [`SignalChunk`] trace so a marshal can
- * see *why* the timer called (or missed) a lap against the visible signal (marshaling.html
- * §3.2). One-shot per `(adapter, competitor)`; a later one supersedes (the projection keeps
- * the last).
+ * see *why* the timer called (or missed) a lap against the visible signal. One-shot per
+ * `(adapter, competitor)`; a later one supersedes (a fold keeps the last).
  */
 export type SignalThresholds = { 
 /**

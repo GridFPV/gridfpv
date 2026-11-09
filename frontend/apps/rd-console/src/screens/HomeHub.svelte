@@ -3,33 +3,27 @@
    * HomeHub — the RD console's app-level landing (#118).
    *
    * The two-level IA's root: big, field-readable cards — **Events** (the prominent, full-width
-   * primary action on top) above a smaller row of **Pilots**, **Classes**, **Timers** — each
-   * navigating to its own page. The picker is no longer the landing (it's the Events page),
-   * and app-level timer management is no longer a modal (it's the Timers page). Each card shows a
-   * quick at-a-glance summary read open (no token) on mount: Pilots count (`GET /pilots`), Events
-   * count (`GET /events`), and timer count + how many are connected (`GET /timers`). A failed read
-   * just shows a dash — the hub never blocks on a summary.
+   * primary action on top) above a smaller row of **Pilots** and **Classes** — each navigating to
+   * its own page. Each card shows a quick at-a-glance count read open (no token) on mount
+   * (`GET /events`, `GET /pilots`, `GET /classes`). A failed read just shows a dash — the hub
+   * never blocks on a summary.
    *
    * Big text + dark surfaces by design: this hub is glanced at on a laptop outdoors in the sun, so
    * the cards are large, high-contrast tap targets ("readable in sunlight?" is the gate).
    */
   import { Card } from '@gridfpv/components';
-  import type { Timer } from '@gridfpv/types';
   import type { Session } from '../lib/session.svelte.js';
-  import { isTimerConnected } from '../lib/timers.js';
 
   let {
     session,
     onpilots,
     onclasses,
-    onevents,
-    ontimers
+    onevents
   }: {
     session: Session;
     onpilots: () => void;
     onclasses: () => void;
     onevents: () => void;
-    ontimers: () => void;
   } = $props();
 
   // Each summary loads independently and best-effort; `undefined` while loading, `null` on a
@@ -37,15 +31,6 @@
   let pilotCount = $state<number | undefined | null>(undefined);
   let classCount = $state<number | undefined | null>(undefined);
   let eventCount = $state<number | undefined | null>(undefined);
-  let timerCount = $state<number | undefined | null>(undefined);
-  let connectedTimers = $state<number | undefined | null>(undefined);
-
-  // A timer is "connected" when it is usable now: a Mock reports Ready, a live RotorHazard reports
-  // Connected once its socket is up (a Configured-but-not-dialed-in RH does NOT count). Shared
-  // predicate (`isTimerConnected`) so the count can't drift from the timer screens.
-  function countConnected(timers: Timer[]): number {
-    return timers.filter(isTimerConnected).length;
-  }
 
   $effect(() => {
     void session
@@ -60,16 +45,6 @@
       .listEvents()
       .then((events) => (eventCount = events.length))
       .catch(() => (eventCount = null));
-    void session
-      .listTimers()
-      .then((timers) => {
-        timerCount = timers.length;
-        connectedTimers = countConnected(timers);
-      })
-      .catch(() => {
-        timerCount = null;
-        connectedTimers = null;
-      });
   });
 
   function fmt(n: number | undefined | null): string {
@@ -98,9 +73,8 @@
       </div>
     </header>
 
-    <!-- Events is the primary action: a single full-width, prominent card on top. The three config
-         pages (Pilots, Classes, Timers) sit beneath it as a smaller row. To flip Events to the
-         bottom later, move the `.events-row` element after `.config-row` (or set `order` on them). -->
+    <!-- Events is the primary action: a single full-width, prominent card on top. The two
+         directory pages (Pilots, Classes) sit beneath it as a smaller row. -->
     <div class="cards">
       <div class="events-row">
         <button type="button" class="hub-card events feature" onclick={onevents}>
@@ -182,32 +156,6 @@
             </div>
           </Card>
         </button>
-
-        <button type="button" class="hub-card timers" onclick={ontimers}>
-          <Card elevation="md">
-            <div class="card-body">
-              <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M12 8v4l2.5 2.5M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-              <h2 class="card-title">Timers</h2>
-              <p class="card-summary">
-                <span class="count">{fmt(timerCount)}</span>
-                <span class="unit">{timerCount === 1 ? 'timer' : 'timers'}</span>
-                {#if timerCount !== undefined && timerCount !== null && timerCount > 0}
-                  <span class="connected">· {fmt(connectedTimers)} connected</span>
-                {/if}
-              </p>
-              <span class="card-go" aria-hidden="true">→</span>
-            </div>
-          </Card>
-        </button>
       </div>
     </div>
   </div>
@@ -261,8 +209,7 @@
     letter-spacing: var(--gf-tracking-caps);
   }
 
-  /* Events on top (full width), the three config cards beneath. `.cards` stacks the two rows; flip
-     the order here (e.g. `flex-direction: column-reverse`) to move Events to the bottom later. */
+  /* Events on top (full width), the two directory cards beneath. `.cards` stacks the two rows. */
   .cards {
     display: flex;
     flex-direction: column;
@@ -274,11 +221,11 @@
   }
   .config-row {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
     gap: var(--gf-space-5);
   }
   @media (max-width: 44rem) {
-    /* Narrow widths: the three config cards wrap into a flexible grid. */
+    /* Narrow widths: the directory cards wrap into a flexible grid. */
     .config-row {
       grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
     }
@@ -348,10 +295,6 @@
   .card-summary .unit {
     text-transform: uppercase;
     letter-spacing: var(--gf-tracking-caps);
-    font-size: var(--gf-font-size-xs);
-  }
-  .card-summary .connected {
-    color: var(--gf-text-faint);
     font-size: var(--gf-font-size-xs);
   }
   .card-go {

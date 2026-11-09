@@ -5,9 +5,7 @@
    * A real route in the two-level IA's home hub (Home › Classes). It hosts the shared
    * {@link ClassManager} (directory CRUD: the add / edit / remove form for Custom classes, plus the
    * locked, read-only built-ins the Director seeds), mirroring how {@link PilotsPage} hosts
-   * {@link PilotManager} — the manager is reusable; only its
-   * host differs (a routed page here; the in-event {@link EventClassesRoster} embeds the same
-   * component with per-event selection layered on). `Breadcrumbs` + the brand root get you home.
+   * {@link PilotManager}. `Breadcrumbs` + the brand root get you home.
    */
   import { Button, Card, InfoTip } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
@@ -27,8 +25,8 @@
 
 <div class="page">
   <div class="page-inner">
-    <!-- The brand is the home root here too (#118): the directory pages carry the same
-         top-left GridFPV mark as the workspace sidebar, leaving for the hub. -->
+    <!-- The brand is the home root (#118): every page carries the same top-left GridFPV mark,
+         leaving for the hub. -->
     <div class="brand-row"><Brand onclick={onhome} /></div>
     <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Classes' }]} />
 

@@ -4,7 +4,7 @@
  * from the list.
  *
  * The flow drives real clicks in headless chromium against the worker's real Director: open the
- * Events picker, create a uniquely-named event, open its Delete affordance, and assert the red
+ * Events page, create a uniquely-named event, open its Delete affordance, and assert the red
  * "Delete permanently" button stays disabled until the exact event name is re-typed into the
  * confirm field. Then confirm and assert the event row disappears from the list (the delete really
  * took effect server-side).
@@ -17,67 +17,27 @@
  * (browser console, page errors, the Director's log).
  */
 import { expect, test } from './observability.js';
-
-/** Return to the home hub (mirrors routing.spec's helper). */
-async function gotoHub(page: import('@playwright/test').Page) {
-  await page.goto('/');
-  const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
-  const liveNav = page.getByRole('button', { name: /Race control/ });
-  await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
-  if (await liveNav.isVisible().catch(() => false)) {
-    await page
-      .getByRole('navigation', { name: 'Breadcrumb' })
-      .getByRole('button', { name: 'Home' })
-      .click();
-  }
-  await expect(pilotsCard).toBeVisible({ timeout: 15_000 });
-}
-
-/** Open the Events picker ("Choose an event"), switching out of any auto-entered workspace. */
-async function gotoPicker(page: import('@playwright/test').Page) {
-  await gotoHub(page);
-  await page.getByRole('button', { name: /Events/ }).click();
-  const picker = page.getByRole('heading', { name: 'Choose an event' });
-  const liveNav = page.getByRole('button', { name: /Race control/ });
-  await expect(picker.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
-  if (await liveNav.isVisible().catch(() => false)) {
-    // Auto-entered the active event's workspace. The "← Switch event" button is gone
-    // (`ContextHeader.svelte`): the way back out is the breadcrumb's **Events** crumb.
-    await leaveToPicker(page);
-  }
-  await expect(picker).toBeVisible({ timeout: 15_000 });
-}
-
-/** Leave the event workspace for the picker — the breadcrumb's Events crumb. */
-async function leaveToPicker(page: import('@playwright/test').Page) {
-  await page
-    .getByRole('navigation', { name: 'Breadcrumb' })
-    .getByRole('button', { name: 'Events' })
-    .click();
-}
+import { eventsCrumb, gotoEvents } from './nav.js';
 
 test('create an event, then permanently delete it through the hard-confirm dialog', async ({
   page
 }) => {
-  await gotoPicker(page);
+  await gotoEvents(page);
 
   // A unique name so the spec is independent of other specs / a reused Director.
   const name = `Doomed Event ${Date.now()}`;
 
-  // Create it via the "New event" dialog (don't auto-open the setup wizard).
+  // Create it via the "New event" dialog.
   await page
     .getByRole('button', { name: /New event/ })
     .first()
     .click();
   await page.getByRole('textbox', { name: 'Event name' }).fill(name);
-  // Uncheck "Set up event" so we land back on the picker, not the wizard.
-  const setupToggle = page.getByRole('checkbox', { name: /Set up event after creating/ });
-  if (await setupToggle.isChecked().catch(() => false)) await setupToggle.uncheck();
   await page.getByRole('button', { name: /Create & enter/ }).click();
 
-  // The new event entered its workspace; return to the picker to see/delete it in the list.
-  await expect(page.getByRole('button', { name: /Race control/ })).toBeVisible({ timeout: 15_000 });
-  await leaveToPicker(page);
+  // The new event's page opened; return to the Events page to see/delete it in the list.
+  await expect(page.getByRole('heading', { name, level: 1 })).toBeVisible({ timeout: 15_000 });
+  await eventsCrumb(page).click();
   await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
     timeout: 15_000
   });
@@ -114,4 +74,8 @@ test('create an event, then permanently delete it through the hard-confirm dialo
   await expect(page.getByRole('button', { name: `Delete ${name}` })).toBeHidden({
     timeout: 15_000
   });
+
+  // The delete really took effect server-side.
+  const after = (await (await page.request.get('/events')).json()) as { name: string }[];
+  expect(after.map((e) => e.name)).not.toContain(name);
 });

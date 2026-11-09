@@ -2,7 +2,7 @@
 //!
 //! This is purely additive packaging: it does **not** replace the hosted development
 //! workflow. The team still develops against the hosted Director
-//! (`cargo build -p gridfpv-app --features live`, serving `:8080`). This app is how the
+//! (`cargo build -p gridfpv-app`, serving `:8080`). This app is how the
 //! maintainer runs a *native* build.
 //!
 //! # What it does on launch

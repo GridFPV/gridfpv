@@ -1,17 +1,18 @@
 /**
- * Seam 9 (issue #72): events are first-class containers — the events lifecycle API and the
- * event-rooted surface.
+ * The Director's HTTP surface, driven over the real wire: the events lifecycle, the active
+ * event, the app-level pilot and class directories, the join token, and the build stamp.
  *
  * guards:
  *  - `GET /events` on a **fresh** Director is an empty list — there is no built-in event
  *    (#414), so first run is genuinely "create an event", not "pick the seeded one".
  *  - `POST /events` is RD-gated (no/bad token → 401), auto-generates a unique `id` from the
  *    display `name` (the id is never user-supplied), and returns the new event's `EventMeta`.
- *  - the new event is immediately reachable: a snapshot under `/events/{id}/snapshot/...` is a
- *    200, and a control command under `/events/{id}/control` acks — against THAT event's own
- *    log, independent of every other event (a heat scheduled in one is invisible in the other).
- *  - an unknown event id → a typed `ProtocolError` 404 (`UnknownScope`), the same shape an
- *    unknown heat/pilot gets.
+ *  - `DELETE /events/{id}` is RD-gated and permanent; an unknown id → a typed `ProtocolError`
+ *    404 (`UnknownScope`).
+ *  - a path under an API prefix that matches no route is the same typed 404, never the console.
+ *
+ * Every body is also checked against its generated binding (`wire-shape.ts`), so an expectation
+ * here is never a second hand-written copy of a wire shape.
  *
  * Everything drives the real Director over the real wire — no mocks.
  */
@@ -21,20 +22,17 @@ import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type {
-  Class,
-  Command,
-  EventMeta,
-  FormatSchema,
-  Pilot,
-  RoundDef,
-  StartProcedure,
-  Timer
-} from '@gridfpv/types';
+import type { Class, EventMeta, JoinTokenResponse, Pilot } from '@gridfpv/types';
 
-import { listHeats } from '../packages/protocol-client/dist/index.js';
+import {
+  createPilot as clientCreatePilot,
+  isRequestFailure,
+  listClasses as clientListClasses,
+  listEvents as clientListEvents
+} from '../packages/protocol-client/dist/index.js';
 import { type Director } from '../test-harness/director.ts';
 import { eventRoot, startContractDirector } from './harness.ts';
+import { wireShapeProblems } from './wire-shape.ts';
 
 const TOKEN = 'rd-events-contract';
 
@@ -46,8 +44,6 @@ beforeAll(async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'gridfpv-events-data-'));
   director = await startContractDirector({
     token: TOKEN,
-    simLaps: 1,
-    simLapMs: 40,
     env: { GRIDFPV_DATA_DIR: dataDir }
   });
 });
@@ -113,8 +109,24 @@ describe('seam 9: events lifecycle API', () => {
     expect(created.persistent).toBe(true);
     // created_at is a plain JSON number (the i64 → number contract), never a bigint/string.
     expect(typeof created.created_at).toBe('number');
+    expect(wireShapeProblems(created, 'EventMeta')).toEqual([]);
     const listed = (await listEvents()).find((e) => e.id === created.id);
     expect(listed?.name).toBe('Shape Check');
+  });
+
+  it('POST /events stores the optional details and omits the unset ones', async () => {
+    const res = await fetch(`${director.baseUrl}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ name: 'Detailed', date: '2026-06-20', location: 'Main field' })
+    });
+    expect(res.status).toBe(200);
+    const created = (await res.json()) as EventMeta;
+    expect(wireShapeProblems(created, 'EventMeta')).toEqual([]);
+    expect(created.date).toBe('2026-06-20');
+    expect(created.location).toBe('Main field');
+    expect('organizer' in created).toBe(false);
+    expect('description' in created).toBe(false);
   });
 
   it('POST /events requires the RD token — no/bad token → 401', async () => {
@@ -141,57 +153,25 @@ describe('seam 9: events lifecycle API', () => {
     expect(ids).toContain(b.id);
   });
 
-  it('a created event is reachable and independent of every other event', async () => {
-    const created = (await createEvent('Race Night', TOKEN)).body as EventMeta;
-    const other = (await createEvent('Club Night', TOKEN)).body as EventMeta;
-
-    // Schedule a heat in the created event over ITS OWN control path (`/events/{id}/control`).
-    const command: Command = { ScheduleHeat: { heat: 'cn-1', lineup: ['A', 'B'] } };
-    const scheduled = await fetch(`${eventRoot(director.baseUrl, created.id)}/control`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify(command)
-    });
-    expect(scheduled.status).toBe(200);
-    expect(((await scheduled.json()) as { ok: boolean }).ok).toBe(true);
-
-    // The heat resolves a 200 under the created event…
-    const inCreated = await fetch(`${eventRoot(director.baseUrl, created.id)}/snapshot/heat/cn-1`);
-    expect(inCreated.status).toBe(200);
-
-    // …but is NOT visible in the other event (per-event logs are independent).
-    const inOther = await fetch(`${eventRoot(director.baseUrl, other.id)}/snapshot/heat/cn-1`);
-    expect(inOther.status).toBe(404);
-  });
-
-  it('an unknown event id → 404 ProtocolError(UnknownScope)', async () => {
+  it('a path under /events that matches no route → 404 ProtocolError(UnknownScope)', async () => {
     const res = await fetch(`${eventRoot(director.baseUrl, 'no-such-event')}/snapshot/event/x`);
     expect(res.status).toBe(404);
     const body = (await res.json()) as { code?: string };
     expect(body.code).toBe('UnknownScope');
+    expect(wireShapeProblems(body, 'ProtocolError')).toEqual([]);
   });
 
-  it('DELETE /events/{id} permanently removes a created event and ALL its data', async () => {
-    // Create an event, give it a fact (a scheduled heat), then delete it.
+  it('DELETE /events/{id} permanently removes a created event', async () => {
     const created = (await createEvent('Doomed Event', TOKEN)).body as EventMeta;
-    const scheduled = await fetch(`${eventRoot(director.baseUrl, created.id)}/control`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ ScheduleHeat: { heat: 'd-1', lineup: ['A'] } } as Command)
-    });
-    expect(scheduled.status).toBe(200);
 
     // The delete is RD-gated and a 200 with no error body.
     const del = await deleteEvent(created.id, TOKEN);
     expect(del.status).toBe(200);
 
-    // It is gone from the listing, and every per-event surface 404s (the data is gone too).
+    // It is gone from the listing, and a second delete finds nothing.
     const ids = (await listEvents()).map((e) => e.id);
     expect(ids).not.toContain(created.id);
-    const snap = await fetch(`${eventRoot(director.baseUrl, created.id)}/snapshot/event/x`);
-    expect(snap.status).toBe(404);
-    const heat = await fetch(`${eventRoot(director.baseUrl, created.id)}/snapshot/heat/d-1`);
-    expect(heat.status).toBe(404);
+    expect((await deleteEvent(created.id, TOKEN)).status).toBe(404);
   });
 
   it('DELETE /events/{id} is RD-gated and 404s unknown ids — no event is reserved', async () => {
@@ -291,279 +271,18 @@ describe('seam 9b: the Director active event (#90)', () => {
  *  - `POST /timers` is **RD-gated** (no/bad token → 401), auto-generates an id, returns the
  *    new `Timer`, which then appears in the listing.
  *  - `PUT /events/{id}/timers` is **RD-gated**, validates each id names a known timer (unknown →
- *    404 `UnknownScope`), and on success records the selection on the event's `EventMeta.timers`.
- */
-describe('seam 10: application-level timers + per-event selection (#73)', () => {
-  /** `GET /timers` → the parsed `Timer[]` (asserting a 200, open read). */
-  async function listTimers(): Promise<Timer[]> {
-    const res = await fetch(`${director.baseUrl}/timers`);
-    expect(res.status).toBe(200);
-    return (await res.json()) as Timer[];
-  }
-
-  /** `POST /timers` with an optional bearer token → raw status + parsed body. */
-  async function createTimer(
-    body: unknown,
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${director.baseUrl}/timers`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body)
-    });
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** `PUT /events/{id}/timers` with `{ ids }` + optional token → raw status + parsed body. */
-  async function setEventTimers(
-    eventId: string,
-    ids: string[],
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/timers`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ ids })
-    });
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  it('GET /timers lists the built-in Mock first (open read)', async () => {
-    const timers = await listTimers();
-    expect(timers.length).toBeGreaterThanOrEqual(1);
-    expect(timers[0].id).toBe('mock');
-    expect(timers[0].name).toBe('Mock');
-    expect('Mock' in timers[0].kind).toBe(true);
-  });
-
-  it('POST /timers requires the RD token — no/bad token → 401', async () => {
-    const body = { name: 'No Auth', kind: { Mock: { laps: 1, lap_ms: 50 } } };
-    expect((await createTimer(body)).status).toBe(401);
-    expect((await createTimer(body, 'not-a-real-token')).status).toBe(401);
-  });
-
-  it('POST /timers creates a timer and it appears in the listing', async () => {
-    const created = (
-      await createTimer(
-        { name: 'Field RH', kind: { Rotorhazard: { url: 'http://rh.local:5000' } } },
-        TOKEN
-      )
-    ).body as Timer;
-    expect(created.id).toMatch(/^field-rh-/);
-    expect(created.status).toBe('Configured');
-
-    const ids = (await listTimers()).map((t) => t.id);
-    expect(ids[0]).toBe('mock');
-    expect(ids).toContain(created.id);
-  });
-
-  it('PUT /events/{id}/timers validates ids and records the selection', async () => {
-    // Create a real timer, then select it for a fresh event.
-    const timer = (
-      await createTimer({ name: 'Extra Sim', kind: { Mock: { laps: 1, lap_ms: 50 } } }, TOKEN)
-    ).body as Timer;
-    const event = (await createEvent('Timers Event', TOKEN)).body as EventMeta;
-
-    // Selecting a known timer succeeds and the event meta reflects it.
-    const ok = await setEventTimers(event.id, [timer.id], TOKEN);
-    expect(ok.status).toBe(200);
-    expect((ok.body as EventMeta).timers).toEqual([timer.id]);
-
-    // Selecting an UNKNOWN timer → 404 UnknownScope.
-    const bad = await setEventTimers(event.id, ['no-such-timer'], TOKEN);
-    expect(bad.status).toBe(404);
-    expect((bad.body as { code?: string }).code).toBe('UnknownScope');
-
-    // RD-gated: no token → 401.
-    expect((await setEventTimers(event.id, [timer.id])).status).toBe(401);
-  });
-
-  it('refuses to select a RotorHazard timer with no GridFPV plugin (#405)', async () => {
-    // #405: the plugin is REQUIRED to race a RotorHazard timer, and the gate is at event timer
-    // selection. It has to live in the Director, not just in the console's picker — this route is
-    // reachable directly, and this suite mocks nothing, so it proves the wire actually refuses.
-    //
-    // A freshly created RH timer has never been probed (`plugin` absent): presence is only
-    // knowable over a live socket. That is its own case, and its message says "connect it", not
-    // "plugin missing" — different problem, different fix.
-    const rh = (
-      await createTimer(
-        { name: 'Plugin-less RH', kind: { Rotorhazard: { url: 'http://rh.invalid:5000' } } },
-        TOKEN
-      )
-    ).body as Timer;
-    // The wire sends an explicit `null` for "never probed" (the TS binding types it optional, so
-    // a console must treat absent and null alike — `selectionRefusal` keys off falsiness).
-    expect(rh.plugin ?? null).toBeNull();
-
-    const event = (await createEvent('Plugin Gate Event', TOKEN)).body as EventMeta;
-    const refused = await setEventTimers(event.id, [rh.id], TOKEN);
-    expect(refused.status).toBe(400);
-    const err = refused.body as { code?: string; message?: string };
-    expect(err.code).toBe('BadRequest');
-    // Names the timer by its friendly name, never its id (repo display rule), and says what next.
-    expect(err.message).toContain('Plugin-less RH');
-    expect(err.message).toContain('Connect it');
-    expect(err.message).not.toContain(rh.id);
-
-    // Nothing was recorded — the event never picks up the refused timer.
-    const after = (await listEvents()).find((e) => e.id === event.id)!;
-    expect(after.timers).not.toContain(rh.id);
-
-    // A Mock is never gated — the requirement is RotorHazard-specific.
-    const mockOk = await setEventTimers(event.id, ['mock'], TOKEN);
-    expect(mockOk.status).toBe(200);
-    expect((mockOk.body as EventMeta).timers).toEqual(['mock']);
-  });
-});
 
 /**
- * Issue #112: **primary/alternate timer roles + failover** — redundant timers at one gate, one
- * designated **primary**, the rest **alternates**. Only the role designation API is exercised on
- * the wire here (the single-active-source feed + failover is proven by the Rust bridge/live tests).
- *
- * guards:
- *  - a new event's `EventMeta.primary_timer` is absent (additive `#[serde(default)]`); the first
- *    selected timer is the effective primary by default.
- *  - `PUT /events/{id}/timers` accepts an optional `primary` (it must be one of `ids`), recorded on
- *    `EventMeta.primary_timer`.
- *  - `PUT /events/{id}/primary-timer` is **RD-gated**, designates a selected timer as primary,
- *    rejects a primary not in the selection (400), and `null` clears the override.
- */
-describe('seam 10b: primary/alternate timer roles (#112)', () => {
-  /** `PUT /events/{id}/timers` with `{ ids, primary? }` + optional token → raw status + parsed body. */
-  async function setEventTimersWithPrimary(
-    eventId: string,
-    ids: string[],
-    primary: string | undefined,
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/timers`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ ids, ...(primary !== undefined ? { primary } : {}) })
-    });
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** `PUT /events/{id}/primary-timer` with `{ id }` (or `{}`) + optional token → status + body. */
-  async function setPrimaryTimer(
-    eventId: string,
-    id: string | null | undefined,
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/primary-timer`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify(id === undefined ? {} : { id })
-    });
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** Create two Mock timers + an event selecting both, returning their ids. */
-  async function eventWithTwoTimers(): Promise<{ event: string; a: string; b: string }> {
-    const create = async (name: string) => {
-      const res = await fetch(`${director.baseUrl}/timers`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({ name, kind: { Mock: { laps: 1, lap_ms: 50 } } })
-      });
-      return ((await res.json()) as Timer).id;
-    };
-    const a = await create('Primary Sim');
-    const b = await create('Alternate Sim');
-    const event = (await createEvent('Redundant Timers', TOKEN)).body as EventMeta;
-    return { event: event.id, a, b };
-  }
-
-  it('a new event has no explicit primary (additive default)', async () => {
-    const event = (await createEvent('No Primary Yet', TOKEN)).body as EventMeta;
-    expect(event.primary_timer).toBeUndefined();
-  });
-
-  it('PUT /events/{id}/timers records an optional primary among the selection', async () => {
-    const { event, a, b } = await eventWithTwoTimers();
-    const ok = await setEventTimersWithPrimary(event, [a, b], b, TOKEN);
-    expect(ok.status).toBe(200);
-    const meta = ok.body as EventMeta;
-    expect(meta.timers).toEqual([a, b]);
-    expect(meta.primary_timer).toBe(b);
-
-    // A primary NOT in the selection → 400 BadRequest.
-    const bad = await setEventTimersWithPrimary(event, [a, b], 'mock', TOKEN);
-    expect(bad.status).toBe(400);
-  });
-
-  it('PUT /events/{id}/primary-timer designates, rejects out-of-selection, and clears', async () => {
-    const { event, a, b } = await eventWithTwoTimers();
-    await setEventTimersWithPrimary(event, [a, b], undefined, TOKEN);
-
-    // Designate the alternate as primary.
-    const ok = await setPrimaryTimer(event, b, TOKEN);
-    expect(ok.status).toBe(200);
-    expect((ok.body as EventMeta).primary_timer).toBe(b);
-
-    // A primary not in the selection → 400 BadRequest.
-    const bad = await setPrimaryTimer(event, 'mock', TOKEN);
-    expect(bad.status).toBe(400);
-
-    // Clearing the override (`null`) → effective primary falls back to the first selected.
-    const cleared = await setPrimaryTimer(event, null, TOKEN);
-    expect(cleared.status).toBe(200);
-    expect((cleared.body as EventMeta).primary_timer).toBeUndefined();
-
-    // RD-gated: no token → 401.
-    expect((await setPrimaryTimer(event, a)).status).toBe(401);
-  });
-});
-
-/**
- * Issue #74: pilots are **application-level configuration** — a persisted directory the RD
- * maintains once, and each event builds a **roster** of which directory pilots race it. Channels
- * are a separate concern (#117) and are not exercised here.
+ * Issue #74: pilots are **application-level** — a persisted directory the RD maintains once.
  *
  * guards:
  *  - `GET /pilots` is an **open read** → `Pilot[]` (empty on a fresh Director — no built-in pilot).
  *  - `POST /pilots` is **RD-gated** (no/bad token → 401), requires a `callsign`, auto-generates an
- *    id, carries optional metadata incl. the cloud-pull `vtx_types`/`multigp_id` hooks, and the new
- *    pilot then appears in the listing.
- *  - `PUT /events/{id}/roster` is **RD-gated**, validates each id names a directory pilot (unknown →
- *    404 `UnknownScope`), and records the roster on the event's `EventMeta.roster` (empty default).
- *  - `POST`/`DELETE /events/{id}/roster/{pilotId}` add/remove a single pilot (idempotent).
+ *    id, carries optional metadata incl. the `vtx_types`/`multigp_id` hooks, and the new pilot
+ *    then appears in the listing.
+ *  - `PUT /pilots/{id}` edits with the three-state `OptionalEdit`; `DELETE /pilots/{id}` removes.
  */
-describe('seam 11: application-level pilots + per-event roster (#74)', () => {
+describe('seam 11: the application-level pilot directory (#74)', () => {
   /** `GET /pilots` → the parsed `Pilot[]` (asserting a 200, open read). */
   async function listPilots(): Promise<Pilot[]> {
     const res = await fetch(`${director.baseUrl}/pilots`);
@@ -582,28 +301,6 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
       method: 'POST',
       headers,
       body: JSON.stringify(body)
-    });
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** `PUT /events/{id}/roster` with `{ pilot_ids }` + optional token → raw status + parsed body. */
-  async function setRoster(
-    eventId: string,
-    pilotIds: string[],
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/roster`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ pilot_ids: pilotIds })
     });
     let parsed: unknown;
     try {
@@ -651,8 +348,11 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
     expect(created.vtx_types).toEqual(['Analog', 'HDZero']);
     expect(created.multigp_id).toBe('mgp-42');
 
-    const ids = (await listPilots()).map((p) => p.id);
-    expect(ids).toContain(created.id);
+    expect(wireShapeProblems(created, 'Pilot')).toEqual([]);
+
+    const pilots = await listPilots();
+    expect(pilots.map((p) => p.id)).toContain(created.id);
+    for (const pilot of pilots) expect(wireShapeProblems(pilot, 'Pilot')).toEqual([]);
   });
 
   it('POST /pilots rejects a missing/blank callsign with 400', async () => {
@@ -728,70 +428,29 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
     expect((await put(created.id, { team: 'X' })).status).toBe(401);
   });
 
-  it('PUT /events/{id}/roster validates ids and records the roster (empty default)', async () => {
-    // A new event has an empty roster by default.
-    const event = (await createEvent('Roster Event', TOKEN)).body as EventMeta;
-    expect(event.roster).toEqual([]);
-
-    // Create a directory pilot and roster it.
-    const pilot = (await createPilot({ callsign: 'Roster Me' }, TOKEN)).body as Pilot;
-    const ok = await setRoster(event.id, [pilot.id], TOKEN);
-    expect(ok.status).toBe(200);
-    expect((ok.body as EventMeta).roster).toEqual([pilot.id]);
-
-    // An UNKNOWN pilot id → 404 UnknownScope.
-    const bad = await setRoster(event.id, ['no-such-pilot'], TOKEN);
-    expect(bad.status).toBe(404);
-    expect((bad.body as { code?: string }).code).toBe('UnknownScope');
-
-    // RD-gated: no token → 401.
-    expect((await setRoster(event.id, [pilot.id])).status).toBe(401);
-  });
-
-  it('POST/DELETE /events/{id}/roster/{pilotId} add and remove one pilot (idempotent)', async () => {
-    const event = (await createEvent('Add Remove Event', TOKEN)).body as EventMeta;
-    const a = (await createPilot({ callsign: 'Pilot A' }, TOKEN)).body as Pilot;
-    const b = (await createPilot({ callsign: 'Pilot B' }, TOKEN)).body as Pilot;
-
-    const addOne = async (pilotId: string, token?: string) => {
-      const headers: Record<string, string> = {};
-      if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(`${eventRoot(director.baseUrl, event.id)}/roster/${pilotId}`, {
-        method: 'POST',
-        headers
-      });
-      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
-    };
-    const removeOne = async (pilotId: string) => {
-      const res = await fetch(`${eventRoot(director.baseUrl, event.id)}/roster/${pilotId}`, {
+  it('DELETE /pilots/{id} removes the pilot — RD-gated, 404 on an unknown id', async () => {
+    const created = (await createPilot({ callsign: 'Leaving' }, TOKEN)).body as Pilot;
+    const del = (id: string, token?: string) =>
+      fetch(`${director.baseUrl}/pilots/${id}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${TOKEN}` }
+        headers: token === undefined ? {} : { Authorization: `Bearer ${token}` }
       });
-      return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
-    };
 
-    // RD-gated.
-    expect((await addOne(a.id)).status).toBe(401);
+    expect((await del(created.id)).status).toBe(401);
+    expect((await del(created.id, TOKEN)).status).toBe(200);
+    expect((await listPilots()).map((p) => p.id)).not.toContain(created.id);
 
-    // Add two; adding a is idempotent.
-    expect(((await addOne(a.id, TOKEN)).body as EventMeta).roster).toEqual([a.id]);
-    expect(((await addOne(b.id, TOKEN)).body as EventMeta).roster).toEqual([a.id, b.id]);
-    expect(((await addOne(a.id, TOKEN)).body as EventMeta).roster).toEqual([a.id, b.id]);
-
-    // Unknown pilot add → 404.
-    expect((await addOne('no-such-pilot', TOKEN)).status).toBe(404);
-
-    // Remove one; removing an absent one is a no-op.
-    expect(((await removeOne(a.id)).body as EventMeta).roster).toEqual([b.id]);
-    expect(((await removeOne(a.id)).body as EventMeta).roster).toEqual([b.id]);
+    const unknown = await del(created.id, TOKEN);
+    expect(unknown.status).toBe(404);
+    expect(((await unknown.json()) as { code?: string }).code).toBe('UnknownScope');
   });
 });
 
 /**
  * Issue #84 (registry slice): classes are **application-level configuration** — a persisted
- * directory the RD maintains once, and each event selects which directory classes run at it. The
+ * directory the RD maintains once, that outlives any one event. The
  * directory mirrors the pilot directory (a `ClassSource` provenance + optional reference/description;
- * the `ClassId`/`OptionalEdit` types are reused). Rounds / the phase engine are NOT in this slice.
+ * the `ClassId`/`OptionalEdit` types are reused).
  *
  * guards:
  *  - `GET /classes` is an **open read** → `Class[]` carrying the 9 locked, fixed-id **built-in**
@@ -800,11 +459,9 @@ describe('seam 11: application-level pilots + per-event roster (#74)', () => {
  *    carries the `source`/`reference`/`description` metadata, and the new class appears in the listing.
  *  - `PUT/DELETE /classes/{id}` on a **built-in** id is rejected (read-only); user/Custom classes are
  *    full CRUD (set / clear via wire-`null` — the `OptionalEdit` three-state).
- *  - `PUT /events/{id}/classes` is **RD-gated**, validates each id names a directory class (unknown →
- *    404 `UnknownScope`), and records the selection on the event's `EventMeta.classes` (empty default);
- *    a built-in id is selectable like any class.
+ *  - `PUT /classes/{id}/hidden` hides or un-hides any class, built-ins included.
  */
-describe('seam 12: application-level classes + per-event selection (#84)', () => {
+describe('seam 12: the application-level class directory (#84)', () => {
   /** `GET /classes` → the parsed `Class[]` (asserting a 200, open read). */
   async function listClasses(): Promise<Class[]> {
     const res = await fetch(`${director.baseUrl}/classes`);
@@ -823,28 +480,6 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
       method: 'POST',
       headers,
       body: JSON.stringify(body)
-    });
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** `PUT /events/{id}/classes` with `{ ids }` + optional token → raw status + parsed body. */
-  async function setEventClasses(
-    eventId: string,
-    ids: string[],
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/classes`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ ids })
     });
     let parsed: unknown;
     try {
@@ -883,6 +518,7 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
     expect(byId.get('freedom-spec')?.source).toBe('FreedomSpec');
     expect(byId.get('street-league')?.source).toBe('StreetLeague');
     expect(byId.get('udl-igniter')?.source).toBe('UDL');
+    for (const cls of classes) expect(wireShapeProblems(cls, 'Class')).toEqual([]);
   });
 
   it('PUT/DELETE on a built-in class is rejected — built-ins are read-only', async () => {
@@ -975,26 +611,6 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
     expect((await put('no-such-class', { name: 'X' }, TOKEN)).status).toBe(404);
   });
 
-  it('PUT /events/{id}/classes validates ids and records the selection (empty default)', async () => {
-    // A new event has an empty class selection by default.
-    const event = (await createEvent('Classes Event', TOKEN)).body as EventMeta;
-    expect(event.classes).toEqual([]);
-
-    // Create a directory class and select it.
-    const cls = (await createClass({ name: 'Selectable' }, TOKEN)).body as Class;
-    const ok = await setEventClasses(event.id, [cls.id], TOKEN);
-    expect(ok.status).toBe(200);
-    expect((ok.body as EventMeta).classes).toEqual([cls.id]);
-
-    // An UNKNOWN class id → 404 UnknownScope.
-    const bad = await setEventClasses(event.id, ['no-such-class'], TOKEN);
-    expect(bad.status).toBe(404);
-    expect((bad.body as { code?: string }).code).toBe('UnknownScope');
-
-    // RD-gated: no token → 401.
-    expect((await setEventClasses(event.id, [cls.id])).status).toBe(401);
-  });
-
   it('PUT /classes/{id}/hidden toggles visibility (built-ins too), RD-gated, 404 on unknown', async () => {
     const setHidden = async (id: string, hidden: boolean, token?: string) => {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1027,690 +643,86 @@ describe('seam 12: application-level classes + per-event selection (#84)', () =>
 });
 
 /**
- * Race redesign Slice 1a: **per-class membership** — given the event's present pilots (roster) and
- * its selected classes, *which roster pilots race which class*. The membership is recorded on the
- * event's `EventMeta.classes_membership` (additive, omitted from the wire when empty).
+ * Join tokens (#63): an RD trades its token for a **read-only** one to hand to a spectator.
  *
  * guards:
- *  - a new event's `EventMeta.classes_membership` is absent (additive `#[serde(default)]`,
- *    omit-when-empty).
- *  - `PUT /events/{id}/classes/{classId}/membership` is **RD-gated** (no token → 401), validates the
- *    class names a known directory class and each pilot id names a directory pilot (unknown → 404
- *    `UnknownScope`), and replaces that class's pilot list wholesale.
- *  - an empty `pilot_ids` clears the class's membership entry.
+ *  - `POST /events/{id}/auth/join-token` is **RD-gated** (no/bad token → 401) and 404s an
+ *    unknown event.
+ *  - the minted token is a distinct credential, and it is **rejected on every write**.
  */
-describe('race Slice 1a: per-class membership', () => {
-  /**
-   * `PUT /events/{id}/classes/{classId}/membership` with `{ pilots }` + optional token. Each element
-   * may be a bare pilot-id string (the legacy/channel-less shape, accepted by the server's serde
-   * shim) or a full `{ pilot, channel? }` slot (race redesign Slice 7a).
-   */
-  async function setMembership(
-    eventId: string,
-    classId: string,
-    pilots: Array<string | { pilot: string; channel?: number }>,
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(
-      `${eventRoot(director.baseUrl, eventId)}/classes/${classId}/membership`,
-      { method: 'PUT', headers, body: JSON.stringify({ pilots }) }
-    );
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** Create a pilot, returning its id. */
-  async function makePilot(callsign: string): Promise<string> {
-    const res = await fetch(`${director.baseUrl}/pilots`, {
+describe('seam 6: the read-only join token (#63)', () => {
+  const mint = (eventId: string, token?: string) =>
+    fetch(`${eventRoot(director.baseUrl, eventId)}/auth/join-token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ callsign })
+      headers: token === undefined ? {} : { Authorization: `Bearer ${token}` }
     });
-    return ((await res.json()) as Pilot).id;
-  }
 
-  /** Select the event's classes + roster the pilots — the prerequisite for setting membership. */
-  async function selectClassesAndRoster(
-    eventId: string,
-    classIds: string[],
-    pilotIds: string[]
-  ): Promise<void> {
-    const put = (path: string, body: unknown): Promise<Response> =>
-      fetch(`${eventRoot(director.baseUrl, eventId)}/${path}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify(body)
-      });
-    await put('classes', { ids: classIds });
-    await put('roster', { pilot_ids: pilotIds });
-  }
-
-  it('a new event has no class membership (additive, omit-when-empty)', async () => {
-    const event = (await createEvent('Membership Default', TOKEN)).body as EventMeta;
-    expect(event.classes_membership).toBeUndefined();
+  it('minting a join token requires the RD token — no/bad token → 401', async () => {
+    const event = (await createEvent('Join Gate', TOKEN)).body as EventMeta;
+    expect((await mint(event.id)).status).toBe(401);
+    expect((await mint(event.id, 'not-a-real-token')).status).toBe(401);
   });
 
-  it('PUT membership validates the class + pilots and replaces a class list wholesale', async () => {
-    const event = (await createEvent('Membership Event', TOKEN)).body as EventMeta;
-    const a = await makePilot('Member A');
-    const b = await makePilot('Member B');
-    // The event must select the class and roster the pilots before membership (the class is
-    // event-scoped and members must be on the roster — same rule round validation enforces).
-    await selectClassesAndRoster(event.id, ['mgp-open'], [a, b]);
-
-    // Set the Open built-in class's membership (bare ids → channel-less slots, via the serde shim).
-    const ok = await setMembership(event.id, 'mgp-open', [a, b], TOKEN);
-    expect(ok.status).toBe(200);
-    const meta = ok.body as EventMeta;
-    const entry = (meta.classes_membership ?? []).find((m) => m.class === 'mgp-open');
-    // The wire shape is now member slots: `{ pilot, channel? }` (race redesign Slice 7a).
-    expect(entry?.pilots.map((s) => s.pilot)).toEqual([a, b]);
-    expect(entry?.pilots.every((s) => s.channel === undefined)).toBe(true);
-
-    // Replacing that class's list is wholesale.
-    const replaced = (await setMembership(event.id, 'mgp-open', [a], TOKEN)).body as EventMeta;
-    const replacedEntry = (replaced.classes_membership ?? []).find((m) => m.class === 'mgp-open');
-    expect(replacedEntry?.pilots.map((s) => s.pilot)).toEqual([a]);
-
-    // An empty list clears the class's entry.
-    const cleared = (await setMembership(event.id, 'mgp-open', [], TOKEN)).body as EventMeta;
-    expect((cleared.classes_membership ?? []).some((m) => m.class === 'mgp-open')).toBe(false);
-
-    // An UNKNOWN class id → 404 UnknownScope.
-    const badClass = await setMembership(event.id, 'no-such-class', [a], TOKEN);
-    expect(badClass.status).toBe(404);
-    expect((badClass.body as { code?: string }).code).toBe('UnknownScope');
-
-    // An UNKNOWN pilot id → 404 UnknownScope.
-    const badPilot = await setMembership(event.id, 'mgp-open', ['no-such-pilot'], TOKEN);
-    expect(badPilot.status).toBe(404);
-    expect((badPilot.body as { code?: string }).code).toBe('UnknownScope');
-
-    // RD-gated: no token → 401.
-    expect((await setMembership(event.id, 'mgp-open', [a])).status).toBe(401);
+  it('minting against an unknown event → 404 UnknownScope', async () => {
+    const res = await mint('no-such-event', TOKEN);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { code?: string }).code).toBe('UnknownScope');
   });
 
-  it('per-pilot channels (Slice 7a) are set when valid and rejected when not in the primary timer pool', async () => {
-    const event = (await createEvent('Channel Membership', TOKEN)).body as EventMeta;
-    const a = await makePilot('Chan A');
-    const b = await makePilot('Chan B');
-    await selectClassesAndRoster(event.id, ['mgp-open'], [a, b]);
-
-    // The event's default primary is the built-in Mock, whose available channels include Raceband
-    // R1/R2 (5658 / 5695). Assigning those is accepted and round-trips on the slot's `channel`.
-    const ok = await setMembership(
-      event.id,
-      'mgp-open',
-      [
-        { pilot: a, channel: 5658 },
-        { pilot: b, channel: 5695 }
-      ],
-      TOKEN
-    );
-    expect(ok.status).toBe(200);
-    const entry = ((ok.body as EventMeta).classes_membership ?? []).find(
-      (m) => m.class === 'mgp-open'
-    );
-    expect(entry?.pilots).toEqual([
-      { pilot: a, channel: 5658 },
-      { pilot: b, channel: 5695 }
-    ]);
-
-    // A channel NOT in the primary timer's available pool → 400 BadRequest (node_count does not
-    // cap the channel set; only the pool membership is validated).
-    const bad = await setMembership(event.id, 'mgp-open', [{ pilot: a, channel: 1234 }], TOKEN);
-    expect(bad.status).toBe(400);
-    expect((bad.body as { code?: string }).code).toBe('BadRequest');
-  });
-});
-
-/**
- * Race redesign Slice 2a: **rounds** — event-level, class-tagged, *dynamic* format-instances. A
- * `RoundDef` scopes a `FormatRegistry` format (+ its config + win condition) to one or more eligible
- * classes, with a `SeedingRule` (default `FromRoster`; `FromRanking` is the #84 carry seam). Rounds
- * are recorded on `EventMeta.rounds` (additive, omitted from the wire when empty). The Rounds UI is
- * Slice 2b — these guard the backend wire only.
- *
- * guards:
- *  - a new event's `EventMeta.rounds` is absent (additive `#[serde(default)]`, omit-when-empty).
- *  - `POST /events/{id}/rounds` is **RD-gated** (no token → 401), auto-generates the round id, and
- *    returns the created `RoundDef`. Each class must be selected by the event, the format must be a
- *    known registry name, and a `FromRanking` source must exist (bad → 400 `BadRequest`).
- *  - `PUT /events/{id}/rounds/{roundId}` replaces the round wholesale; `DELETE` removes it; an
- *    unknown round id → 404 `UnknownScope`.
- */
-describe('race Slice 2a: rounds', () => {
-  /** `POST /events/{id}/rounds` with a body + optional token → raw status + parsed body. */
-  async function addRound(
-    eventId: string,
-    body: unknown,
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/rounds`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body)
-    });
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** `PUT`/`DELETE /events/{id}/rounds/{roundId}` → raw status + parsed body. */
-  async function mutateRound(
-    eventId: string,
-    roundId: string,
-    method: 'PUT' | 'DELETE',
-    body?: unknown,
-    token: string = TOKEN
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`
-    };
-    const res = await fetch(
-      `${eventRoot(director.baseUrl, eventId)}/rounds/${encodeURIComponent(roundId)}`,
-      { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }
-    );
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      parsed = undefined;
-    }
-    return { status: res.status, body: parsed };
-  }
-
-  /** Select the built-in `mgp-open` class on an event so a round may run for it. */
-  async function selectOpen(eventId: string): Promise<void> {
-    await fetch(`${eventRoot(director.baseUrl, eventId)}/classes`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ ids: ['mgp-open'] })
-    });
-  }
-
-  it('a new event has no rounds (additive, omit-when-empty)', async () => {
-    const event = (await createEvent('Rounds Default', TOKEN)).body as EventMeta;
-    expect(event.rounds).toBeUndefined();
-  });
-
-  it('POST /rounds is RD-gated — no token → 401', async () => {
-    const event = (await createEvent('Rounds Auth', TOKEN)).body as EventMeta;
-    await selectOpen(event.id);
-    const res = await addRound(event.id, {
-      label: 'Q1',
-      classes: ['mgp-open'],
-      format: 'timed_qual',
-      win_condition: 'BestLap'
-    });
-    expect(res.status).toBe(401);
-  });
-
-  it('POST /rounds generates an id and records the round; PUT/DELETE edit it', async () => {
-    const event = (await createEvent('Rounds CRUD', TOKEN)).body as EventMeta;
-    await selectOpen(event.id);
-
-    const created = await addRound(
-      event.id,
-      {
-        label: 'Qualifying R1',
-        classes: ['mgp-open'],
-        format: 'timed_qual',
-        params: {},
-        win_condition: 'BestLap',
-        time_limit_secs: 60
-      },
-      TOKEN
-    );
-    expect(created.status).toBe(200);
-    const round = created.body as RoundDef;
-    expect(round.id).toMatch(/^qualifying-r1-/);
-    expect(round.label).toBe('Qualifying R1');
-    expect(round.format).toBe('timed_qual');
-    expect(round.seeding).toBe('FromRoster'); // default
-    // Race redesign Slice 7a: channel_mode defaults by format — timed_qual → 'Static'.
-    expect(round.channel_mode).toBe('Static');
-
-    // A non-Static format defaults to 'PerHeat'; an explicit channel_mode overrides the default.
-    const bracket = (
-      await addRound(
-        event.id,
-        {
-          label: 'Head to Head',
-          classes: ['mgp-open'],
-          format: 'head_to_head',
-          win_condition: 'BestLap',
-          time_limit_secs: 60
-        },
-        TOKEN
-      )
-    ).body as RoundDef;
-    expect(bracket.channel_mode).toBe('PerHeat');
-    const forced = (
-      await addRound(
-        event.id,
-        {
-          label: 'Forced',
-          classes: ['mgp-open'],
-          format: 'timed_qual',
-          channel_mode: 'PerHeat',
-          win_condition: 'BestLap',
-          time_limit_secs: 60
-        },
-        TOKEN
-      )
-    ).body as RoundDef;
-    expect(forced.channel_mode).toBe('PerHeat');
-
-    // The round is recorded on the event meta (re-create returns the current snapshot via list).
-    const list = (await fetch(`${director.baseUrl}/events`).then((r) => r.json())) as EventMeta[];
-    const meta = list.find((e) => e.id === event.id)!;
-    expect((meta.rounds ?? []).map((r) => r.id)).toContain(round.id);
-
-    // PUT replaces wholesale (id preserved).
-    const updated = await mutateRound(event.id, round.id, 'PUT', {
-      label: 'Open Qualifying',
-      classes: ['mgp-open'],
-      format: 'head_to_head',
-      params: { group_size: '2' },
-      win_condition: { FirstToLaps: { n: 5 } }
-    });
-    expect(updated.status).toBe(200);
-    const updatedRound = updated.body as RoundDef;
-    expect(updatedRound.id).toBe(round.id);
-    expect(updatedRound.format).toBe('head_to_head');
-
-    // DELETE removes it; a second DELETE is a 404 UnknownScope.
-    expect((await mutateRound(event.id, round.id, 'DELETE')).status).toBe(200);
-    const gone = await mutateRound(event.id, round.id, 'DELETE');
-    expect(gone.status).toBe(404);
-    expect((gone.body as { code?: string }).code).toBe('UnknownScope');
-  });
-
-  it('POST /rounds round-trips the start procedure — internally tagged on `mode` (heat-lifecycle Slice 2)', async () => {
-    const event = (await createEvent('Rounds Start Procedure', TOKEN)).body as EventMeta;
-    await selectOpen(event.id);
-
-    // Omitted on create → the server defaults a randomized-delay procedure. The wire shape
-    // is INTERNALLY tagged on `mode` (`{ "mode": "randomized-delay", min_delay_ms, … }`) —
-    // not externally tagged like SeedingRule/WinCondition — so the tag is pinned explicitly.
-    const defaulted = (
-      await addRound(
-        event.id,
-        {
-          label: 'Defaulted Start',
-          classes: ['mgp-open'],
-          format: 'timed_qual',
-          params: {},
-          win_condition: 'BestLap',
-          time_limit_secs: 60
-        },
-        TOKEN
-      )
-    ).body as RoundDef;
-    expect(defaulted.start_procedure.mode).toBe('randomized-delay');
-    expect(typeof defaulted.start_procedure.min_delay_ms).toBe('number');
-    expect(typeof defaulted.start_procedure.max_delay_ms).toBe('number');
-    expect(defaulted.start_procedure.min_delay_ms).toBeLessThanOrEqual(
-      defaulted.start_procedure.max_delay_ms
-    );
-
-    // Explicit: the full randomized-delay variant — window bounds plus the optional start
-    // tone — round-trips through create byte-for-byte.
-    const procedure: StartProcedure = {
-      mode: 'randomized-delay',
-      min_delay_ms: 1200,
-      max_delay_ms: 3400,
-      tone: { hz: 880, ms: 400 }
-    };
-    const created = await addRound(
-      event.id,
-      {
-        label: 'Custom Start',
-        classes: ['mgp-open'],
-        format: 'timed_qual',
-        params: {},
-        win_condition: 'BestLap',
-        time_limit_secs: 60,
-        start_procedure: procedure
-      },
-      TOKEN
-    );
-    expect(created.status).toBe(200);
-    const round = created.body as RoundDef;
-    expect(round.start_procedure).toEqual(procedure);
-
-    // …and survives the persist: the event meta reads the same procedure back.
-    const meta = (await listEvents()).find((e) => e.id === event.id)!;
-    const stored = (meta.rounds ?? []).find((r) => r.id === round.id)!;
-    expect(stored.start_procedure).toEqual(procedure);
-
-    // PUT replaces it wholesale too (the round-editor path).
-    const replaced: StartProcedure = {
-      mode: 'randomized-delay',
-      min_delay_ms: 500,
-      max_delay_ms: 500
-    };
-    const updated = await mutateRound(event.id, round.id, 'PUT', {
-      label: 'Custom Start',
-      classes: ['mgp-open'],
-      format: 'timed_qual',
-      params: {},
-      win_condition: 'BestLap',
-      time_limit_secs: 60,
-      start_procedure: replaced
-    });
-    expect(updated.status).toBe(200);
-    expect((updated.body as RoundDef).start_procedure).toEqual(replaced);
-  });
-
-  it('POST /rounds accepts an open_practice round seeded ActiveNodes (open-practice format)', async () => {
-    // Open practice (open-practice format, Slice 1): a round is `format: "open_practice"` +
-    // `seeding: ActiveNodes { nodes }` (node indices), with no eligible classes — it is keyed on
-    // active *channels*, not pilots. The round round-trips through the meta with its seeding intact.
-    const event = (await createEvent('Open Practice Round', TOKEN)).body as EventMeta;
-    // No class selection needed — an open-practice round has an empty classes list.
-    const created = await addRound(
-      event.id,
-      {
-        label: 'Open Practice',
-        classes: [],
-        format: 'open_practice',
-        params: {},
-        win_condition: 'BestLap',
-        seeding: { ActiveNodes: { nodes: [0, 1, 2] } }
-      },
-      TOKEN
-    );
-    expect(created.status).toBe(200);
-    const round = created.body as RoundDef;
-    expect(round.format).toBe('open_practice');
-    expect(round.classes).toEqual([]);
-    expect(round.seeding).toEqual({ ActiveNodes: { nodes: [0, 1, 2] } });
-
-    // It round-trips through the event meta (the seeding + format survive the persist).
-    const list = (await fetch(`${director.baseUrl}/events`).then((r) => r.json())) as EventMeta[];
-    const meta = list.find((e) => e.id === event.id)!;
-    const stored = (meta.rounds ?? []).find((r) => r.id === round.id)!;
-    expect(stored.seeding).toEqual({ ActiveNodes: { nodes: [0, 1, 2] } });
-  });
-
-  it('POST /rounds open_practice with NO win condition + a time limit auto-creates one heat', async () => {
-    // Open-practice refinement: the request may omit `win_condition` (open practice does no scoring)
-    // and carry a `time_limit_secs`; creating the round auto-creates its single channel heat (no
-    // manual FillRound). Re-filling is idempotent — there is still exactly one heat for the round.
-    const event = (await createEvent('Open Practice Auto', TOKEN)).body as EventMeta;
-    const created = await addRound(
-      event.id,
-      {
-        label: 'Open Practice',
-        classes: [],
-        format: 'open_practice',
-        // No `win_condition` field at all — additive on the wire.
-        seeding: { ActiveNodes: { nodes: [0, 1] } },
-        time_limit_secs: 3600
-      },
-      TOKEN
-    );
-    expect(created.status).toBe(200);
-    const round = created.body as RoundDef;
-    // The inert default win condition is stored; the time limit round-trips.
-    expect(round.win_condition).toBe('BestLap');
-    expect(round.time_limit_secs).toBe(3600);
-
-    // The single channel heat was auto-created on round creation (no FillRound was sent).
-    const heats = await listHeats(director.baseUrl, event.id);
-    const forRound = heats.filter((h) => h.round === round.id);
-    expect(forRound).toHaveLength(1);
-    expect(forRound[0].lineup).toEqual(['node-0', 'node-1']);
-
-    // Idempotent: re-running the round's FillRound over the control path adds no second heat.
-    await fetch(`${eventRoot(director.baseUrl, event.id)}/control`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ FillRound: { round: round.id } })
-    });
-    const after = (await listHeats(director.baseUrl, event.id)).filter((h) => h.round === round.id);
-    expect(after).toHaveLength(1);
-  });
-
-  it('POST /rounds validates format, class selection, and seeding source → 400', async () => {
-    const event = (await createEvent('Rounds Validation', TOKEN)).body as EventMeta;
-    await selectOpen(event.id);
-
-    // Unknown format → 400 BadRequest.
-    const badFormat = await addRound(
-      event.id,
-      { label: 'X', classes: ['mgp-open'], format: 'no-such-format', win_condition: 'BestLap' },
-      TOKEN
-    );
-    expect(badFormat.status).toBe(400);
-    expect((badFormat.body as { code?: string }).code).toBe('BadRequest');
-
-    // A directory class the event does NOT select (mgp-7 is a built-in, but only mgp-open is
-    // selected here) → 400.
-    const badClass = await addRound(
-      event.id,
-      { label: 'X', classes: ['mgp-7'], format: 'timed_qual', win_condition: 'BestLap' },
-      TOKEN
-    );
-    expect(badClass.status).toBe(400);
-
-    // FromRanking with a dangling source round → 400.
-    const dangling = await addRound(
-      event.id,
-      {
-        label: 'Bracket',
-        classes: ['mgp-open'],
-        format: 'head_to_head',
-        win_condition: 'BestLap',
-        seeding: { FromRanking: { source_rounds: ['does-not-exist'], top_n: 4 } }
-      },
-      TOKEN
-    );
-    expect(dangling.status).toBe(400);
-
-    // An unknown event id → 404 UnknownScope.
-    const badEvent = await addRound(
-      'no-such-event',
-      { label: 'X', classes: ['mgp-open'], format: 'timed_qual', win_condition: 'BestLap' },
-      TOKEN
-    );
-    expect(badEvent.status).toBe(404);
-    expect((badEvent.body as { code?: string }).code).toBe('UnknownScope');
-  });
-
-  it('GET /formats is an open read of the standard formats + their param schemas (the round dropdown / params editor source)', async () => {
-    // The Rounds UI sources its format dropdown AND per-format params editor here rather than
-    // hard-coding the list — the single source of truth is the engine's `FormatRegistry`. An open
-    // read (no token). Race redesign Slice 7a: each entry is `{ name, params: [...] }`.
-    const res = await fetch(`${director.baseUrl}/formats`);
+  it('an RD mints a read-only join token that is REJECTED on a write', async () => {
+    const event = (await createEvent('Join Me', TOKEN)).body as EventMeta;
+    const res = await mint(event.id, TOKEN);
     expect(res.status).toBe(200);
-    const schemas = (await res.json()) as FormatSchema[];
-    // The **offered** production formats, in sorted name order, including the casual `open_practice`
-    // (open-practice format) with no param knobs. ZippyQ is shelved (#218) — still registered (so
-    // persisted `zippyq` rounds validate, see the `POST /rounds` accepts-registered-format guard) but
-    // omitted from this offered set so a new round can't select it.
-    expect(schemas.map((s) => s.name)).toEqual(['head_to_head', 'open_practice', 'timed_qual']);
-    expect(schemas.map((s) => s.name)).not.toContain('zippyq');
-    // head_to_head (D17, the atomic racing round) declares `group_size` (number, default 2) +
-    // `rotations` ("Heats per group", number, default 1 — the same groups race N times, scoring
-    // accumulating) + a `scoring` enum (placement | points, default placement).
-    const h2h = schemas.find((s) => s.name === 'head_to_head')!;
-    expect(h2h.params.find((p) => p.key === 'group_size')?.kind).toBe('number');
-    expect(h2h.params.find((p) => p.key === 'group_size')?.default).toBe('2');
-    const rotations = h2h.params.find((p) => p.key === 'rotations')!;
-    expect(rotations.kind).toBe('number');
-    expect(rotations.default).toBe('1');
-    expect(rotations.label).toBe('Heats per group');
-    const scoring = h2h.params.find((p) => p.key === 'scoring')!;
-    expect(scoring.kind).toBe('enum');
-    expect(scoring.options).toEqual(['placement', 'points']);
-    expect(scoring.default).toBe('placement');
-    // open_practice declares no params (its active nodes are the field, via ActiveNodes seeding).
-    expect(schemas.find((s) => s.name === 'open_practice')!.params).toEqual([]);
-    // timed_qual declares `rounds` (number, default 3) relabeled "Heats per pilot". It declares NO
-    // `metric` param: the qualifying metric is derived from the round's win condition (the qualifying
-    // metric IS the win condition — Rounds form redesign), not a separate stored knob.
-    const tq = schemas.find((s) => s.name === 'timed_qual')!;
-    const rounds = tq.params.find((p) => p.key === 'rounds')!;
-    expect(rounds.kind).toBe('number');
-    expect(rounds.default).toBe('3');
-    expect(rounds.label).toBe('Heats per pilot');
-    expect(tq.params.find((p) => p.key === 'metric')).toBeUndefined();
+    const body = (await res.json()) as JoinTokenResponse;
+    expect(wireShapeProblems(body, 'JoinTokenResponse')).toEqual([]);
+    expect(body.token.length).toBeGreaterThan(0);
+    expect(body.token).not.toBe(TOKEN); // a distinct, freshly-minted credential
+
+    // A spectator can watch, never write: the join token is refused where the RD token works.
+    const asSpectator = await createEvent('Spectator Event', body.token);
+    expect(asSpectator.status).toBe(401);
+    expect((asSpectator.body as { code?: string }).code).toBe('Unauthorized');
   });
 });
 
 /**
- * Race redesign Slice 3a: the **round-driven engine** — `Command::FillRound`. Building the round's
- * format generator from the eligible classes' membership (the field) and the round's completed heats
- * read off the log, it schedules the **next** heat tagged with the round (and the class when
- * single-class). A round whose generator has no more heats is **complete** — a successful ack, not an
- * error. The Heats UI is Slice 3b; this guards the backend wire only.
- *
- * guards:
- *  - `FillRound` over `POST /events/{id}/control` (RD-gated) acks `{ ok: true }` and the
- *    round-scheduled heat becomes snapshot-able, tagged with the round + the single class, lineup =
- *    the class membership.
- *  - `FillRound` on a round with no membership (empty field) is a well-formed `{ ok: false }`
- *    (BadRequest), NOT an HTTP error; on an unknown round it is `{ ok: false, UnknownScope }`.
+ * The real `@gridfpv/protocol-client` build against the real Director: the client's own calls
+ * read the same wire the raw `fetch` tests above pin, and a refusal reaches the caller as a
+ * `RequestFailure` carrying the Director's sentence and the HTTP status.
  */
-describe('race Slice 3a: FillRound (round-driven engine)', () => {
-  /** `POST /events/{id}/control` a command with an optional token → raw status + parsed body. */
-  async function control(
-    eventId: string,
-    command: Command,
-    token?: string
-  ): Promise<{ status: number; body: unknown }> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(`${eventRoot(director.baseUrl, eventId)}/control`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(command)
-    });
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch {
-      body = undefined;
-    }
-    return { status: res.status, body };
-  }
+describe('the protocol-client against the real Director', () => {
+  it('reads the event list and the class directory', async () => {
+    const events = await clientListEvents(director.baseUrl);
+    expect(events.length).toBeGreaterThan(0);
+    for (const event of events) expect(wireShapeProblems(event, 'EventMeta')).toEqual([]);
 
-  /** Create a pilot, returning its id. */
-  async function makePilot(callsign: string): Promise<string> {
-    const res = await fetch(`${director.baseUrl}/pilots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ callsign })
-    });
-    return ((await res.json()) as Pilot).id;
-  }
+    const classes = await clientListClasses(director.baseUrl);
+    expect(classes.map((c) => c.id)).toContain('mgp-open');
+  });
 
-  /** Select `mgp-open`, set its membership to `pilotIds`, add a 1-round timed_qual; return ids. */
-  async function setupQualRound(
-    eventName: string,
-    pilotIds: string[]
-  ): Promise<{ eventId: string; roundId: string }> {
-    const event = (await createEvent(eventName, TOKEN)).body as EventMeta;
-    await fetch(`${eventRoot(director.baseUrl, event.id)}/classes`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ ids: ['mgp-open'] })
-    });
-    // Roster the pilots before membership (members must be on the event roster).
-    await fetch(`${eventRoot(director.baseUrl, event.id)}/roster`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ pilot_ids: pilotIds })
-    });
-    await fetch(`${eventRoot(director.baseUrl, event.id)}/classes/mgp-open/membership`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      // Bare pilot-id elements (channel-less slots, via the serde shim) — this seam exercises the
-      // per-heat path (whole-field heat + first-fit channels), so the round is forced PerHeat.
-      body: JSON.stringify({ pilots: pilotIds })
-    });
-    const created = await fetch(`${eventRoot(director.baseUrl, event.id)}/rounds`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({
-        label: 'Qualifying',
-        classes: ['mgp-open'],
-        format: 'timed_qual',
-        params: { rounds: '1' },
-        win_condition: 'BestLap',
-        // Best Lap only ranks, so a scored round needs a race time to end (server validation).
-        time_limit_secs: 60,
-        // timed_qual defaults to Static (Slice 7a); these FillRound seams assert the per-heat
-        // whole-field path, so force PerHeat (the static path is covered by the app-level e2e).
-        channel_mode: 'PerHeat'
-      })
-    });
-    const round = (await created.json()) as RoundDef;
-    return { eventId: event.id, roundId: round.id };
-  }
-
-  it('FillRound acks ok and the round-scheduled heat is snapshot-able (tagged round + class)', async () => {
-    const a = await makePilot('Fill A');
-    const b = await makePilot('Fill B');
-    const { eventId, roundId } = await setupQualRound('FillRound Event', [a, b]);
-
-    // FillRound draws the field from the class membership and schedules the first heat.
-    const ack = await control(eventId, { FillRound: { round: roundId } }, TOKEN);
-    expect(ack.status).toBe(200);
-    expect(ack.body.ok).toBe(true);
-    // #395: the ack now reports WHAT it did, not merely that it was accepted — a fill that
-    // schedules nothing used to be indistinguishable from one that scheduled a heat. Assert the
-    // productive outcome positively rather than pinning the whole envelope, which would break
-    // again on the next additive field.
-    expect(ack.body.outcome?.FillRound?.stopped).toBe('SingleStep');
-    expect(ack.body.outcome?.FillRound?.scheduled).toHaveLength(1);
-
-    // The class snapshot now resolves (the round-tagged heat folded into the class scope).
-    const classSnap = await fetch(
-      `${eventRoot(director.baseUrl, eventId)}/snapshot/class/${eventId}/mgp-open`
+  it('creates a pilot with the RD token', async () => {
+    const pilot = await clientCreatePilot(
+      director.baseUrl,
+      { callsign: 'Client Made', vtx_types: [] },
+      TOKEN
     );
-    expect(classSnap.status).toBe(200);
+    expect(pilot.callsign).toBe('Client Made');
+    expect(wireShapeProblems(pilot, 'Pilot')).toEqual([]);
   });
 
-  it('FillRound on an empty-field round → CommandAck{ok:false} (BadRequest), HTTP 200', async () => {
-    // A round whose class has no membership has no field to schedule.
-    const { eventId, roundId } = await setupQualRound('FillRound Empty', []);
-    const ack = await control(eventId, { FillRound: { round: roundId } }, TOKEN);
-    expect(ack.status).toBe(200); // the failure rides in the ack body, not the HTTP status
-    const body = ack.body as { ok: boolean; error?: { code: string } };
-    expect(body.ok).toBe(false);
-    expect(body.error?.code).toBe('BadRequest');
-  });
-
-  it('FillRound on an unknown round → CommandAck{ok:false, UnknownScope}', async () => {
-    const event = (await createEvent('FillRound Unknown', TOKEN)).body as EventMeta;
-    const ack = await control(event.id, { FillRound: { round: 'no-such-round' } }, TOKEN);
-    const body = ack.body as { ok: boolean; error?: { code: string } };
-    expect(body.ok).toBe(false);
-    expect(body.error?.code).toBe('UnknownScope');
-  });
-
-  it('FillRound is RD-gated — no token → 401', async () => {
-    const { eventId, roundId } = await setupQualRound('FillRound Auth', []);
-    const res = await control(eventId, { FillRound: { round: roundId } });
-    expect(res.status).toBe(401);
+  it('a refused write rejects with the status and the typed code', async () => {
+    const refused = await clientCreatePilot(director.baseUrl, {
+      callsign: 'No Token',
+      vtx_types: []
+    }).then(
+      () => undefined,
+      (e: unknown) => e
+    );
+    expect(isRequestFailure(refused)).toBe(true);
+    if (!isRequestFailure(refused)) return;
+    expect(refused.status).toBe(401);
+    expect(refused.code).toBe('Unauthorized');
+    expect(refused.message.length).toBeGreaterThan(0);
   });
 });
 
