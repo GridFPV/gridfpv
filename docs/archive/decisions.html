@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Decisions</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. This is the old decision log. Some decisions about the spine still hold (D4, D9, D16, D21, D22, D25, D26, D27) and are being re-checked; the decisions about rounds, formats and the heat lifecycle are replaced. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. This is the old decision log. Some decisions about the spine still hold (D4, D9, D16, D21, D22, D25, D26, D27) and are being re-checked; the decisions about rounds, formats and the heat lifecycle are replaced. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -33,7 +33,7 @@
       <p>
         Each entry is a small accepted decision, not a spec. Where a decision changed an earlier
         stance (e.g. an abort once landed at <code>Staged</code>), the entry says so. When this
-        doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+        doc and the <a href="../vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>
 
@@ -292,8 +292,8 @@
     <h2>D9 · The native desktop app embeds the Director, ships portable-only, stores data next to the exe — <em>implemented</em></h2>
     <dl class="entities">
       <dt>Context</dt>
-      <dd>The RD console was always destined for a native shell (<a href="clients.html">Clients</a>;
-      <a href="architecture.html">Architecture</a> §2), shipped as a plain web app in v0.4 while the
+      <dd>The RD console was always destined for a native shell (<a href="../clients.html">Clients</a>;
+      <a href="../architecture.html">Architecture</a> §2), shipped as a plain web app in v0.4 while the
       Tauri work was deferred. A release form needs to answer three questions at once: how a
       non-technical RD <em>gets and runs</em> the app, how the shell relates to the Director that
       actually runs races, and where an event's data lives. The hosted Director
@@ -514,8 +514,8 @@
       <strong>race-management system (RMS)</strong>. RH only <em>streams</em> scalar RSSI aggregates
       on the wire — the dense per-tick signal history needs a post-race pull — and we don't control
       that wire protocol. So the richest signal, the one marshaling most wants, never arrives live and
-      isn't ours to shape (<a href="timer-adapters.html">Timer Adapters</a> §3,
-      <a href="marshaling.html">Marshaling</a>).</dd>
+      isn't ours to shape (<a href="../timer-adapters.html">Timer Adapters</a> §3,
+      <a href="../marshaling.html">Marshaling</a>).</dd>
       <dt>Decision</dt>
       <dd>A <strong>two-tier</strong> timer strategy. <strong>Tier 1 (now, non-negotiable):</strong>
       the <strong>RH adapter stays the primary path</strong> — it works with any existing RH install
@@ -904,11 +904,11 @@
 
     <footer class="doc-footer">
       <p>
-        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+        Internal design documentation · <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>
-  <script src="assets/vendor/mermaid.min.js"></script>
-  <script src="assets/diagrams.js"></script>
+  <script src="../assets/vendor/mermaid.min.js"></script>
+  <script src="../assets/diagrams.js"></script>
 </body>
 </html>

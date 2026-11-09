@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Heat Lifecycle</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It describes the six-state heat. A heat is now a lineup that is raced one or more times, and the states belong to the race: ready, running, stopped, then saved or discarded. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It describes the six-state heat. A heat is now a lineup that is raced one or more times, and the states belong to the race: ready, running, stopped, then saved or discarded. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -33,11 +33,11 @@
       <p>
         This doc owns the <strong>heat finite-state machine</strong> — its states, commands,
         recorded transitions, and the runtime clock that appends the automatic ones. It builds
-        on the append-only spine (<a href="architecture.html">Architecture</a> §3), the scoring
+        on the append-only spine (<a href="../architecture.html">Architecture</a> §3), the scoring
         and win conditions (<a href="race-engine.html">Race Engine</a> §4), and the canonical
-        passes from <a href="timer-adapters.html">Timer Adapters</a>. The <em>why</em> behind
+        passes from <a href="../timer-adapters.html">Timer Adapters</a>. The <em>why</em> behind
         each decision here is logged ADR-style in <a href="decisions.html">Decisions</a>. When
-        this doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+        this doc and the <a href="../vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>
 
@@ -337,11 +337,11 @@ stateDiagram-v2
 
     <footer class="doc-footer">
       <p>
-        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+        Internal design documentation · <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>
-  <script src="assets/vendor/mermaid.min.js"></script>
-  <script src="assets/diagrams.js"></script>
+  <script src="../assets/vendor/mermaid.min.js"></script>
+  <script src="../assets/diagrams.js"></script>
 </body>
 </html>

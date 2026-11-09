@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Roadmap</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It is the build plan from before the restructure. The new order of work is in the primitives doc, section 8. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It is the build plan from before the restructure. The new order of work is in the primitives doc, section 8. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -33,8 +33,8 @@
         This doc owns the <strong>phase plan</strong> and how it is tracked on GitHub.
         It sequences the work the other docs specify — it does not redefine their designs; each
         phase links to the doc that owns its detail. It is a <strong>living plan</strong>
-        (<a href="index.html">authoritative but revisable</a>): phases and scope will shift as we
-        learn. When this doc and the <a href="vision.html">Vision</a> disagree, the Vision wins.
+        (<a href="../index.html">authoritative but revisable</a>): phases and scope will shift as we
+        learn. When this doc and the <a href="../vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>
 
@@ -58,7 +58,7 @@
     <div class="principle">
       <p><span class="name">Correctness by replay from day one.</span> The replay test harness
       and golden cases arrive with the first adapters, not bolted on later — the
-      <a href="testing-strategy.html">testing strategy</a> is a phase input, not an afterthought.</p>
+      <a href="../testing-strategy.html">testing strategy</a> is a phase input, not an afterthought.</p>
     </div>
 
     <div class="callout">
@@ -138,13 +138,13 @@ flowchart LR
     <p><strong>Goal:</strong> prove the append-only spine end to end with the simplest possible pieces.</p>
     <ul>
       <li>Rust workspace + crate layout; the storage trait; <strong>SQLite append-only log</strong>.</li>
-      <li>The <strong>canonical event model</strong> as Rust types (<a href="timer-adapters.html">Timer Adapters</a>) + Rust→TS generation wired.</li>
+      <li>The <strong>canonical event model</strong> as Rust types (<a href="../timer-adapters.html">Timer Adapters</a>) + Rust→TS generation wired.</li>
       <li>A synthetic/manual source appending <code>Pass</code> events; the projection engine deriving a lap list; a minimal read.</li>
     </ul>
     <p><strong>Done when:</strong> a synthetic session appends events and yields a correct, recomputable lap list; the replay-harness scaffold exists.</p>
 
     <h3>v0.2 — First adapters + replay harness</h3>
-    <p><strong>Goal:</strong> real timing in, with the test discipline. (<a href="timer-adapters.html">Timer Adapters</a>, <a href="testing-strategy.html">Testing</a>)</p>
+    <p><strong>Goal:</strong> real timing in, with the test discipline. (<a href="../timer-adapters.html">Timer Adapters</a>, <a href="../testing-strategy.html">Testing</a>)</p>
     <ul>
       <li><strong>RotorHazard adapter</strong> (Socket.IO → canonical events, signal context) and <strong>Velocidrone adapter</strong> (WebSocket → passes + splits), behind the capability model.</li>
       <li>Clock alignment + reconnect/dedup; <strong>recorded-session replay harness</strong> + golden cases; dockerized RH for fixtures and live integration tests.</li>
@@ -160,7 +160,7 @@ flowchart LR
     <p><strong>Done when (met):</strong> a full event ran from a recorded source with correct results and marshaling; generators table-tested. The shipping format set was later narrowed to the three primitives (see the status note above).</p>
 
     <h3>v0.4 — Direct a single race (RD console) — RELEASED (v0.4.0-alpha.1)</h3>
-    <p><strong>Goal (met):</strong> a person can run a real event end to end from the RD console. (<a href="protocol.html">Protocol</a>, <a href="clients.html">Clients</a>)</p>
+    <p><strong>Goal (met):</strong> a person can run a real event end to end from the RD console. (<a href="../protocol.html">Protocol</a>, <a href="../clients.html">Clients</a>)</p>
     <p>
       The horizontal foundation — embedded <strong>axum protocol server</strong> (snapshot + WS
       stream, scoping, bearer + LAN join-token auth), the <strong>Svelte</strong> console shell +
@@ -193,7 +193,7 @@ flowchart LR
     <ul>
       <li><strong>Slice 0 — Log tags.</strong> Tag the log (notably <code>HeatScheduled</code>) with
       class / round / per-pilot frequencies; promote <code>ClassId</code> / <code>RoundId</code> into
-      the events crate (<a href="architecture.html">Architecture</a> §4).</li>
+      the events crate (<a href="../architecture.html">Architecture</a> §4).</li>
       <li><strong>Slice 1 — Roster = membership = presence.</strong> Per-class roster membership;
       IRL = RD adds pilots + binds node→pilot, Sim = auto-membership from <code>CompetitorSeen</code>
       (auto-add + auto-bind name matches).</li>
@@ -239,7 +239,7 @@ flowchart LR
       <li><strong>Tournament rebuild</strong> (post-v1, from <code>tournaments-snapshot</code> on the
       D13 level-per-round model): small fixes #32/#33 → the generate-full-bracket helper #30 → the
       bracket container + tree viz #31; double-elim and multi-main first-class.</li>
-      <li><strong>The required RotorHazard plugin</strong> (D16, <a href="rotorhazard-plugin.html">design</a>):
+      <li><strong>The required RotorHazard plugin</strong> (D16, <a href="../rotorhazard-plugin.html">design</a>):
       slice 0 (the RH 4.4.0 mock harness) is built; next the versioned handshake, dense live RSSI,
       clean start/stop ownership, and re-detection over stored traces (#3 recalc).</li>
     </ul>
@@ -250,14 +250,14 @@ flowchart LR
     </p>
 
     <h3>v0.5 — Racer/spectator PWA</h3>
-    <p><strong>Goal:</strong> racers and spectators can follow along on their phones. (<a href="clients.html">Clients</a>)</p>
+    <p><strong>Goal:</strong> racers and spectators can follow along on their phones. (<a href="../clients.html">Clients</a>)</p>
     <ul>
       <li>The <strong>racer/spectator PWA</strong> (snapshot+subscribe, scoped views, LAN-degraded, install/offline where the secure context allows); QR/join-token onboarding.</li>
     </ul>
     <p><strong>Done when:</strong> racers on the LAN see their next heat and live standings on their phones.</p>
 
     <h3>v0.6 — Streaming / broadcast</h3>
-    <p><strong>Goal:</strong> stream a race — overlays and OBS direction — entirely on the LAN, no Cloud required. (<a href="streaming.html">Streaming</a>, <a href="clients.html">Clients</a>)</p>
+    <p><strong>Goal:</strong> stream a race — overlays and OBS direction — entirely on the LAN, no Cloud required. (<a href="../streaming.html">Streaming</a>, <a href="../clients.html">Clients</a>)</p>
     <ul>
       <li><strong>OBS overlays</strong> (leaderboard, staging, podium, bracket) as read-only protocol clients, with theming.</li>
       <li><strong>Broadcast control</strong> — obs-websocket scene maps driven by race-state, with automatic / armed / manual transition modes; the control-only capture boundary (OBS owns video).</li>
@@ -265,15 +265,15 @@ flowchart LR
     <p><strong>Done when:</strong> overlays render in OBS from live state and scene switches follow the heat loop — all driven by a Director on the LAN with no Cloud.</p>
 
     <h3>v0.7 — Cloud</h3>
-    <p><strong>Goal:</strong> off-LAN reach and longevity. (<a href="cloud.html">Cloud &amp; Season</a>)</p>
+    <p><strong>Goal:</strong> off-LAN reach and longevity. (<a href="../cloud.html">Cloud &amp; Season</a>)</p>
     <ul>
-      <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait — the Cloud realization of the event-as-container model (the <code>events</code> + <code>event_log</code> schema in <a href="architecture.html">Architecture</a> §4).</li>
+      <li><strong>One-way resumable push</strong> (Director → Cloud); Postgres warehouse via the same server crate + storage trait — the Cloud realization of the event-as-container model (the <code>events</code> + <code>event_log</code> schema in <a href="../architecture.html">Architecture</a> §4).</li>
       <li><strong>Accounts</strong> + free-account-gated reads; the live relay (same PWA off-LAN) + web push; long-term portal basics (career, standings); the <strong>season</strong> model.</li>
     </ul>
     <p><strong>Done when:</strong> a Director with internet relays a live event to off-LAN viewers, a season aggregates across events, and a self-hosted Cloud deploy is documented.</p>
 
     <h3>v0.8 — Integrations</h3>
-    <p><strong>Goal:</strong> connect to the ecosystem. (<a href="integrations.html">External Integrations</a>)</p>
+    <p><strong>Goal:</strong> connect to the ecosystem. (<a href="../integrations.html">External Integrations</a>)</p>
     <ul>
       <li><strong>MultiGP RaceSync</strong> (roster import, queued/resumable results push); credential handling.</li>
       <li><strong>Open-data API</strong> + export + embeddable widgets — the cross-event surface leans on the Cloud warehouse from v0.7.</li>
@@ -281,7 +281,7 @@ flowchart LR
     <p><strong>Done when:</strong> roster import + results push work against a chapter, and the open-data API + widgets serve.</p>
 
     <h3>RH integration — a required GridFPV RotorHazard plugin</h3>
-    <p><strong>Goal:</strong> make the RotorHazard integration plugin-based, for native control and live dense signal. (<a href="timer-adapters.html">Timer Adapters</a>, <a href="decisions.html">D16</a>)</p>
+    <p><strong>Goal:</strong> make the RotorHazard integration plugin-based, for native control and live dense signal. (<a href="../timer-adapters.html">Timer Adapters</a>, <a href="decisions.html">D16</a>)</p>
     <ul>
       <li>A <strong>required GridFPV RotorHazard plugin</strong> running <em>inside</em> the RH server
       with <strong>RHAPI access</strong> (node manager / race events / config). It supersedes the
@@ -299,7 +299,7 @@ flowchart LR
       <strong>"Required" is a guided one-step install</strong> (Grid detects a missing plugin and
       offers to install it), not a hard-fail, keeping the "try it fast" feel. The plugin becomes the
       <strong>primary RH integration</strong>; the design doc lives at
-      <a href="rotorhazard-plugin.html">RotorHazard Plugin</a> (floor: RHAPI 1.3 / RH 4.3.0+),
+      <a href="../rotorhazard-plugin.html">RotorHazard Plugin</a> (floor: RHAPI 1.3 / RH 4.3.0+),
       slice 0 (the RH 4.4.0 mock harness) is built, and the released alpha integrates via the
       live RH <em>adapter</em> while the plugin path lands (<a href="decisions.html">D16</a>).
     </p>
@@ -308,7 +308,7 @@ flowchart LR
     <p>These run across every phase rather than living in one:</p>
     <dl class="entities">
       <dt>Testing &amp; replay</dt>
-      <dd>Golden cases and recorded-session replay land with v0.2 and grow with every feature (<a href="testing-strategy.html">Testing</a>).</dd>
+      <dd>Golden cases and recorded-session replay land with v0.2 and grow with every feature (<a href="../testing-strategy.html">Testing</a>).</dd>
       <dt>Build &amp; packaging</dt>
       <dd>The single-binary, cross-platform, offline build (Tauri bundle, vendored assets, Rust→TS generation) is maintained from v0.1 onward.</dd>
       <dt>Documentation</dt>
@@ -353,11 +353,11 @@ flowchart LR
 
     <footer class="doc-footer">
       <p>
-        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+        Internal design documentation · <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>
-  <script src="assets/vendor/mermaid.min.js"></script>
-  <script src="assets/diagrams.js"></script>
+  <script src="../assets/vendor/mermaid.min.js"></script>
+  <script src="../assets/diagrams.js"></script>
 </body>
 </html>

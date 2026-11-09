@@ -38,7 +38,7 @@
         hosts the public dashboards (<a href="cloud.html">Cloud &amp; Season</a>), the
         canonical timing model imports deliberately bypass (<a href="timer-adapters.html">Timer
         Adapters</a>), and where imports plug into setup and qualifying
-        (<a href="event-pipeline.html">Event Pipeline</a>). Cloud-specific secrets and
+        (<a href="archive/event-pipeline.html">Event Pipeline</a>). Cloud-specific secrets and
         deployment config are <strong>out of the FOSS repo</strong> entirely. When this doc
         and the <a href="vision.html">Vision</a> disagree, the Vision wins.
       </p>
@@ -125,7 +125,7 @@ flowchart LR
 
     <h3>Roster import at setup</h3>
     <p>
-      At Setup &amp; Registration (<a href="event-pipeline.html">Event Pipeline</a>, Phase 1)
+      At Setup &amp; Registration (<a href="archive/event-pipeline.html">Event Pipeline</a>, Phase 1)
       the RD can pull the chapter roster from RaceSync to assemble the field without manual
       entry. This is an <strong>import / ingestion</strong>, covered in §3 — it produces
       GridFPV entries and a pilot-id mapping, not live passes. The same mapping is what
@@ -196,7 +196,7 @@ flowchart LR
     <h3>The Velocidrone leaderboard (qualifying ingestion)</h3>
     <p>
       In sim racing the leaderboard for a spec track <em>is</em> the qualifying ranking —
-      "leaderboard bashing" (<a href="event-pipeline.html">Event Pipeline</a>, Phase 3).
+      "leaderboard bashing" (<a href="archive/event-pipeline.html">Event Pipeline</a>, Phase 3).
       Importing it produces the ordered seed that the mains build from, treated as an equal
       to running qualifying live or skipping it. It is a ranking, full stop: no per-pass
       timing, no signal context, nothing the adapter model would carry.

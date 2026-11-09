@@ -571,9 +571,10 @@ here, or as `//NOTE:` lines anywhere, as they come up.
 
 ## 10. Status of the other docs
 
-Nothing was deleted. Each older doc now carries a banner at the top.
+Nothing was deleted. Each older doc carries a banner at the top. Docs that are wholly old were
+moved to `docs/archive/`. Docs under review stay in `docs/` until they are rewritten.
 
-**Old design, kept for history.** Do not build against these.
+**Old design, kept for history.** These live in `docs/archive/`. Do not build against them.
 
 | Doc | Why it is old |
 |---|---|

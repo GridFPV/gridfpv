@@ -9,10 +9,11 @@ Standing rules for working in this repo. These bind every change (human or agent
 phase, heat, ranking rule, completion rule, format and ruling. Read it before any design or
 engine work.
 
-- **Every other doc in `docs/` carries a banner.** "Old design, kept for history" means do not
-  build against it. "Under review" means the banner names which sections are old. Where any
+- **Every other doc carries a banner.** "Old design, kept for history" docs live in
+  `docs/archive/`; do not build against them. "Under review" docs stay in `docs/`, and each
+  banner names which sections are old. Where any
   doc, or a rule further down this file, disagrees with `docs/primitives.md`, that doc wins.
-- **Old docs are never deleted.** They are the record of decisions we moved away from.
+- **Old docs are never deleted.** They move to `docs/archive/` and stay as the record of decisions we moved away from.
 - **RotorHazard is not the reference.** Its vocabulary stays inside the RotorHazard adapter.
 - **Some rules below describe code that is being rebuilt** (the competitor-name resolvers, the
   RotorHazard transport, the e2e suite). The principles hold; the file paths may not.

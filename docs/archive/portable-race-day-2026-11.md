@@ -1,7 +1,7 @@
 # Grid as the portable race manager — November 2026
 
 > **Old, kept for history (2026-11-09).** This proposal, with Ryan's notes and answers below,
-> led to [Grid primitives](primitives.md), which is the current design. Its advice to adopt
+> led to [Grid primitives](../primitives.md), which is the current design. Its advice to adopt
 > grid-rh's vocabulary (stages, formats, seats) was rejected. Its OFT adapter design (section 4.3)
 > is still the working plan for that adapter.
 

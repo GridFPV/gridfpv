@@ -37,8 +37,8 @@
         <strong>off-LAN viewer account model</strong>. It builds on the append-only spine and
         resumable sync from <a href="architecture.html">Architecture</a> §3, the Cloud shape
         in §8, and the trust boundaries in §9; it deepens the season phase from
-        <a href="event-pipeline.html">Event Pipeline</a> Phase 5 and
-        <a href="pipeline-season.html">Pipeline: Season</a>. Wire-level message shapes and the
+        <a href="archive/event-pipeline.html">Event Pipeline</a> Phase 5 and
+        <a href="archive/pipeline-season.html">Pipeline: Season</a>. Wire-level message shapes and the
         read-authorization contract belong to the <a href="protocol.html">Protocol</a> spec;
         we reference them rather than redefine them. Harder specifics are parked as
         <a href="#open">Open decisions</a>. When this doc and the
@@ -297,7 +297,7 @@ sequenceDiagram
     <h2>5. The season / championship model</h2>
     <p>
       A season links several independently-run events into a championship and computes standings
-      across them, <strong>per class</strong> (<a href="pipeline-season.html">Pipeline: Season</a>).
+      across them, <strong>per class</strong> (<a href="archive/pipeline-season.html">Pipeline: Season</a>).
       Events are run independently and need not know about a season while they run — the season
       references them and folds their results afterward, so seasons never touch the live path.
     </p>
@@ -463,7 +463,7 @@ sequenceDiagram
       classes or mix sim + IRL where a league wants a combined championship. Open refinement: when
       both the Director and the Cloud compute a season, how the local view and the authoritative
       Cloud aggregate are presented together (carried from
-      <a href="pipeline-season.html">Pipeline: Season</a>).</li>
+      <a href="archive/pipeline-season.html">Pipeline: Season</a>).</li>
       <li><span class="resolved">Accepted — Qualification &amp; participation modeling.</span>
       Qualification is <strong>modeled lightly</strong>, leaving most championship-qualification
       logic to the league, as recommended. Open refinement: attendance / participation points and

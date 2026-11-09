@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Channel Model</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It describes the three-scope channel layout model. Channels now live on seats and profiles that belong to the timer. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It describes the three-scope channel layout model. Channels now live on seats and profiles that belong to the timer. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -33,9 +33,9 @@
         This doc owns the <strong>channel / node model</strong> and how channels are assigned.
         It is the deep dive behind the channel notes in <a href="pipeline-setup.html">Setup</a>
         §Channels, <a href="pipeline-mains.html">Mains</a> §Channel assignment, and
-        <a href="timer-adapters.html">Timer Adapters</a> §5. When this doc and
-        <a href="architecture.html">Architecture</a> disagree on shape, follow Architecture;
-        when either disagrees with the <a href="vision.html">Vision</a>, the Vision wins.
+        <a href="../timer-adapters.html">Timer Adapters</a> §5. When this doc and
+        <a href="../architecture.html">Architecture</a> disagree on shape, follow Architecture;
+        when either disagrees with the <a href="../vision.html">Vision</a>, the Vision wins.
         <em>This is the as-built (v0.4) Timer-registry model (#73/#117).</em>
       </p>
     </div>
@@ -93,7 +93,7 @@
       who flies on which channel (it knows the field and avoids conflicts). The adapter
       <strong>advertises</strong> the hardware's capability and node count and, at race time,
       <strong>dynamically tunes</strong> the device's nodes to the assignment. Neither owns the other's
-      job (<a href="race-engine.html">Race Engine</a> §5, <a href="timer-adapters.html">Timer Adapters</a> §5).</p>
+      job (<a href="race-engine.html">Race Engine</a> §5, <a href="../timer-adapters.html">Timer Adapters</a> §5).</p>
     </div>
 
     <h2>2. Channels ≠ nodes</h2>
@@ -221,8 +221,8 @@
 
     <footer class="doc-footer">
       <p>
-        Internal design documentation · <a href="timer-adapters.html">Timer Adapters</a> ·
-        <a href="index.html">&larr; back to docs index</a>
+        Internal design documentation · <a href="../timer-adapters.html">Timer Adapters</a> ·
+        <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>

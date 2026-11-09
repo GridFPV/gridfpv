@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Pipeline: Qualifying</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It belongs to the fixed event pipeline, which is replaced by freely nested phases. Its capability lists are still useful as a checklist. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It belongs to the fixed event pipeline, which is replaced by freely nested phases. Its capability lists are still useful as a checklist. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -31,7 +31,7 @@
         This is a deep dive on one phase of the
         <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
         and surfaces the decisions and data each implies. It does not define the schema or
-        APIs; those belong to the <a href="architecture.html">Architecture</a> doc.
+        APIs; those belong to the <a href="../architecture.html">Architecture</a> doc.
       </p>
     </div>
 
@@ -63,7 +63,7 @@
         rounds' real field — PR #332). Live is the path that shipped; <strong>import / skip and the rolling-queue
         (ZippyQ) engine are not built</strong> in v0.4. (Engine: <code>round_engine.rs</code> static
         path + the <code>timed_qual</code> generator; UI:
-        <a href="clients.html">Clients</a> §1 Rounds+Heats.)
+        <a href="../clients.html">Clients</a> §1 Rounds+Heats.)
       </p>
     </div>
 
@@ -197,7 +197,7 @@
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="event-pipeline.html">event pipeline</a> ·
-        <a href="index.html">&larr; back to docs index</a>
+        <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>

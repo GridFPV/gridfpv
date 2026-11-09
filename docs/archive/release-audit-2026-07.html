@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Release Audit (July 2026)</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It audits engine and console code that is being rebuilt. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It audits engine and console code that is being rebuilt. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -123,7 +123,7 @@
       <li><strong>Server-anchored staging countdown</strong>: the staging clock anchored to each
       console's mount instant (two consoles read different windows; late-resolving config
       re-anchored it mid-count). The live state now carries <code>staged_at</code> and the
-      countdown anchors there — see <a href="live-state-clock.html">Live State &amp; the Race
+      countdown anchors there — see <a href="../live-state-clock.html">Live State &amp; the Race
       Clock</a>.</li>
       <li><strong>Protocol client</strong>: the resume cursor never advanced (a reconnect replayed
       the entire backlog through the UI); an unhandled Delta envelope would have frozen the view
@@ -243,7 +243,7 @@
 
     <footer class="doc-footer">
       <p>
-        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+        Internal design documentation · <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>

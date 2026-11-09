@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Event Pipeline</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It describes a fixed pipeline of event stages. Events are now built from freely nested phases. Note that "phase" here means a pipeline stage, which is not the new meaning. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It describes a fixed pipeline of event stages. Events are now built from freely nested phases. Note that "phase" here means a pipeline stage, which is not the new meaning. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -32,9 +32,9 @@
         This doc defines the pipeline at the level of <strong>intent and
         capability</strong> — the ideas we must hit. It deliberately leaves the data
         model, the timer-adapter spec, protocol message shapes, and the Cloud warehouse
-        to their own docs (see <a href="architecture.html">Architecture</a> and
-        <a href="timer-adapters.html">Timer Adapters</a>). When this doc and the vision disagree, the
-        <a href="vision.html">Vision</a> wins.
+        to their own docs (see <a href="../architecture.html">Architecture</a> and
+        <a href="../timer-adapters.html">Timer Adapters</a>). When this doc and the vision disagree, the
+        <a href="../vision.html">Vision</a> wins.
       </p>
     </div>
 
@@ -206,7 +206,7 @@
     <p>
       This phase leans on the optional Cloud — the analytics warehouse and season linking —
       so it is intentionally light here and will get its own treatment alongside the Cloud
-      design (<a href="architecture.html">Architecture</a>). The single-event pipeline above stands on its own
+      design (<a href="../architecture.html">Architecture</a>). The single-event pipeline above stands on its own
       without it.
     </p>
 
@@ -233,7 +233,7 @@
 
     <footer class="doc-footer">
       <p>
-        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+        Internal design documentation · <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>

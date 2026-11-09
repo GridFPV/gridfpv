@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Race Engine</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It describes the format generators and the round model, which are being rebuilt on the new primitives. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It describes the format generators and the round model, which are being rebuilt on the new primitives. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -39,9 +39,9 @@
         exact rules of each named format (MultiGP P9–P16, FAI, Chase-the-Ace, ZippyQ
         specifics) to per-format specs written as they're built; here we define the
         interface they plug into. It builds on canonical events from
-        <a href="timer-adapters.html">Timer Adapters</a> and the append-only spine from
-        <a href="architecture.html">Architecture</a> §3. When this doc and the
-        <a href="vision.html">Vision</a> disagree, the Vision wins.
+        <a href="../timer-adapters.html">Timer Adapters</a> and the append-only spine from
+        <a href="../architecture.html">Architecture</a> §3. When this doc and the
+        <a href="../vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>
 
@@ -245,7 +245,7 @@ stateDiagram-v2
       <li><strong>Laps from passes.</strong> The first pass is the holeshot / start; a lap
       completes on each subsequent crossing of the lap gate (a full circuit of the gates /
       splits where the track has them). Marshaling adjudications (void, insert, adjust) fold
-      in exactly as in <a href="architecture.html">Architecture</a> §3 — the lap list is a
+      in exactly as in <a href="../architecture.html">Architecture</a> §3 — the lap list is a
       projection (<code>lap_list_marshaled</code>), with each adjudication targeting a prior
       pass by its append offset (<code>LogRef</code>), last-writer-wins by log order; the raw
       passes stay byte-identical.</li>
@@ -330,7 +330,7 @@ stateDiagram-v2
       not a free-floating event pool — the standard FPV catalog plus the adapter's fixed-or-flexible
       capability (custom raw-MHz where allowed) — and the timer's <strong>node/slot count caps the
       heat field</strong> (<a href="pipeline-setup.html">Setup</a>,
-      <a href="timer-adapters.html">Timer Adapters</a> §5). At race time the adapter
+      <a href="../timer-adapters.html">Timer Adapters</a> §5). At race time the adapter
       <strong>dynamically tunes</strong> its nodes to the allocation. Sim timers declare no channel
       capability and get an empty allocation. Both interleaving and allocation are pure functions of
       the log (§6).
@@ -398,7 +398,7 @@ stateDiagram-v2
       procedure has one shipped mode (<code>RandomizedDelay</code> — gate-start-vs-staggered
       configurability never landed; add a variant if needed); the first crossing of the start/finish
       gate after arming opens lap 1; splits derive per the gate model in
-      <a href="timer-adapters.html">Timer Adapters</a>.</li>
+      <a href="../timer-adapters.html">Timer Adapters</a>.</li>
       <li><span class="resolved">Resolved — Frequency / channel allocation ownership.</span>
       The Race Engine allocates channels (it knows the heat / field); the adapter advertises
       its capabilities and applies the tuning — shared with the Timer Adapters decision.</li>
@@ -415,11 +415,11 @@ stateDiagram-v2
 
     <footer class="doc-footer">
       <p>
-        Internal design documentation · <a href="index.html">&larr; back to docs index</a>
+        Internal design documentation · <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>
-  <script src="assets/vendor/mermaid.min.js"></script>
-  <script src="assets/diagrams.js"></script>
+  <script src="../assets/vendor/mermaid.min.js"></script>
+  <script src="../assets/diagrams.js"></script>
 </body>
 </html>

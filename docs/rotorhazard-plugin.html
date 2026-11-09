@@ -21,13 +21,13 @@
     </div>
 
     <p class="lead">
-      The decided primary RotorHazard integration (<a href="decisions.html">D16</a>): a small
+      The decided primary RotorHazard integration (<a href="archive/decisions.html">D16</a>): a small
       GridFPV plugin that runs <strong>inside</strong> the RH server with <strong>RHAPI access</strong>,
       replacing the socket-API ceiling. It makes the socket workarounds native — <strong>live dense
       RSSI</strong> (no save-then-pull), <strong>clean start/stop</strong> bypassing RH's RMS staging,
       <strong>per-node passes</strong> without the seating dance, and <strong>threshold access</strong>
       that unblocks the draggable-threshold <em>recalculate</em> marshaling feature
-      (<a href="marshaling-plan.html">#3</a>). It reuses RH's entire proven stack — node firmware, RMS,
+      (<a href="archive/marshaling-plan.html">#3</a>). It reuses RH's entire proven stack — node firmware, RMS,
       and the detection moat — at a fraction of the dropped own-the-stack cost.
     </p>
 
@@ -37,7 +37,7 @@
         protocol</strong>, the <strong>required-with-guided-install</strong> onboarding, and the
         <strong>sliced build plan</strong>. It is downstream of <a href="timer-adapters.html">Timer
         Adapters</a> (the canonical event model — unchanged; the plugin is a richer RH adapter behind
-        the <em>same</em> vocabulary) and <a href="decisions.html">D16</a> (the direction). Where this
+        the <em>same</em> vocabulary) and <a href="archive/decisions.html">D16</a> (the direction). Where this
         doc and Timer Adapters disagree on the event model, Timer Adapters wins.
       </p>
     </div>
@@ -62,7 +62,7 @@
       <p><span class="name">Required means guided, not gated.</span> Grid detects a missing or
       incompatible plugin and offers a <strong>one-step install</strong> — it does not hard-fail with a
       cryptic error. Every serious RMS (FPVTrackside, LiveTime) already requires its own timing
-      plugin, so this is the normal shape, not friction (<a href="decisions.html">D16</a>).</p>
+      plugin, so this is the normal shape, not friction (<a href="archive/decisions.html">D16</a>).</p>
     </div>
     <div class="principle">
       <p><span class="name">Raw handles on the wire; friendly names resolved in Grid.</span> The
@@ -110,7 +110,7 @@
       write is RotorHazard's own stock socket.io handler, on the connection the Grid adapter already
       holds — so <strong>calibration needs no plugin at all</strong>, which is what lets the Tune page
       (#355) work on a bone-stock RH. See the correction below for the shape and the two traps. For
-      <a href="marshaling-plan.html">#3 recalc</a> we mostly need the dense trace (below), not a live
+      <a href="archive/marshaling-plan.html">#3 recalc</a> we mostly need the dense trace (below), not a live
       setter — see §3.</dd>
       <dt>Seating — <code>rhapi.db</code> + <code>rhapi.race.slots</code></dt>
       <dd>Read/assign node-seat &harr; pilot in-process, no <code>add_pilot</code>/<code>alter_heat</code>
@@ -725,7 +725,7 @@ flowchart LR
       (RHAPI&nbsp;1.4). The <code>manifest.json</code> declares <code>required_rhapi_version</code> 1.3 so
       RH's own loader refuses to load us into a too-old server, and Grid surfaces "update RH to v4.3.0+"
       as part of the guided install. We are comfortable making users update RH — every serious RMS
-      requires a current timer (<a href="decisions.html">D16</a>).</p>
+      requires a current timer (<a href="archive/decisions.html">D16</a>).</p>
     </div>
     <div class="callout">
       <p>
@@ -854,8 +854,8 @@ flowchart LR
       <p>
         Internal design documentation ·
         <a href="timer-adapters.html">Timer Adapters</a> ·
-        <a href="decisions.html">Decisions</a> ·
-        <a href="marshaling-plan.html">Marshaling Build Plan</a> ·
+        <a href="archive/decisions.html">Decisions</a> ·
+        <a href="archive/marshaling-plan.html">Marshaling Build Plan</a> ·
         <a href="index.html">&larr; back to docs index</a>
       </p>
     </footer>

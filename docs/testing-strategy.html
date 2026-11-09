@@ -35,7 +35,7 @@
       <p>
         This doc owns the <strong>correctness strategy</strong>: the guardrail, the test
         levels, the fixture formats, and what each layer must prove. It defers the concrete
-        win-condition and tie-break catalogue to <a href="race-engine.html">Race Engine</a>
+        win-condition and tie-break catalogue to <a href="archive/race-engine.html">Race Engine</a>
         §7, the exact canonical-event and signal-context shapes to
         <a href="timer-adapters.html">Timer Adapters</a>, and the wire-contract shapes to
         <a href="protocol.html">Protocol</a> — this doc tests against those interfaces, it
@@ -66,8 +66,8 @@
     <p>
       This is not a compromise we tolerate; it is the design working as intended. Because
       adapters are <a href="timer-adapters.html">pure translators</a> and the
-      <a href="race-engine.html">engine is a pure function of the log</a>
-      (<a href="race-engine.html">Race Engine</a> §6), every behavior we care about is a
+      <a href="archive/race-engine.html">engine is a pure function of the log</a>
+      (<a href="archive/race-engine.html">Race Engine</a> §6), every behavior we care about is a
       pure function of recorded bytes. There is nothing about a <em>live</em> timer that a
       faithfully recorded session doesn't capture — so recording it once and replaying it is
       strictly better than re-flying it, and it is repeatable.
@@ -142,7 +142,7 @@
       them as fixtures, and replay them through the real pipeline — asserting the projections
       come out identical every time. This is what the append-only spine and engine determinism
       buy us: <strong>same events in, same heats/results/standings out</strong>
-      (<a href="race-engine.html">Race Engine</a> §6).
+      (<a href="archive/race-engine.html">Race Engine</a> §6).
     </p>
     <p>
       A captured session is just an ordered log of canonical events (the same atoms the live
@@ -197,7 +197,7 @@ flowchart LR
     <ul>
       <li><strong>Passes → laps.</strong> A pass stream (holeshot + crossings, optionally with
       splits) folds into a lap list — the first pass is the start, each subsequent lap-gate
-      crossing completes a lap (<a href="race-engine.html">Race Engine</a> §4).</li>
+      crossing completes a lap (<a href="archive/race-engine.html">Race Engine</a> §4).</li>
       <li><strong>Laps → heat result.</strong> A lap list plus a configured win condition
       (most laps in a window, first to N, best consecutive) yields a finishing order, with
       ties broken by the recorded rule.</li>
@@ -291,7 +291,7 @@ flowchart LR
       <p>
         <strong>Why this matters going forward.</strong> This is the closest thing to a real race
         we can run in automation, and it generates a genuine timed lap stream on demand. As the
-        <a href="race-engine.html">Race Engine</a> lands, the same harness becomes the way to test
+        <a href="archive/race-engine.html">Race Engine</a> lands, the same harness becomes the way to test
         every <strong>timing-dependent stage</strong> end to end — the heat-loop state machine,
         scoring and win conditions, marshaling, and format advancement — driven by realistic,
         scriptable signals rather than hand-built fixtures. Edge cases (missed crossings,
@@ -447,7 +447,7 @@ cargo xtask rh-mock dump http://localhost:8080 practice q-1</pre>
     <h2>7. Testing the format generators</h2>
     <p>
       Format / qualifying generators are a pure function of state too
-      (<a href="race-engine.html">Race Engine</a> §3): given the seeded field, config, and the
+      (<a href="archive/race-engine.html">Race Engine</a> §3): given the seeded field, config, and the
       results of completed heats, a generator emits the next heat(s), declares completion, or
       exposes the current ranking. That makes them ideal for <strong>table-driven</strong>
       tests — a table of (seeded field + config + completed results) → expected (next heats /
@@ -459,7 +459,7 @@ cargo xtask rh-mock dump http://localhost:8080 practice q-1</pre>
       <li><strong>Completion &amp; final ranking.</strong> Given the last results, assert the
       generator declares the format complete and exposes the correct final ordering.</li>
       <li><strong>The dynamic case.</strong> ZippyQ / rolling was the honesty-forcing format (built then shelved, D10; the structure generators live on <code>tournaments-snapshot</code> — the shipping registry is the three primitives)
-      (<a href="race-engine.html">Race Engine</a> §3) — a table that adds rounds on demand and
+      (<a href="archive/race-engine.html">Race Engine</a> §3) — a table that adds rounds on demand and
       asserts the generator produces sensible next heats from current state, never a
       precomputed schedule.</li>
       <li><strong>Recorded outcomes.</strong> Any randomness (a seeding draw, a coin-flip

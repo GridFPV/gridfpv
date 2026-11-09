@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridFPV — Pipeline: Brackets / Mains</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body>
   <main class="page">
@@ -17,7 +17,7 @@
     <div class="callout doc-status doc-status-old">
       <p>
         <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
-        doc. It belongs to the fixed event pipeline, which is replaced by freely nested phases. Its capability lists are still useful as a checklist. The current design is <a href="primitives.md">Grid primitives</a>.
+        doc. It belongs to the fixed event pipeline, which is replaced by freely nested phases. Its capability lists are still useful as a checklist. The current design is <a href="../primitives.md">Grid primitives</a>.
       </p>
     </div>
 
@@ -43,7 +43,7 @@
         This is a deep dive on one phase of the
         <a href="event-pipeline.html">event pipeline</a>. It describes intent and capability
         and surfaces the decisions and data each implies. It does not define the schema or
-        APIs; those belong to the <a href="architecture.html">Architecture</a> doc.
+        APIs; those belong to the <a href="../architecture.html">Architecture</a> doc.
       </p>
     </div>
 
@@ -89,9 +89,9 @@
         a <strong>&ldquo;Generate heats&rdquo;</strong> action fills the whole deterministic round in
         one pass (backend loops <code>FillRound</code>; <a href="decisions.html">D12</a>, #216).
         ZippyQ is <strong>shelved</strong> (<a href="decisions.html">D10</a>) and PWA
-        self-register is <strong>deferred</strong>. (Data model in <a href="architecture.html">Architecture</a>
+        self-register is <strong>deferred</strong>. (Data model in <a href="../architecture.html">Architecture</a>
         §4; engine carry in <a href="race-engine.html">Race Engine</a> §3/§5; UI is the combined
-        Rounds+Heats stage-page, <a href="clients.html">Clients</a> §1.)
+        Rounds+Heats stage-page, <a href="../clients.html">Clients</a> §1.)
       </p>
     </div>
 
@@ -180,7 +180,7 @@
       <li>At race time GridFPV <strong>dynamically tunes the timer's nodes</strong> to the assigned
         channels: the engine decides the assignment, the adapter applies the tuning to the hardware
         (<a href="channel-model.html">Channel Model</a> §6; <a href="race-engine.html">Race Engine</a> §5;
-        <a href="timer-adapters.html">Timer Adapters</a> §5).</li>
+        <a href="../timer-adapters.html">Timer Adapters</a> §5).</li>
       <li>The number of pilots in a heat is capped by the timer's <strong>node count</strong>, but the
         timer's <strong>available channels can exceed</strong> that — the pool the engine first-fits
         from (<a href="channel-model.html">Channel Model</a> §2).</li>
@@ -240,7 +240,7 @@
     <footer class="doc-footer">
       <p>
         Internal design documentation · <a href="event-pipeline.html">event pipeline</a> ·
-        <a href="index.html">&larr; back to docs index</a>
+        <a href="../index.html">&larr; back to docs index</a>
       </p>
     </footer>
   </main>
