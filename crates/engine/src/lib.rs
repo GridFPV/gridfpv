@@ -10,10 +10,13 @@
 //! - [`laps`] — a race's laps per seat, with the lap rulings (§5.7).
 //! - [`heat`] — a race's finishing order, a heat's standings under a ranking rule, and
 //!   whether its completion rule says it is done (§5.4, §5.5).
+//! - [`phase`] — the phase tree: fields, seat references, combined rankings, completion and
+//!   inherited formats (§5.2 – §5.6).
 //!
-//! Phases, formats set on the tree, penalties and protests are added on top of these.
+//! Penalties, false starts, protests and locking are added on top of these.
 #![forbid(unsafe_code)]
 
 pub mod heat;
 pub mod laps;
+pub mod phase;
 pub mod race;

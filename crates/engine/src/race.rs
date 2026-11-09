@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gridfpv_events::{DiscardReason, Event, HeatId, LineupEntry, RaceId, RaceSetup};
+use gridfpv_events::{DiscardReason, Event, LineupEntry, PhaseId, RaceId, RaceSetup};
 
 /// Where a race is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -186,7 +186,7 @@ impl Races {
     }
 
     /// The races of one heat, in order. A heat can be raced more than once.
-    pub fn of_heat<'a>(&'a self, heat: &'a HeatId) -> impl Iterator<Item = &'a Race> {
+    pub fn of_heat<'a>(&'a self, heat: &'a PhaseId) -> impl Iterator<Item = &'a Race> {
         self.iter().filter(move |race| &race.setup.heat == heat)
     }
 
@@ -391,7 +391,7 @@ mod tests {
     fn setup(race: &str, heat: &str) -> RaceSetup {
         RaceSetup {
             race: RaceId(race.into()),
-            heat: HeatId(heat.into()),
+            heat: PhaseId(heat.into()),
             lineup: vec![entry("seat-0", Some("ana")), entry("seat-1", Some("ben"))],
             owner: StartOwner::Grid,
         }
@@ -545,7 +545,7 @@ mod tests {
         stop(&mut races, "r2");
         save(&mut races, "r2");
 
-        let heat = HeatId("h1".into());
+        let heat = PhaseId("h1".into());
         let of_heat: Vec<_> = races
             .of_heat(&heat)
             .map(|r| (r.setup.race.clone(), r.state))
@@ -574,7 +574,7 @@ mod tests {
             stop(&mut races, race);
             save(&mut races, race);
         }
-        let heat = HeatId("final".into());
+        let heat = PhaseId("final".into());
         assert_eq!(races.of_heat(&heat).filter(|r| r.counts()).count(), 3);
     }
 
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(races.iter().count(), 1);
         let race = races.get(&id("r1")).unwrap();
         assert_eq!(race.state, RaceState::Running);
-        assert_eq!(race.setup.heat, HeatId("h1".into()));
+        assert_eq!(race.setup.heat, PhaseId("h1".into()));
     }
 
     #[test]

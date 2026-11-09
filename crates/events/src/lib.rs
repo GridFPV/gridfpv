@@ -313,12 +313,12 @@ pub struct ClassId(pub String);
 #[ts(export, export_to = "bindings/", as = "f64")]
 pub struct LogRef(pub u64);
 
-/// Identifies one **heat**: a lineup that is raced one or more times — the leaf phase
-/// (`docs/primitives.md` §5.4).
+/// Identifies one **phase**: field in, ranking out (`docs/primitives.md` §5.2). A heat is the
+/// leaf phase, so a heat's id is a `PhaseId` too.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(transparent)]
 #[ts(export, export_to = "bindings/")]
-pub struct HeatId(pub String);
+pub struct PhaseId(pub String);
 
 /// One place in a race's lineup: a seat on a timer, and the pilot flying on it.
 ///
@@ -360,7 +360,7 @@ pub struct RaceSetup {
     /// The race's own id. Every race has one, including a re-run of the same heat.
     pub race: RaceId,
     /// The heat this is a race of.
-    pub heat: HeatId,
+    pub heat: PhaseId,
     /// Who is on which seat.
     pub lineup: Vec<LineupEntry>,
     /// Who owned the start.
@@ -497,6 +497,101 @@ pub struct Format {
     /// Points by finishing position, first place first. A position past the end scores 0.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<u32>,
+}
+
+// --- The phase tree (docs/primitives.md §5.2 – §5.4) ---------------------------
+
+/// One part of a phase's field. A field is built from one or more slices, in order, and
+/// that order is the seed order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum FieldSlice {
+    /// Every pilot on a class's roster, in roster order.
+    Class(ClassId),
+    /// One named pilot.
+    Pilot(PilotId),
+    /// Positions `from` to `to` (1-based, both included) of another phase's ranking. It
+    /// resolves when that phase is complete.
+    FromPhase { phase: PhaseId, from: u32, to: u32 },
+    /// A list brought in from outside (a Velocidrone leaderboard, a MultiGP list), already
+    /// in seed order.
+    Imported(Vec<PilotId>),
+}
+
+/// Who a seat in a heat's lineup is for: the **seat reference**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SeatSource {
+    /// A named pilot.
+    Pilot(PilotId),
+    /// Whoever finishes at `position` (1-based) in another phase. Until that phase is
+    /// complete the seat shows as its description ("Winner of Heat 3").
+    FromPhase { phase: PhaseId, position: u32 },
+    /// Nobody named. Only an unranked heat (practice) may leave a seat open.
+    Open,
+}
+
+/// One seat in a heat's lineup, before it is resolved to a pilot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct HeatSeat {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+    pub source: SeatSource,
+}
+
+/// How a phase that holds phases turns its children's results into its own ranking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum CombineRule {
+    /// Stack the children in order: a pilot is placed by the first child that holds them,
+    /// at their position in it. Children are listed best first (A-Main before B-Main; the
+    /// final before the semi-finals).
+    Stack,
+    /// For a round of side-by-side heats: order pilots by their position in their own heat
+    /// (all the winners, then all the seconds, …), then by seed.
+    ByHeatPosition,
+    /// Pool every race the pilot flew beneath this phase and sort by these measures (sum
+    /// of points for a round robin; best lap or best N consecutive across time-trial runs).
+    Measures(RankingRule),
+}
+
+/// What a phase is: a heat, or a holder of phases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum PhaseKind {
+    /// The leaf: a lineup that is raced one or more times.
+    Heat { lineup: Vec<HeatSeat> },
+    /// A phase that holds phases. An empty `field` means "whoever is in my children".
+    Group {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        field: Vec<FieldSlice>,
+        combine: CombineRule,
+    },
+}
+
+/// One phase in an event's tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PhaseDef {
+    pub id: PhaseId,
+    /// The director's name for it ("Qualifying", "C-Main", "Winners Round 2").
+    pub label: String,
+    /// The phase that holds this one, or `None` at the top of the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent: Option<PhaseId>,
+    pub kind: PhaseKind,
+    /// The format set on this phase. It applies to every heat beneath it unless a phase
+    /// lower down sets its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub format: Option<Format>,
+    /// A layout name for views and overlays ("double-elimination", "mains-ladder"). The
+    /// engine never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_hint: Option<String>,
 }
 
 /// A canonical event in the append-only log.
@@ -798,7 +893,7 @@ mod tests {
     fn sample_setup() -> RaceSetup {
         RaceSetup {
             race: RaceId("race-1".into()),
-            heat: HeatId("heat-a".into()),
+            heat: PhaseId("heat-a".into()),
             lineup: vec![
                 LineupEntry {
                     adapter: AdapterId("oft-3fa2".into()),
@@ -967,5 +1062,60 @@ mod tests {
         assert_eq!(practice.ranking, None);
         assert!(practice.points.is_empty());
         assert_eq!(practice.race.min_lap_micros, None);
+    }
+
+    #[test]
+    fn a_phase_definition_round_trips() {
+        let heat = PhaseDef {
+            id: PhaseId("a-final".into()),
+            label: "A-Main Final".into(),
+            parent: Some(PhaseId("a-main".into())),
+            kind: PhaseKind::Heat {
+                lineup: vec![
+                    HeatSeat {
+                        adapter: AdapterId("oft".into()),
+                        seat: SeatRef("seat-0".into()),
+                        source: SeatSource::FromPhase {
+                            phase: PhaseId("a-semi-1".into()),
+                            position: 1,
+                        },
+                    },
+                    HeatSeat {
+                        adapter: AdapterId("oft".into()),
+                        seat: SeatRef("seat-1".into()),
+                        source: SeatSource::Open,
+                    },
+                ],
+            },
+            format: None,
+            display_hint: None,
+        };
+        let group = PhaseDef {
+            id: PhaseId("c-main".into()),
+            label: "C-Main".into(),
+            parent: Some(PhaseId("mains".into())),
+            kind: PhaseKind::Group {
+                field: vec![
+                    FieldSlice::FromPhase {
+                        phase: PhaseId("qualifying".into()),
+                        from: 17,
+                        to: 22,
+                    },
+                    FieldSlice::FromPhase {
+                        phase: PhaseId("d-main".into()),
+                        from: 1,
+                        to: 2,
+                    },
+                ],
+                combine: CombineRule::Stack,
+            },
+            format: None,
+            display_hint: Some("double-elimination".into()),
+        };
+        for def in [heat, group] {
+            let json = serde_json::to_string(&def).unwrap();
+            let back: PhaseDef = serde_json::from_str(&json).unwrap();
+            assert_eq!(def, back);
+        }
     }
 }
