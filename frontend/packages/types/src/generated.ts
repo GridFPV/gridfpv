@@ -52,6 +52,7 @@ export type * from '@bindings/Event';
 export type * from '@bindings/EventId';
 export type * from '@bindings/EventMeta';
 export type * from '@bindings/FieldSlice';
+export type * from '@bindings/FirstLap';
 export type * from '@bindings/Format';
 export type * from '@bindings/GateIndex';
 export type * from '@bindings/HeatSeat';

@@ -1,9 +1,8 @@
 # Grid primitives
 
-**Status:** revision 6 (2026-11-09): the design to build against, with build progress in §8
-and new questions in §9. Revision 1 was written
-from the design discussion of that day; revisions 2 to 5 fold in Ryan's notes and answers. Sections marked **Agreed**
-record what Ryan decided.
+**Status:** revision 7 (2026-11-09): the design to build against, with build progress in §8.
+Revision 1 was written from the design discussion of that day; revisions 2 to 7 fold in
+Ryan's notes and answers. Sections marked **Agreed** record what Ryan decided.
 
 **This is the current design.** Every other doc in this folder is either marked old or marked
 under review (§10). Where another doc disagrees with this one, this one wins.
@@ -28,6 +27,12 @@ events and pilots carry outside ids (§4); a field can be seeded from an importe
 
 **What changed in revision 5:** removing a lap always folds its time into the next lap; a
 restart point is the separate case (§5.7).
+
+**What changed in revision 7:** the six questions from building the engine are answered (§9
+says where each answer went). A disqualified pilot's earned place passes down by default and
+the director can keep it empty (§5.7). What starts the first lap is a race rule, hole shot by
+default (§5.6). Brackets are generated for any field and heat size (§6). A lone pilot may fly
+or be waved through (§5.4). A position override is set on a heat (§5.7).
 
 ---
 
@@ -270,6 +275,11 @@ director can override the result, and the override is a ruling.
 no-shows are ordered by seed. The director may also remove them from the heat, which is a
 ruling. Removing them does not improve their place: see the no-show rule in §5.5.
 
+**A pilot alone in a heat** (Agreed): byes in a bracket can leave one pilot in a heat. That
+is the director's and the pilot's choice. The pilot can fly it, or the director can call the
+heat done and the pilot advances without flying. The director can call any heat done this
+way, whatever its completion rule says.
+
 ### 5.5 Ranking rules and completion rules (Agreed)
 
 A **ranking rule** is a pure function. On a heat it reads the heat's saved races. On any other
@@ -338,6 +348,16 @@ So a director sets "2 minutes, most laps" once on Qualifying. In a multi-main, e
 carries "first to 3 laps, one race", and only the A-Main final heat carries the Chase the Ace
 format.
 
+**What starts the first lap** (Agreed) is one of the race rules:
+
+- **Hole shot** (the default): the pilot's first crossing starts lap 1. That crossing has no
+  lap time.
+- **From the tone:** the start tone starts lap 1, so the first crossing ends it.
+
+Timing from the tone needs the tone's time on the timer's own clock. The same is true of the
+filter that ignores crossings before the start. A timer that cannot give that time falls back
+to the hole shot and filters nothing at the start. OFT can give it.
+
 ### 5.7 Ruling (Agreed)
 
 A ruling is a human decision recorded as a fact in the log. Rulings are never automatic.
@@ -353,7 +373,10 @@ A ruling is a human decision recorded as a fact in the log. Rulings are never au
   used together: "best N consecutive" may not span a restart. Always marked by a person.
 - **False start:** names the pilot and the race.
 - Penalties: time added, points changed, disqualification.
-- **Position override:** the director can always change a pilot's position in a ranking.
+- **Position override:** the director can always set a pilot's position **in a heat**. It
+  takes effect from there on: every lineup and ranking that reads the heat sees the new
+  order. It holds until the director clears it. Positions in a phase above a heat are never
+  set by hand; they follow from the heats.
 - Lineup and channel overrides, including removing a no-show.
 
 **False starts:**
@@ -367,6 +390,9 @@ A ruling is a human decision recorded as a fact in the log. Rulings are never au
   director confirms it.
 - A disqualified pilot is dropped from later lineups in that phase and ranked below everyone
   who kept racing.
+- **A place the pilot had already earned** (a bump-up spot they won): by default the next
+  pilot moves up and takes it. When disqualifying, the director can choose to **keep the
+  place empty** instead. Then nobody moves up, and that seat in the next heat stays empty.
 - Default limits for presets: none in qualifying; **2 across a whole multi-main**; 2 across a
   whole bracket.
 
@@ -438,10 +464,33 @@ seat references and formats. The director can then edit any part by hand.
 | Time trial | Lineups from the roster; each heat ranked by best N consecutive; parent takes each pilot's best result |
 | Head-to-head round | Lineups from a seed; ranked by points or finish order |
 | Points heat | One heat, N races, points summed across them |
-| Bracket | A chain of phases where each lineup refers to earlier heats |
+| Bracket | A chain of rounds where each lineup refers to earlier heats (see below) |
+| Mains | Brackets stacked with bump-ups (§6.1) |
 | Chase the Ace | One heat, raced until a pilot has two wins |
 | Single pilot | One heat with one pilot, done when the director says so, best 3 consecutive |
 | Season | A ranking rule over several events |
+
+**Brackets** (Agreed). One generator covers every shape Ryan runs: single or double
+elimination, heats of 2 to 8 pilots, and any field from 3 pilots up. The director picks the
+heat size (how many seats), how many advance from each heat (at most half), and single or
+double.
+
+- Round 1 deals the field into as few heats as hold it, all the same size or one apart.
+  Seeds are spread by a snake: with 8 pilots and 4 seats, 1-4-5-8 race 2-3-6-7.
+- The top pilots of each heat advance, round after round, until one heat is left. Two pilots
+  out of the same heat are kept apart in the next round where that is possible.
+- **Single elimination:** fail to advance and you are out. The last heat is the final.
+- **Double elimination:** fail to advance and you drop to the losers side. The losers side
+  races down between each drop. The best of the winners final and of the losers final meet
+  in the final.
+- A field that fits in one heat is just a final.
+- Pilots are placed by the last round they flew. Pilots who go out in the same round are
+  ordered by their place in their heat, then by seed.
+- A 16 pilot double elimination with 4 seats is 14 heats.
+
+**Big events** (70 to 100 pilots) run as mains of 16: the generator takes the number per
+main and the number who bump up, and says how many mains the field needs. 96 pilots with 2
+bumping up is 7 mains.
 
 **The display hint** (Agreed in aim). The engine never needs to know which preset made a
 tree. Views and overlays do: a double elimination bracket, a mains ladder and a points table
@@ -534,12 +583,13 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
 3. Cut the code down to a skeleton that still builds and passes CI. **Done.**
    `docs/port-list.md` lists what was removed that is worth porting back.
 4. Grow the primitives upward from the race, each with tests. **The engine is built**
-   (`crates/engine`, pure, about 80 tests):
+   (`crates/engine`, pure, about 100 tests):
    - `race`: the race states and checked commands (§5.1).
    - `laps`: laps per seat, with remove, restore, insert, adjust and restart (§5.7).
    - `heat`: a race's finishing order, heat standings, completion rules (§5.4, §5.5).
    - `phase`: the tree, fields, seat references, combined rankings, inherited formats.
-   - `presets`: double elimination and stacked mains, checked against §6.1.
+   - `presets`: brackets of any shape and stacked mains, checked against §6.1 and against
+     96 pilots in mains of 16.
    - `rulings`: false starts, disqualification, locking, protests (§5.7, §5.8).
 5. **Next:** wire the engine into the Director (commands over HTTP, the live stream ported
    back from `devel`), then the Run page, then the OFT adapter. Nothing in the app uses the
@@ -547,9 +597,10 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
 6. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before.
 
-**Not built yet in the engine:** time and points penalties, the position override, class
-standings across a class's phases (§5.3), keeping a pilot's channel between heats (§5.4),
-the run queue (§5.9), and the "ignore crossings before" filter.
+**Not built yet in the engine:** time and points penalties, class standings across a class's
+phases (§5.3), keeping a pilot's channel between heats (§5.4), and the run queue (§5.9). The
+"ignore crossings before the start" filter and timing lap 1 from the tone are built, but
+need the tone's time on the timer's clock, which arrives with the OFT adapter.
 
 **OFT in tests** (Agreed): the OFT repos will live on GitHub eventually. Until then Grid
 uses the local checkout at `~/development/fpv/open-fpv-timer`, and tests that need a fake
@@ -575,34 +626,22 @@ round and heat model that this doc replaces.
 
 ---
 
-## 9. Open questions for Ryan
+## 9. Questions from the build (all answered)
 
-These came up while building the engine. Each has what the code does today, so "yes" is
-enough where you agree.
+Six questions came up while building the engine. Ryan answered them on 2026-11-09. Each
+answer is now part of the section named, and is built and tested unless it says otherwise.
 
-1. **A disqualified pilot's bump-up spot.** Today a disqualified pilot drops to the bottom
-   of every heat beneath the phase they are out of. So if they had won the D-Main, the next
-   pilot becomes its winner and takes the bump-up to the C-Main. Is that right, or should
-   the spot stay empty?
+| Question | Answer | Where |
+|---|---|---|
+| A disqualified pilot had won a bump-up spot. Who gets it? | The next pilot, by default. The director can keep the spot empty instead | §5.7 |
+| Is the first crossing always the hole shot? | It is a race rule. Hole shot is the default; timing from the tone is the other choice | §5.6 |
+| Which bracket shapes? | All of them: heats of 2 to 8, single and double elimination, 3 pilots up to 100, big events as mains of 16 | §6 |
+| Must a pilot alone in a heat fly? | Director's and pilot's choice: fly it, or the director calls the heat done | §5.4 |
+| Does a position override stick? | It is set on a heat and takes effect from there on, until cleared | §5.7 |
+| "Ignore crossings before the start" | Comes with the OFT adapter. The filter is built; it needs the tone on the timer's clock | §5.6 |
 
-2. **The first crossing is the hole shot.** Today a seat's first crossing in a race starts
-   lap 1 and has no lap time. Timing lap 1 from the start tone is the other convention.
-   Should that be a race rule the format can choose, or is hole shot always right?
-
-3. **Bracket shapes.** The one bracket preset so far is the eight-pilot double elimination
-   with four-pilot heats: round 1 seeded 1-4-5-8 against 2-3-6-7, top two advance, bottom
-   two drop to the losers side. Which other shapes do you run (16 pilots, six-pilot heats,
-   single elimination)? Point me at the charts you use.
-
-4. **A heat with one pilot in a bracket.** If byes leave one pilot alone in a heat, they
-   must still fly and save a race today. Should a lone pilot advance without flying?
-
-5. **Time and points penalties, and the position override.** Not built yet. For the
-   override: does a set position stick even if later rulings would move the pilot, until
-   the director removes it?
-
-6. **Ignore crossings before.** The start-side lap filter needs the start tone on the
-   timer's clock. It will come with the OFT adapter, which can line the two clocks up.
+**Still open:** time and points penalties are not designed in detail yet. They are added
+when the Marshal page is built.
 
 ---
 

@@ -251,6 +251,11 @@ pub fn heat_complete(
     saved_races: usize,
     director_done: bool,
 ) -> bool {
+    // The director can always call a heat done: a lone pilot who advances without flying,
+    // or a heat cut short.
+    if director_done {
+        return true;
+    }
     match rule {
         CompletionRule::SavedRaces(n) => saved_races >= *n as usize,
         CompletionRule::AnyPilotReaches { measure, at_least } => standings.iter().any(|s| {
@@ -262,7 +267,7 @@ pub fn heat_complete(
                 }
             })
         }),
-        CompletionRule::DirectorDecides => director_done,
+        CompletionRule::DirectorDecides => false,
     }
 }
 
@@ -331,6 +336,7 @@ mod tests {
                 end,
                 staging_micros: 0,
                 min_lap_micros: None,
+                first_lap: Default::default(),
             },
             completion,
             ranking: Some(RankingRule {

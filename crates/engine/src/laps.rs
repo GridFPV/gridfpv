@@ -20,7 +20,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gridfpv_events::{AdapterId, Event, LogRef, RaceId, RemovalReason, SeatRef, SourceTime};
+use gridfpv_events::{
+    AdapterId, Event, FirstLap, LogRef, RaceId, RemovalReason, SeatRef, SourceTime,
+};
 
 /// The lap filters a race runs under. They come from the race rules of the format in force.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,13 +30,19 @@ pub struct LapFilters {
     /// The shortest time a lap may take, in microseconds. A crossing that follows the
     /// counted crossing before it by less than this is filtered out. `None` filters nothing.
     pub min_lap_micros: Option<i64>,
+    /// The start tone on the timer's clock, when the timer can give it. Crossings before it
+    /// are left out. `None` (a timer whose clock Grid cannot line up with the tone) leaves
+    /// every crossing in and times lap 1 from the hole shot.
+    pub start_at: Option<SourceTime>,
+    /// What starts lap 1. [`FirstLap::FromTone`] needs `start_at`.
+    pub first_lap: FirstLap,
 }
 
 /// One timed interval between two counted crossings on a seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Lap {
-    /// The crossing that started it.
-    pub start: LogRef,
+    /// The crossing that started it. `None` for a first lap timed from the start tone.
+    pub start: Option<LogRef>,
     /// The crossing that ended it. Rulings about this lap target this crossing.
     pub end: LogRef,
     /// When it started, on the timer's clock.
@@ -74,6 +82,8 @@ pub enum Uncounted {
     Removed(Option<RemovalReason>),
     /// The minimum lap time filtered it out.
     UnderMinLap,
+    /// It came before the start tone.
+    BeforeStart,
 }
 
 /// A crossing that was left out, and why. Kept so the marshal can see and restore it.
@@ -87,8 +97,11 @@ pub struct UncountedCrossing {
 /// One seat's laps in one race.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SeatLaps {
-    /// The seat's first counted crossing: it starts lap 1.
+    /// The seat's first counted crossing, when it starts lap 1. `None` when lap 1 is timed
+    /// from the start tone instead.
     pub hole_shot: Option<(LogRef, SourceTime)>,
+    /// The start tone, when lap 1 is timed from it.
+    pub tone_at: Option<SourceTime>,
     /// Every interval after the hole shot, in order: laps and marked restarts.
     pub intervals: Vec<Lap>,
     /// Crossings that were removed or filtered, in time order.
@@ -111,10 +124,11 @@ impl SeatLaps {
         self.laps().map(Lap::micros).min()
     }
 
-    /// The time from the hole shot to the last counted crossing, in microseconds. This
-    /// includes any restart intervals: it is time on the clock, not a sum of laps.
+    /// The time from the start of lap 1 (the hole shot, or the tone) to the last counted
+    /// crossing, in microseconds. This includes any restart intervals: it is time on the
+    /// clock, not a sum of laps.
     pub fn total_micros(&self) -> Option<i64> {
-        let (_, start) = self.hole_shot?;
+        let start = self.tone_at.or(self.hole_shot.map(|(_, at)| at))?;
         let last = self.intervals.last()?;
         Some(last.ended_at.micros_since(start))
     }
@@ -288,7 +302,11 @@ impl RaceLaps {
 
         let mut out = SeatLaps::default();
         // The last crossing that counted: where the next lap starts.
-        let mut previous: Option<(LogRef, SourceTime)> = None;
+        let mut previous: Option<(Option<LogRef>, SourceTime)> = None;
+        if let (FirstLap::FromTone, Some(tone)) = (filters.first_lap, filters.start_at) {
+            out.tone_at = Some(tone);
+            previous = Some((None, tone));
+        }
         for (offset, crossing) in crossings {
             if let Some(reason) = crossing.removed {
                 out.uncounted.push(UncountedCrossing {
@@ -298,15 +316,27 @@ impl RaceLaps {
                 });
                 continue;
             }
+            // A marked restart is a person's call and is never filtered away.
+            if !crossing.restart
+                && filters
+                    .start_at
+                    .is_some_and(|start| crossing.at.micros < start.micros)
+            {
+                out.uncounted.push(UncountedCrossing {
+                    crossing: *offset,
+                    at: crossing.at,
+                    why: Uncounted::BeforeStart,
+                });
+                continue;
+            }
             let Some((start, started_at)) = previous else {
                 out.hole_shot = Some((*offset, crossing.at));
-                previous = Some((*offset, crossing.at));
+                previous = Some((Some(*offset), crossing.at));
                 continue;
             };
             let too_short = filters
                 .min_lap_micros
                 .is_some_and(|min| crossing.at.micros_since(started_at) < min);
-            // A marked restart is a person's call and is never filtered away.
             if too_short && !crossing.restart {
                 out.uncounted.push(UncountedCrossing {
                     crossing: *offset,
@@ -326,7 +356,7 @@ impl RaceLaps {
                     LapKind::Lap
                 },
             });
-            previous = Some((*offset, crossing.at));
+            previous = Some((Some(*offset), crossing.at));
         }
         out
     }
@@ -631,6 +661,7 @@ mod tests {
         let events = vec![pass(0), pass(10 * S), pass(10 * S + S / 2), pass(19 * S)];
         let filters = LapFilters {
             min_lap_micros: Some(2 * S),
+            ..LapFilters::default()
         };
         let laps = read(&events, filters);
         assert_eq!(times(&laps), vec![10 * S, 9 * S]);
@@ -656,6 +687,7 @@ mod tests {
         ];
         let filters = LapFilters {
             min_lap_micros: Some(2 * S),
+            ..LapFilters::default()
         };
         let laps = read(&events, filters);
         assert_eq!(times(&laps), vec![10 * S, 2_400_000]);
@@ -677,6 +709,7 @@ mod tests {
         ];
         let filters = LapFilters {
             min_lap_micros: Some(2 * S),
+            ..LapFilters::default()
         };
         let laps = read(&events, filters);
         assert_eq!(laps.intervals[1].kind, LapKind::Restart);
@@ -733,5 +766,61 @@ mod tests {
         assert!(!fold.is_crossing_of(&RaceId("other".into()), &LogRef(1)));
         assert!(!fold.is_crossing_of(&race(), &LogRef(99)));
         assert_eq!(times(&read(&events, none())), vec![10 * S, 9 * S]);
+    }
+
+    #[test]
+    fn by_default_the_first_crossing_is_the_hole_shot_even_when_the_tone_is_known() {
+        let filters = LapFilters {
+            start_at: Some(SourceTime::from_micros(S)),
+            ..LapFilters::default()
+        };
+        let laps = read(&[pass(3 * S), pass(13 * S)], filters);
+        assert_eq!(times(&laps), vec![10 * S]);
+        assert!(laps.hole_shot.is_some());
+        assert_eq!(laps.tone_at, None);
+    }
+
+    #[test]
+    fn timed_from_the_tone_the_first_crossing_ends_lap_one() {
+        let filters = LapFilters {
+            start_at: Some(SourceTime::from_micros(S)),
+            first_lap: FirstLap::FromTone,
+            ..LapFilters::default()
+        };
+        let laps = read(&[pass(3 * S), pass(13 * S)], filters);
+        assert_eq!(times(&laps), vec![2 * S, 10 * S]);
+        assert_eq!(laps.hole_shot, None);
+        assert_eq!(laps.intervals[0].start, None);
+        assert_eq!(laps.intervals[1].start, Some(LogRef(0)));
+        // The total runs from the tone.
+        assert_eq!(laps.total_micros(), Some(12 * S));
+    }
+
+    #[test]
+    fn timing_from_the_tone_falls_back_to_the_hole_shot_when_the_tone_is_not_known() {
+        let filters = LapFilters {
+            first_lap: FirstLap::FromTone,
+            ..LapFilters::default()
+        };
+        let laps = read(&[pass(3 * S), pass(13 * S)], filters);
+        assert_eq!(times(&laps), vec![10 * S]);
+        assert!(laps.hole_shot.is_some());
+    }
+
+    #[test]
+    fn a_crossing_before_the_start_tone_is_left_out_and_kept_for_the_marshal() {
+        // A pilot drifted through the gate during staging.
+        let filters = LapFilters {
+            start_at: Some(SourceTime::from_micros(5 * S)),
+            ..LapFilters::default()
+        };
+        let laps = read(&[pass(2 * S), pass(7 * S), pass(17 * S)], filters);
+        assert_eq!(
+            laps.hole_shot,
+            Some((LogRef(1), SourceTime::from_micros(7 * S)))
+        );
+        assert_eq!(times(&laps), vec![10 * S]);
+        assert_eq!(laps.uncounted.len(), 1);
+        assert_eq!(laps.uncounted[0].why, Uncounted::BeforeStart);
     }
 }

@@ -56,7 +56,10 @@ pub enum LockError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rulings {
     false_starts: BTreeSet<(RaceId, PilotId)>,
-    disqualified: BTreeSet<(PhaseId, PilotId)>,
+    /// Each disqualification, and whether the pilot's earned place stays empty.
+    disqualified: BTreeMap<(PhaseId, PilotId), bool>,
+    /// Positions the director set by hand, per heat.
+    positions: BTreeMap<(PhaseId, PilotId), u32>,
     locked: BTreeSet<PhaseId>,
     done: BTreeSet<PhaseId>,
     protests: BTreeMap<ProtestId, Protest>,
@@ -86,8 +89,26 @@ impl Rulings {
             Event::FalseStartCleared { race, pilot } => {
                 self.false_starts.remove(&(race.clone(), pilot.clone()));
             }
-            Event::Disqualified { phase, pilot, .. } => {
-                self.disqualified.insert((phase.clone(), pilot.clone()));
+            Event::Disqualified {
+                phase,
+                pilot,
+                keep_place_empty,
+                ..
+            } => {
+                self.disqualified
+                    .insert((phase.clone(), pilot.clone()), *keep_place_empty);
+            }
+            Event::PositionSet {
+                heat,
+                pilot,
+                position,
+                ..
+            } => {
+                self.positions
+                    .insert((heat.clone(), pilot.clone()), *position);
+            }
+            Event::PositionCleared { heat, pilot } => {
+                self.positions.remove(&(heat.clone(), pilot.clone()));
             }
             Event::Reinstated { phase, pilot } => {
                 self.disqualified.remove(&(phase.clone(), pilot.clone()));
@@ -139,9 +160,28 @@ impl Rulings {
     /// The pilots disqualified from exactly this phase.
     pub fn disqualified_from(&self, phase: &PhaseId) -> Vec<PilotId> {
         self.disqualified
-            .iter()
+            .keys()
             .filter(|(p, _)| p == phase)
             .map(|(_, pilot)| pilot.clone())
+            .collect()
+    }
+
+    /// The pilots disqualified from exactly this phase whose earned place stays empty
+    /// instead of passing to the next pilot.
+    pub fn places_kept_empty(&self, phase: &PhaseId) -> Vec<PilotId> {
+        self.disqualified
+            .iter()
+            .filter(|((p, _), keep)| p == phase && **keep)
+            .map(|((_, pilot), _)| pilot.clone())
+            .collect()
+    }
+
+    /// The positions the director set by hand in a heat.
+    pub fn positions_set(&self, heat: &PhaseId) -> Vec<(PilotId, u32)> {
+        self.positions
+            .iter()
+            .filter(|((h, _), _)| h == heat)
+            .map(|((_, pilot), position)| (pilot.clone(), *position))
             .collect()
     }
 
@@ -207,7 +247,7 @@ impl Rulings {
                 let count = self.false_starts(tree, races, &def.id, pilot);
                 let already = tree.with_ancestors(&def.id).iter().any(|above| {
                     self.disqualified
-                        .contains(&(above.id.clone(), (*pilot).clone()))
+                        .contains_key(&(above.id.clone(), (*pilot).clone()))
                 });
                 if count >= limit && !already {
                     out.push(ProposedDisqualification {
@@ -286,6 +326,7 @@ mod tests {
                 end: EndCondition::FirstToLaps(1),
                 staging_micros: 0,
                 min_lap_micros: None,
+                first_lap: Default::default(),
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -483,6 +524,12 @@ mod tests {
         fn disqualified(&self, phase: &PhaseId) -> Vec<PilotId> {
             self.0.rulings().disqualified_from(phase)
         }
+        fn places_kept_empty(&self, phase: &PhaseId) -> Vec<PilotId> {
+            self.0.rulings().places_kept_empty(phase)
+        }
+        fn positions_set(&self, heat: &PhaseId) -> Vec<(PilotId, u32)> {
+            self.0.rulings().positions_set(heat)
+        }
     }
 
     #[test]
@@ -571,6 +618,7 @@ mod tests {
             phase: pid("mains"),
             pilot: pilot("ana"),
             reason: Some("two false starts".into()),
+            keep_place_empty: false,
         });
         assert_eq!(
             log.rulings().disqualified_from(&pid("mains")),
@@ -619,6 +667,7 @@ mod tests {
             phase: pid("mains"),
             pilot: pilot("ana"),
             reason: None,
+            keep_place_empty: false,
         });
         let after = tree.evaluate(&FromLog(&log));
         // She now ranks last in the D-Main, so its winner — the pilot who bumps up — is Ben.
@@ -665,6 +714,7 @@ mod tests {
             phase: pid("mains"),
             pilot: pilot("cat"),
             reason: None,
+            keep_place_empty: false,
         });
         let results = tree.evaluate(&FromLog(&log));
         assert_eq!(results[&pid("b-main")].lineup[0].who, SeatWho::Nobody);
@@ -682,6 +732,7 @@ mod tests {
             phase: pid("mains"),
             pilot: pilot("ana"),
             reason: None,
+            keep_place_empty: false,
         });
         log.push(Event::Reinstated {
             phase: pid("mains"),
@@ -847,5 +898,131 @@ mod tests {
             heat: pid("d-main"),
         });
         assert!(!log.rulings().director_done(&pid("d-main")));
+    }
+
+    #[test]
+    fn a_disqualified_pilots_place_can_be_kept_empty_instead_of_passing_down() {
+        let tree = event();
+        let mut log = Log::default();
+        log.start("d1", "d-main", &["ana", "ben"]);
+        log.cross("d1", &["ana", "ben"]);
+        log.stop_and_save("d1");
+        log.push(Event::Disqualified {
+            phase: pid("mains"),
+            pilot: pilot("ana"),
+            reason: None,
+            keep_place_empty: true,
+        });
+        let results = tree.evaluate(&FromLog(&log));
+        // Ana had won the bump-up. Nobody takes it: Ben stays in the D-Main.
+        assert_eq!(results[&pid("b-main")].lineup[2].who, SeatWho::Nobody);
+        assert_eq!(
+            results[&pid("b-main")].field,
+            vec![pilot("cat"), pilot("dee")]
+        );
+        // In the D-Main's own results she still ranks last, below Ben.
+        let d_main: Vec<&str> = results[&pid("d-main")]
+            .ranking
+            .iter()
+            .map(|p| p.pilot.0.as_str())
+            .collect();
+        assert_eq!(d_main, vec!["ben", "ana"]);
+        assert_eq!(
+            results[&pid("d-main")].places,
+            vec![None, Some(pilot("ben"))]
+        );
+    }
+
+    #[test]
+    fn a_position_set_by_hand_holds_and_feeds_the_next_heat() {
+        let tree = event();
+        let mut log = Log::default();
+        log.start("d1", "d-main", &["ana", "ben"]);
+        log.cross("d1", &["ana", "ben"]);
+        log.stop_and_save("d1");
+        // The director rules that Ben finished first (Ana cut a gate).
+        log.push(Event::PositionSet {
+            heat: pid("d-main"),
+            pilot: pilot("ben"),
+            position: 1,
+            note: None,
+        });
+        let results = tree.evaluate(&FromLog(&log));
+        let d_main = &results[&pid("d-main")];
+        assert_eq!(d_main.ranking[0].pilot, pilot("ben"));
+        assert_eq!(d_main.ranking[0].position, 1);
+        assert_eq!(d_main.ranking[1].pilot, pilot("ana"));
+        assert_eq!(d_main.ranking[1].position, 2);
+        // From there on: Ben takes the bump-up.
+        assert_eq!(
+            results[&pid("b-main")].lineup[2].who,
+            SeatWho::Pilot(pilot("ben"))
+        );
+
+        log.push(Event::PositionCleared {
+            heat: pid("d-main"),
+            pilot: pilot("ben"),
+        });
+        let results = tree.evaluate(&FromLog(&log));
+        assert_eq!(results[&pid("d-main")].ranking[0].pilot, pilot("ana"));
+    }
+
+    #[test]
+    fn a_position_set_past_the_end_of_the_heat_puts_the_pilot_last() {
+        let tree = event();
+        let mut log = Log::default();
+        log.start("d1", "d-main", &["ana", "ben"]);
+        log.cross("d1", &["ana", "ben"]);
+        log.stop_and_save("d1");
+        log.push(Event::PositionSet {
+            heat: pid("d-main"),
+            pilot: pilot("ana"),
+            position: 9,
+            note: None,
+        });
+        let results = tree.evaluate(&FromLog(&log));
+        let order: Vec<u32> = results[&pid("d-main")]
+            .ranking
+            .iter()
+            .map(|p| p.position)
+            .collect();
+        assert_eq!(order, vec![1, 2]);
+        assert_eq!(results[&pid("d-main")].ranking[1].pilot, pilot("ana"));
+    }
+
+    #[test]
+    fn the_director_can_call_a_lone_pilots_heat_done_so_they_advance_without_flying() {
+        let mut tree = Tree::new();
+        tree.put(group("mains", None, None));
+        tree.put(heat(
+            "b-main",
+            "mains",
+            vec![
+                named("cat"),
+                SeatSource::FromPhase {
+                    phase: pid("d-main"),
+                    position: 1,
+                },
+            ],
+        ));
+        tree.put(heat("d-main", "mains", vec![named("ana")]));
+        let mut log = Log::default();
+        // The format wants one saved race, so the heat is not done by itself.
+        let before = tree.evaluate(&FromLog(&log));
+        assert!(!before[&pid("d-main")].complete);
+        assert!(matches!(
+            before[&pid("b-main")].lineup[1].who,
+            SeatWho::Waiting { .. }
+        ));
+
+        log.push(Event::HeatDone {
+            heat: pid("d-main"),
+        });
+        let after = tree.evaluate(&FromLog(&log));
+        assert!(after[&pid("d-main")].complete);
+        assert_eq!(
+            after[&pid("b-main")].lineup[1].who,
+            SeatWho::Pilot(pilot("ana"))
+        );
     }
 }

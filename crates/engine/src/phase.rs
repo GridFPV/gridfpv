@@ -20,8 +20,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use gridfpv_events::{
-    AdapterId, ClassId, CombineRule, CompletionRule, EndCondition, FieldSlice, Format, Measure,
-    PhaseDef, PhaseId, PhaseKind, PilotId, RaceRules, RankingRule, SeatRef, SeatSource,
+    AdapterId, ClassId, CombineRule, CompletionRule, EndCondition, FieldSlice, FirstLap, Format,
+    Measure, PhaseDef, PhaseId, PhaseKind, PilotId, RaceRules, RankingRule, SeatRef, SeatSource,
 };
 
 use crate::heat::{RaceEntry, Standing, heat_complete, heat_standings};
@@ -39,6 +39,15 @@ pub trait Inputs {
     /// The pilots the director has disqualified from exactly this phase. A disqualification
     /// also covers every phase beneath it.
     fn disqualified(&self, _phase: &PhaseId) -> Vec<PilotId> {
+        Vec::new()
+    }
+    /// Of those, the pilots whose earned place stays empty instead of passing to the next
+    /// pilot (the director's choice when disqualifying).
+    fn places_kept_empty(&self, _phase: &PhaseId) -> Vec<PilotId> {
+        Vec::new()
+    }
+    /// The positions the director set by hand in a heat (1 for the top).
+    fn positions_set(&self, _heat: &PhaseId) -> Vec<(PilotId, u32)> {
         Vec::new()
     }
 }
@@ -91,6 +100,10 @@ pub struct PhaseResult {
     pub lineup: Vec<ResolvedSeat>,
     /// The field in ranked order.
     pub ranking: Vec<Placed>,
+    /// What "position N of this phase" hands on to another phase, top first. It is the
+    /// ranking, except where a disqualified pilot's place is kept empty: there the slot
+    /// holds nobody, and the pilots below do not move up into it.
+    pub places: Vec<Option<PilotId>>,
     /// Whether the phase is done.
     pub complete: bool,
 }
@@ -101,9 +114,9 @@ impl PhaseResult {
         if !self.complete {
             return None;
         }
-        self.ranking
+        self.places
             .get(position.checked_sub(1)? as usize)
-            .map(|placed| &placed.pilot)
+            .and_then(Option::as_ref)
     }
 }
 
@@ -125,6 +138,7 @@ fn no_format() -> Format {
             end: EndCondition::Open,
             staging_micros: 0,
             min_lap_micros: None,
+            first_lap: FirstLap::default(),
         },
         completion: CompletionRule::DirectorDecides,
         ranking: None,
@@ -261,6 +275,15 @@ impl Eval<'_> {
             .collect()
     }
 
+    /// Of the pilots disqualified from a phase, those whose earned place stays empty.
+    fn kept_empty(&self, id: &PhaseId) -> BTreeSet<PilotId> {
+        self.tree
+            .with_ancestors(id)
+            .iter()
+            .flat_map(|def| self.inputs.places_kept_empty(&def.id))
+            .collect()
+    }
+
     /// The result for a phase, working it out first if needed. `None` when the phase does
     /// not exist or is part of a loop.
     fn phase(&mut self, id: &PhaseId) -> Option<&PhaseResult> {
@@ -336,8 +359,56 @@ impl Eval<'_> {
                     races.len(),
                     self.inputs.director_done(&def.id),
                 ));
-        out.ranking = place(standings, &disqualified, |_, _| Ordering::Equal);
+        let kept_empty = self.kept_empty(&def.id);
+        let set = self.inputs.positions_set(&def.id);
+        (out.ranking, out.places) = place(standings, &disqualified, &kept_empty, &set, |_, _| {
+            Ordering::Equal
+        });
         out
+    }
+
+    /// Resolve field slices to pilots, in order, each pilot once. The flag says whether a
+    /// slice is still waiting on another phase.
+    fn slices(&mut self, slices: &[FieldSlice]) -> (Vec<PilotId>, bool) {
+        let mut field: Vec<PilotId> = Vec::new();
+        let mut waiting = false;
+        let add = |field: &mut Vec<PilotId>, pilot: &PilotId| {
+            if !field.contains(pilot) {
+                field.push(pilot.clone());
+            }
+        };
+        for slice in slices {
+            match slice {
+                FieldSlice::Class(class) => {
+                    for pilot in self.inputs.roster(class) {
+                        add(&mut field, &pilot);
+                    }
+                }
+                FieldSlice::Pilot(pilot) => add(&mut field, pilot),
+                FieldSlice::Imported(pilots) => {
+                    for pilot in pilots {
+                        add(&mut field, pilot);
+                    }
+                }
+                FieldSlice::FromPhase { phase, from, to } => {
+                    let picked: Option<Vec<PilotId>> =
+                        self.phase(phase).filter(|s| s.complete).map(|s| {
+                            (*from..=*to)
+                                .filter_map(|position| s.at(position).cloned())
+                                .collect()
+                        });
+                    match picked {
+                        Some(pilots) => {
+                            for pilot in &pilots {
+                                add(&mut field, pilot);
+                            }
+                        }
+                        None => waiting = true,
+                    }
+                }
+            }
+        }
+        (field, waiting)
     }
 
     fn group(
@@ -352,55 +423,46 @@ impl Eval<'_> {
             self.phase(child);
         }
 
-        // The field: the slices in order, or — with no slices — whoever is in the children.
-        let add = |field: &mut Vec<PilotId>, pilot: &PilotId| {
-            if !field.contains(pilot) {
-                field.push(pilot.clone());
-            }
-        };
+        // The field: the slices in order, or — with no slices — whoever is in the children,
+        // in the seed order of the nearest phase above that has a field of its own (a
+        // bracket's round takes its seeds from the bracket).
         if slices.is_empty() {
             for child in &children {
                 match self.done.get(child) {
                     Some(result) => {
                         out.waiting |= result.waiting;
                         for pilot in &result.field {
-                            add(&mut out.field, pilot);
+                            if !out.field.contains(pilot) {
+                                out.field.push(pilot.clone());
+                            }
                         }
                     }
                     None => out.waiting = true,
                 }
             }
-        }
-        for slice in slices {
-            match slice {
-                FieldSlice::Class(class) => {
-                    for pilot in self.inputs.roster(class) {
-                        add(&mut out.field, &pilot);
-                    }
-                }
-                FieldSlice::Pilot(pilot) => add(&mut out.field, pilot),
-                FieldSlice::Imported(pilots) => {
-                    for pilot in pilots {
-                        add(&mut out.field, pilot);
-                    }
-                }
-                FieldSlice::FromPhase { phase, from, to } => {
-                    let picked: Option<Vec<PilotId>> =
-                        self.phase(phase).filter(|s| s.complete).map(|s| {
-                            (*from..=*to)
-                                .filter_map(|position| s.at(position).cloned())
-                                .collect()
-                        });
-                    match picked {
-                        Some(pilots) => {
-                            for pilot in &pilots {
-                                add(&mut out.field, pilot);
-                            }
-                        }
-                        None => out.waiting = true,
-                    }
-                }
+            let above: Option<Vec<FieldSlice>> = self
+                .tree
+                .with_ancestors(&def.id)
+                .iter()
+                .skip(1)
+                .find_map(|def| match &def.kind {
+                    PhaseKind::Group { field, .. } if !field.is_empty() => Some(field.clone()),
+                    _ => None,
+                });
+            if let Some(above) = above {
+                let (seeds, _) = self.slices(&above);
+                let seed = |pilot: &PilotId| {
+                    seeds
+                        .iter()
+                        .position(|seeded| seeded == pilot)
+                        .unwrap_or(usize::MAX)
+                };
+                out.field.sort_by_key(seed);
             }
+        } else {
+            let (field, waiting) = self.slices(slices);
+            out.field = field;
+            out.waiting |= waiting;
         }
 
         // Pool every race each pilot flew in the heats beneath this phase.
@@ -423,18 +485,28 @@ impl Eval<'_> {
             })
         };
         let disqualified = self.disqualified(&def.id);
-        out.ranking = place(pooled, &disqualified, |a, b| match combine {
-            CombineRule::Stack => {
-                let key =
-                    |s: &Standing| place_in_children(&s.pilot).unwrap_or((usize::MAX, u32::MAX));
-                key(a).cmp(&key(b))
-            }
-            CombineRule::ByHeatPosition => {
-                let key = |s: &Standing| place_in_children(&s.pilot).map_or(u32::MAX, |(_, p)| p);
-                key(a).cmp(&key(b))
-            }
-            CombineRule::Measures(rule) => by_measures(rule, a, b),
-        });
+        let kept_empty = self.kept_empty(&def.id);
+        (out.ranking, out.places) =
+            place(
+                pooled,
+                &disqualified,
+                &kept_empty,
+                &[],
+                |a, b| match combine {
+                    CombineRule::Stack => {
+                        let key = |s: &Standing| {
+                            place_in_children(&s.pilot).unwrap_or((usize::MAX, u32::MAX))
+                        };
+                        key(a).cmp(&key(b))
+                    }
+                    CombineRule::ByHeatPosition => {
+                        let key =
+                            |s: &Standing| place_in_children(&s.pilot).map_or(u32::MAX, |(_, p)| p);
+                        key(a).cmp(&key(b))
+                    }
+                    CombineRule::Measures(rule) => by_measures(rule, a, b),
+                },
+            );
 
         out.complete = !out.waiting
             && !children.is_empty()
@@ -448,26 +520,56 @@ impl Eval<'_> {
 /// Put results in their final order and number them 1 to n. The order is: pilots still in
 /// the phase above disqualified pilots, pilots who flew above pilots who never did, then
 /// `rule`, then seed. For a heat `results` arrive already sorted by its ranking rule, and
-/// the stable sort keeps that order within each group.
+/// the stable sort keeps that order within each group. Last, each position the director set
+/// by hand (`set`) moves that pilot to it.
+///
+/// Returns the ranking and the places it hands on (see [`PhaseResult::places`]): the same
+/// order, except that a pilot in `kept_empty` holds the place they had earned as an empty
+/// slot, so nobody moves up into it.
 fn place(
-    mut results: Vec<Standing>,
+    results: Vec<Standing>,
     disqualified: &BTreeSet<PilotId>,
+    kept_empty: &BTreeSet<PilotId>,
+    set: &[(PilotId, u32)],
     rule: impl Fn(&Standing, &Standing) -> Ordering,
-) -> Vec<Placed> {
-    let out = |s: &Standing| disqualified.contains(&s.pilot);
+) -> (Vec<Placed>, Vec<Option<PilotId>>) {
     let presorted: BTreeMap<PilotId, usize> = results
         .iter()
         .enumerate()
         .map(|(index, s)| (s.pilot.clone(), index))
         .collect();
-    results.sort_by(|a, b| {
-        out(a)
-            .cmp(&out(b))
-            .then_with(|| b.flew.cmp(&a.flew))
-            .then_with(|| rule(a, b))
-            .then_with(|| presorted[&a.pilot].cmp(&presorted[&b.pilot]))
-    });
-    results
+    let order = |out: &dyn Fn(&Standing) -> bool| -> Vec<Standing> {
+        let mut sorted = results.clone();
+        sorted.sort_by(|a, b| {
+            out(a)
+                .cmp(&out(b))
+                .then_with(|| b.flew.cmp(&a.flew))
+                .then_with(|| rule(a, b))
+                .then_with(|| presorted[&a.pilot].cmp(&presorted[&b.pilot]))
+        });
+        // The director's hand-set positions, lowest first so each lands where it was put.
+        let mut moves: Vec<&(PilotId, u32)> = set.iter().collect();
+        moves.sort_by_key(|(_, position)| *position);
+        for (pilot, position) in moves {
+            if let Some(from) = sorted.iter().position(|s| &s.pilot == pilot) {
+                let moved = sorted.remove(from);
+                let to = (position.saturating_sub(1) as usize).min(sorted.len());
+                sorted.insert(to, moved);
+            }
+        }
+        sorted
+    };
+
+    // What is handed on: pilots whose place is kept empty stay where they had earned it,
+    // as an empty slot.
+    let places = order(&|s| disqualified.contains(&s.pilot) && !kept_empty.contains(&s.pilot))
+        .into_iter()
+        .map(|s| {
+            let empty = disqualified.contains(&s.pilot) && kept_empty.contains(&s.pilot);
+            (!empty).then_some(s.pilot)
+        })
+        .collect();
+    let ranking = order(&|s| disqualified.contains(&s.pilot))
         .into_iter()
         .enumerate()
         .map(|(index, mut result)| {
@@ -479,7 +581,8 @@ fn place(
                 result,
             }
         })
-        .collect()
+        .collect();
+    (ranking, places)
 }
 
 /// One pilot's numbers pooled across several heats.
@@ -634,6 +737,7 @@ mod tests {
                 end: EndCondition::FirstToLaps(laps),
                 staging_micros: 0,
                 min_lap_micros: None,
+                first_lap: Default::default(),
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -937,6 +1041,7 @@ mod tests {
                 end: EndCondition::Open,
                 staging_micros: 0,
                 min_lap_micros: None,
+                first_lap: Default::default(),
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(best3.clone()),

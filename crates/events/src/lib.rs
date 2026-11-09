@@ -431,6 +431,22 @@ pub struct RaceRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub min_lap_micros: Option<i64>,
+    /// What starts a pilot's first lap. The default is the hole shot.
+    #[serde(default)]
+    pub first_lap: FirstLap,
+}
+
+/// What starts a pilot's first lap in a race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum FirstLap {
+    /// The pilot's first crossing (the hole shot) starts lap 1. That crossing has no lap
+    /// time of its own.
+    #[default]
+    HoleShot,
+    /// The start tone starts lap 1, so the first crossing ends it. This needs the tone's
+    /// time on the timer's clock; a timer that cannot give it falls back to the hole shot.
+    FromTone,
 }
 
 /// One number Grid folds for a pilot from the saved races of a heat. Rules are built from
@@ -759,7 +775,25 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         reason: Option<String>,
+        /// What happens to a place the pilot had already earned that feeds another heat (a
+        /// bump-up spot). `false`, the default: the next pilot moves up and takes it.
+        /// `true`: the place stays empty.
+        #[serde(default)]
+        keep_place_empty: bool,
     },
+    /// The director set a pilot's finishing position in a heat by hand. It holds until it
+    /// is cleared, and everything that reads the heat's ranking sees it.
+    PositionSet {
+        heat: PhaseId,
+        pilot: PilotId,
+        /// 1 for the top.
+        position: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
+    /// A hand-set position was cleared: the pilot is ranked by the rules again.
+    PositionCleared { heat: PhaseId, pilot: PilotId },
     /// A disqualification was lifted.
     Reinstated { phase: PhaseId, pilot: PilotId },
     /// The director locked a phase: its results, and everything beneath it, are official.
@@ -1109,6 +1143,7 @@ mod tests {
                 end: EndCondition::FirstToLaps(3),
                 staging_micros: 5_000_000,
                 min_lap_micros: Some(2_000_000),
+                first_lap: Default::default(),
             },
             completion: CompletionRule::AnyPilotReaches {
                 measure: Measure::Wins,
