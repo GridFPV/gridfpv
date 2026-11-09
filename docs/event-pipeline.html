@@ -14,6 +14,13 @@
       <p class="doc-kind">Internal design doc · what an event is and what each phase must do</p>
     </header>
 
+    <div class="callout doc-status doc-status-old">
+      <p>
+        <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
+        doc. It describes a fixed pipeline of event stages. Events are now built from freely nested phases. Note that "phase" here means a pipeline stage, which is not the new meaning. The current design is <a href="primitives.md">Grid primitives</a>.
+      </p>
+    </div>
+
     <p class="lead">
       What it actually means to run an FPV race event in GridFPV — the phases an event
       moves through, and the specific capabilities we want to hit at each one. The same

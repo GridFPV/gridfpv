@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · how a log frame becomes the live projection and the server-authoritative clock</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> The rules still stand: the live state is a pure fold of the log (section 1), the race clock is set by the server (section 2), and snapshot and stream share one fold (section 3). Old: every field definition in section 1, the transition names and diagram in section 2, and all of section 4, which are written against the six-state heat, rounds and <code>CompetitorRegistered</code>. This is an as-built doc and gets rewritten when the live fold is rebuilt; until then <a href="primitives.md">Grid primitives</a> wins.
+      </p>
+    </div>
+
     <p class="lead">
       The <strong>live race-state</strong> projection (<code>LiveRaceState</code>) is the
       latency-sensitive core every overlay, HUD, and spectator watches — the heat on the timer,

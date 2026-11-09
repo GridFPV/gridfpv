@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · how we keep race-timing logic correct without depending on a live external backend</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> Sections 1, 2, 3, 5, 6, 8 and 9 still stand: the no-live-backend rule, golden cases, replay, the RotorHazard harnesses and the contract and browser suites. Section 7 (format generator tests) is old; its table-driven method moves to ranking rules, completion rules and presets. Sections 4, 5.1 and 5.3 stand but name the old heat flow (Stage, Start, abort, win condition). Where this doc disagrees with <a href="primitives.md">Grid primitives</a>, that doc wins.
+      </p>
+    </div>
+
     <p class="lead">
       How GridFPV earns trust in its results. The whole system is built so that correctness
       is a property we can <em>replay</em>, not one we have to witness live: pure translators

@@ -14,6 +14,13 @@
       <p class="doc-kind">Internal design doc · the heat FSM, its commands, and the runtime clock that drives it</p>
     </header>
 
+    <div class="callout doc-status doc-status-old">
+      <p>
+        <strong>Old design, kept for history (2026-11-09).</strong> Do not build against this
+        doc. It describes the six-state heat. A heat is now a lineup that is raced one or more times, and the states belong to the race: ready, running, stopped, then saved or discarded. The current design is <a href="primitives.md">Grid primitives</a>.
+      </p>
+    </div>
+
     <p class="lead">
       The one reusable state machine that runs every heat, in every phase — six states from
       <code>Scheduled</code> to <code>Final</code>. This is the deep-dive behind

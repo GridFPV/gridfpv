@@ -1,5 +1,8 @@
 # Board reconciliation — August 2026
 
+> **Old, kept for history (2026-11-09).** A finished working ledger from before the
+> restructure. The current design is [Grid primitives](primitives.md).
+
 **Status:** open loose ends, not yet actioned. Written 2026-08-23 on returning to the
 project after ~7 weeks away (the gap between cutting `v0.4.0-alpha.1` on 2026-07-05 and
 picking it back up).

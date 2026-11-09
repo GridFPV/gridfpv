@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · the one read/realtime contract every client speaks</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> Sections 2 (prose), 3, 4, 5, 6, 7, 8 and 9 still stand: snapshot plus change stream, scoping, auth, TLS, generated types and versioning. The projection list and the "As built" note in section 1, and the endpoint tables in section 2 (rounds, formats, timer channel fields, the command set), are old and will be rewritten when the server is rebuilt. Where this doc disagrees with <a href="primitives.md">Grid primitives</a>, that doc wins.
+      </p>
+    </div>
+
     <p class="lead">
       The single read/realtime contract. A client opens it, fetches a <strong>snapshot</strong>
       of the projections it cares about, then subscribes to a <strong>realtime change

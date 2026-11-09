@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · the required in-process RH integration + its sliced build plan</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> The RotorHazard adapter and plugin are due a full rewrite, so read this as a record of verified RotorHazard facts, not a plan. Sections 1, 2, 4, 4b, 5 and 6 hold those facts and the plugin as built. In sections 3, 7 and 8 the re-detection decision is reopened by <a href="primitives.md">Grid primitives</a>, and the Stage and Arm wording follows the old heat flow. In this doc "heat", "format", "seat" and "practice mode" mean RotorHazard's things, not Grid's.
+      </p>
+    </div>
+
     <p class="lead">
       The decided primary RotorHazard integration (<a href="decisions.html">D16</a>): a small
       GridFPV plugin that runs <strong>inside</strong> the RH server with <strong>RHAPI access</strong>,
