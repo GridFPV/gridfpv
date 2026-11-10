@@ -387,9 +387,12 @@ impl ClockFit {
 /// - Outside that, signal is held briefly and then dropped.
 ///
 /// Batches are joined into chunks about a second long before they are logged, so a race is
-/// a few hundred log entries, not tens of thousands. Joining changes no sample: only
-/// batches that follow on exactly, at the same rate and unit, are joined. The joined chunk
-/// carries the latest noise floor of its batches.
+/// a few hundred log entries, not tens of thousands. Joining changes no sample value. Only
+/// batches that follow on from each other (to within half a sample), at the same rate and
+/// unit, are joined; a real gap starts a new chunk. A chunk is kept to about a second so
+/// that the time of a sample inside it, counted from the chunk's start, stays true to a
+/// small fraction of a sample even when the Timer's clocks drift. The joined chunk carries
+/// the latest noise floor of its batches.
 ///
 /// Times are on the Timer's clock, taken from the samples themselves. This is pure: no clock
 /// is read.
@@ -475,8 +478,11 @@ impl SignalBuffer {
     /// follow on from it, or once it is long enough.
     fn join(&mut self, chunk: SignalChunk, out: &mut Vec<SignalChunk>) {
         let seat = chunk.seat.clone();
+        // "Follows on" allows for less than half a sample of slack. A real Timer maps its
+        // receiver's clock onto its own, so a batch starts a microsecond or two off where
+        // the one before ended (*seen* against `oftd`: -1, 0 or +1 µs).
         let follows = self.open.get(&seat).is_some_and(|open| {
-            end_of(open) == chunk.from.micros
+            (end_of(open) - chunk.from.micros).abs() * 2 < i64::from(open.period_micros)
                 && open.period_micros == chunk.period_micros
                 && open.unit == chunk.unit
         });
@@ -811,5 +817,21 @@ mod tests {
                 exit: -760
             }
         );
+    }
+
+    #[test]
+    fn batches_a_microsecond_off_are_joined_as_a_real_timer_sends_them() {
+        let mut buffer = SignalBuffer::new();
+        let mut second = batch("0", 50);
+        second.from = SourceTime::from_micros(50_001);
+        let mut third = batch("0", 100);
+        third.from = SourceTime::from_micros(99_999);
+        let mut logged = buffer.push(batch("0", 0), true);
+        logged.extend(buffer.push(second, true));
+        logged.extend(buffer.push(third, true));
+        logged.extend(buffer.flush());
+        assert_eq!(logged.len(), 1);
+        assert_eq!(logged[0].levels.len(), 150);
+        assert_eq!(logged[0].from, SourceTime::from_micros(0));
     }
 }

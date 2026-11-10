@@ -15,8 +15,8 @@ export type SeatSignal = { adapter: AdapterId, seat: SeatRef,
  */
 start_at?: SourceTime, 
 /**
- * The trace, oldest first. Chunks that follow on exactly are joined; a gap in the
- * signal is a gap between chunks.
+ * The trace, oldest first, in the chunks it was logged in (about a second each). Each
+ * chunk has its own start time; a gap in the signal is a gap between chunks.
  */
 chunks: Array<SignalChunk>, 
 /**

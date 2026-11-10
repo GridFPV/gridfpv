@@ -508,8 +508,8 @@ pub struct SeatSignal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub start_at: Option<SourceTime>,
-    /// The trace, oldest first. Chunks that follow on exactly are joined; a gap in the
-    /// signal is a gap between chunks.
+    /// The trace, oldest first, in the chunks it was logged in (about a second each). Each
+    /// chunk has its own start time; a gap in the signal is a gap between chunks.
     pub chunks: Vec<SignalChunk>,
     /// The enter and exit levels the timer was using, oldest first. The timer logs them
     /// when the race comes on and again whenever they move by more than a dB.
@@ -564,20 +564,7 @@ pub async fn get_signal(
                     else {
                         continue;
                     };
-                    // Join a chunk that follows on exactly from the one before it.
-                    match seat.chunks.last_mut() {
-                        Some(last)
-                            if last.period_micros == chunk.period_micros
-                                && last.unit == chunk.unit
-                                && last.from.micros
-                                    + last.levels.len() as i64 * i64::from(last.period_micros)
-                                    == chunk.from.micros =>
-                        {
-                            last.levels.extend(chunk.levels);
-                            last.noise_floor = chunk.noise_floor.or(last.noise_floor);
-                        }
-                        _ => seat.chunks.push(chunk),
-                    }
+                    seat.chunks.push(chunk);
                 }
                 Event::SignalThresholds(thresholds) => {
                     if let Some(seat) = seats
@@ -1144,7 +1131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_races_logged_signal_is_read_back_joined_and_kept_apart_from_the_next_race() {
+    async fn a_races_logged_signal_is_read_back_and_kept_apart_from_the_next_race() {
         use gridfpv_events::{SignalChunk, SignalThresholds, SignalUnit};
         let (registry, event) = with_bracket(0).await;
         let heat = PhaseId("finals/final".into());
@@ -1212,12 +1199,11 @@ mod tests {
         // Four seats in the lineup; only seat 0 has signal.
         assert_eq!(signal.seats.len(), 4);
         let seat = &signal.seats[0];
-        // Two chunks that followed on are one; the gap stays a gap.
-        assert_eq!(seat.chunks.len(), 2);
-        assert_eq!(seat.chunks[0].levels.len(), 200);
+        // The chunks come back as they were logged, each with its own start.
+        assert_eq!(seat.chunks.len(), 3);
         assert_eq!(seat.chunks[0].levels[99], -900);
-        assert_eq!(seat.chunks[0].levels[100], -700);
-        assert_eq!(seat.chunks[1].from, SourceTime::from_micros(300_000));
+        assert_eq!(seat.chunks[1].levels[0], -700);
+        assert_eq!(seat.chunks[2].from, SourceTime::from_micros(300_000));
         assert_eq!(seat.thresholds.len(), 1);
         assert_eq!(seat.thresholds[0].enter, -750);
         assert!(signal.seats[1].chunks.is_empty());

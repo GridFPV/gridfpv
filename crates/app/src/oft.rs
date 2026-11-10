@@ -9,8 +9,8 @@
 //! 3. Logs what the timer reports into the **active event**. A pass is stamped with the race
 //!    running at that moment by the Director (see `gridfpv_server::control`). With no active
 //!    event there is nowhere to log to, and reports are dropped.
-//! 4. Pings the timer every two seconds to measure how its clock lines up with the
-//!    Director's, and logs that when it moves.
+//! 4. Pings the timer to measure how its clock lines up with the Director's (a quick burst
+//!    on connect, then every two seconds), and logs that when it moves.
 //!
 //! 5. Takes the timer's signal at full rate and logs it while a race is on, with a few
 //!    seconds either side (see `SignalBuffer`). Signal outside a race is not kept.
@@ -36,6 +36,12 @@ use gridfpv_server::timers::{SeatLevels, Timer, TimerLive};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
+/// How many quick pings open a connection, and how far apart. The first ping or two share
+/// the link with the timer's hello and the first rush of signal and come back slowly, so
+/// one of them alone would place a race start tens of milliseconds out. A quick burst gets
+/// a good measurement before anyone can start a race.
+const OPENING_PINGS: u32 = 15;
+const OPENING_PING_EVERY: Duration = Duration::from_millis(100);
 /// How often the timer is pinged to measure its clock.
 const PING_EVERY: Duration = Duration::from_secs(2);
 /// A logged clock offset is logged again when the measurement moves by more than this many
@@ -190,12 +196,19 @@ impl Link {
         let (mut socket, _) = tokio_tungstenite::connect_async(&url)
             .await
             .map_err(|e| format!("Could not reach the timer at {}: {e}", timer.address))?;
-        let mut ping = tokio::time::interval(PING_EVERY);
+        let mut next_ping = tokio::time::Instant::now();
+        let mut pings: u32 = 0;
         // When the ping in flight was sent, on the Director's clock.
         let mut ping_sent: Option<i64> = None;
         loop {
             tokio::select! {
-                _ = ping.tick() => {
+                _ = tokio::time::sleep_until(next_ping) => {
+                    pings += 1;
+                    next_ping += if pings < OPENING_PINGS {
+                        OPENING_PING_EVERY
+                    } else {
+                        PING_EVERY
+                    };
                     ping_sent = Some(now_micros());
                     socket
                         .send(Message::text(r#"{"type":"ping"}"#))
