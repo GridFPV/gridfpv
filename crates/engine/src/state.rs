@@ -865,6 +865,20 @@ impl Inputs for EventState {
         self.rulings.director_done(heat)
     }
 
+    fn last_seat(&self, pilot: &PilotId) -> Option<(AdapterId, gridfpv_events::SeatRef)> {
+        // The latest race the pilot was in, whatever became of it: the seat was theirs.
+        self.races
+            .iter()
+            .filter_map(|race| {
+                race.setup
+                    .lineup
+                    .iter()
+                    .find(|entry| entry.pilot.as_ref() == Some(pilot))
+                    .map(|entry| (entry.adapter.clone(), entry.seat.clone()))
+            })
+            .last()
+    }
+
     fn disqualified(&self, phase: &PhaseId) -> Vec<PilotId> {
         self.rulings.disqualified_from(phase)
     }
@@ -1991,5 +2005,113 @@ mod tests {
             race
         );
         assert_eq!(director.state.race_for_pass(&pass(0), 122 * S), None);
+    }
+
+    #[test]
+    fn a_pilot_keeps_their_seat_into_the_next_heat_and_the_higher_seed_wins_a_clash() {
+        let mut director = bracket_event();
+        // Round 1: seeds 1-4-5-8 on seats 0-3 of heat 1, seeds 2-3-6-7 on heat 2.
+        fly(&mut director, "bracket/winners-1/heat-1");
+        fly(&mut director, "bracket/winners-1/heat-2");
+        let results = director.state.results();
+        let on = |heat: &str| -> Vec<(String, String)> {
+            results[&pid(heat)]
+                .lineup
+                .iter()
+                .map(|seat| {
+                    let who = match &seat.who {
+                        SeatWho::Pilot(pilot) => pilot.0.clone(),
+                        other => format!("{other:?}"),
+                    };
+                    (seat.seat.0.clone(), who)
+                })
+                .collect()
+        };
+        // The winners final takes the top two of each heat. Seat order won, so p1 (seat 0)
+        // and p4 (seat 1) come from heat 1, and p2 (seat 0) and p3 (seat 1) from heat 2.
+        // The lineup's seeds are p1, p2, p4, p3 (winners first). p1 and p2 both flew seat
+        // 0: p1 is seeded higher and keeps it. p4 and p3 both flew seat 1: p4 keeps it.
+        // The two who had to move take the seats nobody asked for, in seed order.
+        assert_eq!(
+            on("bracket/winners-final"),
+            vec![
+                ("seat-0".to_owned(), "p1".to_owned()),
+                ("seat-1".to_owned(), "p4".to_owned()),
+                ("seat-2".to_owned(), "p2".to_owned()),
+                ("seat-3".to_owned(), "p3".to_owned()),
+            ]
+        );
+        // The losers heat takes 3rd and 4th of each: p5 and p8 flew seats 2 and 3 in heat
+        // 1 and are seeded above p6 and p7, so they keep them.
+        let losers = on("bracket/losers-1");
+        assert!(
+            losers.contains(&("seat-2".to_owned(), "p5".to_owned())),
+            "{losers:?}"
+        );
+        assert!(
+            losers.contains(&("seat-3".to_owned(), "p8".to_owned())),
+            "{losers:?}"
+        );
+        // The field (the seed order) is not changed by where pilots sit.
+        assert_eq!(
+            results[&pid("bracket/winners-final")].field,
+            vec![pilot("p1"), pilot("p2"), pilot("p4"), pilot("p3")]
+        );
+
+        // Once the heat has been flown its lineup stays as it was flown.
+        fly(&mut director, "bracket/winners-final");
+        let results = director.state.results();
+        let after: Vec<String> = results[&pid("bracket/winners-final")]
+            .lineup
+            .iter()
+            .map(|seat| match &seat.who {
+                SeatWho::Pilot(pilot) => pilot.0.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(after, vec!["p1", "p4", "p2", "p3"]);
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn a_seat_the_director_gave_to_a_named_pilot_is_never_moved() {
+        let mut director = Director::default();
+        let heat = |id: &str, who: [&str; 2]| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: None,
+            kind: PhaseKind::Heat {
+                lineup: who
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| HeatSeat {
+                        adapter: oft(),
+                        seat: SeatRef(format!("seat-{i}")),
+                        source: SeatSource::Pilot(pilot(name)),
+                    })
+                    .collect(),
+            },
+            format: Some(format(EndCondition::FirstToLaps(1), 0)),
+            false_start_limit: None,
+            display_hint: None,
+        };
+        director
+            .record(Event::PhaseDefined {
+                def: heat("one", ["ana", "ben"]),
+            })
+            .unwrap();
+        // The director puts them the other way round in the second heat, on purpose.
+        director
+            .record(Event::PhaseDefined {
+                def: heat("two", ["ben", "ana"]),
+            })
+            .unwrap();
+        fly(&mut director, "one");
+        let results = director.state.results();
+        let two: Vec<&SeatWho> = results[&pid("two")].lineup.iter().map(|s| &s.who).collect();
+        assert_eq!(
+            two,
+            vec![&SeatWho::Pilot(pilot("ben")), &SeatWho::Pilot(pilot("ana"))]
+        );
     }
 }

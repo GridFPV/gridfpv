@@ -46,6 +46,11 @@ pub trait Inputs {
     fn places_kept_empty(&self, _phase: &PhaseId) -> Vec<PilotId> {
         Vec::new()
     }
+    /// The seat a pilot flew on in their latest race, in this event. Used to keep a pilot on
+    /// the same seat (so the same channel) from one heat to the next.
+    fn last_seat(&self, _pilot: &PilotId) -> Option<(AdapterId, SeatRef)> {
+        None
+    }
     /// The positions the director set by hand in a heat (1 for the top).
     fn positions_set(&self, _heat: &PhaseId) -> Vec<(PilotId, u32)> {
         Vec::new()
@@ -347,6 +352,10 @@ impl Eval<'_> {
             });
         }
 
+        if !out.waiting {
+            self.keep_seats(seats, &mut out.lineup);
+        }
+
         let fallback = no_format();
         let format = self.tree.format_for(&def.id).unwrap_or(&fallback);
         let standings = heat_standings(&out.field, &races, format);
@@ -367,6 +376,63 @@ impl Eval<'_> {
             Ordering::Equal
         });
         out
+    }
+
+    /// Keep each pilot on the seat they last flew on, where that can be done
+    /// (`docs/primitives.md` §5.4). A seat is a channel, and a pilot who keeps theirs does
+    /// not have to change video channel between heats.
+    ///
+    /// Only seats filled **from another phase** are moved around, and only among
+    /// themselves: a seat the director gave to a named pilot stays theirs. When two pilots
+    /// last flew on the same seat, the one seeded higher in this heat (earlier in its
+    /// lineup) keeps it and the other takes a seat nobody asked for.
+    fn keep_seats(&self, seats: &[gridfpv_events::HeatSeat], lineup: &mut [ResolvedSeat]) {
+        // The seats that may be swapped, in lineup order, with the pilot each resolved to.
+        let movable: Vec<usize> = (0..lineup.len())
+            .filter(|i| {
+                matches!(seats[*i].source, SeatSource::FromPhase { .. })
+                    && matches!(lineup[*i].who, SeatWho::Pilot(_))
+            })
+            .collect();
+        if movable.len() < 2 {
+            return;
+        }
+        let pilots: Vec<PilotId> = movable
+            .iter()
+            .filter_map(|i| match &lineup[*i].who {
+                SeatWho::Pilot(pilot) => Some(pilot.clone()),
+                _ => None,
+            })
+            .collect();
+        // Where each pilot ends up: an index into `movable`.
+        let mut seat_of: Vec<Option<usize>> = vec![None; pilots.len()];
+        let mut taken = vec![false; movable.len()];
+        // First, in seed order, everyone whose last seat is one of these and still free.
+        for (who, pilot) in pilots.iter().enumerate() {
+            let Some((adapter, seat)) = self.inputs.last_seat(pilot) else {
+                continue;
+            };
+            let wanted = movable
+                .iter()
+                .position(|i| lineup[*i].adapter == adapter && lineup[*i].seat == seat);
+            if let Some(slot) = wanted.filter(|slot| !taken[*slot]) {
+                taken[slot] = true;
+                seat_of[who] = Some(slot);
+            }
+        }
+        // Then everyone else, in seed order, onto the seats left, in lineup order.
+        for placed in seat_of.iter_mut().filter(|placed| placed.is_none()) {
+            let free = taken.iter().position(|t| !t);
+            if let Some(slot) = free {
+                taken[slot] = true;
+                *placed = Some(slot);
+            }
+        }
+        for (who, pilot) in pilots.into_iter().enumerate() {
+            if let Some(slot) = seat_of[who] {
+                lineup[movable[slot]].who = SeatWho::Pilot(pilot);
+            }
+        }
     }
 
     /// Resolve field slices to pilots, in order, each pilot once. The flag says whether a

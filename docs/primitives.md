@@ -655,8 +655,11 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
 director's order, and a helper that spaces pilots out), class standings (§5.3), a first-to-N
 race that can stop itself, and a time limit for races that are not timed (§5.6).
 
-**Not built yet in the engine:** time and points penalties, and keeping a pilot's channel
-between heats (§5.4).
+**Also built:** a pilot keeps their seat, and so their channel, from one heat to the next
+(§5.4). Only seats filled from another phase are moved; when two pilots last flew the same
+seat, the higher seed keeps it. A director's override of the result is not built.
+
+**Not built yet in the engine:** time and points penalties.
 
 **OFT in tests** (Agreed): the OFT repos will live on GitHub eventually. Until then Grid
 uses the local checkout at `~/development/fpv/open-fpv-timer`, and tests that need a fake
