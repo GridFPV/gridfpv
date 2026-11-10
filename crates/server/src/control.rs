@@ -171,15 +171,12 @@ impl Session<'_> {
         Ok(())
     }
 
-    /// Log an observation from a timer. A pass is stamped with the race that is running
-    /// now; a pass while no race runs belongs to no race.
+    /// Log an observation from a timer. A pass is stamped with the race it belongs to: the
+    /// one running now, or one stopped a moment ago that the crossing was part of (see
+    /// `EventState::race_for_pass`). Otherwise it belongs to no race.
     pub fn observe(&mut self, mut event: Event) -> Result<(), ProtocolError> {
         if let Event::Pass(pass) = &mut event {
-            pass.race = self
-                .state
-                .races
-                .running()
-                .map(|race| race.setup.race.clone());
+            pass.race = self.state.race_for_pass(pass, self.now);
         }
         // Signal is logged for the marshal and shown on no live screen, so it does not
         // wake the change feed: a console must not reload once a second for it.

@@ -248,6 +248,42 @@ impl EventState {
         out
     }
 
+    /// The race a crossing belongs to, when it is logged at `now` (Director's clock).
+    ///
+    /// Normally that is the race running now. But a timer reports a crossing a little after
+    /// it happened (it waits for the signal to fall), so a pilot's last crossing can arrive
+    /// just after the race was stopped. Such a crossing still belongs to that race, as long
+    /// as the race has not been saved or discarded yet:
+    ///
+    /// - where the timer's clock is known, when the crossing happened at or before the stop;
+    /// - where it is not, when the crossing arrives within [`Self::LATE_PASS_MICROS`] of it.
+    ///
+    /// Anything else belongs to no race.
+    pub fn race_for_pass(&self, pass: &gridfpv_events::Pass, now: i64) -> Option<RaceId> {
+        if let Some(running) = self.races.running() {
+            return Some(running.setup.race.clone());
+        }
+        let stopped = self
+            .races
+            .undecided()
+            .filter(|race| race.state == RaceState::Stopped)?;
+        let on_this_timer = stopped
+            .setup
+            .lineup
+            .iter()
+            .any(|entry| entry.adapter == pass.adapter);
+        let stopped_at = stopped.stopped_at?;
+        let in_time = match self.clock_offsets.get(&pass.adapter) {
+            Some(offset) => pass.at.micros <= stopped_at + offset,
+            None => now - stopped_at <= Self::LATE_PASS_MICROS,
+        };
+        (on_this_timer && in_time).then(|| stopped.setup.race.clone())
+    }
+
+    /// How long after a stop a crossing is still taken for the stopped race, on a timer
+    /// whose clock is not known.
+    pub const LATE_PASS_MICROS: i64 = 1_000_000;
+
     /// The heats that can be raced now: every seat resolved, somebody to race, not complete,
     /// not locked. In tree order.
     fn ready_heats(&self, results: &BTreeMap<PhaseId, PhaseResult>) -> Vec<PhaseId> {
@@ -1853,5 +1889,96 @@ mod tests {
         director.record(flag(true)).unwrap();
         assert!(director.state.races.get(&race).unwrap().needs_marshal);
         assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn a_crossing_that_arrives_just_after_the_stop_still_belongs_to_the_race() {
+        fn pass(at: i64) -> Pass {
+            Pass {
+                adapter: oft(),
+                seat: SeatRef("seat-0".into()),
+                at: SourceTime::from_micros(at),
+                sequence: None,
+                gate: GateIndex::LAP,
+                signal: None,
+                race: None,
+            }
+        }
+        let race = Some(rid("heat#1"));
+
+        // A timer whose clock is known: the crossing's own time decides.
+        let mut director = solo_heat(FirstLap::HoleShot);
+        director.append(
+            0,
+            Event::ClockOffset {
+                adapter: oft(),
+                offset_micros: -100 * S,
+                error_micros: 200,
+            },
+        );
+        director.now = 100 * S;
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        director.now = 120 * S;
+        director.catch_up();
+        assert_eq!(
+            director.state.race_for_pass(&pass(15 * S), director.now),
+            race
+        );
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        // Stopped at 120 s, which is 20 s on the timer. A crossing at 19.9 s is in.
+        director.now = 125 * S;
+        assert_eq!(
+            director
+                .state
+                .race_for_pass(&pass(19_900_000), director.now),
+            race
+        );
+        // One that happened after the stop is not, however soon it arrives.
+        assert_eq!(
+            director.state.race_for_pass(&pass(20_100_000), 120 * S + 1),
+            None
+        );
+        // Another timer's crossing is not.
+        let mut other = pass(19_900_000);
+        other.adapter = gridfpv_events::AdapterId("elsewhere".into());
+        assert_eq!(director.state.race_for_pass(&other, director.now), None);
+        // Once the race is saved, nothing more joins it.
+        director
+            .send(Command::SaveRace {
+                race: rid("heat#1"),
+                needs_marshal: false,
+                note: None,
+            })
+            .unwrap();
+        assert_eq!(
+            director
+                .state
+                .race_for_pass(&pass(19_900_000), director.now),
+            None
+        );
+
+        // A timer whose clock is not known: only arrival time can decide.
+        let mut director = solo_heat(FirstLap::HoleShot);
+        director.now = 100 * S;
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        director.now = 120 * S;
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        assert_eq!(
+            director.state.race_for_pass(&pass(0), 120 * S + 500_000),
+            race
+        );
+        assert_eq!(director.state.race_for_pass(&pass(0), 122 * S), None);
     }
 }
