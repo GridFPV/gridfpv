@@ -630,8 +630,13 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      no timer, where crossings are logged by hand.
    - Checked by hand on 2026-11-10: a heat run against `oftd --fake` through the Director
      gave laps from the timer, lap 1 timed from the tone, and the race's signal in the log.
-   - **Not yet:** mDNS discovery, writing seat frequencies and thresholds to the timer, the
-     Tune page, and showing the logged signal in Marshal.
+   - **Settings and live signal** (server side): `GET`/`PUT /timers/{id}/config` read and
+     write the timer's seats, frequencies, threshold and minimum lap. Every write is read
+     back, and a write the timer did not keep is reported as refused. `GET
+     /timers/{id}/live` sends live signal and each seat's levels for tuning; none of that is
+     logged. Checked by hand against `oftd --fake`.
+   - **Not yet:** the Tune page in the console, mDNS discovery, and showing the logged
+     signal in Marshal.
 7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before.
 

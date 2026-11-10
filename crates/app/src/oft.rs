@@ -15,6 +15,9 @@
 //! 5. Takes the timer's signal at full rate and logs it while a race is on, with a few
 //!    seconds either side (see `SignalBuffer`). Signal outside a race is not kept.
 //!
+//! 6. Passes signal and each seat's levels on, live, to anyone tuning the timer. That is
+//!    never logged.
+//!
 //! A connection that fails says why in the timer's status and tries again, waiting a little
 //! longer each time, up to ten seconds.
 //!
@@ -29,7 +32,7 @@ use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftMessage, SignalBuffer, seat
 use gridfpv_events::{AdapterId, Event};
 use gridfpv_server::control::with_event;
 use gridfpv_server::events::{EventId, EventRegistry};
-use gridfpv_server::timers::{Timer, TimerKind};
+use gridfpv_server::timers::{SeatLevels, Timer, TimerKind, TimerLive};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -229,12 +232,32 @@ impl Link {
                                 self.log_clock();
                             }
                         }
+                        OftMessage::Status { seats } => {
+                            // For whoever is tuning, live. Never logged.
+                            let levels = seats
+                                .iter()
+                                .map(|seat| SeatLevels {
+                                    seat: seat_ref(seat.seat),
+                                    level: seat.rssi,
+                                    floor: seat.floor,
+                                    enter: seat.enter,
+                                    exit: seat.exit,
+                                    crossing: seat.crossing,
+                                })
+                                .collect();
+                            self.registry
+                                .timers()
+                                .publish(&self.id, TimerLive::Levels(levels));
+                        }
                         _ => {}
                     }
                     let is_hello = matches!(message, OftMessage::Hello { .. });
                     for event in adapter.translate(message) {
                         match event {
                             Event::SignalChunk(chunk) => {
+                                self.registry
+                                    .timers()
+                                    .publish(&self.id, TimerLive::Signal(chunk.clone()));
                                 let race_on = self.registry.race_on();
                                 for chunk in self.signal.push(chunk, race_on) {
                                     self.log(Event::SignalChunk(chunk));

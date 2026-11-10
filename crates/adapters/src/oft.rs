@@ -22,14 +22,15 @@
 //!   (signed tenths of a dB). The Director does not log all of them: [`SignalBuffer`]
 //!   decides which, so a race's signal is kept and idle hours are not.
 //!
-//! `status` is parsed and ignored for now.
+//! `status` gives no events: its per-seat levels are for the Tune screen, live, and are
+//! never logged. [`OftConfig`] is the Timer's settings as `/config` reads and writes them.
 
 use std::collections::{BTreeMap, VecDeque};
 
 use gridfpv_events::{
     AdapterId, Event, GateIndex, Pass, SeatRef, SignalChunk, SignalContext, SignalUnit, SourceTime,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Adapter, Capabilities};
 
@@ -41,6 +42,56 @@ pub struct OftSeat {
     /// The seat's actual sample rate. More seats on one Node means a lower rate each.
     #[serde(default)]
     pub rate_hz: u32,
+}
+
+/// One seat's levels right now, from a `status` message. Power is in tenths of a dB.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OftSeatStatus {
+    pub seat: u32,
+    /// The latest signal level.
+    #[serde(default)]
+    pub rssi: Option<i32>,
+    /// The tracked noise floor.
+    #[serde(default)]
+    pub floor: Option<i32>,
+    /// The level that opens a crossing, as the Timer is using it now.
+    #[serde(default)]
+    pub enter: i32,
+    /// The level that closes it.
+    #[serde(default)]
+    pub exit: i32,
+    /// Whether the seat is inside a crossing right now.
+    #[serde(default)]
+    pub crossing: bool,
+}
+
+/// One seat in a Timer's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OftSeatConfig {
+    pub seat: u32,
+    pub freq_mhz: u32,
+    pub enabled: bool,
+}
+
+/// How a Timer sets its crossing levels. Values are tenths of a dB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum OftThreshold {
+    /// Enter at the noise floor plus `snr_enter`; exit `hysteresis` below that.
+    Auto { snr_enter: i32, hysteresis: i32 },
+    /// Fixed enter and exit levels.
+    Manual { enter: i32, exit: i32 },
+}
+
+/// A Timer's settings: the body of `GET` and `PUT /oft/v1/config` (spec §6.3). In protocol
+/// v1 the threshold is one setting for the whole Timer; per-seat thresholds are agreed for
+/// the next version of the spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OftConfig {
+    pub seats: Vec<OftSeatConfig>,
+    pub seats_per_node: u32,
+    pub threshold: OftThreshold,
+    pub min_lap_ms: u32,
 }
 
 /// One message from a Timer's WebSocket. Fields Grid does not use are left out; unknown
@@ -90,8 +141,11 @@ pub enum OftMessage {
         #[serde(default)]
         nf: Option<i32>,
     },
-    /// Periodic health. Not used yet.
-    Status {},
+    /// Periodic health, with each seat's levels right now.
+    Status {
+        #[serde(default)]
+        seats: Vec<OftSeatStatus>,
+    },
     /// The Timer acknowledged a subscription.
     Ack {},
     /// The Timer refused something the client sent.
@@ -148,7 +202,7 @@ impl OftAdapter {
     /// It also asks for every seat's signal at the Timer's full rate: Grid keeps signal as
     /// fine as the Timer has it.
     pub fn subscription(&self) -> String {
-        let samples = r#""samples":{"seats":"all","decimate":1}"#;
+        let samples = r#""samples":{"seats":"all","decimate":1},"status":true"#;
         match self.last_seq {
             Some(seq) => {
                 format!(r#"{{"type":"sub","crossings":{{"since":{seq}}},{samples}}}"#)
@@ -239,7 +293,7 @@ impl Adapter for OftAdapter {
                 noise_floor: nf,
             })],
             OftMessage::Pong { .. }
-            | OftMessage::Status {}
+            | OftMessage::Status { .. }
             | OftMessage::Ack {}
             | OftMessage::Error { .. }
             | OftMessage::Unknown => Vec::new(),
@@ -520,7 +574,7 @@ mod tests {
         adapter.translate(OftMessage::parse(HELLO).unwrap());
         assert_eq!(
             adapter.subscription(),
-            r#"{"type":"sub","crossings":{},"samples":{"seats":"all","decimate":1}}"#
+            r#"{"type":"sub","crossings":{},"samples":{"seats":"all","decimate":1},"status":true}"#
         );
         assert_eq!(adapter.translate(crossing(1, 0, 100)).len(), 1);
         assert_eq!(adapter.translate(crossing(2, 0, 200)).len(), 1);
@@ -528,7 +582,7 @@ mod tests {
         adapter.translate(OftMessage::parse(HELLO).unwrap());
         assert_eq!(
             adapter.subscription(),
-            r#"{"type":"sub","crossings":{"since":2},"samples":{"seats":"all","decimate":1}}"#
+            r#"{"type":"sub","crossings":{"since":2},"samples":{"seats":"all","decimate":1},"status":true}"#
         );
         // A Timer that replays more than was asked for still adds nothing twice.
         assert!(adapter.translate(crossing(2, 0, 200)).is_empty());
@@ -706,5 +760,56 @@ mod tests {
         assert_eq!(flushed.len(), 2);
         assert!(flushed.iter().all(|chunk| chunk.levels.len() == 500));
         assert!(buffer.flush().is_empty());
+    }
+
+    #[test]
+    fn a_status_message_carries_each_seats_levels() {
+        let frame = r#"{"type":"status","uptime_s":12,"time_us":12000000,"temp_c":41.5,
+            "dropped":0,"clock_err_us":null,"clock_synced":false,"clock_source":"ping",
+            "drift_ppm":null,"node_connected":true,"clients":1,
+            "seats":[{"seat":0,"node":"00aabbccddee","rate_hz":1000,"rssi":-880,
+                      "floor":-900,"enter":-750,"exit":-800,"crossing":false}]}"#;
+        let OftMessage::Status { seats } = OftMessage::parse(frame).unwrap() else {
+            panic!("expected a status");
+        };
+        assert_eq!(
+            seats,
+            vec![OftSeatStatus {
+                seat: 0,
+                rssi: Some(-880),
+                floor: Some(-900),
+                enter: -750,
+                exit: -800,
+                crossing: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_timers_settings_round_trip_in_the_timers_own_shape() {
+        // The default `/config` of `oftd`.
+        let body = r#"{"seats":[{"seat":0,"freq_mhz":5800,"enabled":true}],"seats_per_node":8,
+            "threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000}"#;
+        let config: OftConfig = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            config.threshold,
+            OftThreshold::Auto {
+                snr_enter: 150,
+                hysteresis: 50
+            }
+        );
+        let again: serde_json::Value = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            again,
+            serde_json::from_str::<serde_json::Value>(body).unwrap()
+        );
+        let manual = r#"{"mode":"manual","enter":-700,"exit":-760}"#;
+        assert_eq!(
+            serde_json::from_str::<OftThreshold>(manual).unwrap(),
+            OftThreshold::Manual {
+                enter: -700,
+                exit: -760
+            }
+        );
     }
 }

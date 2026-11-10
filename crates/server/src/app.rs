@@ -123,6 +123,14 @@ pub fn router(registry: EventRegistry) -> Router {
             "/timers/{timer_id}",
             axum::routing::delete(crate::timers::delete_timer),
         )
+        .route(
+            "/timers/{timer_id}/config",
+            get(crate::timers::get_timer_config).put(crate::timers::put_timer_config),
+        )
+        .route(
+            "/timers/{timer_id}/live",
+            get(crate::timers::get_timer_live),
+        )
         // Any path that matched no route above is a typed 404, not the SPA shell — see
         // [`api_fallback`] / [`smart_fallback`].
         .fallback(api_fallback)

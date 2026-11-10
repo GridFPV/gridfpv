@@ -16,16 +16,32 @@
 //! | `GET /timers` | every timer with its status |
 //! | `POST /timers` | add a timer |
 //! | `DELETE /timers/{id}` | remove a timer |
+//! | `GET /timers/{id}/config` | the timer's settings, read from the timer |
+//! | `PUT /timers/{id}/config` | change them, and read them back to prove they took |
+//! | `GET /timers/{id}/live` | server-sent events: live signal and levels, for tuning |
+//!
+//! **Settings live on the timer.** Grid keeps no copy: a read asks the timer, and a write
+//! is followed by a read, so what a screen shows is always what the timer is doing.
+//!
+//! **Live signal is not logged.** It goes from the connection straight to whoever is
+//! listening and is then gone. (A race's signal is logged; see `gridfpv_adapters::oft`.)
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use std::convert::Infallible;
+use std::time::Duration;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use gridfpv_events::{AdapterId, SeatRef};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use futures_util::stream::{self, Stream};
+use gridfpv_adapters::oft::{OftConfig, OftSeatConfig, OftThreshold};
+use gridfpv_events::{AdapterId, SeatRef, SignalChunk};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use tokio::sync::watch;
 use ts_rs::TS;
 
@@ -94,6 +110,133 @@ pub struct TimerView {
     pub status: TimerStatus,
 }
 
+/// One seat in a timer's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct TimerSeatConfig {
+    pub seat: SeatRef,
+    /// The video frequency the seat watches, in MHz.
+    pub freq_mhz: u32,
+    /// Whether the timer watches this seat at all.
+    pub enabled: bool,
+}
+
+/// How a timer sets the levels it detects crossings against. Values are tenths of a dB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum TimerThreshold {
+    /// Follow the noise floor: enter `snr_enter` above it, exit `hysteresis` below that.
+    Auto { snr_enter: i32, hysteresis: i32 },
+    /// Fixed enter and exit levels.
+    Manual { enter: i32, exit: i32 },
+}
+
+/// A timer's settings. Today the threshold is one setting for the whole timer; per-seat
+/// thresholds come with the next version of the OFT protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct TimerConfig {
+    pub seats: Vec<TimerSeatConfig>,
+    /// The most seats one receiver may share. More seats on a receiver means a lower
+    /// sample rate for each.
+    pub seats_per_node: u32,
+    pub threshold: TimerThreshold,
+    /// The timer ignores a second crossing on a seat within this many milliseconds.
+    pub min_lap_ms: u32,
+}
+
+impl From<OftConfig> for TimerConfig {
+    fn from(config: OftConfig) -> Self {
+        Self {
+            seats: config
+                .seats
+                .into_iter()
+                .map(|seat| TimerSeatConfig {
+                    seat: gridfpv_adapters::oft::seat_ref(seat.seat),
+                    freq_mhz: seat.freq_mhz,
+                    enabled: seat.enabled,
+                })
+                .collect(),
+            seats_per_node: config.seats_per_node,
+            threshold: match config.threshold {
+                OftThreshold::Auto {
+                    snr_enter,
+                    hysteresis,
+                } => TimerThreshold::Auto {
+                    snr_enter,
+                    hysteresis,
+                },
+                OftThreshold::Manual { enter, exit } => TimerThreshold::Manual { enter, exit },
+            },
+            min_lap_ms: config.min_lap_ms,
+        }
+    }
+}
+
+impl TimerConfig {
+    /// The settings in an OFT Timer's own shape. A seat handle that is not an OFT seat
+    /// number cannot be sent, and is an error rather than a guess.
+    fn to_oft(&self) -> Result<OftConfig, TimerError> {
+        let seats = self
+            .seats
+            .iter()
+            .map(|seat| {
+                Ok(OftSeatConfig {
+                    seat: seat.seat.0.parse().map_err(|_| TimerError::BadSeat)?,
+                    freq_mhz: seat.freq_mhz,
+                    enabled: seat.enabled,
+                })
+            })
+            .collect::<Result<_, TimerError>>()?;
+        Ok(OftConfig {
+            seats,
+            seats_per_node: self.seats_per_node,
+            threshold: match self.threshold {
+                TimerThreshold::Auto {
+                    snr_enter,
+                    hysteresis,
+                } => OftThreshold::Auto {
+                    snr_enter,
+                    hysteresis,
+                },
+                TimerThreshold::Manual { enter, exit } => OftThreshold::Manual { enter, exit },
+            },
+            min_lap_ms: self.min_lap_ms,
+        })
+    }
+}
+
+/// One seat's levels right now, in tenths of a dB.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SeatLevels {
+    pub seat: SeatRef,
+    /// The latest signal level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub level: Option<i32>,
+    /// The noise floor the timer is tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub floor: Option<i32>,
+    /// The level that opens a crossing, as the timer is using it now.
+    pub enter: i32,
+    /// The level that closes it.
+    pub exit: i32,
+    /// Whether the seat is inside a crossing right now.
+    pub crossing: bool,
+}
+
+/// What a timer's connection sends to live listeners. Never logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum TimerLive {
+    /// A batch of signal samples for one seat, as the timer sent them.
+    Signal(SignalChunk),
+    /// Every seat's levels, about once a second.
+    Levels(Vec<SeatLevels>),
+}
+
 /// Why a directory call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TimerError {
@@ -105,12 +248,22 @@ pub enum TimerError {
     NotFound,
     #[error("Could not save the timers: {0}")]
     Io(String),
+    #[error("That seat is not one this timer has.")]
+    BadSeat,
+    /// The timer could not be asked, or said no. The text says which, for the director.
+    #[error("{0}")]
+    Unreachable(String),
+    #[error("The timer did not take the change. It is still set the way it was.")]
+    NotTaken,
 }
 
 impl From<TimerError> for ProtocolError {
     fn from(error: TimerError) -> Self {
         let code = match error {
-            TimerError::NoName | TimerError::BadAddress => ErrorCode::BadRequest,
+            TimerError::NoName | TimerError::BadAddress | TimerError::BadSeat => {
+                ErrorCode::BadRequest
+            }
+            TimerError::Unreachable(_) | TimerError::NotTaken => ErrorCode::Refused,
             TimerError::NotFound => ErrorCode::UnknownScope,
             TimerError::Io(_) => ErrorCode::Internal,
         };
@@ -121,6 +274,8 @@ impl From<TimerError> for ProtocolError {
 struct Inner {
     timers: BTreeMap<AdapterId, Timer>,
     status: BTreeMap<AdapterId, TimerStatus>,
+    /// Where each timer's connection sends live signal and levels.
+    live: BTreeMap<AdapterId, broadcast::Sender<TimerLive>>,
     data_dir: Option<PathBuf>,
 }
 
@@ -158,6 +313,7 @@ impl TimerDirectory {
             inner: Arc::new(RwLock::new(Inner {
                 timers,
                 status: BTreeMap::new(),
+                live: BTreeMap::new(),
                 data_dir,
             })),
             generation: watch::Sender::new(0),
@@ -241,6 +397,8 @@ impl TimerDirectory {
             return Err(e);
         }
         inner.status.remove(id);
+        // Dropping the sender ends every live feed of this timer.
+        inner.live.remove(id);
         drop(inner);
         self.generation.send_modify(|g| *g += 1);
         Ok(())
@@ -254,6 +412,92 @@ impl TimerDirectory {
             change(inner.status.entry(id.clone()).or_default());
         }
     }
+}
+
+impl TimerDirectory {
+    /// One timer's record.
+    pub fn get(&self, id: &AdapterId) -> Option<Timer> {
+        self.read().timers.get(id).cloned()
+    }
+
+    /// Send something to a timer's live listeners. With nobody listening it is dropped.
+    pub fn publish(&self, id: &AdapterId, live: TimerLive) {
+        if let Some(sender) = self.read().live.get(id) {
+            let _ = sender.send(live);
+        }
+    }
+
+    /// Listen to a timer's live signal and levels. `None` for a timer that is not in the
+    /// directory.
+    pub fn listen(&self, id: &AdapterId) -> Option<broadcast::Receiver<TimerLive>> {
+        let mut inner = self.write();
+        if !inner.timers.contains_key(id) {
+            return None;
+        }
+        Some(
+            inner
+                .live
+                .entry(id.clone())
+                // Room for a few seconds of batches. A listener that falls further behind
+                // skips ahead: live signal is for looking at now.
+                .or_insert_with(|| broadcast::Sender::new(512))
+                .subscribe(),
+        )
+    }
+}
+
+/// How long a timer is given to answer a settings request.
+const TIMER_ANSWER: Duration = Duration::from_secs(3);
+
+fn config_url(timer: &Timer) -> String {
+    format!("http://{}/oft/v1/config", timer.address)
+}
+
+/// Read a timer's settings from the timer.
+async fn read_config(timer: &Timer) -> Result<OftConfig, TimerError> {
+    let unreachable =
+        |e: reqwest::Error| TimerError::Unreachable(format!("Could not reach {}: {e}", timer.name));
+    reqwest::Client::new()
+        .get(config_url(timer))
+        .timeout(TIMER_ANSWER)
+        .send()
+        .await
+        .map_err(unreachable)?
+        .error_for_status()
+        .map_err(unreachable)?
+        .json()
+        .await
+        .map_err(unreachable)
+}
+
+/// Write a timer's settings, then read them back. The write only counts if the timer then
+/// reports exactly what was sent.
+async fn write_config(timer: &Timer, config: &OftConfig) -> Result<OftConfig, TimerError> {
+    let response = reqwest::Client::new()
+        .put(config_url(timer))
+        .timeout(TIMER_ANSWER)
+        .json(config)
+        .send()
+        .await
+        .map_err(|e| TimerError::Unreachable(format!("Could not reach {}: {e}", timer.name)))?;
+    if !response.status().is_success() {
+        // The timer says why in `{"error": "..."}`.
+        let why = response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|body| body["error"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "it gave no reason".to_owned());
+        return Err(TimerError::Unreachable(format!(
+            "{} refused the change: {why}.",
+            timer.name
+        )));
+    }
+    let now = read_config(timer).await?;
+    if &now != config {
+        return Err(TimerError::NotTaken);
+    }
+    Ok(now)
 }
 
 fn save(inner: &Inner) -> Result<(), TimerError> {
@@ -320,6 +564,70 @@ pub async fn delete_timer(
 ) -> Result<StatusCode, ProtocolError> {
     registry.timers().delete(&timer_id)?;
     Ok(StatusCode::OK)
+}
+
+/// `GET /timers/{timer_id}/config` — the timer's settings, read from the timer. Open read.
+pub async fn get_timer_config(
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<AdapterId>,
+) -> Result<Json<TimerConfig>, ProtocolError> {
+    let timer = registry
+        .timers()
+        .get(&timer_id)
+        .ok_or(TimerError::NotFound)?;
+    Ok(Json(read_config(&timer).await?.into()))
+}
+
+/// `PUT /timers/{timer_id}/config` — change the timer's settings, RD-gated. Answers with
+/// the settings as the timer reports them afterwards. If those are not what was sent, the
+/// answer is `Refused`: a write that did not land must never look like one that did.
+pub async fn put_timer_config(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<AdapterId>,
+    Json(body): Json<TimerConfig>,
+) -> Result<Json<TimerConfig>, ProtocolError> {
+    let timer = registry
+        .timers()
+        .get(&timer_id)
+        .ok_or(TimerError::NotFound)?;
+    let config = body.to_oft()?;
+    Ok(Json(write_config(&timer, &config).await?.into()))
+}
+
+/// `GET /timers/{timer_id}/live` — server-sent events for tuning. Open read.
+///
+/// Sends `signal` events (a [`SignalChunk`] each) and `levels` events (a list of
+/// [`SeatLevels`]), as JSON. Nothing is sent while the timer is not connected. The feed
+/// ends when the timer is removed.
+pub async fn get_timer_live(
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<AdapterId>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ProtocolError> {
+    let listener = registry
+        .timers()
+        .listen(&timer_id)
+        .ok_or(TimerError::NotFound)?;
+    let stream = stream::unfold(listener, |mut listener| async move {
+        loop {
+            match listener.recv().await {
+                Ok(live) => {
+                    let (name, data) = match &live {
+                        TimerLive::Signal(chunk) => ("signal", serde_json::to_string(chunk)),
+                        TimerLive::Levels(levels) => ("levels", serde_json::to_string(levels)),
+                    };
+                    if let Ok(data) = data {
+                        let event = SseEvent::default().event(name).data(data);
+                        return Some((Ok(event), listener));
+                    }
+                }
+                // Fell behind: skip to what is happening now.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]
@@ -420,5 +728,230 @@ mod tests {
         std::fs::write(dir.join(TIMERS_FILE), b"{ not json").unwrap();
         assert!(TimerDirectory::new(Some(dir.clone())).list().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- settings, against a fake timer ---------------------------------------------------
+
+    use crate::app::router;
+    use crate::events::EventRegistry;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use std::sync::Mutex;
+    use tower::ServiceExt;
+
+    /// How the fake timer treats a write.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fake {
+        /// Takes it.
+        Honest,
+        /// Says yes and changes nothing.
+        Forgetful,
+        /// Says no, with a reason.
+        Strict,
+    }
+
+    /// A fake OFT timer serving `/oft/v1/config`. Gives its `host:port`.
+    async fn fake_timer(kind: Fake) -> String {
+        let stored: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(serde_json::json!({
+            "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true}],
+            "seats_per_node": 8,
+            "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
+            "min_lap_ms": 2000,
+        })));
+        let read = {
+            let stored = stored.clone();
+            move || {
+                let stored = stored.clone();
+                async move { Json(stored.lock().unwrap().clone()) }
+            }
+        };
+        let write = move |Json(body): Json<serde_json::Value>| {
+            let stored = stored.clone();
+            async move {
+                match kind {
+                    Fake::Honest => {
+                        *stored.lock().unwrap() = body.clone();
+                        (StatusCode::OK, Json(body))
+                    }
+                    Fake::Forgetful => (StatusCode::OK, Json(body)),
+                    Fake::Strict => (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "freq_mhz out of range"})),
+                    ),
+                }
+            }
+        };
+        let app = axum::Router::new().route("/oft/v1/config", axum::routing::get(read).put(write));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr.to_string()
+    }
+
+    async fn call(
+        registry: &EventRegistry,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        let body = match body {
+            Some(json) => {
+                builder = builder.header("Content-Type", "application/json");
+                Body::from(json.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = router(registry.clone())
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn with_timer(kind: Fake) -> (EventRegistry, String) {
+        let registry = EventRegistry::new(None).unwrap();
+        let address = fake_timer(kind).await;
+        let timer = registry
+            .timers()
+            .create(&request("Gate", &address))
+            .unwrap();
+        (registry, format!("/timers/{}/config", timer.id.0))
+    }
+
+    fn changed() -> serde_json::Value {
+        serde_json::json!({
+            "seats": [
+                {"seat": "0", "freq_mhz": 5658, "enabled": true},
+                {"seat": "1", "freq_mhz": 5917, "enabled": true},
+            ],
+            "seats_per_node": 4,
+            "threshold": {"Manual": {"enter": -700, "exit": -760}},
+            "min_lap_ms": 3000,
+        })
+    }
+
+    #[tokio::test]
+    async fn settings_are_read_from_the_timer() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let (status, body) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let config: TimerConfig = serde_json::from_value(body).unwrap();
+        assert_eq!(config.seats[0].seat, SeatRef("0".into()));
+        assert_eq!(config.seats[0].freq_mhz, 5800);
+        assert_eq!(
+            config.threshold,
+            TimerThreshold::Auto {
+                snr_enter: 150,
+                hysteresis: 50
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_change_is_written_and_read_back() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let (status, body) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, changed());
+        // And it is what the timer now reports.
+        let (_, body) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(body, changed());
+    }
+
+    #[tokio::test]
+    async fn a_write_the_timer_did_not_keep_is_never_reported_as_done() {
+        let (registry, uri) = with_timer(Fake::Forgetful).await;
+        let (status, body) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body["message"],
+            "The timer did not take the change. It is still set the way it was."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timers_own_refusal_is_passed_on_with_its_reason() {
+        let (registry, uri) = with_timer(Fake::Strict).await;
+        let (status, body) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body["message"],
+            "Gate refused the change: freq_mhz out of range."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seat_the_timer_cannot_have_is_a_bad_request_and_nothing_is_sent() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let mut body = changed();
+        body["seats"][0]["seat"] = serde_json::json!("left");
+        let (status, _) = call(&registry, "PUT", &uri, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, now) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(now["seats"][0]["freq_mhz"], 5800);
+    }
+
+    #[tokio::test]
+    async fn a_timer_that_cannot_be_reached_says_so_and_an_unknown_timer_is_a_404() {
+        let registry = EventRegistry::new(None).unwrap();
+        // A port nothing listens on.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let timer = registry
+            .timers()
+            .create(&request("Gate", &address))
+            .unwrap();
+        let (status, body) = call(
+            &registry,
+            "GET",
+            &format!("/timers/{}/config", timer.id.0),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Could not reach Gate"),
+            "{body}"
+        );
+        for uri in ["/timers/nope/config", "/timers/nope/live"] {
+            let (status, _) = call(&registry, "GET", uri, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_data_reaches_listeners_and_the_feed_ends_with_the_timer() {
+        let directory = TimerDirectory::new(None);
+        let timer = directory.create(&request("Gate", "10.0.0.5:7270")).unwrap();
+        // With nobody listening, publishing is harmless.
+        directory.publish(&timer.id, TimerLive::Levels(Vec::new()));
+        let mut listener = directory.listen(&timer.id).unwrap();
+        let levels = TimerLive::Levels(vec![SeatLevels {
+            seat: SeatRef("0".into()),
+            level: Some(-880),
+            floor: Some(-900),
+            enter: -750,
+            exit: -800,
+            crossing: false,
+        }]);
+        directory.publish(&timer.id, levels.clone());
+        assert_eq!(listener.recv().await.unwrap(), levels);
+        directory.delete(&timer.id).unwrap();
+        assert!(matches!(
+            listener.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+        assert!(directory.listen(&timer.id).is_none());
     }
 }
