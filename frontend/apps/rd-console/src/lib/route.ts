@@ -13,6 +13,8 @@
  *   - `#/pilots`       → the Pilots page
  *   - `#/classes`      → the Classes page
  *   - `#/timers`       → the Timers page
+ *   - `#/timers/‹timer›` → the Tune page for one timer. `‹timer›` is the timer's id,
+ *     percent-encoded. A timer is app-level, so this page needs no open event.
  *   - `#/events`       → the Events page
  *   - `#/event`        → the open event's page
  *   - `#/event/run/‹heat›` → the Run view for one heat of the open event. `‹heat›` is the
@@ -23,18 +25,19 @@
  * `#/event` hash with no active event reconciles to the Events page rather than rendering an
  * empty page (see {@link reconcileRoute}).
  */
-import type { PhaseId } from '@gridfpv/types';
+import type { AdapterId, PhaseId } from '@gridfpv/types';
 
 /** The app-level pages shown outside an event. */
 export type AppPage = 'home' | 'events' | 'pilots' | 'classes' | 'timers';
 
 /**
- * A parsed route. An app-level page, the open event's page, or the Run view for one heat of
- * the open event. This is the pure view-intent the hash encodes; reconciliation against the
+ * A parsed route. An app-level page, the Tune page for one timer, the open event's page, or the
+ * Run view for one heat of the open event. This is the pure view-intent the hash encodes; reconciliation against the
  * live active event happens in {@link reconcileRoute}.
  */
 export type Route =
   | { kind: 'page'; page: AppPage }
+  | { kind: 'tune'; timer: AdapterId }
   | { kind: 'event' }
   | { kind: 'run'; heat: PhaseId };
 
@@ -73,6 +76,13 @@ export function parseHash(hash: string): Route {
     }
     return { kind: 'event' };
   }
+  if (head === 'timers' && segments.length === 2) {
+    // `timers/‹timer›`: the timer id keeps its case and is one encoded segment. A broken one
+    // falls back to the Timers page.
+    const timer = decodeSegment(segments[1]);
+    if (timer) return { kind: 'tune', timer };
+    return { kind: 'page', page: 'timers' };
+  }
   if ((APP_PAGES as readonly string[]).includes(head)) {
     return { kind: 'page', page: head as AppPage };
   }
@@ -81,14 +91,20 @@ export function parseHash(hash: string): Route {
 
 /**
  * Format a {@link Route} back into a hash string (always with the leading `#/`). The hub formats
- * to `#/` (canonical), the pages to `#/<page>`, the event page to `#/event` and a heat's Run view
- * to `#/event/run/‹encoded heat id›`. Round-trips with {@link parseHash} for every route.
+ * to `#/` (canonical), the pages to `#/<page>`, a timer's Tune page to `#/timers/‹encoded timer
+ * id›`, the event page to `#/event` and a heat's Run view to `#/event/run/‹encoded heat id›`. Round-trips with {@link parseHash} for every route.
  */
 export function formatHash(route: Route): string {
   if (route.kind === 'event') return '#/event';
   if (route.kind === 'run') return `#/event/run/${encodeURIComponent(route.heat)}`;
+  if (route.kind === 'tune') return `#/timers/${encodeURIComponent(route.timer)}`;
   if (route.page === 'home') return '#/';
   return `#/${route.page}`;
+}
+
+/** Whether a route shows part of the open event, so it needs one. */
+export function inEvent(route: Route): boolean {
+  return route.kind === 'event' || route.kind === 'run';
 }
 
 /**
@@ -97,13 +113,14 @@ export function formatHash(route: Route): string {
  *
  *   - An `event` or `run` route with **no active event** → fall back to the Events page
  *     (`#/events`), since there is no event to show.
+ *   - A `tune` route never needs an event: a timer is app-level, like the pages.
  *   - A `page` route with an **active event** is fine as-is: the user explicitly navigated to a
  *     top-level page even though an event is active, so honour it. This includes the hub: an
  *     empty/hub hash stays on the hub even when an event is active — the hash is authoritative,
  *     so being outside an event survives a reload.
  */
 export function reconcileRoute(route: Route, hasActiveEvent: boolean): Route {
-  if (route.kind !== 'page' && !hasActiveEvent) {
+  if (inEvent(route) && !hasActiveEvent) {
     return { kind: 'page', page: 'events' };
   }
   return route;

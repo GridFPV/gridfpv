@@ -6,6 +6,7 @@ import type {
   EventMeta,
   Pilot,
   Timer,
+  TimerConfig,
   TimerView
 } from '@gridfpv/types';
 import { Session, type SessionApi } from '../src/lib/session.svelte.js';
@@ -328,6 +329,78 @@ describe('Session', () => {
       const gated = timerSession({ deleteTimer: refused });
       gated.setTokenProvider(async () => undefined);
       expect(await gated.deleteTimer('gate-x1y2')).toBeUndefined();
+    });
+  });
+
+  describe("a timer's settings and live feed", () => {
+    const CONFIG: TimerConfig = {
+      seats: [{ seat: '0', freq_mhz: 5658, enabled: true }],
+      seats_per_node: 4,
+      threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
+      min_lap_ms: 2000
+    };
+    const tuneSession = (overrides?: SessionOverrides) =>
+      new Session({ baseUrl: 'http://d.local', autoRestore: false, api: { ...overrides } });
+
+    it('getTimerConfig reads the settings open (no token)', async () => {
+      const getTimerConfig = vi.fn(async () => CONFIG);
+      const session = tuneSession({ getTimerConfig });
+      expect(await session.getTimerConfig('gate-x1y2')).toEqual(CONFIG);
+      expect(getTimerConfig).toHaveBeenCalledWith('http://d.local', 'gate-x1y2', {
+        token: undefined
+      });
+    });
+
+    it('putTimerConfig sends without a token first, then prompts once when refused for auth', async () => {
+      const putTimerConfig = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
+        .mockResolvedValueOnce(CONFIG);
+      const session = tuneSession({ putTimerConfig });
+      session.setTokenProvider(async () => 'tok');
+      expect(await session.putTimerConfig('gate-x1y2', CONFIG)).toEqual(CONFIG);
+      expect(putTimerConfig).toHaveBeenNthCalledWith(
+        1,
+        'http://d.local',
+        'gate-x1y2',
+        CONFIG,
+        undefined
+      );
+      expect(putTimerConfig).toHaveBeenNthCalledWith(
+        2,
+        'http://d.local',
+        'gate-x1y2',
+        CONFIG,
+        'tok'
+      );
+    });
+
+    it("putTimerConfig throws the timer's refusal as the Director wrote it, with no prompt", async () => {
+      const SAID = 'The timer did not take the change. It is still set the way it was.';
+      const provider = vi.fn(async () => 'tok');
+      const session = tuneSession({
+        putTimerConfig: vi.fn().mockRejectedValue(refusal(409, SAID))
+      });
+      session.setTokenProvider(provider);
+      await expect(session.putTimerConfig('gate-x1y2', CONFIG)).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    it('putTimerConfig resolves undefined when the token prompt is cancelled', async () => {
+      const session = tuneSession({
+        putTimerConfig: vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'))
+      });
+      session.setTokenProvider(async () => undefined);
+      expect(await session.putTimerConfig('gate-x1y2', CONFIG)).toBeUndefined();
+    });
+
+    it('subscribeTimerLive listens on this Director and hands back the stop function', () => {
+      const stop = vi.fn();
+      const subscribeTimerLive = vi.fn(() => stop);
+      const session = tuneSession({ subscribeTimerLive });
+      const handlers = { onSignal: vi.fn(), onLevels: vi.fn() };
+      expect(session.subscribeTimerLive('gate-x1y2', handlers)).toBe(stop);
+      expect(subscribeTimerLive).toHaveBeenCalledWith('http://d.local', 'gate-x1y2', handlers);
     });
   });
 

@@ -5,7 +5,7 @@
    * The list of timers the Director knows. Each row shows the timer's name and address,
    * whether the Director is connected to it, what is wrong when it is not (the Director's
    * own sentence), how many seats it reports and how well its clock is known. A timer is
-   * added in a dialog and removed with a two-step button.
+   * added in a dialog and removed with a two-step button. **Tune** opens the timer's Tune page.
    *
    * The Director holds the connection to each timer and there is no change feed for them, so
    * this page reads the list again every {@link TIMER_POLL_MS} while it is open.
@@ -20,14 +20,23 @@
     StatusPill,
     toast
   } from '@gridfpv/components';
-  import type { CreateTimerRequest, TimerView } from '@gridfpv/types';
+  import type { AdapterId, CreateTimerRequest, TimerView } from '@gridfpv/types';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import type { Session } from '../lib/session.svelte.js';
   import { clockSentence, OFT_PORT, seatCountSentence, TIMER_POLL_MS } from '../lib/timers.js';
 
-  let { session, onhome }: { session: Session; onhome: () => void } = $props();
+  let {
+    session,
+    onhome,
+    ontune
+  }: {
+    session: Session;
+    onhome: () => void;
+    /** Open a timer's Tune page. */
+    ontune?: (timer: AdapterId) => void;
+  } = $props();
 
   /** The list, or `undefined` before the first read lands. */
   let timers = $state.raw<TimerView[] | undefined>(undefined);
@@ -149,6 +158,13 @@
                   </p>
                 </div>
                 <div class="actions">
+                  {#if ontune}
+                    <Button
+                      variant="secondary"
+                      title="Tune {view.timer.name}"
+                      onclick={() => ontune(view.timer.id)}>Tune</Button
+                    >
+                  {/if}
                   <ConfirmButton
                     variant="danger"
                     disabled={removing === view.timer.id}
@@ -288,6 +304,12 @@
     flex-wrap: wrap;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
+  }
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-shrink: 0;
   }
   .form {
     display: flex;

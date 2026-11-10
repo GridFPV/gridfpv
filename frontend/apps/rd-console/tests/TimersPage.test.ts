@@ -134,6 +134,18 @@ describe('TimersPage', () => {
     await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Gate' })).toBeNull());
   });
 
+  it("opens a timer's Tune page from its row, by the timer's id", async () => {
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [GATE, OFF])
+    });
+    const ontune = vi.fn();
+    render(TimersPage, { session, onhome: vi.fn(), ontune });
+    const off = await screen.findByRole('listitem', { name: 'Far Gate' });
+    await fireEvent.click(within(off).getByRole('button', { name: 'Tune' }));
+    expect(ontune).toHaveBeenCalledWith('far-gate-9zz0');
+  });
+
   it('reads the list every 2 seconds while open, and stops when it closes', async () => {
     vi.useFakeTimers();
     const listTimersImpl = vi.fn(async (): Promise<TimerView[]> => []);

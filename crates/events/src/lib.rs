@@ -840,6 +840,17 @@ pub enum Event {
     },
     /// The event dropped a class.
     RosterRemoved { class: ClassId },
+    /// The event set which phases count toward a class's standings, in order. The first
+    /// decides. A later one in the list is only reached back to for pilots the ones before
+    /// it leave unplaced (`docs/primitives.md` §5.3).
+    StandingsSet {
+        class: ClassId,
+        phases: Vec<PhaseId>,
+    },
+    /// The director set the run queue: the order they mean to fly heats in. Heats not
+    /// listed follow after, in the default order. A suggestion only: any ready heat can
+    /// be started at any time.
+    QueueSet { heats: Vec<PhaseId> },
     /// A protest was filed against a race.
     ProtestFiled {
         protest: ProtestId,

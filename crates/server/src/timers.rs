@@ -453,10 +453,22 @@ fn config_url(timer: &Timer) -> String {
     format!("http://{}/oft/v1/config", timer.address)
 }
 
+/// The sentence for a timer that did not answer. The technical cause goes to the
+/// diagnostics log, not the screen: it names URLs and socket errors a director cannot act on.
+fn unreachable(timer: &Timer, cause: &reqwest::Error) -> TimerError {
+    eprintln!(
+        "WARNING: timer {:?} at {} did not answer: {cause}",
+        timer.name, timer.address
+    );
+    TimerError::Unreachable(format!(
+        "Could not reach {}. Check that it is switched on and on the network.",
+        timer.name
+    ))
+}
+
 /// Read a timer's settings from the timer.
 async fn read_config(timer: &Timer) -> Result<OftConfig, TimerError> {
-    let unreachable =
-        |e: reqwest::Error| TimerError::Unreachable(format!("Could not reach {}: {e}", timer.name));
+    let unreachable = |e: reqwest::Error| unreachable(timer, &e);
     reqwest::Client::new()
         .get(config_url(timer))
         .timeout(TIMER_ANSWER)
@@ -479,7 +491,7 @@ async fn write_config(timer: &Timer, config: &OftConfig) -> Result<OftConfig, Ti
         .json(config)
         .send()
         .await
-        .map_err(|e| TimerError::Unreachable(format!("Could not reach {}: {e}", timer.name)))?;
+        .map_err(|e| unreachable(timer, &e))?;
     if !response.status().is_success() {
         // The timer says why in `{"error": "..."}`.
         let why = response

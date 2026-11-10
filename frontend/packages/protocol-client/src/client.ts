@@ -31,8 +31,11 @@ import type {
   Pilot,
   PilotId,
   ProtocolError,
+  SeatLevels,
   SetClassHiddenRequest,
+  SignalChunk,
   Timer,
+  TimerConfig,
   TimerView,
   UpdateClassRequest,
   UpdatePilotRequest
@@ -399,6 +402,45 @@ export async function deleteTimer(
 }
 
 /**
+ * Read a timer's settings (`GET /timers/{id}/config`). An open read (no token). The Director
+ * asks the timer each time and keeps no copy, so this is what the timer is doing right now. A
+ * timer that cannot be reached answers **409** with a sentence for the director.
+ */
+export async function getTimerConfig(
+  baseUrl: string,
+  id: AdapterId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<TimerConfig> {
+  return apiJson<TimerConfig>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/config`,
+    options,
+    "read the timer's settings"
+  );
+}
+
+/**
+ * Change a timer's settings (`PUT /timers/{id}/config`). RD-gated. The body is the whole
+ * {@link TimerConfig}. Resolves to the settings as the timer reports them afterwards. A timer
+ * that refuses, cannot be reached, or did not keep the change answers **409** with a sentence
+ * for the director; a seat the timer cannot have is a **400**.
+ */
+export async function putTimerConfig(
+  baseUrl: string,
+  id: AdapterId,
+  config: TimerConfig,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<TimerConfig> {
+  return apiJson<TimerConfig>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}/config`,
+    { method: 'PUT', body: config, token, fetch: options.fetch },
+    "change the timer's settings"
+  );
+}
+
+/**
  * List every class in the application-level directory (`GET /classes`) — issue #84. An open read
  * (no token), mirroring `GET /pilots`: classes are app-level configuration the RD maintains once.
  * Resolves to the classes in id order, or rejects on a non-2xx /
@@ -629,5 +671,59 @@ export function subscribeChanges(
     if (Number.isFinite(cursor)) onCursor(cursor);
   });
   if (opts.onError) source.addEventListener('error', opts.onError);
+  return () => source.close();
+}
+
+/** What a timer's live feed hands over. */
+export interface TimerLiveHandlers {
+  /** A batch of signal samples for one seat. About 20 to 50 a second for each seat. */
+  onSignal: (chunk: SignalChunk) => void;
+  /** Every seat's levels, about once a second. */
+  onLevels: (levels: SeatLevels[]) => void;
+  /** The connection dropped. The browser is already reconnecting by then. */
+  onError?: () => void;
+}
+
+/** The JSON an event carries, or `undefined` when it is not JSON. */
+function eventJson(data: unknown): unknown {
+  if (typeof data !== 'string') return undefined;
+  try {
+    return JSON.parse(data) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Listen to a timer's live feed (`GET /timers/{id}/live`, server-sent events), for tuning. An
+ * open read. `signal` events go to `onSignal` and `levels` events to `onLevels`. Returns a
+ * function that stops listening.
+ *
+ * Nothing arrives while the timer is not connected. The Director ends the feed when the timer
+ * is removed; `EventSource` then tries again by itself and `onError` hears each failure.
+ *
+ * An event that is not the JSON it should be is skipped: one odd event must not stop the feed.
+ */
+export function subscribeTimerLive(
+  baseUrl: string,
+  timerId: AdapterId,
+  handlers: TimerLiveHandlers,
+  opts: { EventSource?: EventSourceConstructor } = {}
+): () => void {
+  const Source: EventSourceConstructor | undefined =
+    opts.EventSource ?? (globalThis as { EventSource?: EventSourceConstructor }).EventSource;
+  if (!Source) throw new Error('This browser cannot listen for live changes.');
+  const source = new Source(`${trimSlash(baseUrl)}/timers/${encodeURIComponent(timerId)}/live`);
+  source.addEventListener('signal', (event) => {
+    const chunk = eventJson(event.data);
+    if (typeof chunk !== 'object' || chunk === null) return;
+    if (!Array.isArray((chunk as Partial<SignalChunk>).levels)) return;
+    handlers.onSignal(chunk as SignalChunk);
+  });
+  source.addEventListener('levels', (event) => {
+    const levels = eventJson(event.data);
+    if (Array.isArray(levels)) handlers.onLevels(levels as SeatLevels[]);
+  });
+  if (handlers.onError) source.addEventListener('error', handlers.onError);
   return () => source.close();
 }

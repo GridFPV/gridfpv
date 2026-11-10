@@ -41,6 +41,9 @@ pub struct EventView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub current_race: Option<RaceId>,
+    /// The run queue: the heats that can be raced now, in the suggested order. A
+    /// suggestion only: any of them can be started.
+    pub queue: Vec<PhaseId>,
     /// Every protest, open or resolved.
     pub protests: Vec<ProtestView>,
     /// Pilots who have reached a phase's false start limit. The director decides.
@@ -53,6 +56,23 @@ pub struct EventView {
 pub struct RosterView {
     pub class: ClassId,
     pub pilots: Vec<PilotId>,
+    /// The phases that count toward the class's standings, the deciding one first.
+    pub counted_phases: Vec<PhaseId>,
+    /// Everyone on the roster, 1 to n.
+    pub standings: Vec<ClassPlaceView>,
+}
+
+/// One pilot's place in a class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ClassPlaceView {
+    pub pilot: PilotId,
+    /// 1 for the top.
+    pub position: u32,
+    /// The phase that placed them. Absent for a pilot no counted phase has placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub placed_by: Option<PhaseId>,
 }
 
 /// One phase and what has been worked out for it.
@@ -357,6 +377,16 @@ impl EventView {
                 .map(|(class, pilots)| RosterView {
                     class: class.clone(),
                     pilots: pilots.clone(),
+                    counted_phases: state.class_phases.get(class).cloned().unwrap_or_default(),
+                    standings: state
+                        .class_standings(class, &results)
+                        .into_iter()
+                        .map(|place| ClassPlaceView {
+                            pilot: place.pilot,
+                            position: place.position,
+                            placed_by: place.placed_by,
+                        })
+                        .collect(),
                 })
                 .collect(),
             phases,
@@ -366,6 +396,7 @@ impl EventView {
                 .map(|race| race_view(state, race))
                 .collect(),
             current_race: state.races.undecided().map(|race| race.setup.race.clone()),
+            queue: state.queue(&results),
             protests: state
                 .rulings
                 .protests()

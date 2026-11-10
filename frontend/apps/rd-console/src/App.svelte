@@ -4,7 +4,8 @@
    *
    * The console is a **home hub of pages** plus the open event's page. The shell shows an
    * **app-level route**: the {@link HomeHub} (landing), or one of its pages — {@link EventPicker}
-   * (the Events page), {@link PilotsPage}, {@link ClassesPage}, {@link TimersPage}. Selecting an event on the Events
+   * (the Events page), {@link PilotsPage}, {@link ClassesPage}, {@link TimersPage}. A timer's Tune
+   * button opens its {@link TunePage}. Selecting an event on the Events
    * page opens {@link EventPage}, and a heat on it opens that heat's {@link RunPage}.
    *
    * On load the shell resolves the Director's active event (server state, #90) so an `#/event`
@@ -30,12 +31,14 @@
   import PilotsPage from './screens/PilotsPage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
   import TimersPage from './screens/TimersPage.svelte';
+  import TunePage from './screens/TunePage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
   import {
     parseHash,
     formatHash,
     reconcileRoute,
     resolveInitialRoute,
+    inEvent,
     type Route,
     type AppPage
   } from './lib/route.js';
@@ -107,7 +110,7 @@
   // view, so moving between them does not read everything again. It lives only while an event
   // screen is showing; on the hub or a directory page there is nothing to keep fresh.
   let live = $state.raw<EventLive | undefined>(undefined);
-  const liveEventId = $derived(route.kind === 'page' ? undefined : session.currentEvent?.id);
+  const liveEventId = $derived(inEvent(route) ? session.currentEvent?.id : undefined);
   $effect(() => {
     const id = liveEventId;
     if (!id) {
@@ -158,8 +161,13 @@
     {:else if route.page === 'classes'}
       <ClassesPage {session} onhome={goHome} />
     {:else if route.page === 'timers'}
-      <TimersPage {session} onhome={goHome} />
+      <TimersPage {session} onhome={goHome} ontune={(timer) => navigate({ kind: 'tune', timer })} />
     {/if}
+  {:else if route.kind === 'tune'}
+    <!-- A timer's Tune page. Keyed on the timer, so a different timer starts a fresh page. -->
+    {#key route.timer}
+      <TunePage {session} timer={route.timer} onhome={goHome} ontimers={() => goPage('timers')} />
+    {/key}
   {:else if session.currentEvent && live}
     {#if route.kind === 'run'}
       <RunPage

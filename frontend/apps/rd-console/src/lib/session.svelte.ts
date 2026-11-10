@@ -42,13 +42,17 @@ import {
   listTimers,
   createTimer,
   deleteTimer,
+  getTimerConfig,
+  putTimerConfig,
   getEventState,
   sendCommand,
   createBracket,
   postPass,
   subscribeChanges,
+  subscribeTimerLive,
   isRequestFailure
 } from '@gridfpv/protocol-client';
+import type { TimerLiveHandlers } from '@gridfpv/protocol-client';
 import type {
   AdapterId,
   BracketRequest,
@@ -66,6 +70,7 @@ import type {
   Pilot,
   PilotId,
   Timer,
+  TimerConfig,
   TimerView,
   UpdateClassRequest,
   UpdatePilotRequest
@@ -146,11 +151,14 @@ const realApi = {
   listTimers,
   createTimer,
   deleteTimer,
+  getTimerConfig,
+  putTimerConfig,
   getEventState,
   sendCommand,
   createBracket,
   postPass,
-  subscribeChanges
+  subscribeChanges,
+  subscribeTimerLive
 };
 
 /** The record of seams a {@link Session} calls outward through — see {@link realApi}. */
@@ -391,6 +399,33 @@ export class Session {
       await this.#api.deleteTimer(this.baseUrl, id, token);
       return true as const;
     });
+  }
+
+  /**
+   * Read a timer's settings (`GET /timers/{id}/config`, open). The Director asks the timer
+   * each time. Throws with the Director's sentence when the timer cannot be reached.
+   */
+  getTimerConfig(id: AdapterId): Promise<TimerConfig> {
+    return this.#api.getTimerConfig(this.baseUrl, id, { token: this.#token });
+  }
+
+  /**
+   * Change a timer's settings (`PUT /timers/{id}/config`). Resolves to the settings as the
+   * timer reports them afterwards, `undefined` on a cancelled token prompt, or throws with the
+   * Director's sentence (the timer said no, could not be reached, or did not keep the change).
+   */
+  putTimerConfig(id: AdapterId, config: TimerConfig): Promise<TimerConfig | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.putTimerConfig(this.baseUrl, id, config, token)
+    );
+  }
+
+  /**
+   * Listen to a timer's live signal and levels, for tuning. Returns a function that stops
+   * listening.
+   */
+  subscribeTimerLive(id: AdapterId, handlers: TimerLiveHandlers): () => void {
+    return this.#api.subscribeTimerLive(this.baseUrl, id, handlers);
   }
 
   // ── An event's competition ─────────────────────────────────────────────────

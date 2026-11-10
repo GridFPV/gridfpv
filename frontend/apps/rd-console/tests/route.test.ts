@@ -10,6 +10,7 @@ import {
   reconcileRoute,
   resolveInitialRoute,
   DEFAULT_ROUTE,
+  inEvent,
   type Route
 } from '../src/lib/route.js';
 
@@ -97,7 +98,9 @@ describe('round-trip (format → parse)', () => {
     { kind: 'event' },
     { kind: 'run', heat: 'quali-ab12' },
     { kind: 'run', heat: 'finals/winners-1/heat-2' },
-    { kind: 'run', heat: 'Heat 1 #2 ?&%' }
+    { kind: 'run', heat: 'Heat 1 #2 ?&%' },
+    { kind: 'tune', timer: 'gate-X1y2' },
+    { kind: 'tune', timer: 'far gate/9 #?&%' }
   ];
   for (const route of routes) {
     it(`round-trips ${JSON.stringify(route)}`, () => {
@@ -161,5 +164,39 @@ describe('resolveInitialRoute (hash is authoritative; #118)', () => {
 
   it('an explicit page hash is honoured even with an active event', () => {
     expect(resolveInitialRoute('#/pilots', true)).toEqual({ kind: 'page', page: 'pilots' });
+  });
+});
+
+describe("a timer's Tune page", () => {
+  const tune: Route = { kind: 'tune', timer: 'gate-X1y2' };
+
+  it('parses #/timers/‹timer›, decoding the id and keeping its case', () => {
+    expect(parseHash('#/timers/gate-X1y2')).toEqual(tune);
+    expect(parseHash('#/TIMERS/gate-X1y2/')).toEqual(tune);
+    expect(parseHash('#/timers/far%20gate%2F9')).toEqual({ kind: 'tune', timer: 'far gate/9' });
+  });
+
+  it('formats with the timer id as one encoded segment', () => {
+    expect(formatHash(tune)).toBe('#/timers/gate-X1y2');
+    expect(formatHash({ kind: 'tune', timer: 'far gate/9' })).toBe('#/timers/far%20gate%2F9');
+  });
+
+  it('falls a broken or over-long Tune hash back to the Timers page', () => {
+    expect(parseHash('#/timers/')).toEqual({ kind: 'page', page: 'timers' });
+    expect(parseHash('#/timers/%E0%A4%A')).toEqual({ kind: 'page', page: 'timers' });
+    expect(parseHash('#/timers/a/b')).toEqual({ kind: 'page', page: 'timers' });
+  });
+
+  it('needs no open event: it survives a reload with or without one', () => {
+    expect(inEvent(tune)).toBe(false);
+    expect(reconcileRoute(tune, false)).toEqual(tune);
+    expect(reconcileRoute(tune, true)).toEqual(tune);
+    expect(resolveInitialRoute('#/timers/gate-X1y2', false)).toEqual(tune);
+  });
+
+  it('only the event page and the Run view are inside an event', () => {
+    expect(inEvent({ kind: 'event' })).toBe(true);
+    expect(inEvent({ kind: 'run', heat: 'h1' })).toBe(true);
+    expect(inEvent({ kind: 'page', page: 'timers' })).toBe(false);
   });
 });

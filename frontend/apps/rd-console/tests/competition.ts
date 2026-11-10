@@ -136,6 +136,7 @@ export function eventView(over: Partial<EventView> = {}): EventView {
     phases: [],
     races: [],
     protests: [],
+    queue: [],
     proposed_disqualifications: [],
     ...over
   };

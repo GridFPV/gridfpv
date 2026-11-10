@@ -3,7 +3,9 @@
  *
  * A person opens the Timers page from the hub and adds a timer at an address nothing listens
  * on. The Director tries to reach it by itself and fails, so the timer is listed as not
- * connected, with the Director's own sentence for why. The add-heat dialog then offers the
+ * connected, with the Director's own sentence for why. Its Tune page opens from the row and
+ * says the same, with the Director's sentence for why the settings could not be read. The
+ * add-heat dialog then offers the
  * timer by name under "Timed by" but it **cannot be chosen** (it has reported no seats), and
  * the dialog stays on the Bench. Last, the timer is removed.
  *
@@ -29,7 +31,7 @@ interface TimerRow {
   status: { connected: boolean; problem?: string; seats: string[] };
 }
 
-test('RD adds a timer nothing answers at, sees why, cannot put a heat on it, and removes it', async ({
+test('RD adds a timer nothing answers at, sees why, opens its Tune page, cannot put a heat on it, and removes it', async ({
   page
 }) => {
   const before = (await (await page.request.get('/active-event')).json()) as {
@@ -85,6 +87,42 @@ test('RD adds a timer nothing answers at, sees why, cannot put a heat on it, and
       timeout: 15_000
     });
     expect(await page.locator('body').innerText()).not.toContain(timerId);
+
+    // ── Tune: the timer's own page says it is not connected, and why ─────────────────────
+    // There is no real timer here, so this goes only as far as is honest: the page opens
+    // from the row, names the timer, and shows the Director's two sentences (why it is not
+    // connected, and why its settings could not be read) where the settings would be.
+    await row.getByRole('button', { name: 'Tune' }).click();
+    await expect
+      .poll(() => new URL(page.url()).hash)
+      .toBe(`#/timers/${encodeURIComponent(timerId)}`);
+    await expect(page.getByRole('heading', { name: TIMER, level: 1 })).toBeVisible();
+    const crumbs = page.getByRole('navigation', { name: 'Breadcrumb' });
+    await expect(crumbs).toContainText('Home');
+    await expect(crumbs).toContainText('Timers');
+    await expect(crumbs).toContainText(TIMER);
+    await expect(page.getByText('Not connected', { exact: true })).toBeVisible();
+    const notConnected = page.getByTestId('not-connected');
+    await expect(notConnected).toContainText(`${TIMER} is not connected.`);
+    await expect(notConnected).toContainText(made!.status.problem!);
+    const settingsProblem = page.getByTestId('settings-problem');
+    await expect(settingsProblem).toContainText("The timer's settings could not be read.");
+    await expect(settingsProblem).toContainText(`Could not reach ${TIMER}`);
+    // No settings to edit, and nothing to apply.
+    await expect(page.getByRole('list', { name: 'Seats' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Apply to timer' })).toHaveCount(0);
+    expect(await page.locator('body').innerText()).not.toContain(timerId);
+
+    // A reload stays on the timer's Tune page (the hash names it).
+    await page.reload();
+    await expect(page.getByRole('heading', { name: TIMER, level: 1 })).toBeVisible();
+    await expect(page.getByTestId('settings-problem')).toContainText(`Could not reach ${TIMER}`);
+    expect(await page.locator('body').innerText()).not.toContain(timerId);
+
+    // The Timers crumb goes back to the list.
+    await crumbs.getByRole('button', { name: 'Timers' }).click();
+    await expect(page).toHaveURL(/#\/timers$/);
+    await expect(row).toBeVisible();
 
     // ── The add-heat dialog offers it by name, but it cannot be chosen ───────────────────
     await gotoEvents(page);

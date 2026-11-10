@@ -46,6 +46,7 @@ describe('the event snapshot', () => {
       phases: [],
       races: [],
       protests: [],
+      queue: [],
       proposed_disqualifications: []
     };
     const { fetch, seen } = recording(view);

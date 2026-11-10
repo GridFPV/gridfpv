@@ -72,6 +72,17 @@ pub enum Refusal {
     NotACommand,
 }
 
+/// One pilot's place in a class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassPlace {
+    pub pilot: PilotId,
+    /// 1 for the top. Every pilot on the roster has a different position.
+    pub position: u32,
+    /// The phase that placed them. `None` for a pilot no counted phase has placed: they
+    /// come last, in roster order.
+    pub placed_by: Option<PhaseId>,
+}
+
 /// One event's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventState {
@@ -88,6 +99,11 @@ pub struct EventState {
     /// For a running first-to-N race whose pilots have all finished: when the last of them
     /// did, on the Director's clock. Cleared if a ruling takes a finish away.
     pub all_finished_at: BTreeMap<RaceId, i64>,
+    /// The phases that count toward each class's standings, the deciding one first.
+    pub class_phases: BTreeMap<ClassId, Vec<PhaseId>>,
+    /// The order the director set for the run queue. Heats not in it follow in the default
+    /// order.
+    pub queue_order: Vec<PhaseId>,
     /// Where in the log each race begins: the offset of its first fact. A race's signal is
     /// logged from there on, so this is where to start reading for it.
     pub race_log_start: BTreeMap<RaceId, u64>,
@@ -117,6 +133,10 @@ impl EventState {
             }
             Event::RosterRemoved { class } => {
                 self.rosters.remove(class);
+            }
+            Event::QueueSet { heats } => self.queue_order = heats.clone(),
+            Event::StandingsSet { class, phases } => {
+                self.class_phases.insert(class.clone(), phases.clone());
             }
             Event::ClockOffset {
                 adapter,
@@ -184,6 +204,122 @@ impl EventState {
                 self.all_finished_at.remove(&id);
             }
         }
+    }
+
+    /// A class's standings: everyone on its roster, 1 to n.
+    ///
+    /// The class's counted phases are read in order. The first one's ranking places the
+    /// pilots it holds. Each later phase places only pilots still unplaced, below everyone
+    /// already placed. Pilots no counted phase holds come last, in roster order. A pilot
+    /// who is not on the roster is left out.
+    pub fn class_standings(
+        &self,
+        class: &ClassId,
+        results: &BTreeMap<PhaseId, PhaseResult>,
+    ) -> Vec<ClassPlace> {
+        let roster = self.rosters.get(class).cloned().unwrap_or_default();
+        let mut out: Vec<ClassPlace> = Vec::new();
+        let phases = self.class_phases.get(class).map_or(&[][..], Vec::as_slice);
+        for phase in phases {
+            let Some(result) = results.get(phase) else {
+                continue;
+            };
+            for placed in &result.ranking {
+                let fresh = roster.contains(&placed.pilot)
+                    && !out.iter().any(|place| place.pilot == placed.pilot);
+                if fresh {
+                    out.push(ClassPlace {
+                        pilot: placed.pilot.clone(),
+                        position: out.len() as u32 + 1,
+                        placed_by: Some(phase.clone()),
+                    });
+                }
+            }
+        }
+        for pilot in roster {
+            if !out.iter().any(|place| place.pilot == pilot) {
+                out.push(ClassPlace {
+                    pilot,
+                    position: out.len() as u32 + 1,
+                    placed_by: None,
+                });
+            }
+        }
+        out
+    }
+
+    /// The heats that can be raced now: every seat resolved, somebody to race, not complete,
+    /// not locked. In tree order.
+    fn ready_heats(&self, results: &BTreeMap<PhaseId, PhaseResult>) -> Vec<PhaseId> {
+        self.tree
+            .iter()
+            .filter(|def| matches!(def.kind, PhaseKind::Heat { .. }))
+            .filter(|def| {
+                results.get(&def.id).is_some_and(|result| {
+                    !result.waiting
+                        && !result.complete
+                        && result
+                            .lineup
+                            .iter()
+                            .any(|seat| matches!(seat.who, SeatWho::Pilot(_) | SeatWho::Open))
+                }) && !self.rulings.is_locked(&self.tree, &def.id)
+            })
+            .map(|def| def.id.clone())
+            .collect()
+    }
+
+    /// The run queue: the heats that can be raced now, in the order suggested. Heats the
+    /// director put in order come first, in that order; the rest follow in the order the
+    /// phases were set up, which runs one phase to completion before the next.
+    pub fn queue(&self, results: &BTreeMap<PhaseId, PhaseResult>) -> Vec<PhaseId> {
+        let mut ready = self.ready_heats(results);
+        let place = |heat: &PhaseId| {
+            self.queue_order
+                .iter()
+                .position(|queued| queued == heat)
+                .unwrap_or(usize::MAX)
+        };
+        // Stable: heats the director did not place keep their tree order.
+        ready.sort_by_key(place);
+        ready
+    }
+
+    /// A helper order for the run queue that spaces pilots out: the heat whose pilots have
+    /// waited longest goes first, so nobody flies back to back when it can be avoided. The
+    /// director asks for this; it is never applied by itself.
+    pub fn queue_spaced(&self, results: &BTreeMap<PhaseId, PhaseResult>) -> Vec<PhaseId> {
+        // Each pilot's latest race, by its place in the order races were flown.
+        let mut last_flew: BTreeMap<&PilotId, usize> = BTreeMap::new();
+        for (index, race) in self.races.iter().enumerate() {
+            for entry in &race.setup.lineup {
+                if let Some(pilot) = &entry.pilot {
+                    last_flew.insert(pilot, index);
+                }
+            }
+        }
+        let mut waiting: Vec<PhaseId> = self.ready_heats(results);
+        let mut out = Vec::new();
+        let mut next = self.races.iter().count();
+        // Pick one heat at a time, then count its pilots as having just flown.
+        while !waiting.is_empty() {
+            let rested = |heat: &PhaseId| -> Option<usize> {
+                results[heat]
+                    .field
+                    .iter()
+                    .filter_map(|pilot| last_flew.get(pilot).copied())
+                    .max()
+            };
+            let pick = (0..waiting.len())
+                .min_by_key(|index| rested(&waiting[*index]))
+                .unwrap_or(0);
+            let heat = waiting.remove(pick);
+            for pilot in &results[&heat].field {
+                last_flew.insert(pilot, next);
+            }
+            next += 1;
+            out.push(heat);
+        }
+        out
     }
 
     /// The stretch of the log that holds a race's signal: from its first fact up to the
@@ -489,6 +625,13 @@ impl EventState {
                 Ok(())
             }
             Event::RosterSet { .. } | Event::RosterRemoved { .. } => Ok(()),
+            Event::QueueSet { heats } => heats.iter().try_for_each(|heat| self.heat(heat)),
+            Event::StandingsSet { phases, .. } => phases.iter().try_for_each(|phase| {
+                if self.tree.get(phase).is_none() {
+                    return Err(Refusal::UnknownPhase(phase.clone()));
+                }
+                Ok(())
+            }),
 
             Event::LapRemoved { race, crossing, .. }
             | Event::LapRestored { race, crossing }
@@ -1487,6 +1630,174 @@ mod tests {
         assert_eq!(
             director.state.races.get(&rid("heat#1")).unwrap().stopped_at,
             Some(30 * S)
+        );
+    }
+
+    #[test]
+    fn the_run_queue_lists_ready_heats_and_follows_the_directors_order() {
+        let mut director = bracket_event();
+        let results = director.state.results();
+        // Only round 1 can be raced: everything else waits on it.
+        assert_eq!(
+            director.state.queue(&results),
+            vec![
+                pid("bracket/winners-1/heat-1"),
+                pid("bracket/winners-1/heat-2")
+            ]
+        );
+        director
+            .record(Event::QueueSet {
+                heats: vec![pid("bracket/winners-1/heat-2")],
+            })
+            .unwrap();
+        let results = director.state.results();
+        assert_eq!(
+            director.state.queue(&results),
+            vec![
+                pid("bracket/winners-1/heat-2"),
+                pid("bracket/winners-1/heat-1")
+            ]
+        );
+        // A queue can only name heats that exist.
+        assert_eq!(
+            director.record(Event::QueueSet {
+                heats: vec![pid("bracket")]
+            }),
+            Err(Refusal::NotAHeat(pid("bracket")))
+        );
+        // A heat that has been raced leaves the queue; what it unlocks joins it.
+        fly(&mut director, "bracket/winners-1/heat-2");
+        fly(&mut director, "bracket/winners-1/heat-1");
+        let results = director.state.results();
+        assert_eq!(
+            director.state.queue(&results),
+            vec![pid("bracket/losers-1"), pid("bracket/winners-final")]
+        );
+    }
+
+    #[test]
+    fn the_spacing_helper_puts_the_heat_whose_pilots_waited_longest_first() {
+        // Three one-pilot heats, then a heat with the pilot who just flew.
+        let mut director = Director::default();
+        let solo = |id: &str, who: &str| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: None,
+            kind: PhaseKind::Heat {
+                lineup: vec![HeatSeat {
+                    adapter: oft(),
+                    seat: SeatRef("seat-0".into()),
+                    source: SeatSource::Pilot(pilot(who)),
+                }],
+            },
+            format: Some(format(EndCondition::FirstToLaps(1), 0)),
+            false_start_limit: None,
+            display_hint: None,
+        };
+        for (id, who) in [("a1", "ana"), ("a2", "ana"), ("b1", "ben"), ("c1", "cat")] {
+            director
+                .record(Event::PhaseDefined { def: solo(id, who) })
+                .unwrap();
+        }
+        fly(&mut director, "a1");
+        let results = director.state.results();
+        // By default the queue runs in the order the heats were set up: Ana again first.
+        assert_eq!(
+            director.state.queue(&results),
+            vec![pid("a2"), pid("b1"), pid("c1")]
+        );
+        // Spaced out, the pilots who have not flown go first and Ana rests.
+        assert_eq!(
+            director.state.queue_spaced(&results),
+            vec![pid("b1"), pid("c1"), pid("a2")]
+        );
+    }
+
+    #[test]
+    fn class_standings_take_the_first_counted_phase_and_reach_back_for_the_rest() {
+        let mut director = Director::default();
+        let open = ClassId("open".into());
+        let roster: Vec<PilotId> = ["ana", "ben", "cat", "dee", "eli"]
+            .iter()
+            .map(|name| pilot(name))
+            .collect();
+        director
+            .record(Event::RosterSet {
+                class: open.clone(),
+                pilots: roster.clone(),
+            })
+            .unwrap();
+        let heat = |id: &str, who: &[&str]| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: None,
+            kind: PhaseKind::Heat {
+                lineup: who
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| HeatSeat {
+                        adapter: oft(),
+                        seat: SeatRef(format!("seat-{i}")),
+                        source: SeatSource::Pilot(pilot(name)),
+                    })
+                    .collect(),
+            },
+            format: Some(format(EndCondition::FirstToLaps(1), 0)),
+            false_start_limit: None,
+            display_hint: None,
+        };
+        // Qualifying has four of the five; the final has the two who made it.
+        director
+            .record(Event::PhaseDefined {
+                def: heat("qualifying", &["dee", "cat", "ben", "ana"]),
+            })
+            .unwrap();
+        director
+            .record(Event::PhaseDefined {
+                def: heat("final", &["ben", "dee"]),
+            })
+            .unwrap();
+        assert_eq!(
+            director.record(Event::StandingsSet {
+                class: open.clone(),
+                phases: vec![pid("nope")],
+            }),
+            Err(Refusal::UnknownPhase(pid("nope")))
+        );
+        director
+            .record(Event::StandingsSet {
+                class: open.clone(),
+                phases: vec![pid("final"), pid("qualifying")],
+            })
+            .unwrap();
+        // Seat order wins each heat.
+        fly(&mut director, "qualifying");
+        fly(&mut director, "final");
+        let results = director.state.results();
+        let standings = director.state.class_standings(&open, &results);
+        let order: Vec<(&str, u32, Option<&str>)> = standings
+            .iter()
+            .map(|place| {
+                (
+                    place.pilot.0.as_str(),
+                    place.position,
+                    place.placed_by.as_ref().map(|phase| phase.0.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                // The final decides its two.
+                ("ben", 1, Some("final")),
+                ("dee", 2, Some("final")),
+                // Qualifying is reached back to for the pilots who never made the final,
+                // in qualifying order (Dee and Ben are already placed).
+                ("cat", 3, Some("qualifying")),
+                ("ana", 4, Some("qualifying")),
+                // Eli is on the roster and flew nothing: last.
+                ("eli", 5, None),
+            ]
         );
     }
 }

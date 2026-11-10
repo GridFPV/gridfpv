@@ -635,15 +635,19 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      back, and a write the timer did not keep is reported as refused. `GET
      /timers/{id}/live` sends live signal and each seat's levels for tuning; none of that is
      logged. Checked by hand against `oftd --fake`.
-   - **Not yet:** the Tune page in the console, mDNS discovery, and showing the logged
-     signal in Marshal.
+   - **Tune page** in the console: each seat's frequency and on/off, a live signal trace
+     per seat with the enter, exit and noise floor levels drawn on it, and the detection
+     settings. Changes are a draft until "Apply to timer". Not yet run against a real timer.
+   - **Not yet:** mDNS discovery, and showing the logged signal in Marshal.
 7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before.
 
-**Not built yet in the engine:** time and points penalties, class standings across a class's
-phases (§5.3), keeping a pilot's channel between heats (§5.4), and the run queue (§5.9). The
-"ignore crossings before the start" filter and timing lap 1 from the tone are built, but
-need the tone's time on the timer's clock, which arrives with the OFT adapter.
+**Built in the engine since the first pass:** the run queue (§5.9: the ready heats, the
+director's order, and a helper that spaces pilots out), class standings (§5.3), a first-to-N
+race that can stop itself, and a time limit for races that are not timed (§5.6).
+
+**Not built yet in the engine:** time and points penalties, and keeping a pilot's channel
+between heats (§5.4).
 
 **OFT in tests** (Agreed): the OFT repos will live on GitHub eventually. Until then Grid
 uses the local checkout at `~/development/fpv/open-fpv-timer`, and tests that need a fake
