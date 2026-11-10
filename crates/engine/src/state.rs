@@ -85,6 +85,9 @@ pub struct EventState {
     pub clock_offsets: BTreeMap<AdapterId, i64>,
     /// Each race's start on each of its timers' own clocks, where the offset was known.
     pub starts_on_timer: BTreeMap<(RaceId, AdapterId), SourceTime>,
+    /// For a running first-to-N race whose pilots have all finished: when the last of them
+    /// did, on the Director's clock. Cleared if a ruling takes a finish away.
+    pub all_finished_at: BTreeMap<RaceId, i64>,
     /// How many log entries have been applied: the offset the next one will have.
     pub applied: u64,
 }
@@ -125,7 +128,49 @@ impl EventState {
             Event::RaceStarted { .. } => self.place_starts(),
             _ => {}
         }
+        self.note_all_finished(recorded_at);
         self.applied = offset + 1;
+    }
+
+    /// Keep [`EventState::all_finished_at`] true for the running race, after an entry
+    /// recorded at `recorded_at` was applied.
+    fn note_all_finished(&mut self, recorded_at: Option<i64>) {
+        let Some(race) = self.races.running() else {
+            self.all_finished_at.clear();
+            return;
+        };
+        let id = race.setup.race.clone();
+        let target = match self.tree.format_for(&race.setup.heat).map(|f| f.race.end) {
+            Some(EndCondition::FirstToLaps(n)) => n as usize,
+            _ => return,
+        };
+        // Only named pilots count. An open seat has nobody to wait for.
+        let mut pilots = race
+            .setup
+            .lineup
+            .iter()
+            .filter(|entry| entry.pilot.is_some());
+        let all = pilots.clone().next().is_some()
+            && pilots.all(|entry| {
+                self.laps
+                    .seat(
+                        &id,
+                        &entry.adapter,
+                        &entry.seat,
+                        self.filters_for(race, &entry.adapter),
+                    )
+                    .lap_count()
+                    >= target
+            });
+        match (all, recorded_at) {
+            (true, Some(at)) => {
+                self.all_finished_at.entry(id).or_insert(at);
+            }
+            (true, None) => {}
+            (false, _) => {
+                self.all_finished_at.remove(&id);
+            }
+        }
     }
 
     /// Put each started race's start on the clocks of its timers, where that is known and
@@ -233,15 +278,22 @@ impl EventState {
             .min()
     }
 
-    /// When a race that started at `started` stops by itself: a timed race, after its time
-    /// and its grace window. Other races run until the director stops them.
+    /// When a race that started at `started` stops by itself. A timed race: after its time
+    /// and its grace window. A first-to-N race whose format asks for it: a set wait after
+    /// every pilot has finished. Any other race runs until the director stops it.
     fn runs_out(&self, race: &Race, started: i64) -> Option<i64> {
-        match self.tree.format_for(&race.setup.heat)?.race.end {
+        let rules = &self.tree.format_for(&race.setup.heat)?.race;
+        match rules.end {
             EndCondition::Timed {
                 micros,
                 grace_micros,
             } => Some(started + micros + grace_micros),
-            EndCondition::FirstToLaps(_) | EndCondition::Open => None,
+            EndCondition::FirstToLaps(_) => {
+                let wait = rules.stop_after_all_finish_micros?;
+                let finished = self.all_finished_at.get(&race.setup.race)?;
+                Some(finished + wait)
+            }
+            EndCondition::Open => None,
         }
     }
 
@@ -613,6 +665,7 @@ mod tests {
                 staging_micros,
                 min_lap_micros: None,
                 first_lap: FirstLap::default(),
+                stop_after_all_finish_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -1217,5 +1270,120 @@ mod tests {
                 .seat(&rid("heat#1"), &oft(), &SeatRef("seat-0".into()), filters);
         assert_eq!(laps.lap_count(), 1);
         assert!(laps.hole_shot.is_some());
+    }
+
+    /// Two pilots, first to one lap, stopping `wait` after both finish (or never).
+    fn two_pilot_heat(wait: Option<i64>) -> Director {
+        let mut format = format(EndCondition::FirstToLaps(1), 0);
+        format.race.stop_after_all_finish_micros = wait;
+        let mut director = Director::default();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("heat"),
+                    label: "Heat".into(),
+                    parent: None,
+                    kind: PhaseKind::Heat {
+                        lineup: ["ana", "ben"]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, name)| HeatSeat {
+                                adapter: oft(),
+                                seat: SeatRef(format!("seat-{i}")),
+                                source: SeatSource::Pilot(pilot(name)),
+                            })
+                            .collect(),
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        director
+    }
+
+    fn state_of(director: &Director) -> RaceState {
+        director.state.races.get(&rid("heat#1")).unwrap().state
+    }
+
+    #[test]
+    fn a_first_to_n_race_can_stop_itself_a_set_wait_after_everyone_finishes() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        for (now, seat, at) in [
+            (S, "seat-0", 0),
+            (S, "seat-1", 0),
+            (11 * S, "seat-0", 10 * S),
+        ] {
+            director.now = now;
+            director.cross(seat, at);
+        }
+        // Ana has finished; Ben has not. Nothing is due.
+        assert_eq!(director.state.next_due(), None);
+        director.now = 14 * S;
+        director.cross("seat-1", 13 * S);
+        // Both have finished, 14 s in. The race stops 60 s later.
+        assert_eq!(director.state.next_due(), Some(74 * S));
+        director.now = 73 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Running);
+        director.now = 200 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Stopped);
+        assert_eq!(
+            director.state.races.get(&rid("heat#1")).unwrap().stopped_at,
+            Some(74 * S)
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn removing_a_finishing_lap_during_the_wait_keeps_the_race_going() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        // A false reading "finishes" Ben.
+        let stray = director.cross("seat-1", 10 * S + 1);
+        assert_eq!(director.state.next_due(), Some(71 * S));
+        director.now = 20 * S;
+        director
+            .record(Event::LapRemoved {
+                race: rid("heat#1"),
+                crossing: stray,
+                reason: None,
+                note: None,
+            })
+            .unwrap();
+        assert_eq!(director.state.next_due(), None);
+        director.now = 500 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Running);
+        // Ben really finishes; the wait starts from then.
+        director.cross("seat-1", 40 * S);
+        assert_eq!(director.state.next_due(), Some(560 * S));
+    }
+
+    #[test]
+    fn by_default_a_first_to_n_race_waits_for_the_director() {
+        let mut director = two_pilot_heat(None);
+        director.now = S;
+        for (seat, at) in [
+            ("seat-0", 0),
+            ("seat-1", 0),
+            ("seat-0", 10 * S),
+            ("seat-1", 11 * S),
+        ] {
+            director.cross(seat, at);
+        }
+        assert_eq!(director.state.next_due(), None);
+        director.now = 10_000 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Running);
     }
 }

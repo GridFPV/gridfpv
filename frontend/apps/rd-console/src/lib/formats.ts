@@ -68,6 +68,35 @@ export const BUILT_IN_FORMATS: readonly FormatChoice[] = [
   }
 ];
 
+/**
+ * How a first-to-N race stops, as the picker offers it: the director stops it (the
+ * default), or it stops by itself a set wait after every pilot has finished. The wait is
+ * for a track where extra crossings are likely and laps may need sorting out first.
+ */
+export const STOP_CHOICES: readonly { key: string; label: string; seconds: number | null }[] = [
+  { key: 'manual', label: 'The director stops it', seconds: null },
+  { key: '10', label: 'By itself, 10 seconds after everyone finishes', seconds: 10 },
+  { key: '30', label: 'By itself, 30 seconds after everyone finishes', seconds: 30 },
+  { key: '60', label: 'By itself, 60 seconds after everyone finishes', seconds: 60 },
+  { key: '120', label: 'By itself, 2 minutes after everyone finishes', seconds: 120 }
+];
+
+/** Whether the stop choice applies: only a first-to-N race can stop when everyone finishes. */
+export function canStopItself(format: Format | undefined): boolean {
+  const end = format?.race.end;
+  return typeof end === 'object' && end !== null && 'FirstToLaps' in end;
+}
+
+/**
+ * A copy of `format` with the stop choice applied. A format the choice does not apply to,
+ * or an unknown key, comes back unchanged.
+ */
+export function withStopChoice(format: Format, stopKey: string): Format {
+  const seconds = STOP_CHOICES.find((choice) => choice.key === stopKey)?.seconds ?? null;
+  if (seconds === null || !canStopItself(format)) return format;
+  return { ...format, race: { ...format.race, stop_after_all_finish_micros: seconds * SECOND } };
+}
+
 /** The format for a picker key, or `undefined` for a key that is not in the list. */
 export function formatByKey(key: string): Format | undefined {
   return BUILT_IN_FORMATS.find((choice) => choice.key === key)?.format;

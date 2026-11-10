@@ -354,6 +354,12 @@ format.
   lap time.
 - **From the tone:** the start tone starts lap 1, so the first crossing ends it.
 
+**How a first-to-N race stops** (Agreed) is a race rule too. By default the director stops
+it. As an option it stops by itself a set wait after every pilot has finished. The wait is
+there for a hard track, where extra crossings are likely and the director may need the race
+kept open to sort laps out. If a finishing lap is removed during the wait, the race keeps
+going. A pilot who never finishes means the race never stops by itself.
+
 Timing from the tone needs the tone's time on the timer's own clock. The same is true of the
 filter that ignores crossings before the start. A timer that cannot give that time falls back
 to the hole shot and filters nothing at the start. OFT can give it.

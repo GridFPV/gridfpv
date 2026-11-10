@@ -22,4 +22,11 @@ min_lap_micros?: number,
 /**
  * What starts a pilot's first lap. The default is the hole shot.
  */
-first_lap: FirstLap, };
+first_lap: FirstLap, 
+/**
+ * For a first-to-N race: stop the race by itself this many microseconds after every
+ * pilot in it has finished. `None`, the default, leaves the stop to the director. The
+ * wait is there for a track where extra crossings are likely and laps may need
+ * sorting out before the race is called over.
+ */
+stop_after_all_finish_micros?: number, };

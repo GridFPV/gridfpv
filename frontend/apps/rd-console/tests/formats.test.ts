@@ -83,3 +83,32 @@ describe('format questions', () => {
     expect(isRanked(undefined)).toBe(false);
   });
 });
+
+describe('the stop choice', () => {
+  it('applies only to a first-to-N race', async () => {
+    const { canStopItself } = await import('../src/lib/formats.js');
+    expect(canStopItself(formatByKey('first-to-3'))).toBe(true);
+    expect(canStopItself(formatByKey('timed-2-min'))).toBe(false);
+    expect(canStopItself(formatByKey('practice'))).toBe(false);
+    expect(canStopItself(undefined)).toBe(false);
+  });
+
+  it('leaves the stop to the director by default', async () => {
+    const { STOP_CHOICES, withStopChoice } = await import('../src/lib/formats.js');
+    const format = formatByKey('first-to-3')!;
+    expect(STOP_CHOICES[0].key).toBe('manual');
+    expect(withStopChoice(format, 'manual')).toBe(format);
+    expect(withStopChoice(format, 'no-such-choice')).toBe(format);
+  });
+
+  it('sets the wait, in microseconds, without touching the built-in format', async () => {
+    const { withStopChoice } = await import('../src/lib/formats.js');
+    const format = formatByKey('first-to-3')!;
+    const stopping = withStopChoice(format, '60');
+    expect(stopping.race.stop_after_all_finish_micros).toBe(60 * S);
+    expect(format.race.stop_after_all_finish_micros).toBeUndefined();
+    // A timed race already ends by itself: the choice changes nothing.
+    const timed = formatByKey('timed-2-min')!;
+    expect(withStopChoice(timed, '60')).toBe(timed);
+  });
+});

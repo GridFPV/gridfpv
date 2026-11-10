@@ -176,6 +176,7 @@ fn event_with_heat(registry: &EventRegistry, timer: &AdapterId) -> EventId {
                 staging_micros: 0,
                 min_lap_micros: None,
                 first_lap: FirstLap::HoleShot,
+                stop_after_all_finish_micros: None,
             },
             completion: CompletionRule::DirectorDecides,
             ranking: None,

@@ -9,7 +9,13 @@
   import { Banner, Button, Dialog, Field, Input, Select } from '@gridfpv/components';
   import type { HeatSeat, PhaseDef, PilotId } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { BUILT_IN_FORMATS, formatByKey } from '../lib/formats.js';
+  import {
+    BUILT_IN_FORMATS,
+    STOP_CHOICES,
+    canStopItself,
+    formatByKey,
+    withStopChoice
+  } from '../lib/formats.js';
   import { newPhaseId } from '../lib/phases.js';
   import { MAX_SEATS, SEATS } from '../lib/seats.js';
   import PilotPicker from './PilotPicker.svelte';
@@ -19,6 +25,7 @@
   let name = $state('');
   let chosen = $state<PilotId[]>([]);
   let formatKey = $state(BUILT_IN_FORMATS[0].key);
+  let stopKey = $state(STOP_CHOICES[0].key);
   let busy = $state(false);
   let nameError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
@@ -42,8 +49,9 @@
       error = 'Choose at least one pilot.';
       return;
     }
-    const format = formatByKey(formatKey);
-    if (!format) return;
+    const picked = formatByKey(formatKey);
+    if (!picked) return;
+    const format = withStopChoice(picked, stopKey);
     const lineup: HeatSeat[] = chosen.map((pilot, index) => ({
       adapter: SEATS[index].adapter,
       seat: SEATS[index].seat,
@@ -88,6 +96,15 @@
         {/each}
       </Select>
     </Field>
+    {#if canStopItself(formatByKey(formatKey))}
+      <Field label="The race stops">
+        <Select bind:value={stopKey} aria-label="The race stops" disabled={busy}>
+          {#each STOP_CHOICES as choice (choice.key)}
+            <option value={choice.key}>{choice.label}</option>
+          {/each}
+        </Select>
+      </Field>
+    {/if}
     {#if error}
       <Banner tone="danger">{error}</Banner>
     {/if}
