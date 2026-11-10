@@ -234,6 +234,20 @@ pub struct Live {
     /// Whether a race is counting down or running right now. Kept here so a timer
     /// connection can ask many times a second without locking the event.
     pub race_on: Arc<std::sync::atomic::AtomicBool>,
+    /// The race that is counting down or running right now, for a timer that has to be
+    /// told when to listen.
+    pub race_now: Arc<Mutex<Option<RaceNow>>>,
+}
+
+/// The race that is counting down or running right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaceNow {
+    pub race: gridfpv_events::RaceId,
+    /// Its start on the Director's clock, in microseconds: the tone for a race still
+    /// counting down, the logged start for one that is running.
+    pub starts_at: i64,
+    /// The timers its lineup uses.
+    pub timers: Vec<gridfpv_events::AdapterId>,
 }
 
 impl Live {
@@ -242,6 +256,7 @@ impl Live {
             state: Arc::default(),
             changed: tokio::sync::watch::Sender::new(0),
             race_on: Arc::default(),
+            race_now: Arc::default(),
         }
     }
 }
@@ -407,6 +422,13 @@ impl EventRegistry {
                     .race_on
                     .load(std::sync::atomic::Ordering::Relaxed)
             })
+    }
+
+    /// The race counting down or running in the active event right now, if any.
+    pub fn race_now(&self) -> Option<RaceNow> {
+        let reg = self.read();
+        let live = &reg.events.get(reg.active_event.as_ref()?)?.live;
+        live.race_now.lock().ok()?.clone()
     }
 
     /// The Director-wide timer directory.

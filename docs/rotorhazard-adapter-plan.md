@@ -1,7 +1,16 @@
 # RotorHazard adapter: the plan for the rewrite
 
-**Status:** a plan, written 2026-11-10, worked out by reading RotorHazard's own source for
-4.4.0 and 4.3.0. The pure translator is being built; the connection is not.
+**Status:** written 2026-11-10 from RotorHazard's own source for 4.4.0 and 4.3.0. Steps 1,
+2, 4 and 5 of the order of work are **built**: the socket framing, the translator, the
+connection, and race control. Timer settings from Grid (steps 3 and 6), live levels and the
+rough race trace beyond the Tune feed (step 7), and a fake RotorHazard for CI are not.
+
+**A whole Grid race has been run against live RotorHazard 4.4.0 and 4.3.0**
+(`crates/app/tests/rh_live.rs`, run by hand on 2026-11-10, three passes): Grid started the
+race, RotorHazard started listening at Grid's tone without anyone touching it, simulated
+crossings became Grid laps with lap 1 timed from the tone, Grid's stop left RotorHazard
+stopped and cleared, and a second race of the heat ran cleanly. That test is local only;
+CI has no RotorHazard.
 
 **Checked against live RotorHazard on 2026-11-10** (the 4.4.0 and 4.3.0 images on this
 machine, by hand, with a throwaway script):

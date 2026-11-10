@@ -58,6 +58,8 @@ pub const TIMERS_FILE: &str = "timers.json";
 pub enum TimerKind {
     /// An Open FPV Timer, over its network protocol.
     Oft,
+    /// A RotorHazard timer, as it ships, over its own socket. Nothing is installed on it.
+    RotorHazard,
 }
 
 /// A timer as a person set it up.
@@ -255,6 +257,10 @@ pub enum TimerError {
     Unreachable(String),
     #[error("The timer did not take the change. It is still set the way it was.")]
     NotTaken,
+    #[error(
+        "Changing a RotorHazard timer's settings from Grid is not built yet. Use its own Settings page for now."
+    )]
+    NotBuilt,
 }
 
 impl From<TimerError> for ProtocolError {
@@ -263,7 +269,9 @@ impl From<TimerError> for ProtocolError {
             TimerError::NoName | TimerError::BadAddress | TimerError::BadSeat => {
                 ErrorCode::BadRequest
             }
-            TimerError::Unreachable(_) | TimerError::NotTaken => ErrorCode::Refused,
+            TimerError::Unreachable(_) | TimerError::NotTaken | TimerError::NotBuilt => {
+                ErrorCode::Refused
+            }
             TimerError::NotFound => ErrorCode::UnknownScope,
             TimerError::Io(_) => ErrorCode::Internal,
         };
@@ -587,6 +595,9 @@ pub async fn get_timer_config(
         .timers()
         .get(&timer_id)
         .ok_or(TimerError::NotFound)?;
+    if timer.kind != TimerKind::Oft {
+        return Err(TimerError::NotBuilt.into());
+    }
     Ok(Json(read_config(&timer).await?.into()))
 }
 
@@ -603,6 +614,9 @@ pub async fn put_timer_config(
         .timers()
         .get(&timer_id)
         .ok_or(TimerError::NotFound)?;
+    if timer.kind != TimerKind::Oft {
+        return Err(TimerError::NotBuilt.into());
+    }
     let config = body.to_oft()?;
     Ok(Json(write_config(&timer, &config).await?.into()))
 }

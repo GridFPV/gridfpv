@@ -56,6 +56,7 @@ pub struct Session<'a> {
     state: &'a mut EventState,
     changed: &'a watch::Sender<u64>,
     race_on: &'a std::sync::atomic::AtomicBool,
+    race_now: &'a std::sync::Mutex<Option<crate::events::RaceNow>>,
     registry: &'a EventRegistry,
     /// The Director's clock for this request, in epoch microseconds.
     pub now: i64,
@@ -93,6 +94,7 @@ pub fn with_event<R>(
         state: &mut state,
         changed: &live.changed,
         race_on: &live.race_on,
+        race_now: &live.race_now,
         registry,
         now: now_micros(),
     };
@@ -120,12 +122,31 @@ impl Session<'_> {
 
     fn note_race_on(&self) {
         use gridfpv_engine::race::RaceState;
-        let on = self
+        let now = self
             .state
             .races
             .undecided()
-            .is_some_and(|race| matches!(race.state, RaceState::Staging | RaceState::Running));
-        self.race_on.store(on, std::sync::atomic::Ordering::Relaxed);
+            .filter(|race| matches!(race.state, RaceState::Staging | RaceState::Running))
+            .and_then(|race| {
+                let mut timers: Vec<AdapterId> = race
+                    .setup
+                    .lineup
+                    .iter()
+                    .map(|entry| entry.adapter.clone())
+                    .collect();
+                timers.sort();
+                timers.dedup();
+                Some(crate::events::RaceNow {
+                    race: race.setup.race.clone(),
+                    starts_at: race.started_at.or(race.tone_at)?,
+                    timers,
+                })
+            });
+        self.race_on
+            .store(now.is_some(), std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut held) = self.race_now.lock() {
+            *held = now;
+        }
     }
 
     fn append(&mut self, at: i64, event: Event) -> Result<(), ProtocolError> {

@@ -82,9 +82,10 @@ function seatNumber(
   }
   const view = timers.find((candidate) => candidate.timer.id === adapter);
   if (!view) return undefined;
-  // An OFT seat handle is the seat's own number, counted from 0. Use it first: a seat's
+  // A timer's seat handle is the seat's own number, counted from 0 (an OFT seat, a
+  // RotorHazard node). Use it first: a seat's
   // name must not change when another seat is switched off and the list gets shorter.
-  if (view.timer.kind === 'Oft' && /^\d+$/.test(seat)) return Number(seat) + 1;
+  if (/^\d+$/.test(seat)) return Number(seat) + 1;
   const index = view.status.seats.indexOf(seat);
   return index >= 0 ? index + 1 : undefined;
 }

@@ -1,13 +1,37 @@
 /**
  * Words for a timer's status on the Timers page. Pure, so they can be tested alone.
  */
-import type { TimerStatus } from '@gridfpv/types';
+import type { TimerKind, TimerStatus } from '@gridfpv/types';
 
 /** How often a screen that shows timers reads the list again. Timers have no change feed. */
 export const TIMER_POLL_MS = 2000;
 
 /** The port an OFT timer listens on. */
 export const OFT_PORT = 7270;
+
+/**
+ * The kinds of timer that can be added, as the add-timer dialog offers them. `port` is the
+ * port that kind listens on unless someone changed it.
+ */
+export const TIMER_KINDS: readonly {
+  kind: TimerKind;
+  label: string;
+  port: number;
+  hint: string;
+}[] = [
+  {
+    kind: 'Oft',
+    label: 'An OFT timer',
+    port: OFT_PORT,
+    hint: 'An Open FPV Timer gate.'
+  },
+  {
+    kind: 'RotorHazard',
+    label: 'A RotorHazard timer',
+    port: 5000,
+    hint: 'Used as it is. Nothing is installed on it. Its settings are changed on its own pages for now.'
+  }
+];
 
 /**
  * How well the timer's clock is known: "Clock known to within 0.2 ms". The number is the

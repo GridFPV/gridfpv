@@ -159,8 +159,8 @@ where
         _ => None,
     };
 
-    // Keep a connection to every OFT timer in the directory, for as long as the Director runs.
-    let timers = crate::oft::spawn(registry.clone());
+    // Keep a connection to every timer in the directory, for as long as the Director runs.
+    let timers = crate::links::spawn(registry.clone());
 
     let app = build_app(registry, &assets);
 

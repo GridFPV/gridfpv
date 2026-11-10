@@ -282,6 +282,76 @@ pub fn ask_state() -> String {
     )
 }
 
+/// What Grid needs from RotorHazard right now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Want {
+    /// A Grid race that uses this timer is counting down or running: RotorHazard must be
+    /// listening, with its race started at this instant on its own clock.
+    Listening { start_at_s: f64 },
+    /// No Grid race needs this timer.
+    Idle,
+}
+
+/// The one thing to tell RotorHazard next, to move it toward what Grid wants.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Step {
+    /// Send [`stage`] with this start.
+    Stage { start_at_s: f64 },
+    /// Send [`stop`].
+    Stop,
+    /// Send [`discard`].
+    Discard,
+}
+
+/// Starts closer together than this are the same start. RotorHazard starts on the instant
+/// asked (*seen:* a difference of 0.0), so this only allows for rounding.
+const SAME_START_S: f64 = 0.05;
+
+/// Work out the next thing to tell RotorHazard, from where its race is and what Grid wants.
+///
+/// The rule is simple: RotorHazard's race is only a switch that makes it listen. It should
+/// be on, with Grid's start, exactly while a Grid race needs it.
+///
+/// - `status` and `rh_start_s` are RotorHazard's race now.
+/// - `grid_started_it` says whether Grid asked for RotorHazard's current race. Grid never
+///   stops or clears a race it did not start while it wants nothing itself: someone may be
+///   using RotorHazard's own page.
+///
+/// One step at a time: after each, RotorHazard reports its new status and this is asked
+/// again. `None` means there is nothing to do.
+pub fn next_step(
+    status: RhRaceStatus,
+    rh_start_s: Option<f64>,
+    grid_started_it: bool,
+    want: Want,
+) -> Option<Step> {
+    match want {
+        Want::Listening { start_at_s } => {
+            let same_start =
+                rh_start_s.is_some_and(|start| (start - start_at_s).abs() <= SAME_START_S);
+            match status {
+                RhRaceStatus::Ready => Some(Step::Stage { start_at_s }),
+                // Already on with Grid's start (the Director restarted mid-race, perhaps):
+                // leave it be.
+                RhRaceStatus::Staging | RhRaceStatus::Racing if same_start => None,
+                // Just asked, and RotorHazard has not said its start yet.
+                RhRaceStatus::Staging if grid_started_it && rh_start_s.is_none() => None,
+                // On, but for some other start: it must be stopped and cleared first.
+                RhRaceStatus::Staging | RhRaceStatus::Racing => Some(Step::Stop),
+                // Stopped (someone pressed stop on RotorHazard's page, or an old race is
+                // still held): clear it, and the next step starts it again.
+                RhRaceStatus::Done => Some(Step::Discard),
+            }
+        }
+        Want::Idle if grid_started_it => match status {
+            RhRaceStatus::Staging | RhRaceStatus::Racing => Some(Step::Stop),
+            RhRaceStatus::Done => Some(Step::Discard),
+            RhRaceStatus::Ready => None,
+        },
+        Want::Idle => None,
+    }
+}
+
 /// The translator for one RotorHazard.
 #[derive(Debug, Clone)]
 pub struct RotorHazardAdapter {
@@ -595,5 +665,76 @@ mod tests {
             Some(1904518.493188328)
         );
         assert_eq!(server_time_s(&[]), None);
+    }
+
+    const T: f64 = 1_904_547.5;
+    const LISTEN: Want = Want::Listening { start_at_s: T };
+
+    #[test]
+    fn a_grid_race_turns_rotorhazard_on_at_grids_start() {
+        assert_eq!(
+            next_step(RhRaceStatus::Ready, None, false, LISTEN),
+            Some(Step::Stage { start_at_s: T })
+        );
+        // Asked, counting down, start not reported yet: wait.
+        assert_eq!(next_step(RhRaceStatus::Staging, None, true, LISTEN), None);
+        // On with Grid's start: nothing to do, whoever asked (a Director restart forgets).
+        assert_eq!(
+            next_step(RhRaceStatus::Staging, Some(T), true, LISTEN),
+            None
+        );
+        assert_eq!(
+            next_step(RhRaceStatus::Racing, Some(T), false, LISTEN),
+            None
+        );
+    }
+
+    #[test]
+    fn rotorhazard_in_the_wrong_state_is_walked_back_to_a_fresh_start() {
+        // An old race is still held: clear it, then start.
+        assert_eq!(
+            next_step(RhRaceStatus::Done, Some(T - 300.0), false, LISTEN),
+            Some(Step::Discard)
+        );
+        // Racing for some other start (someone used RotorHazard's own page): stop, clear,
+        // start. One step each time it reports back.
+        assert_eq!(
+            next_step(RhRaceStatus::Racing, Some(T - 300.0), false, LISTEN),
+            Some(Step::Stop)
+        );
+        // Someone pressed stop on RotorHazard's page in the middle of Grid's race.
+        assert_eq!(
+            next_step(RhRaceStatus::Done, Some(T), true, LISTEN),
+            Some(Step::Discard)
+        );
+        assert_eq!(
+            next_step(RhRaceStatus::Ready, None, true, LISTEN),
+            Some(Step::Stage { start_at_s: T })
+        );
+    }
+
+    #[test]
+    fn when_grids_race_is_over_rotorhazard_is_stopped_and_cleared() {
+        assert_eq!(
+            next_step(RhRaceStatus::Racing, Some(T), true, Want::Idle),
+            Some(Step::Stop)
+        );
+        assert_eq!(
+            next_step(RhRaceStatus::Done, Some(T), true, Want::Idle),
+            Some(Step::Discard)
+        );
+        assert_eq!(next_step(RhRaceStatus::Ready, None, true, Want::Idle), None);
+    }
+
+    #[test]
+    fn a_race_grid_did_not_start_is_left_alone_while_grid_wants_nothing() {
+        for status in [
+            RhRaceStatus::Ready,
+            RhRaceStatus::Staging,
+            RhRaceStatus::Racing,
+            RhRaceStatus::Done,
+        ] {
+            assert_eq!(next_step(status, Some(T), false, Want::Idle), None);
+        }
     }
 }

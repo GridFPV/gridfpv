@@ -3,4 +3,4 @@
 /**
  * What kind of timer this is: which adapter speaks to it.
  */
-export type TimerKind = "Oft";
+export type TimerKind = "Oft" | "RotorHazard";

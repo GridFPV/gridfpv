@@ -17,15 +17,16 @@
     Dialog,
     Field,
     Input,
+    Select,
     StatusPill,
     toast
   } from '@gridfpv/components';
-  import type { AdapterId, CreateTimerRequest, TimerView } from '@gridfpv/types';
+  import type { AdapterId, CreateTimerRequest, TimerKind, TimerView } from '@gridfpv/types';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import type { Session } from '../lib/session.svelte.js';
-  import { clockSentence, OFT_PORT, seatCountSentence, TIMER_POLL_MS } from '../lib/timers.js';
+  import { clockSentence, seatCountSentence, TIMER_KINDS, TIMER_POLL_MS } from '../lib/timers.js';
 
   let {
     session,
@@ -64,6 +65,8 @@
   let addOpen = $state(false);
   let name = $state('');
   let address = $state('');
+  let kind = $state<TimerKind>('Oft');
+  const kindInfo = $derived(TIMER_KINDS.find((choice) => choice.kind === kind) ?? TIMER_KINDS[0]);
   let saving = $state(false);
   let formError = $state<string | undefined>(undefined);
 
@@ -80,7 +83,7 @@
     formError = undefined;
     // The Director checks the name and the address and answers in a sentence; that sentence
     // is shown as it is, so the rule lives in one place.
-    const request: CreateTimerRequest = { name: name.trim(), kind: 'Oft', address: address.trim() };
+    const request: CreateTimerRequest = { name: name.trim(), kind, address: address.trim() };
     saving = true;
     try {
       const created = await session.createTimer(request);
@@ -158,7 +161,7 @@
                   </p>
                 </div>
                 <div class="actions">
-                  {#if ontune}
+                  {#if ontune && view.timer.kind === 'Oft'}
                     <Button
                       variant="secondary"
                       title="Tune {view.timer.name}"
@@ -187,14 +190,21 @@
       <Field label="Name" required hint="What people will call it, like Gate.">
         <Input bind:value={name} placeholder="e.g. Gate" aria-label="Name" autocomplete="off" />
       </Field>
+      <Field label="Kind of timer" hint={kindInfo.hint}>
+        <Select bind:value={kind} aria-label="Kind of timer">
+          {#each TIMER_KINDS as choice (choice.kind)}
+            <option value={choice.kind}>{choice.label}</option>
+          {/each}
+        </Select>
+      </Field>
       <Field
         label="Address"
         required
-        hint="The timer's address and port. An OFT timer listens on port {OFT_PORT}."
+        hint="The timer's address and port. {kindInfo.label} listens on port {kindInfo.port}."
       >
         <Input
           bind:value={address}
-          placeholder="192.168.1.50:{OFT_PORT}"
+          placeholder="192.168.1.50:{kindInfo.port}"
           aria-label="Address"
           autocomplete="off"
           spellcheck="false"

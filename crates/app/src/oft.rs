@@ -1,7 +1,7 @@
 //! The connections to OFT timers.
 //!
-//! [`spawn`] starts one task that watches the timer directory and keeps one connection per
-//! OFT timer in it. Each connection:
+//! [`crate::links`] keeps one connection per timer in the directory. This is what a
+//! connection to an OFT timer does:
 //!
 //! 1. Opens the timer's WebSocket and waits for its `hello`.
 //! 2. Subscribes to crossings **after the last one it saw**, so a dropped link loses nothing
@@ -32,7 +32,7 @@ use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftMessage, SignalBuffer, seat
 use gridfpv_events::{AdapterId, Event, SeatRef, SignalThresholds, SignalUnit};
 use gridfpv_server::control::with_event;
 use gridfpv_server::events::{EventId, EventRegistry};
-use gridfpv_server::timers::{SeatLevels, Timer, TimerKind, TimerLive};
+use gridfpv_server::timers::{SeatLevels, Timer, TimerLive};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -45,44 +45,14 @@ const OFFSET_MOVED: i64 = 500;
 /// every ping, so silence this long means the link is gone.
 const SILENCE: Duration = Duration::from_secs(8);
 
-/// Start keeping a connection to every OFT timer in the directory. Runs until aborted.
+/// Start keeping a connection to every timer in the directory. Runs until aborted. (Kept
+/// here under its first name; the work is in [`crate::links`].)
 pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
-    tokio::spawn(supervise(registry))
-}
-
-async fn supervise(registry: EventRegistry) {
-    let directory = registry.timers();
-    let mut changes = directory.watch();
-    let mut held: BTreeMap<AdapterId, (Timer, JoinHandle<()>)> = BTreeMap::new();
-    loop {
-        let wanted: BTreeMap<AdapterId, Timer> = directory
-            .records()
-            .into_iter()
-            .filter(|timer| timer.kind == TimerKind::Oft)
-            .map(|timer| (timer.id.clone(), timer))
-            .collect();
-        // Drop connections to timers that were removed or changed.
-        held.retain(|id, (timer, task)| {
-            let keep = wanted.get(id) == Some(timer);
-            if !keep {
-                task.abort();
-            }
-            keep
-        });
-        for (id, timer) in wanted {
-            held.entry(id).or_insert_with(|| {
-                let task = tokio::spawn(hold(registry.clone(), timer.clone()));
-                (timer, task)
-            });
-        }
-        if changes.changed().await.is_err() {
-            return;
-        }
-    }
+    crate::links::spawn(registry)
 }
 
 /// Keep one timer connected for ever.
-async fn hold(registry: EventRegistry, timer: Timer) {
+pub(crate) async fn hold(registry: EventRegistry, timer: Timer) {
     let mut adapter = OftAdapter::new(timer.id.clone());
     let mut link = Link {
         registry: registry.clone(),

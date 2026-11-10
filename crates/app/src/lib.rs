@@ -14,6 +14,8 @@
 // messages on the shipped desktop build.
 #[macro_use]
 pub mod logging;
+pub mod links;
 pub mod oft;
+pub mod rotorhazard;
 
 pub mod director;
