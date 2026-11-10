@@ -177,9 +177,12 @@ export function uncountedLabel(why: UncountedWhy, reason?: RemovalReason): strin
   }
 }
 
-/** One row of a seat's lap list: the hole shot, a lap, or a marked restart. */
+/**
+ * One row of a seat's lap list: the hole shot, a lap, a marked restart, or the stretch the
+ * timer restarted in (its clock began again, so the time across it is not known).
+ */
 export interface LapRow {
-  kind: 'holeshot' | 'lap' | 'restart';
+  kind: 'holeshot' | 'lap' | 'restart' | 'timerRestart';
   /** The crossing a ruling about this row names. */
   crossing: LogRef;
   /** When the crossing was made, on the timer's clock. */
@@ -209,8 +212,13 @@ export function lapRows(seat: RaceSeatView): LapRow[] {
   let number = 0;
   let bestMarked = false;
   for (const lap of seat.laps) {
-    if (lap.restart) {
-      rows.push({ kind: 'restart', crossing: lap.crossing, at: lap.ended_at, best: false });
+    if (lap.restart || lap.timer_restarted) {
+      rows.push({
+        kind: lap.restart ? 'restart' : 'timerRestart',
+        crossing: lap.crossing,
+        at: lap.ended_at,
+        best: false
+      });
       continue;
     }
     number += 1;
@@ -230,7 +238,7 @@ export function lapRows(seat: RaceSeatView): LapRow[] {
 
 /** How many laps of a seat count. */
 export function countedLaps(seat: RaceSeatView): number {
-  return seat.laps.filter((lap) => !lap.restart).length;
+  return seat.laps.filter((lap) => !lap.restart && !lap.timer_restarted).length;
 }
 
 /** The moment a seat's times are read from, and what to call it. */
@@ -296,7 +304,7 @@ export function signalForSeat(
 
 /** A mark on a seat's trace: the start, or one crossing. */
 export interface TraceMark {
-  kind: 'start' | 'holeshot' | 'lap' | 'restart' | 'uncounted';
+  kind: 'start' | 'holeshot' | 'lap' | 'restart' | 'timerRestart' | 'uncounted';
   /** On the timer's clock. */
   at: SourceTime;
   /** The crossing behind it. The start has none. */
@@ -314,7 +322,14 @@ export function traceMarks(seat: RaceSeatView, startAt?: SourceTime): TraceMark[
       kind: row.kind,
       at: row.at,
       crossing: row.crossing,
-      text: row.kind === 'holeshot' ? 'HS' : row.kind === 'restart' ? 'R' : String(row.number)
+      text:
+        row.kind === 'holeshot'
+          ? 'HS'
+          : row.kind === 'restart'
+            ? 'R'
+            : row.kind === 'timerRestart'
+              ? 'T'
+              : String(row.number)
     });
   }
   for (const crossing of seat.uncounted) {

@@ -94,8 +94,10 @@ pub struct EventState {
     pub rosters: BTreeMap<ClassId, Vec<PilotId>>,
     /// Each timer's clock minus the Director's, as last measured.
     pub clock_offsets: BTreeMap<AdapterId, i64>,
-    /// Each race's start on each of its timers' own clocks, where the offset was known.
-    pub starts_on_timer: BTreeMap<(RaceId, AdapterId), SourceTime>,
+    /// Each race's start on each of its timers' own clocks, where the offset was known,
+    /// with the run of that clock it was placed on (a timer that restarts begins its clock
+    /// again).
+    pub starts_on_timer: BTreeMap<(RaceId, AdapterId), (SourceTime, u32)>,
     /// For a running first-to-N race whose pilots have all finished: when the last of them
     /// did, on the Director's clock. Cleared if a ruling takes a finish away.
     pub all_finished_at: BTreeMap<RaceId, i64>,
@@ -147,6 +149,11 @@ impl EventState {
                 // A timer measured after the start still places that start, if nothing
                 // had placed it yet.
                 self.place_starts();
+            }
+            Event::SessionStarted { adapter, .. } => {
+                // The timer started up: its clock began again, so the old offset is for a
+                // clock that no longer exists. It must not place a start until measured.
+                self.clock_offsets.remove(adapter);
             }
             Event::RaceStarting { setup, .. } => {
                 self.race_log_start
@@ -387,7 +394,10 @@ impl EventState {
                 };
                 self.starts_on_timer
                     .entry((race.setup.race.clone(), entry.adapter.clone()))
-                    .or_insert(SourceTime::from_micros(started_at + offset));
+                    .or_insert((
+                        SourceTime::from_micros(started_at + offset),
+                        self.laps.clock_run(&entry.adapter),
+                    ));
             }
         }
     }
@@ -404,13 +414,14 @@ impl EventState {
             .tree
             .format_for(&race.setup.heat)
             .map(|format| &format.race);
+        let start = self
+            .starts_on_timer
+            .get(&(race.setup.race.clone(), adapter.clone()));
         LapFilters {
             min_lap_micros: rules.and_then(|rules| rules.min_lap_micros),
-            start_at: self
-                .starts_on_timer
-                .get(&(race.setup.race.clone(), adapter.clone()))
-                .copied(),
+            start_at: start.map(|(at, _)| *at),
             first_lap: rules.map(|rules| rules.first_lap).unwrap_or_default(),
+            start_clock_run: start.map_or(0, |(_, run)| *run),
         }
     }
 

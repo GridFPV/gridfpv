@@ -13,4 +13,9 @@ crossing: LogRef, started_at: SourceTime, ended_at: SourceTime, micros: number,
 /**
  * A marked restart: it has no lap time and does not count.
  */
-restart: boolean, };
+restart: boolean, 
+/**
+ * The timer restarted between the two crossings, so the time between them is not
+ * known. Like a restart it has no lap time and does not count.
+ */
+timer_restarted: boolean, };

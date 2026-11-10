@@ -302,7 +302,8 @@
       if (entry.kind === 'start') mark(entry.at, colours.start, [], entry.text, false);
       else if (entry.kind === 'uncounted')
         mark(entry.at, colours.faint, [2, 4], entry.text, strong);
-      else if (entry.kind === 'restart') mark(entry.at, colours.exit, [6, 4], entry.text, strong);
+      else if (entry.kind === 'restart' || entry.kind === 'timerRestart')
+        mark(entry.at, colours.exit, [6, 4], entry.text, strong);
       else mark(entry.at, colours.lap, [], entry.text, strong);
     }
     if (adding !== undefined) mark(adding, colours.selected, [3, 3], '+', false);

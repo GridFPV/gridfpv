@@ -13,7 +13,9 @@
 //!
 //! What is translated so far (conformance level L1):
 //!
-//! - `hello` → [`Event::AdapterConnected`], and a [`Event::SeatSeen`] for each seat.
+//! - `hello` → [`Event::AdapterConnected`], a [`Event::SessionStarted`] when the Timer has
+//!   booted since the last one (its clock began again), and a [`Event::SeatSeen`] for each
+//!   seat.
 //! - `crossing` → [`Event::Pass`] at `t_mid`, the lap instant (spec §8).
 //! - `pong` → a clock sample for [`ClockFit`], which maps the Director's clock onto the
 //!   Timer's so the start tone can be placed on the Timer's clock.
@@ -28,7 +30,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use gridfpv_events::{
-    AdapterId, Event, GateIndex, Pass, SeatRef, SignalChunk, SignalContext, SignalUnit, SourceTime,
+    AdapterId, Event, GateIndex, Pass, SeatRef, SessionId, SignalChunk, SignalContext, SignalUnit,
+    SourceTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -236,14 +239,23 @@ impl Adapter for OftAdapter {
                 ..
             } => {
                 self.calibrated = calibrated;
-                if self.boot_id.as_deref() != Some(boot_id.as_str()) {
+                let new_boot = self.boot_id.as_deref() != Some(boot_id.as_str());
+                if new_boot {
                     // A new boot: the Timer's crossing numbers start again.
-                    self.boot_id = Some(boot_id);
+                    self.boot_id = Some(boot_id.clone());
                     self.last_seq = None;
                 }
                 let mut events = vec![Event::AdapterConnected {
                     adapter: self.id.clone(),
                 }];
+                if new_boot {
+                    // The Timer's clock started again with this boot. Saying so in the log
+                    // is what stops times from two boots being compared.
+                    events.push(Event::SessionStarted {
+                        adapter: self.id.clone(),
+                        session: SessionId(boot_id),
+                    });
+                }
                 events.extend(seats.into_iter().map(|seat| Event::SeatSeen {
                     adapter: self.id.clone(),
                     seat: seat_ref(seat.seat),
@@ -545,6 +557,10 @@ mod tests {
             vec![
                 Event::AdapterConnected {
                     adapter: AdapterId("gate".into())
+                },
+                Event::SessionStarted {
+                    adapter: AdapterId("gate".into()),
+                    session: SessionId("9c1e".into()),
                 },
                 Event::SeatSeen {
                     adapter: AdapterId("gate".into()),

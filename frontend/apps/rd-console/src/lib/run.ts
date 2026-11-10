@@ -81,7 +81,7 @@ export interface SeatRow {
 /** The rows for a race in progress: one per seat of its lineup, with the laps so far. */
 export function raceSeatRows(race: RaceView, names: Names): SeatRow[] {
   return race.seats.map((seat, index) => {
-    const laps = seat.laps.filter((lap) => !lap.restart);
+    const laps = seat.laps.filter((lap) => !lap.restart && !lap.timer_restarted);
     return {
       adapter: seat.adapter,
       seat: seat.seat,

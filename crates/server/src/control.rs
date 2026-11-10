@@ -550,7 +550,7 @@ pub async fn get_signal(
                 start_at: state
                     .starts_on_timer
                     .get(&(query.race.clone(), entry.adapter.clone()))
-                    .copied(),
+                    .map(|(at, _)| *at),
                 chunks: Vec::new(),
                 thresholds: Vec::new(),
             })

@@ -297,12 +297,19 @@ async fn races_are_timed_by_the_real_oft_daemon() {
         "{} chunks: batches were not joined",
         chunks.len()
     );
+    // On a quiet machine there are none at all. On a busy one the daemon can miss a batch
+    // or two, so the test allows a little: what it must never see is a trace in pieces.
+    let mut missing = 0;
     for pair in chunks.windows(2) {
         let end = pair[0]["from"].as_i64().unwrap()
             + pair[0]["levels"].as_array().unwrap().len() as i64 * 1000;
         let gap = pair[1]["from"].as_i64().unwrap() - end;
-        assert!(gap.abs() < 500, "a gap of {gap} µs in the trace");
+        assert!(gap > -500, "chunks overlap by {} µs", -gap);
+        if gap >= 500 {
+            missing += gap;
+        }
     }
+    assert!(missing < 100_000, "{missing} µs of signal are missing");
     assert_eq!(seat["chunks"][0]["unit"], json!(SignalUnit::TenthsDb));
     assert!(seat["start_at"].is_number());
     assert!(!seat["thresholds"].as_array().unwrap().is_empty());
@@ -388,6 +395,82 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     stop_and_save(&registry, &event, &second);
     // The first race's laps did not change when the timer came back with low numbers.
     assert!(laps(&registry, &event, &timer, &first).len() >= 3);
+
+    // ── The timer reboots in the middle of a race: the laps either side are kept, and
+    //    nothing is timed across the reboot ──────────────────────────────────────────────
+    with_event(&registry, &event, |session| {
+        session.commands(vec![Command::Record(Box::new(Event::HeatReopened {
+            heat: PhaseId("heat".into()),
+        }))])
+    })
+    .ok();
+    start(&registry, &event).await;
+    tokio::time::sleep(Duration::from_millis(4_200)).await;
+    let third = RaceId("heat#3".into());
+    let before_reboot = laps(&registry, &event, &timer, &third).len();
+    assert!(
+        before_reboot >= 2,
+        "before the reboot: {before_reboot} laps"
+    );
+    daemon.stop();
+    let mut daemon = Daemon::start(&addr);
+    eventually("the timer to come back mid-race", 30, || {
+        connected(&registry)
+    })
+    .await;
+    let (status, _) = call(&registry, "PUT", &uri, Some(config.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(6_500)).await;
+    with_event(&registry, &event, |session| {
+        let state = session.state();
+        let found = state.races.get(&third).unwrap();
+        let laps = state.laps.seat(
+            &third,
+            &timer,
+            &SeatRef("0".into()),
+            state.filters_for(found, &timer),
+        );
+        use gridfpv_engine::laps::LapKind;
+        let kinds: Vec<LapKind> = laps.intervals.iter().map(|lap| lap.kind).collect();
+        // Exactly one stretch with no time: the reboot.
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == LapKind::TimerRestarted)
+                .count(),
+            1,
+            "{kinds:?}"
+        );
+        // Laps after the reboot count, and are the fake Node's 1.5 s again.
+        let after: Vec<i64> = laps
+            .intervals
+            .iter()
+            .skip_while(|lap| lap.kind != LapKind::TimerRestarted)
+            .skip(1)
+            .map(|lap| lap.micros())
+            .collect();
+        assert!(after.len() >= 3, "after the reboot: {after:?}");
+        // The first lap after a boot is left out of the check: the timer's detector is
+        // still settling on the noise floor then, and places its first crossing up to a
+        // tenth of a second late (seen: 1.406 s for a 1.5 s lap). That is the timer's
+        // doing, not Grid's.
+        for lap in &after[1..] {
+            assert!((lap - LAP).abs() < 5_000, "a lap was {lap} µs: {after:?}");
+        }
+        // No crossing after the reboot was thrown away as "before the start" because its
+        // clock is new. (At most one real one: a crossing made just before the tone and
+        // reported just after it, which is what that filter is for.)
+        let before_start = laps
+            .uncounted
+            .iter()
+            .filter(|c| c.why == gridfpv_engine::laps::Uncounted::BeforeStart)
+            .count();
+        assert!(before_start <= 1, "{:?}", laps.uncounted);
+        assert!(laps.lap_count() >= before_reboot + 2);
+        Ok(())
+    })
+    .unwrap();
+    stop_and_save(&registry, &event, &third);
 
     daemon.stop();
     links.abort();

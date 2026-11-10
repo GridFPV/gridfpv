@@ -255,6 +255,9 @@ pub struct LapView {
     pub micros: i64,
     /// A marked restart: it has no lap time and does not count.
     pub restart: bool,
+    /// The timer restarted between the two crossings, so the time between them is not
+    /// known. Like a restart it has no lap time and does not count.
+    pub timer_restarted: bool,
 }
 
 /// Why a crossing does not count.
@@ -509,6 +512,7 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
                         ended_at: lap.ended_at,
                         micros: lap.micros(),
                         restart: lap.kind == LapKind::Restart,
+                        timer_restarted: lap.kind == LapKind::TimerRestarted,
                     })
                     .collect(),
                 uncounted: laps

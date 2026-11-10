@@ -123,7 +123,9 @@
       ? 'the hole shot'
       : row.kind === 'restart'
         ? 'the restart'
-        : `lap ${row.number}`;
+        : row.kind === 'timerRestart'
+          ? 'the crossing after the timer restarted'
+          : `lap ${row.number}`;
 </script>
 
 <li class="seat" aria-label="{seatName}, {who}">
@@ -217,7 +219,8 @@
                 title="Show on the trace"
                 onclick={() => pick(row.crossing)}
               >
-                {#if row.kind === 'holeshot'}Hole shot{:else if row.kind === 'restart'}Restart{:else}Lap
+                {#if row.kind === 'holeshot'}Hole shot{:else if row.kind === 'restart'}Restart{:else if row.kind === 'timerRestart'}Timer
+                  restarted{:else}Lap
                   {row.number}{/if}
               </button>
             </th>
@@ -227,6 +230,8 @@
                 {#if row.best}<Badge tone="success">Best</Badge>{/if}
               {:else if row.kind === 'restart'}
                 <span class="muted">No lap time</span>
+              {:else if row.kind === 'timerRestart'}
+                <span class="muted">No lap time: the timer's clock started again</span>
               {:else}
                 <span class="muted">Starts lap 1</span>
               {/if}
