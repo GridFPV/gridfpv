@@ -21,6 +21,11 @@
  *     heat's id, percent-encoded (a heat id can hold slashes).
  *   - `#/event/marshal` → the Marshal page of the open event, and `#/event/marshal/‹race›`
  *     → the same page with one race open. `‹race›` is the race's id, percent-encoded.
+ *   - `#/overlay/race` → the race overlay, a page for an OBS browser source: light text, for
+ *     dark video. `#/overlay/race/light` is the same page with dark text on a light panel,
+ *     for bright video. An overlay is drawn bare (no shell) on a see-through page, and
+ *     follows the Director's active event by itself. `#/overlay/‹anything else›` draws
+ *     nothing at all, so a mistyped source never puts the console in the video.
  *
  * The open event itself is **app-wide server state** (the Director's active event, #90), so the
  * hash does not name *which* event. The event page always shows the Director's active event; an
@@ -42,7 +47,22 @@ export type Route =
   | { kind: 'tune'; timer: AdapterId }
   | { kind: 'event' }
   | { kind: 'run'; heat: PhaseId }
-  | { kind: 'marshal'; race?: RaceId };
+  | { kind: 'marshal'; race?: RaceId }
+  /**
+   * An overlay page for an OBS browser source. `overlay` is absent for a name the console
+   * does not have: that page draws nothing. `theme` is only ever present as `'light'`
+   * (dark text on a light panel); absent means the default, light text on a dark panel.
+   */
+  | { kind: 'overlay'; overlay?: OverlayName; theme?: 'light' };
+
+/** The overlay pages the console has. */
+export type OverlayName = 'race';
+export const OVERLAYS: readonly OverlayName[] = ['race'];
+/**
+ * An overlay's contrast, named for its panel: `'dark'` is light text on a dark panel (for
+ * dark video), `'light'` is dark text on a light panel (for bright video).
+ */
+export type OverlayTheme = 'dark' | 'light';
 
 /** Decode one percent-encoded hash segment, or `undefined` if it is not valid encoding. */
 function decodeSegment(segment: string): string | undefined {
@@ -70,6 +90,19 @@ export function parseHash(hash: string): Route {
 
   const segments = s.split('/');
   const head = segments[0].toLowerCase();
+  if (head === 'overlay') {
+    // `overlay/‹name›` and `overlay/‹name›/light`. An unknown name, or no name, is an overlay
+    // that draws nothing: a browser source must never fall back to the hub. Any third part
+    // other than `light` is the default contrast, so a mistyped one still draws the overlay.
+    const name = segments[1]?.toLowerCase();
+    if (name === undefined || !(OVERLAYS as readonly string[]).includes(name)) {
+      return { kind: 'overlay' };
+    }
+    const overlay = name as OverlayName;
+    return segments[2]?.toLowerCase() === 'light'
+      ? { kind: 'overlay', overlay, theme: 'light' }
+      : { kind: 'overlay', overlay };
+  }
   if (head === 'event') {
     // `event/run/‹heat›`: the heat id keeps its case and is one encoded segment. A run hash
     // with no heat, or a broken one, falls back to the event page.
@@ -102,8 +135,16 @@ export function parseHash(hash: string): Route {
  * Format a {@link Route} back into a hash string (always with the leading `#/`). The hub formats
  * to `#/` (canonical), the pages to `#/<page>`, a timer's Tune page to `#/timers/‹encoded timer
  * id›`, the event page to `#/event` and a heat's Run view to `#/event/run/‹encoded heat id›`. Round-trips with {@link parseHash} for every route.
+ * An overlay formats to `#/overlay/‹name›`, with `/light` for the light panel; the overlay
+ * with no name formats to `#/overlay`.
  */
 export function formatHash(route: Route): string {
+  if (route.kind === 'overlay') {
+    if (route.overlay === undefined) return '#/overlay';
+    return route.theme === 'light'
+      ? `#/overlay/${route.overlay}/light`
+      : `#/overlay/${route.overlay}`;
+  }
   if (route.kind === 'event') return '#/event';
   if (route.kind === 'run') return `#/event/run/${encodeURIComponent(route.heat)}`;
   if (route.kind === 'marshal') {
@@ -122,12 +163,22 @@ export function inEvent(route: Route): boolean {
 }
 
 /**
+ * Whether a route is an overlay: drawn bare on a see-through page, with no shell, no token
+ * prompt, no toasts and no sound.
+ */
+export function isOverlay(route: Route): boolean {
+  return route.kind === 'overlay';
+}
+
+/**
  * Reconcile a parsed {@link Route} against whether an event is currently active (the Director's
  * active event, server state):
  *
  *   - An `event`, `run` or `marshal` route with **no active event** → fall back to the Events page
  *     (`#/events`), since there is no event to show.
  *   - A `tune` route never needs an event: a timer is app-level, like the pages.
+ *   - An `overlay` route is never changed: with no event it draws its idle mark, which is
+ *     what a browser source left in a scene should do.
  *   - A `page` route with an **active event** is fine as-is: the user explicitly navigated to a
  *     top-level page even though an event is active, so honour it. This includes the hub: an
  *     empty/hub hash stays on the hub even when an event is active — the hash is authoritative,

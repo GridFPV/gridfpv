@@ -11,7 +11,8 @@
  * browser's, so a countdown runs on the Director's clock.
  *
  * Timers have no change feed, so while the store is running it asks for the timer list again
- * every {@link TIMER_POLL_MS}. It stops asking when the store stops.
+ * every {@link TIMER_POLL_MS}. It stops asking when the store stops. A store made with
+ * `pollTimers: false` (the overlay's) reads the list once and does not ask again.
  *
  * Writes go through the {@link Session}, so they get its token handling: sent without a
  * token first, and the token dialog opens only if the Director asks for one.
@@ -92,11 +93,21 @@ export class EventLive {
   /** The quickest round trip seen so far. A quicker read gives a truer clock offset. */
   #bestRoundTripMs = Number.POSITIVE_INFINITY;
   #clock: () => number;
+  #pollTimers: boolean;
 
-  constructor(session: LiveSession, eventId: EventId, opts?: { now?: () => number }) {
+  /**
+   * `pollTimers: false` reads the timer list once, for seat names, and never again. The
+   * overlay uses it: it shows no timer status, so it has nothing to keep fresh.
+   */
+  constructor(
+    session: LiveSession,
+    eventId: EventId,
+    opts?: { now?: () => number; pollTimers?: boolean }
+  ) {
     this.#session = session;
     this.eventId = eventId;
     this.#clock = opts?.now ?? (() => Date.now());
+    this.#pollTimers = opts?.pollTimers ?? true;
   }
 
   /** Read the snapshot, the pilots and the timers, and start listening for changes. */
@@ -107,7 +118,9 @@ export class EventLive {
     void this.reloadTimers();
     void this.reloadClasses();
     clearInterval(this.#timerPoll);
-    this.#timerPoll = setInterval(() => void this.reloadTimers(), TIMER_POLL_MS);
+    this.#timerPoll = this.#pollTimers
+      ? setInterval(() => void this.reloadTimers(), TIMER_POLL_MS)
+      : undefined;
     try {
       // The feed sends the current cursor on every connect and reconnect, so a console
       // that was cut off reads a fresh snapshot as soon as it is back.

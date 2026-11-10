@@ -9,6 +9,11 @@
    * page opens {@link EventPage}; a heat on it opens that heat's {@link RunPage}, and its
    * Marshal link opens the {@link MarshalPage}.
    *
+   * An **overlay** route (`#/overlay/‹name›`) is the exception to all of it: a page for an OBS
+   * browser source, drawn bare on a see-through page. It gets no brand, no token dialog and no
+   * toasts, it does not open the event in this session, and nothing that makes sound is ever
+   * mounted for it (the start tone lives in {@link RunPage} alone).
+   *
    * On load the shell resolves the Director's active event (server state, #90) so an `#/event`
    * URL can render, but the hash is authoritative for *which* view to show (#118): a bare/hub
    * load stays on the hub and never opens an event — the user only gets there by navigating in or
@@ -35,12 +40,14 @@
   import TimersPage from './screens/TimersPage.svelte';
   import TunePage from './screens/TunePage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
+  import RaceOverlay from './screens/RaceOverlay.svelte';
   import {
     parseHash,
     formatHash,
     reconcileRoute,
     resolveInitialRoute,
     inEvent,
+    isOverlay,
     type Route,
     type AppPage
   } from './lib/route.js';
@@ -88,9 +95,12 @@
   // read `GET /active-event` (it determines whether an event hash can render), then resolve the
   // route from the hash + whether an event is active. While it resolves we show a brief loading
   // state; after this the hash is the source of truth.
+  // An overlay skips this: it follows the active event by itself and needs no route resolved.
+  // (It runs on the first route that is not an overlay, should the hash ever be edited to one.)
   let resumed = false;
+  const bare = $derived(isOverlay(route));
   $effect(() => {
-    if (resumed) return;
+    if (resumed || bare) return;
     resumed = true;
     void (async () => {
       await session.resolveActiveEvent();
@@ -125,6 +135,16 @@
     return () => store.stop();
   });
 
+  // An overlay is laid over video, so the page under it must be see-through. `app.css` lifts the
+  // dark canvas while this flag is on <html>.
+  $effect(() => {
+    if (!bare) return;
+    document.documentElement.dataset.overlay = '';
+    return () => {
+      delete document.documentElement.dataset.overlay;
+    };
+  });
+
   // Leaving the event page closes the event in this console (the Director's active event is left
   // alone) and lands on the page asked for.
   function leaveEventTo(page: AppPage) {
@@ -135,7 +155,26 @@
 
 <svelte:window onhashchange={onHashChange} onpopstate={onHashChange} />
 
-<div class="gridfpv-root gridfpv-dense">
+{#if route.kind === 'overlay'}
+  <!-- An OBS browser source: bare, on a see-through page. A name the console does not have
+       draws nothing at all. Not dense: an overlay sets its own sizes for a 1920x1080 frame. -->
+  <div class="gridfpv-root">
+    {#if route.overlay === 'race'}
+      <RaceOverlay {session} theme={route.theme ?? 'dark'} />
+    {/if}
+  </div>
+{:else}
+  <div class="gridfpv-root gridfpv-dense">
+    {@render shell()}
+  </div>
+
+  <!-- The lazy token prompt lives above any screen (the only token surface). -->
+  <TokenDialog bind:this={tokenDialog} />
+
+  <ToastHost />
+{/if}
+
+{#snippet shell()}
   {#if session.resolvingActiveEvent && !session.currentEvent}
     <!-- Resolving the Director's active event (#90): a brief loading state before we know
          whether an event page can render. -->
@@ -211,12 +250,7 @@
       <span>Resuming…</span>
     </div>
   {/if}
-</div>
-
-<!-- The lazy token prompt lives above any screen (the only token surface). -->
-<TokenDialog bind:this={tokenDialog} />
-
-<ToastHost />
+{/snippet}
 
 <style>
   /* The active-event resume loading state (#90). */

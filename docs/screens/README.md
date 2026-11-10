@@ -17,3 +17,4 @@ seconds. Nothing in these is mocked on Grid's side.
 | [Timers](2026-11-10/timers.png) | The timer list with its status |
 | [Timers, one found on the network](2026-11-10/timers-found.png) | A timer that announces itself, listed with an Add button (OFT protocol v0.4) |
 | [Tune, a seat with its own levels](2026-11-10/tune-seat-levels.png) | Seat 1 on fixed levels of its own, applied to the timer, with the timer-wide levels below (OFT protocol v0.4) |
+| [Race overlay](2026-11-10/overlay.png) | The OBS browser-source page mid-race, on the bench (two pilots, made-up crossings) |

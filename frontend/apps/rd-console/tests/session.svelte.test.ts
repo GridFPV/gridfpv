@@ -205,6 +205,31 @@ describe('Session', () => {
     expect(getActiveEvent).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
   });
 
+  it('readActiveEvent gives the whole event, null for none, and throws when the read fails', async () => {
+    const getActiveEvent = vi.fn(async () => ({ event: EVENT_A }));
+    const session = new Session({ autoRestore: false, api: { getActiveEvent } });
+    expect(await session.readActiveEvent()).toEqual(EVENT_A);
+    expect(getActiveEvent).toHaveBeenCalledWith(session.baseUrl, { token: undefined });
+    // Reading it opens nothing in this session.
+    expect(session.currentEvent).toBeUndefined();
+
+    const none = new Session({
+      autoRestore: false,
+      api: { getActiveEvent: vi.fn(async () => ({ event: null })) }
+    });
+    expect(await none.readActiveEvent()).toBeNull();
+
+    const down = new Session({
+      autoRestore: false,
+      api: {
+        getActiveEvent: vi.fn(async () => {
+          throw new Error('fetch failed');
+        })
+      }
+    });
+    await expect(down.readActiveEvent()).rejects.toThrow('fetch failed');
+  });
+
   it('getActiveEventId resolves undefined when nothing is active', async () => {
     const getActiveEvent = vi.fn(async () => ({ event: null }));
     const session = new Session({ autoRestore: false, api: { getActiveEvent } });

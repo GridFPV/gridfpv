@@ -252,6 +252,23 @@ describe('toProtocolError', () => {
     }
   });
 
+  it('with pollTimers off it reads the timers once, for seat names, and never again', async () => {
+    vi.useFakeTimers();
+    try {
+      const listTimers = vi.fn(async () => [timerView('gate-x1y2', 'Gate', 2)]);
+      const live = new EventLive(fakeSession({ listTimers }).session, 'evt', {
+        pollTimers: false
+      });
+      live.start();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(listTimers).toHaveBeenCalledTimes(1);
+      expect(live.names.seat('gate-x1y2', '1')).toBe('Seat 2');
+      live.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the last timer list when a read fails, and the same list when nothing changed', async () => {
     const listTimers = vi
       .fn<LiveSession['listTimers']>()

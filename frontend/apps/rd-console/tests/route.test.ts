@@ -11,6 +11,7 @@ import {
   resolveInitialRoute,
   DEFAULT_ROUTE,
   inEvent,
+  isOverlay,
   type Route
 } from '../src/lib/route.js';
 
@@ -233,5 +234,66 @@ describe('the Marshal page route', () => {
       page: 'events'
     });
     expect(reconcileRoute({ kind: 'marshal' }, true)).toEqual({ kind: 'marshal' });
+  });
+});
+
+describe('overlay routes', () => {
+  const race: Route = { kind: 'overlay', overlay: 'race' };
+  const light: Route = { kind: 'overlay', overlay: 'race', theme: 'light' };
+  const nothing: Route = { kind: 'overlay' };
+
+  it('parses the race overlay, with light text by default', () => {
+    expect(parseHash('#/overlay/race')).toEqual(race);
+    expect(parseHash('#/Overlay/RACE/')).toEqual(race);
+    expect(parseHash('overlay/race')).toEqual(race);
+  });
+
+  it('parses the light panel, and takes any other third part as the default', () => {
+    expect(parseHash('#/overlay/race/light')).toEqual(light);
+    expect(parseHash('#/overlay/race/LIGHT/')).toEqual(light);
+    expect(parseHash('#/overlay/race/dark')).toEqual(race);
+    expect(parseHash('#/overlay/race/lihgt')).toEqual(race);
+  });
+
+  it('an unknown overlay name, or none, is an overlay that draws nothing, never the hub', () => {
+    expect(parseHash('#/overlay/nope')).toEqual(nothing);
+    expect(parseHash('#/overlay/nope/light')).toEqual(nothing);
+    expect(parseHash('#/overlay')).toEqual(nothing);
+    expect(parseHash('#/overlay/')).toEqual(nothing);
+    expect(parseHash('#/overlay/nope')).not.toEqual(DEFAULT_ROUTE);
+  });
+
+  it('formats and round-trips', () => {
+    expect(formatHash(race)).toBe('#/overlay/race');
+    expect(formatHash(light)).toBe('#/overlay/race/light');
+    expect(formatHash(nothing)).toBe('#/overlay');
+    for (const route of [race, light, nothing]) {
+      expect(parseHash(formatHash(route))).toEqual(route);
+    }
+  });
+
+  it('is bare, and no other route is', () => {
+    expect(isOverlay(race)).toBe(true);
+    expect(isOverlay(light)).toBe(true);
+    expect(isOverlay(nothing)).toBe(true);
+    for (const route of [
+      DEFAULT_ROUTE,
+      { kind: 'event' },
+      { kind: 'run', heat: 'h1' },
+      { kind: 'marshal' },
+      { kind: 'tune', timer: 't1' }
+    ] satisfies Route[]) {
+      expect(isOverlay(route)).toBe(false);
+    }
+  });
+
+  it('needs no open event and is never sent elsewhere', () => {
+    expect(inEvent(race)).toBe(false);
+    for (const route of [race, light, nothing]) {
+      expect(reconcileRoute(route, false)).toEqual(route);
+      expect(reconcileRoute(route, true)).toEqual(route);
+    }
+    expect(resolveInitialRoute('#/overlay/race/light', false)).toEqual(light);
+    expect(resolveInitialRoute('#/overlay/nope', true)).toEqual(nothing);
   });
 });

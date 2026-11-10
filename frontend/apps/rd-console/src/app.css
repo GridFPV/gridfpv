@@ -50,6 +50,17 @@ body::before {
     );
 }
 
+/* An overlay (`#/overlay/‹name›`) is a page for an OBS browser source, which lays it over
+ * video. The shell sets `data-overlay` on <html> while one is showing, and the dark canvas
+ * and its wash step aside so the page is see-through. */
+html[data-overlay],
+html[data-overlay] body {
+  background: transparent;
+}
+html[data-overlay] body::before {
+  display: none;
+}
+
 :focus-visible {
   outline: none;
 }

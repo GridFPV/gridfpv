@@ -528,6 +528,17 @@ export class Session {
   }
 
   /**
+   * Read the Director's **active event** in full (`GET /active-event`, open, no token):
+   * the event, or `null` when none is active. Unlike {@link getActiveEventId} a failed read
+   * **throws**, so a caller that follows the active event (the overlay) can tell "nothing is
+   * active" from "the Director did not answer" and keep what it has for the second.
+   */
+  async readActiveEvent(): Promise<EventMeta | null> {
+    const { event } = await this.#api.getActiveEvent(this.baseUrl, { token: this.#token });
+    return event;
+  }
+
+  /**
    * Resolve the Director's **active event** on load (issue #90). The active event is server-side
    * Director state — there is one RD on one event — so a reload reads it (`GET /active-event`)
    * and opens the same event every client is on.

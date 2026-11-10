@@ -7,7 +7,8 @@
    * order the director can change. The Phases card shows the competition: every phase as a
    * tree, each heat with its lineup, its ranking and rulings, and a button that opens its Run
    * view. Heats and brackets are added from here. The Classes card holds each class's roster
-   * and standings. The Marshal link at the top opens the Marshal page.
+   * and standings. The Overlays card, last, gives the URLs of the pages that go on top of
+   * video in OBS. The Marshal link at the top opens the Marshal page.
    *
    * The competition comes from the live event store, so the list follows the Director as
    * races are run, from this console or another one.
@@ -22,6 +23,7 @@
   import AddHeatDialog from './AddHeatDialog.svelte';
   import ClassRosterDialog from './ClassRosterDialog.svelte';
   import EventClasses from './EventClasses.svelte';
+  import EventOverlays from './EventOverlays.svelte';
   import PhaseList from './PhaseList.svelte';
   import RunQueue from './RunQueue.svelte';
 
@@ -150,6 +152,10 @@
         <EventClasses {live} />
       </Card>
     {/if}
+
+    <Card title="Overlays" elevation="sm">
+      <EventOverlays />
+    </Card>
   </div>
 </div>
 
