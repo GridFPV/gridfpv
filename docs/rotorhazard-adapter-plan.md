@@ -1,5 +1,10 @@
 # RotorHazard adapter: the plan for the rewrite
 
+**Paused (Ryan, 2026-11-10).** No more RotorHazard work until the OFT adapter is fully
+tested: OFT defines the shape Grid wants from a timer. The shape of the RotorHazard adapter,
+and whether there is a plugin, are still to be discussed. Nothing below is agreed. The code
+that exists stays in the tree and is not offered in the console.
+
 **Status:** written 2026-11-10 from RotorHazard's own source for 4.4.0 and 4.3.0. Steps 1,
 2, 4 and 5 of the order of work are **built**: the socket framing, the translator, the
 connection, and race control. Timer settings from Grid (steps 3 and 6), live levels and the

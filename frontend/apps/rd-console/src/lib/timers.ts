@@ -12,6 +12,9 @@ export const OFT_PORT = 7270;
 /**
  * The kinds of timer that can be added, as the add-timer dialog offers them. `port` is the
  * port that kind listens on unless someone changed it.
+ *
+ * A RotorHazard timer is not offered: the Director can hold one, but that adapter is paused
+ * until the OFT one is fully tested and its shape is agreed (2026-11-10).
  */
 export const TIMER_KINDS: readonly {
   kind: TimerKind;
@@ -24,12 +27,6 @@ export const TIMER_KINDS: readonly {
     label: 'An OFT timer',
     port: OFT_PORT,
     hint: 'An Open FPV Timer gate.'
-  },
-  {
-    kind: 'RotorHazard',
-    label: 'A RotorHazard timer',
-    port: 5000,
-    hint: 'Used as it is. Nothing is installed on it. Its settings are changed on its own pages for now.'
   }
 ];
 
