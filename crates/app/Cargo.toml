@@ -47,6 +47,7 @@ rust-embed = { version = "8", optional = true }
 mime_guess = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
+mdns-sd = "0.21.7"
 
 [dev-dependencies]
 # The fake OFT timer in `tests/oft_link.rs` is an axum WebSocket server.

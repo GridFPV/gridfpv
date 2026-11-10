@@ -74,6 +74,11 @@ pub struct OftSeatConfig {
     pub seat: u32,
     pub freq_mhz: u32,
     pub enabled: bool,
+    /// The seat's own threshold (protocol v0.4, a Timer whose `config` capability has
+    /// `seat_thresholds`). Absent means the seat uses the Timer-wide one. Never sent as
+    /// `null`: the Timer reads back an absent key, and a write is checked against that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<OftThreshold>,
 }
 
 /// How a Timer sets its crossing levels. Values are tenths of a dB.
@@ -86,15 +91,32 @@ pub enum OftThreshold {
     Manual { enter: i32, exit: i32 },
 }
 
-/// A Timer's settings: the body of `GET` and `PUT /oft/v1/config` (spec §6.3). In protocol
-/// v1 the threshold is one setting for the whole Timer; per-seat thresholds are agreed for
-/// the next version of the spec.
+/// A Timer's settings: the body of `GET` and `PUT /oft/v1/config` (spec §6.3). The top-level
+/// threshold is the Timer-wide one. From spec v0.4 a seat may carry its own. A `PUT`
+/// replaces the whole config, so per-seat thresholds must be sent every time or they are
+/// cleared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OftConfig {
     pub seats: Vec<OftSeatConfig>,
     pub seats_per_node: u32,
     pub threshold: OftThreshold,
     pub min_lap_ms: u32,
+}
+
+/// The capabilities Grid reads from a Timer's `hello` (spec §6.2). An absent key means the
+/// Timer cannot do it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub struct OftCapabilities {
+    #[serde(default)]
+    pub config: OftConfigCapability,
+}
+
+/// What a Timer's `/config` accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub struct OftConfigCapability {
+    /// Whether each seat can carry its own threshold (spec v0.4).
+    #[serde(default)]
+    pub seat_thresholds: bool,
 }
 
 /// One message from a Timer's WebSocket. Fields Grid does not use are left out; unknown
@@ -117,6 +139,9 @@ pub enum OftMessage {
         /// Whether power values are tenths of a dBm (true) or relative tenths of a dB.
         #[serde(default)]
         calibrated: bool,
+        /// What the Timer can do. Only the keys Grid reads are picked out.
+        #[serde(default)]
+        capabilities: OftCapabilities,
     },
     /// A seat crossed the gate.
     Crossing {
@@ -849,5 +874,42 @@ mod tests {
         assert_eq!(logged.len(), 1);
         assert_eq!(logged[0].levels.len(), 150);
         assert_eq!(logged[0].from, SourceTime::from_micros(0));
+    }
+
+    #[test]
+    fn a_v0_4_timer_says_it_takes_a_threshold_per_seat_and_its_settings_carry_them() {
+        // The capability, as `oftd` sends it from spec v0.4.
+        let hello = HELLO.replace(
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 }"#,
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 },
+               "config": { "persist": false, "threshold_modes": ["auto", "manual"],
+                           "min_lap_ms": true, "seats_per_node": true, "seat_thresholds": true }"#,
+        );
+        let OftMessage::Hello { capabilities, .. } = OftMessage::parse(&hello).unwrap() else {
+            panic!("expected a hello");
+        };
+        assert!(capabilities.config.seat_thresholds);
+        // A v0.3 hello has no such key.
+        let OftMessage::Hello { capabilities, .. } = OftMessage::parse(HELLO).unwrap() else {
+            panic!("expected a hello");
+        };
+        assert!(!capabilities.config.seat_thresholds);
+
+        // The example `/config` body from the spec: seat 1 has its own, seat 0 does not.
+        let body = r#"{"seats":[{"seat":0,"freq_mhz":5658,"enabled":true},{"seat":1,"freq_mhz":5732,"enabled":true,"threshold":{"mode":"manual","enter":-700,"exit":-760}}],"seats_per_node":8,"threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000}"#;
+        let config: OftConfig = serde_json::from_str(body).unwrap();
+        assert_eq!(config.seats[0].threshold, None);
+        assert_eq!(
+            config.seats[1].threshold,
+            Some(OftThreshold::Manual {
+                enter: -700,
+                exit: -760
+            })
+        );
+        // It goes back out the same: a seat with no threshold has no key, never a null.
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::from_str::<serde_json::Value>(body).unwrap()
+        );
     }
 }

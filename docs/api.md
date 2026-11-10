@@ -47,6 +47,7 @@ laptop), writes are open too.
 | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | The pilot list |
 | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | The class list |
 | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | The timer list, each with its live status |
+| `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added |
 | `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer |
 | `GET /timers/{id}/live` | Live signal and levels for tuning (server-sent events) |
 

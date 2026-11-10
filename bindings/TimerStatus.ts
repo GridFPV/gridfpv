@@ -18,4 +18,9 @@ seats: Array<SeatRef>,
  * The most the timer's clock can be off from the Director's, in microseconds. Absent
  * until it has been measured.
  */
-clock_error_micros?: number, };
+clock_error_micros?: number, 
+/**
+ * Whether each seat can carry its own threshold. A timer that cannot has one
+ * threshold for all its seats.
+ */
+seat_thresholds?: boolean, };

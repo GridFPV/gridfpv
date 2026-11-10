@@ -120,6 +120,7 @@ pub fn router(registry: EventRegistry) -> Router {
             "/timers",
             get(crate::timers::list_timers).post(crate::timers::create_timer),
         )
+        .route("/timers/discovered", get(crate::timers::list_discovered))
         .route(
             "/timers/{timer_id}",
             axum::routing::delete(crate::timers::delete_timer),

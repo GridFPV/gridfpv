@@ -36,7 +36,15 @@ impl Daemon {
         let bin =
             std::env::var("GRIDFPV_OFTD_BIN").expect("set GRIDFPV_OFTD_BIN to the oftd binary");
         let child = Process::new(bin)
-            .args(["--fake", "--fake-lap-s", "1.5", "--listen", addr])
+            // No mDNS: this daemon is for this test only and must not show up on the network.
+            .args([
+                "--fake",
+                "--fake-lap-s",
+                "1.5",
+                "--no-mdns",
+                "--listen",
+                addr,
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -237,6 +245,34 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     assert_eq!(written, config);
     let (_, read_back) = call(&registry, "GET", &uri, None).await;
     assert_eq!(read_back, config);
+    // A threshold for one seat (OFT protocol v0.4): written, read back, and in use.
+    assert!(
+        registry.timers().list()[0].status.seat_thresholds,
+        "this daemon should say it takes a threshold per seat"
+    );
+    let mut per_seat = config.clone();
+    per_seat["seats"][0]["threshold"] = json!({"Manual": {"enter": -700, "exit": -760}});
+    let (status, written) = call(&registry, "PUT", &uri, Some(per_seat.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(written, per_seat);
+    let mut live = registry.timers().listen(&timer).unwrap();
+    let levels = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(gridfpv_server::timers::TimerLive::Levels(levels)) = live.recv().await {
+                if levels[0].enter == -700 {
+                    return levels;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the timer never reported the seat's own levels");
+    assert_eq!((levels[0].enter, levels[0].exit), (-700, -760));
+    // Back to the timer-wide threshold: the seat's own is gone, not left behind.
+    let (status, written) = call(&registry, "PUT", &uri, Some(config.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(written["seats"][0].get("threshold").is_none());
+
     // The timer's own refusal comes through with its reason.
     let mut bad = config.clone();
     bad["seats"][0]["freq_mhz"] = json!(9999);

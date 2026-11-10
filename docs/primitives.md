@@ -639,7 +639,14 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
    - **Tune page** in the console: each seat's frequency and on/off, a live signal trace
      per seat with the enter, exit and noise floor levels drawn on it, and the detection
      settings. Changes are a draft until "Apply to timer". Not yet run against a real timer.
-   - **Not yet:** mDNS discovery, and showing the logged signal in Marshal.
+   - **OFT protocol v0.4, server side:** a seat can carry its own threshold on a timer
+     that says it takes them, and OFT timers are found on the network (`GET
+     /timers/discovered`). Both checked against the real daemon. The console does not show
+     either yet.
+   - **A timer that restarts mid-race:** its clock begins again. The laps either side are
+     kept, and the stretch across the restart has no time.
+   - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):
+     settings, races, the race's signal, a restart between races and one mid-race.
 7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before. **Started:** `docs/api.md` lists every route as built, and the
    Protocol doc's banner points at it.

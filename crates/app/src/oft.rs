@@ -234,6 +234,7 @@ impl Link {
                             boot_id,
                             seats,
                             calibrated,
+                            capabilities,
                             ..
                         } => {
                             self.unit = if *calibrated {
@@ -251,6 +252,7 @@ impl Link {
                                 status.connected = true;
                                 status.problem = None;
                                 status.seats = seats;
+                                status.seat_thresholds = capabilities.config.seat_thresholds;
                             });
                         }
                         OftMessage::Pong { time_us } => {

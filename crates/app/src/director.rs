@@ -161,6 +161,9 @@ where
 
     // Keep a connection to every timer in the directory, for as long as the Director runs.
     let timers = crate::links::spawn(registry.clone());
+    // Look for OFT timers on the network, for the "found on the network" list. Held until
+    // the Director stops.
+    let _discovery = crate::discovery::spawn(registry.clone());
 
     let app = build_app(registry, &assets);
 

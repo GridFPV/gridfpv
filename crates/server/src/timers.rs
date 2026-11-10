@@ -16,6 +16,7 @@
 //! | `GET /timers` | every timer with its status |
 //! | `POST /timers` | add a timer |
 //! | `DELETE /timers/{id}` | remove a timer |
+//! | `GET /timers/discovered` | OFT timers found on the network, added or not |
 //! | `GET /timers/{id}/config` | the timer's settings, read from the timer |
 //! | `PUT /timers/{id}/config` | change them, and read them back to prove they took |
 //! | `GET /timers/{id}/live` | server-sent events: live signal and levels, for tuning |
@@ -102,6 +103,11 @@ pub struct TimerStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub clock_error_micros: Option<i64>,
+    /// Whether each seat can carry its own threshold. A timer that cannot has one
+    /// threshold for all its seats.
+    #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
+    pub seat_thresholds: bool,
 }
 
 /// A timer with its status (`GET /timers`).
@@ -121,6 +127,41 @@ pub struct TimerSeatConfig {
     pub freq_mhz: u32,
     /// Whether the timer watches this seat at all.
     pub enabled: bool,
+    /// The seat's own threshold. Absent means it uses the timer-wide one. Only a timer
+    /// whose status says `seat_thresholds` takes these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub threshold: Option<TimerThreshold>,
+}
+
+impl From<OftThreshold> for TimerThreshold {
+    fn from(threshold: OftThreshold) -> Self {
+        match threshold {
+            OftThreshold::Auto {
+                snr_enter,
+                hysteresis,
+            } => Self::Auto {
+                snr_enter,
+                hysteresis,
+            },
+            OftThreshold::Manual { enter, exit } => Self::Manual { enter, exit },
+        }
+    }
+}
+
+impl From<TimerThreshold> for OftThreshold {
+    fn from(threshold: TimerThreshold) -> Self {
+        match threshold {
+            TimerThreshold::Auto {
+                snr_enter,
+                hysteresis,
+            } => Self::Auto {
+                snr_enter,
+                hysteresis,
+            },
+            TimerThreshold::Manual { enter, exit } => Self::Manual { enter, exit },
+        }
+    }
 }
 
 /// How a timer sets the levels it detects crossings against. Values are tenths of a dB.
@@ -133,8 +174,8 @@ pub enum TimerThreshold {
     Manual { enter: i32, exit: i32 },
 }
 
-/// A timer's settings. Today the threshold is one setting for the whole timer; per-seat
-/// thresholds come with the next version of the OFT protocol.
+/// A timer's settings. `threshold` is the timer-wide one; a seat may carry its own on a timer
+/// that takes them (OFT from protocol v0.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct TimerConfig {
@@ -157,19 +198,11 @@ impl From<OftConfig> for TimerConfig {
                     seat: gridfpv_adapters::oft::seat_ref(seat.seat),
                     freq_mhz: seat.freq_mhz,
                     enabled: seat.enabled,
+                    threshold: seat.threshold.map(Into::into),
                 })
                 .collect(),
             seats_per_node: config.seats_per_node,
-            threshold: match config.threshold {
-                OftThreshold::Auto {
-                    snr_enter,
-                    hysteresis,
-                } => TimerThreshold::Auto {
-                    snr_enter,
-                    hysteresis,
-                },
-                OftThreshold::Manual { enter, exit } => TimerThreshold::Manual { enter, exit },
-            },
+            threshold: config.threshold.into(),
             min_lap_ms: config.min_lap_ms,
         }
     }
@@ -187,22 +220,14 @@ impl TimerConfig {
                     seat: seat.seat.0.parse().map_err(|_| TimerError::BadSeat)?,
                     freq_mhz: seat.freq_mhz,
                     enabled: seat.enabled,
+                    threshold: seat.threshold.map(Into::into),
                 })
             })
             .collect::<Result<_, TimerError>>()?;
         Ok(OftConfig {
             seats,
             seats_per_node: self.seats_per_node,
-            threshold: match self.threshold {
-                TimerThreshold::Auto {
-                    snr_enter,
-                    hysteresis,
-                } => OftThreshold::Auto {
-                    snr_enter,
-                    hysteresis,
-                },
-                TimerThreshold::Manual { enter, exit } => OftThreshold::Manual { enter, exit },
-            },
+            threshold: self.threshold.into(),
             min_lap_ms: self.min_lap_ms,
         })
     }
@@ -239,6 +264,24 @@ pub enum TimerLive {
     Levels(Vec<SeatLevels>),
 }
 
+/// An OFT timer found on the network (it advertises itself over mDNS). Finding one adds
+/// nothing: a person adds it. What it says about itself here is a hint; the timer itself is
+/// the truth once it is connected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct DiscoveredTimer {
+    /// The name the timer gives itself.
+    pub name: String,
+    /// Where it is: `host:port`, ready to be used as a timer's address.
+    pub address: String,
+    /// How many seats it says it has on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub seats: Option<u32>,
+    /// Whether a timer at this address is already in the directory.
+    pub added: bool,
+}
+
 /// Why a directory call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TimerError {
@@ -252,6 +295,10 @@ pub enum TimerError {
     Io(String),
     #[error("That seat is not one this timer has.")]
     BadSeat,
+    #[error(
+        "This timer has one threshold for all its seats. It cannot take one for a single seat."
+    )]
+    OneThreshold,
     /// The timer could not be asked, or said no. The text says which, for the director.
     #[error("{0}")]
     Unreachable(String),
@@ -266,9 +313,10 @@ pub enum TimerError {
 impl From<TimerError> for ProtocolError {
     fn from(error: TimerError) -> Self {
         let code = match error {
-            TimerError::NoName | TimerError::BadAddress | TimerError::BadSeat => {
-                ErrorCode::BadRequest
-            }
+            TimerError::NoName
+            | TimerError::BadAddress
+            | TimerError::BadSeat
+            | TimerError::OneThreshold => ErrorCode::BadRequest,
             TimerError::Unreachable(_) | TimerError::NotTaken | TimerError::NotBuilt => {
                 ErrorCode::Refused
             }
@@ -284,6 +332,8 @@ struct Inner {
     status: BTreeMap<AdapterId, TimerStatus>,
     /// Where each timer's connection sends live signal and levels.
     live: BTreeMap<AdapterId, broadcast::Sender<TimerLive>>,
+    /// Timers found on the network, by the full name they advertise under.
+    discovered: BTreeMap<String, DiscoveredTimer>,
     data_dir: Option<PathBuf>,
 }
 
@@ -322,6 +372,7 @@ impl TimerDirectory {
                 timers,
                 status: BTreeMap::new(),
                 live: BTreeMap::new(),
+                discovered: BTreeMap::new(),
                 data_dir,
             })),
             generation: watch::Sender::new(0),
@@ -423,6 +474,33 @@ impl TimerDirectory {
 }
 
 impl TimerDirectory {
+    /// A timer was found on the network, or what it says about itself changed. `key` is the
+    /// full name it advertises under.
+    pub fn found(&self, key: &str, timer: DiscoveredTimer) {
+        self.write().discovered.insert(key.to_owned(), timer);
+    }
+
+    /// A timer found earlier has gone from the network.
+    pub fn lost(&self, key: &str) {
+        self.write().discovered.remove(key);
+    }
+
+    /// The timers found on the network, by name, each marked if a timer at its address is
+    /// already in the directory.
+    pub fn discovered(&self) -> Vec<DiscoveredTimer> {
+        let inner = self.read();
+        let mut found: Vec<DiscoveredTimer> = inner
+            .discovered
+            .values()
+            .map(|timer| DiscoveredTimer {
+                added: inner.timers.values().any(|t| t.address == timer.address),
+                ..timer.clone()
+            })
+            .collect();
+        found.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.address.cmp(&b.address)));
+        found
+    }
+
     /// One timer's record.
     pub fn get(&self, id: &AdapterId) -> Option<Timer> {
         self.read().timers.get(id).cloned()
@@ -567,6 +645,11 @@ pub async fn list_timers(State(registry): State<EventRegistry>) -> Json<Vec<Time
     Json(registry.timers().list())
 }
 
+/// `GET /timers/discovered` — OFT timers found on the network. An open read.
+pub async fn list_discovered(State(registry): State<EventRegistry>) -> Json<Vec<DiscoveredTimer>> {
+    Json(registry.timers().discovered())
+}
+
 /// `POST /timers` — add a timer, RD-gated.
 pub async fn create_timer(
     _auth: ControlAuth,
@@ -616,6 +699,16 @@ pub async fn put_timer_config(
         .ok_or(TimerError::NotFound)?;
     if timer.kind != TimerKind::Oft {
         return Err(TimerError::NotBuilt.into());
+    }
+    // A timer that has one threshold for every seat would drop a seat's own without a
+    // word, and the write would then fail its readback with a vaguer message. Say it here.
+    let takes_seat_thresholds = registry
+        .timers()
+        .list()
+        .iter()
+        .any(|view| view.timer.id == timer_id && view.status.seat_thresholds);
+    if !takes_seat_thresholds && body.seats.iter().any(|seat| seat.threshold.is_some()) {
+        return Err(TimerError::OneThreshold.into());
     }
     let config = body.to_oft()?;
     Ok(Json(write_config(&timer, &config).await?.into()))
@@ -979,5 +1072,66 @@ mod tests {
             Err(broadcast::error::RecvError::Closed)
         ));
         assert!(directory.listen(&timer.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_threshold_for_one_seat_is_only_sent_to_a_timer_that_takes_them() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let timer = registry.timers().records()[0].id.clone();
+        let mut body = changed();
+        body["seats"][1]["threshold"] =
+            serde_json::json!({"Manual": {"enter": -650, "exit": -700}});
+
+        // The timer has not said it takes them: refused here, in plain words, not sent.
+        let (status, answer) = call(&registry, "PUT", &uri, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            answer["message"],
+            "This timer has one threshold for all its seats. It cannot take one for a single seat."
+        );
+        let (_, now) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(now["seats"][0]["freq_mhz"], 5800);
+
+        // Once its connection reports that it does, the seat's threshold goes through and
+        // reads back; a seat without one has no key at all.
+        registry
+            .timers()
+            .report(&timer, |status| status.seat_thresholds = true);
+        let (status, answer) = call(&registry, "PUT", &uri, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer, body);
+        assert!(answer["seats"][0].get("threshold").is_none());
+    }
+
+    #[test]
+    fn timers_found_on_the_network_are_listed_and_marked_once_added() {
+        let directory = TimerDirectory::new(None);
+        let found = |name: &str, address: &str| DiscoveredTimer {
+            name: name.into(),
+            address: address.into(),
+            seats: Some(1),
+            added: false,
+        };
+        directory.found("b._oft._tcp.local.", found("Gate B", "10.0.0.6:7270"));
+        directory.found("a._oft._tcp.local.", found("Gate A", "10.0.0.5:7270"));
+        let names: Vec<String> = directory.discovered().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["Gate A", "Gate B"]);
+        assert!(directory.discovered().iter().all(|t| !t.added));
+        // Finding a timer adds nothing.
+        assert!(directory.list().is_empty());
+
+        directory.create(&request("Gate", "10.0.0.5:7270")).unwrap();
+        let added: Vec<bool> = directory
+            .discovered()
+            .into_iter()
+            .map(|t| t.added)
+            .collect();
+        assert_eq!(added, vec![true, false]);
+
+        // The same name found again replaces what was known; one that leaves is dropped.
+        directory.found("b._oft._tcp.local.", found("Gate B", "10.0.0.9:7270"));
+        assert_eq!(directory.discovered()[1].address, "10.0.0.9:7270");
+        directory.lost("a._oft._tcp.local.");
+        assert_eq!(directory.discovered().len(), 1);
     }
 }

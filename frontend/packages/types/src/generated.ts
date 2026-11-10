@@ -51,6 +51,7 @@ export type * from '@bindings/CreatePilotRequest';
 export type * from '@bindings/CreateTimerRequest';
 export type * from '@bindings/CrossingView';
 export type * from '@bindings/DiscardReason';
+export type * from '@bindings/DiscoveredTimer';
 export type * from '@bindings/EliminationKind';
 export type * from '@bindings/EndCondition';
 export type * from '@bindings/ErrorCode';

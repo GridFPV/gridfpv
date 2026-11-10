@@ -3,8 +3,8 @@ import type { TimerSeatConfig } from "./TimerSeatConfig";
 import type { TimerThreshold } from "./TimerThreshold";
 
 /**
- * A timer's settings. Today the threshold is one setting for the whole timer; per-seat
- * thresholds come with the next version of the OFT protocol.
+ * A timer's settings. `threshold` is the timer-wide one; a seat may carry its own on a timer
+ * that takes them (OFT from protocol v0.4).
  */
 export type TimerConfig = { seats: Array<TimerSeatConfig>, 
 /**
