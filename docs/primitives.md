@@ -609,9 +609,10 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      `POST …/presets/bracket` and `…/presets/mains`, `POST …/passes`, and
      `GET …/changes` (a feed of the log cursor; a console that hears a new cursor reads the
      snapshot again).
-   - The console: the event page lists the phases and adds a heat or a bracket, and the Run
-     page runs one heat (start, countdown and tone, stop, save or discard). Crossings come
-     from a bench button until the console reads seats from a timer.
+   - The console: the event page (phases, "Up next", classes with rosters and standings,
+     rulings on heats and phases), the Run page (start, countdown and tone, stop, save or
+     discard), and the Marshal page (a to-do list, lap rulings, the race's signal trace,
+     protests). A heat is timed by a timer, or by the bench, where crossings are a button.
 6. Timers. **The OFT adapter is built:**
    - `adapters::oft`: a Timer's messages translated to Grid's events, and the clock fit.
      Pure, tested with messages from the spec.
