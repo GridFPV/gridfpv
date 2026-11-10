@@ -159,6 +159,12 @@ where
         _ => None,
     };
 
+    // Bind first. If the port is taken this returns here, before anything long-lived has
+    // been started: the desktop app tries again on another port, and a first try that had
+    // already started the timer connections would leave a second set running.
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+
     // Keep a connection to every timer in the directory, for as long as the Director runs.
     let timers = crate::links::spawn(registry.clone());
     // Look for OFT timers on the network, for the "found on the network" list. Held until
@@ -166,9 +172,6 @@ where
     let _discovery = crate::discovery::spawn(registry.clone());
 
     let app = build_app(registry, &assets);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let bound = listener.local_addr()?;
 
     on_ready(&DirectorReady {
         bound,

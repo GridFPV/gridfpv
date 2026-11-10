@@ -21,11 +21,20 @@ On launch the app:
 
 1. Builds a multi-thread tokio runtime and spawns the **same** Director the hosted `gridfpv`
    binary runs — via the shared `gridfpv_app::director::run_director` — as a background task.
-   It binds **loopback on an ephemeral free port** (`127.0.0.1:0`), uses a **true-portable
-   data dir** (`gridfpv-data/` next to the executable, with a per-user app-data fallback) for
-   created events' SQLite files, and serves the **bundled** `rd-console` dist as the SPA.
-2. Waits for the Director to report its OS-assigned port, then opens the main window pointed
-   at `http://127.0.0.1:<port>/`.
+   It binds **loopback on a fixed port** (`127.0.0.1:8080` by default; `GRIDFPV_ADDR`
+   overrides it), uses a **true-portable data dir** (`gridfpv-data/` next to the executable,
+   with a per-user app-data fallback) for created events' SQLite files, and serves the
+   **bundled** `rd-console` dist as the SPA.
+2. Waits for the Director to report the port it bound, then opens the main window pointed at
+   `http://127.0.0.1:<port>/`.
+
+**Why a fixed port.** The app used to bind `127.0.0.1:0` and take whatever port the OS gave
+it, which changed on every restart — and an **OBS browser source** holding an overlay URL
+(`http://127.0.0.1:<port>/#/overlay/race`) broke every time. The port is now the same one the
+hosted binary defaults to, and the same after every launch. If it is taken, the app falls back
+to an ephemeral port **and says so in the log** rather than refusing to start; set
+`GRIDFPV_ADDR=127.0.0.1:<other>` to pick a different fixed port (or a LAN address for OBS on
+another machine — off loopback, set `GRIDFPV_RD_TOKEN` to gate control).
 
 Because the window loads the Director's HTTP origin directly (rather than the bundled assets
 over `tauri://`), the SPA's **same-origin** API calls (`/snapshot/...`, `/control/...`) and
@@ -43,8 +52,8 @@ The Director's serve entry point was extracted into one reusable function,
 
 - the hosted `gridfpv` binary (`crates/app/src/main.rs`) — env-resolved address, Ctrl-C
   shutdown, prints the startup banner; behavior unchanged; and
-- this native app (`src-tauri/src/lib.rs`) — `127.0.0.1:0`, per-user data dir, bundled
-  assets, and an `on_ready` that reads the ephemeral port.
+- this native app (`src-tauri/src/lib.rs`) — `127.0.0.1:8080` (or `GRIDFPV_ADDR`), the
+  portable data dir, bundled assets, and an `on_ready` that reads the bound port.
 
 So the two share identical Director wiring (event registry, optional RD token, sim
 lap-source bridge, presence reconciler, router, CORS).
@@ -120,16 +129,16 @@ chmod +x src-tauri/target/release/gridfpv-desktop
 ./src-tauri/target/release/gridfpv-desktop
 ```
 
-A native window opens with the RD console, backed by the in-process Director on a private
-loopback port. The maintainer runs this over RDP (which provides a display). A `gridfpv-data/`
+A native window opens with the RD console, backed by the in-process Director on loopback
+port 8080 (`http://127.0.0.1:8080/`, the address OBS browser sources and other tabs can hold). The maintainer runs this over RDP (which provides a display). A `gridfpv-data/`
 folder appears next to the binary, holding created events' SQLite files.
 
 > **Headless note:** the GUI window needs a display, so on a headless VM the window itself
 > can't render. The **server half** (the embedded Director) needs no display and is covered
 > by an integration test — `crates/app/tests/director.rs ::
 > run_director_serves_health_on_loopback_ephemeral_port` — which drives the exact
-> `run_director` entry point the app uses, binds a loopback ephemeral port, and asserts
-> `/health` answers over a real socket. The full app can also be smoke-launched headless with
+> `run_director` entry point the app uses (on an ephemeral port, so the test never collides
+> with a running Director) and asserts `/health` answers over a real socket. The full app can also be smoke-launched headless with
 > `xvfb-run` (set `WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1` to avoid the
 > WebKit GPU path hanging under Xvfb).
 
