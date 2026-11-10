@@ -360,6 +360,10 @@ there for a hard track, where extra crossings are likely and the director may ne
 kept open to sort laps out. If a finishing lap is removed during the wait, the race keeps
 going. A pilot who never finishes means the race never stops by itself.
 
+**A time limit** (Agreed) can be set on any race that is not timed: first-to-N or open. The
+race stops by itself at the limit, whoever has or has not finished. With both a limit and
+the wait above, whichever comes first stops the race. The default is no limit.
+
 Timing from the tone needs the tone's time on the timer's own clock. The same is true of the
 filter that ignores crossings before the start. A timer that cannot give that time falls back
 to the hole shot and filters nothing at the start. OFT can give it.

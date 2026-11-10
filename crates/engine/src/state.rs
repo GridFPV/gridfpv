@@ -278,22 +278,32 @@ impl EventState {
             .min()
     }
 
-    /// When a race that started at `started` stops by itself. A timed race: after its time
-    /// and its grace window. A first-to-N race whose format asks for it: a set wait after
-    /// every pilot has finished. Any other race runs until the director stops it.
+    /// When a race that started at `started` stops by itself, if it does.
+    ///
+    /// - A timed race: after its time and its grace window.
+    /// - A first-to-N race whose format asks for it: a set wait after every pilot finished.
+    /// - A first-to-N or open race with a time limit: at the limit.
+    ///
+    /// Whichever comes first. With none of these the director stops it.
     fn runs_out(&self, race: &Race, started: i64) -> Option<i64> {
         let rules = &self.tree.format_for(&race.setup.heat)?.race;
+        let limit = rules.max_micros.map(|max| started + max);
         match rules.end {
             EndCondition::Timed {
                 micros,
                 grace_micros,
             } => Some(started + micros + grace_micros),
             EndCondition::FirstToLaps(_) => {
-                let wait = rules.stop_after_all_finish_micros?;
-                let finished = self.all_finished_at.get(&race.setup.race)?;
-                Some(finished + wait)
+                let all_done = rules.stop_after_all_finish_micros.and_then(|wait| {
+                    let finished = self.all_finished_at.get(&race.setup.race)?;
+                    Some(finished + wait)
+                });
+                match (all_done, limit) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                }
             }
-            EndCondition::Open => None,
+            EndCondition::Open => limit,
         }
     }
 
@@ -666,6 +676,7 @@ mod tests {
                 min_lap_micros: None,
                 first_lap: FirstLap::default(),
                 stop_after_all_finish_micros: None,
+                max_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -1385,5 +1396,69 @@ mod tests {
         director.now = 10_000 * S;
         director.catch_up();
         assert_eq!(state_of(&director), RaceState::Running);
+    }
+
+    #[test]
+    fn a_race_that_is_not_timed_can_carry_a_time_limit() {
+        // Open, with a five minute limit.
+        let mut format = format(EndCondition::Open, 0);
+        format.race.max_micros = Some(300 * S);
+        let mut director = Director::default();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("heat"),
+                    label: "Heat".into(),
+                    parent: None,
+                    kind: PhaseKind::Heat {
+                        lineup: vec![HeatSeat {
+                            adapter: oft(),
+                            seat: SeatRef("seat-0".into()),
+                            source: SeatSource::Pilot(pilot("ana")),
+                        }],
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director.now = 10 * S;
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        assert_eq!(director.state.next_due(), Some(310 * S));
+        director.now = 1000 * S;
+        director.catch_up();
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        assert_eq!(race.state, RaceState::Stopped);
+        assert_eq!(race.stopped_at, Some(310 * S));
+    }
+
+    #[test]
+    fn a_first_to_n_race_stops_at_whichever_comes_first_the_wait_or_the_limit() {
+        // Everyone finishes at 14 s; a 60 s wait would stop it at 74 s, but the limit is 30 s.
+        let mut director = two_pilot_heat(Some(60 * S));
+        let mut def = director.state.tree.get(&pid("heat")).unwrap().clone();
+        def.format.as_mut().unwrap().race.max_micros = Some(30 * S);
+        director.record(Event::PhaseDefined { def }).unwrap();
+        // Nobody has finished: only the limit is due.
+        assert_eq!(director.state.next_due(), Some(30 * S));
+        for (now, seat, at) in [
+            (S, "seat-0", 0),
+            (S, "seat-1", 0),
+            (11 * S, "seat-0", 10 * S),
+            (14 * S, "seat-1", 13 * S),
+        ] {
+            director.now = now;
+            director.cross(seat, at);
+        }
+        assert_eq!(director.state.next_due(), Some(30 * S));
+        director.now = 100 * S;
+        director.catch_up();
+        assert_eq!(
+            director.state.races.get(&rid("heat#1")).unwrap().stopped_at,
+            Some(30 * S)
+        );
     }
 }

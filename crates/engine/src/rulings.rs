@@ -349,6 +349,7 @@ mod tests {
                 min_lap_micros: None,
                 first_lap: Default::default(),
                 stop_after_all_finish_micros: None,
+                max_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {

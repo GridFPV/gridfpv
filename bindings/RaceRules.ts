@@ -29,4 +29,10 @@ first_lap: FirstLap,
  * wait is there for a track where extra crossings are likely and laps may need
  * sorting out before the race is called over.
  */
-stop_after_all_finish_micros?: number, };
+stop_after_all_finish_micros?: number, 
+/**
+ * For a race that is not timed (first-to-N or open): the longest it may run, in
+ * microseconds from the start. The race stops by itself when it gets there, whoever
+ * has or has not finished. `None`, the default, sets no limit.
+ */
+max_micros?: number, };

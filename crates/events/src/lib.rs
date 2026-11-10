@@ -444,6 +444,12 @@ pub struct RaceRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub stop_after_all_finish_micros: Option<i64>,
+    /// For a race that is not timed (first-to-N or open): the longest it may run, in
+    /// microseconds from the start. The race stops by itself when it gets there, whoever
+    /// has or has not finished. `None`, the default, sets no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub max_micros: Option<i64>,
 }
 
 /// What starts a pilot's first lap in a race.
@@ -1230,6 +1236,7 @@ mod tests {
                 min_lap_micros: Some(2_000_000),
                 first_lap: Default::default(),
                 stop_after_all_finish_micros: None,
+                max_micros: None,
             },
             completion: CompletionRule::AnyPilotReaches {
                 measure: Measure::Wins,
