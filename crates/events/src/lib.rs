@@ -657,6 +657,10 @@ pub enum ProtestOutcome {
 /// Externally tagged (the default serde representation): each variant serialises as
 /// `{ "VariantName": { ..fields } }`, which maps cleanly to a discriminated union in
 /// the generated TypeScript (#4).
+// A phase definition is much bigger than a pass. Boxing it would save memory only where
+// events are held in bulk, and nothing holds them in bulk: they are read from the log,
+// folded, and dropped. So the plain shape is kept.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum Event {
