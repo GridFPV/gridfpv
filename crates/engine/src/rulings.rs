@@ -185,9 +185,30 @@ impl Rulings {
             .collect()
     }
 
+    /// Whether a false start is recorded against this pilot in this race.
+    pub fn has_false_start(&self, race: &RaceId, pilot: &PilotId) -> bool {
+        self.false_starts.contains(&(race.clone(), pilot.clone()))
+    }
+
+    /// Whether a lock sits on exactly this phase (not on one above it).
+    pub fn is_locked_here(&self, phase: &PhaseId) -> bool {
+        self.locked.contains(phase)
+    }
+
+    /// Whether this pilot is disqualified from exactly this phase.
+    pub fn is_disqualified_from(&self, phase: &PhaseId, pilot: &PilotId) -> bool {
+        self.disqualified
+            .contains_key(&(phase.clone(), pilot.clone()))
+    }
+
     /// One protest.
     pub fn protest(&self, id: &ProtestId) -> Option<&Protest> {
         self.protests.get(id)
+    }
+
+    /// Every protest, open or resolved, with its id.
+    pub fn protests(&self) -> impl Iterator<Item = (&ProtestId, &Protest)> {
+        self.protests.iter()
     }
 
     /// The protests that are still open, with their ids.

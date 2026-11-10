@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 gridfpv-events.workspace = true
 gridfpv-storage.workspace = true
+gridfpv-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ts-rs = "12"
@@ -25,6 +26,11 @@ tower = { version = "0.5", features = ["util"] }
 # `getrandom` draws them straight from the OS CSPRNG — minimal, std-ish, no key
 # management. Real signed/HMAC join tokens are a later concern (see `auth` module docs).
 getrandom = "0.3"
+
+# The change feed (`GET /events/{id}/changes`): a `watch` channel per event carries the log
+# cursor, and the feed is a server-sent-event stream built with `futures-util`.
+tokio = { version = "1", features = ["sync", "time"] }
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` drives the router in tests with no real network;

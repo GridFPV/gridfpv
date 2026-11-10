@@ -42,6 +42,10 @@ pub enum ErrorCode {
     /// The request was malformed or not allowed — a blank required field, an edit to a
     /// read-only built-in.
     BadRequest,
+    /// A command was understood but is not allowed right now: the event's state refuses it
+    /// (another race is undecided, the heat is waiting, the phase is locked). Nothing was
+    /// changed. The message says why, in words a director can act on.
+    Refused,
     /// An unexpected server-side failure. The catch-all an older client also maps an
     /// unknown future code onto.
     Internal,

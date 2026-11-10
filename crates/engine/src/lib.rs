@@ -12,12 +12,14 @@
 //!   whether its completion rule says it is done (§5.4, §5.5).
 //! - [`phase`] — the phase tree: fields, seat references, combined rankings, completion and
 //!   inherited formats (§5.2 – §5.6).
-//! - [`presets`] — generators that write plain phases: a double elimination bracket, and
-//!   mains stacked with bump-ups (§6).
-//! - [`rulings`] — false starts counted against a phase's limit, disqualification, locking
-//!   and protests (§5.7, §5.8).
+//! - [`presets`] — generators that write plain phases: brackets of any shape, and mains
+//!   stacked with bump-ups (§6).
+//! - [`rulings`] — false starts counted against a phase's limit, disqualification, hand-set
+//!   positions, locking and protests (§5.7, §5.8).
+//! - [`state`] — all of the above folded together for one event, with the one check every
+//!   console command goes through and the facts that time alone makes true.
 //!
-//! Still to come: time and points penalties, and the director's position override.
+//! Still to come: time and points penalties, class standings, and the run queue.
 #![forbid(unsafe_code)]
 
 pub mod heat;
@@ -26,3 +28,4 @@ pub mod phase;
 pub mod presets;
 pub mod race;
 pub mod rulings;
+pub mod state;

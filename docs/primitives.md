@@ -591,9 +591,15 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
    - `presets`: brackets of any shape and stacked mains, checked against §6.1 and against
      96 pilots in mains of 16.
    - `rulings`: false starts, disqualification, locking, protests (§5.7, §5.8).
-5. **Next:** wire the engine into the Director (commands over HTTP, the live stream ported
-   back from `devel`), then the Run page, then the OFT adapter. Nothing in the app uses the
-   engine yet.
+5. Wire the engine into the Director. **Done** for the server side:
+   - `engine::state`: one event's whole state, the one check every command goes through,
+     and the facts time alone makes true (a countdown reaching its tone, a timed race
+     running out).
+   - `server::control`: `GET /events/{id}/state` (one snapshot), `POST …/commands`,
+     `POST …/presets/bracket` and `…/presets/mains`, `POST …/passes`, and
+     `GET …/changes` (a feed of the log cursor; a console that hears a new cursor reads the
+     snapshot again).
+   - **Next:** the Run page in the console, then the OFT adapter.
 6. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before.
 
@@ -610,6 +616,24 @@ feature that CI does not enable, so CI on GitHub stays green.
 **Not in the first build:** timing with no timer (a manual adapter where the director taps
 laps), and seasons. Season rules such as "best N of M events" need measures that §5.5 does
 not have yet; they are added when seasons are built.
+
+**Planned, not built: video in marshaling** (Ryan, 2026-11-10). When reviewing laps today,
+Ryan opens the OBS recording made through grid-rh's video page and reads the lap times off
+the overlay. Grid should do this natively:
+
+- In Marshal, picking a heat opens a small window with that race's recorded video.
+- The video follows the marker on the signal trace. Where there is no signal data, it
+  follows the race time instead.
+- This means grid-rh's video features move into Grid, as already planned.
+
+What the design must leave room for, and does: a race already has its start on the server
+clock, and every crossing has a time. A recording only needs one more fact in the log, saying
+which race it covers and what server time its first frame is. Then any moment in the race
+maps to a moment in the video. Nothing in §5 changes.
+
+**To discuss once the base is done:** whether Grid should control video itself, the way
+FPVTrackside does, instead of leaving capture to OBS. This was decided against for grid-rh.
+Ryan wants the question opened again for the native app.
 
 **Decided elsewhere and unchanged:**
 

@@ -1217,6 +1217,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridfpv-engine"
+version = "0.4.0"
+dependencies = [
+ "gridfpv-events",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "gridfpv-events"
 version = "0.4.0"
 dependencies = [
@@ -1229,11 +1237,14 @@ name = "gridfpv-server"
 version = "0.4.0"
 dependencies = [
  "axum",
+ "futures-util",
  "getrandom 0.3.4",
+ "gridfpv-engine",
  "gridfpv-events",
  "gridfpv-storage",
  "serde",
  "serde_json",
+ "tokio",
  "tower",
  "ts-rs",
 ]

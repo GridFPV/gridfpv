@@ -800,6 +800,14 @@ pub enum Event {
     PhaseLocked { phase: PhaseId },
     /// The director unlocked a phase.
     PhaseUnlocked { phase: PhaseId },
+    /// The event set a class's roster: the pilots racing in that class at this event, in
+    /// roster order. A class is in the event once it has a roster.
+    RosterSet {
+        class: ClassId,
+        pilots: Vec<PilotId>,
+    },
+    /// The event dropped a class.
+    RosterRemoved { class: ClassId },
     /// A protest was filed against a race.
     ProtestFiled {
         protest: ProtestId,
@@ -819,6 +827,56 @@ pub enum Event {
         #[ts(optional)]
         note: Option<String>,
     },
+}
+
+/// What a console asks the Director to do in an event (`POST /events/{id}/commands`).
+///
+/// The Director checks a command against the event's state. If it is allowed, the facts it
+/// stands for are appended to the log; if not, it is refused with the reason and nothing is
+/// appended.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum Command {
+    /// Start the next race of a heat. The lineup is the heat's resolved lineup, and the
+    /// race rules come from the format in force. A format with a staging time begins the
+    /// countdown; the Director logs the start at the tone.
+    StartRace { heat: PhaseId },
+    /// Stop the running race.
+    StopRace { race: RaceId },
+    /// Save a stopped race, so it counts.
+    SaveRace {
+        race: RaceId,
+        #[serde(default)]
+        needs_marshal: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
+    /// Discard a race: staging, running, stopped or already saved.
+    DiscardRace {
+        race: RaceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        reason: Option<DiscardReason>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
+    /// File a protest against a race. The Director gives it an id.
+    FileProtest {
+        race: RaceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        by: Option<PilotId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        note: Option<String>,
+    },
+    /// Record a setup fact or a ruling, sent as the fact itself: a phase defined or removed,
+    /// a roster, a lap ruling, a heat called done, a false start, a disqualification, a
+    /// position set by hand, a lock, a protest resolved. Facts that only a timer or the
+    /// Director itself may log (passes, race starts and stops) are refused.
+    Record(Box<Event>),
 }
 
 #[cfg(test)]

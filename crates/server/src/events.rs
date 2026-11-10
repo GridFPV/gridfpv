@@ -215,6 +215,26 @@ impl CreateEventRequest {
 struct RegisteredEvent {
     meta: EventMeta,
     log: SharedLog,
+    live: Live,
+}
+
+/// An event's live state beside its log: the engine's fold of the log, kept caught up, and
+/// the channel that tells listeners the log grew. See [`crate::control`].
+#[derive(Clone)]
+pub struct Live {
+    /// The fold of the log so far. Always lock the log **before** this.
+    pub state: Arc<Mutex<gridfpv_engine::state::EventState>>,
+    /// The log cursor (how many entries), sent whenever it moves.
+    pub changed: tokio::sync::watch::Sender<u64>,
+}
+
+impl Live {
+    fn new() -> Self {
+        Self {
+            state: Arc::default(),
+            changed: tokio::sync::watch::Sender::new(0),
+        }
+    }
 }
 
 /// The registry of all events on this Director.
@@ -363,6 +383,11 @@ impl EventRegistry {
         self.read().events.get(id).map(|e| e.log.clone())
     }
 
+    /// An event's live state, or `None` if no such event.
+    pub fn live(&self, id: &EventId) -> Option<Live> {
+        self.read().events.get(id).map(|e| e.live.clone())
+    }
+
     /// The metadata for every event, in id order.
     ///
     /// The order is stable (the map is a `BTreeMap`) so `GET /events` is deterministic. The list
@@ -436,6 +461,7 @@ impl EventRegistry {
             RegisteredEvent {
                 meta: meta.clone(),
                 log,
+                live: Live::new(),
             },
         );
         Ok(meta)
@@ -620,6 +646,7 @@ fn restore_persisted_events(dir: &Path, events: &mut BTreeMap<EventId, Registere
             RegisteredEvent {
                 meta,
                 log: Arc::new(Mutex::new(log)),
+                live: Live::new(),
             },
         );
     }

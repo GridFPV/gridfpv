@@ -11,6 +11,11 @@
 //! | `GET /events`, `POST /events`, `DELETE /events/{id}` | the event registry |
 //! | `GET /active-event`, `PUT /active-event` | the Director's active event |
 //! | `POST /events/{id}/auth/join-token` | mint a read-only join token |
+//! | `GET /events/{id}/state` | the event's competition snapshot |
+//! | `POST /events/{id}/commands` | one console command: checked, then logged as facts |
+//! | `POST /events/{id}/presets/bracket`, `…/presets/mains` | generate phases from a preset |
+//! | `POST /events/{id}/passes` | a gate crossing from outside (tools and tests) |
+//! | `GET /events/{id}/changes` | server-sent events: the log cursor, each time it moves |
 //! | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | the pilot directory |
 //! | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | the class directory |
 //!
@@ -78,6 +83,26 @@ pub fn router(registry: EventRegistry) -> Router {
         // event on connect/reload, and an RD-gated write to set it.
         .route("/active-event", get(get_active_event).put(set_active_event))
         .route("/events/{event_id}/auth/join-token", post(mint_join_token))
+        // The competition: one snapshot, one door for commands, the preset generators, a
+        // pass from outside, and the change feed. See [`crate::control`].
+        .route("/events/{event_id}/state", get(crate::control::get_state))
+        .route(
+            "/events/{event_id}/commands",
+            post(crate::control::post_command),
+        )
+        .route(
+            "/events/{event_id}/presets/bracket",
+            post(crate::control::post_bracket),
+        )
+        .route(
+            "/events/{event_id}/presets/mains",
+            post(crate::control::post_mains),
+        )
+        .route("/events/{event_id}/passes", post(crate::control::post_pass))
+        .route(
+            "/events/{event_id}/changes",
+            get(crate::control::get_changes),
+        )
         // The app-level pilot directory: an open list; create/edit/delete are RD-gated.
         .route("/pilots", get(list_pilots).post(create_pilot))
         .route("/pilots/{pilot_id}", put(update_pilot).delete(delete_pilot))
@@ -448,7 +473,7 @@ where
 
 /// Current server wall-clock time in **microseconds** since the Unix epoch — what `GET /time`
 /// serves.
-fn now_micros() -> i64 {
+pub(crate) fn now_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
@@ -465,6 +490,7 @@ impl IntoResponse for ProtocolError {
             ErrorCode::StaleCursor => StatusCode::GONE,
             ErrorCode::VersionMismatch => StatusCode::UPGRADE_REQUIRED,
             ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
+            ErrorCode::Refused => StatusCode::CONFLICT,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self)).into_response()
