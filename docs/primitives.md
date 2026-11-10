@@ -663,6 +663,23 @@ seat, the higher seed keeps it. A director's override of the result is not built
 
 **Not built yet in the engine:** time and points penalties.
 
+**Known loose ends** (as of 2026-11-10; none blocks a race):
+
+- The overlay works out "best N consecutive laps" itself, as the engine also does. The
+  Director should serve it, so the rule lives in one place.
+- A race has no "saved at" time in the snapshot, so the overlay infers how long to keep a
+  result on screen.
+- The trace of a race in which the timer restarted is drawn on two clocks at once. The lap
+  list is right; the picture is not.
+- Marshal cannot move a lap's time yet, though the Director can. The trace does not pan by
+  touch drag.
+- A class cannot be removed from an event in the console. A timer can be removed while a
+  heat still uses it.
+- Every unlocked phase row has a Lock button, which is a lot on a big bracket.
+- The timer list and the active event are polled, not pushed.
+- Refusing a start with no countdown on a timer that needs warning is not enforced.
+- The desktop app is not compiled or run by any gate on this machine.
+
 **OFT in tests** (Agreed): the OFT repos will live on GitHub eventually. Until then Grid
 uses the local checkout at `~/development/fpv/open-fpv-timer`, and tests that need a fake
 Timer run locally only. Anything that depends on the local checkout sits behind a cargo
