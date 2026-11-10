@@ -19,12 +19,15 @@
 import { isRequestFailure } from '@gridfpv/protocol-client';
 import type {
   BracketRequest,
+  Class,
   Command,
   EventId,
   EventView,
   PassRequest,
   Pilot,
   ProtocolError,
+  RaceId,
+  RaceSignal,
   TimerView
 } from '@gridfpv/types';
 import { buildNames, type Names } from './names.js';
@@ -40,8 +43,10 @@ export type LiveSession = Pick<
   | 'sendCommand'
   | 'createBracket'
   | 'postPass'
+  | 'getRaceSignal'
   | 'listPilots'
   | 'listTimers'
+  | 'listClasses'
 >;
 
 /**
@@ -68,10 +73,14 @@ export class EventLive {
   timers = $state.raw<TimerView[]>([]);
   /** Whether the timer directory has been read at least once. */
   timersLoaded = $state(false);
+  /** The class directory, for class names and the class picker. */
+  classes = $state.raw<Class[]>([]);
   /** What a heat can be timed by: every timer, then the bench. */
   seatSources: SeatSource[] = $derived(seatSources(this.timers));
   /** The one resolver from ids to names for this event. */
-  names: Names = $derived(buildNames(this.view?.phases ?? [], this.pilots, this.timers));
+  names: Names = $derived(
+    buildNames(this.view?.phases ?? [], this.pilots, this.timers, this.classes)
+  );
 
   readonly eventId: EventId;
   #session: LiveSession;
@@ -96,6 +105,7 @@ export class EventLive {
     void this.reload();
     void this.reloadPilots();
     void this.reloadTimers();
+    void this.reloadClasses();
     clearInterval(this.#timerPoll);
     this.#timerPoll = setInterval(() => void this.reloadTimers(), TIMER_POLL_MS);
     try {
@@ -183,6 +193,16 @@ export class EventLive {
     }
   }
 
+  /** Read the class directory again (a class may have been added since the page opened). */
+  async reloadClasses(): Promise<void> {
+    try {
+      const classes = await this.#session.listClasses();
+      if (!this.#stopped) this.classes = classes;
+    } catch {
+      // Class names fall back to "Unknown class".
+    }
+  }
+
   /**
    * Read the timer directory again. A read that fails keeps the last list: a timer's name
    * should not turn into "Unknown timer" because one request was dropped.
@@ -215,6 +235,14 @@ export class EventLive {
   /** Log one gate crossing. Same answers as {@link send}. */
   async postPass(pass: PassRequest): Promise<boolean> {
     return this.#wrote(await this.#session.postPass(this.eventId, pass));
+  }
+
+  /**
+   * Read a race's logged signal: one trace per seat, on the timer's clock. Read when a marshal
+   * opens the race, never kept here, because it can be large. A failure throws.
+   */
+  raceSignal(race: RaceId): Promise<RaceSignal> {
+    return this.#session.getRaceSignal(this.eventId, race);
   }
 
   /**

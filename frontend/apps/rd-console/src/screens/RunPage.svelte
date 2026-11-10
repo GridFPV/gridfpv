@@ -14,14 +14,15 @@
    * A command the Director refuses shows its sentence in the banner at the top, as it is.
    */
   import { onDestroy, untrack } from 'svelte';
-  import { Badge, Banner, Button, Card, RaceClock, formatMicros } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Input, RaceClock, formatMicros } from '@gridfpv/components';
   import type {
     Command,
     DiscardReason,
     EventMeta,
     PhaseId,
     PilotId,
-    ProtocolError
+    ProtocolError,
+    RaceId
   } from '@gridfpv/types';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
@@ -174,7 +175,25 @@
   // ── Actions ────────────────────────────────────────────────────────────────
   let busy = $state(false);
   let error = $state<ProtocolError | undefined>(undefined);
-  let discardOpen = $state(false);
+  /** The race the discard dialog is open for: the stopped one, or a saved one from the list. */
+  let discardTarget = $state<RaceId | undefined>(undefined);
+  const discarding = $derived(races.find((r) => r.race === discardTarget));
+  /** The save options. One click on Save still saves; these only add to it. */
+  let needsLook = $state(false);
+  let saveNote = $state('');
+
+  function save() {
+    if (!race) return;
+    const note = saveNote.trim();
+    void act({
+      SaveRace: { race: race.race, needs_marshal: needsLook, ...(note ? { note } : {}) }
+    }).then(() => {
+      // A refused save keeps what was typed.
+      if (error) return;
+      needsLook = false;
+      saveNote = '';
+    });
+  }
 
   /** Send one command. A refusal lands in the banner in the Director's words. */
   async function act(command: Command) {
@@ -197,18 +216,19 @@
   }
 
   async function discard(reason: DiscardReason | undefined, falseStartBy?: PilotId) {
-    if (!race) return;
+    const target = discarding;
+    if (!target) return;
     // The dialog shows a failure itself, so these are not caught here.
     if (falseStartBy !== undefined) {
       const recorded = await live.send({
-        Record: { FalseStart: { race: race.race, pilot: falseStartBy } }
+        Record: { FalseStart: { race: target.race, pilot: falseStartBy } }
       });
       if (!recorded) return;
     }
     const done = await live.send({
-      DiscardRace: reason === undefined ? { race: race.race } : { race: race.race, reason }
+      DiscardRace: reason === undefined ? { race: target.race } : { race: target.race, reason }
     });
-    if (done) discardOpen = false;
+    if (done) discardTarget = undefined;
   }
 
   /** The bench tool: log a crossing on a seat, stamped with this browser's clock. */
@@ -357,21 +377,33 @@
                   onclick={() => act({ StopRace: { race: race.race } })}>Stop</Button
                 >
               {:else}
-                <Button
-                  variant="primary"
-                  size="lg"
-                  disabled={busy}
-                  onclick={() => act({ SaveRace: { race: race.race, needs_marshal: false } })}
-                  >Save</Button
-                >
+                <Button variant="primary" size="lg" disabled={busy} onclick={save}>Save</Button>
                 <Button
                   variant="ghost"
                   size="lg"
                   disabled={busy}
-                  onclick={() => (discardOpen = true)}>Discard</Button
+                  onclick={() => (discardTarget = race.race)}>Discard</Button
                 >
               {/if}
             </div>
+            {#if race?.state === 'Stopped'}
+              <!-- Optional. Save works without opening this. -->
+              <details class="save-options">
+                <summary>Save options</summary>
+                <label class="look">
+                  <input type="checkbox" bind:checked={needsLook} disabled={busy} />
+                  Needs a look
+                </label>
+                <p class="muted">Puts the race on the Marshal page's to-do list.</p>
+                <Input
+                  bind:value={saveNote}
+                  placeholder="Note (optional)"
+                  aria-label="Note for this race"
+                  autocomplete="off"
+                  disabled={busy}
+                />
+              </details>
+            {/if}
           </div>
         </div>
       </Card>
@@ -417,6 +449,21 @@
                     </span>
                   {/each}
                 </span>
+                {#if past.needs_marshal && past.state === 'Saved'}
+                  <Badge tone="warn">Needs a look</Badge>
+                {/if}
+                {#if past.note}<span class="muted">{past.note}</span>{/if}
+                {#if past.state === 'Saved' && !past.locked}
+                  <span class="past-action">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      aria-label="Discard race {raceNumber(past.race)}"
+                      onclick={() => (discardTarget = past.race)}>Discard</Button
+                    >
+                  </span>
+                {/if}
               </li>
             {/each}
           </ol>
@@ -426,13 +473,13 @@
   </div>
 </div>
 
-{#if discardOpen && race}
+{#if discarding}
   <DiscardDialog
-    pilots={race.seats.flatMap((seat) =>
+    pilots={discarding.seats.flatMap((seat) =>
       seat.pilot === undefined ? [] : [{ id: seat.pilot, callsign: names.pilot(seat.pilot) }]
     )}
     ondiscard={discard}
-    onclose={() => (discardOpen = false)}
+    onclose={() => (discardTarget = undefined)}
   />
 {/if}
 
@@ -558,6 +605,28 @@
     gap: var(--gf-space-1) var(--gf-space-4);
     flex-wrap: wrap;
     font-size: var(--gf-font-size-sm);
+  }
+  .past-action {
+    margin-left: auto;
+  }
+  .save-options {
+    width: min(22rem, 100%);
+    font-size: var(--gf-font-size-sm);
+  }
+  .save-options summary {
+    cursor: pointer;
+    color: var(--gf-text-secondary);
+    text-align: center;
+  }
+  .save-options[open] {
+    display: grid;
+    gap: var(--gf-space-2);
+  }
+  .look {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    font-weight: var(--gf-font-weight-semibold);
   }
   @media (max-width: 48rem) {
     .timerhead {

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { BracketRequest, Command, EventView, Format, MainsRequest } from '@gridfpv/types';
+import type {
+  BracketRequest,
+  Command,
+  EventView,
+  Format,
+  MainsRequest,
+  RaceSignal
+} from '@gridfpv/types';
 import type { EventSourceLike, FetchLike } from './client.js';
 
 // The competition calls: the snapshot, one command, the presets, a pass, and the change feed.
@@ -229,5 +236,50 @@ describe('the change feed', () => {
     const stop = subscribeChanges(BASE, EVT, () => {}, { EventSource: FakeSource });
     stop();
     expect(FakeSource.made[0].closed).toBe(true);
+  });
+});
+
+describe("a race's logged signal", () => {
+  it('getRaceSignal GETs /events/{id}/signal with the race id encoded, and needs no token', async () => {
+    const signal: RaceSignal = {
+      race: 'q/heat 1#2',
+      seats: [
+        {
+          adapter: 'gate-x1y2',
+          seat: '0',
+          start_at: 1_000_000,
+          chunks: [
+            {
+              adapter: 'gate-x1y2',
+              seat: '0',
+              from: 1_000_000,
+              period_micros: 1000,
+              levels: [-900, -850],
+              unit: 'TenthsDbm'
+            }
+          ],
+          thresholds: [
+            { adapter: 'gate-x1y2', seat: '0', enter: -600, exit: -700, unit: 'TenthsDbm' }
+          ]
+        }
+      ]
+    };
+    const { fetch, seen } = recording(signal);
+    const { getRaceSignal } = await import('./client.js');
+    expect(await getRaceSignal(BASE, EVT, 'q/heat 1#2', { fetch })).toEqual(signal);
+    expect(seen[0].url).toBe(`${ROOT}/signal?race=q%2Fheat%201%232`);
+    expect(seen[0].init?.method).toBeUndefined();
+    expect(sentHeaders(seen[0].init).Authorization).toBeUndefined();
+  });
+
+  it("getRaceSignal rejects with the Director's sentence", async () => {
+    const fetch: FetchLike = async () =>
+      ({
+        ok: false,
+        status: 404,
+        json: async (): Promise<unknown> => ({ code: 'NotFound', message: 'No such race.' })
+      }) as unknown as Response;
+    const { getRaceSignal } = await import('./client.js');
+    await expect(getRaceSignal(BASE, EVT, 'nope', { fetch })).rejects.toThrow('No such race.');
   });
 });

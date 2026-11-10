@@ -99,6 +99,8 @@ describe('round-trip (format → parse)', () => {
     { kind: 'run', heat: 'quali-ab12' },
     { kind: 'run', heat: 'finals/winners-1/heat-2' },
     { kind: 'run', heat: 'Heat 1 #2 ?&%' },
+    { kind: 'marshal' },
+    { kind: 'marshal', race: 'finals/winners-1/heat-2#3' },
     { kind: 'tune', timer: 'gate-X1y2' },
     { kind: 'tune', timer: 'far gate/9 #?&%' }
   ];
@@ -197,6 +199,39 @@ describe("a timer's Tune page", () => {
   it('only the event page and the Run view are inside an event', () => {
     expect(inEvent({ kind: 'event' })).toBe(true);
     expect(inEvent({ kind: 'run', heat: 'h1' })).toBe(true);
+    expect(inEvent({ kind: 'marshal' })).toBe(true);
+    expect(inEvent({ kind: 'marshal', race: 'h1#1' })).toBe(true);
     expect(inEvent({ kind: 'page', page: 'timers' })).toBe(false);
+  });
+});
+
+describe('the Marshal page route', () => {
+  it('parses the page with and without a race, keeping the race id as it is', () => {
+    expect(parseHash('#/event/marshal')).toEqual({ kind: 'marshal' });
+    expect(parseHash('#/EVENT/Marshal/')).toEqual({ kind: 'marshal' });
+    expect(parseHash('#/event/marshal/quali-A1b2%231')).toEqual({
+      kind: 'marshal',
+      race: 'quali-A1b2#1'
+    });
+  });
+
+  it('opens the page with no race when the race segment is broken, and the event page for a longer path', () => {
+    expect(parseHash('#/event/marshal/%E0%A4%A')).toEqual({ kind: 'marshal' });
+    expect(parseHash('#/event/marshal/a/b')).toEqual({ kind: 'event' });
+  });
+
+  it('formats with the race id encoded, so a "#" or "/" in it survives', () => {
+    expect(formatHash({ kind: 'marshal' })).toBe('#/event/marshal');
+    expect(formatHash({ kind: 'marshal', race: 'finals/final#2' })).toBe(
+      '#/event/marshal/finals%2Ffinal%232'
+    );
+  });
+
+  it('needs an open event', () => {
+    expect(reconcileRoute({ kind: 'marshal', race: 'h#1' }, false)).toEqual({
+      kind: 'page',
+      page: 'events'
+    });
+    expect(reconcileRoute({ kind: 'marshal' }, true)).toEqual({ kind: 'marshal' });
   });
 });

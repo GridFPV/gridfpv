@@ -27,6 +27,8 @@ async function open(view: EventView, over: Partial<LiveSession> = {}) {
     postPass: vi.fn(async () => ({ cursor: view.cursor })),
     listPilots: vi.fn(async () => PILOTS),
     listTimers: vi.fn(async () => []),
+    listClasses: vi.fn(async () => []),
+    getRaceSignal: vi.fn(async (_id: string, race: string) => ({ race, seats: [] })),
     ...over
   };
   const live = new EventLive(session, EVENT.id);
@@ -34,8 +36,16 @@ async function open(view: EventView, over: Partial<LiveSession> = {}) {
   await live.reloadPilots();
   await live.reloadTimers();
   const onrun = vi.fn();
-  render(EventPage, { event: EVENT, live, onhome: vi.fn(), onevents: vi.fn(), onrun });
-  return { session, onrun };
+  const onmarshal = vi.fn();
+  render(EventPage, {
+    event: EVENT,
+    live,
+    onhome: vi.fn(),
+    onevents: vi.fn(),
+    onrun,
+    onmarshal
+  });
+  return { session, onrun, onmarshal };
 }
 
 describe('EventPage phases', () => {

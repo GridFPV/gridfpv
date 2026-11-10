@@ -394,6 +394,16 @@ describe('Session', () => {
       expect(await session.putTimerConfig('gate-x1y2', CONFIG)).toBeUndefined();
     });
 
+    it("getRaceSignal reads a race's logged signal open (no token)", async () => {
+      const signal = { race: 'q-1#1', seats: [] };
+      const getRaceSignal = vi.fn(async () => signal);
+      const session = tuneSession({ getRaceSignal });
+      expect(await session.getRaceSignal('evt', 'q-1#1')).toEqual(signal);
+      expect(getRaceSignal).toHaveBeenCalledWith('http://d.local', 'evt', 'q-1#1', {
+        token: undefined
+      });
+    });
+
     it('subscribeTimerLive listens on this Director and hands back the stop function', () => {
       const stop = vi.fn();
       const subscribeTimerLive = vi.fn(() => stop);

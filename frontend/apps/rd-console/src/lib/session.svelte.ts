@@ -48,6 +48,7 @@ import {
   sendCommand,
   createBracket,
   postPass,
+  getRaceSignal,
   subscribeChanges,
   subscribeTimerLive,
   isRequestFailure
@@ -69,6 +70,8 @@ import type {
   PassRequest,
   Pilot,
   PilotId,
+  RaceId,
+  RaceSignal,
   Timer,
   TimerConfig,
   TimerView,
@@ -157,6 +160,7 @@ const realApi = {
   sendCommand,
   createBracket,
   postPass,
+  getRaceSignal,
   subscribeChanges,
   subscribeTimerLive
 };
@@ -438,6 +442,11 @@ export class Session {
   /** Read an event's competition snapshot (`GET /events/{id}/state`). */
   getEventState(id: EventMeta['id']): Promise<EventView> {
     return this.#api.getEventState(this.baseUrl, id, { token: this.#token });
+  }
+
+  /** Read a race's logged signal (`GET /events/{id}/signal?race=…`). An open read. */
+  getRaceSignal(id: EventMeta['id'], race: RaceId): Promise<RaceSignal> {
+    return this.#api.getRaceSignal(this.baseUrl, id, race, { token: this.#token });
   }
 
   /**

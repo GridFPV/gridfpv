@@ -45,7 +45,7 @@ pub enum LockError {
     #[error("phase {0:?} is already locked")]
     AlreadyLocked(PhaseId),
     /// A race beneath the phase still has an open protest.
-    #[error("protest {protest:?} on race {race:?} is still open")]
+    #[error("a protest on race {race:?} is still open; resolve it first")]
     OpenProtest { protest: ProtestId, race: RaceId },
     /// A race beneath the phase is staging, running, or waiting to be saved or discarded.
     #[error("race {0:?} is not decided yet")]

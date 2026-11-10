@@ -31,6 +31,8 @@ import type {
   Pilot,
   PilotId,
   ProtocolError,
+  RaceId,
+  RaceSignal,
   SeatLevels,
   SetClassHiddenRequest,
   SignalChunk,
@@ -632,6 +634,26 @@ export async function postPass(
     eventPath(id, '/passes'),
     { method: 'POST', body: pass, token, fetch: options.fetch },
     'log the crossing'
+  );
+}
+
+/**
+ * Read a race's logged signal (`GET /events/{id}/signal?race=…`). An open read. One entry per
+ * seat of the race, in lineup order, on the timer's own clock (the same clock as the laps). A
+ * seat on a timer that reports no signal has no chunks. Read it when it is wanted: a long race
+ * can be a few megabytes.
+ */
+export async function getRaceSignal(
+  baseUrl: string,
+  id: EventId,
+  race: RaceId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<RaceSignal> {
+  return apiJson<RaceSignal>(
+    baseUrl,
+    eventPath(id, `/signal?race=${encodeURIComponent(race)}`),
+    options,
+    "read the race's signal"
   );
 }
 

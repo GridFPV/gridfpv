@@ -19,27 +19,30 @@
  *   - `#/event`        → the open event's page
  *   - `#/event/run/‹heat›` → the Run view for one heat of the open event. `‹heat›` is the
  *     heat's id, percent-encoded (a heat id can hold slashes).
+ *   - `#/event/marshal` → the Marshal page of the open event, and `#/event/marshal/‹race›`
+ *     → the same page with one race open. `‹race›` is the race's id, percent-encoded.
  *
  * The open event itself is **app-wide server state** (the Director's active event, #90), so the
  * hash does not name *which* event. The event page always shows the Director's active event; an
  * `#/event` hash with no active event reconciles to the Events page rather than rendering an
  * empty page (see {@link reconcileRoute}).
  */
-import type { AdapterId, PhaseId } from '@gridfpv/types';
+import type { AdapterId, PhaseId, RaceId } from '@gridfpv/types';
 
 /** The app-level pages shown outside an event. */
 export type AppPage = 'home' | 'events' | 'pilots' | 'classes' | 'timers';
 
 /**
- * A parsed route. An app-level page, the Tune page for one timer, the open event's page, or the
- * Run view for one heat of the open event. This is the pure view-intent the hash encodes; reconciliation against the
+ * A parsed route. An app-level page, the Tune page for one timer, the open event's page, the
+ * Run view for one heat of the open event, or its Marshal page (with or without a race open). This is the pure view-intent the hash encodes; reconciliation against the
  * live active event happens in {@link reconcileRoute}.
  */
 export type Route =
   | { kind: 'page'; page: AppPage }
   | { kind: 'tune'; timer: AdapterId }
   | { kind: 'event' }
-  | { kind: 'run'; heat: PhaseId };
+  | { kind: 'run'; heat: PhaseId }
+  | { kind: 'marshal'; race?: RaceId };
 
 /** Decode one percent-encoded hash segment, or `undefined` if it is not valid encoding. */
 function decodeSegment(segment: string): string | undefined {
@@ -74,6 +77,12 @@ export function parseHash(hash: string): Route {
       const heat = decodeSegment(segments[2]);
       if (heat) return { kind: 'run', heat };
     }
+    // `event/marshal` and `event/marshal/‹race›`. A broken race segment opens the page with
+    // no race chosen.
+    if (segments[1]?.toLowerCase() === 'marshal' && segments.length <= 3) {
+      const race = segments.length === 3 ? decodeSegment(segments[2]) : undefined;
+      return race ? { kind: 'marshal', race } : { kind: 'marshal' };
+    }
     return { kind: 'event' };
   }
   if (head === 'timers' && segments.length === 2) {
@@ -97,6 +106,11 @@ export function parseHash(hash: string): Route {
 export function formatHash(route: Route): string {
   if (route.kind === 'event') return '#/event';
   if (route.kind === 'run') return `#/event/run/${encodeURIComponent(route.heat)}`;
+  if (route.kind === 'marshal') {
+    return route.race === undefined
+      ? '#/event/marshal'
+      : `#/event/marshal/${encodeURIComponent(route.race)}`;
+  }
   if (route.kind === 'tune') return `#/timers/${encodeURIComponent(route.timer)}`;
   if (route.page === 'home') return '#/';
   return `#/${route.page}`;
@@ -104,14 +118,14 @@ export function formatHash(route: Route): string {
 
 /** Whether a route shows part of the open event, so it needs one. */
 export function inEvent(route: Route): boolean {
-  return route.kind === 'event' || route.kind === 'run';
+  return route.kind === 'event' || route.kind === 'run' || route.kind === 'marshal';
 }
 
 /**
  * Reconcile a parsed {@link Route} against whether an event is currently active (the Director's
  * active event, server state):
  *
- *   - An `event` or `run` route with **no active event** → fall back to the Events page
+ *   - An `event`, `run` or `marshal` route with **no active event** → fall back to the Events page
  *     (`#/events`), since there is no event to show.
  *   - A `tune` route never needs an event: a timer is app-level, like the pages.
  *   - A `page` route with an **active event** is fine as-is: the user explicitly navigated to a

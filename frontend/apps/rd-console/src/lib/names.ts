@@ -10,6 +10,8 @@
  */
 import type {
   AdapterId,
+  Class,
+  ClassId,
   PhaseId,
   PhaseView,
   Pilot,
@@ -22,6 +24,8 @@ import { seatLabel, timerName } from './seats.js';
 
 /** Shown for a pilot who is no longer in the pilot directory. */
 export const UNKNOWN_PILOT = 'Unknown pilot';
+/** Shown for a class that is no longer in the class directory. */
+export const UNKNOWN_CLASS = 'Unknown class';
 /** Shown for a phase the event no longer has. */
 export const UNKNOWN_PHASE = 'Unknown phase';
 
@@ -30,6 +34,8 @@ export interface Names {
   phase(id: PhaseId): string;
   /** A pilot's callsign. */
   pilot(id: PilotId): string;
+  /** A class's name, e.g. "Open". */
+  klass(id: ClassId): string;
   /** Who is on a seat: a callsign, or where the pilot will come from. */
   who(who: SeatWhoView): string;
   /**
@@ -63,7 +69,7 @@ export function placeOf(position: number, phaseLabel: string): string {
 }
 
 /**
- * Build the resolver from the event's phases, the pilot directory and the timer directory.
+ * Build the resolver from the event's phases and the pilot, timer and class directories.
  *
  * The timer directory holds every timer the Director knows, connected or not, so a heat on a
  * timer that is switched off, or a heat that finished long ago, still names its seats.
@@ -74,13 +80,16 @@ export function placeOf(position: number, phaseLabel: string): string {
 export function buildNames(
   phases: readonly PhaseView[],
   pilots: readonly Pilot[],
-  timers: readonly TimerView[] = []
+  timers: readonly TimerView[] = [],
+  classes: readonly Class[] = []
 ): Names {
   const phaseLabels = new Map(phases.map((phase) => [phase.def.id, phase.def.label]));
   const callsigns = new Map(pilots.map((pilot) => [pilot.id, pilot.callsign]));
 
   const phase = (id: PhaseId): string => phaseLabels.get(id) ?? UNKNOWN_PHASE;
+  const classNames = new Map(classes.map((c) => [c.id, c.name]));
   const pilot = (id: PilotId): string => callsigns.get(id) ?? UNKNOWN_PILOT;
+  const klass = (id: ClassId): string => classNames.get(id) ?? UNKNOWN_CLASS;
   const who = (seat: SeatWhoView): string => {
     if (seat === 'Open') return 'Open seat';
     if (seat === 'Nobody') return 'Empty';
@@ -90,5 +99,5 @@ export function buildNames(
   const seat = (adapter: AdapterId, ref: SeatRef, position?: number): string =>
     seatLabel(timers, adapter, ref, position);
   const timer = (adapter: AdapterId): string => timerName(timers, adapter);
-  return { phase, pilot, who, seat, timer };
+  return { phase, pilot, klass, who, seat, timer };
 }

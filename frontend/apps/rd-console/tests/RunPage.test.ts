@@ -28,6 +28,8 @@ async function open(view: EventView, over: Partial<LiveSession> = {}) {
     postPass: vi.fn(async () => ({ cursor: view.cursor })),
     listPilots: vi.fn(async () => PILOTS),
     listTimers: vi.fn(async () => []),
+    listClasses: vi.fn(async () => []),
+    getRaceSignal: vi.fn(async (_id: string, race: string) => ({ race, seats: [] })),
     ...over
   };
   const live = new EventLive(session, EVENT.id);
@@ -156,6 +158,49 @@ describe('RunPage', () => {
         SaveRace: { race: stopped.race, needs_marshal: false }
       })
     );
+  });
+
+  it('the save options add "Needs a look" and a note to the save', async () => {
+    const stopped = race(HEAT, 1, 'Stopped', { started_at: 0, stopped_at: 40 * S });
+    const { session } = await open(
+      eventView({ phases: [quali()], races: [stopped], current_race: stopped.race })
+    );
+    await fireEvent.click(screen.getByText('Save options'));
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Needs a look' }));
+    await fireEvent.input(screen.getByRole('textbox', { name: 'Note for this race' }), {
+      target: { value: ' Bee may have a stray lap ' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(session.sendCommand).toHaveBeenCalledWith(EVENT.id, {
+        SaveRace: { race: stopped.race, needs_marshal: true, note: 'Bee may have a stray lap' }
+      })
+    );
+  });
+
+  it('a saved race can be discarded from the earlier races, unless it is locked', async () => {
+    const saved = race(HEAT, 1, 'Saved', {
+      needs_marshal: true,
+      note: 'check lap 2',
+      seats: [raceSeat(0, 'p-1a'), raceSeat(1, 'p-2b')]
+    });
+    const locked = race(HEAT, 2, 'Saved', { locked: true });
+    const { session } = await open(eventView({ phases: [quali()], races: [saved, locked] }));
+    const earlier = within(screen.getByRole('list', { name: 'Earlier races' })).getAllByRole(
+      'listitem'
+    );
+    expect(earlier[0]).toHaveTextContent('Needs a look');
+    expect(earlier[0]).toHaveTextContent('check lap 2');
+    expect(screen.queryByRole('button', { name: 'Discard race 2' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Discard race 1' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'False start' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Ace' }));
+    await waitFor(() => expect(session.sendCommand).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(session.sendCommand).mock.calls.map((call) => call[1])).toEqual([
+      { Record: { FalseStart: { race: saved.race, pilot: 'p-1a' } } },
+      { DiscardRace: { race: saved.race, reason: 'FalseStart' } }
+    ]);
+    expectNoRawIds();
   });
 
   it('discarding for a false start asks who, records it, then discards with the reason', async () => {

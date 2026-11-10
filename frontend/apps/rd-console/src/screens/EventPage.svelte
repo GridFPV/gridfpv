@@ -2,28 +2,36 @@
   /**
    * EventPage — the open event's page (Home › Events › ‹event name›).
    *
-   * Two parts. The details card shows what the event is: date, location, organizer and
-   * description. The Phases card shows the competition: every phase as a tree, each heat with
-   * its lineup and a button that opens its Run view. Heats and brackets are added from here.
+   * From the top: the details card shows what the event is (date, location, organizer and
+   * description). "Up next" is the run queue: the heats that can be raced now, in a suggested
+   * order the director can change. The Phases card shows the competition: every phase as a
+   * tree, each heat with its lineup, its ranking and rulings, and a button that opens its Run
+   * view. Heats and brackets are added from here. The Classes card holds each class's roster
+   * and standings. The Marshal link at the top opens the Marshal page.
    *
    * The competition comes from the live event store, so the list follows the Director as
    * races are run, from this console or another one.
    */
-  import { Banner, Button, Card } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card } from '@gridfpv/components';
   import type { EventMeta, PhaseId } from '@gridfpv/types';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
+  import { marshalCount } from '../lib/marshal.js';
   import AddBracketDialog from './AddBracketDialog.svelte';
   import AddHeatDialog from './AddHeatDialog.svelte';
+  import ClassRosterDialog from './ClassRosterDialog.svelte';
+  import EventClasses from './EventClasses.svelte';
   import PhaseList from './PhaseList.svelte';
+  import RunQueue from './RunQueue.svelte';
 
   let {
     event,
     live,
     onhome,
     onevents,
-    onrun
+    onrun,
+    onmarshal
   }: {
     event: EventMeta;
     /** The live competition of this event. */
@@ -34,11 +42,17 @@
     onevents: () => void;
     /** Open the Run view for a heat. */
     onrun: (heat: PhaseId) => void;
+    /** Open the Marshal page. */
+    onmarshal: () => void;
   } = $props();
 
   // Each dialog is mounted only while open, so a closed one never sits in the page.
   let addHeatOpen = $state(false);
   let addBracketOpen = $state(false);
+  let addClassOpen = $state(false);
+
+  /** How many races need a look or have an open protest. */
+  const toMarshal = $derived(live.view ? marshalCount(live.view) : 0);
 
   /** The detail rows that have a value — an unset detail is left out rather than shown blank. */
   const details = $derived(
@@ -66,6 +80,22 @@
 
     <header class="page-head">
       <h1 class="page-title">{event.name}</h1>
+      <span class="head-links">
+        <Button
+          variant="secondary"
+          aria-label={toMarshal === 0
+            ? 'Marshal'
+            : `Marshal, ${toMarshal} ${toMarshal === 1 ? 'race needs' : 'races need'} a look`}
+          onclick={onmarshal}
+        >
+          Marshal
+          {#if toMarshal > 0}
+            <span data-testid="marshal-count"
+              ><Badge tone="warn" variant="solid">{toMarshal}</Badge></span
+            >
+          {/if}
+        </Button>
+      </span>
     </header>
 
     <Card elevation="sm">
@@ -85,6 +115,12 @@
       </div>
     </Card>
 
+    {#if live.view && live.view.phases.length > 0}
+      <Card title="Up next" elevation="sm">
+        <RunQueue view={live.view} names={live.names} {live} {onrun} />
+      </Card>
+    {/if}
+
     <Card title="Phases" elevation="sm">
       {#snippet actions()}
         <Button size="sm" variant="secondary" onclick={() => (addBracketOpen = true)}>
@@ -100,12 +136,26 @@
       {:else if live.view.phases.length === 0}
         <p class="muted">Nothing to race yet. Add a heat or a bracket to start.</p>
       {:else}
-        <PhaseList view={live.view} names={live.names} {onrun} />
+        <PhaseList view={live.view} names={live.names} {live} {onrun} />
       {/if}
     </Card>
+
+    {#if live.view}
+      <Card title="Classes" elevation="sm">
+        {#snippet actions()}
+          <Button size="sm" variant="secondary" onclick={() => (addClassOpen = true)}>
+            + Add class
+          </Button>
+        {/snippet}
+        <EventClasses {live} />
+      </Card>
+    {/if}
   </div>
 </div>
 
+{#if addClassOpen}
+  <ClassRosterDialog {live} onclose={() => (addClassOpen = false)} />
+{/if}
 {#if addHeatOpen}
   <AddHeatDialog {live} onclose={() => (addHeatOpen = false)} />
 {/if}
@@ -131,6 +181,15 @@
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-5);
+  }
+  .page-head {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-4);
+    flex-wrap: wrap;
+  }
+  .head-links {
+    margin-left: auto;
   }
   .page-title {
     margin: 0;

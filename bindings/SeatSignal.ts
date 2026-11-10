@@ -20,7 +20,7 @@ start_at?: SourceTime,
  */
 chunks: Array<SignalChunk>, 
 /**
- * The enter and exit levels the timer was using, oldest first, each with the log
- * position it was recorded at.
+ * The enter and exit levels the timer was using, oldest first. The timer logs them
+ * when the race comes on and again whenever they move by more than a dB.
  */
 thresholds: Array<SignalThresholds>, };

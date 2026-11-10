@@ -33,8 +33,10 @@ function fakeSession(over: Partial<LiveSession> = {}): {
     sendCommand: vi.fn(async () => ({ cursor: 2 })),
     createBracket: vi.fn(async () => ({ cursor: 2 })),
     postPass: vi.fn(async () => ({ cursor: 2 })),
+    getRaceSignal: vi.fn(async (_id, race) => ({ race, seats: [] })),
     listPilots: vi.fn(async (): Promise<Pilot[]> => []),
     listTimers: vi.fn(async (): Promise<TimerView[]> => []),
+    listClasses: vi.fn(async () => []),
     ...over
   };
   return { session, cursor: (n) => onCursor(n), stopped: () => stopped };
@@ -171,6 +173,26 @@ describe('EventLive', () => {
       code: 'Refused',
       message: '"q-1" is already complete'
     });
+  });
+
+  it('reads the class directory on start and names classes from it', async () => {
+    const { session } = fakeSession({
+      listClasses: vi.fn(async () => [{ id: 'cls-9k', name: 'Open', source: 'Custom' as const }])
+    });
+    const live = new EventLive(session, 'evt');
+    live.start();
+    await settle();
+    live.stop();
+    expect(live.classes.map((c) => c.name)).toEqual(['Open']);
+    expect(live.names.klass('cls-9k')).toBe('Open');
+    expect(live.names.klass('gone')).toBe('Unknown class');
+  });
+
+  it("raceSignal reads the race's signal for this event", async () => {
+    const feed = fakeSession();
+    const live = new EventLive(feed.session, 'evt');
+    expect(await live.raceSignal('q-1#1')).toEqual({ race: 'q-1#1', seats: [] });
+    expect(feed.session.getRaceSignal).toHaveBeenCalledWith('evt', 'q-1#1');
   });
 
   it('stop closes the feed and drops a read that lands afterwards', async () => {

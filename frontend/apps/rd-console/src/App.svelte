@@ -6,7 +6,8 @@
    * **app-level route**: the {@link HomeHub} (landing), or one of its pages — {@link EventPicker}
    * (the Events page), {@link PilotsPage}, {@link ClassesPage}, {@link TimersPage}. A timer's Tune
    * button opens its {@link TunePage}. Selecting an event on the Events
-   * page opens {@link EventPage}, and a heat on it opens that heat's {@link RunPage}.
+   * page opens {@link EventPage}; a heat on it opens that heat's {@link RunPage}, and its
+   * Marshal link opens the {@link MarshalPage}.
    *
    * On load the shell resolves the Director's active event (server state, #90) so an `#/event`
    * URL can render, but the hash is authoritative for *which* view to show (#118): a bare/hub
@@ -28,6 +29,7 @@
   import EventPicker from './screens/EventPicker.svelte';
   import EventPage from './screens/EventPage.svelte';
   import RunPage from './screens/RunPage.svelte';
+  import MarshalPage from './screens/MarshalPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
   import TimersPage from './screens/TimersPage.svelte';
@@ -179,12 +181,24 @@
         onevent={() => navigate({ kind: 'event' })}
         onrun={(heat) => navigate({ kind: 'run', heat })}
       />
+    {:else if route.kind === 'marshal'}
+      <MarshalPage
+        event={session.currentEvent}
+        {live}
+        race={route.race}
+        onhome={() => leaveEventTo('home')}
+        onevents={() => leaveEventTo('events')}
+        onevent={() => navigate({ kind: 'event' })}
+        onopen={(race) => navigate({ kind: 'marshal', race })}
+        onrun={(heat) => navigate({ kind: 'run', heat })}
+      />
     {:else}
       <EventPage
         event={session.currentEvent}
         {live}
         onhome={() => leaveEventTo('home')}
         onevents={() => leaveEventTo('events')}
+        onmarshal={() => navigate({ kind: 'marshal' })}
         onrun={(heat) => navigate({ kind: 'run', heat })}
       />
     {/if}

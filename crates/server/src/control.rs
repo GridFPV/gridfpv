@@ -493,8 +493,8 @@ pub struct SeatSignal {
     /// The trace, oldest first. Chunks that follow on exactly are joined; a gap in the
     /// signal is a gap between chunks.
     pub chunks: Vec<SignalChunk>,
-    /// The enter and exit levels the timer was using, oldest first, each with the log
-    /// position it was recorded at.
+    /// The enter and exit levels the timer was using, oldest first. The timer logs them
+    /// when the race comes on and again whenever they move by more than a dB.
     pub thresholds: Vec<SignalThresholds>,
 }
 

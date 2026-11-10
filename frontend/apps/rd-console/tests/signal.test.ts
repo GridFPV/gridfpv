@@ -1,6 +1,21 @@
 /** The live signal store: the ring, thinning for the screen, crossings, range and the clock. */
 import { describe, expect, it } from 'vitest';
-import { crossingSpans, SignalRing, thin, TimerClock, verticalRange } from '../src/lib/signal.js';
+import {
+  clampWindow,
+  crossingSpans,
+  MIN_WINDOW_MICROS,
+  nearestMark,
+  panWindow,
+  RaceTrace,
+  SignalRing,
+  thin,
+  timeAtX,
+  TimerClock,
+  verticalRange,
+  wholeWindow,
+  xAtTime,
+  zoomWindow
+} from '../src/lib/signal.js';
 
 function samples(ring: SignalRing): [number, number][] {
   const out: [number, number][] = [];
@@ -206,5 +221,108 @@ describe('TimerClock', () => {
     clock.observe(900_000_000, 1000);
     clock.observe(40_000, 2000);
     expect(clock.now(2000)).toBe(40_000);
+  });
+});
+
+describe('RaceTrace', () => {
+  const chunks = [
+    { from: 1_000_000, period_micros: 1000, levels: [-900, -850, -600] },
+    // A gap in the signal, then more.
+    { from: 2_000_000, period_micros: 1000, levels: [-700, -880] }
+  ];
+
+  it('joins the chunks into one trace on the timer clock', () => {
+    const trace = new RaceTrace(chunks);
+    expect(trace.length).toBe(5);
+    expect(trace.first).toBe(1_000_000);
+    expect(trace.last).toBe(2_001_000);
+    const seen: [number, number][] = [];
+    trace.each(-Infinity, Infinity, (time, level) => seen.push([time, level]));
+    expect(seen).toEqual([
+      [1_000_000, -900],
+      [1_001_000, -850],
+      [1_002_000, -600],
+      [2_000_000, -700],
+      [2_001_000, -880]
+    ]);
+  });
+
+  it('visits only the samples in the stretch asked for', () => {
+    const trace = new RaceTrace(chunks);
+    const seen: number[] = [];
+    trace.each(1_001_000, 2_001_000, (time) => seen.push(time));
+    expect(seen).toEqual([1_001_000, 1_002_000, 2_000_000]);
+  });
+
+  it('puts chunks in time order even when they arrive out of order', () => {
+    const trace = new RaceTrace([chunks[1], chunks[0]]);
+    expect(trace.first).toBe(1_000_000);
+    expect(trace.last).toBe(2_001_000);
+  });
+
+  it('is empty for a seat with no signal', () => {
+    const trace = new RaceTrace([]);
+    expect(trace.length).toBe(0);
+    expect(trace.first).toBeUndefined();
+    expect(wholeWindow(trace)).toBeUndefined();
+  });
+
+  it('thins like the live ring: a peak inside a column is kept', () => {
+    const trace = new RaceTrace([{ from: 0, period_micros: 10, levels: [1, 9, 2, 3, 4, 0] }]);
+    const thinned = thin(trace, 0, 60, 2);
+    expect([...thinned.max]).toEqual([9, 4]);
+    expect([...thinned.min]).toEqual([1, 0]);
+  });
+});
+
+describe('the race trace window', () => {
+  const bounds = { from: 0, to: 60_000_000 };
+
+  it('covers the samples and the marks, with a little room', () => {
+    const trace = new RaceTrace([{ from: 10_000_000, period_micros: 1000, levels: [1, 2] }]);
+    const whole = wholeWindow(trace, [{ at: 5_000_000 }, { at: 30_000_000 }]);
+    expect(whole).toBeDefined();
+    expect(whole!.from).toBeLessThan(5_000_000);
+    expect(whole!.to).toBeGreaterThan(30_000_000);
+  });
+
+  it('zooms in around the anchor, which stays where it is on screen', () => {
+    const zoomed = zoomWindow(bounds, bounds, 0.5, 15_000_000);
+    expect(zoomed.to - zoomed.from).toBe(30_000_000);
+    // The anchor was a quarter of the way across, and still is.
+    expect((15_000_000 - zoomed.from) / (zoomed.to - zoomed.from)).toBeCloseTo(0.25);
+  });
+
+  it('never zooms out past the whole race or in past the shortest stretch', () => {
+    expect(zoomWindow(bounds, bounds, 4)).toEqual(bounds);
+    let window = bounds;
+    for (let i = 0; i < 40; i += 1) window = zoomWindow(window, bounds, 0.5);
+    expect(window.to - window.from).toBe(MIN_WINDOW_MICROS);
+  });
+
+  it('pans without changing length and stops at the ends', () => {
+    const window = { from: 10_000_000, to: 20_000_000 };
+    expect(panWindow(window, bounds, 5_000_000)).toEqual({ from: 15_000_000, to: 25_000_000 });
+    expect(panWindow(window, bounds, -50_000_000)).toEqual({ from: 0, to: 10_000_000 });
+    expect(panWindow(window, bounds, 90_000_000)).toEqual({ from: 50_000_000, to: 60_000_000 });
+  });
+
+  it('clamps a window that is longer than the whole race to the whole race', () => {
+    expect(clampWindow({ from: -5, to: 90_000_000 }, bounds)).toEqual(bounds);
+  });
+
+  it('turns a pixel into a whole-microsecond time and back', () => {
+    const window = { from: 1_000_000, to: 2_000_000 };
+    expect(timeAtX(window, 1000, 250)).toBe(1_250_000);
+    expect(timeAtX(window, 3, 1)).toBe(1_333_333);
+    expect(xAtTime(window, 1000, 1_250_000)).toBe(250);
+    expect(timeAtX(window, 0, 10)).toBe(1_000_000);
+  });
+
+  it('finds the nearest mark within reach, or none', () => {
+    const marks = [{ at: 100 }, { at: 200 }, { at: 260 }];
+    expect(nearestMark(marks, 210, 30)).toBe(marks[1]);
+    expect(nearestMark(marks, 240, 30)).toBe(marks[2]);
+    expect(nearestMark(marks, 150, 30)).toBeUndefined();
   });
 });

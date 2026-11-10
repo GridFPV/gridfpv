@@ -38,6 +38,7 @@ export {
   createBracket,
   createMains,
   postPass,
+  getRaceSignal,
   subscribeChanges,
   subscribeTimerLive
 } from './client.js';
