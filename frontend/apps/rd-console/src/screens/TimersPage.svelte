@@ -7,8 +7,12 @@
    * own sentence), how many seats it reports and how well its clock is known. A timer is
    * added in a dialog and removed with a two-step button. **Tune** opens the timer's Tune page.
    *
+   * Under the list, **Found on the network** shows the timers that advertise themselves and
+   * are not added yet. Each has an Add button that adds it in one click, with the name the
+   * timer gives itself and the address it was found at.
+   *
    * The Director holds the connection to each timer and there is no change feed for them, so
-   * this page reads the list again every {@link TIMER_POLL_MS} while it is open.
+   * this page reads both lists again every {@link TIMER_POLL_MS} while it is open.
    */
   import {
     Banner,
@@ -21,12 +25,25 @@
     StatusPill,
     toast
   } from '@gridfpv/components';
-  import type { AdapterId, CreateTimerRequest, TimerKind, TimerView } from '@gridfpv/types';
+  import type {
+    AdapterId,
+    CreateTimerRequest,
+    DiscoveredTimer,
+    TimerKind,
+    TimerView
+  } from '@gridfpv/types';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import type { Session } from '../lib/session.svelte.js';
-  import { clockSentence, seatCountSentence, TIMER_KINDS, TIMER_POLL_MS } from '../lib/timers.js';
+  import {
+    clockSentence,
+    notAddedYet,
+    seatCount,
+    seatCountSentence,
+    TIMER_KINDS,
+    TIMER_POLL_MS
+  } from '../lib/timers.js';
 
   let {
     session,
@@ -44,13 +61,34 @@
   /** Why the last read failed. Cleared by the next good one. */
   let loadError = $state<string | undefined>(undefined);
 
-  async function load() {
+  async function loadTimers() {
     try {
       timers = await session.listTimers();
       loadError = undefined;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /** The timers found on the network, or `undefined` before the first read lands. */
+  let found = $state.raw<DiscoveredTimer[] | undefined>(undefined);
+  /** Why the last read of them failed. Cleared by the next good one. */
+  let foundError = $state<string | undefined>(undefined);
+  /** The found timers a person can still add. */
+  const toAdd = $derived(found ? notAddedYet(found) : undefined);
+
+  async function loadFound() {
+    try {
+      found = await session.listDiscoveredTimers();
+      foundError = undefined;
+    } catch (e) {
+      foundError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** Read both lists. Each stands alone: one failing does not hide the other. */
+  async function load() {
+    await Promise.all([loadTimers(), loadFound()]);
   }
 
   // Read now, then every couple of seconds until the page closes.
@@ -95,6 +133,32 @@
       formError = err instanceof Error ? err.message : String(err);
     } finally {
       saving = false;
+    }
+  }
+
+  // ── Add a timer found on the network ───────────────────────────────────────
+  /** The address of the found timer being added right now. */
+  let addingFound = $state<string | undefined>(undefined);
+  /** Why the last one-click add failed, in the Director's words. */
+  let addFoundError = $state<string | undefined>(undefined);
+
+  async function addFound(timer: DiscoveredTimer) {
+    if (addingFound) return;
+    addingFound = timer.address;
+    addFoundError = undefined;
+    try {
+      const created = await session.createTimer({
+        name: timer.name,
+        kind: 'Oft',
+        address: timer.address
+      });
+      if (!created) return;
+      toast.success(`Added “${created.name}”.`);
+      await load();
+    } catch (err) {
+      addFoundError = err instanceof Error ? err.message : String(err);
+    } finally {
+      addingFound = undefined;
     }
   }
 
@@ -181,6 +245,57 @@
         {/if}
       </div>
     </Card>
+
+    <Card elevation="sm" title="Found on the network">
+      <div class="wrap found">
+        {#if foundError}
+          <Banner tone="danger" title="The network could not be searched for timers.">
+            {foundError}
+          </Banner>
+        {/if}
+        {#if addFoundError}
+          <div data-testid="found-problem">
+            <Banner
+              tone="danger"
+              title="The timer was not added."
+              ondismiss={() => (addFoundError = undefined)}>{addFoundError}</Banner
+            >
+          </div>
+        {/if}
+        {#if toAdd === undefined}
+          {#if !foundError}<p class="muted" role="status">Looking for timers…</p>{/if}
+        {:else if toAdd.length === 0}
+          <p class="muted" data-testid="found-none">
+            Timers that announce themselves on the network show up here, and a timer can always be
+            added by its address.
+          </p>
+        {:else}
+          <ul class="timers" aria-label="Found on the network">
+            {#each toAdd as timer (timer.address)}
+              <li class="timer" aria-label={timer.name}>
+                <div class="main">
+                  <span class="name">{timer.name}</span>
+                  <span class="address">{timer.address}</span>
+                  {#if timer.seats !== undefined}
+                    <p class="facts"><span data-fact="seats">{seatCount(timer.seats)}</span></p>
+                  {/if}
+                </div>
+                <div class="actions">
+                  <Button
+                    variant="secondary"
+                    title="Add {timer.name}"
+                    disabled={addingFound !== undefined}
+                    onclick={() => void addFound(timer)}
+                  >
+                    {addingFound === timer.address ? 'Adding…' : 'Add'}
+                  </Button>
+                </div>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    </Card>
   </div>
 </div>
 
@@ -254,6 +369,11 @@
   }
   .wrap {
     padding: var(--gf-space-2);
+  }
+  .found {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
   }
   .muted {
     margin: 0;

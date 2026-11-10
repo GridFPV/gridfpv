@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { CreateTimerRequest, ProtocolError, Timer, TimerView } from '@gridfpv/types';
+import type {
+  CreateTimerRequest,
+  DiscoveredTimer,
+  ProtocolError,
+  Timer,
+  TimerView
+} from '@gridfpv/types';
 import type { FetchLike } from './client.js';
 
 describe('events lifecycle helpers (#72)', () => {
@@ -125,6 +131,19 @@ describe('the timer directory', () => {
     const { listTimers } = await import('./client.js');
     expect(await listTimers(`${BASE}/`, { fetch })).toEqual(views);
     expect(seen[0].url).toBe(`${BASE}/timers`);
+    expect(seen[0].init?.method).toBeUndefined();
+    expect(headersOf(seen[0].init).Authorization).toBeUndefined();
+  });
+
+  it('listDiscoveredTimers GETs /timers/discovered with no token and returns what was found', async () => {
+    const found: DiscoveredTimer[] = [
+      { name: 'Gate', address: '192.168.1.50:7270', seats: 4, added: true },
+      { name: 'Far', address: '192.168.1.51:7270', added: false }
+    ];
+    const { fetch, seen } = recording(found);
+    const { listDiscoveredTimers } = await import('./client.js');
+    expect(await listDiscoveredTimers(`${BASE}/`, { fetch })).toEqual(found);
+    expect(seen[0].url).toBe(`${BASE}/timers/discovered`);
     expect(seen[0].init?.method).toBeUndefined();
     expect(headersOf(seen[0].init).Authorization).toBeUndefined();
   });
@@ -270,6 +289,7 @@ describe("request failures carry the Director's words (#433)", () => {
       ['deleteClass', (fetch) => c.deleteClass(BASE, CLASS, TOKEN, { fetch })],
       ['setClassHidden', (fetch) => c.setClassHidden(BASE, CLASS, true, TOKEN, { fetch })],
       ['listTimers', (fetch) => c.listTimers(BASE, { fetch })],
+      ['listDiscoveredTimers', (fetch) => c.listDiscoveredTimers(BASE, { fetch })],
       ['createTimer', (fetch) => c.createTimer(BASE, REQ, TOKEN, { fetch })],
       ['deleteTimer', (fetch) => c.deleteTimer(BASE, TIMER, TOKEN, { fetch })],
       ['getTimerConfig', (fetch) => c.getTimerConfig(BASE, TIMER, { fetch })],

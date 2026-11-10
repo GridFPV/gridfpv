@@ -5,7 +5,8 @@
    * The director watches each seat's live signal and sets the timer so every pass makes one
    * crossing. The page has four parts:
    *
-   * - **Seats**: each seat's frequency, whether it is on, and its live numbers.
+   * - **Seats**: each seat's frequency, whether it is on, and its live numbers. On a timer
+   *   that takes levels per seat, also whether the seat uses the timer's levels or its own.
    * - **Signal**: a scrolling trace for each seat that is on, with the enter and exit levels
    *   and the noise floor drawn on it and each crossing shaded.
    * - **Detection**: how the enter and exit levels are set, the minimum lap time and how many
@@ -18,8 +19,9 @@
    * timer's name and status come from the timer list, read again every {@link TIMER_POLL_MS}.
    * The feed and the reads both stop when the page closes.
    *
-   * In this version of the timer's protocol the enter and exit setting is one for the whole
-   * timer, so Detection is not per seat.
+   * Detection holds the timer's levels. A timer whose status says it takes levels per seat
+   * lets a seat have its own; every other seat uses the timer's. A timer that does not take
+   * them has one setting for all its seats, and the page offers no choice per seat.
    */
   import { untrack } from 'svelte';
   import {
@@ -58,10 +60,10 @@
     isDirty,
     levelsInUse,
     nextSeat,
-    withMode,
-    type ThresholdMode,
+    ownLevels,
     type TuneDraft
   } from '../lib/tune.js';
+  import LevelsFields from './LevelsFields.svelte';
   import SignalTrace from './SignalTrace.svelte';
 
   let {
@@ -103,6 +105,8 @@
   /** The name people see. Before the list lands there is none to show yet. */
   const timerLabel = $derived(timers === undefined ? 'Timer' : names.timer(timer));
   const connected = $derived(view?.status.connected ?? false);
+  /** Whether this timer takes levels per seat. When it does not, none is offered or sent. */
+  const seatLevels = $derived(view?.status.seat_thresholds ?? false);
   const seatName = (seat: SeatRef, position: number): string => names.seat(timer, seat, position);
 
   // ── The settings: what the timer has, and the draft ────────────────────────
@@ -147,8 +151,8 @@
     });
   });
 
-  const result = $derived(draft ? draftConfig(draft, seatName) : undefined);
-  const dirty = $derived(draft && config ? isDirty(draft, config) : false);
+  const result = $derived(draft ? draftConfig(draft, seatName, seatLevels) : undefined);
+  const dirty = $derived(draft && config ? isDirty(draft, config, seatLevels) : false);
 
   // ── The live feed ──────────────────────────────────────────────────────────
   // Samples arrive hundreds of times a second, so they go into plain ring buffers the traces
@@ -212,9 +216,15 @@
     draft.seats[position].mhz = value === 'other' ? '' : Number(value);
   }
 
-  function setMode(mode: ThresholdMode) {
-    if (!draft || !config) return;
-    draft = withMode(draft, mode, levelsInUse([...levels.values()], config));
+  /**
+   * Give a seat its own levels, or put it back on the timer's. Its own start the way the
+   * timer's are set, with the levels the seat is using right now as its fixed levels.
+   */
+  function setOwnLevels(position: number, own: boolean) {
+    if (!draft) return;
+    const seat = draft.seats[position];
+    if (own === (seat.levels !== undefined)) return;
+    seat.levels = own ? ownLevels(draft.levels, levels.get(seat.seat)) : undefined;
   }
 
   function add() {
@@ -408,6 +418,35 @@
                       </span>
                     {/if}
                   </div>
+                  {#if seatLevels}
+                    <div class="own">
+                      <div class="own-choice">
+                        <span>This seat's levels</span>
+                        <Select
+                          size="sm"
+                          aria-label="{label}: this seat's levels"
+                          value={seat.levels ? 'own' : 'timer'}
+                          onchange={(e: Event) =>
+                            setOwnLevels(
+                              position,
+                              (e.currentTarget as HTMLSelectElement).value === 'own'
+                            )}
+                        >
+                          <option value="timer">Same as the timer</option>
+                          <option value="own">Its own</option>
+                        </Select>
+                      </div>
+                      {#if seat.levels}
+                        <LevelsFields
+                          bind:levels={seat.levels}
+                          inUse={live}
+                          group="levels-{position}"
+                          legend="{label} enter and exit levels"
+                          who={label}
+                        />
+                      {/if}
+                    </div>
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -475,108 +514,43 @@
         <!-- ── Detection ─────────────────────────────────────────────────── -->
         <Card
           title="Detection"
-          subtitle="When the timer counts a crossing. These settings are for every seat on this timer."
+          subtitle={seatLevels
+            ? "When the timer counts a crossing. These levels are the timer's own. Every seat that has none of its own uses them."
+            : 'When the timer counts a crossing. These settings are for every seat on this timer.'}
         >
-          <div class="detection">
-            <fieldset class="mode">
-              <legend>Enter and exit levels</legend>
-              <label class="radio">
-                <input
-                  type="radio"
-                  name="threshold-mode"
-                  checked={draft.mode === 'Auto'}
-                  onchange={() => setMode('Auto')}
-                />
-                <span>Follow the noise floor</span>
-              </label>
-              <label class="radio">
-                <input
-                  type="radio"
-                  name="threshold-mode"
-                  checked={draft.mode === 'Manual'}
-                  onchange={() => setMode('Manual')}
-                />
-                <span>Fixed levels</span>
-              </label>
-            </fieldset>
-
-            <div class="fields">
-              {#if draft.mode === 'Auto'}
-                <Field
-                  label="Enter this far above the floor (dB)"
-                  hint="A crossing starts when the signal rises this far above the noise floor."
-                >
-                  <Input
-                    type="number"
-                    inputmode="decimal"
-                    step="0.5"
-                    aria-label="Enter this far above the floor, in dB"
-                    bind:value={draft.aboveFloorDb}
-                  />
-                </Field>
-                <Field
-                  label="Exit this far below enter (dB)"
-                  hint="The crossing ends when the signal falls this far below the enter level."
-                >
-                  <Input
-                    type="number"
-                    inputmode="decimal"
-                    step="0.5"
-                    aria-label="Exit this far below enter, in dB"
-                    bind:value={draft.belowEnterDb}
-                  />
-                </Field>
-              {:else}
-                <Field label="Enter level (dB)" hint="A crossing starts at this signal level.">
-                  <Input
-                    type="number"
-                    inputmode="decimal"
-                    step="0.5"
-                    aria-label="Enter level, in dB"
-                    bind:value={draft.enterDb}
-                  />
-                </Field>
-                <Field
-                  label="Exit level (dB)"
-                  hint="The crossing ends when the signal falls below this level."
-                >
-                  <Input
-                    type="number"
-                    inputmode="decimal"
-                    step="0.5"
-                    aria-label="Exit level, in dB"
-                    bind:value={draft.exitDb}
-                  />
-                </Field>
-              {/if}
-              <Field
-                label="Minimum lap time (seconds)"
-                hint="A second crossing on a seat sooner than this is ignored."
-              >
-                <Input
-                  type="number"
-                  inputmode="decimal"
-                  min="0"
-                  step="0.1"
-                  aria-label="Minimum lap time, in seconds"
-                  bind:value={draft.minLapSeconds}
-                />
-              </Field>
-              <Field
-                label="Seats per receiver"
-                hint="More seats on one receiver means each seat's signal is read less often."
-              >
-                <Input
-                  type="number"
-                  inputmode="numeric"
-                  min="1"
-                  step="1"
-                  aria-label="Seats per receiver"
-                  bind:value={draft.seatsPerReceiver}
-                />
-              </Field>
-            </div>
-          </div>
+          <LevelsFields
+            bind:levels={draft.levels}
+            inUse={levelsInUse([...levels.values()], config)}
+            group="threshold-mode"
+            legend="Enter and exit levels"
+          >
+            <Field
+              label="Minimum lap time (seconds)"
+              hint="A second crossing on a seat sooner than this is ignored."
+            >
+              <Input
+                type="number"
+                inputmode="decimal"
+                min="0"
+                step="0.1"
+                aria-label="Minimum lap time, in seconds"
+                bind:value={draft.minLapSeconds}
+              />
+            </Field>
+            <Field
+              label="Seats per receiver"
+              hint="More seats on one receiver means each seat's signal is read less often."
+            >
+              <Input
+                type="number"
+                inputmode="numeric"
+                min="1"
+                step="1"
+                aria-label="Seats per receiver"
+                bind:value={draft.seatsPerReceiver}
+              />
+            </Field>
+          </LevelsFields>
         </Card>
 
         <!-- ── Apply ─────────────────────────────────────────────────────── -->
@@ -716,15 +690,13 @@
     font-weight: var(--gf-font-weight-semibold);
     font-variant-numeric: tabular-nums;
   }
-  .switch,
-  .radio {
+  .switch {
     display: inline-flex;
     align-items: center;
     gap: var(--gf-space-2);
     cursor: pointer;
   }
-  .switch input,
-  .radio input {
+  .switch input {
     width: 1.15rem;
     height: 1.15rem;
     accent-color: var(--gf-accent);
@@ -740,6 +712,26 @@
     flex-wrap: wrap;
     font-size: var(--gf-font-size-sm);
     font-variant-numeric: tabular-nums;
+  }
+  /* A seat's own levels: a second line in the seat's row, the whole width. */
+  .own {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
+    padding-top: var(--gf-space-3);
+    border-top: 1px solid var(--gf-border);
+  }
+  .own-choice {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .own-choice :global(.gf-select) {
+    width: 12.5rem;
   }
   .number {
     display: inline-flex;
@@ -818,32 +810,6 @@
   .summary dd {
     margin: 0;
     font-weight: var(--gf-font-weight-semibold);
-  }
-
-  /* Detection */
-  .detection {
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-4);
-  }
-  .mode {
-    margin: 0;
-    padding: 0;
-    border: 0;
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-5);
-    flex-wrap: wrap;
-  }
-  .mode legend {
-    padding: 0;
-    margin-bottom: var(--gf-space-2);
-    font-weight: var(--gf-font-weight-semibold);
-  }
-  .fields {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-    gap: var(--gf-space-4);
   }
 
   /* Apply: stays in reach at the bottom of the window while the director scrolls. */

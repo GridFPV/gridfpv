@@ -23,6 +23,7 @@ import type {
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
+  DiscoveredTimer,
   EventId,
   EventMeta,
   EventView,
@@ -364,6 +365,25 @@ export async function listTimers(
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<TimerView[]> {
   return apiJson<TimerView[]>(baseUrl, '/timers', options, 'list the timers');
+}
+
+/**
+ * List the OFT timers found on the network (`GET /timers/discovered`): the ones that advertise
+ * themselves. An open read (no token). Each {@link DiscoveredTimer} says whether a timer at
+ * its address is already added. Finding a timer adds nothing; a person adds it with
+ * {@link createTimer}. There is no change feed, so a screen that shows them asks again every
+ * couple of seconds.
+ */
+export async function listDiscoveredTimers(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<DiscoveredTimer[]> {
+  return apiJson<DiscoveredTimer[]>(
+    baseUrl,
+    '/timers/discovered',
+    options,
+    'look for timers on the network'
+  );
 }
 
 /**

@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
-import type { Timer, TimerView } from '@gridfpv/types';
+import type { DiscoveredTimer, Timer, TimerView } from '@gridfpv/types';
 import TimersPage from '../src/screens/TimersPage.svelte';
 import { timerView } from './competition.js';
 import { makeTestSession } from './support.js';
@@ -146,17 +146,177 @@ describe('TimersPage', () => {
     expect(ontune).toHaveBeenCalledWith('far-gate-9zz0');
   });
 
-  it('reads the list every 2 seconds while open, and stops when it closes', async () => {
+  it('reads both lists every 2 seconds while open, and stops when it closes', async () => {
     vi.useFakeTimers();
     const listTimersImpl = vi.fn(async (): Promise<TimerView[]> => []);
-    const { session } = makeTestSession({ noEnter: true, listTimersImpl });
+    const listDiscoveredTimersImpl = vi.fn(async (): Promise<DiscoveredTimer[]> => []);
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl,
+      listDiscoveredTimersImpl
+    });
     const { unmount } = render(TimersPage, { session, onhome: vi.fn() });
     await vi.advanceTimersByTimeAsync(0);
     expect(listTimersImpl).toHaveBeenCalledTimes(1);
+    expect(listDiscoveredTimersImpl).toHaveBeenCalledTimes(1);
+    expect(listDiscoveredTimersImpl).toHaveBeenCalledWith('http://d.local', { token: 'tok' });
     await vi.advanceTimersByTimeAsync(4000);
     expect(listTimersImpl).toHaveBeenCalledTimes(3);
+    expect(listDiscoveredTimersImpl).toHaveBeenCalledTimes(3);
     unmount();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(listTimersImpl).toHaveBeenCalledTimes(3);
+    expect(listDiscoveredTimersImpl).toHaveBeenCalledTimes(3);
+  });
+
+  describe('found on the network', () => {
+    const NONE =
+      'Timers that announce themselves on the network show up here, and a timer can always be added by its address.';
+    const FAR: DiscoveredTimer = {
+      name: 'Far Gate',
+      address: '10.0.0.9:7270',
+      seats: 4,
+      added: false
+    };
+    const BENCH: DiscoveredTimer = { name: 'Bench Gate', address: '10.0.0.7:7270', added: false };
+    const KNOWN: DiscoveredTimer = {
+      name: 'oft-gate',
+      address: '192.168.1.50:7270',
+      seats: 1,
+      added: true
+    };
+    const foundList = () => screen.getByRole('list', { name: 'Found on the network' });
+
+    it('says where found timers show up when there is none', async () => {
+      const { session } = makeTestSession({ noEnter: true });
+      render(TimersPage, { session, onhome: vi.fn() });
+      expect(screen.getByRole('heading', { name: 'Found on the network' })).toBeVisible();
+      expect(await screen.findByText(NONE)).toBeVisible();
+      expect(screen.queryByRole('list', { name: 'Found on the network' })).toBeNull();
+    });
+
+    it('lists a found timer with its name, address and seats, and not one already added', async () => {
+      const { session } = makeTestSession({
+        noEnter: true,
+        listTimersImpl: vi.fn(async () => [GATE]),
+        listDiscoveredTimersImpl: vi.fn(async () => [
+          KNOWN,
+          FAR,
+          BENCH,
+          { ...FAR, name: 'Solo', address: '10.0.0.3:7270', seats: 1 }
+        ])
+      });
+      render(TimersPage, { session, onhome: vi.fn() });
+      const far = await waitFor(() =>
+        within(foundList()).getByRole('listitem', { name: 'Far Gate' })
+      );
+      expect(far).toHaveTextContent('10.0.0.9:7270');
+      expect(far).toHaveTextContent('4 seats');
+      expect(within(far).getByRole('button', { name: 'Add' })).toBeEnabled();
+      // The seat count is left out when the timer did not say.
+      const bench = within(foundList()).getByRole('listitem', { name: 'Bench Gate' });
+      expect(bench).toHaveTextContent('10.0.0.7:7270');
+      expect(bench).not.toHaveTextContent(/seat/);
+      expect(within(foundList()).getByRole('listitem', { name: 'Solo' })).toHaveTextContent(
+        '1 seat'
+      );
+      // The one already added is in the timer list, not here.
+      expect(within(foundList()).getAllByRole('listitem')).toHaveLength(3);
+      expect(within(foundList()).queryByText('oft-gate')).toBeNull();
+      expect(screen.queryByText(NONE)).toBeNull();
+    });
+
+    it('says the same sentence when every found timer is already added', async () => {
+      const { session } = makeTestSession({
+        noEnter: true,
+        listTimersImpl: vi.fn(async () => [GATE]),
+        listDiscoveredTimersImpl: vi.fn(async () => [KNOWN])
+      });
+      render(TimersPage, { session, onhome: vi.fn() });
+      expect(await screen.findByText(NONE)).toBeVisible();
+      expect(screen.queryByText('oft-gate')).toBeNull();
+    });
+
+    it('adds a found timer in one click, with its name and address, and reads both lists again', async () => {
+      const created: Timer = {
+        id: 'far-gate-9zz0',
+        name: 'Far Gate',
+        kind: 'Oft',
+        address: FAR.address
+      };
+      const list: TimerView[] = [];
+      let found: DiscoveredTimer[] = [FAR];
+      const createTimerImpl = vi.fn(async () => {
+        list.push({ timer: created, status: { connected: false, seats: [] } });
+        found = [{ ...FAR, added: true }];
+        return created;
+      });
+      const { session } = makeTestSession({
+        noEnter: true,
+        listTimersImpl: vi.fn(async () => [...list]),
+        listDiscoveredTimersImpl: vi.fn(async () => found),
+        createTimerImpl
+      });
+      render(TimersPage, { session, onhome: vi.fn() });
+      const far = await waitFor(() =>
+        within(foundList()).getByRole('listitem', { name: 'Far Gate' })
+      );
+      await fireEvent.click(within(far).getByRole('button', { name: 'Add' }));
+      await waitFor(() =>
+        expect(createTimerImpl).toHaveBeenCalledWith(
+          'http://d.local',
+          { name: 'Far Gate', kind: 'Oft', address: '10.0.0.9:7270' },
+          'tok'
+        )
+      );
+      // It moves to the timer list, and nothing is left to add.
+      await waitFor(() =>
+        expect(
+          within(screen.getByRole('list', { name: 'Timers' })).getByRole('listitem', {
+            name: 'Far Gate'
+          })
+        ).toBeVisible()
+      );
+      expect(await screen.findByText(NONE)).toBeVisible();
+      // No dialog was opened for it, and the id is not on the page.
+      expect(screen.queryByRole('form', { name: 'Add timer' })).toBeNull();
+      expect(document.body.textContent).not.toContain(created.id);
+    });
+
+    it("shows the Director's sentence when the add is refused, and keeps the timer listed", async () => {
+      const REFUSED = 'A timer needs a name.';
+      const { session } = makeTestSession({
+        noEnter: true,
+        listDiscoveredTimersImpl: vi.fn(async () => [FAR]),
+        createTimerImpl: vi.fn(async () => {
+          throw Object.assign(new Error(REFUSED), { status: 400 });
+        })
+      });
+      render(TimersPage, { session, onhome: vi.fn() });
+      const far = await waitFor(() =>
+        within(foundList()).getByRole('listitem', { name: 'Far Gate' })
+      );
+      await fireEvent.click(within(far).getByRole('button', { name: 'Add' }));
+      const problem = await screen.findByTestId('found-problem');
+      expect(problem).toHaveTextContent('The timer was not added.');
+      expect(problem).toHaveTextContent(REFUSED);
+      expect(within(foundList()).getByRole('listitem', { name: 'Far Gate' })).toBeVisible();
+      await waitFor(() => expect(within(far).getByRole('button', { name: 'Add' })).toBeEnabled());
+    });
+
+    it("says so, in the Director's words, when the network could not be searched", async () => {
+      const SAID_NO = 'The Director cannot look for timers right now.';
+      const { session } = makeTestSession({
+        noEnter: true,
+        listTimersImpl: vi.fn(async () => [GATE]),
+        listDiscoveredTimersImpl: vi.fn(async () => {
+          throw new Error(SAID_NO);
+        })
+      });
+      render(TimersPage, { session, onhome: vi.fn() });
+      expect(await screen.findByText(SAID_NO)).toBeVisible();
+      // The timer list is still shown.
+      expect(screen.getByRole('listitem', { name: 'Gate' })).toBeVisible();
+    });
   });
 });

@@ -40,6 +40,7 @@ import {
   deleteClass,
   setClassHidden,
   listTimers,
+  listDiscoveredTimers,
   createTimer,
   deleteTimer,
   getTimerConfig,
@@ -65,6 +66,7 @@ import type {
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
+  DiscoveredTimer,
   EventMeta,
   EventView,
   PassRequest,
@@ -152,6 +154,7 @@ const realApi = {
   deleteClass,
   setClassHidden,
   listTimers,
+  listDiscoveredTimers,
   createTimer,
   deleteTimer,
   getTimerConfig,
@@ -384,6 +387,15 @@ export class Session {
    */
   listTimers(): Promise<TimerView[]> {
     return this.#api.listTimers(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * List the OFT timers found on the network (`GET /timers/discovered`, open, no token), each
+   * marked with whether it is already added. No change feed: a screen reads it again with the
+   * timer list.
+   */
+  listDiscoveredTimers(): Promise<DiscoveredTimer[]> {
+    return this.#api.listDiscoveredTimers(this.baseUrl, { token: this.#token });
   }
 
   /**

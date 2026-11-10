@@ -85,19 +85,11 @@ export function secondsToMs(value: FieldValue | null | undefined): number | unde
 /** How the timer sets its levels: following the noise floor, or fixed. */
 export type ThresholdMode = 'Auto' | 'Manual';
 
-/** One seat in the draft. */
-export interface DraftSeat {
-  /** The seat's wire handle. Never shown. */
-  seat: SeatRef;
-  /** The frequency in MHz. */
-  mhz: FieldValue;
-  enabled: boolean;
-}
-
-/** The settings as the director is editing them. */
-export interface TuneDraft {
-  seats: DraftSeat[];
-  seatsPerReceiver: FieldValue;
+/**
+ * Enter and exit levels as the director is editing them: the timer's, or one seat's own. The
+ * fields of the mode that is not in use are kept, so switching back loses nothing typed.
+ */
+export interface LevelsDraft {
   mode: ThresholdMode;
   /** Follow the noise floor: enter this many dB above the floor. */
   aboveFloorDb: FieldValue;
@@ -107,6 +99,25 @@ export interface TuneDraft {
   enterDb: FieldValue;
   /** Fixed levels: the exit level in dB. */
   exitDb: FieldValue;
+}
+
+/** One seat in the draft. */
+export interface DraftSeat {
+  /** The seat's wire handle. Never shown. */
+  seat: SeatRef;
+  /** The frequency in MHz. */
+  mhz: FieldValue;
+  enabled: boolean;
+  /** The seat's own levels. Absent means the seat uses the timer's. */
+  levels?: LevelsDraft;
+}
+
+/** The settings as the director is editing them. */
+export interface TuneDraft {
+  seats: DraftSeat[];
+  seatsPerReceiver: FieldValue;
+  /** The timer's levels: what every seat with none of its own uses. */
+  levels: LevelsDraft;
   /** The minimum lap time in seconds. */
   minLapSeconds: FieldValue;
 }
@@ -117,33 +128,43 @@ export function thresholdMode(threshold: TimerThreshold): ThresholdMode {
 }
 
 /**
- * A draft that says what the timer's settings say. The fields of the mode that is not in use
- * start empty: the timer holds no values for them.
+ * Levels that say what a threshold says. The fields of the mode that is not in use start
+ * empty: the timer holds no values for them.
  */
-export function draftFrom(config: TimerConfig): TuneDraft {
-  const { threshold } = config;
-  const draft: TuneDraft = {
-    seats: config.seats.map((seat) => ({
-      seat: seat.seat,
-      mhz: seat.freq_mhz,
-      enabled: seat.enabled
-    })),
-    seatsPerReceiver: config.seats_per_node,
+export function levelsFrom(threshold: TimerThreshold): LevelsDraft {
+  const levels: LevelsDraft = {
     mode: thresholdMode(threshold),
     aboveFloorDb: '',
     belowEnterDb: '',
     enterDb: '',
-    exitDb: '',
-    minLapSeconds: msToSeconds(config.min_lap_ms)
+    exitDb: ''
   };
   if ('Auto' in threshold) {
-    draft.aboveFloorDb = tenthsToDb(threshold.Auto.snr_enter);
-    draft.belowEnterDb = tenthsToDb(threshold.Auto.hysteresis);
+    levels.aboveFloorDb = tenthsToDb(threshold.Auto.snr_enter);
+    levels.belowEnterDb = tenthsToDb(threshold.Auto.hysteresis);
   } else {
-    draft.enterDb = tenthsToDb(threshold.Manual.enter);
-    draft.exitDb = tenthsToDb(threshold.Manual.exit);
+    levels.enterDb = tenthsToDb(threshold.Manual.enter);
+    levels.exitDb = tenthsToDb(threshold.Manual.exit);
   }
-  return draft;
+  return levels;
+}
+
+/**
+ * A draft that says what the timer's settings say. A seat has levels in the draft only when
+ * it has its own on the timer.
+ */
+export function draftFrom(config: TimerConfig): TuneDraft {
+  return {
+    seats: config.seats.map((seat) => ({
+      seat: seat.seat,
+      mhz: seat.freq_mhz,
+      enabled: seat.enabled,
+      ...(seat.threshold ? { levels: levelsFrom(seat.threshold) } : {})
+    })),
+    seatsPerReceiver: config.seats_per_node,
+    levels: levelsFrom(config.threshold),
+    minLapSeconds: msToSeconds(config.min_lap_ms)
+  };
 }
 
 /** The settings a draft would send, or a sentence saying why it cannot be sent yet. */
@@ -152,8 +173,57 @@ export type DraftResult = { ok: true; config: TimerConfig } | { ok: false; probl
 const problem = (sentence: string): DraftResult => ({ ok: false, problem: sentence });
 
 /**
+ * The threshold a set of levels would send, or a sentence saying what is missing. `who` is
+ * the name people see for the seat whose own levels these are ("Seat 2"); leave it out for
+ * the timer's levels.
+ */
+function thresholdFrom(
+  levels: LevelsDraft,
+  who?: string
+): { ok: true; threshold: TimerThreshold } | { ok: false; problem: string } {
+  const missing = (sentence: string) => ({ ok: false as const, problem: sentence });
+  if (levels.mode === 'Auto') {
+    const snrEnter = dbToTenths(levels.aboveFloorDb);
+    const hysteresis = dbToTenths(levels.belowEnterDb);
+    if (snrEnter === undefined) {
+      return missing(
+        who
+          ? `Say how far above the noise floor ${who} enters.`
+          : 'Say how far above the noise floor to enter.'
+      );
+    }
+    if (hysteresis === undefined) {
+      return missing(
+        who ? `Say how far below enter ${who} exits.` : 'Say how far below enter to exit.'
+      );
+    }
+    return { ok: true, threshold: { Auto: { snr_enter: snrEnter, hysteresis } } };
+  }
+  const enter = dbToTenths(levels.enterDb);
+  const exit = dbToTenths(levels.exitDb);
+  if (enter === undefined) {
+    return missing(who ? `${who} needs an enter level.` : 'Fixed levels need an enter level.');
+  }
+  if (exit === undefined) {
+    return missing(who ? `${who} needs an exit level.` : 'Fixed levels need an exit level.');
+  }
+  if (exit >= enter) {
+    return missing(
+      who
+        ? `On ${who}, the exit level must be below the enter level.`
+        : 'The exit level must be below the enter level.'
+    );
+  }
+  return { ok: true, threshold: { Manual: { enter, exit } } };
+}
+
+/**
  * Turn a draft into the settings to send. `seatName` gives the name people see for a seat
  * ("Seat 2"), so a sentence about a seat never carries its wire handle.
+ *
+ * The timer replaces the whole of its settings each time, so every seat with its own levels
+ * carries them, and a seat with none carries no `threshold` at all. `seatLevels` says whether
+ * the timer takes levels per seat; when it does not, none is ever sent.
  *
  * Only what cannot be sent at all is caught here (an empty field, a level order that makes no
  * crossing). Whether the timer accepts a value is the timer's call, and its answer is shown
@@ -161,15 +231,23 @@ const problem = (sentence: string): DraftResult => ({ ok: false, problem: senten
  */
 export function draftConfig(
   draft: TuneDraft,
-  seatName: (seat: SeatRef, position: number) => string
+  seatName: (seat: SeatRef, position: number) => string,
+  seatLevels = true
 ): DraftResult {
   const seats: TimerSeatConfig[] = [];
   for (const [position, seat] of draft.seats.entries()) {
+    const name = seatName(seat.seat, position);
     const mhz = fieldNumber(seat.mhz);
     if (mhz === undefined || !Number.isInteger(mhz) || mhz <= 0) {
-      return problem(`${seatName(seat.seat, position)} needs a frequency in whole MHz.`);
+      return problem(`${name} needs a frequency in whole MHz.`);
     }
-    seats.push({ seat: seat.seat, freq_mhz: mhz, enabled: seat.enabled });
+    const sent: TimerSeatConfig = { seat: seat.seat, freq_mhz: mhz, enabled: seat.enabled };
+    if (seatLevels && seat.levels) {
+      const own = thresholdFrom(seat.levels, name);
+      if (!own.ok) return problem(own.problem);
+      sent.threshold = own.threshold;
+    }
+    seats.push(sent);
   }
 
   const perReceiver = fieldNumber(draft.seatsPerReceiver);
@@ -177,21 +255,8 @@ export function draftConfig(
     return problem('Seats per receiver must be a whole number, 1 or more.');
   }
 
-  let threshold: TimerThreshold;
-  if (draft.mode === 'Auto') {
-    const snrEnter = dbToTenths(draft.aboveFloorDb);
-    const hysteresis = dbToTenths(draft.belowEnterDb);
-    if (snrEnter === undefined) return problem('Say how far above the noise floor to enter.');
-    if (hysteresis === undefined) return problem('Say how far below enter to exit.');
-    threshold = { Auto: { snr_enter: snrEnter, hysteresis } };
-  } else {
-    const enter = dbToTenths(draft.enterDb);
-    const exit = dbToTenths(draft.exitDb);
-    if (enter === undefined) return problem('Fixed levels need an enter level.');
-    if (exit === undefined) return problem('Fixed levels need an exit level.');
-    if (exit >= enter) return problem('The exit level must be below the enter level.');
-    threshold = { Manual: { enter, exit } };
-  }
+  const timerWide = thresholdFrom(draft.levels);
+  if (!timerWide.ok) return problem(timerWide.problem);
 
   const minLap = secondsToMs(draft.minLapSeconds);
   if (minLap === undefined || minLap < 0) {
@@ -200,7 +265,12 @@ export function draftConfig(
 
   return {
     ok: true,
-    config: { seats, seats_per_node: perReceiver, threshold, min_lap_ms: minLap }
+    config: {
+      seats,
+      seats_per_node: perReceiver,
+      threshold: timerWide.threshold,
+      min_lap_ms: minLap
+    }
   };
 }
 
@@ -227,7 +297,10 @@ export function sameConfig(a: TimerConfig, b: TimerConfig): boolean {
       return (
         seat.seat === other.seat &&
         seat.freq_mhz === other.freq_mhz &&
-        seat.enabled === other.enabled
+        seat.enabled === other.enabled &&
+        (seat.threshold && other.threshold
+          ? sameThreshold(seat.threshold, other.threshold)
+          : !seat.threshold && !other.threshold)
       );
     })
   );
@@ -235,50 +308,72 @@ export function sameConfig(a: TimerConfig, b: TimerConfig): boolean {
 
 /**
  * Whether the draft differs from what the timer has. A draft that cannot be sent yet differs:
- * the director has changed something and it is not on the timer.
+ * the director has changed something and it is not on the timer. `seatLevels` is as for
+ * {@link draftConfig}.
  */
-export function isDirty(draft: TuneDraft, config: TimerConfig): boolean {
-  const result = draftConfig(draft, () => 'Seat');
+export function isDirty(draft: TuneDraft, config: TimerConfig, seatLevels = true): boolean {
+  const result = draftConfig(draft, () => 'Seat', seatLevels);
   return !result.ok || !sameConfig(result.config, config);
 }
 
+/** An enter and an exit level, in tenths of a dB. */
+export interface EnterExit {
+  enter: number;
+  exit: number;
+}
+
 /**
- * The fixed levels to start from when the director switches from following the noise floor:
- * the levels the timer is using right now. Fixed levels are one setting for the whole timer,
- * while each seat follows its own floor, so the seat with the highest enter level is taken;
- * that level is above the noise on every seat. Only seats that are on count. `undefined` when
- * the timer has reported no levels.
+ * The fixed levels to start from when the director switches the timer's levels from following
+ * the noise floor: the levels the timer is using right now. Fixed levels are one setting for
+ * every seat that uses them, while each seat follows its own floor, so the seat with the
+ * highest enter level is taken; that level is above the noise on every seat. Only seats that
+ * are on and use the timer's levels count: a seat with its own says nothing about the timer's.
+ * `undefined` when the timer has reported no levels for such a seat.
  */
 export function levelsInUse(
   levels: readonly SeatLevels[],
   config: TimerConfig
-): { enter: number; exit: number } | undefined {
-  const on = new Set(config.seats.filter((seat) => seat.enabled).map((seat) => seat.seat));
+): EnterExit | undefined {
+  const counted = new Set(
+    config.seats.filter((seat) => seat.enabled && !seat.threshold).map((seat) => seat.seat)
+  );
   let highest: SeatLevels | undefined;
   for (const seat of levels) {
-    if (!on.has(seat.seat)) continue;
+    if (!counted.has(seat.seat)) continue;
     if (!highest || seat.enter > highest.enter) highest = seat;
   }
   return highest ? { enter: highest.enter, exit: highest.exit } : undefined;
 }
 
 /**
- * The draft with its threshold mode changed. Going to fixed levels, empty enter and exit
- * fields are filled from the levels the timer is using right now (`inUse`); numbers the
- * director already typed are kept.
+ * Levels with their mode changed. Going to fixed levels, empty enter and exit fields are
+ * filled from the levels in use right now (`inUse`); numbers the director already typed are
+ * kept.
  */
 export function withMode(
-  draft: TuneDraft,
+  levels: LevelsDraft,
   mode: ThresholdMode,
-  inUse: { enter: number; exit: number } | undefined
-): TuneDraft {
-  if (mode === draft.mode) return draft;
-  const next: TuneDraft = { ...draft, mode };
+  inUse: EnterExit | undefined
+): LevelsDraft {
+  if (mode === levels.mode) return levels;
+  const next: LevelsDraft = { ...levels, mode };
   if (mode === 'Manual' && inUse) {
     if (fieldNumber(next.enterDb) === undefined) next.enterDb = tenthsToDb(inUse.enter);
     if (fieldNumber(next.exitDb) === undefined) next.exitDb = tenthsToDb(inUse.exit);
   }
   return next;
+}
+
+/**
+ * The levels a seat starts from when the director gives it its own. It starts the way the
+ * timer's levels are set in the draft, so nothing changes until a number does. Its fixed enter
+ * and exit are the levels the seat is using right now (`inUse`, from the live feed), so going
+ * to fixed levels starts from what is on the trace. Without live levels the timer's fixed
+ * levels in the draft stand in.
+ */
+export function ownLevels(timer: LevelsDraft, inUse: EnterExit | undefined): LevelsDraft {
+  if (!inUse) return { ...timer };
+  return { ...timer, enterDb: tenthsToDb(inUse.enter), exitDb: tenthsToDb(inUse.exit) };
 }
 
 /**

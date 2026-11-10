@@ -31,7 +31,8 @@ const lap = (crossing: number, from: number, to: number, restart = false): LapVi
   started_at: START + from * S,
   ended_at: START + to * S,
   micros: (to - from) * S,
-  restart
+  restart,
+  timer_restarted: false
 });
 
 const placed = (pilot: string, position: number, laps: number, over = {}) => ({

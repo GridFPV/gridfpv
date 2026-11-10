@@ -69,5 +69,8 @@ every crossing after it. All three are fixed, and each fix has a test in CI as w
 barrel check. The frontend adds `check`, `lint`, `test` and `build`. `cargo xtask e2e` runs
 the browser suite. CI runs all of it on every push to the draft pull request.
 
-A push is not done until CI is green. Never chain a commit after a gate with `;`: a failed
-gate must stop the commit.
+A push is not done until CI is green. Two rules that each cost a red run:
+
+- Never chain a commit after a gate with `;`. A failed gate must stop the commit.
+- Read a gate's **exit code**, not its output. Counting "0 errors" lines missed a type
+  error that only the TypeScript compiler step reported.

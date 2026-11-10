@@ -1,7 +1,7 @@
 /**
- * Words for a timer's status on the Timers page. Pure, so they can be tested alone.
+ * Words for a timer's status on the Timers page, and the timers found on the network. Pure, so they can be tested alone.
  */
-import type { TimerKind, TimerStatus } from '@gridfpv/types';
+import type { DiscoveredTimer, TimerKind, TimerStatus } from '@gridfpv/types';
 
 /** How often a screen that shows timers reads the list again. Timers have no change feed. */
 export const TIMER_POLL_MS = 2000;
@@ -42,9 +42,21 @@ export function clockSentence(errorMicros: number | undefined): string {
   return `Clock known to within ${Math.round(ms)} ms`;
 }
 
+/** A number of seats in words: "4 seats", "1 seat". */
+export function seatCount(count: number): string {
+  return `${count} ${count === 1 ? 'seat' : 'seats'}`;
+}
+
 /** How many seats the timer reports: "4 seats", "1 seat", "No seats reported yet". */
 export function seatCountSentence(status: TimerStatus): string {
   const count = status.seats.length;
-  if (count === 0) return 'No seats reported yet';
-  return `${count} ${count === 1 ? 'seat' : 'seats'}`;
+  return count === 0 ? 'No seats reported yet' : seatCount(count);
+}
+
+/**
+ * The timers found on the network that are not added yet, in the order the Director gave
+ * them. One that is already added is in the timer list, so it is not offered again.
+ */
+export function notAddedYet(found: readonly DiscoveredTimer[]): DiscoveredTimer[] {
+  return found.filter((timer) => !timer.added);
 }

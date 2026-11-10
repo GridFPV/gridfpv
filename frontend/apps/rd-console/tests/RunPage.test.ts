@@ -100,7 +100,8 @@ describe('RunPage', () => {
       started_at: 0,
       ended_at: micros,
       micros,
-      restart: false
+      restart: false,
+      timer_restarted: false
     });
     const running = race(HEAT, 1, 'Running', {
       started_at: 0,
@@ -253,7 +254,8 @@ describe('RunPage', () => {
       started_at: 0,
       ended_at: S,
       micros: S,
-      restart: false
+      restart: false,
+      timer_restarted: false
     });
     const saved = race(HEAT, 2, 'Saved', {
       seats: [

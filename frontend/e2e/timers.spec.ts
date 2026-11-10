@@ -50,6 +50,14 @@ test('RD adds a timer nothing answers at, sees why, opens its Tune page, cannot 
     await expect(page).toHaveURL(/#\/timers$/);
     await expect(page.getByRole('heading', { name: 'Timers', level: 1 })).toBeVisible();
 
+    // ── Found on the network: nothing here ───────────────────────────────────────────────
+    // This Director has no timer on its network and finds none, so this goes only as far as
+    // is honest: the section is there and says where found timers would show up.
+    await expect(page.getByRole('heading', { name: 'Found on the network' })).toBeVisible();
+    await expect(page.getByTestId('found-none')).toHaveText(
+      'Timers that announce themselves on the network show up here, and a timer can always be added by its address.'
+    );
+
     // ── A bad address is refused in the Director's words, and the dialog stays open ──────
     await page.getByRole('button', { name: '+ Add timer' }).click();
     const form = page.getByRole('form', { name: 'Add timer' });

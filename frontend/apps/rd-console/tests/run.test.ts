@@ -24,7 +24,8 @@ const lap = (crossing: number, micros: number, restart = false) => ({
   started_at: 0,
   ended_at: micros,
   micros,
-  restart
+  restart,
+  timer_restarted: false
 });
 
 describe('readClock', () => {

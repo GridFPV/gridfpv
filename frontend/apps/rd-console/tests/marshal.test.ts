@@ -39,7 +39,8 @@ const lap = (crossing: number, from: number, to: number, restart = false): LapVi
   started_at: from,
   ended_at: to,
   micros: to - from,
-  restart
+  restart,
+  timer_restarted: false
 });
 const protest = (id: string, raceId: string, over: Partial<ProtestView> = {}): ProtestView => ({
   protest: id,

@@ -23,6 +23,9 @@ const OFF: TimerView = {
   status: { connected: false, problem: SAID, seats: [] }
 };
 
+/** The same timer, saying it takes levels per seat. */
+const PER_SEAT = timerView(ID, 'Gate', 2, { seat_thresholds: true });
+
 const CONFIG: TimerConfig = {
   seats: [
     { seat: '0', freq_mhz: 5658, enabled: true },
@@ -297,6 +300,198 @@ describe('TunePage', () => {
     await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalled());
     expect(putTimerConfigImpl.mock.calls[0][2].threshold).toEqual({
       Manual: { enter: -771, exit: -821 }
+    });
+  });
+
+  describe("a seat's own levels", () => {
+    const choice = (name: string) =>
+      within(seatRow(name)).getByLabelText(`${name}: this seat's levels`);
+    const TIMER_WIDE =
+      'When the timer counts a crossing. These settings are for every seat on this timer.';
+    const TIMER_DEFAULT =
+      "When the timer counts a crossing. These levels are the timer's own. Every seat that has none of its own uses them.";
+
+    it('offers none on a timer that does not take them, and sends none', async () => {
+      const { putTimerConfigImpl } = open();
+      await waitFor(() => seatRow('Seat 1'));
+      expect(screen.queryByText("This seat's levels")).toBeNull();
+      expect(screen.queryByLabelText("Seat 1: this seat's levels")).toBeNull();
+      expect(screen.getByText(TIMER_WIDE)).toBeVisible();
+      expect(screen.queryByText(TIMER_DEFAULT)).toBeNull();
+
+      await fireEvent.click(screen.getByRole('switch', { name: 'Seat 2 on' }));
+      await fireEvent.click(await screen.findByRole('button', { name: 'Apply to timer' }));
+      await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalled());
+      for (const seat of putTimerConfigImpl.mock.calls[0][2].seats) {
+        expect('threshold' in seat).toBe(false);
+      }
+    });
+
+    it("offers the choice on a timer that takes them, and says the timer's levels are the default", async () => {
+      open({}, PER_SEAT);
+      await waitFor(() => seatRow('Seat 1'));
+      expect(choice('Seat 1')).toHaveValue('timer');
+      expect(choice('Seat 2')).toHaveValue('timer');
+      expect(within(seatRow('Seat 1')).getByText("This seat's levels")).toBeVisible();
+      expect(
+        within(choice('Seat 1')).getByRole('option', { name: 'Same as the timer' })
+      ).toBeTruthy();
+      expect(within(choice('Seat 1')).getByRole('option', { name: 'Its own' })).toBeTruthy();
+      // No fields for a seat on the timer's levels.
+      expect(within(seatRow('Seat 1')).queryByRole('radio')).toBeNull();
+      expect(screen.getByText(TIMER_DEFAULT)).toBeVisible();
+      expect(screen.queryByText(TIMER_WIDE)).toBeNull();
+      expect(screen.getByText('This is what the timer is using.')).toBeVisible();
+    });
+
+    it('gives a seat its own levels, filled from the levels it is using right now, and applies them', async () => {
+      const { feed, putTimerConfigImpl } = open({}, PER_SEAT);
+      const one = await waitFor(() => seatRow('Seat 1'));
+      feed.handlers!.onLevels(LEVELS);
+      await waitFor(() => expect(within(one).getByTestId('seat-live')).toHaveTextContent('-77.3'));
+
+      await fireEvent.change(choice('Seat 1'), { target: { value: 'own' } });
+      // It starts the way the timer's levels are set, and the draft is changed already.
+      const group = await within(one).findByRole('group', {
+        name: 'Seat 1 enter and exit levels'
+      });
+      expect(within(group).getByRole('radio', { name: 'Follow the noise floor' })).toBeChecked();
+      expect(
+        within(one).getByLabelText('Seat 1 enter this far above the floor, in dB')
+      ).toHaveValue(15);
+      expect(within(one).getByLabelText('Seat 1 exit this far below enter, in dB')).toHaveValue(5);
+      expect(await screen.findByText('These changes are not on the timer yet.')).toBeVisible();
+
+      // Fixed levels start from the levels this seat is using right now.
+      await fireEvent.click(within(group).getByRole('radio', { name: 'Fixed levels' }));
+      expect(await within(one).findByLabelText('Seat 1 enter level, in dB')).toHaveValue(-77.1);
+      expect(within(one).getByLabelText('Seat 1 exit level, in dB')).toHaveValue(-82.1);
+      await fireEvent.input(within(one).getByLabelText('Seat 1 enter level, in dB'), {
+        target: { value: '-70' }
+      });
+
+      // The timer's own levels are not touched by any of it.
+      expect(screen.getByLabelText('Enter this far above the floor, in dB')).toHaveValue(15);
+      const timerMode = screen.getByRole('group', { name: 'Enter and exit levels' });
+      expect(
+        within(timerMode).getByRole('radio', { name: 'Follow the noise floor' })
+      ).toBeChecked();
+      // The other seat stays on the timer's.
+      expect(choice('Seat 2')).toHaveValue('timer');
+
+      await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+      await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalled());
+      const sent = putTimerConfigImpl.mock.calls[0][2];
+      expect(sent.seats[0]).toEqual({
+        seat: '0',
+        freq_mhz: 5658,
+        enabled: true,
+        threshold: { Manual: { enter: -700, exit: -821 } }
+      });
+      expect('threshold' in sent.seats[1]).toBe(false);
+      expect(sent.threshold).toEqual(CONFIG.threshold);
+      // What came back has the seat's own levels, and the page shows them as applied.
+      expect(await screen.findByText('This is what the timer is using.')).toBeVisible();
+      expect(choice('Seat 1')).toHaveValue('own');
+      expect(within(seatRow('Seat 1')).getByLabelText('Seat 1 enter level, in dB')).toHaveValue(
+        -70
+      );
+    });
+
+    it("shows a seat's own levels from the timer, sends them again with any other change, and omits the key for 'Same as the timer'", async () => {
+      const own: TimerConfig = {
+        ...CONFIG,
+        seats: [
+          { ...CONFIG.seats[0], threshold: { Manual: { enter: -700, exit: -760 } } },
+          { ...CONFIG.seats[1], threshold: { Auto: { snr_enter: 120, hysteresis: 40 } } }
+        ]
+      };
+      const { putTimerConfigImpl } = open(
+        { getTimerConfigImpl: vi.fn(async () => structuredClone(own)) },
+        PER_SEAT
+      );
+      const one = await waitFor(() => seatRow('Seat 1'));
+      expect(choice('Seat 1')).toHaveValue('own');
+      expect(within(one).getByLabelText('Seat 1 enter level, in dB')).toHaveValue(-70);
+      expect(within(one).getByLabelText('Seat 1 exit level, in dB')).toHaveValue(-76);
+      expect(
+        within(seatRow('Seat 2')).getByLabelText('Seat 2 enter this far above the floor, in dB')
+      ).toHaveValue(12);
+      expect(screen.getByText('This is what the timer is using.')).toBeVisible();
+
+      // Seat 2 goes back to the timer's levels; seat 1 is not touched.
+      await fireEvent.change(choice('Seat 2'), { target: { value: 'timer' } });
+      await waitFor(() => expect(within(seatRow('Seat 2')).queryByRole('radio')).toBeNull());
+      await fireEvent.click(await screen.findByRole('button', { name: 'Apply to timer' }));
+      await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalled());
+      const sent = putTimerConfigImpl.mock.calls[0][2];
+      expect(sent.seats[0].threshold).toEqual({ Manual: { enter: -700, exit: -760 } });
+      expect('threshold' in sent.seats[1]).toBe(false);
+    });
+
+    it("says which seat's levels have a hole, and Discard puts the seat back as the timer has it", async () => {
+      const { getTimerConfigImpl } = open({}, PER_SEAT);
+      const one = await waitFor(() => seatRow('Seat 1'));
+      await fireEvent.change(choice('Seat 1'), { target: { value: 'own' } });
+      const group = await within(one).findByRole('group', {
+        name: 'Seat 1 enter and exit levels'
+      });
+      // No live levels yet, and the timer follows the floor, so fixed levels start empty.
+      await fireEvent.click(within(group).getByRole('radio', { name: 'Fixed levels' }));
+      expect(await screen.findByText('Seat 1 needs an enter level.')).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Apply to timer' })).toBeDisabled();
+
+      await fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+      await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(2));
+      expect(await screen.findByText('This is what the timer is using.')).toBeVisible();
+      expect(choice('Seat 1')).toHaveValue('timer');
+      expect(within(seatRow('Seat 1')).queryByRole('radio')).toBeNull();
+    });
+
+    it("shows the Director's sentence as it is when the timer will not take a seat's levels", async () => {
+      const REFUSED =
+        'This timer has one threshold for all its seats. It cannot take one for a single seat.';
+      open(
+        {
+          putTimerConfigImpl: vi.fn(async () => {
+            throw Object.assign(new Error(REFUSED), { status: 400, code: 'BadRequest' });
+          })
+        },
+        PER_SEAT
+      );
+      await waitFor(() => seatRow('Seat 1'));
+      await fireEvent.change(choice('Seat 1'), { target: { value: 'own' } });
+      await fireEvent.click(await screen.findByRole('button', { name: 'Apply to timer' }));
+      expect(await screen.findByTestId('apply-problem')).toHaveTextContent(REFUSED);
+      expect(choice('Seat 1')).toHaveValue('own');
+    });
+
+    it("draws each seat's trace against that seat's own levels", async () => {
+      const bothOn: TimerConfig = {
+        ...CONFIG,
+        seats: [
+          CONFIG.seats[0],
+          { ...CONFIG.seats[1], enabled: true, threshold: { Manual: { enter: -600, exit: -660 } } }
+        ]
+      };
+      const { feed } = open(
+        { getTimerConfigImpl: vi.fn(async () => structuredClone(bothOn)) },
+        PER_SEAT
+      );
+      await waitFor(() => seatRow('Seat 1'));
+      feed.handlers!.onLevels([
+        LEVELS[0],
+        { seat: '1', level: -880, floor: -915, enter: -600, exit: -660, crossing: false }
+      ]);
+      const traces = screen.getByRole('list', { name: 'Signal' });
+      const one = within(traces).getByRole('listitem', { name: 'Seat 1' });
+      const two = within(traces).getByRole('listitem', { name: 'Seat 2' });
+      await waitFor(() =>
+        expect(within(two).getByLabelText('Seat 2 levels')).toHaveTextContent('Enter -60.0 dB')
+      );
+      expect(within(two).getByLabelText('Seat 2 levels')).toHaveTextContent('Exit -66.0 dB');
+      expect(within(one).getByLabelText('Seat 1 levels')).toHaveTextContent('Enter -77.1 dB');
+      expect(within(one).getByLabelText('Seat 1 levels')).toHaveTextContent('Exit -82.1 dB');
     });
   });
 

@@ -3,6 +3,7 @@ import type {
   Class,
   CreateClassRequest,
   CreatePilotRequest,
+  DiscoveredTimer,
   EventMeta,
   Pilot,
   Timer,
@@ -291,6 +292,16 @@ describe('Session', () => {
       const session = timerSession({ listTimers });
       expect(await session.listTimers()).toEqual(views);
       expect(listTimers).toHaveBeenCalledWith('http://d.local', { token: undefined });
+    });
+
+    it('listDiscoveredTimers reads the timers found on the network open (no token)', async () => {
+      const found: DiscoveredTimer[] = [
+        { name: 'Gate', address: '10.0.0.5:7270', seats: 4, added: false }
+      ];
+      const listDiscoveredTimers = vi.fn(async () => found);
+      const session = timerSession({ listDiscoveredTimers });
+      expect(await session.listDiscoveredTimers()).toEqual(found);
+      expect(listDiscoveredTimers).toHaveBeenCalledWith('http://d.local', { token: undefined });
     });
 
     it('createTimer sends without a token first, then prompts once when refused for auth', async () => {

@@ -61,6 +61,8 @@ export function makeTestSession(
       listPilots: async () => [],
       // The same goes for the timer read, which several screens poll.
       listTimers: async () => [],
+      // And for the timers found on the network, which the Timers page reads with the list.
+      listDiscoveredTimers: async () => [],
       ...seamOverrides(opts)
     }
   });

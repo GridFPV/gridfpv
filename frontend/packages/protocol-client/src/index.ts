@@ -29,6 +29,7 @@ export {
   deleteClass,
   setClassHidden,
   listTimers,
+  listDiscoveredTimers,
   createTimer,
   deleteTimer,
   getTimerConfig,
