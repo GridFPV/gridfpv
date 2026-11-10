@@ -29,7 +29,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use gridfpv_adapters::Adapter;
 use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftMessage, SignalBuffer, seat_ref};
-use gridfpv_events::{AdapterId, Event};
+use gridfpv_events::{AdapterId, Event, SeatRef, SignalThresholds, SignalUnit};
 use gridfpv_server::control::with_event;
 use gridfpv_server::events::{EventId, EventRegistry};
 use gridfpv_server::timers::{SeatLevels, Timer, TimerKind, TimerLive};
@@ -89,6 +89,9 @@ async fn hold(registry: EventRegistry, timer: Timer) {
         id: timer.id.clone(),
         fit: ClockFit::new(),
         signal: SignalBuffer::new(),
+        levels: BTreeMap::new(),
+        unit: SignalUnit::TenthsDb,
+        levels_logged: BTreeMap::new(),
         boot_id: None,
         logged: None,
     };
@@ -128,6 +131,11 @@ struct Link {
     id: AdapterId,
     fit: ClockFit,
     signal: SignalBuffer,
+    /// Each seat's enter and exit levels as the timer last reported them, and the unit.
+    levels: BTreeMap<SeatRef, (i32, i32)>,
+    unit: SignalUnit,
+    /// The levels logged for the race that is on. Empty while no race is on.
+    levels_logged: BTreeMap<SeatRef, (i32, i32)>,
     /// The boot the clock fit belongs to. A new boot is a new clock.
     boot_id: Option<String>,
     /// The event the clock offset was last logged to, and the offset logged.
@@ -176,6 +184,36 @@ impl Link {
         }
     }
 
+    /// While a race is on, log the levels the timer detects against: once when the race
+    /// comes on, and again when they move by more than a dB (a timer that follows the noise
+    /// floor moves them by itself). They sit beside the race's signal for the marshal.
+    fn log_levels(&mut self) {
+        if !self.registry.race_on() {
+            self.levels_logged.clear();
+            return;
+        }
+        let moved: Vec<(SeatRef, (i32, i32))> = self
+            .levels
+            .iter()
+            .filter(|(seat, now)| {
+                self.levels_logged.get(*seat).is_none_or(|logged| {
+                    (logged.0 - now.0).abs() > 10 || (logged.1 - now.1).abs() > 10
+                })
+            })
+            .map(|(seat, now)| (seat.clone(), *now))
+            .collect();
+        for (seat, (enter, exit)) in moved {
+            self.log(Event::SignalThresholds(SignalThresholds {
+                adapter: self.id.clone(),
+                seat: seat.clone(),
+                enter,
+                exit,
+                unit: self.unit,
+            }));
+            self.levels_logged.insert(seat, (enter, exit));
+        }
+    }
+
     /// One connection, from open to the first failure. `Ok` means the timer closed it.
     async fn run(&mut self, timer: &Timer, adapter: &mut OftAdapter) -> Result<(), String> {
         let url = format!("ws://{}/oft/v1/stream", timer.address);
@@ -209,7 +247,17 @@ impl Link {
                         continue;
                     };
                     match &message {
-                        OftMessage::Hello { boot_id, seats, .. } => {
+                        OftMessage::Hello {
+                            boot_id,
+                            seats,
+                            calibrated,
+                            ..
+                        } => {
+                            self.unit = if *calibrated {
+                                SignalUnit::TenthsDbm
+                            } else {
+                                SignalUnit::TenthsDb
+                            };
                             if self.boot_id.as_deref() != Some(boot_id.as_str()) {
                                 self.boot_id = Some(boot_id.clone());
                                 self.fit.reset();
@@ -248,6 +296,11 @@ impl Link {
                             self.registry
                                 .timers()
                                 .publish(&self.id, TimerLive::Levels(levels));
+                            self.levels = seats
+                                .iter()
+                                .map(|seat| (seat_ref(seat.seat), (seat.enter, seat.exit)))
+                                .collect();
+                            self.log_levels();
                         }
                         _ => {}
                     }
@@ -259,6 +312,10 @@ impl Link {
                                     .timers()
                                     .publish(&self.id, TimerLive::Signal(chunk.clone()));
                                 let race_on = self.registry.race_on();
+                                if race_on && self.levels_logged.is_empty() {
+                                    // The race just came on: its levels go in first.
+                                    self.log_levels();
+                                }
                                 for chunk in self.signal.push(chunk, race_on) {
                                     self.log(Event::SignalChunk(chunk));
                                 }

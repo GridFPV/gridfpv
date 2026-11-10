@@ -104,6 +104,7 @@ pub fn router(registry: EventRegistry) -> Router {
             "/events/{event_id}/changes",
             get(crate::control::get_changes),
         )
+        .route("/events/{event_id}/signal", get(crate::control::get_signal))
         // The app-level pilot directory: an open list; create/edit/delete are RD-gated.
         .route("/pilots", get(list_pilots).post(create_pilot))
         .route("/pilots/{pilot_id}", put(update_pilot).delete(delete_pilot))

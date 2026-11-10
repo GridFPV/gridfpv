@@ -21,6 +21,7 @@
 //! | `POST /events/{id}/presets/mains` | generate stacked mains |
 //! | `POST /events/{id}/passes` | a gate crossing from outside |
 //! | `GET /events/{id}/changes` | server-sent `cursor` events |
+//! | `GET /events/{id}/signal?race=…` | a race's logged signal, for the marshal |
 //!
 //! **The change feed** carries no data, only the log cursor. A console that hears a new
 //! cursor reads the snapshot again. That is simple and cannot drift; the snapshot is small
@@ -36,8 +37,8 @@ use futures_util::stream::{self, Stream};
 use gridfpv_engine::presets::{self, Bracket, Elimination, Mains};
 use gridfpv_engine::state::EventState;
 use gridfpv_events::{
-    AdapterId, Command, Event, FieldSlice, Format, GateIndex, Pass, PhaseDef, PhaseId, SeatRef,
-    SeatSource, SourceTime,
+    AdapterId, Command, Event, FieldSlice, Format, GateIndex, Pass, PhaseDef, PhaseId, RaceId,
+    SeatRef, SeatSource, SignalChunk, SignalThresholds, SourceTime,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -468,6 +469,113 @@ pub async fn post_pass(
             race: None,
         }))?;
         Ok(Json(session.outcome()))
+    })
+}
+
+/// Which race `GET /events/{id}/signal` is asked about. A race id holds characters a path
+/// segment cannot, so it travels as a query value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SignalQuery {
+    pub race: RaceId,
+}
+
+/// One seat's logged signal in a race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SeatSignal {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+    /// The race's start on this timer's clock, where the timer's clock was measured. The
+    /// trace, the crossings and this are all on that one clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start_at: Option<SourceTime>,
+    /// The trace, oldest first. Chunks that follow on exactly are joined; a gap in the
+    /// signal is a gap between chunks.
+    pub chunks: Vec<SignalChunk>,
+    /// The enter and exit levels the timer was using, oldest first, each with the log
+    /// position it was recorded at.
+    pub thresholds: Vec<SignalThresholds>,
+}
+
+/// A race's logged signal (`GET /events/{id}/signal?race=…`). Seats are in lineup order. A
+/// timer that reports no signal gives seats with no chunks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RaceSignal {
+    pub race: RaceId,
+    pub seats: Vec<SeatSignal>,
+}
+
+/// `GET /events/{event_id}/signal?race=…` — a race's logged signal. An open read.
+///
+/// The signal is read from the log on request and is not kept in memory: it is large, and
+/// only a marshal reviewing a race needs it.
+pub async fn get_signal(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    axum::extract::Query(query): axum::extract::Query<SignalQuery>,
+) -> Result<Json<RaceSignal>, ProtocolError> {
+    with_event(&registry, &event_id, |session| {
+        let state = session.state();
+        let unknown =
+            || ProtocolError::new(ErrorCode::UnknownScope, "There is no such race.".to_owned());
+        let race = state.races.get(&query.race).ok_or_else(unknown)?;
+        let (from, to) = state.race_log_range(&query.race).ok_or_else(unknown)?;
+        let mut seats: Vec<SeatSignal> = race
+            .setup
+            .lineup
+            .iter()
+            .map(|entry| SeatSignal {
+                adapter: entry.adapter.clone(),
+                seat: entry.seat.clone(),
+                start_at: state
+                    .starts_on_timer
+                    .get(&(query.race.clone(), entry.adapter.clone()))
+                    .copied(),
+                chunks: Vec::new(),
+                thresholds: Vec::new(),
+            })
+            .collect();
+        for stored in session.log.read_range(from, to).map_err(internal)? {
+            match stored.event {
+                Event::SignalChunk(chunk) => {
+                    let Some(seat) = seats
+                        .iter_mut()
+                        .find(|s| s.adapter == chunk.adapter && s.seat == chunk.seat)
+                    else {
+                        continue;
+                    };
+                    // Join a chunk that follows on exactly from the one before it.
+                    match seat.chunks.last_mut() {
+                        Some(last)
+                            if last.period_micros == chunk.period_micros
+                                && last.unit == chunk.unit
+                                && last.from.micros
+                                    + last.levels.len() as i64 * i64::from(last.period_micros)
+                                    == chunk.from.micros =>
+                        {
+                            last.levels.extend(chunk.levels);
+                            last.noise_floor = chunk.noise_floor.or(last.noise_floor);
+                        }
+                        _ => seat.chunks.push(chunk),
+                    }
+                }
+                Event::SignalThresholds(thresholds) => {
+                    if let Some(seat) = seats
+                        .iter_mut()
+                        .find(|s| s.adapter == thresholds.adapter && s.seat == thresholds.seat)
+                    {
+                        seat.thresholds.push(thresholds);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(Json(RaceSignal {
+            race: query.race.clone(),
+            seats,
+        }))
     })
 }
 
@@ -1015,5 +1123,102 @@ mod tests {
         assert!(message.contains("race 1 of Final"), "{message}");
         assert!(!message.contains("finals"), "{message}");
         assert!(!message.contains('#'), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_races_logged_signal_is_read_back_joined_and_kept_apart_from_the_next_race() {
+        use gridfpv_events::{SignalChunk, SignalThresholds, SignalUnit};
+        let (registry, event) = with_bracket(0).await;
+        let heat = PhaseId("finals/final".into());
+        let chunk = |from: i64, level: i32| {
+            Event::SignalChunk(SignalChunk {
+                adapter: AdapterId("oft".into()),
+                seat: SeatRef("seat-0".into()),
+                from: SourceTime::from_micros(from),
+                period_micros: 1000,
+                levels: vec![level; 100],
+                unit: SignalUnit::TenthsDb,
+                noise_floor: Some(-900),
+            })
+        };
+        let observe = |events: Vec<Event>| {
+            with_event(&registry, &event, |session| {
+                for event in events {
+                    session.observe(event)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        };
+        let cursor_before = state(&registry, &event).await.cursor;
+        command(&registry, &event, Command::StartRace { heat: heat.clone() }).await;
+        observe(vec![
+            Event::SignalThresholds(SignalThresholds {
+                adapter: AdapterId("oft".into()),
+                seat: SeatRef("seat-0".into()),
+                enter: -750,
+                exit: -800,
+                unit: SignalUnit::TenthsDb,
+            }),
+            chunk(0, -900),
+            chunk(100_000, -700),
+            // 100 ms are missing before this one.
+            chunk(300_000, -900),
+        ]);
+        let first = RaceId("finals/final#1".into());
+        command(
+            &registry,
+            &event,
+            Command::DiscardRace {
+                race: first.clone(),
+                reason: None,
+                note: None,
+            },
+        )
+        .await;
+        command(&registry, &event, Command::StartRace { heat }).await;
+        observe(vec![chunk(9_000_000, -850)]);
+
+        let read = |race: &str| {
+            let registry = registry.clone();
+            let uri = format!(
+                "/events/{}/signal?race={}",
+                event.0,
+                race.replace('/', "%2F").replace('#', "%23")
+            );
+            async move { send(&registry, "GET", &uri, None, None).await }
+        };
+        let (status, body) = read("finals/final#1").await;
+        assert_eq!(status, StatusCode::OK);
+        let signal: RaceSignal = serde_json::from_value(body).unwrap();
+        // Four seats in the lineup; only seat 0 has signal.
+        assert_eq!(signal.seats.len(), 4);
+        let seat = &signal.seats[0];
+        // Two chunks that followed on are one; the gap stays a gap.
+        assert_eq!(seat.chunks.len(), 2);
+        assert_eq!(seat.chunks[0].levels.len(), 200);
+        assert_eq!(seat.chunks[0].levels[99], -900);
+        assert_eq!(seat.chunks[0].levels[100], -700);
+        assert_eq!(seat.chunks[1].from, SourceTime::from_micros(300_000));
+        assert_eq!(seat.thresholds.len(), 1);
+        assert_eq!(seat.thresholds[0].enter, -750);
+        assert!(signal.seats[1].chunks.is_empty());
+
+        // The second race has only its own signal.
+        let (_, body) = read("finals/final#2").await;
+        let signal: RaceSignal = serde_json::from_value(body).unwrap();
+        assert_eq!(signal.seats[0].chunks.len(), 1);
+        assert_eq!(
+            signal.seats[0].chunks[0].from,
+            SourceTime::from_micros(9_000_000)
+        );
+
+        let (status, _) = read("no-such-race").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Signal moved the log on, but did not wake the change feed for each chunk: the
+        // feed's cursor is the one sent with the last race fact.
+        let live = registry.live(&event).unwrap();
+        assert!(*live.changed.borrow() > cursor_before);
+        assert!(*live.changed.borrow() < state(&registry, &event).await.cursor);
     }
 }

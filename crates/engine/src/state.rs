@@ -88,6 +88,9 @@ pub struct EventState {
     /// For a running first-to-N race whose pilots have all finished: when the last of them
     /// did, on the Director's clock. Cleared if a ruling takes a finish away.
     pub all_finished_at: BTreeMap<RaceId, i64>,
+    /// Where in the log each race begins: the offset of its first fact. A race's signal is
+    /// logged from there on, so this is where to start reading for it.
+    pub race_log_start: BTreeMap<RaceId, u64>,
     /// How many log entries have been applied: the offset the next one will have.
     pub applied: u64,
 }
@@ -125,7 +128,17 @@ impl EventState {
                 // had placed it yet.
                 self.place_starts();
             }
-            Event::RaceStarted { .. } => self.place_starts(),
+            Event::RaceStarting { setup, .. } => {
+                self.race_log_start
+                    .entry(setup.race.clone())
+                    .or_insert(offset);
+            }
+            Event::RaceStarted { setup } => {
+                self.race_log_start
+                    .entry(setup.race.clone())
+                    .or_insert(offset);
+                self.place_starts();
+            }
             _ => {}
         }
         self.note_all_finished(recorded_at);
@@ -171,6 +184,21 @@ impl EventState {
                 self.all_finished_at.remove(&id);
             }
         }
+    }
+
+    /// The stretch of the log that holds a race's signal: from its first fact up to the
+    /// first fact of the next race to begin (or the end of the log). `None` for a race that
+    /// does not exist.
+    pub fn race_log_range(&self, race: &RaceId) -> Option<(u64, u64)> {
+        let from = *self.race_log_start.get(race)?;
+        let to = self
+            .race_log_start
+            .values()
+            .copied()
+            .filter(|start| *start > from)
+            .min()
+            .unwrap_or(self.applied);
+        Some((from, to))
     }
 
     /// Put each started race's start on the clocks of its timers, where that is known and

@@ -53,6 +53,8 @@ pub trait EventSource {
     fn read_all(&self) -> StorageResult<Vec<StoredEvent>>;
     /// Read every entry from `start` (inclusive) to the end.
     fn read_from(&self, start: Offset) -> StorageResult<Vec<StoredEvent>>;
+    /// Read the entries in `[start, end)`.
+    fn read_range(&self, start: Offset, end: Offset) -> StorageResult<Vec<StoredEvent>>;
     /// Append a single event, returning its assigned offset.
     fn append(&mut self, event: Event, recorded_at: Option<i64>) -> StorageResult<Offset>;
     /// The number of entries — equivalently the offset the next append receives.
@@ -69,6 +71,9 @@ impl<L: EventLog> EventSource for L {
     }
     fn read_from(&self, start: Offset) -> StorageResult<Vec<StoredEvent>> {
         EventLog::read_from(self, start)
+    }
+    fn read_range(&self, start: Offset, end: Offset) -> StorageResult<Vec<StoredEvent>> {
+        EventLog::read_range(self, start, end)
     }
     fn append(&mut self, event: Event, recorded_at: Option<i64>) -> StorageResult<Offset> {
         EventLog::append(self, event, recorded_at)
