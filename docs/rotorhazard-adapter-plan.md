@@ -1,8 +1,22 @@
 # RotorHazard adapter: the plan for the rewrite
 
-**Status:** a plan, written 2026-11-10. Nothing here is built. It was worked out by reading
-RotorHazard's own source for 4.4.0 and 4.3.0. **Nothing in it has been run against a live
-RotorHazard yet**, so every claim below is "read in the source", not "seen working".
+**Status:** a plan, written 2026-11-10, worked out by reading RotorHazard's own source for
+4.4.0 and 4.3.0. The pure translator is being built; the connection is not.
+
+**Checked against live RotorHazard on 2026-11-10** (the 4.4.0 and 4.3.0 images on this
+machine, by hand, with a throwaway script):
+
+- A websocket-only connection works, with no login, and `get_server_time` answers.
+- `stage_race` with `secondary_format`, `ignore_secondary_heat` and `start_time_s` started
+  the race at exactly the instant asked for (the reported start minus the asked start was
+  0.0 on both versions).
+- A lap of 0.6 seconds was kept, so the minimum lap filter is off in that mode.
+- `stop_race` took the status to "done" and `discard_laps` took it back to "ready" with the
+  lap list empty.
+- 4.4.0 laps carry `deleted` and `source`; 4.3.0 laps carry `lap_raw` instead. Both carry
+  `lap_time_stamp`.
+
+Everything else below is still "read in the source", not "seen working".
 
 Source paths are in RotorHazard's `src/server/`. Line numbers are for 4.4.0.
 
