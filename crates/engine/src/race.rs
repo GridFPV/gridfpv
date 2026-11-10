@@ -154,6 +154,17 @@ impl Races {
                     }
                 }
             }
+            Event::MarshalFlagSet {
+                race,
+                needs_marshal,
+            } => {
+                if let Some(race) = self.by_id.get_mut(race) {
+                    // Only a saved race is on, or off, the marshal's list.
+                    if race.state == RaceState::Saved {
+                        race.needs_marshal = *needs_marshal;
+                    }
+                }
+            }
             Event::RaceDiscarded { race, reason, note } => {
                 if let Some(race) = self.by_id.get_mut(race) {
                     if race.state != RaceState::Discarded {

@@ -749,6 +749,11 @@ pub enum Event {
         note: Option<String>,
     },
 
+    /// The marshal's to-do flag on a race was set or cleared after the save: `true` puts
+    /// the race on the list of races that need a look, `false` takes it off once someone
+    /// has looked.
+    MarshalFlagSet { race: RaceId, needs_marshal: bool },
+
     // --- lap rulings (docs/primitives.md §5.7) ---
     // A ruling is a human decision. Each names its race, and targets a **crossing** by the
     // log offset of the fact that made it: a `Pass`, or a `LapInserted`.

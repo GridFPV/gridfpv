@@ -662,6 +662,23 @@ impl EventState {
                 Ok(())
             }
 
+            Event::MarshalFlagSet {
+                race,
+                needs_marshal,
+            } => {
+                let found = self.open_race(race)?;
+                if found.state != RaceState::Saved {
+                    return Err(Refusal::Race(RaceError::WrongState {
+                        race: race.clone(),
+                        state: found.state,
+                        wanted: "flag",
+                    }));
+                }
+                if found.needs_marshal == *needs_marshal {
+                    return Err(Refusal::NothingToUndo);
+                }
+                Ok(())
+            }
             Event::HeatDone { heat } | Event::HeatReopened { heat } => {
                 self.heat(heat)?;
                 self.unlocked(heat)
@@ -1799,5 +1816,42 @@ mod tests {
                 ("eli", 5, None),
             ]
         );
+    }
+
+    #[test]
+    fn the_marshals_flag_can_be_cleared_and_set_on_a_saved_race() {
+        let mut director = bracket_event();
+        let heat = "bracket/winners-1/heat-1";
+        director
+            .send(Command::StartRace { heat: pid(heat) })
+            .unwrap();
+        let race = rid(&format!("{heat}#1"));
+        let flag = |needs_marshal| Event::MarshalFlagSet {
+            race: rid(&format!("{heat}#1")),
+            needs_marshal,
+        };
+        // Not while it is still running.
+        assert!(matches!(
+            director.record(flag(true)),
+            Err(Refusal::Race(RaceError::WrongState { .. }))
+        ));
+        director
+            .send(Command::StopRace { race: race.clone() })
+            .unwrap();
+        director
+            .send(Command::SaveRace {
+                race: race.clone(),
+                needs_marshal: true,
+                note: None,
+            })
+            .unwrap();
+        assert!(director.state.races.get(&race).unwrap().needs_marshal);
+        director.record(flag(false)).unwrap();
+        assert!(!director.state.races.get(&race).unwrap().needs_marshal);
+        // Clearing it twice is nothing to do.
+        assert_eq!(director.record(flag(false)), Err(Refusal::NothingToUndo));
+        director.record(flag(true)).unwrap();
+        assert!(director.state.races.get(&race).unwrap().needs_marshal);
+        assert_eq!(director.replayed(), director.state);
     }
 }
