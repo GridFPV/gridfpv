@@ -640,7 +640,8 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      settings. Changes are a draft until "Apply to timer". Not yet run against a real timer.
    - **Not yet:** mDNS discovery, and showing the logged signal in Marshal.
 7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
-   rebuilt, not before.
+   rebuilt, not before. **Started:** `docs/api.md` lists every route as built, and the
+   Protocol doc's banner points at it.
 
 **Built in the engine since the first pass:** the run queue (§5.9: the ready heats, the
 director's order, and a helper that spaces pilots out), class standings (§5.3), a first-to-N
