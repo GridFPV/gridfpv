@@ -173,7 +173,12 @@ describe("request failures carry the Director's words (#433)", () => {
       ['createClass', (fetch) => c.createClass(BASE, REQ, TOKEN, { fetch })],
       ['updateClass', (fetch) => c.updateClass(BASE, CLASS, REQ, TOKEN, { fetch })],
       ['deleteClass', (fetch) => c.deleteClass(BASE, CLASS, TOKEN, { fetch })],
-      ['setClassHidden', (fetch) => c.setClassHidden(BASE, CLASS, true, TOKEN, { fetch })]
+      ['setClassHidden', (fetch) => c.setClassHidden(BASE, CLASS, true, TOKEN, { fetch })],
+      ['getEventState', (fetch) => c.getEventState(BASE, EVT, { fetch })],
+      ['sendCommand', (fetch) => c.sendCommand(BASE, EVT, REQ, TOKEN, { fetch })],
+      ['createBracket', (fetch) => c.createBracket(BASE, EVT, REQ, TOKEN, { fetch })],
+      ['createMains', (fetch) => c.createMains(BASE, EVT, REQ, TOKEN, { fetch })],
+      ['postPass', (fetch) => c.postPass(BASE, EVT, REQ, TOKEN, { fetch })]
     ];
 
     for (const [name, run] of probes) {

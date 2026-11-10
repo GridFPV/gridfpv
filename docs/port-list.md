@@ -109,7 +109,8 @@ twice.
 ## Frontend
 
 On the same day the console was cut down to a skeleton too: the home hub, the Events, Pilots
-and Classes pages, and a plain page for an open event. Everything below was removed from
+and Classes pages, and a plain page for an open event (since rebuilt: it now lists the
+phases and opens a Run page for a heat). Everything below was removed from
 `frontend/` and is on `devel`. Paths are under `frontend/` unless they say otherwise.
 
 ### Talking to the Director

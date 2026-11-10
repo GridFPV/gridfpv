@@ -54,6 +54,7 @@ pub struct Session<'a> {
     log: &'a mut (dyn EventSource + Send),
     state: &'a mut EventState,
     changed: &'a watch::Sender<u64>,
+    registry: &'a EventRegistry,
     /// The Director's clock for this request, in epoch microseconds.
     pub now: i64,
 }
@@ -89,6 +90,7 @@ pub fn with_event<R>(
         log: &mut *log,
         state: &mut state,
         changed: &live.changed,
+        registry,
         now: now_micros(),
     };
     session.catch_up()?;
@@ -126,11 +128,17 @@ impl Session<'_> {
         let mut facts = Vec::new();
         // One command needs no scratch copy of the state.
         if let [only] = &commands[..] {
-            facts = self.state.check(only.clone(), self.now).map_err(refused)?;
+            facts = self
+                .state
+                .check(only.clone(), self.now)
+                .map_err(|refusal| self.refused(self.state, refusal))?;
         } else {
             scratch = self.state.clone();
             for command in commands {
-                for fact in scratch.check(command, self.now).map_err(refused)? {
+                let checked = scratch
+                    .check(command, self.now)
+                    .map_err(|refusal| self.refused(&scratch, refusal))?;
+                for fact in checked {
                     scratch.apply(scratch.applied, Some(self.now), &fact);
                     facts.push(fact);
                 }
@@ -162,8 +170,46 @@ impl Session<'_> {
     }
 }
 
-fn refused(reason: impl std::fmt::Display) -> ProtocolError {
-    ProtocolError::new(ErrorCode::Refused, reason.to_string())
+impl Session<'_> {
+    /// A refusal as the sentence a director reads. The engine names things by id, because
+    /// ids are all it has. A raw id must never reach a screen, so each quoted id is swapped
+    /// here for its name: a race for "race N of ‹heat›", a phase for its label, a pilot for
+    /// their callsign. `state` is the state the command was checked against.
+    fn refused(&self, state: &EventState, refusal: impl std::fmt::Display) -> ProtocolError {
+        let mut message = refusal.to_string();
+        // An id appears as the engine's debug form, `RaceId("…")`, or as a bare `"…"`.
+        let swap = |message: String, kind: &str, id: &str, name: &str| {
+            message
+                .replace(&format!("{kind}({id:?})"), name)
+                .replace(&format!("{id:?}"), name)
+        };
+        let label = |phase: &PhaseId| {
+            state.tree.get(phase).map_or_else(
+                || "a phase that no longer exists".to_owned(),
+                |def| def.label.clone(),
+            )
+        };
+        // Races first: a race id contains its heat's id.
+        for race in state.races.iter() {
+            let number = state
+                .races
+                .of_heat(&race.setup.heat)
+                .position(|other| other.setup.race == race.setup.race)
+                .map_or(1, |index| index + 1);
+            let name = format!("{number} of {}", label(&race.setup.heat));
+            message = swap(message, "RaceId", &race.setup.race.0, &name);
+        }
+        // Longest ids first, so a phase is never swapped inside a longer id that holds it.
+        let mut phases: Vec<&PhaseDef> = state.tree.iter().collect();
+        phases.sort_by_key(|def| std::cmp::Reverse(def.id.0.len()));
+        for def in phases {
+            message = swap(message, "PhaseId", &def.id.0, &def.label);
+        }
+        for pilot in self.registry.pilots().list() {
+            message = swap(message, "PilotId", &pilot.id.0, &pilot.callsign);
+        }
+        ProtocolError::new(ErrorCode::Refused, message)
+    }
 }
 
 /// What a write answers: where the log is now. The snapshot at this cursor (or later)
@@ -916,5 +962,31 @@ mod tests {
             .await
             .expect("the feed did not end");
         assert_eq!(ended, None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_names_things_by_their_names_never_by_id() {
+        let (registry, event) = with_bracket(0).await;
+        let heat = PhaseId("finals/final".into());
+        command(&registry, &event, Command::StartRace { heat: heat.clone() }).await;
+        let refuse = |body: serde_json::Value| {
+            let registry = registry.clone();
+            let uri = format!("/events/{}/commands", event.0);
+            async move {
+                let (status, body) = send(&registry, "POST", &uri, Some(body), None).await;
+                assert_eq!(status, StatusCode::CONFLICT);
+                serde_json::from_value::<ProtocolError>(body)
+                    .unwrap()
+                    .message
+            }
+        };
+        // Saving a race that is still running.
+        let message = refuse(json!({ "SaveRace": { "race": "finals/final#1" } })).await;
+        assert_eq!(message, "cannot save race 1 of Final while it is Running");
+        // Starting again while it runs.
+        let message = refuse(json!({ "StartRace": { "heat": "finals/final" } })).await;
+        assert!(message.contains("race 1 of Final"), "{message}");
+        assert!(!message.contains("finals"), "{message}");
+        assert!(!message.contains('#'), "{message}");
     }
 }

@@ -41,6 +41,24 @@ describe('parseHash', () => {
     expect(parseHash('#/foo/bar')).toEqual(DEFAULT_ROUTE);
   });
 
+  it("parses a heat's Run view, decoding the heat id and keeping its case", () => {
+    expect(parseHash('#/event/run/quali-A1b2')).toEqual({ kind: 'run', heat: 'quali-A1b2' });
+    // A generated heat id holds slashes; they travel as one encoded segment.
+    expect(parseHash('#/event/run/finals%2Fwinners-1%2Fheat-2')).toEqual({
+      kind: 'run',
+      heat: 'finals/winners-1/heat-2'
+    });
+    expect(parseHash('#/EVENT/RUN/h1/')).toEqual({ kind: 'run', heat: 'h1' });
+  });
+
+  it('falls a Run hash with no heat, a broken one, or extra parts back to the event page', () => {
+    expect(parseHash('#/event/run')).toEqual({ kind: 'event' });
+    expect(parseHash('#/event/run/')).toEqual({ kind: 'event' });
+    expect(parseHash('#/event/run/%E0%A4%A')).toEqual({ kind: 'event' });
+    expect(parseHash('#/event/run/a/b')).toEqual({ kind: 'event' });
+    expect(parseHash('#/event/other')).toEqual({ kind: 'event' });
+  });
+
   // The `#/event` page and the `#/events` page differ by ONE letter; neither may swallow the
   // other.
   it('does not confuse the event page with the Events page', () => {
@@ -58,6 +76,12 @@ describe('formatHash', () => {
     expect(formatHash({ kind: 'page', page: 'pilots' })).toBe('#/pilots');
     expect(formatHash({ kind: 'event' })).toBe('#/event');
   });
+
+  it("formats a heat's Run view with the heat id as one encoded segment", () => {
+    expect(formatHash({ kind: 'run', heat: 'finals/winners-1/heat-2' })).toBe(
+      '#/event/run/finals%2Fwinners-1%2Fheat-2'
+    );
+  });
 });
 
 describe('round-trip (format → parse)', () => {
@@ -66,7 +90,10 @@ describe('round-trip (format → parse)', () => {
     { kind: 'page', page: 'pilots' },
     { kind: 'page', page: 'classes' },
     { kind: 'page', page: 'events' },
-    { kind: 'event' }
+    { kind: 'event' },
+    { kind: 'run', heat: 'quali-ab12' },
+    { kind: 'run', heat: 'finals/winners-1/heat-2' },
+    { kind: 'run', heat: 'Heat 1 #2 ?&%' }
   ];
   for (const route of routes) {
     it(`round-trips ${JSON.stringify(route)}`, () => {
@@ -89,6 +116,22 @@ describe('reconcileRoute', () => {
 
   it('falls the event route back to the Events page when no event is active', () => {
     expect(reconcileRoute({ kind: 'event' }, false)).toEqual({ kind: 'page', page: 'events' });
+  });
+});
+
+describe('reconcileRoute for a Run view', () => {
+  const run: Route = { kind: 'run', heat: 'finals/final' };
+
+  it('keeps the Run view when an event is active', () => {
+    expect(reconcileRoute(run, true)).toEqual(run);
+  });
+
+  it('falls back to the Events page when no event is active', () => {
+    expect(reconcileRoute(run, false)).toEqual({ kind: 'page', page: 'events' });
+  });
+
+  it('a Run hash survives a reload while an event is active', () => {
+    expect(resolveInitialRoute('#/event/run/finals%2Ffinal', true)).toEqual(run);
   });
 });
 

@@ -5,7 +5,7 @@
    * The console is a **home hub of pages** plus the open event's page. The shell shows an
    * **app-level route**: the {@link HomeHub} (landing), or one of its pages — {@link EventPicker}
    * (the Events page), {@link PilotsPage}, {@link ClassesPage}. Selecting an event on the Events
-   * page opens {@link EventPage}.
+   * page opens {@link EventPage}, and a heat on it opens that heat's {@link RunPage}.
    *
    * On load the shell resolves the Director's active event (server state, #90) so an `#/event`
    * URL can render, but the hash is authoritative for *which* view to show (#118): a bare/hub
@@ -22,9 +22,11 @@
   import '@gridfpv/components/tokens.css';
   import { ToastHost } from '@gridfpv/components';
   import { Session } from './lib/session.svelte.js';
+  import { EventLive } from './lib/eventLive.svelte.js';
   import HomeHub from './screens/HomeHub.svelte';
   import EventPicker from './screens/EventPicker.svelte';
   import EventPage from './screens/EventPage.svelte';
+  import RunPage from './screens/RunPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
@@ -100,6 +102,23 @@
     }
   });
 
+  // The live competition of the open event: one store, shared by the event page and the Run
+  // view, so moving between them does not read everything again. It lives only while an event
+  // screen is showing; on the hub or a directory page there is nothing to keep fresh.
+  let live = $state.raw<EventLive | undefined>(undefined);
+  const liveEventId = $derived(route.kind === 'page' ? undefined : session.currentEvent?.id);
+  $effect(() => {
+    const id = liveEventId;
+    if (!id) {
+      live = undefined;
+      return;
+    }
+    const store = new EventLive(session, id);
+    live = store;
+    store.start();
+    return () => store.stop();
+  });
+
   // Leaving the event page closes the event in this console (the Director's active event is left
   // alone) and lands on the page asked for.
   function leaveEventTo(page: AppPage) {
@@ -137,12 +156,26 @@
     {:else if route.page === 'classes'}
       <ClassesPage {session} onhome={goHome} />
     {/if}
-  {:else if session.currentEvent}
-    <EventPage
-      event={session.currentEvent}
-      onhome={() => leaveEventTo('home')}
-      onevents={() => leaveEventTo('events')}
-    />
+  {:else if session.currentEvent && live}
+    {#if route.kind === 'run'}
+      <RunPage
+        event={session.currentEvent}
+        {live}
+        heat={route.heat}
+        onhome={() => leaveEventTo('home')}
+        onevents={() => leaveEventTo('events')}
+        onevent={() => navigate({ kind: 'event' })}
+        onrun={(heat) => navigate({ kind: 'run', heat })}
+      />
+    {:else}
+      <EventPage
+        event={session.currentEvent}
+        {live}
+        onhome={() => leaveEventTo('home')}
+        onevents={() => leaveEventTo('events')}
+        onrun={(heat) => navigate({ kind: 'run', heat })}
+      />
+    {/if}
   {:else}
     <!-- Edge case: an event route with no open event (e.g. the event was just deleted).
          `onHashChange`/`reconcileRoute` flips the route to the Events page, so this is a momentary

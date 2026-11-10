@@ -5,20 +5,27 @@
  * bearer token and error handling are written once. A non-2xx answer rejects with a
  * {@link RequestFailure} that carries the Director's own sentence and the HTTP status.
  *
- * There is no live stream here. The Director serves no snapshot or WebSocket surface at the
- * moment; the old stream client (snapshot, subscribe, resume by cursor) is on the `devel`
- * branch and is listed in `docs/port-list.md`.
+ * The competition is live through two calls. {@link getEventState} reads the whole event
+ * snapshot, and {@link subscribeChanges} listens to the Director's change feed, which sends
+ * only the log cursor. A console that hears a new cursor reads the snapshot again. There are
+ * no deltas and nothing to resume, so the two cannot drift apart.
  */
 
 import type {
   ActiveEvent,
+  BracketRequest,
   Class,
   ClassId,
+  Command,
+  CommandOutcome,
   CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
   EventId,
   EventMeta,
+  EventView,
+  MainsRequest,
+  PassRequest,
   Pilot,
   PilotId,
   ProtocolError,
@@ -434,4 +441,139 @@ export async function setClassHidden(
     { method: 'PUT', body, token, fetch: options.fetch },
     'change the class visibility'
   );
+}
+
+// ── The competition in an event: snapshot, commands, presets, passes, change feed ────────────
+
+/** The route root for one event's competition. */
+const eventPath = (id: EventId, rest: string): string => `/events/${encodeURIComponent(id)}${rest}`;
+
+/**
+ * Read an event's competition snapshot (`GET /events/{id}/state`). An open read. It holds
+ * the rosters, every phase with its lineup and ranking, every race with its laps, and the
+ * Director's clock (`now`) at the moment it was worked out.
+ */
+export async function getEventState(
+  baseUrl: string,
+  id: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<EventView> {
+  return apiJson<EventView>(baseUrl, eventPath(id, '/state'), options, 'read the event');
+}
+
+/**
+ * Send one command (`POST /events/{id}/commands`). RD-gated. A command the event's state
+ * does not allow answers **409** with the reason; it rejects with that sentence, which is
+ * written for the director and is shown as it is.
+ */
+export async function sendCommand(
+  baseUrl: string,
+  id: EventId,
+  command: Command,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    eventPath(id, '/commands'),
+    { method: 'POST', body: command, token, fetch: options.fetch },
+    'do that'
+  );
+}
+
+/**
+ * Generate a bracket's phases (`POST /events/{id}/presets/bracket`). RD-gated. All of the
+ * phases are added, or none. A shape that cannot work answers **400**, and one the event
+ * does not allow answers **409**, each with the reason.
+ */
+export async function createBracket(
+  baseUrl: string,
+  id: EventId,
+  request: BracketRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    eventPath(id, '/presets/bracket'),
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the bracket'
+  );
+}
+
+/**
+ * Generate stacked mains (`POST /events/{id}/presets/mains`). RD-gated. All or none, like
+ * {@link createBracket}.
+ */
+export async function createMains(
+  baseUrl: string,
+  id: EventId,
+  request: MainsRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    eventPath(id, '/presets/mains'),
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the mains'
+  );
+}
+
+/**
+ * Log one gate crossing (`POST /events/{id}/passes`). RD-gated. `at` is in microseconds on
+ * the timer's own clock. The Director stamps the pass with the race that is running now.
+ */
+export async function postPass(
+  baseUrl: string,
+  id: EventId,
+  pass: PassRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    eventPath(id, '/passes'),
+    { method: 'POST', body: pass, token, fetch: options.fetch },
+    'log the crossing'
+  );
+}
+
+/** The part of an `EventSource` the change feed uses. */
+export interface EventSourceLike {
+  addEventListener(type: string, listener: (event: { data?: unknown }) => void): void;
+  close(): void;
+}
+
+/** A constructor for an {@link EventSourceLike} (injectable for tests and Node). */
+export type EventSourceConstructor = new (url: string) => EventSourceLike;
+
+/**
+ * Listen to an event's change feed (`GET /events/{id}/changes`, server-sent events). An
+ * open read. `onCursor` is called with the log length each time the Director sends it.
+ * Returns a function that stops listening.
+ *
+ * There is no resume logic on purpose. `EventSource` reconnects by itself, and the Director
+ * sends the current cursor on every connect, so a console that was cut off hears a cursor
+ * as soon as it is back and reads the snapshot again.
+ *
+ * `onError` is told when the connection drops. The browser is already reconnecting by then.
+ */
+export function subscribeChanges(
+  baseUrl: string,
+  id: EventId,
+  onCursor: (cursor: number) => void,
+  opts: { EventSource?: EventSourceConstructor; onError?: () => void } = {}
+): () => void {
+  const Source: EventSourceConstructor | undefined =
+    opts.EventSource ?? (globalThis as { EventSource?: EventSourceConstructor }).EventSource;
+  if (!Source) throw new Error('This browser cannot listen for live changes.');
+  const source = new Source(`${trimSlash(baseUrl)}${eventPath(id, '/changes')}`);
+  source.addEventListener('cursor', (event) => {
+    const cursor = Number(event.data);
+    // A cursor that is not a number carries nothing to act on.
+    if (Number.isFinite(cursor)) onCursor(cursor);
+  });
+  if (opts.onError) source.addEventListener('error', opts.onError);
+  return () => source.close();
 }

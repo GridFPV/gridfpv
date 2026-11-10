@@ -1,0 +1,84 @@
+/**
+ * The built-in formats a director can pick when adding a heat or a bracket.
+ *
+ * A format is a named bundle of rules: how one race ends, when the heat is done, and how
+ * the heat is ranked. This short list is the only place the console defines any. A format
+ * editor can replace it later; the screens only read {@link BUILT_IN_FORMATS}.
+ */
+import type { Format } from '@gridfpv/types';
+
+const SECOND = 1_000_000;
+
+/** The countdown before the start tone, for every format that has one. */
+const STAGING_MICROS = 5 * SECOND;
+
+/** One entry in the format picker. */
+export interface FormatChoice {
+  /** Stable key for the picker's `<option>`. Not sent to the Director. */
+  key: string;
+  /** What the picker shows. */
+  label: string;
+  format: Format;
+}
+
+export const BUILT_IN_FORMATS: readonly FormatChoice[] = [
+  {
+    key: 'practice',
+    label: 'Practice (open, no ranking, director ends it)',
+    format: {
+      name: 'Practice',
+      // No countdown: practice starts the moment the director presses Start.
+      race: { end: 'Open', staging_micros: 0, first_lap: 'HoleShot' },
+      completion: 'DirectorDecides'
+    }
+  },
+  {
+    key: 'best-3-consecutive',
+    label: 'Single pilot: best 3 consecutive',
+    format: {
+      name: 'Best 3 consecutive',
+      race: { end: 'Open', staging_micros: STAGING_MICROS, first_lap: 'HoleShot' },
+      completion: 'DirectorDecides',
+      ranking: { sort: [{ BestConsecutive: 3 }] }
+    }
+  },
+  {
+    key: 'first-to-3',
+    label: 'First to 3 laps',
+    format: {
+      name: 'First to 3 laps',
+      race: { end: { FirstToLaps: 3 }, staging_micros: STAGING_MICROS, first_lap: 'HoleShot' },
+      completion: { SavedRaces: 1 },
+      ranking: { sort: ['LastFinish'] }
+    }
+  },
+  {
+    key: 'timed-2-min',
+    label: '2 minutes, most laps',
+    format: {
+      name: '2 minutes, most laps',
+      race: {
+        end: { Timed: { micros: 120 * SECOND, grace_micros: 10 * SECOND } },
+        staging_micros: STAGING_MICROS,
+        first_lap: 'HoleShot'
+      },
+      completion: { SavedRaces: 1 },
+      ranking: { sort: ['Laps', 'LastFinish'] }
+    }
+  }
+];
+
+/** The format for a picker key, or `undefined` for a key that is not in the list. */
+export function formatByKey(key: string): Format | undefined {
+  return BUILT_IN_FORMATS.find((choice) => choice.key === key)?.format;
+}
+
+/** Whether a heat under this format is done only when the director says so. */
+export function directorEndsHeat(format: Format | undefined): boolean {
+  return format?.completion === 'DirectorDecides';
+}
+
+/** Whether a heat under this format is ranked. Practice is not. */
+export function isRanked(format: Format | undefined): boolean {
+  return format?.ranking !== undefined;
+}

@@ -39,15 +39,25 @@ import {
   updateClass,
   deleteClass,
   setClassHidden,
+  getEventState,
+  sendCommand,
+  createBracket,
+  postPass,
+  subscribeChanges,
   isRequestFailure
 } from '@gridfpv/protocol-client';
 import type {
+  BracketRequest,
   Class,
   ClassId,
+  Command,
+  CommandOutcome,
   CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
   EventMeta,
+  EventView,
+  PassRequest,
   Pilot,
   PilotId,
   UpdateClassRequest,
@@ -125,7 +135,12 @@ const realApi = {
   createClass,
   updateClass,
   deleteClass,
-  setClassHidden
+  setClassHidden,
+  getEventState,
+  sendCommand,
+  createBracket,
+  postPass,
+  subscribeChanges
 };
 
 /** The record of seams a {@link Session} calls outward through — see {@link realApi}. */
@@ -334,6 +349,48 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#api.setClassHidden(this.baseUrl, id, hidden, token)
     );
+  }
+
+  // ── An event's competition ─────────────────────────────────────────────────
+  //
+  // The snapshot and the change feed are open reads. Commands, presets and passes are
+  // control-gated writes and take the same path as every other write here: sent without a
+  // token first, and the token dialog opens only if the Director answers 401/403.
+  // `lib/eventLive.svelte.ts` is the one caller; screens go through it.
+
+  /** Read an event's competition snapshot (`GET /events/{id}/state`). */
+  getEventState(id: EventMeta['id']): Promise<EventView> {
+    return this.#api.getEventState(this.baseUrl, id, { token: this.#token });
+  }
+
+  /**
+   * Listen to an event's change feed. `onCursor` hears the log length each time it moves.
+   * Returns a function that stops listening.
+   */
+  subscribeChanges(id: EventMeta['id'], onCursor: (cursor: number) => void): () => void {
+    return this.#api.subscribeChanges(this.baseUrl, id, onCursor);
+  }
+
+  /**
+   * Send one command. Resolves `undefined` if the token prompt was cancelled. A refusal
+   * (409) throws with the Director's sentence.
+   */
+  sendCommand(id: EventMeta['id'], command: Command): Promise<CommandOutcome | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.sendCommand(this.baseUrl, id, command, token)
+    );
+  }
+
+  /** Generate a bracket's phases. Same answers as {@link sendCommand}. */
+  createBracket(id: EventMeta['id'], request: BracketRequest): Promise<CommandOutcome | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.createBracket(this.baseUrl, id, request, token)
+    );
+  }
+
+  /** Log one gate crossing. Same answers as {@link sendCommand}. */
+  postPass(id: EventMeta['id'], pass: PassRequest): Promise<CommandOutcome | undefined> {
+    return this.#privilegedWrite((token) => this.#api.postPass(this.baseUrl, id, pass, token));
   }
 
   /**

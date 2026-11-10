@@ -2,27 +2,43 @@
   /**
    * EventPage — the open event's page (Home › Events › ‹event name›).
    *
-   * Shows the event's own details: name, date, location, organizer and description. That is all
-   * an event carries right now — the competition content (classes at the event, phases, heats,
-   * races) is being rebuilt from the primitives in `docs/primitives.md`, and this page says so
-   * rather than showing empty sections for it.
+   * Two parts. The details card shows what the event is: date, location, organizer and
+   * description. The Phases card shows the competition: every phase as a tree, each heat with
+   * its lineup and a button that opens its Run view. Heats and brackets are added from here.
+   *
+   * The competition comes from the live event store, so the list follows the Director as
+   * races are run, from this console or another one.
    */
-  import { Card } from '@gridfpv/components';
-  import type { EventMeta } from '@gridfpv/types';
+  import { Banner, Button, Card } from '@gridfpv/components';
+  import type { EventMeta, PhaseId } from '@gridfpv/types';
   import Brand from '../Brand.svelte';
   import Breadcrumbs from '../Breadcrumbs.svelte';
+  import type { EventLive } from '../lib/eventLive.svelte.js';
+  import AddBracketDialog from './AddBracketDialog.svelte';
+  import AddHeatDialog from './AddHeatDialog.svelte';
+  import PhaseList from './PhaseList.svelte';
 
   let {
     event,
+    live,
     onhome,
-    onevents
+    onevents,
+    onrun
   }: {
     event: EventMeta;
+    /** The live competition of this event. */
+    live: EventLive;
     /** Leave for the home hub. */
     onhome: () => void;
     /** Leave for the Events page. */
     onevents: () => void;
+    /** Open the Run view for a heat. */
+    onrun: (heat: PhaseId) => void;
   } = $props();
+
+  // Each dialog is mounted only while open, so a closed one never sits in the page.
+  let addHeatOpen = $state(false);
+  let addBracketOpen = $state(false);
 
   /** The detail rows that have a value — an unset detail is left out rather than shown blank. */
   const details = $derived(
@@ -69,11 +85,33 @@
       </div>
     </Card>
 
-    <p class="rebuild-note">
-      This is everything an event holds for now. Running races in an event is being rebuilt.
-    </p>
+    <Card title="Phases" elevation="sm">
+      {#snippet actions()}
+        <Button size="sm" variant="secondary" onclick={() => (addBracketOpen = true)}>
+          + Add bracket
+        </Button>
+        <Button size="sm" variant="primary" onclick={() => (addHeatOpen = true)}>+ Add heat</Button>
+      {/snippet}
+      {#if live.loadError}
+        <Banner tone="danger" title="The event could not be read.">{live.loadError}</Banner>
+      {/if}
+      {#if !live.view}
+        {#if !live.loadError}<p class="muted" role="status">Loading…</p>{/if}
+      {:else if live.view.phases.length === 0}
+        <p class="muted">Nothing to race yet. Add a heat or a bracket to start.</p>
+      {:else}
+        <PhaseList view={live.view} names={live.names} {onrun} />
+      {/if}
+    </Card>
   </div>
 </div>
+
+{#if addHeatOpen}
+  <AddHeatDialog {live} onclose={() => (addHeatOpen = false)} />
+{/if}
+{#if addBracketOpen}
+  <AddBracketDialog {live} onclose={() => (addBracketOpen = false)} />
+{/if}
 
 <style>
   .brand-row {
@@ -127,7 +165,7 @@
     overflow-wrap: anywhere;
   }
   .no-details,
-  .rebuild-note {
+  .muted {
     margin: 0;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);

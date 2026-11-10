@@ -14,22 +14,37 @@
  *   - `#/classes`      → the Classes page
  *   - `#/events`       → the Events page
  *   - `#/event`        → the open event's page
+ *   - `#/event/run/‹heat›` → the Run view for one heat of the open event. `‹heat›` is the
+ *     heat's id, percent-encoded (a heat id can hold slashes).
  *
  * The open event itself is **app-wide server state** (the Director's active event, #90), so the
  * hash does not name *which* event. The event page always shows the Director's active event; an
  * `#/event` hash with no active event reconciles to the Events page rather than rendering an
  * empty page (see {@link reconcileRoute}).
  */
+import type { PhaseId } from '@gridfpv/types';
 
 /** The app-level pages shown outside an event. */
 export type AppPage = 'home' | 'events' | 'pilots' | 'classes';
 
 /**
- * A parsed route. Either an app-level page, or the open event's page. This is the pure
- * view-intent the hash encodes; reconciliation against the live active event happens in
- * {@link reconcileRoute}.
+ * A parsed route. An app-level page, the open event's page, or the Run view for one heat of
+ * the open event. This is the pure view-intent the hash encodes; reconciliation against the
+ * live active event happens in {@link reconcileRoute}.
  */
-export type Route = { kind: 'page'; page: AppPage } | { kind: 'event' };
+export type Route =
+  | { kind: 'page'; page: AppPage }
+  | { kind: 'event' }
+  | { kind: 'run'; heat: PhaseId };
+
+/** Decode one percent-encoded hash segment, or `undefined` if it is not valid encoding. */
+function decodeSegment(segment: string): string | undefined {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+}
 
 const APP_PAGES: readonly AppPage[] = ['home', 'events', 'pilots', 'classes'];
 
@@ -46,8 +61,17 @@ export function parseHash(hash: string): Route {
   const s = hash.replace(/^#/, '').replace(/^\//, '').replace(/\/$/, '');
   if (s === '') return DEFAULT_ROUTE;
 
-  const head = s.split('/')[0].toLowerCase();
-  if (head === 'event') return { kind: 'event' };
+  const segments = s.split('/');
+  const head = segments[0].toLowerCase();
+  if (head === 'event') {
+    // `event/run/‹heat›`: the heat id keeps its case and is one encoded segment. A run hash
+    // with no heat, or a broken one, falls back to the event page.
+    if (segments[1]?.toLowerCase() === 'run' && segments.length === 3) {
+      const heat = decodeSegment(segments[2]);
+      if (heat) return { kind: 'run', heat };
+    }
+    return { kind: 'event' };
+  }
   if ((APP_PAGES as readonly string[]).includes(head)) {
     return { kind: 'page', page: head as AppPage };
   }
@@ -56,11 +80,12 @@ export function parseHash(hash: string): Route {
 
 /**
  * Format a {@link Route} back into a hash string (always with the leading `#/`). The hub formats
- * to `#/` (canonical), the pages to `#/<page>`, and the event page to `#/event`. Round-trips with
- * {@link parseHash} for every route.
+ * to `#/` (canonical), the pages to `#/<page>`, the event page to `#/event` and a heat's Run view
+ * to `#/event/run/‹encoded heat id›`. Round-trips with {@link parseHash} for every route.
  */
 export function formatHash(route: Route): string {
   if (route.kind === 'event') return '#/event';
+  if (route.kind === 'run') return `#/event/run/${encodeURIComponent(route.heat)}`;
   if (route.page === 'home') return '#/';
   return `#/${route.page}`;
 }
@@ -69,15 +94,15 @@ export function formatHash(route: Route): string {
  * Reconcile a parsed {@link Route} against whether an event is currently active (the Director's
  * active event, server state):
  *
- *   - An `event` route with **no active event** → fall back to the Events page (`#/events`),
- *     since there is no event to show.
+ *   - An `event` or `run` route with **no active event** → fall back to the Events page
+ *     (`#/events`), since there is no event to show.
  *   - A `page` route with an **active event** is fine as-is: the user explicitly navigated to a
  *     top-level page even though an event is active, so honour it. This includes the hub: an
  *     empty/hub hash stays on the hub even when an event is active — the hash is authoritative,
  *     so being outside an event survives a reload.
  */
 export function reconcileRoute(route: Route, hasActiveEvent: boolean): Route {
-  if (route.kind === 'event' && !hasActiveEvent) {
+  if (route.kind !== 'page' && !hasActiveEvent) {
     return { kind: 'page', page: 'events' };
   }
   return route;
