@@ -3,6 +3,7 @@ import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { Class, EventMeta, Pilot } from '@gridfpv/types';
 import HomeHub from '../src/screens/HomeHub.svelte';
+import { timerView } from './competition.js';
 import { makeTestSession } from './support.js';
 
 const PILOTS: Pilot[] = [
@@ -35,14 +36,21 @@ describe('HomeHub (app-level landing, #118)', () => {
       noEnter: true,
       listPilotsImpl: vi.fn(async () => PILOTS),
       listClassesImpl: vi.fn(async () => CLASSES),
+      listTimersImpl: vi.fn(async () => [timerView('gate-x1y2', 'Gate')]),
       listEventsImpl: vi.fn(async () => EVENTS)
     }).session;
     return { session };
   }
 
-  it('renders the three cards with their summary counts', async () => {
+  it('renders the four cards with their summary counts', async () => {
     const { session } = setup();
-    render(HomeHub, { session, onpilots: vi.fn(), onclasses: vi.fn(), onevents: vi.fn() });
+    render(HomeHub, {
+      session,
+      onpilots: vi.fn(),
+      onclasses: vi.fn(),
+      ontimers: vi.fn(),
+      onevents: vi.fn()
+    });
 
     // Summaries settle per card (count + unit are separate spans): 2 pilots, 3 classes, 2 events.
     const pilotsCard = screen.getByRole('heading', { name: 'Pilots' }).closest('button')!;
@@ -52,6 +60,9 @@ describe('HomeHub (app-level landing, #118)', () => {
     expect(within(pilotsCard).getByText('pilots')).toBeInTheDocument();
     await waitFor(() => expect(within(classesCard).getByText('3')).toBeInTheDocument());
     expect(within(classesCard).getByText('classes')).toBeInTheDocument();
+    const timersCard = screen.getByRole('heading', { name: 'Timers' }).closest('button')!;
+    await waitFor(() => expect(within(timersCard).getByText('1')).toBeInTheDocument());
+    expect(within(timersCard).getByText('timer')).toBeInTheDocument();
     await waitFor(() => expect(within(eventsCard).getByText('2')).toBeInTheDocument());
     expect(within(eventsCard).getByText('events')).toBeInTheDocument();
   });
@@ -60,15 +71,18 @@ describe('HomeHub (app-level landing, #118)', () => {
     const { session } = setup();
     const onpilots = vi.fn();
     const onclasses = vi.fn();
+    const ontimers = vi.fn();
     const onevents = vi.fn();
-    render(HomeHub, { session, onpilots, onclasses, onevents });
+    render(HomeHub, { session, onpilots, onclasses, ontimers, onevents });
 
     await fireEvent.click(screen.getByRole('heading', { name: 'Pilots' }).closest('button')!);
     await fireEvent.click(screen.getByRole('heading', { name: 'Classes' }).closest('button')!);
+    await fireEvent.click(screen.getByRole('heading', { name: 'Timers' }).closest('button')!);
     await fireEvent.click(screen.getByRole('heading', { name: 'Events' }).closest('button')!);
 
     expect(onpilots).toHaveBeenCalledTimes(1);
     expect(onclasses).toHaveBeenCalledTimes(1);
+    expect(ontimers).toHaveBeenCalledTimes(1);
     expect(onevents).toHaveBeenCalledTimes(1);
   });
 
@@ -81,7 +95,13 @@ describe('HomeHub (app-level landing, #118)', () => {
       listClassesImpl: vi.fn(async () => CLASSES),
       listEventsImpl: vi.fn(async () => EVENTS)
     }).session;
-    render(HomeHub, { session, onpilots: vi.fn(), onclasses: vi.fn(), onevents: vi.fn() });
+    render(HomeHub, {
+      session,
+      onpilots: vi.fn(),
+      onclasses: vi.fn(),
+      ontimers: vi.fn(),
+      onevents: vi.fn()
+    });
 
     const pilotsCard = screen.getByRole('heading', { name: 'Pilots' }).closest('button')!;
     await waitFor(() => expect(within(pilotsCard).getByText('—')).toBeInTheDocument());

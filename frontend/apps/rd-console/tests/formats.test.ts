@@ -112,3 +112,24 @@ describe('the stop choice', () => {
     expect(withStopChoice(timed, '60')).toBe(timed);
   });
 });
+
+describe('the time limit choice', () => {
+  it('applies to every race that is not timed', async () => {
+    const { canHaveLimit } = await import('../src/lib/formats.js');
+    expect(canHaveLimit(formatByKey('first-to-3'))).toBe(true);
+    expect(canHaveLimit(formatByKey('practice'))).toBe(true);
+    expect(canHaveLimit(formatByKey('timed-2-min'))).toBe(false);
+    expect(canHaveLimit(undefined)).toBe(false);
+  });
+
+  it('sets no limit by default, and the limit in microseconds when one is picked', async () => {
+    const { LIMIT_CHOICES, withLimitChoice } = await import('../src/lib/formats.js');
+    const format = formatByKey('practice')!;
+    expect(LIMIT_CHOICES[0].key).toBe('none');
+    expect(withLimitChoice(format, 'none')).toBe(format);
+    expect(withLimitChoice(format, '300').race.max_micros).toBe(300 * S);
+    expect(format.race.max_micros).toBeUndefined();
+    const timed = formatByKey('timed-2-min')!;
+    expect(withLimitChoice(timed, '300')).toBe(timed);
+  });
+});

@@ -97,6 +97,35 @@ export function withStopChoice(format: Format, stopKey: string): Format {
   return { ...format, race: { ...format.race, stop_after_all_finish_micros: seconds * SECOND } };
 }
 
+/**
+ * The longest a race that is not timed may run, as the picker offers it. No limit is the
+ * default. At the limit the race stops by itself, whoever has or has not finished.
+ */
+export const LIMIT_CHOICES: readonly { key: string; label: string; seconds: number | null }[] = [
+  { key: 'none', label: 'No time limit', seconds: null },
+  { key: '120', label: 'Stops after 2 minutes', seconds: 120 },
+  { key: '180', label: 'Stops after 3 minutes', seconds: 180 },
+  { key: '300', label: 'Stops after 5 minutes', seconds: 300 },
+  { key: '600', label: 'Stops after 10 minutes', seconds: 600 }
+];
+
+/** Whether a time limit applies: any race that is not already timed. */
+export function canHaveLimit(format: Format | undefined): boolean {
+  if (!format) return false;
+  const end = format.race.end;
+  return !(typeof end === 'object' && end !== null && 'Timed' in end);
+}
+
+/**
+ * A copy of `format` with the time limit applied. A timed format, or an unknown key, comes
+ * back unchanged.
+ */
+export function withLimitChoice(format: Format, limitKey: string): Format {
+  const seconds = LIMIT_CHOICES.find((choice) => choice.key === limitKey)?.seconds ?? null;
+  if (seconds === null || !canHaveLimit(format)) return format;
+  return { ...format, race: { ...format.race, max_micros: seconds * SECOND } };
+}
+
 /** The format for a picker key, or `undefined` for a key that is not in the list. */
 export function formatByKey(key: string): Format | undefined {
   return BUILT_IN_FORMATS.find((choice) => choice.key === key)?.format;

@@ -1,31 +1,43 @@
 <script lang="ts">
   /**
-   * AddHeatDialog — add one heat to the event: a name, the pilots in seat order, a format.
+   * AddHeatDialog — add one heat to the event: a name, what times it, the pilots in seat
+   * order, a format.
+   *
+   * "Timed by" lists every seat source by name (`lib/seats.ts`): each timer, then the Bench.
+   * The seats on offer, and so the most pilots the heat can hold, follow the one chosen.
    *
    * The parent mounts this only while it is open, so a closed copy never sits in the page.
    * It sends one `PhaseDefined` fact. If the Director refuses, its sentence is shown here
    * and the dialog stays open with everything the director typed.
    */
   import { Banner, Button, Dialog, Field, Input, Select } from '@gridfpv/components';
-  import type { HeatSeat, PhaseDef, PilotId } from '@gridfpv/types';
+  import type { AdapterId, HeatSeat, PhaseDef, PilotId } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import {
     BUILT_IN_FORMATS,
+    LIMIT_CHOICES,
     STOP_CHOICES,
+    canHaveLimit,
     canStopItself,
     formatByKey,
+    withLimitChoice,
     withStopChoice
   } from '../lib/formats.js';
   import { newPhaseId } from '../lib/phases.js';
-  import { MAX_SEATS, SEATS } from '../lib/seats.js';
+  import { canChoose, chosenSource, sourceOptionLabel } from '../lib/seats.js';
   import PilotPicker from './PilotPicker.svelte';
 
   let { live, onclose }: { live: EventLive; onclose: () => void } = $props();
 
   let name = $state('');
   let chosen = $state<PilotId[]>([]);
+  /** The source the director picked. Until they pick, the default is used. */
+  let pickedSource = $state<AdapterId | undefined>(undefined);
+  const source = $derived(chosenSource(live.seatSources, pickedSource));
+  const seats = $derived(source.seats);
   let formatKey = $state(BUILT_IN_FORMATS[0].key);
   let stopKey = $state(STOP_CHOICES[0].key);
+  let limitKey = $state(LIMIT_CHOICES[0].key);
   let busy = $state(false);
   let nameError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
@@ -33,6 +45,7 @@
   // The directory may have changed since the event page opened.
   $effect(() => {
     void live.reloadPilots();
+    void live.reloadTimers();
   });
 
   async function submit(e?: Event) {
@@ -49,12 +62,16 @@
       error = 'Choose at least one pilot.';
       return;
     }
+    if (chosen.length > seats.length) {
+      error = `${source.name} has ${seats.length} ${seats.length === 1 ? 'seat' : 'seats'}. Take out ${chosen.length - seats.length} of the pilots.`;
+      return;
+    }
     const picked = formatByKey(formatKey);
     if (!picked) return;
-    const format = withStopChoice(picked, stopKey);
+    const format = withLimitChoice(withStopChoice(picked, stopKey), limitKey);
     const lineup: HeatSeat[] = chosen.map((pilot, index) => ({
-      adapter: SEATS[index].adapter,
-      seat: SEATS[index].seat,
+      adapter: seats[index].adapter,
+      seat: seats[index].seat,
       source: { Pilot: pilot }
     }));
     const def: PhaseDef = { id: newPhaseId(label), label, kind: { Heat: { lineup } }, format };
@@ -80,12 +97,34 @@
         autocomplete="off"
       />
     </Field>
-    <Field label="Pilots, in seat order" hint="Up to {MAX_SEATS}. The first pilot gets Seat 1.">
+    <Field
+      label="Timed by"
+      hint={source.bench
+        ? 'The Bench is not a timer. Crossings are logged by hand on the Run page.'
+        : undefined}
+    >
+      <Select
+        value={source.id}
+        aria-label="Timed by"
+        disabled={busy}
+        onchange={(e: Event) => (pickedSource = (e.currentTarget as HTMLSelectElement).value)}
+      >
+        {#each live.seatSources as choice (choice.id)}
+          <option value={choice.id} disabled={!canChoose(choice)}>
+            {sourceOptionLabel(choice)}
+          </option>
+        {/each}
+      </Select>
+    </Field>
+    <Field
+      label="Pilots, in seat order"
+      hint="Up to {seats.length}. The first pilot gets {seats[0]?.label ?? 'Seat 1'}."
+    >
       <PilotPicker
         pilots={live.pilots}
         bind:chosen
-        max={MAX_SEATS}
-        slotLabel={(index) => SEATS[index]?.label ?? ''}
+        max={seats.length}
+        slotLabel={(index) => seats[index]?.label ?? 'No seat'}
         disabled={busy}
       />
     </Field>
@@ -100,6 +139,15 @@
       <Field label="The race stops">
         <Select bind:value={stopKey} aria-label="The race stops" disabled={busy}>
           {#each STOP_CHOICES as choice (choice.key)}
+            <option value={choice.key}>{choice.label}</option>
+          {/each}
+        </Select>
+      </Field>
+    {/if}
+    {#if canHaveLimit(formatByKey(formatKey))}
+      <Field label="Time limit">
+        <Select bind:value={limitKey} aria-label="Time limit" disabled={busy}>
+          {#each LIMIT_CHOICES as choice (choice.key)}
             <option value={choice.key}>{choice.label}</option>
           {/each}
         </Select>

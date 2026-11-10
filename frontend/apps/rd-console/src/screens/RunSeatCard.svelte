@@ -3,12 +3,11 @@
    * RunSeatCard — one seat of the heat on the Run view: who is on it, their place, how many
    * laps, the last and best lap, and every lap in order.
    *
-   * While crossings are simulated (`SIMULATE_CROSSINGS` in `lib/seats.ts`) it also carries a
-   * "Crossing" button marked "Bench". That button is a bench tool, not a race-day control.
+   * A bench seat has no timer behind it, so it also carries a "Crossing" button marked
+   * "Bench" that logs a crossing by hand. A seat on a real timer never shows it.
    */
   import { Badge, Button, formatMicros } from '@gridfpv/components';
   import type { SeatRow } from '../lib/run.js';
-  import { SIMULATE_CROSSINGS } from '../lib/seats.js';
 
   let {
     row,
@@ -29,7 +28,7 @@
     <span class="who">{row.who}</span>
     {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
     {#if row.onCourse && racing}<Badge tone="success" dot>On course</Badge>{/if}
-    {#if SIMULATE_CROSSINGS}
+    {#if row.bench}
       <span class="bench">
         <Badge tone="violet" variant="outline">Bench</Badge>
         <Button

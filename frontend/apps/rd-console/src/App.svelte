@@ -4,7 +4,7 @@
    *
    * The console is a **home hub of pages** plus the open event's page. The shell shows an
    * **app-level route**: the {@link HomeHub} (landing), or one of its pages — {@link EventPicker}
-   * (the Events page), {@link PilotsPage}, {@link ClassesPage}. Selecting an event on the Events
+   * (the Events page), {@link PilotsPage}, {@link ClassesPage}, {@link TimersPage}. Selecting an event on the Events
    * page opens {@link EventPage}, and a heat on it opens that heat's {@link RunPage}.
    *
    * On load the shell resolves the Director's active event (server state, #90) so an `#/event`
@@ -29,6 +29,7 @@
   import RunPage from './screens/RunPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
+  import TimersPage from './screens/TimersPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
   import {
     parseHash,
@@ -147,6 +148,7 @@
         {session}
         onpilots={() => goPage('pilots')}
         onclasses={() => goPage('classes')}
+        ontimers={() => goPage('timers')}
         onevents={() => goPage('events')}
       />
     {:else if route.page === 'events'}
@@ -155,6 +157,8 @@
       <PilotsPage {session} onhome={goHome} />
     {:else if route.page === 'classes'}
       <ClassesPage {session} onhome={goHome} />
+    {:else if route.page === 'timers'}
+      <TimersPage {session} onhome={goHome} />
     {/if}
   {:else if session.currentEvent && live}
     {#if route.kind === 'run'}

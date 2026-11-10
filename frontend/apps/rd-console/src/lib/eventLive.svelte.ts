@@ -6,9 +6,12 @@
  * again. That is the whole live mechanism, so there is no second copy of the truth here
  * that could drift.
  *
- * It also holds the pilot directory and builds the one name resolver ({@link Names}) every
- * event screen uses, and it keeps the offset between the Director's clock and this
+ * It also holds the pilot directory and the timer directory, and builds the one name resolver
+ * ({@link Names}) every event screen uses, and it keeps the offset between the Director's clock and this
  * browser's, so a countdown runs on the Director's clock.
+ *
+ * Timers have no change feed, so while the store is running it asks for the timer list again
+ * every {@link TIMER_POLL_MS}. It stops asking when the store stops.
  *
  * Writes go through the {@link Session}, so they get its token handling: sent without a
  * token first, and the token dialog opens only if the Director asks for one.
@@ -21,15 +24,24 @@ import type {
   EventView,
   PassRequest,
   Pilot,
-  ProtocolError
+  ProtocolError,
+  TimerView
 } from '@gridfpv/types';
 import { buildNames, type Names } from './names.js';
+import { seatSources, type SeatSource } from './seats.js';
 import type { Session } from './session.svelte.js';
+import { TIMER_POLL_MS } from './timers.js';
 
 /** The parts of the session the store needs. Narrow, so a test can hand in a stand-in. */
 export type LiveSession = Pick<
   Session,
-  'getEventState' | 'subscribeChanges' | 'sendCommand' | 'createBracket' | 'postPass' | 'listPilots'
+  | 'getEventState'
+  | 'subscribeChanges'
+  | 'sendCommand'
+  | 'createBracket'
+  | 'postPass'
+  | 'listPilots'
+  | 'listTimers'
 >;
 
 /**
@@ -52,12 +64,19 @@ export class EventLive {
   pilots = $state.raw<Pilot[]>([]);
   /** Director clock minus browser clock, in microseconds. */
   clockOffsetMicros = $state(0);
+  /** The timer directory with each timer's status, for seat and timer names and the pickers. */
+  timers = $state.raw<TimerView[]>([]);
+  /** Whether the timer directory has been read at least once. */
+  timersLoaded = $state(false);
+  /** What a heat can be timed by: every timer, then the bench. */
+  seatSources: SeatSource[] = $derived(seatSources(this.timers));
   /** The one resolver from ids to names for this event. */
-  names: Names = $derived(buildNames(this.view?.phases ?? [], this.pilots));
+  names: Names = $derived(buildNames(this.view?.phases ?? [], this.pilots, this.timers));
 
   readonly eventId: EventId;
   #session: LiveSession;
   #unsubscribe: (() => void) | undefined;
+  #timerPoll: ReturnType<typeof setInterval> | undefined;
   #stopped = false;
   #loading = false;
   #loadAgain = false;
@@ -71,11 +90,14 @@ export class EventLive {
     this.#clock = opts?.now ?? (() => Date.now());
   }
 
-  /** Read the snapshot and the pilots, and start listening for changes. */
+  /** Read the snapshot, the pilots and the timers, and start listening for changes. */
   start(): void {
     this.#stopped = false;
     void this.reload();
     void this.reloadPilots();
+    void this.reloadTimers();
+    clearInterval(this.#timerPoll);
+    this.#timerPoll = setInterval(() => void this.reloadTimers(), TIMER_POLL_MS);
     try {
       // The feed sends the current cursor on every connect and reconnect, so a console
       // that was cut off reads a fresh snapshot as soon as it is back.
@@ -92,6 +114,8 @@ export class EventLive {
     this.#stopped = true;
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
+    clearInterval(this.#timerPoll);
+    this.#timerPoll = undefined;
   }
 
   /**
@@ -156,6 +180,22 @@ export class EventLive {
       if (!this.#stopped) this.pilots = pilots;
     } catch {
       // Callsigns fall back to "Unknown pilot"; the snapshot error, if any, says why.
+    }
+  }
+
+  /**
+   * Read the timer directory again. A read that fails keeps the last list: a timer's name
+   * should not turn into "Unknown timer" because one request was dropped.
+   */
+  async reloadTimers(): Promise<void> {
+    try {
+      const timers = await this.#session.listTimers();
+      if (this.#stopped) return;
+      // The list is read every couple of seconds; only a real change is passed on.
+      if (JSON.stringify(timers) !== JSON.stringify(this.timers)) this.timers = timers;
+      this.timersLoaded = true;
+    } catch {
+      // Keep what we have.
     }
   }
 

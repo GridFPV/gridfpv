@@ -39,6 +39,9 @@ import {
   updateClass,
   deleteClass,
   setClassHidden,
+  listTimers,
+  createTimer,
+  deleteTimer,
   getEventState,
   sendCommand,
   createBracket,
@@ -47,6 +50,7 @@ import {
   isRequestFailure
 } from '@gridfpv/protocol-client';
 import type {
+  AdapterId,
   BracketRequest,
   Class,
   ClassId,
@@ -55,11 +59,14 @@ import type {
   CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
+  CreateTimerRequest,
   EventMeta,
   EventView,
   PassRequest,
   Pilot,
   PilotId,
+  Timer,
+  TimerView,
   UpdateClassRequest,
   UpdatePilotRequest
 } from '@gridfpv/types';
@@ -136,6 +143,9 @@ const realApi = {
   updateClass,
   deleteClass,
   setClassHidden,
+  listTimers,
+  createTimer,
+  deleteTimer,
   getEventState,
   sendCommand,
   createBracket,
@@ -349,6 +359,38 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#api.setClassHidden(this.baseUrl, id, hidden, token)
     );
+  }
+
+  // ── Timer directory ────────────────────────────────────────────────────────
+  //
+  // Timers are application-level, like pilots and classes: an open read, gated writes on the
+  // same token path. The Director holds the connection to each timer; this only keeps the list.
+
+  /**
+   * List every timer with its status right now (`GET /timers`, open, no token). There is no
+   * change feed for timers, so a screen that shows them calls this again every couple of seconds.
+   */
+  listTimers(): Promise<TimerView[]> {
+    return this.#api.listTimers(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Add a timer (`POST /timers`). Returns the new {@link Timer}, `undefined` on a cancelled token
+   * prompt, or throws with the Director's sentence (a blank name or a bad address is a **400**).
+   */
+  createTimer(request: CreateTimerRequest): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#api.createTimer(this.baseUrl, request, token));
+  }
+
+  /**
+   * Remove a timer (`DELETE /timers/{id}`). Resolves to `true` once it is gone, `undefined` on a
+   * cancelled token prompt, or throws on any other failure. Mirrors {@link deletePilot}.
+   */
+  deleteTimer(id: AdapterId): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#api.deleteTimer(this.baseUrl, id, token);
+      return true as const;
+    });
   }
 
   // ── An event's competition ─────────────────────────────────────────────────

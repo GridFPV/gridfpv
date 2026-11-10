@@ -9,7 +9,7 @@ import { fireEvent, waitFor } from '@testing-library/dom';
 import type { EventMeta, EventView, Pilot } from '@gridfpv/types';
 import RunPage from '../src/screens/RunPage.svelte';
 import { EventLive, type LiveSession } from '../src/lib/eventLive.svelte.js';
-import { eventView, FIRST_TO_3, heat, race, raceSeat } from './competition.js';
+import { eventView, FIRST_TO_3, heat, race, raceSeat, timerView } from './competition.js';
 
 const EVENT: EventMeta = { id: 'evt-77', name: 'Club Night', created_at: 0, persistent: true };
 const PILOTS: Pilot[] = [
@@ -27,11 +27,13 @@ async function open(view: EventView, over: Partial<LiveSession> = {}) {
     createBracket: vi.fn(async () => ({ cursor: view.cursor })),
     postPass: vi.fn(async () => ({ cursor: view.cursor })),
     listPilots: vi.fn(async () => PILOTS),
+    listTimers: vi.fn(async () => []),
     ...over
   };
   const live = new EventLive(session, EVENT.id);
   await live.reload();
   await live.reloadPilots();
+  await live.reloadTimers();
   const nav = { onhome: vi.fn(), onevents: vi.fn(), onevent: vi.fn(), onrun: vi.fn() };
   render(RunPage, { event: EVENT, live, heat: HEAT, ...nav });
   return { session, live, nav };
@@ -275,5 +277,78 @@ describe('RunPage', () => {
     expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled();
     await fireEvent.click(screen.getByRole('button', { name: 'Open Qualifying Heat 2' }));
     expect(nav.onrun).toHaveBeenCalledWith('other-7');
+  });
+});
+describe('RunPage: what times the heat', () => {
+  const GATE_ID = 'gate-x1y2';
+  /** The qualifying heat, on a timer's seats instead of the bench. */
+  const onGate = (over = {}) => {
+    const phase = quali(over);
+    phase.lineup = phase.lineup.map((seat, index) => ({
+      ...seat,
+      adapter: GATE_ID,
+      seat: String(index)
+    }));
+    return phase;
+  };
+  const gateRace = (state: 'Running' | 'Saved') =>
+    race(HEAT, 1, state, {
+      started_at: 0,
+      seats: [
+        { ...raceSeat(0, 'p-1a'), adapter: GATE_ID, seat: '0' },
+        { ...raceSeat(1, 'p-2b'), adapter: GATE_ID, seat: '1' }
+      ]
+    });
+
+  it('a bench heat says it is timed by the Bench and shows the Crossing buttons', async () => {
+    await open(eventView({ phases: [quali()] }));
+    expect(screen.getByTestId('timed-by')).toHaveTextContent('Timed by Bench');
+    expect(screen.getByRole('button', { name: 'Crossing for Seat 1' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('a heat on a connected timer names the timer and has no Crossing button and no warning', async () => {
+    const running = gateRace('Running');
+    await open(eventView({ phases: [onGate()], races: [running], current_race: running.race }), {
+      listTimers: vi.fn(async () => [timerView(GATE_ID, 'Gate', 4)])
+    });
+    expect(screen.getByTestId('timed-by')).toHaveTextContent('Timed by Gate');
+    expect(screen.getByRole('listitem', { name: 'Seat 1, Ace' })).toBeVisible();
+    expect(screen.getByRole('listitem', { name: 'Seat 2, Bee' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^Crossing/ })).toBeNull();
+    expect(screen.queryByText('Bench')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(document.body.textContent).not.toContain(GATE_ID);
+  });
+
+  it("warns in the Director's words when the heat's timer is not connected", async () => {
+    const SAID = 'Nothing answered at 10.0.0.9:7270.';
+    await open(eventView({ phases: [onGate()] }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 0, { connected: false, problem: SAID })
+      ])
+    });
+    const warning = screen.getByRole('alert');
+    expect(warning).toHaveTextContent('Gate is not connected.');
+    expect(warning).toHaveTextContent(SAID);
+    // The seats are still named, though the timer has reported none.
+    expect(screen.getByRole('listitem', { name: 'Seat 2, Bee' })).toBeVisible();
+    expect(document.body.textContent).not.toContain(GATE_ID);
+  });
+
+  it('says so when the timer was removed, and never shows its id', async () => {
+    await open(eventView({ phases: [onGate()] }));
+    expect(screen.getByTestId('timed-by')).toHaveTextContent('Timed by Unknown timer');
+    expect(screen.getByRole('alert')).toHaveTextContent('The timer for this heat was removed.');
+    expect(screen.getByRole('listitem', { name: 'Seat 1, Ace' })).toBeVisible();
+    expect(document.body.textContent).not.toContain(GATE_ID);
+  });
+
+  it('a finished heat carries no timer warning', async () => {
+    await open(eventView({ phases: [onGate({ complete: true })], races: [gateRace('Saved')] }), {
+      listTimers: vi.fn(async () => [timerView(GATE_ID, 'Gate', 0, { connected: false })])
+    });
+    expect(screen.getByTestId('timed-by')).toHaveTextContent('Timed by Gate');
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

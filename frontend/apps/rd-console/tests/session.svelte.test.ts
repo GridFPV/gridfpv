@@ -4,7 +4,9 @@ import type {
   CreateClassRequest,
   CreatePilotRequest,
   EventMeta,
-  Pilot
+  Pilot,
+  Timer,
+  TimerView
 } from '@gridfpv/types';
 import { Session, type SessionApi } from '../src/lib/session.svelte.js';
 
@@ -275,6 +277,58 @@ describe('Session', () => {
 
     session.clearToken();
     expect(session.hasToken).toBe(false);
+  });
+
+  describe('timers', () => {
+    const GATE: Timer = { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' };
+    const timerSession = (overrides?: SessionOverrides) =>
+      new Session({ baseUrl: 'http://d.local', autoRestore: false, api: { ...overrides } });
+
+    it('listTimers reads the directory open (no token)', async () => {
+      const views: TimerView[] = [{ timer: GATE, status: { connected: false, seats: [] } }];
+      const listTimers = vi.fn(async () => views);
+      const session = timerSession({ listTimers });
+      expect(await session.listTimers()).toEqual(views);
+      expect(listTimers).toHaveBeenCalledWith('http://d.local', { token: undefined });
+    });
+
+    it('createTimer sends without a token first, then prompts once when refused for auth', async () => {
+      const createTimer = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
+        .mockResolvedValueOnce(GATE);
+      const session = timerSession({ createTimer });
+      session.setTokenProvider(async () => 'tok');
+      const request = { name: 'Gate', kind: 'Oft' as const, address: '10.0.0.5:7270' };
+      expect(await session.createTimer(request)).toEqual(GATE);
+      expect(createTimer).toHaveBeenNthCalledWith(1, 'http://d.local', request, undefined);
+      expect(createTimer).toHaveBeenNthCalledWith(2, 'http://d.local', request, 'tok');
+    });
+
+    it("createTimer throws the Director's sentence for a bad address, with no prompt", async () => {
+      const SAID = 'A timer needs an address, like 192.168.1.50:7270.';
+      const createTimer = vi.fn().mockRejectedValue(refusal(400, SAID));
+      const provider = vi.fn(async () => 'tok');
+      const session = timerSession({ createTimer });
+      session.setTokenProvider(provider);
+      await expect(
+        session.createTimer({ name: 'Gate', kind: 'Oft', address: 'nope' })
+      ).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    it('deleteTimer resolves true once removed, and undefined when the prompt is cancelled', async () => {
+      const deleteTimer = vi.fn(async () => {});
+      const session = timerSession({ deleteTimer });
+      session.setToken('tok');
+      expect(await session.deleteTimer('gate-x1y2')).toBe(true);
+      expect(deleteTimer).toHaveBeenCalledWith('http://d.local', 'gate-x1y2', 'tok');
+
+      const refused = vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'));
+      const gated = timerSession({ deleteTimer: refused });
+      gated.setTokenProvider(async () => undefined);
+      expect(await gated.deleteTimer('gate-x1y2')).toBeUndefined();
+    });
   });
 
   describe('pilots (#74)', () => {

@@ -9,7 +9,7 @@ import {
   readClock
 } from '../src/lib/run.js';
 import { StartCue } from '../src/lib/startTone.js';
-import { heat, race, raceSeat } from './competition.js';
+import { heat, race, raceSeat, timerView } from './competition.js';
 
 const S = 1_000_000;
 const names = buildNames(
@@ -100,6 +100,20 @@ describe('seat rows', () => {
       seats: [{ ...raceSeat(0, 'p1'), adapter: 'oft', seat: 'gate-b' }]
     });
     expect(raceSeatRows(odd, names)[0].seatName).toBe('Seat 1');
+  });
+
+  it("a row on a timer is named from the timer's seats and is not a bench seat", () => {
+    const timed = buildNames([], [], [timerView('gate-x1y2', 'Gate', 4)]);
+    const onGate = race('q', 1, 'Running', {
+      seats: [{ ...raceSeat(0, 'p1'), adapter: 'gate-x1y2', seat: '2' }, raceSeat(1, 'p2')]
+    });
+    const [gate, bench] = raceSeatRows(onGate, timed);
+    // Named by the timer's own seat order, not by the place in this lineup.
+    expect(gate).toMatchObject({ seatName: 'Seat 3', bench: false });
+    expect(bench).toMatchObject({ seatName: 'Seat 2', bench: true });
+    const phase = heat('f', 'Final', ['p1']);
+    phase.lineup[0] = { ...phase.lineup[0], adapter: 'gate-x1y2', seat: '1' };
+    expect(lineupSeatRows(phase, timed)[0]).toMatchObject({ seatName: 'Seat 2', bench: false });
   });
 });
 

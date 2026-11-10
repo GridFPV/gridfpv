@@ -23,6 +23,8 @@ describe('parseHash', () => {
   it('parses each top-level page', () => {
     expect(parseHash('#/pilots')).toEqual({ kind: 'page', page: 'pilots' });
     expect(parseHash('#/classes')).toEqual({ kind: 'page', page: 'classes' });
+    expect(parseHash('#/timers')).toEqual({ kind: 'page', page: 'timers' });
+    expect(parseHash('#/Timers/')).toEqual({ kind: 'page', page: 'timers' });
     expect(parseHash('#/events')).toEqual({ kind: 'page', page: 'events' });
   });
 
@@ -74,6 +76,7 @@ describe('formatHash', () => {
 
   it('formats pages and the event page', () => {
     expect(formatHash({ kind: 'page', page: 'pilots' })).toBe('#/pilots');
+    expect(formatHash({ kind: 'page', page: 'timers' })).toBe('#/timers');
     expect(formatHash({ kind: 'event' })).toBe('#/event');
   });
 
@@ -89,6 +92,7 @@ describe('round-trip (format → parse)', () => {
     { kind: 'page', page: 'home' },
     { kind: 'page', page: 'pilots' },
     { kind: 'page', page: 'classes' },
+    { kind: 'page', page: 'timers' },
     { kind: 'page', page: 'events' },
     { kind: 'event' },
     { kind: 'run', heat: 'quali-ab12' },

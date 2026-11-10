@@ -625,6 +625,11 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      tenths of a dB, or tenths of a dBm), never converted. OFT signal is taken at full rate
      and logged while a race is on, with three seconds either side, in chunks about a
      second long. Signal outside a race is not kept.
+   - **Console:** a Timers page (add, remove, live status), and the add-heat and
+     add-bracket dialogs pick which timer times the heat. "Bench" stays as a choice with
+     no timer, where crossings are logged by hand.
+   - Checked by hand on 2026-11-10: a heat run against `oftd --fake` through the Director
+     gave laps from the timer, lap 1 timed from the tone, and the race's signal in the log.
    - **Not yet:** mDNS discovery, writing seat frequencies and thresholds to the timer, the
      Tune page, and showing the logged signal in Marshal.
 7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is

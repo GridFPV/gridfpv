@@ -13,6 +13,7 @@
 
 import type {
   ActiveEvent,
+  AdapterId,
   BracketRequest,
   Class,
   ClassId,
@@ -21,6 +22,7 @@ import type {
   CreateClassRequest,
   CreateEventRequest,
   CreatePilotRequest,
+  CreateTimerRequest,
   EventId,
   EventMeta,
   EventView,
@@ -30,6 +32,8 @@ import type {
   PilotId,
   ProtocolError,
   SetClassHiddenRequest,
+  Timer,
+  TimerView,
   UpdateClassRequest,
   UpdatePilotRequest
 } from '@gridfpv/types';
@@ -341,6 +345,56 @@ export async function deletePilot(
     `/pilots/${encodeURIComponent(id)}`,
     { method: 'DELETE', token, fetch: options.fetch },
     'delete the pilot'
+  );
+}
+
+/**
+ * List every timer the Director knows, each with its status right now (`GET /timers`). An open
+ * read (no token). There is no change feed for timers: a screen that shows them asks again
+ * every couple of seconds. Resolves to the {@link TimerView}s in id order, or rejects on a
+ * non-2xx / transport failure.
+ */
+export async function listTimers(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<TimerView[]> {
+  return apiJson<TimerView[]>(baseUrl, '/timers', options, 'list the timers');
+}
+
+/**
+ * Add a timer (`POST /timers`). RD-gated. The Director makes the id and then keeps a connection
+ * to the timer by itself. A blank name or an address that is not `host:port` is a **400** with a
+ * sentence for the director. Resolves to the new {@link Timer}.
+ */
+export async function createTimer(
+  baseUrl: string,
+  request: CreateTimerRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return apiJson<Timer>(
+    baseUrl,
+    '/timers',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the timer'
+  );
+}
+
+/**
+ * Remove a timer (`DELETE /timers/{id}`). RD-gated. An unknown id answers **404**. The passes it
+ * sent stay in the events it timed. Resolves once the delete succeeds.
+ */
+export async function deleteTimer(
+  baseUrl: string,
+  id: AdapterId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove the timer'
   );
 }
 

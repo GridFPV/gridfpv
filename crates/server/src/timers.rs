@@ -97,13 +97,13 @@ pub struct TimerView {
 /// Why a directory call failed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TimerError {
-    #[error("a timer needs a name")]
+    #[error("A timer needs a name.")]
     NoName,
-    #[error("a timer needs an address, like 192.168.1.50:7270")]
+    #[error("A timer needs an address, like 192.168.1.50:7270.")]
     BadAddress,
-    #[error("there is no such timer")]
+    #[error("There is no such timer.")]
     NotFound,
-    #[error("could not save the timers: {0}")]
+    #[error("Could not save the timers: {0}")]
     Io(String),
 }
 

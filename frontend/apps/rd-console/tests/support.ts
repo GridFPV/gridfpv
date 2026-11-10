@@ -59,6 +59,8 @@ export function makeTestSession(
       // Every other seam keeps its real implementation, which the stubbed `fetch` makes inert,
       // and a test that needs one to answer names it.
       listPilots: async () => [],
+      // The same goes for the timer read, which several screens poll.
+      listTimers: async () => [],
       ...seamOverrides(opts)
     }
   });

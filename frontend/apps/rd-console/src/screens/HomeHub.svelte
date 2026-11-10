@@ -3,9 +3,9 @@
    * HomeHub — the RD console's app-level landing (#118).
    *
    * The two-level IA's root: big, field-readable cards — **Events** (the prominent, full-width
-   * primary action on top) above a smaller row of **Pilots** and **Classes** — each navigating to
+   * primary action on top) above a smaller row of **Pilots**, **Classes** and **Timers** — each navigating to
    * its own page. Each card shows a quick at-a-glance count read open (no token) on mount
-   * (`GET /events`, `GET /pilots`, `GET /classes`). A failed read just shows a dash — the hub
+   * (`GET /events`, `GET /pilots`, `GET /classes`, `GET /timers`). A failed read just shows a dash — the hub
    * never blocks on a summary.
    *
    * Big text + dark surfaces by design: this hub is glanced at on a laptop outdoors in the sun, so
@@ -18,11 +18,13 @@
     session,
     onpilots,
     onclasses,
+    ontimers,
     onevents
   }: {
     session: Session;
     onpilots: () => void;
     onclasses: () => void;
+    ontimers: () => void;
     onevents: () => void;
   } = $props();
 
@@ -30,6 +32,7 @@
   // failed/unreachable read (rendered as a dash). The hub renders immediately regardless.
   let pilotCount = $state<number | undefined | null>(undefined);
   let classCount = $state<number | undefined | null>(undefined);
+  let timerCount = $state<number | undefined | null>(undefined);
   let eventCount = $state<number | undefined | null>(undefined);
 
   $effect(() => {
@@ -41,6 +44,10 @@
       .listClasses()
       .then((classes) => (classCount = classes.length))
       .catch(() => (classCount = null));
+    void session
+      .listTimers()
+      .then((timers) => (timerCount = timers.length))
+      .catch(() => (timerCount = null));
     void session
       .listEvents()
       .then((events) => (eventCount = events.length))
@@ -73,8 +80,8 @@
       </div>
     </header>
 
-    <!-- Events is the primary action: a single full-width, prominent card on top. The two
-         directory pages (Pilots, Classes) sit beneath it as a smaller row. -->
+    <!-- Events is the primary action: a single full-width, prominent card on top. The
+         directory pages (Pilots, Classes, Timers) sit beneath it as a smaller row. -->
     <div class="cards">
       <div class="events-row">
         <button type="button" class="hub-card events feature" onclick={onevents}>
@@ -156,6 +163,37 @@
             </div>
           </Card>
         </button>
+
+        <button type="button" class="hub-card timers" onclick={ontimers}>
+          <Card elevation="md">
+            <div class="card-body">
+              <svg class="card-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle
+                  cx="12"
+                  cy="13"
+                  r="7.5"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                />
+                <path
+                  d="M12 9v4l2.5 2M9.5 2.5h5M12 2.5v3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <h2 class="card-title">Timers</h2>
+              <p class="card-summary">
+                <span class="count">{fmt(timerCount)}</span>
+                <span class="unit">{timerCount === 1 ? 'timer' : 'timers'}</span>
+              </p>
+              <span class="card-go" aria-hidden="true">→</span>
+            </div>
+          </Card>
+        </button>
       </div>
     </div>
   </div>
@@ -221,7 +259,7 @@
   }
   .config-row {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: var(--gf-space-5);
   }
   @media (max-width: 44rem) {

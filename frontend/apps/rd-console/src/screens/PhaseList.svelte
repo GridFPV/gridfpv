@@ -15,7 +15,6 @@
     racesOfHeat,
     type PhaseStatus
   } from '../lib/phases.js';
-  import { seatLabel } from '../lib/seats.js';
 
   let {
     view,
@@ -71,7 +70,7 @@
         <ol class="lineup" aria-label="Lineup of {phase.def.label}">
           {#each phase.lineup as seat, index (index)}
             <li class:pending={typeof seat.who === 'string' || 'Waiting' in seat.who}>
-              <span class="seat">{seatLabel(seat.adapter, seat.seat, index)}</span>
+              <span class="seat">{names.seat(seat.adapter, seat.seat, index)}</span>
               <span class="who">{names.who(seat.who)}</span>
             </li>
           {/each}

@@ -11,7 +11,7 @@ import type {
   RaceView
 } from '@gridfpv/types';
 import type { Names } from './names.js';
-import { seatLabel } from './seats.js';
+import { isBench } from './seats.js';
 
 /** What the big clock shows. Times are in milliseconds, as `RaceClock` takes them. */
 export interface ClockReading {
@@ -62,6 +62,8 @@ export interface SeatRow {
   seat: RaceSeatView['seat'];
   /** "Seat 1". */
   seatName: string;
+  /** True for a bench seat: no timer sends its crossings, so they are logged by hand. */
+  bench: boolean;
   /** A callsign, or where the pilot will come from. */
   who: string;
   pilot?: PilotId;
@@ -83,7 +85,8 @@ export function raceSeatRows(race: RaceView, names: Names): SeatRow[] {
     return {
       adapter: seat.adapter,
       seat: seat.seat,
-      seatName: seatLabel(seat.adapter, seat.seat, index),
+      seatName: names.seat(seat.adapter, seat.seat, index),
+      bench: isBench(seat.adapter),
       who: seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot),
       pilot: seat.pilot,
       place: seat.finish,
@@ -101,7 +104,8 @@ export function lineupSeatRows(phase: PhaseView, names: Names): SeatRow[] {
   return phase.lineup.map((seat, index) => ({
     adapter: seat.adapter,
     seat: seat.seat,
-    seatName: seatLabel(seat.adapter, seat.seat, index),
+    seatName: names.seat(seat.adapter, seat.seat, index),
+    bench: isBench(seat.adapter),
     who: names.who(seat.who),
     pilot: typeof seat.who === 'object' && 'Pilot' in seat.who ? seat.who.Pilot : undefined,
     laps: [],

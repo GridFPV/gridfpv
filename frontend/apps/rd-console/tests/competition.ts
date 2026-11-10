@@ -10,7 +10,9 @@ import type {
   PilotId,
   RaceSeatView,
   RaceView,
-  SeatWhoView
+  SeatWhoView,
+  TimerStatus,
+  TimerView
 } from '@gridfpv/types';
 
 export const FIRST_TO_3: Format = {
@@ -103,6 +105,26 @@ export function race(
     locked: false,
     seats: [],
     ...over
+  };
+}
+
+/**
+ * A timer from the directory. Connected with `seats` seats unless `status` says otherwise.
+ * The id is made to look like the Director's (`slug-tail`), so a leak of it is easy to spot.
+ */
+export function timerView(
+  id: string,
+  name: string,
+  seats = 4,
+  status: Partial<TimerStatus> = {}
+): TimerView {
+  return {
+    timer: { id, name, kind: 'Oft', address: '192.168.1.50:7270' },
+    status: {
+      connected: true,
+      seats: Array.from({ length: seats }, (_, index) => String(index)),
+      ...status
+    }
   };
 }
 

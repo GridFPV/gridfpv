@@ -9,7 +9,7 @@ import type { BracketRequest, Command, EventMeta, EventView, Pilot } from '@grid
 import EventPage from '../src/screens/EventPage.svelte';
 import { EventLive, type LiveSession } from '../src/lib/eventLive.svelte.js';
 import { formatByKey } from '../src/lib/formats.js';
-import { eventView, group, heat, race } from './competition.js';
+import { eventView, group, heat, race, timerView } from './competition.js';
 
 const EVENT: EventMeta = { id: 'evt-77', name: 'Club Night', created_at: 0, persistent: true };
 const PILOTS: Pilot[] = [
@@ -26,11 +26,13 @@ async function open(view: EventView, over: Partial<LiveSession> = {}) {
     createBracket: vi.fn(async () => ({ cursor: view.cursor })),
     postPass: vi.fn(async () => ({ cursor: view.cursor })),
     listPilots: vi.fn(async () => PILOTS),
+    listTimers: vi.fn(async () => []),
     ...over
   };
   const live = new EventLive(session, EVENT.id);
   await live.reload();
   await live.reloadPilots();
+  await live.reloadTimers();
   const onrun = vi.fn();
   render(EventPage, { event: EVENT, live, onhome: vi.fn(), onevents: vi.fn(), onrun });
   return { session, onrun };
@@ -205,5 +207,131 @@ describe('Add a bracket', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
     expect(await within(form).findByRole('alert')).toHaveTextContent(SAID);
     expect(screen.getByRole('form', { name: 'Add a bracket' })).toBeVisible();
+  });
+});
+describe('Timed by', () => {
+  const GATE = timerView('gate-x1y2', 'Gate', 2);
+  const OFF = timerView('far-gate-9zz0', 'Far Gate', 0, {
+    connected: false,
+    problem: 'Nothing answered at 10.0.0.9:7270.'
+  });
+  const timedBy = (form: HTMLElement) =>
+    within(form).getByLabelText('Timed by') as HTMLSelectElement;
+  const optionTexts = (select: HTMLSelectElement) =>
+    [...select.options].map((option) => option.textContent?.trim());
+
+  it('offers only the Bench, already chosen, when no timer is added', async () => {
+    await open(eventView());
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const form = await screen.findByRole('form', { name: 'Add a heat' });
+    expect(optionTexts(timedBy(form))).toEqual(['Bench (no timer: crossings are logged by hand)']);
+    expect(timedBy(form).value).toBe('bench');
+    expect(within(form).getByText(/Up to 8\./)).toBeVisible();
+  });
+
+  it('starts on the first connected timer and puts the lineup on its seats', async () => {
+    const { session } = await open(eventView(), { listTimers: vi.fn(async () => [OFF, GATE]) });
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const form = await screen.findByRole('form', { name: 'Add a heat' });
+    const select = timedBy(form);
+    expect(optionTexts(select)).toEqual([
+      'Far Gate (not connected)',
+      'Gate (2 seats)',
+      'Bench (no timer: crossings are logged by hand)'
+    ]);
+    expect(select.value).toBe('gate-x1y2');
+    // A timer with no seats is listed but cannot be chosen.
+    expect(select.options[0].disabled).toBe(true);
+    expect(select.options[1].disabled).toBe(false);
+    // By name only: no timer id is read by a person.
+    expect(form.textContent).not.toContain('gate-x1y2');
+    expect(form.textContent).not.toContain('far-gate-9zz0');
+    // The seat count follows the timer: two seats, so a third pilot cannot be added.
+    expect(within(form).getByText(/Up to 2\./)).toBeVisible();
+
+    await fireEvent.input(within(form).getByLabelText('Heat name'), { target: { value: 'H1' } });
+    await fireEvent.click(within(form).getByRole('button', { name: 'Bee' }));
+    await fireEvent.click(within(form).getByRole('button', { name: 'Ace' }));
+    expect(within(form).getByRole('button', { name: 'Cat' })).toBeDisabled();
+    const chosen = within(form).getByRole('list', { name: 'Chosen pilots' });
+    expect(chosen).toHaveTextContent('Seat 1');
+    expect(chosen).toHaveTextContent('Seat 2');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add heat' }));
+
+    await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+    const command = vi.mocked(session.sendCommand).mock.calls[0][1] as {
+      Record: { PhaseDefined: { def: { kind: unknown } } };
+    };
+    expect(command.Record.PhaseDefined.def.kind).toEqual({
+      Heat: {
+        lineup: [
+          { adapter: 'gate-x1y2', seat: '0', source: { Pilot: 'p-2b' } },
+          { adapter: 'gate-x1y2', seat: '1', source: { Pilot: 'p-1a' } }
+        ]
+      }
+    });
+  });
+
+  it('lets the director pick the Bench instead, and the seats follow', async () => {
+    const { session } = await open(eventView(), { listTimers: vi.fn(async () => [GATE]) });
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const form = await screen.findByRole('form', { name: 'Add a heat' });
+    await fireEvent.change(timedBy(form), { target: { value: 'bench' } });
+    expect(within(form).getByText(/Up to 8\./)).toBeVisible();
+    await fireEvent.input(within(form).getByLabelText('Heat name'), { target: { value: 'H1' } });
+    await fireEvent.click(within(form).getByRole('button', { name: 'Ace' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add heat' }));
+    await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+    const command = vi.mocked(session.sendCommand).mock.calls[0][1] as {
+      Record: { PhaseDefined: { def: { kind: unknown } } };
+    };
+    expect(command.Record.PhaseDefined.def.kind).toEqual({
+      Heat: { lineup: [{ adapter: 'bench', seat: 'seat-1', source: { Pilot: 'p-1a' } }] }
+    });
+  });
+
+  it("a bracket's heat size cannot pass the timer's seat count, and its seats are the timer's", async () => {
+    const { session } = await open(eventView(), {
+      listTimers: vi.fn(async () => [timerView('gate-x1y2', 'Gate', 3)])
+    });
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add bracket' }));
+    const form = await screen.findByRole('form', { name: 'Add a bracket' });
+    expect(timedBy(form).value).toBe('gate-x1y2');
+    const sizes = within(form).getByLabelText('Pilots in each heat') as HTMLSelectElement;
+    expect([...sizes.options].map((option) => option.value)).toEqual(['2', '3']);
+    // It started on 4, which this timer cannot seat, so it is pulled back to 3.
+    await waitFor(() => expect(sizes.value).toBe('3'));
+
+    await fireEvent.input(within(form).getByLabelText('Bracket name'), {
+      target: { value: 'Finals' }
+    });
+    for (const callsign of ['Cat', 'Ace', 'Bee']) {
+      await fireEvent.click(within(form).getByRole('button', { name: callsign }));
+    }
+    await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
+    await waitFor(() => expect(session.createBracket).toHaveBeenCalled());
+    const request = vi.mocked(session.createBracket).mock.calls[0][1] as BracketRequest;
+    expect(request.seats).toEqual([
+      { adapter: 'gate-x1y2', seat: '0' },
+      { adapter: 'gate-x1y2', seat: '1' },
+      { adapter: 'gate-x1y2', seat: '2' }
+    ]);
+  });
+
+  it("names a heat's seats from its timer in the phase list, even when it is not connected", async () => {
+    const onGate = heat('h-1', 'Heat 1', ['p-1a', 'p-2b']);
+    onGate.lineup = [
+      { adapter: 'far-gate-9zz0', seat: '2', who: { Pilot: 'p-1a' } },
+      { adapter: 'far-gate-9zz0', seat: '0', who: { Pilot: 'p-2b' } }
+    ];
+    await open(eventView({ phases: [onGate] }), { listTimers: vi.fn(async () => [OFF]) });
+    const items = within(screen.getByRole('list', { name: 'Lineup of Heat 1' })).getAllByRole(
+      'listitem'
+    );
+    expect(items.map((item) => item.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'Seat 3 Ace',
+      'Seat 1 Bee'
+    ]);
+    expect(document.body.textContent).not.toContain('far-gate-9zz0');
   });
 });

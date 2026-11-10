@@ -4,7 +4,7 @@
  * `location.hash` is the source of truth for navigation, so refresh, bookmarks, and back/forward
  * all work, while this stays a tiny parse/format helper (no router dependency).
  *
- * **Why hash, not path:** `/pilots`, `/events`, `/classes` are **Director API routes** — a path
+ * **Why hash, not path:** `/pilots`, `/events`, `/classes`, `/timers` are **Director API routes** — a path
  * router would collide with the server. The `#` fragment stays entirely client-side and can
  * never reach the Director, so it is collision-proof.
  *
@@ -12,6 +12,7 @@
  *   - `#/` (or empty)  → the home hub
  *   - `#/pilots`       → the Pilots page
  *   - `#/classes`      → the Classes page
+ *   - `#/timers`       → the Timers page
  *   - `#/events`       → the Events page
  *   - `#/event`        → the open event's page
  *   - `#/event/run/‹heat›` → the Run view for one heat of the open event. `‹heat›` is the
@@ -25,7 +26,7 @@
 import type { PhaseId } from '@gridfpv/types';
 
 /** The app-level pages shown outside an event. */
-export type AppPage = 'home' | 'events' | 'pilots' | 'classes';
+export type AppPage = 'home' | 'events' | 'pilots' | 'classes' | 'timers';
 
 /**
  * A parsed route. An app-level page, the open event's page, or the Run view for one heat of
@@ -46,7 +47,7 @@ function decodeSegment(segment: string): string | undefined {
   }
 }
 
-const APP_PAGES: readonly AppPage[] = ['home', 'events', 'pilots', 'classes'];
+const APP_PAGES: readonly AppPage[] = ['home', 'events', 'pilots', 'classes', 'timers'];
 
 /** The route shown when the hash is empty or unrecognised: the home hub. */
 export const DEFAULT_ROUTE: Route = { kind: 'page', page: 'home' };

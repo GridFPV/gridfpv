@@ -1,0 +1,150 @@
+/**
+ * The Timers page against a mocked session: the list with each timer's status in words, the
+ * add dialog (with the Director's refusal shown as it is), the two-step remove, and the
+ * 2 second poll that stops when the page closes.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, within } from '@testing-library/svelte';
+import { fireEvent, waitFor } from '@testing-library/dom';
+import type { Timer, TimerView } from '@gridfpv/types';
+import TimersPage from '../src/screens/TimersPage.svelte';
+import { timerView } from './competition.js';
+import { makeTestSession } from './support.js';
+
+const GATE = timerView('gate-x1y2', 'Gate', 4, { clock_error_micros: 200 });
+const SAID = 'Nothing answered at 127.0.0.1:9.';
+const OFF: TimerView = {
+  timer: { id: 'far-gate-9zz0', name: 'Far Gate', kind: 'Oft', address: '127.0.0.1:9' },
+  status: { connected: false, problem: SAID, seats: [] }
+};
+
+afterEach(() => vi.useRealTimers());
+
+describe('TimersPage', () => {
+  it('says no timer is added yet, and that the bench seats still work', async () => {
+    const { session } = makeTestSession({ noEnter: true });
+    render(TimersPage, { session, onhome: vi.fn() });
+    expect(
+      await screen.findByText('No timer is added yet. Heats can still be run on the bench seats.')
+    ).toBeVisible();
+  });
+
+  it('lists each timer with its name, address, status, seats and clock', async () => {
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [GATE, OFF])
+    });
+    render(TimersPage, { session, onhome: vi.fn() });
+
+    const gate = await screen.findByRole('listitem', { name: 'Gate' });
+    expect(gate).toHaveTextContent('192.168.1.50:7270');
+    expect(within(gate).getByText('Connected')).toBeVisible();
+    expect(gate).toHaveTextContent('4 seats');
+    expect(gate).toHaveTextContent('Clock known to within 0.2 ms');
+    expect(within(gate).queryByTestId('timer-problem')).toBeNull();
+
+    const off = screen.getByRole('listitem', { name: 'Far Gate' });
+    expect(off).toHaveTextContent('127.0.0.1:9');
+    expect(within(off).getByText('Not connected')).toBeVisible();
+    // The problem is the Director's sentence, as it wrote it.
+    expect(within(off).getByTestId('timer-problem')).toHaveTextContent(SAID);
+    expect(off).toHaveTextContent('No seats reported yet');
+    expect(off).toHaveTextContent('Clock not measured yet');
+
+    // No raw timer id on the page.
+    for (const id of [GATE.timer.id, OFF.timer.id]) {
+      expect(document.body.textContent).not.toContain(id);
+    }
+  });
+
+  it('adds a timer from the dialog and reads the list again', async () => {
+    const created: Timer = { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' };
+    const list: TimerView[] = [];
+    const createTimerImpl = vi.fn(async () => {
+      list.push({ timer: created, status: { connected: false, seats: [] } });
+      return created;
+    });
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [...list]),
+      createTimerImpl
+    });
+    render(TimersPage, { session, onhome: vi.fn() });
+
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
+    const form = await screen.findByRole('form', { name: 'Add timer' });
+    expect(form).toHaveTextContent('An OFT timer listens on port 7270.');
+    expect(within(form).getByLabelText('Address')).toHaveAttribute(
+      'placeholder',
+      '192.168.1.50:7270'
+    );
+    await fireEvent.input(within(form).getByLabelText('Name'), { target: { value: ' Gate ' } });
+    await fireEvent.input(within(form).getByLabelText('Address'), {
+      target: { value: '10.0.0.5:7270' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add timer' }));
+
+    await waitFor(() =>
+      expect(createTimerImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        { name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' },
+        'tok'
+      )
+    );
+    expect(await screen.findByRole('listitem', { name: 'Gate' })).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('form', { name: 'Add timer' })).toBeNull());
+  });
+
+  it("shows the Director's sentence in the dialog when it says no, and stays open", async () => {
+    const REFUSED = 'A timer needs an address, like 192.168.1.50:7270.';
+    const { session } = makeTestSession({
+      noEnter: true,
+      createTimerImpl: vi.fn(async () => {
+        throw Object.assign(new Error(REFUSED), { status: 400 });
+      })
+    });
+    render(TimersPage, { session, onhome: vi.fn() });
+    await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
+    const form = await screen.findByRole('form', { name: 'Add timer' });
+    await fireEvent.input(within(form).getByLabelText('Name'), { target: { value: 'Gate' } });
+    await fireEvent.input(within(form).getByLabelText('Address'), { target: { value: 'nope' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add timer' }));
+    expect(await within(form).findByText(REFUSED)).toBeVisible();
+    expect(screen.getByRole('form', { name: 'Add timer' })).toBeVisible();
+  });
+
+  it('removes a timer only after the second click', async () => {
+    const list = [GATE];
+    const deleteTimerImpl = vi.fn(async () => {
+      list.length = 0;
+    });
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [...list]),
+      deleteTimerImpl
+    });
+    render(TimersPage, { session, onhome: vi.fn() });
+    const gate = await screen.findByRole('listitem', { name: 'Gate' });
+    await fireEvent.click(within(gate).getByRole('button', { name: 'Remove' }));
+    expect(deleteTimerImpl).not.toHaveBeenCalled();
+    await fireEvent.click(within(gate).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() =>
+      expect(deleteTimerImpl).toHaveBeenCalledWith('http://d.local', 'gate-x1y2', 'tok')
+    );
+    await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Gate' })).toBeNull());
+  });
+
+  it('reads the list every 2 seconds while open, and stops when it closes', async () => {
+    vi.useFakeTimers();
+    const listTimersImpl = vi.fn(async (): Promise<TimerView[]> => []);
+    const { session } = makeTestSession({ noEnter: true, listTimersImpl });
+    const { unmount } = render(TimersPage, { session, onhome: vi.fn() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listTimersImpl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(listTimersImpl).toHaveBeenCalledTimes(3);
+    unmount();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(listTimersImpl).toHaveBeenCalledTimes(3);
+  });
+});

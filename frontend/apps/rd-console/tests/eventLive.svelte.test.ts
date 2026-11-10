@@ -4,9 +4,9 @@
  * sends writes through the session.
  */
 import { describe, expect, it, vi } from 'vitest';
-import type { EventView, Pilot } from '@gridfpv/types';
+import type { EventView, Pilot, TimerView } from '@gridfpv/types';
 import { EventLive, toProtocolError, type LiveSession } from '../src/lib/eventLive.svelte.js';
-import { eventView, heat } from './competition.js';
+import { eventView, heat, timerView } from './competition.js';
 
 /** A promise the test settles by hand. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -34,6 +34,7 @@ function fakeSession(over: Partial<LiveSession> = {}): {
     createBracket: vi.fn(async () => ({ cursor: 2 })),
     postPass: vi.fn(async () => ({ cursor: 2 })),
     listPilots: vi.fn(async (): Promise<Pilot[]> => []),
+    listTimers: vi.fn(async (): Promise<TimerView[]> => []),
     ...over
   };
   return { session, cursor: (n) => onCursor(n), stopped: () => stopped };
@@ -192,5 +193,56 @@ describe('toProtocolError', () => {
       message: 'network down'
     });
     expect(toProtocolError('odd')).toEqual({ code: 'Internal', message: 'odd' });
+  });
+
+  it('reads the timers on start and names seats and timers from them', async () => {
+    const { session } = fakeSession({
+      listTimers: vi.fn(async () => [timerView('gate-x1y2', 'Gate', 2)])
+    });
+    const live = new EventLive(session, 'evt');
+    expect(live.timersLoaded).toBe(false);
+    live.start();
+    await settle();
+    live.stop();
+    expect(live.timersLoaded).toBe(true);
+    expect(live.names.timer('gate-x1y2')).toBe('Gate');
+    expect(live.names.seat('gate-x1y2', '1')).toBe('Seat 2');
+    expect(live.seatSources.map((source) => source.name)).toEqual(['Gate', 'Bench']);
+  });
+
+  it('asks for the timers again every 2 seconds while running, and stops when stopped', async () => {
+    vi.useFakeTimers();
+    try {
+      const listTimers = vi.fn(async (): Promise<TimerView[]> => []);
+      const live = new EventLive(fakeSession({ listTimers }).session, 'evt');
+      live.start();
+      expect(listTimers).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(listTimers).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(listTimers).toHaveBeenCalledTimes(4);
+
+      live.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(listTimers).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the last timer list when a read fails, and the same list when nothing changed', async () => {
+    const listTimers = vi
+      .fn<LiveSession['listTimers']>()
+      .mockResolvedValueOnce([timerView('gate-x1y2', 'Gate', 2)])
+      .mockResolvedValueOnce([timerView('gate-x1y2', 'Gate', 2)])
+      .mockRejectedValueOnce(new Error('unreachable'));
+    const live = new EventLive(fakeSession({ listTimers }).session, 'evt');
+    await live.reloadTimers();
+    const first = live.timers;
+    await live.reloadTimers();
+    // An equal list is not passed on, so nothing that reads it runs again.
+    expect(live.timers).toBe(first);
+    await live.reloadTimers();
+    expect(live.names.timer('gate-x1y2')).toBe('Gate');
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ProtocolError } from '@gridfpv/types';
+import type { CreateTimerRequest, ProtocolError, Timer, TimerView } from '@gridfpv/types';
 import type { FetchLike } from './client.js';
 
 describe('events lifecycle helpers (#72)', () => {
@@ -88,6 +88,100 @@ describe('events lifecycle helpers (#72)', () => {
   });
 });
 
+// ── The timer directory ──────────────────────────────────────────────────────────────────────
+
+describe('the timer directory', () => {
+  const BASE = 'http://director.local:8080';
+  const GATE: Timer = { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '192.168.1.50:7270' };
+
+  /** A fetch that records every request and answers 200 with `body`. */
+  function recording(body: unknown): {
+    fetch: FetchLike;
+    seen: { url: string; init?: RequestInit }[];
+  } {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => body
+      } as unknown as Response;
+    };
+    return { fetch, seen };
+  }
+  const headersOf = (init?: RequestInit): Record<string, string> =>
+    init?.headers as Record<string, string>;
+
+  it('listTimers GETs /timers with no token and returns each timer with its status', async () => {
+    const views: TimerView[] = [
+      { timer: GATE, status: { connected: true, seats: ['0', '1'], clock_error_micros: 200 } },
+      {
+        timer: { ...GATE, id: 'far-9zz0', name: 'Far' },
+        status: { connected: false, problem: 'Nothing answered at that address.', seats: [] }
+      }
+    ];
+    const { fetch, seen } = recording(views);
+    const { listTimers } = await import('./client.js');
+    expect(await listTimers(`${BASE}/`, { fetch })).toEqual(views);
+    expect(seen[0].url).toBe(`${BASE}/timers`);
+    expect(seen[0].init?.method).toBeUndefined();
+    expect(headersOf(seen[0].init).Authorization).toBeUndefined();
+  });
+
+  it('createTimer POSTs the name, kind and address with the token and returns the timer', async () => {
+    const { fetch, seen } = recording(GATE);
+    const { createTimer } = await import('./client.js');
+    const request: CreateTimerRequest = { name: 'Gate', kind: 'Oft', address: '192.168.1.50:7270' };
+    expect(await createTimer(BASE, request, 'rd-tok', { fetch })).toEqual(GATE);
+    expect(seen[0].url).toBe(`${BASE}/timers`);
+    expect(seen[0].init?.method).toBe('POST');
+    expect(headersOf(seen[0].init).Authorization).toBe('Bearer rd-tok');
+    expect(headersOf(seen[0].init)['Content-Type']).toBe('application/json');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual(request);
+  });
+
+  it("createTimer rejects a bad address with the Director's sentence and the 400", async () => {
+    const SAID = 'A timer needs an address, like 192.168.1.50:7270.';
+    const fetch: FetchLike = async () =>
+      ({
+        ok: false,
+        status: 400,
+        json: async (): Promise<unknown> => ({ code: 'BadRequest', message: SAID })
+      }) as unknown as Response;
+    const { createTimer, isRequestFailure } = await import('./client.js');
+    const err = await createTimer(BASE, { name: 'Gate', kind: 'Oft', address: 'nope' }, undefined, {
+      fetch
+    }).then(
+      () => undefined,
+      (e: unknown) => e
+    );
+    expect(isRequestFailure(err)).toBe(true);
+    if (!isRequestFailure(err)) return;
+    expect(err.message).toBe(SAID);
+    expect(err.status).toBe(400);
+  });
+
+  it('deleteTimer DELETEs /timers/{id} with the id encoded, and reads no body', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => {
+          throw new SyntaxError('Unexpected end of JSON input');
+        }
+      } as unknown as Response;
+    };
+    const { deleteTimer } = await import('./client.js');
+    await expect(deleteTimer(BASE, 'gate/x1 y2', 'rd-tok', { fetch })).resolves.toBeUndefined();
+    expect(seen[0].url).toBe(`${BASE}/timers/gate%2Fx1%20y2`);
+    expect(seen[0].init?.method).toBe('DELETE');
+    expect(headersOf(seen[0].init).Authorization).toBe('Bearer rd-tok');
+  });
+});
+
 // ── Request failures: the Director's words, never a route line (#433) ────────────────────────
 //
 // A refused write used to reach the RD as `DELETE /classes/{classId} failed: HTTP 400` — a raw id
@@ -100,8 +194,9 @@ describe("request failures carry the Director's words (#433)", () => {
   const EVT = 'evt-9f3a7c';
   const PILOT = 'pilot-3c4d';
   const CLASS = 'class-88ee';
+  const TIMER = 'gate-x1y2';
   /** Every raw handle the sweep hands the client — none may come back out in a message. */
-  const RAW_IDS = [EVT, PILOT, CLASS];
+  const RAW_IDS = [EVT, PILOT, CLASS, TIMER];
 
   /**
    * A stand-in request body. The failing fetch never reads one, and `never` satisfies every
@@ -174,6 +269,9 @@ describe("request failures carry the Director's words (#433)", () => {
       ['updateClass', (fetch) => c.updateClass(BASE, CLASS, REQ, TOKEN, { fetch })],
       ['deleteClass', (fetch) => c.deleteClass(BASE, CLASS, TOKEN, { fetch })],
       ['setClassHidden', (fetch) => c.setClassHidden(BASE, CLASS, true, TOKEN, { fetch })],
+      ['listTimers', (fetch) => c.listTimers(BASE, { fetch })],
+      ['createTimer', (fetch) => c.createTimer(BASE, REQ, TOKEN, { fetch })],
+      ['deleteTimer', (fetch) => c.deleteTimer(BASE, TIMER, TOKEN, { fetch })],
       ['getEventState', (fetch) => c.getEventState(BASE, EVT, { fetch })],
       ['sendCommand', (fetch) => c.sendCommand(BASE, EVT, REQ, TOKEN, { fetch })],
       ['createBracket', (fetch) => c.createBracket(BASE, EVT, REQ, TOKEN, { fetch })],

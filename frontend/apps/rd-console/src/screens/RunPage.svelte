@@ -14,7 +14,7 @@
    * A command the Director refuses shows its sentence in the banner at the top, as it is.
    */
   import { onDestroy, untrack } from 'svelte';
-  import { Badge, Button, Card, RaceClock, formatMicros } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, RaceClock, formatMicros } from '@gridfpv/components';
   import type {
     Command,
     DiscardReason,
@@ -29,6 +29,7 @@
   import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
   import { directorEndsHeat, isRanked } from '../lib/formats.js';
   import { currentRace, isBye, isHeat, racesOfHeat } from '../lib/phases.js';
+  import { isBench } from '../lib/seats.js';
   import {
     finishOrder,
     lineupSeatRows,
@@ -107,6 +108,38 @@
 
   const rows: SeatRow[] = $derived(
     race ? raceSeatRows(race, names) : phase ? lineupSeatRows(phase, names) : []
+  );
+  /**
+   * What times this heat, by name, and what is wrong with it when something is. A heat is
+   * normally on one timer; one put together by hand could be on more, so each is listed.
+   */
+  const timedBy = $derived(
+    [...new Set(rows.map((row) => row.adapter))].map((adapter) => {
+      const name = names.timer(adapter);
+      if (isBench(adapter)) return { adapter, name };
+      const found = live.timers.find((t) => t.timer.id === adapter);
+      // Before the first read of the timer list nothing is known, so nothing is claimed.
+      if (!live.timersLoaded) return { adapter, name };
+      if (!found) {
+        return {
+          adapter,
+          name,
+          trouble: 'The timer for this heat was removed.',
+          detail: 'Its seats cannot be timed. Add the heat again on a timer that is in the list.'
+        };
+      }
+      if (found.status.connected) return { adapter, name };
+      return {
+        adapter,
+        name,
+        trouble: `${name} is not connected.`,
+        detail: found.status.problem ?? 'The Director has not reached it yet.'
+      };
+    })
+  );
+  /** A finished heat needs no timer, so it carries no warning. */
+  const timerTrouble = $derived(
+    phase && !phase.complete && !phase.locked ? timedBy.filter((t) => t.trouble !== undefined) : []
   );
   const showRanking = $derived(!!phase && isRanked(phase.format) && savedCount > 0);
 
@@ -211,12 +244,21 @@
     <header class="page-head">
       <h1 class="page-title">{heatLabel}</h1>
       {#if phase?.format}<span class="format">{phase.format.name}</span>{/if}
+      {#if timedBy.length > 0}
+        <span class="format" data-testid="timed-by">
+          Timed by {timedBy.map((t) => t.name).join(', ')}
+        </span>
+      {/if}
     </header>
 
     <ErrorBanner {error} ondismiss={() => (error = undefined)} />
     {#if live.loadError}
       <ErrorBanner error={{ code: 'Internal', message: live.loadError }} />
     {/if}
+
+    {#each timerTrouble as t (t.adapter)}
+      <Banner tone="warn" title={t.trouble}>{t.detail}</Banner>
+    {/each}
 
     {#if !view}
       {#if !live.loadError}<p class="muted" role="status">Loading…</p>{/if}

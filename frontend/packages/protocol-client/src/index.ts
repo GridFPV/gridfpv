@@ -2,7 +2,7 @@
  * @gridfpv/protocol-client — the thin, framework-agnostic protocol layer.
  *
  * It talks to a single base URL (so it cannot tell LAN from Cloud) over plain HTTP: the event
- * registry, the active event, the app-level pilot and class directories, and an event's
+ * registry, the active event, the app-level pilot, class and timer directories, and an event's
  * competition (snapshot, commands, presets, passes and the change feed). Every failed
  * request rejects with a {@link RequestFailure} carrying the Director's own words and the
  * HTTP status.
@@ -27,6 +27,9 @@ export {
   updateClass,
   deleteClass,
   setClassHidden,
+  listTimers,
+  createTimer,
+  deleteTimer,
   getEventState,
   sendCommand,
   createBracket,
