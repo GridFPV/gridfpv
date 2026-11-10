@@ -641,8 +641,8 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      settings. Changes are a draft until "Apply to timer". Not yet run against a real timer.
    - **OFT protocol v0.4, server side:** a seat can carry its own threshold on a timer
      that says it takes them, and OFT timers are found on the network (`GET
-     /timers/discovered`). Both checked against the real daemon. The console does not show
-     either yet.
+     /timers/discovered`). The Tune page has a seat's own levels and the Timers page has
+     "Found on the network". Both were checked in a browser against the real daemon.
    - **A timer that restarts mid-race:** its clock begins again. The laps either side are
      kept, and the stretch across the restart has no time.
    - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):
