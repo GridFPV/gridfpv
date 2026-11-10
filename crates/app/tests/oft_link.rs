@@ -50,6 +50,9 @@ async fn serve(fake: Fake, mut socket: WebSocket) {
     // The highest crossing sent on this connection. Nothing is sent before a subscription.
     let mut sent: Option<u64> = None;
     let mut subscribed = false;
+    // Signal: ten 1 ms samples every tick for seat 0, following on exactly, once asked for.
+    let mut samples = false;
+    let mut sample_t0: u64 = 0;
     let mut tick = tokio::time::interval(Duration::from_millis(10));
     loop {
         tokio::select! {
@@ -60,6 +63,17 @@ async fn serve(fake: Fake, mut socket: WebSocket) {
                 }
                 if !subscribed {
                     continue;
+                }
+                if samples {
+                    let batch = serde_json::json!({
+                        "type": "samples", "seat": 0, "t0": sample_t0, "dt_us": 1000,
+                        "p": [-900, -900, -880, -700, -400, -400, -700, -880, -900, -900],
+                        "nf": -910,
+                    });
+                    sample_t0 += 10_000;
+                    if socket.send(Message::text(batch.to_string())).await.is_err() {
+                        return;
+                    }
                 }
                 let fresh: Vec<_> = fake
                     .crossings
@@ -102,6 +116,7 @@ async fn serve(fake: Fake, mut socket: WebSocket) {
                         fake.subscriptions.lock().unwrap().push(since);
                         sent = since;
                         subscribed = true;
+                        samples = value.get("samples").is_some();
                     }
                     _ => {}
                 }
@@ -239,6 +254,18 @@ async fn a_timer_in_the_directory_is_connected_and_its_crossings_become_laps() {
     })
     .await;
 
+    // The timer has been sending signal all along. With no race on, none of it is logged.
+    let chunks = |registry: &EventRegistry| -> Vec<gridfpv_events::SignalChunk> {
+        events(registry, &event)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::SignalChunk(chunk) => Some(chunk),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(chunks(&registry).is_empty());
+
     // Start a race; crossings 2 and 3 arrive during it, one lap of ten seconds.
     with_event(&registry, &event, |session| {
         session.commands(vec![Command::StartRace {
@@ -284,6 +311,20 @@ async fn a_timer_in_the_directory_is_connected_and_its_crossings_become_laps() {
         Ok(())
     })
     .unwrap();
+
+    // The race's signal is in the log, exactly as sent.
+    let logged = eventually("the race's signal to be logged", || {
+        let logged = chunks(&registry);
+        (!logged.is_empty()).then_some(logged)
+    })
+    .await;
+    assert_eq!(logged[0].period_micros, 1000);
+    assert_eq!(logged[0].unit, gridfpv_events::SignalUnit::TenthsDb);
+    assert_eq!(logged[0].noise_floor, Some(-910));
+    assert_eq!(&logged[0].levels[..5], [-900, -900, -880, -700, -400]);
+    // (The first chunk is short here: the link dropped mid-race, and a drop logs what a
+    // race had so far rather than losing it.)
+    assert_eq!(logged[0].levels.len() % 10, 0);
 
     // Every crossing was logged exactly once, though the link dropped and replayed.
     let sequences: Vec<u64> = events(&registry, &event)

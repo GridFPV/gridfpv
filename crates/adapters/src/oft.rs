@@ -18,11 +18,17 @@
 //! - `pong` → a clock sample for [`ClockFit`], which maps the Director's clock onto the
 //!   Timer's so the start tone can be placed on the Timer's clock.
 //!
-//! `samples` and `status` are parsed and ignored for now. Signal comes next, and needs
-//! Grid's signal events widened first: OFT power is signed tenths of a dB, and Grid never
-//! down-converts what a timer reports.
+//! - `samples` → [`Event::SignalChunk`], with every level exactly as the Timer sent it
+//!   (signed tenths of a dB). The Director does not log all of them: [`SignalBuffer`]
+//!   decides which, so a race's signal is kept and idle hours are not.
+//!
+//! `status` is parsed and ignored for now.
 
-use gridfpv_events::{AdapterId, Event, GateIndex, Pass, SeatRef, SignalContext, SourceTime};
+use std::collections::{BTreeMap, VecDeque};
+
+use gridfpv_events::{
+    AdapterId, Event, GateIndex, Pass, SeatRef, SignalChunk, SignalContext, SignalUnit, SourceTime,
+};
 use serde::Deserialize;
 
 use crate::{Adapter, Capabilities};
@@ -54,6 +60,9 @@ pub enum OftMessage {
         time_us: u64,
         #[serde(default)]
         seats: Vec<OftSeat>,
+        /// Whether power values are tenths of a dBm (true) or relative tenths of a dB.
+        #[serde(default)]
+        calibrated: bool,
     },
     /// A seat crossed the gate.
     Crossing {
@@ -68,8 +77,19 @@ pub enum OftMessage {
     },
     /// The answer to a `ping`: the Timer's clock now.
     Pong { time_us: u64 },
-    /// Signal samples for one seat. Not used yet.
-    Samples {},
+    /// A batch of signal samples for one seat.
+    Samples {
+        seat: u32,
+        /// The Timer-clock time of the first sample.
+        t0: u64,
+        /// Microseconds between samples.
+        dt_us: u32,
+        /// Power, in tenths of a dB.
+        p: Vec<i32>,
+        /// The noise floor, in tenths of a dB.
+        #[serde(default)]
+        nf: Option<i32>,
+    },
     /// Periodic health. Not used yet.
     Status {},
     /// The Timer acknowledged a subscription.
@@ -107,6 +127,8 @@ pub struct OftAdapter {
     boot_id: Option<String>,
     /// The highest crossing `seq` seen this boot.
     last_seq: Option<u64>,
+    /// Whether the Timer said its power values are calibrated.
+    calibrated: bool,
 }
 
 impl OftAdapter {
@@ -116,16 +138,22 @@ impl OftAdapter {
             id,
             boot_id: None,
             last_seq: None,
+            calibrated: false,
         }
     }
 
     /// The subscription to send after `hello`: every crossing after the last one seen, so a
     /// reconnect picks up what was missed. After a reboot, or on first contact, everything
     /// the Timer still holds.
+    /// It also asks for every seat's signal at the Timer's full rate: Grid keeps signal as
+    /// fine as the Timer has it.
     pub fn subscription(&self) -> String {
+        let samples = r#""samples":{"seats":"all","decimate":1}"#;
         match self.last_seq {
-            Some(seq) => format!(r#"{{"type":"sub","crossings":{{"since":{seq}}}}}"#),
-            None => r#"{"type":"sub","crossings":{}}"#.to_owned(),
+            Some(seq) => {
+                format!(r#"{{"type":"sub","crossings":{{"since":{seq}}},{samples}}}"#)
+            }
+            None => format!(r#"{{"type":"sub","crossings":{{}},{samples}}}"#),
         }
     }
 }
@@ -140,13 +168,20 @@ impl Adapter for OftAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities::none()
             .with_live_passes()
+            .with_signal_context()
             .with_frequency_mgmt()
             .with_calibration()
     }
 
     fn translate(&mut self, raw: OftMessage) -> Vec<Event> {
         match raw {
-            OftMessage::Hello { boot_id, seats, .. } => {
+            OftMessage::Hello {
+                boot_id,
+                seats,
+                calibrated,
+                ..
+            } => {
+                self.calibrated = calibrated;
                 if self.boot_id.as_deref() != Some(boot_id.as_str()) {
                     // A new boot: the Timer's crossing numbers start again.
                     self.boot_id = Some(boot_id);
@@ -184,8 +219,26 @@ impl Adapter for OftAdapter {
                     race: None,
                 })]
             }
+            OftMessage::Samples {
+                seat,
+                t0,
+                dt_us,
+                p,
+                nf,
+            } => vec![Event::SignalChunk(SignalChunk {
+                adapter: self.id.clone(),
+                seat: seat_ref(seat),
+                from: SourceTime::from_micros(i64::try_from(t0).unwrap_or(i64::MAX)),
+                period_micros: dt_us,
+                levels: p,
+                unit: if self.calibrated {
+                    SignalUnit::TenthsDbm
+                } else {
+                    SignalUnit::TenthsDb
+                },
+                noise_floor: nf,
+            })],
             OftMessage::Pong { .. }
-            | OftMessage::Samples {}
             | OftMessage::Status {}
             | OftMessage::Ack {}
             | OftMessage::Error { .. }
@@ -267,6 +320,133 @@ impl ClockFit {
     }
 }
 
+/// Decides which signal chunks are logged, and joins small ones into bigger ones.
+///
+/// A Timer sends signal all day, in batches a few tens of milliseconds long. Logging all of
+/// it would bury an event's log, and logging none would leave a marshal nothing to review.
+/// So:
+///
+/// - While a race is **on** (counting down or running), everything is logged.
+/// - The last [`SignalBuffer::LEAD_MICROS`] before a race came on is logged too, so the
+///   trace shows the pilots sitting on the start, and so is the
+///   [`SignalBuffer::TAIL_MICROS`] after it went off.
+/// - Outside that, signal is held briefly and then dropped.
+///
+/// Batches are joined into chunks about a second long before they are logged, so a race is
+/// a few hundred log entries, not tens of thousands. Joining changes no sample: only
+/// batches that follow on exactly, at the same rate and unit, are joined. The joined chunk
+/// carries the latest noise floor of its batches.
+///
+/// Times are on the Timer's clock, taken from the samples themselves. This is pure: no clock
+/// is read.
+#[derive(Debug, Clone, Default)]
+pub struct SignalBuffer {
+    /// Held while no race is on: the last few seconds per seat.
+    lead: BTreeMap<SeatRef, VecDeque<SignalChunk>>,
+    /// Being joined while a race is on (or its tail runs): one growing chunk per seat.
+    open: BTreeMap<SeatRef, SignalChunk>,
+    /// While the tail after a race runs: the Timer-clock time it ends at.
+    tail_until: Option<i64>,
+    was_on: bool,
+}
+
+/// The Timer-clock time just after a chunk's last sample.
+fn end_of(chunk: &SignalChunk) -> i64 {
+    chunk.from.micros + chunk.levels.len() as i64 * i64::from(chunk.period_micros)
+}
+
+impl SignalBuffer {
+    /// How much signal from before a race came on is kept.
+    pub const LEAD_MICROS: i64 = 3_000_000;
+    /// How much signal from after a race went off is kept.
+    pub const TAIL_MICROS: i64 = 3_000_000;
+    /// A joined chunk is logged once it is this long.
+    pub const CHUNK_MICROS: i64 = 1_000_000;
+
+    /// An empty buffer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take one chunk from the Timer. `race_on` says whether a race is counting down or
+    /// running right now. Gives back the chunks to log, in order.
+    pub fn push(&mut self, chunk: SignalChunk, race_on: bool) -> Vec<SignalChunk> {
+        let now = end_of(&chunk);
+        let mut out = Vec::new();
+        if race_on {
+            self.tail_until = None;
+            if !self.was_on {
+                // The race just came on: what was held becomes the start of the trace.
+                let held = std::mem::take(&mut self.lead);
+                for chunk in held.into_values().flatten() {
+                    self.join(chunk, &mut out);
+                }
+            }
+        } else if self.was_on {
+            self.tail_until = Some(now + Self::TAIL_MICROS);
+        }
+        self.was_on = race_on;
+
+        let logging = race_on
+            || self
+                .tail_until
+                .is_some_and(|until| chunk.from.micros < until);
+        if logging {
+            self.join(chunk, &mut out);
+        } else {
+            if self.tail_until.take().is_some() {
+                // The tail just ended: log what was still being joined.
+                out.extend(std::mem::take(&mut self.open).into_values());
+            }
+            let held = self.lead.entry(chunk.seat.clone()).or_default();
+            held.push_back(chunk);
+            while held
+                .front()
+                .is_some_and(|oldest| end_of(oldest) < now - Self::LEAD_MICROS)
+            {
+                held.pop_front();
+            }
+        }
+        out
+    }
+
+    /// Everything still being joined, to log now. Call this when the link drops, so a race
+    /// in progress keeps what it had.
+    pub fn flush(&mut self) -> Vec<SignalChunk> {
+        self.tail_until = None;
+        std::mem::take(&mut self.open).into_values().collect()
+    }
+
+    /// Add a chunk to its seat's growing chunk, logging that one first if this does not
+    /// follow on from it, or once it is long enough.
+    fn join(&mut self, chunk: SignalChunk, out: &mut Vec<SignalChunk>) {
+        let seat = chunk.seat.clone();
+        let follows = self.open.get(&seat).is_some_and(|open| {
+            end_of(open) == chunk.from.micros
+                && open.period_micros == chunk.period_micros
+                && open.unit == chunk.unit
+        });
+        match self.open.get_mut(&seat) {
+            Some(open) if follows => {
+                open.levels.extend(chunk.levels);
+                open.noise_floor = chunk.noise_floor.or(open.noise_floor);
+            }
+            _ => {
+                if let Some(done) = self.open.insert(seat.clone(), chunk) {
+                    out.push(done);
+                }
+            }
+        }
+        let long_enough = self
+            .open
+            .get(&seat)
+            .is_some_and(|open| end_of(open) - open.from.micros >= Self::CHUNK_MICROS);
+        if long_enough {
+            out.extend(self.open.remove(&seat));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,14 +518,17 @@ mod tests {
     fn a_replay_after_a_reconnect_adds_no_duplicates() {
         let mut adapter = adapter();
         adapter.translate(OftMessage::parse(HELLO).unwrap());
-        assert_eq!(adapter.subscription(), r#"{"type":"sub","crossings":{}}"#);
+        assert_eq!(
+            adapter.subscription(),
+            r#"{"type":"sub","crossings":{},"samples":{"seats":"all","decimate":1}}"#
+        );
         assert_eq!(adapter.translate(crossing(1, 0, 100)).len(), 1);
         assert_eq!(adapter.translate(crossing(2, 0, 200)).len(), 1);
         // The link drops. The same Timer says hello again, and Grid asks from where it was.
         adapter.translate(OftMessage::parse(HELLO).unwrap());
         assert_eq!(
             adapter.subscription(),
-            r#"{"type":"sub","crossings":{"since":2}}"#
+            r#"{"type":"sub","crossings":{"since":2},"samples":{"seats":"all","decimate":1}}"#
         );
         // A Timer that replays more than was asked for still adds nothing twice.
         assert!(adapter.translate(crossing(2, 0, 200)).is_empty());
@@ -359,7 +542,7 @@ mod tests {
         adapter.translate(crossing(7, 0, 100));
         let rebooted = HELLO.replace("9c1e", "a000");
         adapter.translate(OftMessage::parse(&rebooted).unwrap());
-        assert_eq!(adapter.subscription(), r#"{"type":"sub","crossings":{}}"#);
+        assert!(adapter.subscription().contains(r#""crossings":{}"#));
         // Crossing 1 of the new boot is new, though 1 is below 7.
         assert_eq!(adapter.translate(crossing(1, 0, 50)).len(), 1);
     }
@@ -368,7 +551,6 @@ mod tests {
     fn messages_grid_does_not_use_yet_are_parsed_and_ignored() {
         let mut adapter = adapter();
         for frame in [
-            r#"{"type":"samples","seat":0,"t0":81234000,"dt_us":1000,"p":[-912,-910],"nf":-920}"#,
             r#"{"type":"status","uptime_s":3600,"temp_c":41,"dropped":0,"clock_err_us":40}"#,
             r#"{"type":"ack","for":"sub"}"#,
             r#"{"type":"error","code":"unsupported","msg":"no samples"}"#,
@@ -407,5 +589,122 @@ mod tests {
         assert_eq!(fit.error_micros(), Some(1_000));
         fit.reset();
         assert_eq!(fit.to_timer(0), None);
+    }
+
+    #[test]
+    fn samples_keep_every_level_as_the_timer_sent_it() {
+        let mut adapter = adapter();
+        let frame = r#"{"type":"samples","seat":0,"t0":81234000,"dt_us":1000,"p":[-912,-910,-640,-235],"nf":-920}"#;
+        let events = adapter.translate(OftMessage::parse(frame).unwrap());
+        assert_eq!(
+            events,
+            vec![Event::SignalChunk(SignalChunk {
+                adapter: AdapterId("gate".into()),
+                seat: SeatRef("0".into()),
+                from: SourceTime::from_micros(81_234_000),
+                period_micros: 1000,
+                levels: vec![-912, -910, -640, -235],
+                unit: SignalUnit::TenthsDb,
+                noise_floor: Some(-920),
+            })]
+        );
+        // A calibrated Timer's levels are tenths of a dBm.
+        let calibrated = HELLO.replace(r#""level": "L3""#, r#""level": "L3", "calibrated": true"#);
+        adapter.translate(OftMessage::parse(&calibrated).unwrap());
+        let events = adapter.translate(OftMessage::parse(frame).unwrap());
+        let [Event::SignalChunk(chunk)] = &events[..] else {
+            panic!("expected one chunk");
+        };
+        assert_eq!(chunk.unit, SignalUnit::TenthsDbm);
+    }
+
+    /// A 50 ms batch at 1 kHz for a seat, starting at `from_ms`, every level equal to `from_ms`.
+    fn batch(seat: &str, from_ms: i64) -> SignalChunk {
+        SignalChunk {
+            adapter: AdapterId("gate".into()),
+            seat: SeatRef(seat.into()),
+            from: SourceTime::from_micros(from_ms * 1000),
+            period_micros: 1000,
+            levels: vec![from_ms as i32; 50],
+            unit: SignalUnit::TenthsDb,
+            noise_floor: Some(-900),
+        }
+    }
+
+    /// Feed batches covering `[from_ms, to_ms)` and collect what is logged.
+    fn feed(
+        buffer: &mut SignalBuffer,
+        from_ms: i64,
+        to_ms: i64,
+        race_on: bool,
+    ) -> Vec<SignalChunk> {
+        (from_ms..to_ms)
+            .step_by(50)
+            .flat_map(|ms| buffer.push(batch("0", ms), race_on))
+            .collect()
+    }
+
+    fn span(chunks: &[SignalChunk]) -> (i64, i64) {
+        (
+            chunks.first().unwrap().from.micros / 1000,
+            end_of(chunks.last().unwrap()) / 1000,
+        )
+    }
+
+    #[test]
+    fn signal_outside_a_race_is_not_logged() {
+        let mut buffer = SignalBuffer::new();
+        assert!(feed(&mut buffer, 0, 60_000, false).is_empty());
+    }
+
+    #[test]
+    fn a_race_logs_its_signal_with_a_lead_and_a_tail_in_one_second_chunks() {
+        let mut buffer = SignalBuffer::new();
+        let mut logged = feed(&mut buffer, 0, 10_000, false);
+        // The race comes on at 10 s and goes off at 20 s.
+        logged.extend(feed(&mut buffer, 10_000, 20_000, true));
+        logged.extend(feed(&mut buffer, 20_000, 40_000, false));
+        // Three seconds of lead, the race, three seconds of tail (to the batch edge).
+        let (from, to) = span(&logged);
+        assert!((6_900..=7_000).contains(&from), "lead starts at {from} ms");
+        assert!((23_000..=23_100).contains(&to), "tail ends at {to} ms");
+        // Joined into chunks of about a second, with nothing lost and nothing repeated.
+        assert!(logged.len() <= 18, "{} chunks", logged.len());
+        for pair in logged.windows(2) {
+            assert_eq!(end_of(&pair[0]), pair[1].from.micros);
+        }
+        let levels: Vec<i32> = logged.iter().flat_map(|c| c.levels.clone()).collect();
+        assert_eq!(levels.len() as i64, to - from);
+        // Every sample is the one the Timer sent: batch N holds the value N.
+        assert_eq!(levels[0] as i64, from);
+        assert_eq!(*levels.last().unwrap() as i64, to - 50);
+    }
+
+    #[test]
+    fn a_gap_in_the_signal_is_never_joined_over() {
+        let mut buffer = SignalBuffer::new();
+        let mut logged = buffer.push(batch("0", 0), true);
+        // 50 ms are missing here.
+        logged.extend(buffer.push(batch("0", 100), true));
+        logged.extend(buffer.flush());
+        assert_eq!(logged.len(), 2);
+        assert_eq!(logged[0].levels.len(), 50);
+        assert_eq!(logged[1].from, SourceTime::from_micros(100_000));
+    }
+
+    #[test]
+    fn seats_are_joined_apart_and_a_dropped_link_keeps_what_it_had() {
+        let mut buffer = SignalBuffer::new();
+        let mut logged = Vec::new();
+        for ms in (0..500).step_by(50) {
+            logged.extend(buffer.push(batch("0", ms), true));
+            logged.extend(buffer.push(batch("1", ms), true));
+        }
+        // Half a second each: not long enough to log yet.
+        assert!(logged.is_empty());
+        let flushed = buffer.flush();
+        assert_eq!(flushed.len(), 2);
+        assert!(flushed.iter().all(|chunk| chunk.levels.len() == 500));
+        assert!(buffer.flush().is_empty());
     }
 }

@@ -106,6 +106,7 @@ export type * from '@bindings/SignalChunk';
 export type * from '@bindings/SignalContext';
 export type * from '@bindings/SignalHistory';
 export type * from '@bindings/SignalThresholds';
+export type * from '@bindings/SignalUnit';
 export type * from '@bindings/SourceTime';
 export type * from '@bindings/StartOwner';
 export type * from '@bindings/Timer';

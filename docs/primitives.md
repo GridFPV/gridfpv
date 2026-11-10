@@ -617,9 +617,12 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      losing or repeating a crossing, logs into the active event, and measures the timer's
      clock so the start tone can be placed on it.
    - Tested in CI against a fake timer inside the test, and by hand against `oftd --fake`.
-   - **Not yet:** signal samples (Grid's signal events must be widened first: OFT power is
-     signed tenths of a dB), mDNS discovery, writing seat frequencies and thresholds to the
-     timer, and the Timers and Tune pages.
+   - **Signal:** a signal chunk now holds signed levels in the timer's own unit (counts,
+     tenths of a dB, or tenths of a dBm), never converted. OFT signal is taken at full rate
+     and logged while a race is on, with three seconds either side, in chunks about a
+     second long. Signal outside a race is not kept.
+   - **Not yet:** mDNS discovery, writing seat frequencies and thresholds to the timer, the
+     Tune page, and showing the logged signal in Marshal.
 7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before.
 

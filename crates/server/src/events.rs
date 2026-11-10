@@ -224,8 +224,11 @@ struct RegisteredEvent {
 pub struct Live {
     /// The fold of the log so far. Always lock the log **before** this.
     pub state: Arc<Mutex<gridfpv_engine::state::EventState>>,
-    /// The log cursor (how many entries), sent whenever it moves.
+    /// The log cursor (how many entries), sent whenever something a console shows moves.
     pub changed: tokio::sync::watch::Sender<u64>,
+    /// Whether a race is counting down or running right now. Kept here so a timer
+    /// connection can ask many times a second without locking the event.
+    pub race_on: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Live {
@@ -233,6 +236,7 @@ impl Live {
         Self {
             state: Arc::default(),
             changed: tokio::sync::watch::Sender::new(0),
+            race_on: Arc::default(),
         }
     }
 }
@@ -384,6 +388,20 @@ impl EventRegistry {
     /// An event's own log, or `None` if no such event.
     pub fn log(&self, id: &EventId) -> Option<SharedLog> {
         self.read().events.get(id).map(|e| e.log.clone())
+    }
+
+    /// Whether a race is counting down or running in the active event right now.
+    pub fn race_on(&self) -> bool {
+        let reg = self.read();
+        reg.active_event
+            .as_ref()
+            .and_then(|id| reg.events.get(id))
+            .is_some_and(|event| {
+                event
+                    .live
+                    .race_on
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
     }
 
     /// The Director-wide timer directory.

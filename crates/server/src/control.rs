@@ -54,6 +54,7 @@ pub struct Session<'a> {
     log: &'a mut (dyn EventSource + Send),
     state: &'a mut EventState,
     changed: &'a watch::Sender<u64>,
+    race_on: &'a std::sync::atomic::AtomicBool,
     registry: &'a EventRegistry,
     /// The Director's clock for this request, in epoch microseconds.
     pub now: i64,
@@ -90,6 +91,7 @@ pub fn with_event<R>(
         log: &mut *log,
         state: &mut state,
         changed: &live.changed,
+        race_on: &live.race_on,
         registry,
         now: now_micros(),
     };
@@ -111,13 +113,31 @@ impl Session<'_> {
         for (at, fact) in self.state.due(self.now) {
             self.append(at, fact)?;
         }
+        self.note_race_on();
         Ok(())
     }
 
+    fn note_race_on(&self) {
+        use gridfpv_engine::race::RaceState;
+        let on = self
+            .state
+            .races
+            .undecided()
+            .is_some_and(|race| matches!(race.state, RaceState::Staging | RaceState::Running));
+        self.race_on.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn append(&mut self, at: i64, event: Event) -> Result<(), ProtocolError> {
+        self.append_quietly(at, event)?;
+        self.changed.send_replace(self.state.applied);
+        Ok(())
+    }
+
+    /// Append without waking the change feed.
+    fn append_quietly(&mut self, at: i64, event: Event) -> Result<(), ProtocolError> {
         let offset = self.log.append(event.clone(), Some(at)).map_err(internal)?;
         self.state.apply(offset, Some(at), &event);
-        self.changed.send_replace(self.state.applied);
+        self.note_race_on();
         Ok(())
     }
 
@@ -159,6 +179,11 @@ impl Session<'_> {
                 .races
                 .running()
                 .map(|race| race.setup.race.clone());
+        }
+        // Signal is logged for the marshal and shown on no live screen, so it does not
+        // wake the change feed: a console must not reload once a second for it.
+        if matches!(event, Event::SignalChunk(_)) {
+            return self.append_quietly(self.now, event);
         }
         self.append(self.now, event)
     }

@@ -12,6 +12,9 @@
 //! 4. Pings the timer every two seconds to measure how its clock lines up with the
 //!    Director's, and logs that when it moves.
 //!
+//! 5. Takes the timer's signal at full rate and logs it while a race is on, with a few
+//!    seconds either side (see `SignalBuffer`). Signal outside a race is not kept.
+//!
 //! A connection that fails says why in the timer's status and tries again, waiting a little
 //! longer each time, up to ten seconds.
 //!
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use gridfpv_adapters::Adapter;
-use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftMessage, seat_ref};
+use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftMessage, SignalBuffer, seat_ref};
 use gridfpv_events::{AdapterId, Event};
 use gridfpv_server::control::with_event;
 use gridfpv_server::events::{EventId, EventRegistry};
@@ -82,6 +85,7 @@ async fn hold(registry: EventRegistry, timer: Timer) {
         registry: registry.clone(),
         id: timer.id.clone(),
         fit: ClockFit::new(),
+        signal: SignalBuffer::new(),
         boot_id: None,
         logged: None,
     };
@@ -91,6 +95,10 @@ async fn hold(registry: EventRegistry, timer: Timer) {
             Ok(()) => "The timer closed the connection.".to_owned(),
             Err(problem) => problem,
         };
+        // Keep the signal a race in progress had so far.
+        for chunk in link.signal.flush() {
+            link.log(Event::SignalChunk(chunk));
+        }
         let was_connected = registry
             .timers()
             .list()
@@ -116,6 +124,7 @@ struct Link {
     registry: EventRegistry,
     id: AdapterId,
     fit: ClockFit,
+    signal: SignalBuffer,
     /// The boot the clock fit belongs to. A new boot is a new clock.
     boot_id: Option<String>,
     /// The event the clock offset was last logged to, and the offset logged.
@@ -224,7 +233,15 @@ impl Link {
                     }
                     let is_hello = matches!(message, OftMessage::Hello { .. });
                     for event in adapter.translate(message) {
-                        self.log(event);
+                        match event {
+                            Event::SignalChunk(chunk) => {
+                                let race_on = self.registry.race_on();
+                                for chunk in self.signal.push(chunk, race_on) {
+                                    self.log(Event::SignalChunk(chunk));
+                                }
+                            }
+                            other => self.log(other),
+                        }
                     }
                     if is_hello {
                         // Ask for everything after the last crossing seen.

@@ -128,30 +128,28 @@ pub struct SignalContext {
     pub rssi_peak: Option<f32>,
 }
 
-/// A contiguous run of per-tick RSSI samples captured from a signal-capable timer
-/// (RotorHazard first).
+/// What a signal level's number means. A timer reports levels in its own unit, and Grid
+/// keeps them exactly as reported: it never converts one unit to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SignalUnit {
+    /// The timer's own counts, with no physical unit (RotorHazard's filtered ADC counts).
+    Counts,
+    /// Tenths of a dB, relative: only differences mean anything (an uncalibrated OFT Timer).
+    TenthsDb,
+    /// Tenths of a dBm (a calibrated OFT Timer).
+    TenthsDbm,
+}
+
+/// A run of signal samples for one seat, captured from a timer that reports signal.
 ///
-/// The trace is the **evidence** a marshal later reviews a call against. It is captured
-/// **chunked and append-incrementally** rather than one fat per-heat blob: a hardware timer
-/// streams its node RSSI continuously, so chunks append as the run proceeds and interleave
-/// deterministically with the [`Pass`]es in the same log — a single buffered-until-heat-end
-/// event would be lost on an abort. Each chunk is a window of `rssi` samples beginning at
-/// `from` on the source clock, one every `period_micros`; concatenating a seat's chunks
-/// in append order reconstructs the whole trace (a fold's job).
+/// The trace is the **evidence** a marshal later reviews a call against. It is logged in
+/// chunks as the race runs, so it interleaves with the [`Pass`]es in the same log and
+/// survives an aborted race. Each chunk is a window of `levels` beginning at `from` on the
+/// timer's clock, one every `period_micros`. A fold joins a seat's chunks back into one
+/// trace.
 ///
-/// `rssi` is kept as `u16` — RotorHazard's filtered ADC counts are integers, so this is
-/// compact, exact, and free of the float-equality hazards a `f32` trace would carry into the
-/// deterministic fold/tests (matching the events crate's integer-time convention).
-///
-/// # Fidelity bound
-///
-/// RotorHazard's streaming `node_data` socket emit carries only the **latest** per-node
-/// sample (`pass_peak_rssi`/`node_peak_rssi`), not a backfilled per-tick history array (that
-/// lives in the request-driven `current_marshal_data`, which a live translator does not
-/// subscribe to). So a chunk captured from the live stream samples at the emit cadence — one
-/// `rssi` value per `node_data` tick — which is faithful to *what RH exposes live*, but is
-/// coarser than the detector's internal sampling. This is the load-bearing fidelity bound
-/// to confirm on real hardware.
+/// Levels are integers in the timer's own [`SignalUnit`], exactly as reported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SignalChunk {
@@ -159,20 +157,24 @@ pub struct SignalChunk {
     pub adapter: AdapterId,
     /// The source-local seat the trace belongs to.
     pub seat: SeatRef,
-    /// The source-clock timestamp of the **first** sample in `rssi`.
+    /// The source-clock timestamp of the **first** sample in `levels`.
     pub from: SourceTime,
-    /// Microseconds between consecutive samples (the capture cadence).
+    /// Microseconds between consecutive samples.
     #[ts(type = "number")]
     pub period_micros: u32,
-    /// The RSSI samples (filtered ADC counts), oldest first, one every `period_micros`.
-    pub rssi: Vec<u16>,
+    /// The samples, oldest first, one every `period_micros`.
+    pub levels: Vec<i32>,
+    pub unit: SignalUnit,
+    /// The timer's noise floor at the end of this chunk, in the same unit, where it
+    /// reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub noise_floor: Option<i32>,
 }
 
-/// The enter/exit detection thresholds a signal-capable timer is configured with for a node —
-/// the levels the RSSI crosses to open/close a pass (RotorHazard `enter_at_level` /
-/// `exit_at_level`). Captured **once** alongside the [`SignalChunk`] trace so a marshal can
-/// see *why* the timer called (or missed) a lap against the visible signal. One-shot per
-/// `(adapter, seat)`; a later one supersedes (a fold keeps the last).
+/// The enter and exit levels a timer detects crossings against for one seat. Logged
+/// alongside the trace so a marshal can see *why* the timer called (or missed) a lap. The
+/// last one per `(adapter, seat)` wins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SignalThresholds {
@@ -180,10 +182,11 @@ pub struct SignalThresholds {
     pub adapter: AdapterId,
     /// The source-local seat the thresholds apply to.
     pub seat: SeatRef,
-    /// The **enter** threshold: RSSI rising above this opens a pass.
-    pub enter: u16,
-    /// The **exit** threshold: RSSI falling below this closes the pass.
-    pub exit: u16,
+    /// The signal rising above this opens a crossing.
+    pub enter: i32,
+    /// The signal falling below this closes it.
+    pub exit: i32,
+    pub unit: SignalUnit,
 }
 
 /// The **dense, full-fidelity** per-node RSSI history for a heat — the detector's own internal
@@ -977,13 +980,16 @@ mod tests {
                 seat: SeatRef("node-0".into()),
                 from: SourceTime::from_micros(2_215_296),
                 period_micros: 100_000,
-                rssi: vec![70, 72, 150, 148, 71, 70],
+                levels: vec![70, 72, 150, 148, 71, 70],
+                unit: SignalUnit::Counts,
+                noise_floor: None,
             }),
             Event::SignalThresholds(SignalThresholds {
                 adapter: AdapterId("rotorhazard".into()),
                 seat: SeatRef("node-0".into()),
                 enter: 90,
                 exit: 80,
+                unit: SignalUnit::Counts,
             }),
             Event::SignalHistory(SignalHistory {
                 adapter: AdapterId("rotorhazard".into()),
@@ -1028,7 +1034,7 @@ mod tests {
             })
         );
         // And the new facts themselves deserialize from their on-the-wire shape.
-        let chunk = r#"{"SignalChunk":{"adapter":"rotorhazard","seat":"node-1","from":5000000,"period_micros":100000,"rssi":[60,120,61]}}"#;
+        let chunk = r#"{"SignalChunk":{"adapter":"rotorhazard","seat":"node-1","from":5000000,"period_micros":100000,"levels":[-912,-640,-910],"unit":"TenthsDb","noise_floor":-920}}"#;
         assert_eq!(
             serde_json::from_str::<Event>(chunk).unwrap(),
             Event::SignalChunk(SignalChunk {
@@ -1036,7 +1042,9 @@ mod tests {
                 seat: SeatRef("node-1".into()),
                 from: SourceTime::from_micros(5_000_000),
                 period_micros: 100_000,
-                rssi: vec![60, 120, 61],
+                levels: vec![-912, -640, -910],
+                unit: SignalUnit::TenthsDb,
+                noise_floor: Some(-920),
             })
         );
     }
