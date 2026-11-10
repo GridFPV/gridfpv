@@ -394,7 +394,6 @@ impl EventView {
 
 fn race_view(state: &EventState, race: &Race) -> RaceView {
     let id = &race.setup.race;
-    let filters = state.filters_for(&race.setup.heat);
     let end = state
         .format_for(&race.setup.heat)
         .map(|format| format.race.end);
@@ -402,7 +401,10 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
         .setup
         .lineup
         .iter()
-        .map(|entry| state.laps.seat(id, &entry.adapter, &entry.seat, filters))
+        .map(|entry| {
+            let filters = state.filters_for(race, &entry.adapter);
+            state.laps.seat(id, &entry.adapter, &entry.seat, filters)
+        })
         .collect();
     // The order so far, among named pilots, with lineup order as the last tie-break.
     let entries: Vec<RaceEntry> = race

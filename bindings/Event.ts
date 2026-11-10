@@ -32,7 +32,7 @@ import type { SourceTime } from "./SourceTime";
  * `{ "VariantName": { ..fields } }`, which maps cleanly to a discriminated union in
  * the generated TypeScript (#4).
  */
-export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "SeatSeen": { adapter: AdapterId, seat: SeatRef, } } | { "Pass": Pass } | { "SignalChunk": SignalChunk } | { "SignalThresholds": SignalThresholds } | { "SignalHistory": SignalHistory } | { "RaceStarting": { setup: RaceSetup, tone_at: number, } } | { "RaceStarted": { setup: RaceSetup, } } | { "RaceStopped": { race: RaceId, } } | { "RaceSaved": { race: RaceId, 
+export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "AdapterDisconnected": { adapter: AdapterId, } } | { "SessionStarted": { adapter: AdapterId, session: SessionId, } } | { "SessionEnded": { adapter: AdapterId, session: SessionId, } } | { "SeatSeen": { adapter: AdapterId, seat: SeatRef, } } | { "Pass": Pass } | { "ClockOffset": { adapter: AdapterId, offset_micros: number, error_micros: number, } } | { "SignalChunk": SignalChunk } | { "SignalThresholds": SignalThresholds } | { "SignalHistory": SignalHistory } | { "RaceStarting": { setup: RaceSetup, tone_at: number, } } | { "RaceStarted": { setup: RaceSetup, } } | { "RaceStopped": { race: RaceId, } } | { "RaceSaved": { race: RaceId, 
 /**
  * Flags the race for the marshal's to-do list.
  */

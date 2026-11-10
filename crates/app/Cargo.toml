@@ -34,8 +34,9 @@ gridfpv-adapters.workspace = true
 # runtime; `tower-http` adds `ServeDir` (SPA fallback) + permissive CORS (so the Windows
 # Tauri app, a different origin, can call the API/WS). axum matches the server's 0.8.
 gridfpv-server.workspace = true
+gridfpv-events.workspace = true
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 
 # Only compiled in under `--features embed-assets`: `rust-embed` bakes the built RD console
@@ -44,8 +45,14 @@ tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 # via `tower-http`'s `ServeDir` exactly as before, so the hosted dev loop is unchanged.
 rust-embed = { version = "8", optional = true }
 mime_guess = { version = "2", optional = true }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 
 [dev-dependencies]
+# The fake OFT timer in `tests/oft_link.rs` is an axum WebSocket server.
+axum = { version = "0.8", features = ["ws"] }
+serde_json.workspace = true
+gridfpv-engine.workspace = true
 # The Director integration test drives the served router with no real network via
 # `tower::ServiceExt::oneshot`, collecting the response body to assert on it.
 tower = { version = "0.5", features = ["util"] }

@@ -665,6 +665,18 @@ pub enum Event {
     SeatSeen { adapter: AdapterId, seat: SeatRef },
     /// A gate crossing — the atom (see [`Pass`]).
     Pass(Pass),
+    /// How a timer's clock lines up with the Director's: `offset_micros` is the timer's
+    /// clock minus the Director's, measured to within `error_micros`. Logged by the
+    /// Director when it measures a timer (and again when the measurement moves). It is
+    /// what lets the start tone, which the Director decides, be placed on the timer's
+    /// clock. A timer that never reports this has laps timed from the hole shot only.
+    ClockOffset {
+        adapter: AdapterId,
+        #[ts(type = "number")]
+        offset_micros: i64,
+        #[ts(type = "number")]
+        error_micros: i64,
+    },
 
     /// A chunk of captured per-node RSSI trace. An **immutable raw observation** like
     /// [`Pass`]: a signal-capable adapter appends these incrementally as a race runs, and a

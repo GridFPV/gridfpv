@@ -13,6 +13,7 @@ gridfpv-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ts-rs = "12"
+thiserror = "2"
 
 # The HTTP API is one axum `Router` (see `app.rs`).
 axum = "0.8"

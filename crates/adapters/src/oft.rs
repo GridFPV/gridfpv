@@ -1,0 +1,411 @@
+//! The OFT adapter: an Open FPV Timer's messages, translated to Grid's events.
+//!
+//! OFT is specified in the `open-fpv-timer` project (`oft-spec/oft-spec.md`, protocol v1
+//! under `/oft/v1`). A Timer always listens and always reports: it has no notion of a race.
+//! It sends a `hello` when a client connects, then `crossing`, `samples` and `status`
+//! messages on one WebSocket. Grid owns the race; the Timer only says when a seat crossed
+//! the gate.
+//!
+//! This module is the **pure** half: parse a message, keep the little state that needs
+//! keeping, and give back events. It opens no socket and reads no clock, so it is tested
+//! with messages copied from the spec and from `oftd`. The half that holds the connection
+//! lives in the Director.
+//!
+//! What is translated so far (conformance level L1):
+//!
+//! - `hello` → [`Event::AdapterConnected`], and a [`Event::SeatSeen`] for each seat.
+//! - `crossing` → [`Event::Pass`] at `t_mid`, the lap instant (spec §8).
+//! - `pong` → a clock sample for [`ClockFit`], which maps the Director's clock onto the
+//!   Timer's so the start tone can be placed on the Timer's clock.
+//!
+//! `samples` and `status` are parsed and ignored for now. Signal comes next, and needs
+//! Grid's signal events widened first: OFT power is signed tenths of a dB, and Grid never
+//! down-converts what a timer reports.
+
+use gridfpv_events::{AdapterId, Event, GateIndex, Pass, SeatRef, SignalContext, SourceTime};
+use serde::Deserialize;
+
+use crate::{Adapter, Capabilities};
+
+/// One seat in a Timer's `hello` or `/info`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OftSeat {
+    /// The seat's index on the Timer.
+    pub seat: u32,
+    /// The seat's actual sample rate. More seats on one Node means a lower rate each.
+    #[serde(default)]
+    pub rate_hz: u32,
+}
+
+/// One message from a Timer's WebSocket. Fields Grid does not use are left out; unknown
+/// fields and unknown message types are ignored, as the spec requires.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OftMessage {
+    /// Sent once on connect.
+    Hello {
+        /// The Timer's id ("oft-3fa2").
+        #[serde(default)]
+        timer: String,
+        /// Changes every time the Timer boots. Crossing `seq` numbers restart with it.
+        boot_id: String,
+        /// The Timer's clock now, in microseconds since it booted.
+        #[serde(default)]
+        time_us: u64,
+        #[serde(default)]
+        seats: Vec<OftSeat>,
+    },
+    /// A seat crossed the gate.
+    Crossing {
+        /// Counts up by one per crossing since boot.
+        seq: u64,
+        seat: u32,
+        /// The lap instant: the middle of the crossing, on the Timer's clock.
+        t_mid: u64,
+        /// Peak power, in tenths of a dB.
+        #[serde(default)]
+        peak: Option<i32>,
+    },
+    /// The answer to a `ping`: the Timer's clock now.
+    Pong { time_us: u64 },
+    /// Signal samples for one seat. Not used yet.
+    Samples {},
+    /// Periodic health. Not used yet.
+    Status {},
+    /// The Timer acknowledged a subscription.
+    Ack {},
+    /// The Timer refused something the client sent.
+    Error {
+        #[serde(default)]
+        code: String,
+        #[serde(default)]
+        msg: String,
+    },
+    /// A message type this adapter does not know. Ignored.
+    #[serde(other)]
+    Unknown,
+}
+
+impl OftMessage {
+    /// Parse one WebSocket text frame.
+    pub fn parse(frame: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(frame)
+    }
+}
+
+/// The Grid seat handle for an OFT seat index. A handle, not a name: a console shows
+/// "Seat 1" for seat 0.
+pub fn seat_ref(seat: u32) -> SeatRef {
+    SeatRef(seat.to_string())
+}
+
+/// The translator for one Timer.
+#[derive(Debug, Clone)]
+pub struct OftAdapter {
+    id: AdapterId,
+    /// The boot the `seq` numbers below belong to.
+    boot_id: Option<String>,
+    /// The highest crossing `seq` seen this boot.
+    last_seq: Option<u64>,
+}
+
+impl OftAdapter {
+    /// A translator for the Timer Grid knows by `id`.
+    pub fn new(id: AdapterId) -> Self {
+        Self {
+            id,
+            boot_id: None,
+            last_seq: None,
+        }
+    }
+
+    /// The subscription to send after `hello`: every crossing after the last one seen, so a
+    /// reconnect picks up what was missed. After a reboot, or on first contact, everything
+    /// the Timer still holds.
+    pub fn subscription(&self) -> String {
+        match self.last_seq {
+            Some(seq) => format!(r#"{{"type":"sub","crossings":{{"since":{seq}}}}}"#),
+            None => r#"{"type":"sub","crossings":{}}"#.to_owned(),
+        }
+    }
+}
+
+impl Adapter for OftAdapter {
+    type Raw = OftMessage;
+
+    fn id(&self) -> &AdapterId {
+        &self.id
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+            .with_live_passes()
+            .with_frequency_mgmt()
+            .with_calibration()
+    }
+
+    fn translate(&mut self, raw: OftMessage) -> Vec<Event> {
+        match raw {
+            OftMessage::Hello { boot_id, seats, .. } => {
+                if self.boot_id.as_deref() != Some(boot_id.as_str()) {
+                    // A new boot: the Timer's crossing numbers start again.
+                    self.boot_id = Some(boot_id);
+                    self.last_seq = None;
+                }
+                let mut events = vec![Event::AdapterConnected {
+                    adapter: self.id.clone(),
+                }];
+                events.extend(seats.into_iter().map(|seat| Event::SeatSeen {
+                    adapter: self.id.clone(),
+                    seat: seat_ref(seat.seat),
+                }));
+                events
+            }
+            OftMessage::Crossing {
+                seq,
+                seat,
+                t_mid,
+                peak,
+            } => {
+                // A replay after a reconnect repeats crossings already logged.
+                if self.last_seq.is_some_and(|last| seq <= last) {
+                    return Vec::new();
+                }
+                self.last_seq = Some(seq);
+                vec![Event::Pass(Pass {
+                    adapter: self.id.clone(),
+                    seat: seat_ref(seat),
+                    at: SourceTime::from_micros(i64::try_from(t_mid).unwrap_or(i64::MAX)),
+                    sequence: Some(seq),
+                    gate: GateIndex::LAP,
+                    signal: peak.map(|tenths| SignalContext {
+                        rssi_peak: Some(tenths as f32 / 10.0),
+                    }),
+                    race: None,
+                })]
+            }
+            OftMessage::Pong { .. }
+            | OftMessage::Samples {}
+            | OftMessage::Status {}
+            | OftMessage::Ack {}
+            | OftMessage::Error { .. }
+            | OftMessage::Unknown => Vec::new(),
+        }
+    }
+}
+
+/// Maps the Director's clock onto a Timer's clock, from ping round trips.
+///
+/// Each sample is one `ping`: when it was sent and when the `pong` came back, both on the
+/// Director's clock, and the Timer's clock in the `pong`. The Timer read its clock somewhere
+/// inside the round trip; the middle is the best guess, and the error is at most half the
+/// round trip. So the fit uses the sample with the **shortest round trip** (spec §7), out
+/// of the latest [`ClockFit::WINDOW`] pings.
+///
+/// Lap times never use this: they come from the Timer's clock alone. It is used to place
+/// the start tone, which the Director decides, on the Timer's clock.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClockFit {
+    /// The latest pings, oldest first: (Timer clock − Director clock, round trip).
+    recent: std::collections::VecDeque<(i64, i64)>,
+}
+
+impl ClockFit {
+    /// How many pings are kept. Two clocks drift apart (tens of microseconds a second is
+    /// normal), so an old ping, however quick, stops being true. Only the latest ones count.
+    pub const WINDOW: usize = 30;
+
+    /// A fit with no samples yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one ping. Times are microseconds: `sent` and `received` on the Director's clock,
+    /// `timer_us` from the `pong`. A sample that came back before it was sent is dropped.
+    pub fn sample(&mut self, sent: i64, received: i64, timer_us: u64) {
+        let round_trip = received - sent;
+        if round_trip < 0 {
+            return;
+        }
+        let middle = sent + round_trip / 2;
+        let offset = i64::try_from(timer_us).unwrap_or(i64::MAX) - middle;
+        if self.recent.len() == Self::WINDOW {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((offset, round_trip));
+    }
+
+    /// The kept ping with the shortest round trip.
+    fn best(&self) -> Option<(i64, i64)> {
+        self.recent
+            .iter()
+            .copied()
+            .min_by_key(|(_, round_trip)| *round_trip)
+    }
+
+    /// The Timer's clock minus the Director's, in microseconds. `None` until there is a
+    /// sample.
+    pub fn offset_micros(&self) -> Option<i64> {
+        self.best().map(|(offset, _)| offset)
+    }
+
+    /// A moment on the Director's clock, as the Timer's clock would read it. `None` until
+    /// there is a sample.
+    pub fn to_timer(&self, director_micros: i64) -> Option<SourceTime> {
+        self.offset_micros()
+            .map(|offset| SourceTime::from_micros(director_micros + offset))
+    }
+
+    /// The most the mapping can be off by, in microseconds: half the best round trip.
+    pub fn error_micros(&self) -> Option<i64> {
+        self.best().map(|(_, round_trip)| round_trip / 2)
+    }
+
+    /// Forget every sample. Call this when the Timer reboots: its clock started again.
+    pub fn reset(&mut self) {
+        self.recent.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter() -> OftAdapter {
+        OftAdapter::new(AdapterId("gate".into()))
+    }
+
+    /// The `hello` from the spec (§6.4), with the seat list `oftd` adds.
+    const HELLO: &str = r#"{
+        "type": "hello", "proto": 1, "timer": "oft-3fa2", "boot_id": "9c1e",
+        "time_us": 81234567, "level": "L3", "encodings": ["json"],
+        "seats": [{"seat": 0, "node": 0, "rate_hz": 500}, {"seat": 1, "node": 0, "rate_hz": 500}],
+        "capabilities": { "crossings": { "algorithms": ["edge_mid"], "replay": 256 } }
+    }"#;
+
+    /// The `crossing` from the spec (§6.4).
+    const CROSSING: &str = r#"{"type":"crossing","seq":42,"seat":0,"t_enter":81230120,
+        "t_exit":81262480,"t_mid":81246300,"peak":-235,"snr":685,"flags":[]}"#;
+
+    fn crossing(seq: u64, seat: u32, t_mid: u64) -> OftMessage {
+        OftMessage::Crossing {
+            seq,
+            seat,
+            t_mid,
+            peak: None,
+        }
+    }
+
+    #[test]
+    fn a_hello_reports_the_timer_and_its_seats() {
+        let mut adapter = adapter();
+        let events = adapter.translate(OftMessage::parse(HELLO).unwrap());
+        assert_eq!(
+            events,
+            vec![
+                Event::AdapterConnected {
+                    adapter: AdapterId("gate".into())
+                },
+                Event::SeatSeen {
+                    adapter: AdapterId("gate".into()),
+                    seat: SeatRef("0".into())
+                },
+                Event::SeatSeen {
+                    adapter: AdapterId("gate".into()),
+                    seat: SeatRef("1".into())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_crossing_is_a_pass_at_its_middle_instant() {
+        let mut adapter = adapter();
+        let events = adapter.translate(OftMessage::parse(CROSSING).unwrap());
+        let [Event::Pass(pass)] = &events[..] else {
+            panic!("expected one pass, got {events:?}");
+        };
+        assert_eq!(pass.adapter, AdapterId("gate".into()));
+        assert_eq!(pass.seat, SeatRef("0".into()));
+        assert_eq!(pass.at, SourceTime::from_micros(81_246_300));
+        assert_eq!(pass.sequence, Some(42));
+        assert_eq!(pass.signal.unwrap().rssi_peak, Some(-23.5));
+        // The adapter does not know the race. The Director stamps it.
+        assert_eq!(pass.race, None);
+    }
+
+    #[test]
+    fn a_replay_after_a_reconnect_adds_no_duplicates() {
+        let mut adapter = adapter();
+        adapter.translate(OftMessage::parse(HELLO).unwrap());
+        assert_eq!(adapter.subscription(), r#"{"type":"sub","crossings":{}}"#);
+        assert_eq!(adapter.translate(crossing(1, 0, 100)).len(), 1);
+        assert_eq!(adapter.translate(crossing(2, 0, 200)).len(), 1);
+        // The link drops. The same Timer says hello again, and Grid asks from where it was.
+        adapter.translate(OftMessage::parse(HELLO).unwrap());
+        assert_eq!(
+            adapter.subscription(),
+            r#"{"type":"sub","crossings":{"since":2}}"#
+        );
+        // A Timer that replays more than was asked for still adds nothing twice.
+        assert!(adapter.translate(crossing(2, 0, 200)).is_empty());
+        assert_eq!(adapter.translate(crossing(3, 0, 300)).len(), 1);
+    }
+
+    #[test]
+    fn a_reboot_starts_the_crossing_numbers_again() {
+        let mut adapter = adapter();
+        adapter.translate(OftMessage::parse(HELLO).unwrap());
+        adapter.translate(crossing(7, 0, 100));
+        let rebooted = HELLO.replace("9c1e", "a000");
+        adapter.translate(OftMessage::parse(&rebooted).unwrap());
+        assert_eq!(adapter.subscription(), r#"{"type":"sub","crossings":{}}"#);
+        // Crossing 1 of the new boot is new, though 1 is below 7.
+        assert_eq!(adapter.translate(crossing(1, 0, 50)).len(), 1);
+    }
+
+    #[test]
+    fn messages_grid_does_not_use_yet_are_parsed_and_ignored() {
+        let mut adapter = adapter();
+        for frame in [
+            r#"{"type":"samples","seat":0,"t0":81234000,"dt_us":1000,"p":[-912,-910],"nf":-920}"#,
+            r#"{"type":"status","uptime_s":3600,"temp_c":41,"dropped":0,"clock_err_us":40}"#,
+            r#"{"type":"ack","for":"sub"}"#,
+            r#"{"type":"error","code":"unsupported","msg":"no samples"}"#,
+            r#"{"type":"something_from_v2","x":1}"#,
+        ] {
+            let message = OftMessage::parse(frame).unwrap();
+            assert!(adapter.translate(message).is_empty(), "{frame}");
+        }
+        assert!(OftMessage::parse("not json").is_err());
+    }
+
+    #[test]
+    fn the_clock_fit_keeps_the_ping_with_the_shortest_round_trip() {
+        let mut fit = ClockFit::new();
+        assert_eq!(fit.to_timer(0), None);
+        // A slow ping: 10 ms round trip. The Timer's clock is 1 s behind, give or take.
+        fit.sample(5_000_000, 5_010_000, 4_006_000);
+        assert_eq!(fit.error_micros(), Some(5_000));
+        // A fast ping: 400 µs round trip, and a truer reading.
+        fit.sample(6_000_000, 6_000_400, 5_000_200);
+        assert_eq!(fit.error_micros(), Some(200));
+        assert_eq!(
+            fit.to_timer(7_000_000),
+            Some(SourceTime::from_micros(6_000_000))
+        );
+        // A later slow ping does not displace it.
+        fit.sample(8_000_000, 8_050_000, 7_040_000);
+        assert_eq!(fit.error_micros(), Some(200));
+        assert_eq!(fit.offset_micros(), Some(-1_000_000));
+        // Clocks drift, so the quick ping only counts while it is recent.
+        for i in 0..ClockFit::WINDOW as i64 {
+            let sent = 9_000_000 + i * 1_000_000;
+            fit.sample(sent, sent + 2_000, (sent + 1_000 - 999_000) as u64);
+        }
+        assert_eq!(fit.offset_micros(), Some(-999_000));
+        assert_eq!(fit.error_micros(), Some(1_000));
+        fit.reset();
+        assert_eq!(fit.to_timer(0), None);
+    }
+}

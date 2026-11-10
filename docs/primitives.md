@@ -599,8 +599,20 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      `POST …/presets/bracket` and `…/presets/mains`, `POST …/passes`, and
      `GET …/changes` (a feed of the log cursor; a console that hears a new cursor reads the
      snapshot again).
-   - **Next:** the Run page in the console, then the OFT adapter.
-6. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
+   - **In progress:** the Run page in the console.
+6. Timers. **The OFT adapter is built:**
+   - `adapters::oft`: a Timer's messages translated to Grid's events, and the clock fit.
+     Pure, tested with messages from the spec.
+   - `server::timers`: the timer directory (`GET`/`POST /timers`, `DELETE /timers/{id}`),
+     with each timer's live status.
+   - `app::oft`: one connection per OFT timer. It resumes after a dropped link without
+     losing or repeating a crossing, logs into the active event, and measures the timer's
+     clock so the start tone can be placed on it.
+   - Tested in CI against a fake timer inside the test, and by hand against `oftd --fake`.
+   - **Not yet:** signal samples (Grid's signal events must be widened first: OFT power is
+     signed tenths of a dB), mDNS discovery, writing seat frequencies and thresholds to the
+     timer, and the Timers and Tune pages.
+7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before.
 
 **Not built yet in the engine:** time and points penalties, class standings across a class's

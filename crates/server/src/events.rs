@@ -263,6 +263,8 @@ struct Registry {
     /// The Director-wide application-level **class directory**, held here for the same reason
     /// as the pilot directory.
     classes: ClassDirectory,
+    /// The Director-wide timer directory, held here for the same reason.
+    timers: crate::timers::TimerDirectory,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -317,6 +319,7 @@ impl EventRegistry {
                 tokens,
                 pilots,
                 classes,
+                timers: crate::timers::TimerDirectory::new(data_dir.clone()),
                 data_dir,
                 active_event,
             })),
@@ -381,6 +384,11 @@ impl EventRegistry {
     /// An event's own log, or `None` if no such event.
     pub fn log(&self, id: &EventId) -> Option<SharedLog> {
         self.read().events.get(id).map(|e| e.log.clone())
+    }
+
+    /// The Director-wide timer directory.
+    pub fn timers(&self) -> crate::timers::TimerDirectory {
+        self.read().timers.clone()
     }
 
     /// An event's live state, or `None` if no such event.

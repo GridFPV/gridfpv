@@ -11,6 +11,7 @@
 //! - [`events`] — the event registry: create / list / delete events and the active event.
 //!   Each event owns its own append-only log.
 //! - [`pilots`] and [`classes`] — the app-level pilot and class directories.
+//! - [`timers`] — the timer directory: the timers a person set up, and their live status.
 //! - [`control`] — the competition: commands in, facts logged, a snapshot ([`view`]) and a
 //!   change feed out. The rules live in `gridfpv-engine`; this is the plumbing around them.
 //! - [`auth`] — the token tiers and the one gate in front of every write.
@@ -31,6 +32,7 @@ pub mod control;
 pub mod error;
 pub mod events;
 pub mod pilots;
+pub mod timers;
 pub mod view;
 
 use serde::{Deserialize, Serialize};

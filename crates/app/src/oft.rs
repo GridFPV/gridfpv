@@ -1,0 +1,240 @@
+//! The connections to OFT timers.
+//!
+//! [`spawn`] starts one task that watches the timer directory and keeps one connection per
+//! OFT timer in it. Each connection:
+//!
+//! 1. Opens the timer's WebSocket and waits for its `hello`.
+//! 2. Subscribes to crossings **after the last one it saw**, so a dropped link loses nothing
+//!    the timer still holds.
+//! 3. Logs what the timer reports into the **active event**. A pass is stamped with the race
+//!    running at that moment by the Director (see `gridfpv_server::control`). With no active
+//!    event there is nowhere to log to, and reports are dropped.
+//! 4. Pings the timer every two seconds to measure how its clock lines up with the
+//!    Director's, and logs that when it moves.
+//!
+//! A connection that fails says why in the timer's status and tries again, waiting a little
+//! longer each time, up to ten seconds.
+//!
+//! The translation itself is pure and lives in `gridfpv_adapters::oft`.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use gridfpv_adapters::Adapter;
+use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftMessage, seat_ref};
+use gridfpv_events::{AdapterId, Event};
+use gridfpv_server::control::with_event;
+use gridfpv_server::events::{EventId, EventRegistry};
+use gridfpv_server::timers::{Timer, TimerKind};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::Message;
+
+/// How often the timer is pinged to measure its clock.
+const PING_EVERY: Duration = Duration::from_secs(2);
+/// A logged clock offset is logged again when the measurement moves by more than this many
+/// microseconds.
+const OFFSET_MOVED: i64 = 500;
+/// How long a silent timer is waited on before the link is called dead. The timer answers
+/// every ping, so silence this long means the link is gone.
+const SILENCE: Duration = Duration::from_secs(8);
+
+/// Start keeping a connection to every OFT timer in the directory. Runs until aborted.
+pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
+    tokio::spawn(supervise(registry))
+}
+
+async fn supervise(registry: EventRegistry) {
+    let directory = registry.timers();
+    let mut changes = directory.watch();
+    let mut held: BTreeMap<AdapterId, (Timer, JoinHandle<()>)> = BTreeMap::new();
+    loop {
+        let wanted: BTreeMap<AdapterId, Timer> = directory
+            .records()
+            .into_iter()
+            .filter(|timer| timer.kind == TimerKind::Oft)
+            .map(|timer| (timer.id.clone(), timer))
+            .collect();
+        // Drop connections to timers that were removed or changed.
+        held.retain(|id, (timer, task)| {
+            let keep = wanted.get(id) == Some(timer);
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        for (id, timer) in wanted {
+            held.entry(id).or_insert_with(|| {
+                let task = tokio::spawn(hold(registry.clone(), timer.clone()));
+                (timer, task)
+            });
+        }
+        if changes.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Keep one timer connected for ever.
+async fn hold(registry: EventRegistry, timer: Timer) {
+    let mut adapter = OftAdapter::new(timer.id.clone());
+    let mut link = Link {
+        registry: registry.clone(),
+        id: timer.id.clone(),
+        fit: ClockFit::new(),
+        boot_id: None,
+        logged: None,
+    };
+    let mut wait = Duration::from_millis(500);
+    loop {
+        let problem = match link.run(&timer, &mut adapter).await {
+            Ok(()) => "The timer closed the connection.".to_owned(),
+            Err(problem) => problem,
+        };
+        let was_connected = registry
+            .timers()
+            .list()
+            .iter()
+            .any(|view| view.timer.id == timer.id && view.status.connected);
+        registry.timers().report(&timer.id, |status| {
+            status.connected = false;
+            status.problem = Some(problem);
+        });
+        if was_connected {
+            link.log(Event::AdapterDisconnected {
+                adapter: timer.id.clone(),
+            });
+            // It was up, so try again soon.
+            wait = Duration::from_millis(500);
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(10));
+    }
+}
+
+struct Link {
+    registry: EventRegistry,
+    id: AdapterId,
+    fit: ClockFit,
+    /// The boot the clock fit belongs to. A new boot is a new clock.
+    boot_id: Option<String>,
+    /// The event the clock offset was last logged to, and the offset logged.
+    logged: Option<(EventId, i64)>,
+}
+
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+impl Link {
+    /// Log one observation into the active event, if there is one.
+    fn log(&self, event: Event) {
+        let Some(active) = self.registry.active() else {
+            return;
+        };
+        if let Err(e) = with_event(&self.registry, &active.id, |session| session.observe(event)) {
+            eprintln!("WARNING: could not log a timer report: {}", e.message);
+        }
+    }
+
+    /// Log the clock offset when the active event has none from this link yet, or when the
+    /// measurement has moved.
+    fn log_clock(&mut self) {
+        let (Some(offset), Some(error)) = (self.fit.offset_micros(), self.fit.error_micros())
+        else {
+            return;
+        };
+        let Some(active) = self.registry.active() else {
+            return;
+        };
+        let stale = match &self.logged {
+            Some((event, logged)) => event != &active.id || (logged - offset).abs() > OFFSET_MOVED,
+            None => true,
+        };
+        if stale {
+            self.log(Event::ClockOffset {
+                adapter: self.id.clone(),
+                offset_micros: offset,
+                error_micros: error,
+            });
+            self.logged = Some((active.id, offset));
+        }
+    }
+
+    /// One connection, from open to the first failure. `Ok` means the timer closed it.
+    async fn run(&mut self, timer: &Timer, adapter: &mut OftAdapter) -> Result<(), String> {
+        let url = format!("ws://{}/oft/v1/stream", timer.address);
+        let (mut socket, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .map_err(|e| format!("Could not reach the timer at {}: {e}", timer.address))?;
+        let mut ping = tokio::time::interval(PING_EVERY);
+        // When the ping in flight was sent, on the Director's clock.
+        let mut ping_sent: Option<i64> = None;
+        loop {
+            tokio::select! {
+                _ = ping.tick() => {
+                    ping_sent = Some(now_micros());
+                    socket
+                        .send(Message::text(r#"{"type":"ping"}"#))
+                        .await
+                        .map_err(|e| format!("The link to the timer broke: {e}"))?;
+                }
+                frame = tokio::time::timeout(SILENCE, socket.next()) => {
+                    let frame = frame
+                        .map_err(|_| "The timer stopped answering.".to_owned())?;
+                    let text = match frame {
+                        None | Some(Ok(Message::Close(_))) => return Ok(()),
+                        Some(Err(e)) => return Err(format!("The link to the timer broke: {e}")),
+                        Some(Ok(Message::Text(text))) => text,
+                        Some(Ok(_)) => continue,
+                    };
+                    // A frame that is not a message this adapter can read is skipped: one
+                    // odd frame must not cost the link.
+                    let Ok(message) = OftMessage::parse(&text) else {
+                        continue;
+                    };
+                    match &message {
+                        OftMessage::Hello { boot_id, seats, .. } => {
+                            if self.boot_id.as_deref() != Some(boot_id.as_str()) {
+                                self.boot_id = Some(boot_id.clone());
+                                self.fit.reset();
+                                self.logged = None;
+                            }
+                            let seats = seats.iter().map(|s| seat_ref(s.seat)).collect();
+                            self.registry.timers().report(&self.id, |status| {
+                                status.connected = true;
+                                status.problem = None;
+                                status.seats = seats;
+                            });
+                        }
+                        OftMessage::Pong { time_us } => {
+                            if let Some(sent) = ping_sent.take() {
+                                self.fit.sample(sent, now_micros(), *time_us);
+                                let error = self.fit.error_micros();
+                                self.registry.timers().report(&self.id, |status| {
+                                    status.clock_error_micros = error;
+                                });
+                                self.log_clock();
+                            }
+                        }
+                        _ => {}
+                    }
+                    let is_hello = matches!(message, OftMessage::Hello { .. });
+                    for event in adapter.translate(message) {
+                        self.log(event);
+                    }
+                    if is_hello {
+                        // Ask for everything after the last crossing seen.
+                        socket
+                            .send(Message::text(adapter.subscription()))
+                            .await
+                            .map_err(|e| format!("The link to the timer broke: {e}"))?;
+                    }
+                }
+            }
+        }
+    }
+}

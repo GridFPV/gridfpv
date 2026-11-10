@@ -17,6 +17,7 @@
 //! | `POST /events/{id}/passes` | a gate crossing from outside (tools and tests) |
 //! | `GET /events/{id}/changes` | server-sent events: the log cursor, each time it moves |
 //! | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | the pilot directory |
+//! | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | the timer directory, with live status |
 //! | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | the class directory |
 //!
 //! Reads are open; every write demands [`ControlAuth`] first (open until an RD token is
@@ -114,6 +115,14 @@ pub fn router(registry: EventRegistry) -> Router {
             put(update_class).delete(delete_class),
         )
         .route("/classes/{class_id}/hidden", put(set_class_hidden))
+        .route(
+            "/timers",
+            get(crate::timers::list_timers).post(crate::timers::create_timer),
+        )
+        .route(
+            "/timers/{timer_id}",
+            axum::routing::delete(crate::timers::delete_timer),
+        )
         // Any path that matched no route above is a typed 404, not the SPA shell — see
         // [`api_fallback`] / [`smart_fallback`].
         .fallback(api_fallback)
@@ -386,7 +395,7 @@ fn class_error_to_protocol(error: ClassError) -> ProtocolError {
 /// A path matches when it equals a prefix exactly or continues with `/` (so `/eventsxyz` is
 /// *not* an API path, but `/events`, `/events/`, and `/events/zzz` all are).
 pub fn is_api_path(path: &str) -> bool {
-    const API_PREFIXES: [&str; 8] = [
+    const API_PREFIXES: [&str; 9] = [
         "/health",
         "/about",
         "/time",
@@ -394,6 +403,7 @@ pub fn is_api_path(path: &str) -> bool {
         "/active-event",
         "/pilots",
         "/classes",
+        "/timers",
         "/diagnostics",
     ];
     API_PREFIXES.iter().any(|prefix| {
@@ -612,6 +622,8 @@ mod tests {
             "/pilots/bogus",
             "/classes",
             "/classes/open/hidden",
+            "/timers",
+            "/timers/gate-1a2b",
         ] {
             assert!(is_api_path(p), "{p} should be an API path");
         }
@@ -620,7 +632,7 @@ mod tests {
             "/",
             "/heats/q-1/live",
             "/eventsxyz",
-            "/timers",
+            "/timersxyz",
             "/index.html",
         ] {
             assert!(!is_api_path(p), "{p} should NOT be an API path");

@@ -16,8 +16,8 @@
 use std::collections::BTreeMap;
 
 use gridfpv_events::{
-    ClassId, Command, EndCondition, Event, Format, LineupEntry, PhaseId, PhaseKind, PilotId,
-    ProtestId, RaceId, RaceSetup, StartOwner,
+    AdapterId, ClassId, Command, EndCondition, Event, Format, LineupEntry, PhaseId, PhaseKind,
+    PilotId, ProtestId, RaceId, RaceSetup, SourceTime, StartOwner,
 };
 use thiserror::Error;
 
@@ -81,6 +81,10 @@ pub struct EventState {
     pub rulings: Rulings,
     /// Each class in the event and its roster, in roster order.
     pub rosters: BTreeMap<ClassId, Vec<PilotId>>,
+    /// Each timer's clock minus the Director's, as last measured.
+    pub clock_offsets: BTreeMap<AdapterId, i64>,
+    /// Each race's start on each of its timers' own clocks, where the offset was known.
+    pub starts_on_timer: BTreeMap<(RaceId, AdapterId), SourceTime>,
     /// How many log entries have been applied: the offset the next one will have.
     pub applied: u64,
 }
@@ -108,9 +112,39 @@ impl EventState {
             Event::RosterRemoved { class } => {
                 self.rosters.remove(class);
             }
+            Event::ClockOffset {
+                adapter,
+                offset_micros,
+                ..
+            } => {
+                self.clock_offsets.insert(adapter.clone(), *offset_micros);
+                // A timer measured after the start still places that start, if nothing
+                // had placed it yet.
+                self.place_starts();
+            }
+            Event::RaceStarted { .. } => self.place_starts(),
             _ => {}
         }
         self.applied = offset + 1;
+    }
+
+    /// Put each started race's start on the clocks of its timers, where that is known and
+    /// not yet placed. A placed start is never moved: laps must not shift under a later,
+    /// slightly different measurement.
+    fn place_starts(&mut self) {
+        for race in self.races.iter() {
+            let Some(started_at) = race.started_at else {
+                continue;
+            };
+            for entry in &race.setup.lineup {
+                let Some(offset) = self.clock_offsets.get(&entry.adapter) else {
+                    continue;
+                };
+                self.starts_on_timer
+                    .entry((race.setup.race.clone(), entry.adapter.clone()))
+                    .or_insert(SourceTime::from_micros(started_at + offset));
+            }
+        }
     }
 
     /// Work out every phase: fields, lineups, rankings and what is complete.
@@ -118,13 +152,19 @@ impl EventState {
         self.tree.evaluate(self)
     }
 
-    /// The lap filters a heat's races are read under: from the format in force.
-    pub fn filters_for(&self, heat: &PhaseId) -> LapFilters {
-        let rules = self.tree.format_for(heat).map(|format| &format.race);
+    /// The lap filters one timer's seats in a race are read under: the rules of the format
+    /// in force, and the race's start on that timer's clock where it is known.
+    pub fn filters_for(&self, race: &Race, adapter: &AdapterId) -> LapFilters {
+        let rules = self
+            .tree
+            .format_for(&race.setup.heat)
+            .map(|format| &format.race);
         LapFilters {
             min_lap_micros: rules.and_then(|rules| rules.min_lap_micros),
-            // No timer gives the tone on its own clock yet (the OFT adapter will).
-            start_at: None,
+            start_at: self
+                .starts_on_timer
+                .get(&(race.setup.race.clone(), adapter.clone()))
+                .copied(),
             first_lap: rules.map(|rules| rules.first_lap).unwrap_or_default(),
         }
     }
@@ -483,6 +523,7 @@ impl EventState {
             | Event::SessionEnded { .. }
             | Event::SeatSeen { .. }
             | Event::Pass(_)
+            | Event::ClockOffset { .. }
             | Event::SignalChunk(_)
             | Event::SignalThresholds(_)
             | Event::SignalHistory(_)
@@ -501,7 +542,6 @@ impl Inputs for EventState {
     }
 
     fn saved_races(&self, heat: &PhaseId) -> Vec<Vec<RaceEntry>> {
-        let filters = self.filters_for(heat);
         self.races
             .of_heat(heat)
             .filter(|race| race.counts())
@@ -511,9 +551,12 @@ impl Inputs for EventState {
                     .iter()
                     .filter_map(|entry| {
                         let pilot = entry.pilot.clone()?;
-                        let laps =
-                            self.laps
-                                .seat(&race.setup.race, &entry.adapter, &entry.seat, filters);
+                        let laps = self.laps.seat(
+                            &race.setup.race,
+                            &entry.adapter,
+                            &entry.seat,
+                            self.filters_for(race, &entry.adapter),
+                        );
                         Some(RaceEntry { pilot, laps })
                     })
                     .collect()
@@ -1079,5 +1122,100 @@ mod tests {
                 .field
                 .is_empty()
         );
+    }
+
+    fn solo_heat(first_lap: FirstLap) -> Director {
+        let mut format = format(EndCondition::Open, 3 * S);
+        format.race.first_lap = first_lap;
+        let mut director = Director::default();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("heat"),
+                    label: "Heat".into(),
+                    parent: None,
+                    kind: PhaseKind::Heat {
+                        lineup: vec![HeatSeat {
+                            adapter: oft(),
+                            seat: SeatRef("seat-0".into()),
+                            source: SeatSource::Pilot(pilot("ana")),
+                        }],
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director
+    }
+
+    #[test]
+    fn a_measured_timer_clock_lets_lap_one_be_timed_from_the_tone() {
+        let mut director = solo_heat(FirstLap::FromTone);
+        // The timer booted 100 seconds after the Director's clock started.
+        director.append(
+            0,
+            Event::ClockOffset {
+                adapter: oft(),
+                offset_micros: -100 * S,
+                error_micros: 200,
+            },
+        );
+        director.now = 100 * S;
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        director.now = 110 * S;
+        // The tone was at 103 s on the Director's clock: 3 s on the timer's.
+        director.cross("seat-0", 5 * S);
+        director.cross("seat-0", 15 * S);
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        let laps = director.state.laps.seat(
+            &rid("heat#1"),
+            &oft(),
+            &SeatRef("seat-0".into()),
+            director.state.filters_for(race, &oft()),
+        );
+        let times: Vec<i64> = laps.laps().map(|lap| lap.micros()).collect();
+        assert_eq!(times, vec![2 * S, 10 * S]);
+
+        // A later, slightly different measurement does not move laps already timed.
+        director.append(
+            director.now,
+            Event::ClockOffset {
+                adapter: oft(),
+                offset_micros: -100 * S + 900,
+                error_micros: 100,
+            },
+        );
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        assert_eq!(
+            director.state.filters_for(race, &oft()).start_at,
+            Some(SourceTime::from_micros(3 * S))
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn a_timer_that_was_never_measured_falls_back_to_the_hole_shot() {
+        let mut director = solo_heat(FirstLap::FromTone);
+        director.now = 100 * S;
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        director.now = 110 * S;
+        director.cross("seat-0", 5 * S);
+        director.cross("seat-0", 15 * S);
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        let filters = director.state.filters_for(race, &oft());
+        assert_eq!(filters.start_at, None);
+        let laps =
+            director
+                .state
+                .laps
+                .seat(&rid("heat#1"), &oft(), &SeatRef("seat-0".into()), filters);
+        assert_eq!(laps.lap_count(), 1);
+        assert!(laps.hole_shot.is_some());
     }
 }

@@ -159,6 +159,9 @@ where
         _ => None,
     };
 
+    // Keep a connection to every OFT timer in the directory, for as long as the Director runs.
+    let timers = crate::oft::spawn(registry.clone());
+
     let app = build_app(registry, &assets);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -170,9 +173,11 @@ where
         log_file,
     });
 
-    axum::serve(listener, app)
+    let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
-        .await?;
+        .await;
+    timers.abort();
+    served?;
     Ok(())
 }
 
