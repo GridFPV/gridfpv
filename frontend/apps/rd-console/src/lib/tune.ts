@@ -1,5 +1,5 @@
 /**
- * The Tune page's numbers and its draft. Pure, so it can be tested alone.
+ * The Seats page's numbers and its draft. Pure, so it can be tested alone.
  *
  * A timer's settings are edited as a **draft**. Nothing reaches the timer until the director
  * presses Apply, and then the whole of the settings goes at once. This module turns the
@@ -9,8 +9,10 @@
  * The wire holds thresholds in tenths of a dB. People read dB with one decimal, so the draft
  * holds that.
  *
- * Two things are set on the timer itself and only shown here: how many seats share a receiver,
- * and the timer's own minimum lap. The minimum lap a race uses is a rule in its format.
+ * The timer's **lap cooldown** is one of its settings: after a crossing on a seat it reports
+ * no other on that seat for that long, which swallows the bounce of one pass. It is not the
+ * race's minimum lap. That is the event's lap rule, and Grid applies it to what the timer
+ * reports.
  */
 import type {
   SeatLevels,
@@ -125,6 +127,10 @@ export interface TuneDraft {
    * milliseconds. `undefined` on a timer that does not have the setting.
    */
   exitHoldMs?: FieldValue;
+  /**
+   * The lap cooldown, in seconds. `undefined` on a timer that does not have the setting.
+   */
+  lapCooldownS?: FieldValue;
 }
 
 /** Which mode a threshold is in. */
@@ -167,7 +173,10 @@ export function draftFrom(config: TimerConfig): TuneDraft {
       ...(seat.threshold ? { levels: levelsFrom(seat.threshold) } : {})
     })),
     levels: levelsFrom(config.threshold),
-    ...(config.exit_hold_ms !== undefined ? { exitHoldMs: config.exit_hold_ms } : {})
+    ...(config.exit_hold_ms !== undefined ? { exitHoldMs: config.exit_hold_ms } : {}),
+    ...(config.lap_cooldown_ms !== undefined
+      ? { lapCooldownS: msToSeconds(config.lap_cooldown_ms) }
+      : {})
   };
 }
 
@@ -270,6 +279,13 @@ export function draftConfig(
     }
     config.exit_hold_ms = exitHold;
   }
+  if (draft.lapCooldownS !== undefined) {
+    const cooldown = secondsToMs(draft.lapCooldownS);
+    if (cooldown === undefined || cooldown < 0) {
+      return problem('The lap cooldown must be a number of seconds, 0 or more.');
+    }
+    config.lap_cooldown_ms = cooldown;
+  }
 
   return { ok: true, config };
 }
@@ -285,13 +301,11 @@ function sameThreshold(a: TimerThreshold, b: TimerThreshold): boolean {
   return 'Manual' in b && a.Manual.enter === b.Manual.enter && a.Manual.exit === b.Manual.exit;
 }
 
-/**
- * Whether two sets of settings say the same thing. What is set on the timer itself is not
- * compared: Grid never changes it.
- */
+/** Whether two sets of settings say the same thing. */
 export function sameConfig(a: TimerConfig, b: TimerConfig): boolean {
   return (
     a.exit_hold_ms === b.exit_hold_ms &&
+    a.lap_cooldown_ms === b.lap_cooldown_ms &&
     sameThreshold(a.threshold, b.threshold) &&
     a.seats.length === b.seats.length &&
     a.seats.every((seat, index) => {

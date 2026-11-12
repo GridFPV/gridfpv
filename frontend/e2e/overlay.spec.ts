@@ -18,6 +18,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Locator, Page } from '@playwright/test';
+import { heatOnTimer } from './nav.js';
 import { expect, test } from './observability.js';
 
 const STAMP = Date.now();
@@ -84,11 +85,12 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
     ]);
     expect(backgrounds).toEqual(['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)', 'none']);
 
-    // ── The console: open the event, add a heat, open its Run view ───────────────────────
-    await page.goto('/#/event');
-    await expect(page.getByRole('heading', { name: EVENT, level: 1 })).toBeVisible({
+    // ── The console: the event's Phases page, add a heat, open it on the Run page ────────
+    await page.goto('/#/event/phases');
+    await expect(page.getByRole('heading', { name: 'Phases', level: 1 })).toBeVisible({
       timeout: 15_000
     });
+    await expect(page.locator('header a.event')).toContainText(EVENT);
     await page.getByRole('button', { name: '+ Add heat' }).click();
     const form = page.getByRole('form', { name: 'Add a heat' });
     await form.getByLabel('Heat name').fill(HEAT);
@@ -98,7 +100,7 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
     await page.getByRole('button', { name: 'Add heat', exact: true }).click();
     await expect(form).toBeHidden({ timeout: 15_000 });
     await page.getByRole('button', { name: `Run ${HEAT}`, exact: true }).click();
-    await expect(page.getByRole('heading', { name: HEAT, level: 1 })).toBeVisible();
+    await expect(heatOnTimer(page)).toHaveText(HEAT);
 
     // ── Start. The overlay names the heat and counts down, with both pilots listed. ──────
     await page.getByRole('button', { name: 'Start', exact: true }).click();
@@ -212,7 +214,7 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
   }
 });
 
-test('the event page lists the overlay with its URL and a live preview', async ({
+test('the Overlays page lists the overlay with its URL and a live preview', async ({
   page,
   baseURL
 }) => {
@@ -223,8 +225,11 @@ test('the event page lists the overlay with its URL and a live preview', async (
   const eventId = await createEvent(page, name);
   try {
     expect((await page.request.put('/active-event', { data: { id: eventId } })).ok()).toBe(true);
-    await page.goto('/#/event');
-    await expect(page.getByRole('heading', { name, level: 1 })).toBeVisible({ timeout: 15_000 });
+    await page.goto('/#/event/overlays');
+    await expect(page.getByRole('heading', { name: 'Overlays', level: 1 })).toBeVisible({
+      timeout: 15_000
+    });
+    await expect(page.locator('header a.event')).toContainText(name);
 
     const card = page.getByRole('region', { name: 'Race overlay' });
     const origin = new URL(baseURL ?? '').origin;

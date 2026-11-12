@@ -1,9 +1,11 @@
 <script lang="ts">
   /**
-   * RunPage — run one heat (Home › Events › ‹event› › ‹heat›).
+   * RunPage — run the heats, one at a time.
    *
-   * Top to bottom: the clock with the one big action, a card per seat, the heat's ranking,
-   * and its earlier races. The big action follows the race:
+   * Top to bottom: which heat is on the timer (a phase, then one of its heats), the clock
+   * with the one big action, a card per seat, the heat's ranking, and its earlier races.
+   * With no heat named in the URL the page opens on the heat being raced, or the next one.
+   * The big action follows the race:
    *
    *   Start → (countdown) Call off → (racing) Stop → Save or Discard → ready for the next
    *
@@ -12,25 +14,55 @@
    * heat sees the same thing. The clock runs on the Director's clock, not this browser's.
    *
    * A command the Director refuses shows its sentence in the banner at the top, as it is.
+   *
+   * The buttons have keys (`lib/shortcuts.ts`), and each new lap is spoken
+   * (`lib/callouts.ts`); both can be switched off for a browser that only shows the page.
    */
   import { onDestroy, untrack } from 'svelte';
-  import { Badge, Banner, Button, Card, Input, RaceClock, formatMicros } from '@gridfpv/components';
+  import {
+    Badge,
+    Banner,
+    Button,
+    Card,
+    Input,
+    RaceClock,
+    Select,
+    formatMicros
+  } from '@gridfpv/components';
   import type {
+    AdapterId,
     Command,
     DiscardReason,
-    EventMeta,
     PhaseId,
     PilotId,
     ProtocolError,
-    RaceId
+    RaceId,
+    SeatRef
   } from '@gridfpv/types';
-  import Brand from '../Brand.svelte';
-  import Breadcrumbs from '../Breadcrumbs.svelte';
+  import Page from '../Page.svelte';
+  import { Caller, readCalloutsOn, saveCalloutsOn } from '../lib/callouts.js';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
   import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
   import { directorEndsHeat, isRanked } from '../lib/formats.js';
-  import { currentRace, isBye, isHeat, racesOfHeat } from '../lib/phases.js';
+  import { bestLapRun, bestRunInHeat, consecutiveLaps } from '../lib/overlay.js';
+  import {
+    currentRace,
+    defaultHeat,
+    groupOfHeat,
+    heatGroups,
+    isBye,
+    isHeat,
+    racesOfHeat
+  } from '../lib/phases.js';
+  import { formatHash } from '../lib/route.js';
   import { isBench } from '../lib/seats.js';
+  import {
+    DISCARD_ARM_MS,
+    RUN_KEYS,
+    runShortcut,
+    shortcutFree,
+    type RunCaps
+  } from '../lib/shortcuts.js';
   import {
     finishOrder,
     lineupSeatRows,
@@ -44,30 +76,51 @@
   import RunSeatCard from './RunSeatCard.svelte';
 
   let {
-    event,
     live,
-    heat: heatId,
-    onhome,
-    onevents,
-    onevent,
-    onrun
+    heat: named,
+    onrun,
+    ontune
   }: {
-    event: EventMeta;
     live: EventLive;
-    /** The heat to run. A wire handle; its label is what is shown. */
-    heat: PhaseId;
-    onhome: () => void;
-    onevents: () => void;
-    /** Back to the event page. */
-    onevent: () => void;
-    /** Open another heat's Run view. */
+    /**
+     * The heat to run, when the URL names one. A wire handle; its label is what is shown.
+     * With none named the page runs the heat being raced, or the next one.
+     */
+    heat?: PhaseId;
+    /** Put another heat on the timer. */
     onrun: (heat: PhaseId) => void;
+    /** Open a seat's Tune page. */
+    ontune?: (timer: AdapterId, seat: SeatRef) => void;
   } = $props();
 
   const names = $derived(live.names);
   const view = $derived(live.view);
+  /** The heat on this page: the one named, or the one the Director would race next. */
+  const heatId = $derived(named ?? (view ? defaultHeat(view) : undefined));
   const phase = $derived(view?.phases.find((p) => p.def.id === heatId && isHeat(p.def)));
-  const races = $derived(view ? racesOfHeat(view, heatId) : []);
+  const races = $derived(view && heatId !== undefined ? racesOfHeat(view, heatId) : []);
+
+  // ── On the timer: a phase, then one of its heats ───────────────────────────
+  const groups = $derived(view ? heatGroups(view.phases) : []);
+  const group = $derived(heatId === undefined ? undefined : groupOfHeat(groups, heatId));
+  /** Moving to another phase puts its first heat that can still be raced on the timer. */
+  function pickGroup(key: string) {
+    const next = groups.find((g) => g.key === key);
+    if (!next || next.key === group?.key) return;
+    const open = next.heats.find((h) => !h.complete && !h.locked) ?? next.heats[0];
+    onrun(open.def.id);
+  }
+  /** What a heat is called in the picker: its name, and where it stands when that matters. */
+  function heatOption(heat: (typeof groups)[number]['heats'][number]): string {
+    const flown = view ? racesOfHeat(view, heat.def.id).filter((r) => r.state === 'Saved') : [];
+    if (heat.locked) return `${heat.def.label} (locked)`;
+    if (heat.complete) return `${heat.def.label} (complete)`;
+    if (heat.waiting) return `${heat.def.label} (waiting)`;
+    if (flown.length > 0) {
+      return `${heat.def.label} (${flown.length} ${flown.length === 1 ? 'race' : 'races'})`;
+    }
+    return heat.def.label;
+  }
   /** The one race in the event that is not saved or discarded yet, if any. */
   const undecided = $derived(view ? currentRace(view) : undefined);
   /** That race, when it belongs to this heat. */
@@ -77,7 +130,6 @@
   const decided = $derived(races.filter((r) => r.state === 'Saved' || r.state === 'Discarded'));
   const savedCount = $derived(races.filter((r) => r.state === 'Saved').length);
 
-  const heatLabel = $derived(phase?.def.label ?? names.phase(heatId));
   /** The number people call a race by: its place among the heat's races. Never its id. */
   const raceNumber = (id: string): number => races.findIndex((r) => r.race === id) + 1;
 
@@ -143,6 +195,21 @@
     phase && !phase.complete && !phase.locked ? timedBy.filter((t) => t.trouble !== undefined) : []
   );
   const showRanking = $derived(!!phase && isRanked(phase.format) && savedCount > 0);
+
+  // ── Best N laps in a row ───────────────────────────────────────────────────
+  /** The N of a heat ranked on its best N laps in a row, else `undefined`. */
+  const runLength = $derived(consecutiveLaps(phase?.format));
+  /** Each seat's best run in the race on screen, in row order. */
+  const runs = $derived(
+    race && runLength !== undefined
+      ? race.seats.map((seat) => bestLapRun(seat.laps, runLength))
+      : []
+  );
+  /** A pilot's best run in this heat so far: its saved races and the one on screen. */
+  const heatBest = (pilot: PilotId | undefined): number | undefined =>
+    view && heatId !== undefined && runLength !== undefined && pilot !== undefined
+      ? bestRunInHeat(view, heatId, pilot, runLength, race)
+      : undefined;
 
   // ── The clock ──────────────────────────────────────────────────────────────
   // `now` is the Director's clock. It only ticks while something is moving.
@@ -210,9 +277,73 @@
   }
 
   function start() {
+    if (heatId === undefined) return;
     // The click is what lets the browser play sound.
     unlockAudio();
     void act({ StartRace: { heat: heatId } });
+  }
+
+  // ── Lap callouts ───────────────────────────────────────────────────────────
+  const caller = new Caller();
+  let calloutsOn = $state(readCalloutsOn(globalThis.localStorage));
+  $effect(() => {
+    // A pilot's phonetic spelling, where they have one, is how their callsign is said.
+    const pilots = live.pilots;
+    caller.update(
+      race?.state === 'Running' ? race.race : undefined,
+      rows,
+      calloutsOn,
+      (row) => pilots.find((pilot) => pilot.id === row.pilot)?.phonetic
+    );
+  });
+  onDestroy(() => caller.dispose());
+  function setCallouts(on: boolean) {
+    calloutsOn = on;
+    saveCalloutsOn(globalThis.localStorage, on);
+  }
+
+  // ── Keyboard ───────────────────────────────────────────────────────────────
+  let legendOpen = $state(false);
+  /** Set by a first Discard press; a second press before it runs out discards. */
+  let discardArmed = $state(false);
+  let disarm: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(disarm));
+  const caps: RunCaps = $derived({
+    start: !race && canStart && !busy,
+    stop: !busy && (race?.state === 'Running' || race?.state === 'Staging'),
+    save: !busy && race?.state === 'Stopped',
+    discard: !busy && race?.state === 'Stopped'
+  });
+  function onkeydown(e: KeyboardEvent) {
+    if (!shortcutFree(e, document)) return;
+    const action = runShortcut(e.key, caps);
+    if (action === null) return;
+    // Space would otherwise scroll the page or press the focused button a second time.
+    e.preventDefault();
+    if (action !== 'discard') {
+      discardArmed = false;
+      clearTimeout(disarm);
+    }
+    if (action === 'legend') legendOpen = !legendOpen;
+    else if (action === 'start') start();
+    else if (action === 'save') save();
+    else if (action === 'stop' && race) {
+      void act(
+        race.state === 'Staging'
+          ? { DiscardRace: { race: race.race } }
+          : { StopRace: { race: race.race } }
+      );
+    } else if (action === 'discard' && race) {
+      if (discardArmed) {
+        discardArmed = false;
+        clearTimeout(disarm);
+        void act({ DiscardRace: { race: race.race } });
+      } else {
+        discardArmed = true;
+        clearTimeout(disarm);
+        disarm = setTimeout(() => (discardArmed = false), DISCARD_ARM_MS);
+      }
+    }
   }
 
   async function discard(reason: DiscardReason | undefined, falseStartBy?: PilotId) {
@@ -249,28 +380,14 @@
   } as const;
 </script>
 
-<div class="page">
+<svelte:window {onkeydown} />
+
+<Page
+  title="Run"
+  help="run"
+  lede="Race day in one screen: put a heat on the timer, start it, stop it, then save or discard."
+>
   <div class="page-inner">
-    <div class="brand-row"><Brand onclick={onhome} /></div>
-    <Breadcrumbs
-      crumbs={[
-        { label: 'Home', onclick: onhome },
-        { label: 'Events', onclick: onevents },
-        { label: event.name, onclick: onevent },
-        { label: heatLabel }
-      ]}
-    />
-
-    <header class="page-head">
-      <h1 class="page-title">{heatLabel}</h1>
-      {#if phase?.format}<span class="format">{phase.format.name}</span>{/if}
-      {#if timedBy.length > 0}
-        <span class="format" data-testid="timed-by">
-          Timed by {timedBy.map((t) => t.name).join(', ')}
-        </span>
-      {/if}
-    </header>
-
     <ErrorBanner {error} ondismiss={() => (error = undefined)} />
     {#if live.loadError}
       <ErrorBanner error={{ code: 'Internal', message: live.loadError }} />
@@ -282,15 +399,62 @@
 
     {#if !view}
       {#if !live.loadError}<p class="muted" role="status">Loading…</p>{/if}
+    {:else if groups.length === 0}
+      <Card elevation="sm">
+        <p class="muted" data-testid="no-heats">
+          There is no heat to run yet.
+          <a href={formatHash({ kind: 'event', section: 'phases' })}>Add one on the Phases page.</a>
+        </p>
+      </Card>
     {:else if !phase}
       <Card elevation="sm">
         <p class="muted">This heat is not in the event.</p>
-        <Button onclick={onevent}>Back to the event</Button>
+        <Button onclick={() => view && onrun(defaultHeat(view) ?? groups[0].heats[0].def.id)}>
+          Go to the next heat
+        </Button>
       </Card>
     {:else}
       <Card elevation="sm">
         <div class="timerhead">
           <div class="what">
+            <div class="on-timer">
+              <span class="eyebrow">On the timer</span>
+              <div class="pickers">
+                <Select
+                  aria-label="Phase"
+                  value={group?.key ?? ''}
+                  disabled={!!race}
+                  onchange={(e: Event) => pickGroup((e.currentTarget as HTMLSelectElement).value)}
+                >
+                  {#each groups as g (g.key)}
+                    <option value={g.key}>{g.label}</option>
+                  {/each}
+                </Select>
+                <Select
+                  aria-label="Heat"
+                  value={heatId}
+                  disabled={!!race}
+                  onchange={(e: Event) => onrun((e.currentTarget as HTMLSelectElement).value)}
+                >
+                  {#each group?.heats ?? [] as h (h.def.id)}
+                    <option value={h.def.id}>{heatOption(h)}</option>
+                  {/each}
+                </Select>
+              </div>
+              <p class="rules" data-testid="run-rules">
+                {#if phase.format}
+                  <a href={formatHash({ kind: 'page', page: 'formats' })}>{phase.format.name}</a>
+                {:else}
+                  No format
+                {/if}
+                {#if timedBy.length > 0}
+                  <span aria-hidden="true">·</span>
+                  <span data-testid="timed-by">
+                    Timed by {timedBy.map((t) => t.name).join(', ')}
+                  </span>
+                {/if}
+              </p>
+            </div>
             <span class="eyebrow">
               {#if race}
                 Race {raceNumber(race.race)}
@@ -327,7 +491,7 @@
             </p>
             {#if elsewhere && !race}
               <Button size="sm" onclick={() => onrun(elsewhere.heat)}>
-                Open {names.phase(elsewhere.heat)}
+                Go to {names.phase(elsewhere.heat)}
               </Button>
             {/if}
             {#if endHeat}
@@ -335,7 +499,8 @@
                 size="sm"
                 variant="secondary"
                 disabled={busy}
-                onclick={() => act({ Record: { HeatDone: { heat: heatId } } })}>{endHeat}</Button
+                onclick={() => act({ Record: { HeatDone: { heat: phase.def.id } } })}
+                >{endHeat}</Button
               >
             {/if}
           </div>
@@ -382,7 +547,8 @@
                   variant="ghost"
                   size="lg"
                   disabled={busy}
-                  onclick={() => (discardTarget = race.race)}>Discard</Button
+                  onclick={() => (discardTarget = race.race)}
+                  >{discardArmed ? 'Discard (d again)' : 'Discard'}</Button
                 >
               {/if}
             </div>
@@ -408,9 +574,48 @@
         </div>
       </Card>
 
+      <div class="options">
+        <label class="option">
+          <input
+            type="checkbox"
+            checked={calloutsOn}
+            onchange={(e) => setCallouts(e.currentTarget.checked)}
+          />
+          Call out laps
+        </label>
+        <button
+          type="button"
+          class="linkish"
+          aria-expanded={legendOpen}
+          onclick={() => (legendOpen = !legendOpen)}>Keyboard shortcuts</button
+        >
+      </div>
+      {#if legendOpen}
+        <dl class="legend" data-testid="run-keys">
+          {#each RUN_KEYS as entry (entry.does)}
+            <div>
+              <dt>
+                {#each entry.keys as key, index (index)}<kbd>{key}</kbd>{/each}
+              </dt>
+              <dd>{entry.does}</dd>
+            </div>
+          {/each}
+        </dl>
+      {/if}
+
       <ul class="seats" aria-label="Seats">
-        {#each rows as row (`${row.adapter}/${row.seat}`)}
-          <RunSeatCard {row} racing={race?.state === 'Running'} oncrossing={() => crossing(row)} />
+        {#each rows as row, index (`${row.adapter}/${row.seat}`)}
+          <RunSeatCard
+            {row}
+            racing={race?.state === 'Running'}
+            {runLength}
+            run={runs[index]}
+            heatBestMicros={heatBest(row.pilot)}
+            tuneHref={ontune && !row.bench
+              ? formatHash({ kind: 'capture', timer: row.adapter, seat: row.seat })
+              : undefined}
+            oncrossing={() => crossing(row)}
+          />
         {/each}
       </ul>
 
@@ -421,8 +626,14 @@
               <li>
                 <span class="place">{placed.position}</span>
                 <span class="who">{names.pilot(placed.pilot)}</span>
+                {#if runLength !== undefined}
+                  <span class="num strong" data-stat="rank-run">
+                    best {runLength}
+                    {formatMicros(heatBest(placed.pilot))}
+                  </span>
+                {/if}
                 <span class="num">{placed.laps} {placed.laps === 1 ? 'lap' : 'laps'}</span>
-                <span class="num">best {formatMicros(placed.best_lap_micros)}</span>
+                <span class="num">best lap {formatMicros(placed.best_lap_micros)}</span>
                 {#if placed.disqualified}<Badge tone="danger">Disqualified</Badge>{/if}
                 {#if !placed.flew}<Badge tone="neutral">Did not fly</Badge>{/if}
               </li>
@@ -455,6 +666,11 @@
                 {#if past.note}<span class="muted">{past.note}</span>{/if}
                 {#if past.state === 'Saved' && !past.locked}
                   <span class="past-action">
+                    <a
+                      class="fix"
+                      href={formatHash({ kind: 'marshal', race: past.race })}
+                      aria-label="Fix the laps of race {raceNumber(past.race)}">Fix the laps</a
+                    >
                     <Button
                       size="sm"
                       variant="ghost"
@@ -471,7 +687,7 @@
       {/if}
     {/if}
   </div>
-</div>
+</Page>
 
 {#if discarding}
   <DiscardDialog
@@ -484,35 +700,85 @@
 {/if}
 
 <style>
-  .brand-row {
-    margin-bottom: var(--gf-space-4);
-  }
-  .page {
-    min-height: 100vh;
-    padding: var(--gf-space-6) var(--gf-space-8) var(--gf-space-8);
-    color: var(--gf-text);
-    font-family: var(--gf-font-family);
-    overflow: auto;
-  }
   .page-inner {
-    width: min(72rem, 100%);
-    margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-5);
-  }
-  .page-head {
-    display: flex;
-    align-items: baseline;
     gap: var(--gf-space-4);
-    flex-wrap: wrap;
   }
-  .page-title {
+  .on-timer {
+    display: grid;
+    gap: var(--gf-space-2);
+    width: 100%;
+    margin-bottom: var(--gf-space-3);
+  }
+  .pickers {
+    display: grid;
+    gap: var(--gf-space-2);
+  }
+  .rules {
     margin: 0;
-    font-size: var(--gf-font-size-2xl);
-    letter-spacing: var(--gf-tracking-tight);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
   }
-  .format,
+  .rules a,
+  .muted a,
+  .fix {
+    color: var(--gf-accent);
+  }
+  .options {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-5);
+    flex-wrap: wrap;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
+  }
+  .option {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  .linkish {
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: var(--gf-accent);
+    cursor: pointer;
+  }
+  .linkish:focus-visible {
+    outline: none;
+    box-shadow: var(--gf-focus-ring);
+  }
+  .legend {
+    margin: 0;
+    display: grid;
+    gap: var(--gf-space-1);
+    font-size: var(--gf-font-size-sm);
+  }
+  .legend div {
+    display: grid;
+    grid-template-columns: 6rem 1fr;
+    gap: var(--gf-space-3);
+    align-items: baseline;
+  }
+  .legend dd {
+    margin: 0;
+    color: var(--gf-text-secondary);
+  }
+  kbd {
+    display: inline-block;
+    margin-right: var(--gf-space-1);
+    padding: 0 0.4em;
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-xs);
+    background: var(--gf-surface-sunken);
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-xs);
+  }
   .muted {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
@@ -600,6 +866,10 @@
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-secondary);
   }
+  .num.strong {
+    color: var(--gf-text);
+    font-weight: var(--gf-font-weight-bold);
+  }
   .result {
     display: flex;
     gap: var(--gf-space-1) var(--gf-space-4);
@@ -608,6 +878,10 @@
   }
   .past-action {
     margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+    font-size: var(--gf-font-size-sm);
   }
   .save-options {
     width: min(22rem, 100%);

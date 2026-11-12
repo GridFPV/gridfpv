@@ -23,7 +23,7 @@ afterEach(() => vi.useRealTimers());
 describe('TimersPage', () => {
   it('says no timer is added yet, and that the bench seats still work', async () => {
     const { session } = makeTestSession({ noEnter: true });
-    render(TimersPage, { session, onhome: vi.fn() });
+    render(TimersPage, { session });
     expect(
       await screen.findByText('No timer is added yet. Heats can still be run on the bench seats.')
     ).toBeVisible();
@@ -34,7 +34,7 @@ describe('TimersPage', () => {
       noEnter: true,
       listTimersImpl: vi.fn(async () => [GATE, OFF])
     });
-    render(TimersPage, { session, onhome: vi.fn() });
+    render(TimersPage, { session });
 
     const gate = await screen.findByRole('listitem', { name: 'Gate' });
     expect(gate).toHaveTextContent('192.168.1.50:7270');
@@ -69,7 +69,7 @@ describe('TimersPage', () => {
       listTimersImpl: vi.fn(async () => [...list]),
       createTimerImpl
     });
-    render(TimersPage, { session, onhome: vi.fn() });
+    render(TimersPage, { session });
 
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
     const form = await screen.findByRole('form', { name: 'Add timer' });
@@ -103,7 +103,7 @@ describe('TimersPage', () => {
         throw Object.assign(new Error(REFUSED), { status: 400 });
       })
     });
-    render(TimersPage, { session, onhome: vi.fn() });
+    render(TimersPage, { session });
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
     const form = await screen.findByRole('form', { name: 'Add timer' });
     await fireEvent.input(within(form).getByLabelText('Name'), { target: { value: 'Gate' } });
@@ -123,9 +123,9 @@ describe('TimersPage', () => {
       listTimersImpl: vi.fn(async () => [...list]),
       deleteTimerImpl
     });
-    render(TimersPage, { session, onhome: vi.fn() });
+    render(TimersPage, { session });
     const gate = await screen.findByRole('listitem', { name: 'Gate' });
-    await fireEvent.click(within(gate).getByRole('button', { name: 'Remove' }));
+    await fireEvent.click(within(gate).getByRole('button', { name: /^Remove / }));
     expect(deleteTimerImpl).not.toHaveBeenCalled();
     await fireEvent.click(within(gate).getByRole('button', { name: 'Confirm' }));
     await waitFor(() =>
@@ -134,16 +134,43 @@ describe('TimersPage', () => {
     await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Gate' })).toBeNull());
   });
 
-  it("opens a timer's Tune page from its row, by the timer's id", async () => {
+  it("opens a timer's seats and settings from its row, by the timer's id", async () => {
+    const RH: TimerView = {
+      timer: { id: 'rh-pi-4c1d', name: 'Club Pi', kind: 'RotorHazard', address: '10.0.0.5:5000' },
+      status: { connected: true, seats: ['0'] }
+    };
     const { session } = makeTestSession({
       noEnter: true,
-      listTimersImpl: vi.fn(async () => [GATE, OFF])
+      listTimersImpl: vi.fn(async () => [GATE, OFF, RH])
     });
     const ontune = vi.fn();
-    render(TimersPage, { session, onhome: vi.fn(), ontune });
+    render(TimersPage, { session, ontune });
     const off = await screen.findByRole('listitem', { name: 'Far Gate' });
-    await fireEvent.click(within(off).getByRole('button', { name: 'Tune' }));
+    await fireEvent.click(within(off).getByRole('button', { name: 'Settings' }));
     expect(ontune).toHaveBeenCalledWith('far-gate-9zz0');
+    // A RotorHazard timer's seats are set on its own pages, so its row offers none.
+    const rh = screen.getByRole('listitem', { name: 'Club Pi' });
+    expect(within(rh).queryByRole('button', { name: 'Settings' })).toBeNull();
+    expect(within(rh).getByRole('button', { name: /^Remove / })).toBeVisible();
+  });
+
+  it('sits beside Seats in one tab row, and is the current tab', async () => {
+    const { session } = makeTestSession({ noEnter: true });
+    render(TimersPage, { session });
+    const tabs = within(screen.getByRole('navigation', { name: 'Seats and timers' })).getAllByRole(
+      'link'
+    );
+    expect(
+      tabs.map((tab) => [
+        tab.textContent,
+        tab.getAttribute('href'),
+        tab.getAttribute('aria-current')
+      ])
+    ).toEqual([
+      ['Seats', '#/seats', null],
+      ['Timers', '#/timers', 'page']
+    ]);
+    expect(screen.getByRole('heading', { level: 1, name: /Timers/ })).toBeVisible();
   });
 
   it('reads both lists every 2 seconds while open, and stops when it closes', async () => {
@@ -155,7 +182,7 @@ describe('TimersPage', () => {
       listTimersImpl,
       listDiscoveredTimersImpl
     });
-    const { unmount } = render(TimersPage, { session, onhome: vi.fn() });
+    const { unmount } = render(TimersPage, { session });
     await vi.advanceTimersByTimeAsync(0);
     expect(listTimersImpl).toHaveBeenCalledTimes(1);
     expect(listDiscoveredTimersImpl).toHaveBeenCalledTimes(1);
@@ -189,7 +216,7 @@ describe('TimersPage', () => {
 
     it('says where found timers show up when there is none', async () => {
       const { session } = makeTestSession({ noEnter: true });
-      render(TimersPage, { session, onhome: vi.fn() });
+      render(TimersPage, { session });
       expect(screen.getByRole('heading', { name: 'Found on the network' })).toBeVisible();
       expect(await screen.findByText(NONE)).toBeVisible();
       expect(screen.queryByRole('list', { name: 'Found on the network' })).toBeNull();
@@ -206,7 +233,7 @@ describe('TimersPage', () => {
           { ...FAR, name: 'Solo', address: '10.0.0.3:7270', seats: 1 }
         ])
       });
-      render(TimersPage, { session, onhome: vi.fn() });
+      render(TimersPage, { session });
       const far = await waitFor(() =>
         within(foundList()).getByRole('listitem', { name: 'Far Gate' })
       );
@@ -232,7 +259,7 @@ describe('TimersPage', () => {
         listTimersImpl: vi.fn(async () => [GATE]),
         listDiscoveredTimersImpl: vi.fn(async () => [KNOWN])
       });
-      render(TimersPage, { session, onhome: vi.fn() });
+      render(TimersPage, { session });
       expect(await screen.findByText(NONE)).toBeVisible();
       expect(screen.queryByText('oft-gate')).toBeNull();
     });
@@ -257,7 +284,7 @@ describe('TimersPage', () => {
         listDiscoveredTimersImpl: vi.fn(async () => found),
         createTimerImpl
       });
-      render(TimersPage, { session, onhome: vi.fn() });
+      render(TimersPage, { session });
       const far = await waitFor(() =>
         within(foundList()).getByRole('listitem', { name: 'Far Gate' })
       );
@@ -292,7 +319,7 @@ describe('TimersPage', () => {
           throw Object.assign(new Error(REFUSED), { status: 400 });
         })
       });
-      render(TimersPage, { session, onhome: vi.fn() });
+      render(TimersPage, { session });
       const far = await waitFor(() =>
         within(foundList()).getByRole('listitem', { name: 'Far Gate' })
       );
@@ -313,7 +340,7 @@ describe('TimersPage', () => {
           throw new Error(SAID_NO);
         })
       });
-      render(TimersPage, { session, onhome: vi.fn() });
+      render(TimersPage, { session });
       expect(await screen.findByText(SAID_NO)).toBeVisible();
       // The timer list is still shown.
       expect(screen.getByRole('listitem', { name: 'Gate' })).toBeVisible();

@@ -255,28 +255,6 @@ impl Link {
                                 status.seat_thresholds = capabilities.config.seat_thresholds;
                                 status.keeps_settings = capabilities.config.persist;
                             });
-                            // A timer that comes back in the middle of a race (a power
-                            // cycle, a dropped link) may be on its own minimum lap again.
-                            // Put the race's back, as the start of the race did.
-                            if let Some(race) = self.registry.race_now()
-                                && race.timers.contains(&self.id)
-                            {
-                                let directory = self.registry.timers();
-                                let id = self.id.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = gridfpv_server::timers::match_min_lap(
-                                        &directory,
-                                        &id,
-                                        race.min_lap_ms,
-                                    )
-                                    .await
-                                    {
-                                        eprintln!(
-                                            "WARNING: timer {id:?} came back mid-race and its minimum lap could not be set: {e}"
-                                        );
-                                    }
-                                });
-                            }
                         }
                         OftMessage::Pong { time_us } => {
                             if let Some(sent) = ping_sent.take() {

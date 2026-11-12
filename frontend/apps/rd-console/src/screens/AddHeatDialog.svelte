@@ -1,7 +1,10 @@
 <script lang="ts">
   /**
-   * AddHeatDialog — add one heat to the event: a name, what times it, the pilots in seat
-   * order, a format.
+   * AddHeatDialog — add one heat to the event: a name, the phase it goes under, what times
+   * it, the pilots in seat order, a format.
+   *
+   * The format is one of the saved formats, copied into the heat. Under a phase that has a
+   * format the heat can simply use that one, and then carries none of its own.
    *
    * "Timed by" lists every seat source by name (`lib/seats.ts`): each timer, then the Bench.
    * The seats on offer, and so the most pilots the heat can hold, follow the one chosen.
@@ -13,23 +16,22 @@
   import { Banner, Button, Dialog, Field, Input, Select } from '@gridfpv/components';
   import type { AdapterId, HeatSeat, PhaseDef, PilotId } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import {
-    BUILT_IN_FORMATS,
-    LIMIT_CHOICES,
-    STOP_CHOICES,
-    canHaveLimit,
-    canStopItself,
-    formatByKey,
-    withLimitChoice,
-    withMinLap,
-    withStopChoice
-  } from '../lib/formats.js';
-  import { newPhaseId } from '../lib/phases.js';
+  import { holderChoices, newPhaseId } from '../lib/phases.js';
   import { canChoose, chosenSource, sourceOptionLabel } from '../lib/seats.js';
   import { rosterPrefill } from '../lib/rulings.js';
+  import FormatPicker from './FormatPicker.svelte';
   import PilotPicker from './PilotPicker.svelte';
 
-  let { live, onclose }: { live: EventLive; onclose: () => void } = $props();
+  let {
+    live,
+    under,
+    onclose
+  }: {
+    live: EventLive;
+    /** The phase the heat starts under, when it was opened from one. */
+    under?: PhaseDef['id'];
+    onclose: () => void;
+  } = $props();
 
   let name = $state('');
   let chosen = $state<PilotId[]>([]);
@@ -37,11 +39,14 @@
   let pickedSource = $state<AdapterId | undefined>(undefined);
   const source = $derived(chosenSource(live.seatSources, pickedSource));
   const seats = $derived(source.seats);
-  let formatKey = $state(BUILT_IN_FORMATS[0].key);
-  let stopKey = $state(STOP_CHOICES[0].key);
-  let limitKey = $state(LIMIT_CHOICES[0].key);
-  /** The minimum lap time in seconds, as typed. Empty means none. */
-  let minLap = $state<number | string>('');
+  // svelte-ignore state_referenced_locally
+  let parent = $state(under ?? '');
+  const holders = $derived(holderChoices(live.view?.phases ?? []));
+  /** The format a heat under the chosen phase gets without one of its own. */
+  const inherited = $derived(holders.find((holder) => holder.id === parent)?.format);
+  /** The saved format picked. `''` is "use the phase's" where there is one. */
+  let formatId = $state<string | undefined>(undefined);
+  const formatValue = $derived(formatId ?? (inherited ? '' : (live.formats[0]?.id ?? '')));
   let busy = $state(false);
   let nameError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
@@ -50,6 +55,7 @@
   $effect(() => {
     void live.reloadPilots();
     void live.reloadTimers();
+    void live.reloadFormats();
   });
 
   /** The classes at the event, as a shortcut for picking pilots. */
@@ -78,11 +84,9 @@
       error = `${source.name} has ${seats.length} ${seats.length === 1 ? 'seat' : 'seats'}. Take out ${chosen.length - seats.length} of the pilots.`;
       return;
     }
-    const picked = formatByKey(formatKey);
-    if (!picked) return;
-    const format = withMinLap(withLimitChoice(withStopChoice(picked, stopKey), limitKey), minLap);
-    if (!format) {
-      error = 'The minimum lap time must be 0 seconds or more.';
+    const format = live.formats.find((saved) => saved.id === formatValue)?.format;
+    if (!format && !inherited) {
+      error = 'Pick a format. It says how the race ends and how the heat is ranked.';
       return;
     }
     const lineup: HeatSeat[] = chosen.map((pilot, index) => ({
@@ -90,7 +94,13 @@
       seat: seats[index].seat,
       source: { Pilot: pilot }
     }));
-    const def: PhaseDef = { id: newPhaseId(label), label, kind: { Heat: { lineup } }, format };
+    const def: PhaseDef = {
+      id: newPhaseId(label),
+      label,
+      kind: { Heat: { lineup } },
+      ...(parent ? { parent } : {}),
+      ...(format ? { format } : {})
+    };
     busy = true;
     try {
       if (await live.send({ Record: { PhaseDefined: { def } } })) onclose();
@@ -113,6 +123,18 @@
         autocomplete="off"
       />
     </Field>
+    {#if holders.length > 0}
+      <Field label="Under" hint="The phase it belongs to. Leave it at the top if it stands alone.">
+        <Select bind:value={parent} aria-label="Under" disabled={busy}>
+          <option value="">The top of the event</option>
+          {#each holders as holder (holder.id)}
+            <option value={holder.id} disabled={holder.locked}>
+              {holder.label}{holder.locked ? ' (locked)' : ''}
+            </option>
+          {/each}
+        </Select>
+      </Field>
+    {/if}
     <Field
       label="Timed by"
       hint={source.bench
@@ -162,45 +184,13 @@
         disabled={busy}
       />
     </Field>
-    <Field label="Format">
-      <Select bind:value={formatKey} aria-label="Format" disabled={busy}>
-        {#each BUILT_IN_FORMATS as choice (choice.key)}
-          <option value={choice.key}>{choice.label}</option>
-        {/each}
-      </Select>
-    </Field>
-    {#if canStopItself(formatByKey(formatKey))}
-      <Field label="The race stops">
-        <Select bind:value={stopKey} aria-label="The race stops" disabled={busy}>
-          {#each STOP_CHOICES as choice (choice.key)}
-            <option value={choice.key}>{choice.label}</option>
-          {/each}
-        </Select>
-      </Field>
-    {/if}
-    {#if canHaveLimit(formatByKey(formatKey))}
-      <Field label="Time limit">
-        <Select bind:value={limitKey} aria-label="Time limit" disabled={busy}>
-          {#each LIMIT_CHOICES as choice (choice.key)}
-            <option value={choice.key}>{choice.label}</option>
-          {/each}
-        </Select>
-      </Field>
-    {/if}
-    <Field
-      label="Minimum lap time (seconds)"
-      hint="A crossing sooner than this after a pilot's last one is not counted as a lap. Leave empty for no minimum."
-    >
-      <Input
-        type="number"
-        inputmode="decimal"
-        min="0"
-        step="0.1"
-        aria-label="Minimum lap time, in seconds"
-        bind:value={minLap}
-        disabled={busy}
-      />
-    </Field>
+    <FormatPicker
+      formats={live.formats}
+      bind:value={() => formatValue, (id) => (formatId = id)}
+      none={inherited ? `The phase's: ${inherited.name}` : undefined}
+      noneSummary={inherited ? "The heat follows its phase's format." : undefined}
+      disabled={busy}
+    />
     {#if error}
       <Banner tone="danger">{error}</Banner>
     {/if}

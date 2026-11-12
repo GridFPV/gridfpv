@@ -5,11 +5,14 @@
 import type {
   EventView,
   Format,
+  LapView,
   PhaseId,
   PhaseView,
   PilotId,
+  PlacedView,
   RaceSeatView,
   RaceView,
+  SavedFormat,
   SeatWhoView,
   TimerStatus,
   TimerView
@@ -21,6 +24,36 @@ export const FIRST_TO_3: Format = {
   completion: { SavedRaces: 1 },
   ranking: { sort: ['LastFinish'] }
 };
+
+/** An unranked format the director ends by hand: practice. */
+export const OPEN_PRACTICE: Format = {
+  name: 'Open practice',
+  race: { end: 'Open', staging_micros: 0, first_lap: 'HoleShot' },
+  completion: 'DirectorDecides'
+};
+
+/** A timed, ranked format: two minutes, best three laps in a row. */
+export const TWO_MINUTE_QUALI: Format = {
+  name: '2 minute qualifying',
+  race: {
+    end: { Timed: { micros: 120_000_000, grace_micros: 10_000_000 } },
+    staging_micros: 5_000_000,
+    first_lap: 'HoleShot'
+  },
+  completion: { SavedRaces: 3 },
+  ranking: { sort: [{ BestConsecutive: 3 }] }
+};
+
+/**
+ * The saved formats the screen tests read. The ids are made to look like the Director's, so a
+ * leak of one is easy to spot. Practice is first on purpose: a picker that just takes the
+ * first format must not pass a test that expects a ranked one.
+ */
+export const SAVED_FORMATS: SavedFormat[] = [
+  { id: 'fmt-practice-9k2d', format: OPEN_PRACTICE },
+  { id: 'fmt-first3-7q1x', format: FIRST_TO_3 },
+  { id: 'fmt-quali-4m8z', format: TWO_MINUTE_QUALI }
+];
 
 const base = {
   locked: false,
@@ -90,6 +123,38 @@ export function raceSeat(
   };
 }
 
+/** One counted lap of `seconds` seconds. The crossing number is its handle in the log. */
+export function lap(crossing: number, seconds: number, over: Partial<LapView> = {}): LapView {
+  return {
+    crossing,
+    started_at: 0,
+    ended_at: seconds * 1_000_000,
+    micros: seconds * 1_000_000,
+    restart: false,
+    timer_restarted: false,
+    ...over
+  };
+}
+
+/** One pilot's place in a ranking. */
+export function placed(
+  pilot: PilotId,
+  position: number,
+  over: Partial<PlacedView> = {}
+): PlacedView {
+  return {
+    pilot,
+    position,
+    disqualified: false,
+    position_set: false,
+    flew: true,
+    wins: 0,
+    points: 0,
+    laps: 0,
+    ...over
+  };
+}
+
 export function race(
   heatId: PhaseId,
   number: number,
@@ -138,6 +203,7 @@ export function eventView(over: Partial<EventView> = {}): EventView {
     protests: [],
     queue: [],
     proposed_disqualifications: [],
+    lap_rules: {},
     ...over
   };
 }

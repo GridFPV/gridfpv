@@ -5,9 +5,14 @@ import type {
   CreatePilotRequest,
   DiscoveredTimer,
   EventMeta,
+  Format,
   Pilot,
+  SavedFormat,
+  SeatProfile,
+  SeatProfileRequest,
   Timer,
   TimerConfig,
+  TimerProfiles,
   TimerView
 } from '@gridfpv/types';
 import { Session, type SessionApi } from '../src/lib/session.svelte.js';
@@ -585,6 +590,436 @@ describe('Session', () => {
         deleteClass: vi.fn().mockRejectedValue(refusal(404, 'That class no longer exists.'))
       });
       await expect(failing.deleteClass('c1')).rejects.toThrow(/That class no longer exists\./);
+    });
+  });
+
+  describe('updateEvent', () => {
+    const RENAMED: EventMeta = { ...EVENT_A, name: 'Saturday Series', location: 'Back field' };
+    const REQUEST = { name: 'Saturday Series', location: 'Back field' };
+    const eventSession = (overrides?: SessionOverrides) =>
+      new Session({ baseUrl: 'http://d.local', autoRestore: false, api: { ...overrides } });
+
+    it('updateEvent sends the name and details with the held token and returns the event as it now is', async () => {
+      const updateEvent = vi.fn(async () => RENAMED);
+      const session = eventSession({ updateEvent });
+      session.setToken('tok');
+      expect(await session.updateEvent('evt-a', REQUEST)).toEqual(RENAMED);
+      expect(updateEvent).toHaveBeenCalledOnce();
+      expect(updateEvent).toHaveBeenCalledWith('http://d.local', 'evt-a', REQUEST, 'tok');
+    });
+
+    it('updateEvent makes the open event follow when it is the one that changed', async () => {
+      const session = eventSession({ updateEvent: vi.fn(async () => RENAMED) });
+      session.selectEvent(EVENT_A);
+      await session.updateEvent('evt-a', REQUEST);
+      expect(session.currentEvent).toEqual(RENAMED);
+    });
+
+    it('updateEvent leaves the open event alone when a different event changed', async () => {
+      const other: EventMeta = { id: 'evt-b', name: 'Sunday', created_at: 2, persistent: true };
+      const changed: EventMeta = { ...other, name: 'Sunday Finals' };
+      const session = eventSession({ updateEvent: vi.fn(async () => changed) });
+      session.selectEvent(EVENT_A);
+      expect(await session.updateEvent('evt-b', { name: 'Sunday Finals' })).toEqual(changed);
+      expect(session.currentEvent).toEqual(EVENT_A);
+
+      // And with no event open, none is opened.
+      const closed = eventSession({ updateEvent: vi.fn(async () => changed) });
+      await closed.updateEvent('evt-b', { name: 'Sunday Finals' });
+      expect(closed.currentEvent).toBeUndefined();
+    });
+
+    it('updateEvent sends without a token first, then prompts once when refused for auth', async () => {
+      const updateEvent = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
+        .mockResolvedValueOnce(RENAMED);
+      const provider = vi.fn(async () => 'tok');
+      const session = eventSession({ updateEvent });
+      session.setTokenProvider(provider);
+      session.selectEvent(EVENT_A);
+      expect(await session.updateEvent('evt-a', REQUEST)).toEqual(RENAMED);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(updateEvent).toHaveBeenCalledTimes(2);
+      expect(updateEvent).toHaveBeenNthCalledWith(1, 'http://d.local', 'evt-a', REQUEST, undefined);
+      expect(updateEvent).toHaveBeenNthCalledWith(2, 'http://d.local', 'evt-a', REQUEST, 'tok');
+      expect(session.currentEvent).toEqual(RENAMED);
+    });
+
+    it('updateEvent resolves undefined and keeps the open event when the token prompt is cancelled', async () => {
+      const updateEvent = vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'));
+      const session = eventSession({ updateEvent });
+      session.setTokenProvider(async () => undefined);
+      session.selectEvent(EVENT_A);
+      expect(await session.updateEvent('evt-a', REQUEST)).toBeUndefined();
+      expect(updateEvent).toHaveBeenCalledTimes(1);
+      expect(session.currentEvent).toEqual(EVENT_A);
+    });
+
+    it("updateEvent throws the Director's sentence for an empty name, with no prompt, and keeps the open event", async () => {
+      const SAID = 'An event needs a name.';
+      const provider = vi.fn(async () => 'tok');
+      const session = eventSession({
+        updateEvent: vi.fn().mockRejectedValue(refusal(400, SAID))
+      });
+      session.setTokenProvider(provider);
+      session.selectEvent(EVENT_A);
+      await expect(session.updateEvent('evt-a', { name: '' })).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+      expect(session.currentEvent).toEqual(EVENT_A);
+    });
+  });
+
+  describe('saved formats', () => {
+    const FORMAT: Format = {
+      name: '2 minute qualifying',
+      race: { end: { FirstToLaps: 3 }, staging_micros: 5_000_000, first_lap: 'HoleShot' },
+      completion: { SavedRaces: 1 },
+      ranking: { sort: ['LastFinish'] }
+    };
+    const SAVED: SavedFormat = { id: 'fmt-1a2b', format: FORMAT };
+    const formatSession = (overrides?: SessionOverrides) =>
+      new Session({ baseUrl: 'http://d.local', autoRestore: false, api: { ...overrides } });
+
+    it('listFormats reads the saved formats open (no token)', async () => {
+      const listFormats = vi.fn(async () => [SAVED]);
+      const session = formatSession({ listFormats });
+      expect(await session.listFormats()).toEqual([SAVED]);
+      expect(listFormats).toHaveBeenCalledWith('http://d.local', { token: undefined });
+    });
+
+    it('listFormats throws when the read fails', async () => {
+      const session = formatSession({
+        listFormats: vi.fn(async () => {
+          throw new Error('fetch failed');
+        })
+      });
+      await expect(session.listFormats()).rejects.toThrow('fetch failed');
+    });
+
+    it('createFormat sends without a token first, then prompts once when refused for auth', async () => {
+      const createFormat = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
+        .mockResolvedValueOnce(SAVED);
+      const provider = vi.fn(async () => 'tok');
+      const session = formatSession({ createFormat });
+      session.setTokenProvider(provider);
+      expect(await session.createFormat(FORMAT)).toEqual(SAVED);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(createFormat).toHaveBeenCalledTimes(2);
+      expect(createFormat).toHaveBeenNthCalledWith(1, 'http://d.local', FORMAT, undefined);
+      expect(createFormat).toHaveBeenNthCalledWith(2, 'http://d.local', FORMAT, 'tok');
+    });
+
+    it("createFormat throws the Director's sentence for a name already taken, with no prompt", async () => {
+      const SAID = 'There is already a format called 2 minute qualifying.';
+      const provider = vi.fn(async () => 'tok');
+      const session = formatSession({
+        createFormat: vi.fn().mockRejectedValue(refusal(409, SAID))
+      });
+      session.setTokenProvider(provider);
+      await expect(session.createFormat(FORMAT)).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    it('createFormat resolves undefined when the token prompt is cancelled', async () => {
+      const createFormat = vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'));
+      const session = formatSession({ createFormat });
+      session.setTokenProvider(async () => undefined);
+      expect(await session.createFormat(FORMAT)).toBeUndefined();
+      expect(createFormat).toHaveBeenCalledTimes(1);
+    });
+
+    it('updateFormat sends the id and the format with the held token and returns the saved format', async () => {
+      const renamed: SavedFormat = { id: 'fmt-1a2b', format: { ...FORMAT, name: 'Qualifying' } };
+      const updateFormat = vi.fn(async () => renamed);
+      const session = formatSession({ updateFormat });
+      session.setToken('tok');
+      expect(await session.updateFormat('fmt-1a2b', renamed.format)).toEqual(renamed);
+      expect(updateFormat).toHaveBeenCalledOnce();
+      expect(updateFormat).toHaveBeenCalledWith(
+        'http://d.local',
+        'fmt-1a2b',
+        renamed.format,
+        'tok'
+      );
+    });
+
+    it('updateFormat prompts once when refused for auth, and throws any other refusal as written', async () => {
+      const updateFormat = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
+        .mockResolvedValueOnce(SAVED);
+      const session = formatSession({ updateFormat });
+      session.setTokenProvider(async () => 'tok');
+      expect(await session.updateFormat('fmt-1a2b', FORMAT)).toEqual(SAVED);
+      expect(updateFormat).toHaveBeenNthCalledWith(
+        1,
+        'http://d.local',
+        'fmt-1a2b',
+        FORMAT,
+        undefined
+      );
+      expect(updateFormat).toHaveBeenNthCalledWith(2, 'http://d.local', 'fmt-1a2b', FORMAT, 'tok');
+
+      const SAID = 'That format no longer exists.';
+      const provider = vi.fn(async () => 'tok');
+      const failing = formatSession({
+        updateFormat: vi.fn().mockRejectedValue(refusal(404, SAID))
+      });
+      failing.setTokenProvider(provider);
+      await expect(failing.updateFormat('fmt-1a2b', FORMAT)).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    it('deleteFormat resolves true once removed, and undefined when the prompt is cancelled', async () => {
+      const deleteFormat = vi.fn(async () => {});
+      const session = formatSession({ deleteFormat });
+      session.setToken('tok');
+      expect(await session.deleteFormat('fmt-1a2b')).toBe(true);
+      expect(deleteFormat).toHaveBeenCalledWith('http://d.local', 'fmt-1a2b', 'tok');
+
+      const refused = vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'));
+      const gated = formatSession({ deleteFormat: refused });
+      gated.setTokenProvider(async () => undefined);
+      expect(await gated.deleteFormat('fmt-1a2b')).toBeUndefined();
+    });
+
+    it('deleteFormat prompts once when refused for auth, and re-throws a non-auth (404) failure', async () => {
+      const deleteFormat = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, 'Control on this Director needs a token.'))
+        .mockResolvedValueOnce(undefined);
+      const session = formatSession({ deleteFormat });
+      session.setTokenProvider(async () => 'tok');
+      expect(await session.deleteFormat('fmt-1a2b')).toBe(true);
+      expect(deleteFormat).toHaveBeenNthCalledWith(1, 'http://d.local', 'fmt-1a2b', undefined);
+      expect(deleteFormat).toHaveBeenNthCalledWith(2, 'http://d.local', 'fmt-1a2b', 'tok');
+
+      const failing = formatSession({
+        deleteFormat: vi.fn().mockRejectedValue(refusal(404, 'That format no longer exists.'))
+      });
+      await expect(failing.deleteFormat('fmt-1a2b')).rejects.toThrow(
+        /That format no longer exists\./
+      );
+    });
+  });
+
+  describe("a timer's seat profiles", () => {
+    const CONFIG: TimerConfig = {
+      seats: [{ seat: '0', freq_mhz: 5658, enabled: true }],
+      threshold: { Auto: { snr_enter: 150, hysteresis: 50 } }
+    };
+    const REQUEST: SeatProfileRequest = { name: 'Garage', config: CONFIG };
+    const PROFILE: SeatProfile = { id: 'prof-3c4d', name: 'Garage', config: CONFIG };
+    const AUTH = 'Control on this Director needs a token.';
+    const profileSession = (overrides?: SessionOverrides) =>
+      new Session({ baseUrl: 'http://d.local', autoRestore: false, api: { ...overrides } });
+
+    it("listProfiles reads a timer's profiles open (no token)", async () => {
+      const profiles: TimerProfiles = { active: 'prof-3c4d', profiles: [PROFILE] };
+      const listProfiles = vi.fn(async () => profiles);
+      const session = profileSession({ listProfiles });
+      expect(await session.listProfiles('gate-x1y2')).toEqual(profiles);
+      expect(listProfiles).toHaveBeenCalledWith('http://d.local', 'gate-x1y2', {
+        token: undefined
+      });
+    });
+
+    it('listProfiles throws when the read fails', async () => {
+      const SAID = 'That timer is not in the list any more.';
+      const session = profileSession({
+        listProfiles: vi.fn().mockRejectedValue(refusal(404, SAID))
+      });
+      await expect(session.listProfiles('gate-x1y2')).rejects.toThrow(SAID);
+    });
+
+    it('createProfile sends without a token first, then prompts once when refused for auth', async () => {
+      const createProfile = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, AUTH))
+        .mockResolvedValueOnce(PROFILE);
+      const provider = vi.fn(async () => 'tok');
+      const session = profileSession({ createProfile });
+      session.setTokenProvider(provider);
+      expect(await session.createProfile('gate-x1y2', REQUEST)).toEqual(PROFILE);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(createProfile).toHaveBeenCalledTimes(2);
+      expect(createProfile).toHaveBeenNthCalledWith(
+        1,
+        'http://d.local',
+        'gate-x1y2',
+        REQUEST,
+        undefined
+      );
+      expect(createProfile).toHaveBeenNthCalledWith(
+        2,
+        'http://d.local',
+        'gate-x1y2',
+        REQUEST,
+        'tok'
+      );
+    });
+
+    it("createProfile throws the Director's sentence, with no prompt, and resolves undefined when the prompt is cancelled", async () => {
+      const SAID = 'This timer already has a profile called Garage.';
+      const provider = vi.fn(async () => 'tok');
+      const session = profileSession({
+        createProfile: vi.fn().mockRejectedValue(refusal(409, SAID))
+      });
+      session.setTokenProvider(provider);
+      await expect(session.createProfile('gate-x1y2', REQUEST)).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+
+      const gated = profileSession({
+        createProfile: vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'))
+      });
+      gated.setTokenProvider(async () => undefined);
+      expect(await gated.createProfile('gate-x1y2', REQUEST)).toBeUndefined();
+    });
+
+    it('updateProfile sends the timer, the profile and the settings with the held token', async () => {
+      const renamed: SeatProfile = { ...PROFILE, name: 'Field' };
+      const request: SeatProfileRequest = { name: 'Field', config: CONFIG };
+      const updateProfile = vi.fn(async () => renamed);
+      const session = profileSession({ updateProfile });
+      session.setToken('tok');
+      expect(await session.updateProfile('gate-x1y2', 'prof-3c4d', request)).toEqual(renamed);
+      expect(updateProfile).toHaveBeenCalledOnce();
+      expect(updateProfile).toHaveBeenCalledWith(
+        'http://d.local',
+        'gate-x1y2',
+        'prof-3c4d',
+        request,
+        'tok'
+      );
+    });
+
+    it('updateProfile prompts once when refused for auth, and throws any other refusal as written', async () => {
+      const updateProfile = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, AUTH))
+        .mockResolvedValueOnce(PROFILE);
+      const session = profileSession({ updateProfile });
+      session.setTokenProvider(async () => 'tok');
+      expect(await session.updateProfile('gate-x1y2', 'prof-3c4d', REQUEST)).toEqual(PROFILE);
+      expect(updateProfile).toHaveBeenNthCalledWith(
+        1,
+        'http://d.local',
+        'gate-x1y2',
+        'prof-3c4d',
+        REQUEST,
+        undefined
+      );
+      expect(updateProfile).toHaveBeenNthCalledWith(
+        2,
+        'http://d.local',
+        'gate-x1y2',
+        'prof-3c4d',
+        REQUEST,
+        'tok'
+      );
+
+      const SAID = 'That profile no longer exists.';
+      const provider = vi.fn(async () => 'tok');
+      const failing = profileSession({
+        updateProfile: vi.fn().mockRejectedValue(refusal(404, SAID))
+      });
+      failing.setTokenProvider(provider);
+      await expect(failing.updateProfile('gate-x1y2', 'prof-3c4d', REQUEST)).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    it('deleteProfile resolves true once removed, and undefined when the prompt is cancelled', async () => {
+      const deleteProfile = vi.fn(async () => {});
+      const session = profileSession({ deleteProfile });
+      session.setToken('tok');
+      expect(await session.deleteProfile('gate-x1y2', 'prof-3c4d')).toBe(true);
+      expect(deleteProfile).toHaveBeenCalledWith('http://d.local', 'gate-x1y2', 'prof-3c4d', 'tok');
+
+      const refused = vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'));
+      const gated = profileSession({ deleteProfile: refused });
+      gated.setTokenProvider(async () => undefined);
+      expect(await gated.deleteProfile('gate-x1y2', 'prof-3c4d')).toBeUndefined();
+    });
+
+    it('deleteProfile prompts once when refused for auth, and re-throws a non-auth (404) failure', async () => {
+      const deleteProfile = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, AUTH))
+        .mockResolvedValueOnce(undefined);
+      const session = profileSession({ deleteProfile });
+      session.setTokenProvider(async () => 'tok');
+      expect(await session.deleteProfile('gate-x1y2', 'prof-3c4d')).toBe(true);
+      expect(deleteProfile).toHaveBeenNthCalledWith(
+        1,
+        'http://d.local',
+        'gate-x1y2',
+        'prof-3c4d',
+        undefined
+      );
+      expect(deleteProfile).toHaveBeenNthCalledWith(
+        2,
+        'http://d.local',
+        'gate-x1y2',
+        'prof-3c4d',
+        'tok'
+      );
+
+      const failing = profileSession({
+        deleteProfile: vi.fn().mockRejectedValue(refusal(404, 'That profile no longer exists.'))
+      });
+      await expect(failing.deleteProfile('gate-x1y2', 'prof-3c4d')).rejects.toThrow(
+        /That profile no longer exists\./
+      );
+    });
+
+    it('applyProfile sends without a token first, then prompts once when refused for auth, and returns what the timer kept', async () => {
+      const kept: TimerConfig = { ...CONFIG, lap_cooldown_ms: 2500 };
+      const applyProfile = vi
+        .fn()
+        .mockRejectedValueOnce(refusal(401, AUTH))
+        .mockResolvedValueOnce(kept);
+      const provider = vi.fn(async () => 'tok');
+      const session = profileSession({ applyProfile });
+      session.setTokenProvider(provider);
+      expect(await session.applyProfile('gate-x1y2', 'prof-3c4d')).toEqual(kept);
+      expect(provider).toHaveBeenCalledOnce();
+      expect(applyProfile).toHaveBeenCalledTimes(2);
+      expect(applyProfile).toHaveBeenNthCalledWith(
+        1,
+        'http://d.local',
+        'gate-x1y2',
+        'prof-3c4d',
+        undefined
+      );
+      expect(applyProfile).toHaveBeenNthCalledWith(
+        2,
+        'http://d.local',
+        'gate-x1y2',
+        'prof-3c4d',
+        'tok'
+      );
+    });
+
+    it("applyProfile throws the timer's refusal as the Director wrote it, with no prompt", async () => {
+      const SAID = 'Could not reach Gate: connection refused';
+      const provider = vi.fn(async () => 'tok');
+      const session = profileSession({
+        applyProfile: vi.fn().mockRejectedValue(refusal(409, SAID))
+      });
+      session.setTokenProvider(provider);
+      await expect(session.applyProfile('gate-x1y2', 'prof-3c4d')).rejects.toThrow(SAID);
+      expect(provider).not.toHaveBeenCalled();
+    });
+
+    it('applyProfile resolves undefined when the token prompt is cancelled', async () => {
+      const applyProfile = vi.fn().mockRejectedValue(refusal(403, 'Control is gated.'));
+      const session = profileSession({ applyProfile });
+      session.setTokenProvider(async () => undefined);
+      expect(await session.applyProfile('gate-x1y2', 'prof-3c4d')).toBeUndefined();
+      expect(applyProfile).toHaveBeenCalledTimes(1);
     });
   });
 

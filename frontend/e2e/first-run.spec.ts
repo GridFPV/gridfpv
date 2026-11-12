@@ -36,18 +36,18 @@ test('a fresh Director lists no events and the Events page offers the create pat
   // The API itself says so first: an empty list is the first-run state, not an error.
   const listed = await (await fetch(`${director.baseUrl}/events`)).json();
   expect(listed).toEqual([]);
-  // And nothing is active — so the console lands on the hub.
+  // And nothing is active — so the console lands on the Events page.
   const active = await (await fetch(`${director.baseUrl}/active-event`)).json();
   expect(active.event).toBeNull();
 
   await page.goto(director.baseUrl);
 
-  // The hub loads, and the Events page is reachable from it.
-  await expect(page.getByRole('heading', { name: 'Events' })).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('heading', { name: 'Events' }).click();
-  await expect(page.getByRole('heading', { name: 'Choose an event' })).toBeVisible({
+  // With no event to open, the console lands on the Events page by itself.
+  await expect(page.getByRole('heading', { name: 'Events', level: 1 })).toBeVisible({
     timeout: 15_000
   });
+  await expect.poll(() => new URL(page.url()).hash).toBe('#/events');
+  await expect(page.locator('header a.event')).toContainText('None open');
 
   // The empty page is a call to action, not an empty list.
   const cta = page.getByRole('button', { name: 'Create your first event' });

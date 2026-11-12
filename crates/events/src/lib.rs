@@ -431,6 +431,7 @@ pub struct RaceRules {
     #[ts(type = "number")]
     pub staging_micros: i64,
     /// The shortest time a lap may take, in microseconds. A faster crossing is filtered out.
+    /// `None`, the usual case, takes the event's minimum lap ([`LapRules`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub min_lap_micros: Option<i64>,
@@ -450,6 +451,24 @@ pub struct RaceRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub max_micros: Option<i64>,
+}
+
+/// An event's lap rules: what every race of the event filters crossings by, unless the
+/// format in force says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct LapRules {
+    /// The shortest time a lap may take, in microseconds. A crossing that comes sooner
+    /// after the one before it is kept in the log and not counted. `None` filters nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub min_lap_micros: Option<i64>,
+    /// Crossings in this many microseconds after the start are not counted (a take-off
+    /// right under the gate). It needs the start on the timer's clock; a timer that cannot
+    /// give it filters nothing here. `None` ignores only crossings before the start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub ignore_before_micros: Option<i64>,
 }
 
 /// What starts a pilot's first lap in a race.
@@ -771,6 +790,10 @@ pub enum Event {
     },
     /// Undo a removal: the crossing counts again.
     LapRestored { race: RaceId, crossing: LogRef },
+    /// A marshal ruled that a crossing counts although a lap filter left it out: it came
+    /// sooner than the minimum lap after the one before, or in the stretch after the start
+    /// that is ignored. From then on no filter leaves it out. Removing it is the way back.
+    LapCounted { race: RaceId, crossing: LogRef },
     /// Add a crossing the timer missed. Inside an existing lap this splits it in two.
     LapInserted {
         race: RaceId,
@@ -852,6 +875,11 @@ pub enum Event {
         class: ClassId,
         phases: Vec<PhaseId>,
     },
+    /// The event set its lap rules: the minimum lap, and how long after the start crossings
+    /// are ignored. They hold for every race of the event, flown or still to fly; the last
+    /// one set wins. A format may carry a minimum lap of its own, which then wins for the
+    /// heats under it.
+    LapRulesSet { rules: LapRules },
     /// The director set the run queue: the order they mean to fly heats in. Heats not
     /// listed follow after, in the default order. A suggestion only: any ready heat can
     /// be started at any time.

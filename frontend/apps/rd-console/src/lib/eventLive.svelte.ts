@@ -29,6 +29,7 @@ import type {
   ProtocolError,
   RaceId,
   RaceSignal,
+  SavedFormat,
   TimerView
 } from '@gridfpv/types';
 import { buildNames, type Names } from './names.js';
@@ -48,6 +49,7 @@ export type LiveSession = Pick<
   | 'listPilots'
   | 'listTimers'
   | 'listClasses'
+  | 'listFormats'
 >;
 
 /**
@@ -76,6 +78,8 @@ export class EventLive {
   timersLoaded = $state(false);
   /** The class directory, for class names and the class picker. */
   classes = $state.raw<Class[]>([]);
+  /** The saved formats, for the format pickers. */
+  formats = $state.raw<SavedFormat[]>([]);
   /** What a heat can be timed by: every timer, then the bench. */
   seatSources: SeatSource[] = $derived(seatSources(this.timers));
   /** The one resolver from ids to names for this event. */
@@ -117,6 +121,7 @@ export class EventLive {
     void this.reloadPilots();
     void this.reloadTimers();
     void this.reloadClasses();
+    void this.reloadFormats();
     clearInterval(this.#timerPoll);
     this.#timerPoll = this.#pollTimers
       ? setInterval(() => void this.reloadTimers(), TIMER_POLL_MS)
@@ -213,6 +218,16 @@ export class EventLive {
       if (!this.#stopped) this.classes = classes;
     } catch {
       // Class names fall back to "Unknown class".
+    }
+  }
+
+  /** Read the saved formats again (one may have been added since the page opened). */
+  async reloadFormats(): Promise<void> {
+    try {
+      const formats = await this.#session.listFormats();
+      if (!this.#stopped) this.formats = formats;
+    } catch {
+      // The pickers show what was read last.
     }
   }
 

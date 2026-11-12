@@ -31,6 +31,7 @@ pub mod classes;
 pub mod control;
 pub mod error;
 pub mod events;
+pub mod library;
 pub mod pilots;
 pub mod timers;
 pub mod view;

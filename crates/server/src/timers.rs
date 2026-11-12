@@ -179,16 +179,6 @@ pub enum TimerThreshold {
     Manual { enter: i32, exit: i32 },
 }
 
-/// What a timer holds that is not changed from its settings page in Grid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub struct TimerOwnSettings {
-    /// The timer's minimum lap right now: it does not report a second crossing on a seat
-    /// within this many milliseconds. The minimum lap is a race rule in the format, and Grid
-    /// sets the timer to it when a race starts (see [`match_min_lap`]).
-    pub min_lap_ms: u32,
-}
-
 /// A timer's settings, as Grid changes them. `threshold` is the timer-wide one; a seat may
 /// carry its own on a timer that takes them (OFT from protocol v0.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -196,11 +186,14 @@ pub struct TimerOwnSettings {
 pub struct TimerConfig {
     pub seats: Vec<TimerSeatConfig>,
     pub threshold: TimerThreshold,
-    /// What the settings page shows and does not change. Read from the timer; ignored in a
-    /// write, which always leaves these as the timer has them.
-    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    /// The timer's lap cooldown, in milliseconds: after a crossing on a seat, the timer
+    /// reports no other on that seat for this long. It is there to swallow the bounce of
+    /// one pass, at the timer. It is not the race's minimum lap: that is the event's lap
+    /// rule, and Grid applies it to what the timer reports. A write that leaves it out
+    /// keeps what the timer has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub set_on_timer: Option<TimerOwnSettings>,
+    pub lap_cooldown_ms: Option<u32>,
     /// How long the signal must stay below the exit level before a crossing closes, in
     /// milliseconds. Absent on a timer that does not have the setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,9 +215,7 @@ impl From<OftConfig> for TimerConfig {
                 })
                 .collect(),
             threshold: config.threshold.into(),
-            set_on_timer: Some(TimerOwnSettings {
-                min_lap_ms: config.min_lap_ms,
-            }),
+            lap_cooldown_ms: Some(config.min_lap_ms),
             exit_hold_ms: config.exit_hold_ms,
         }
     }
@@ -251,7 +242,7 @@ impl TimerConfig {
         Ok(OftConfig {
             seats,
             threshold: self.threshold.into(),
-            min_lap_ms: now.min_lap_ms,
+            min_lap_ms: self.lap_cooldown_ms.unwrap_or(now.min_lap_ms),
             exit_hold_ms: self.exit_hold_ms,
         })
     }
@@ -654,29 +645,6 @@ async fn keep_config(timer: &Timer) -> Result<(), TimerError> {
     }
 }
 
-/// Make a timer's minimum lap the one a race is about to use. Nothing is sent when the timer
-/// already has it. The change is not kept for the timer's next start: the next race sets it
-/// again. A timer that is not in the directory, or is not an OFT timer, is left alone.
-pub async fn match_min_lap(
-    directory: &TimerDirectory,
-    id: &AdapterId,
-    min_lap_ms: u32,
-) -> Result<(), TimerError> {
-    let Some(timer) = directory.get(id) else {
-        return Ok(());
-    };
-    if timer.kind != TimerKind::Oft {
-        return Ok(());
-    }
-    let mut config = read_config(&timer).await?;
-    if config.min_lap_ms == min_lap_ms {
-        return Ok(());
-    }
-    config.min_lap_ms = min_lap_ms;
-    write_config(&timer, &config).await?;
-    Ok(())
-}
-
 fn save(inner: &Inner) -> Result<(), TimerError> {
     let Some(dir) = &inner.data_dir else {
         return Ok(());
@@ -745,6 +713,11 @@ pub async fn delete_timer(
     Path(timer_id): Path<AdapterId>,
 ) -> Result<StatusCode, ProtocolError> {
     registry.timers().delete(&timer_id)?;
+    // Its saved profiles go with it. A list that could not be saved is not worth failing
+    // the removal for: the timer is already gone.
+    if let Err(e) = registry.library().forget_timer(&timer_id) {
+        eprintln!("WARNING: the removed timer's profiles could not be cleared: {e}");
+    }
     Ok(StatusCode::OK)
 }
 
@@ -772,9 +745,19 @@ pub async fn put_timer_config(
     Path(timer_id): Path<AdapterId>,
     Json(body): Json<TimerConfig>,
 ) -> Result<Json<TimerConfig>, ProtocolError> {
+    Ok(Json(apply_config(&registry, &timer_id, &body).await?))
+}
+
+/// Write settings to a timer and answer with what it then reports. Used by a settings
+/// write and by applying a saved profile.
+pub async fn apply_config(
+    registry: &EventRegistry,
+    timer_id: &AdapterId,
+    body: &TimerConfig,
+) -> Result<TimerConfig, ProtocolError> {
     let timer = registry
         .timers()
-        .get(&timer_id)
+        .get(timer_id)
         .ok_or(TimerError::NotFound)?;
     if timer.kind != TimerKind::Oft {
         return Err(TimerError::NotBuilt.into());
@@ -785,7 +768,7 @@ pub async fn put_timer_config(
         .timers()
         .list()
         .into_iter()
-        .find(|view| view.timer.id == timer_id)
+        .find(|view| &view.timer.id == timer_id)
         .map(|view| view.status)
         .unwrap_or_default();
     if !status.seat_thresholds && body.seats.iter().any(|seat| seat.threshold.is_some()) {
@@ -798,7 +781,7 @@ pub async fn put_timer_config(
     if status.keeps_settings {
         keep_config(&timer).await?;
     }
-    Ok(Json(written.into()))
+    Ok(written.into())
 }
 
 /// `GET /timers/{timer_id}/live` — server-sent events for tuning. Open read.
@@ -1057,53 +1040,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_timers_minimum_lap_is_made_the_races_and_the_rest_is_left_alone() {
-        let (registry, uri) = with_timer(Fake::Honest).await;
-        let id = registry.timers().records()[0].id.clone();
-        let (_, before) = call(&registry, "GET", &uri, None).await;
-        match_min_lap(&registry.timers(), &id, 1500).await.unwrap();
-        let (_, after) = call(&registry, "GET", &uri, None).await;
-        assert_eq!(after["set_on_timer"]["min_lap_ms"], serde_json::json!(1500));
-        assert_eq!(after["seats"], before["seats"]);
-        assert_eq!(after["threshold"], before["threshold"]);
-        // No minimum lap in the format is 0 on the timer.
-        match_min_lap(&registry.timers(), &id, 0).await.unwrap();
-        let (_, after) = call(&registry, "GET", &uri, None).await;
-        assert_eq!(after["set_on_timer"]["min_lap_ms"], serde_json::json!(0));
-    }
-
-    #[tokio::test]
-    async fn a_minimum_lap_the_timer_did_not_take_is_an_error_and_an_unknown_timer_is_skipped() {
-        let (registry, _) = with_timer(Fake::Forgetful).await;
-        let id = registry.timers().records()[0].id.clone();
-        assert_eq!(
-            match_min_lap(&registry.timers(), &id, 1500).await,
-            Err(TimerError::NotTaken)
-        );
-        // Already what the timer has: nothing is sent, so nothing can fail.
-        assert_eq!(match_min_lap(&registry.timers(), &id, 2000).await, Ok(()));
-        // The bench, or a timer since removed.
-        let nobody = AdapterId("bench".into());
-        assert_eq!(
-            match_min_lap(&registry.timers(), &nobody, 1500).await,
-            Ok(())
-        );
-    }
-
-    #[tokio::test]
-    async fn what_is_set_on_the_timer_itself_is_shown_and_never_changed() {
+    async fn the_lap_cooldown_is_written_and_a_write_without_it_keeps_the_timers() {
         let (registry, uri) = with_timer(Fake::Honest).await;
         let mut body = changed();
-        // Whatever a client sends here is ignored.
-        body["set_on_timer"] = serde_json::json!({"min_lap_ms": 0});
-        let (status, written) = call(&registry, "PUT", &uri, Some(body)).await;
+        body["lap_cooldown_ms"] = serde_json::json!(1500);
+        let (status, written) = call(&registry, "PUT", &uri, Some(body.clone())).await;
         assert_eq!(status, StatusCode::OK, "{written}");
-        assert_eq!(written, changed());
-        let (_, read_back) = call(&registry, "GET", &uri, None).await;
-        assert_eq!(
-            read_back["set_on_timer"],
-            serde_json::json!({"min_lap_ms": 2000})
+        assert_eq!(written, body);
+        // Left out of a write: the timer keeps the one it has.
+        let mut without = changed();
+        without.as_object_mut().unwrap().remove("lap_cooldown_ms");
+        let (status, written) = call(&registry, "PUT", &uri, Some(without)).await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        assert_eq!(written["lap_cooldown_ms"], serde_json::json!(1500));
+    }
+
+    #[tokio::test]
+    async fn a_profile_is_saved_from_the_timer_and_applying_it_writes_it_back() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let profiles = uri.replace("/config", "/profiles");
+        // No profile yet.
+        let (status, none) = call(&registry, "GET", &profiles, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(none, serde_json::json!({"profiles": []}));
+        // Save what the timer has now. Saving writes nothing to the timer.
+        let (_, at_first) = call(&registry, "GET", &uri, None).await;
+        let body = serde_json::json!({"name": " Garage ", "config": at_first});
+        let (status, saved) = call(&registry, "POST", &profiles, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["name"], "Garage");
+        let id = saved["id"].as_str().unwrap().to_owned();
+        // The same name again is refused, in words.
+        let (status, taken) = call(&registry, "POST", &profiles, Some(body)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            taken["message"].as_str().unwrap().contains("Garage"),
+            "{taken}"
         );
+        // Change the timer, then apply the profile: the timer is back as it was.
+        let (status, _) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK);
+        let apply = format!("{profiles}/{id}/apply");
+        let (status, applied) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::OK, "{applied}");
+        assert_eq!(applied, at_first);
+        let (_, on_timer) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(on_timer, at_first);
+        let (_, listed) = call(&registry, "GET", &profiles, None).await;
+        assert_eq!(listed["active"], serde_json::json!(id));
+        // An unknown profile and an unknown timer are both not found.
+        let (status, _) = call(&registry, "POST", &format!("{profiles}/nope/apply"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(&registry, "GET", "/timers/nope/profiles", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Removing the timer forgets its profiles.
+        let timer = registry.timers().records()[0].id.clone();
+        let (status, _) = call(&registry, "DELETE", &format!("/timers/{}", timer.0), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(registry.library().profiles(&timer).profiles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_profile_the_timer_did_not_take_is_refused_and_does_not_become_active() {
+        let (registry, uri) = with_timer(Fake::Forgetful).await;
+        let profiles = uri.replace("/config", "/profiles");
+        // A first profile, saved from the timer, is the active one.
+        let (_, at_first) = call(&registry, "GET", &uri, None).await;
+        let body = serde_json::json!({"name": "Garage", "config": at_first});
+        let (_, garage) = call(&registry, "POST", &profiles, Some(body)).await;
+        // A second one holds different settings. Saving it makes it active, as saved from
+        // the timer; put the first back as active to tell the two apart.
+        let body = serde_json::json!({"name": "Field", "config": changed()});
+        let (status, field) = call(&registry, "POST", &profiles, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{field}");
+        let timer = registry.timers().records()[0].id.clone();
+        registry
+            .library()
+            .set_active(&timer, garage["id"].as_str().unwrap())
+            .unwrap();
+        // This timer answers yes and changes nothing, so the readback does not match.
+        let apply = format!("{profiles}/{}/apply", field["id"].as_str().unwrap());
+        let (status, refusal) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+        let (_, listed) = call(&registry, "GET", &profiles, None).await;
+        assert_eq!(listed["active"], garage["id"]);
+    }
+
+    #[tokio::test]
+    async fn saved_formats_are_listed_added_changed_and_removed_over_http() {
+        let registry = EventRegistry::new(None).unwrap();
+        let (status, formats) = call(&registry, "GET", "/formats", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(formats.as_array().unwrap().len(), 4);
+        let mut copy = formats[0]["format"].clone();
+        // A name in use is refused with a sentence that names it.
+        let (status, taken) = call(&registry, "POST", "/formats", Some(copy.clone())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            taken["message"].as_str().unwrap().contains("Practice"),
+            "{taken}"
+        );
+        copy["name"] = serde_json::json!("Warm up");
+        let (status, saved) = call(&registry, "POST", "/formats", Some(copy.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let uri = format!("/formats/{}", saved["id"].as_str().unwrap());
+        copy["race"]["staging_micros"] = serde_json::json!(3_000_000);
+        let (status, changed) = call(&registry, "PUT", &uri, Some(copy)).await;
+        assert_eq!(status, StatusCode::OK, "{changed}");
+        assert_eq!(
+            changed["format"]["race"]["staging_micros"],
+            serde_json::json!(3_000_000)
+        );
+        let (status, _) = call(&registry, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = call(&registry, "DELETE", &uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, formats) = call(&registry, "GET", "/formats", None).await;
+        assert_eq!(formats.as_array().unwrap().len(), 4);
     }
 
     #[tokio::test]
@@ -1189,8 +1242,7 @@ mod tests {
                 {"seat": "1", "freq_mhz": 5917, "enabled": true},
             ],
             "threshold": {"Manual": {"enter": -700, "exit": -760}},
-            // As the fake timer has them: a write never changes these.
-            "set_on_timer": {"min_lap_ms": 2000},
+            "lap_cooldown_ms": 2000,
         })
     }
 

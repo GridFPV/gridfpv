@@ -1,8 +1,8 @@
 /**
  * Running a heat through the console UI, start to saved result.
  *
- * A person adds two pilots, creates an event, adds a heat with the "First to 3 laps" format,
- * opens its Run view and runs one race: Start, the countdown, crossings on each seat, Stop,
+ * A person adds two pilots, creates an event, adds a heat on the Phases page with the "First
+ * to 3 laps" format, opens it on the Run page and runs one race: Start, the countdown, crossings on each seat, Stop,
  * Save. The heat is then complete and its ranking shows the two callsigns in finishing order.
  *
  * No timer is wired in yet, so the crossings come from the Run view's "Crossing" bench
@@ -17,7 +17,7 @@
  */
 import type { Locator, Page } from '@playwright/test';
 import { expect, test } from './observability.js';
-import { gotoEvents, gotoHub } from './nav.js';
+import { gotoEvents, gotoPage, heatOnTimer, openPage } from './nav.js';
 
 const STAMP = Date.now();
 const EVENT = `Run Heat Night ${STAMP}`;
@@ -52,11 +52,7 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
 
   try {
     // ── Two pilots, through the Pilots page ──────────────────────────────────────────────
-    await gotoHub(page);
-    await page.getByRole('button', { name: /Pilots/ }).click();
-    await expect(page.getByRole('heading', { name: 'Pilots', level: 1 })).toBeVisible({
-      timeout: 15_000
-    });
+    await gotoPage(page, 'Pilots');
     await addPilot(page, ACE);
     await addPilot(page, BEE);
 
@@ -76,6 +72,7 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     };
     eventId = active.event?.id;
     expect(eventId).toBeTruthy();
+    await openPage(page, 'Phases');
     await expect(page.getByText('Nothing to race yet.')).toBeVisible();
 
     // ── Add a heat: Ace on Seat 1, Bee on Seat 2, first to 3 laps ────────────────────────
@@ -101,10 +98,12 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     // ── Open the Run view ────────────────────────────────────────────────────────────────
     await phase.getByRole('button', { name: `Run ${HEAT}` }).click();
     await expect(page).toHaveURL(/#\/event\/run\//);
-    await expect(page.getByRole('heading', { name: HEAT, level: 1 })).toBeVisible();
-    const crumbs = page.getByRole('navigation', { name: 'Breadcrumb' });
-    await expect(crumbs).toContainText(EVENT);
-    await expect(crumbs).toContainText(HEAT);
+    await expect(page.getByRole('heading', { name: 'Run', level: 1 })).toBeVisible();
+    // The heat is on the timer, with its format and what times it said in words.
+    await expect(heatOnTimer(page)).toHaveText(HEAT);
+    await expect(page.locator('header a.event')).toContainText(EVENT);
+    await expect(page.getByTestId('run-rules')).toContainText('First to 3 laps');
+    await expect(page.getByTestId('timed-by')).toHaveText('Timed by Bench');
     const status = page.getByTestId('run-status');
     await expect(status).toHaveText('Ready to start.');
 
@@ -178,12 +177,17 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
 
     // ── The Run view survives a reload, and the event page shows the heat complete ───────
     await page.reload();
-    await expect(page.getByRole('heading', { name: HEAT, level: 1 })).toBeVisible({
-      timeout: 15_000
-    });
+    await expect(heatOnTimer(page)).toContainText(HEAT, { timeout: 15_000 });
     await expect(ranking.nth(0)).toContainText(ACE);
-    await crumbs.getByRole('button', { name: EVENT }).click();
+    await openPage(page, 'Phases');
     await expect(phase).toContainText('Complete', { timeout: 15_000 });
+
+    // ── And the Results page has the heat's ranking, in the same order ───────────────────
+    await openPage(page, 'Results');
+    const results = page.getByRole('table', { name: `Results of ${HEAT}` }).getByRole('row');
+    await expect(results.nth(1)).toContainText(ACE);
+    await expect(results.nth(2)).toContainText(BEE);
+    await expect(page.getByTestId('result-state')).toContainText('Provisional');
     const eventText = await page.locator('body').innerText();
     for (const handle of raw) expect(eventText).not.toContain(handle);
   } finally {

@@ -4,6 +4,7 @@ import type { LapView, ProtestView, RaceSeatView } from '@gridfpv/types';
 import {
   canRule,
   countedLaps,
+  defaultRace,
   formatOffset,
   lapRows,
   lockedBy,
@@ -121,17 +122,153 @@ describe('the to-do list', () => {
     expect(marshalCount(eventView())).toBe(0);
   });
 
-  it('groups every other race by heat, in the event order', () => {
+  it('lists every other race that counts by heat, leaving discarded races out', () => {
     expect(otherRaces(view, names)).toEqual([
       {
         heat: 'q-1',
         label: 'Qualifying Heat 1',
+        races: [{ race: 'q-1#2', name: 'Race 2', state: 'Saved' }]
+      }
+    ]);
+  });
+
+  it('lists discarded races too when asked, the newest race of a heat first', () => {
+    expect(otherRaces(view, names, { discarded: true })).toEqual([
+      {
+        heat: 'q-1',
+        label: 'Qualifying Heat 1',
         races: [
-          { race: 'q-1#2', name: 'Race 2', state: 'Saved' },
-          { race: 'q-1#3', name: 'Race 3', state: 'Discarded' }
+          { race: 'q-1#3', name: 'Race 3', state: 'Discarded' },
+          { race: 'q-1#2', name: 'Race 2', state: 'Saved' }
         ]
       }
     ]);
+  });
+});
+
+describe('the list of every other race', () => {
+  // The log holds the heats' races mixed together, and Heat 2 raced first.
+  const view = eventView({
+    phases,
+    races: [
+      race('q-2', 1, 'Saved'),
+      race('q-1', 1, 'Saved'),
+      race('q-1', 2, 'Discarded', { discard_reason: 'FalseStart' }),
+      race('q-2', 2, 'Saved'),
+      race('q-1', 3, 'Saved'),
+      race('q-1', 4, 'Running')
+    ]
+  });
+  const ids = (groups: ReturnType<typeof otherRaces>) =>
+    groups.map((entry) => [entry.heat, entry.races.map((r) => r.race)]);
+
+  it("keeps the heats in the event's order, and each heat's races newest first", () => {
+    expect(ids(otherRaces(view, names))).toEqual([
+      ['q-1', ['q-1#4', 'q-1#3', 'q-1#1']],
+      ['q-2', ['q-2#2', 'q-2#1']]
+    ]);
+  });
+
+  it('numbers a race by its place in its heat, so a hidden discarded race keeps its number', () => {
+    const [first] = otherRaces(view, names);
+    expect(first.races.map((r) => r.name)).toEqual(['Race 4', 'Race 3', 'Race 1']);
+    const [all] = otherRaces(view, names, { discarded: true });
+    expect(all.races.map((r) => r.name)).toEqual(['Race 4', 'Race 3', 'Race 2', 'Race 1']);
+  });
+
+  it('says what state each race is in, with why it was discarded', () => {
+    const [all] = otherRaces(view, names, { discarded: true });
+    expect(all.races.map((r) => r.state)).toEqual([
+      'Racing',
+      'Saved',
+      'Discarded: false start',
+      'Saved'
+    ]);
+  });
+
+  it('narrows the list to the heats asked for', () => {
+    expect(ids(otherRaces(view, names, { heats: new Set(['q-2']) }))).toEqual([
+      ['q-2', ['q-2#2', 'q-2#1']]
+    ]);
+    expect(ids(otherRaces(view, names, { heats: new Set(['q-1', 'q-2']) }))).toEqual(
+      ids(otherRaces(view, names))
+    );
+    expect(otherRaces(view, names, { heats: new Set() })).toEqual([]);
+    expect(otherRaces(view, names, { heats: new Set(['quali']) })).toEqual([]);
+  });
+
+  it('applies both parts of the filter together', () => {
+    expect(ids(otherRaces(view, names, { heats: new Set(['q-1']), discarded: true }))).toEqual([
+      ['q-1', ['q-1#4', 'q-1#3', 'q-1#2', 'q-1#1']]
+    ]);
+  });
+
+  it('leaves out a heat with no race to list', () => {
+    const onlyDiscarded = eventView({
+      phases,
+      races: [race('q-1', 1, 'Discarded'), race('q-2', 1, 'Saved')]
+    });
+    expect(ids(otherRaces(onlyDiscarded, names))).toEqual([['q-2', ['q-2#1']]]);
+    expect(otherRaces(eventView({ phases }), names)).toEqual([]);
+  });
+
+  it('still lists the races of a heat that is no longer among the phases, after the others', () => {
+    const orphaned = eventView({
+      phases,
+      races: [race('gone-9z', 1, 'Saved'), race('q-1', 1, 'Saved')]
+    });
+    const groups = otherRaces(orphaned, names);
+    expect(ids(groups)).toEqual([
+      ['q-1', ['q-1#1']],
+      ['gone-9z', ['gone-9z#1']]
+    ]);
+    // Its label is words, never the heat's id.
+    expect(groups[1].label).toBe('Unknown phase');
+  });
+});
+
+describe('the race the Marshal page opens on', () => {
+  it('is the first race on the to-do list when there is one', () => {
+    const view = eventView({
+      phases,
+      races: [
+        race('q-1', 1, 'Saved'),
+        race('q-1', 2, 'Saved', { needs_marshal: true }),
+        race('q-2', 1, 'Saved', { needs_marshal: true }),
+        race('q-2', 2, 'Saved')
+      ]
+    });
+    expect(defaultRace(view, names)).toBe('q-1#2');
+  });
+
+  it('is a race with an open protest before a newer race with nothing against it', () => {
+    const view = eventView({
+      phases,
+      races: [race('q-1', 1, 'Saved'), race('q-1', 2, 'Saved')],
+      protests: [protest('pr-1', 'q-1#1')]
+    });
+    expect(defaultRace(view, names)).toBe('q-1#1');
+    const resolved = { ...view, protests: [protest('pr-1', 'q-1#1', { outcome: 'Denied' })] };
+    expect(defaultRace(resolved, names)).toBe('q-1#2');
+  });
+
+  it('is the newest race that was not discarded when nothing needs a look', () => {
+    const view = eventView({
+      phases,
+      races: [
+        race('q-1', 1, 'Saved'),
+        race('q-2', 1, 'Saved'),
+        race('q-1', 2, 'Discarded', { needs_marshal: true })
+      ]
+    });
+    expect(defaultRace(view, names)).toBe('q-2#1');
+  });
+
+  it('is nothing before any race is flown, or when every race was discarded', () => {
+    expect(defaultRace(eventView({ phases }), names)).toBeUndefined();
+    expect(
+      defaultRace(eventView({ phases, races: [race('q-1', 1, 'Discarded')] }), names)
+    ).toBeUndefined();
   });
 });
 

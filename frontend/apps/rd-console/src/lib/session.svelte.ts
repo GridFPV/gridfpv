@@ -45,6 +45,16 @@ import {
   deleteTimer,
   getTimerConfig,
   putTimerConfig,
+  updateEvent,
+  listFormats,
+  createFormat,
+  updateFormat,
+  deleteFormat,
+  listProfiles,
+  createProfile,
+  updateProfile,
+  deleteProfile,
+  applyProfile,
   getEventState,
   sendCommand,
   createBracket,
@@ -69,13 +79,18 @@ import type {
   DiscoveredTimer,
   EventMeta,
   EventView,
+  Format,
   PassRequest,
   Pilot,
   PilotId,
   RaceId,
   RaceSignal,
+  SavedFormat,
+  SeatProfile,
+  SeatProfileRequest,
   Timer,
   TimerConfig,
+  TimerProfiles,
   TimerView,
   UpdateClassRequest,
   UpdatePilotRequest
@@ -159,6 +174,16 @@ const realApi = {
   deleteTimer,
   getTimerConfig,
   putTimerConfig,
+  updateEvent,
+  listFormats,
+  createFormat,
+  updateFormat,
+  deleteFormat,
+  listProfiles,
+  createProfile,
+  updateProfile,
+  deleteProfile,
+  applyProfile,
   getEventState,
   sendCommand,
   createBracket,
@@ -434,6 +459,92 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#api.putTimerConfig(this.baseUrl, id, config, token)
     );
+  }
+
+  // ── Saved formats and seat profiles ────────────────────────────────────────
+
+  /** The saved formats (`GET /formats`, open). */
+  listFormats(): Promise<SavedFormat[]> {
+    return this.#api.listFormats(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Save a new format. Resolves to it, `undefined` on a cancelled token prompt, or throws
+   * with the Director's sentence (a name already taken).
+   */
+  createFormat(format: Format): Promise<SavedFormat | undefined> {
+    return this.#privilegedWrite((token) => this.#api.createFormat(this.baseUrl, format, token));
+  }
+
+  /** Replace a saved format. Same answers as {@link createFormat}. */
+  updateFormat(id: string, format: Format): Promise<SavedFormat | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.updateFormat(this.baseUrl, id, format, token)
+    );
+  }
+
+  /** Remove a saved format. Resolves to `true` once it is gone. */
+  deleteFormat(id: string): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#api.deleteFormat(this.baseUrl, id, token);
+      return true as const;
+    });
+  }
+
+  /** A timer's saved profiles, and which one is active (`GET /timers/{id}/profiles`, open). */
+  listProfiles(timer: AdapterId): Promise<TimerProfiles> {
+    return this.#api.listProfiles(this.baseUrl, timer, { token: this.#token });
+  }
+
+  /** Save settings as a new profile of a timer. Nothing is written to the timer. */
+  createProfile(timer: AdapterId, request: SeatProfileRequest): Promise<SeatProfile | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.createProfile(this.baseUrl, timer, request, token)
+    );
+  }
+
+  /** Rename a profile or replace its settings. Nothing is written to the timer. */
+  updateProfile(
+    timer: AdapterId,
+    profile: string,
+    request: SeatProfileRequest
+  ): Promise<SeatProfile | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.updateProfile(this.baseUrl, timer, profile, request, token)
+    );
+  }
+
+  /** Remove a profile. The timer keeps the settings it has. */
+  deleteProfile(timer: AdapterId, profile: string): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#api.deleteProfile(this.baseUrl, timer, profile, token);
+      return true as const;
+    });
+  }
+
+  /**
+   * Write a profile to its timer. Resolves to the settings as the timer reports them
+   * afterwards, or throws with the Director's sentence.
+   */
+  applyProfile(timer: AdapterId, profile: string): Promise<TimerConfig | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.applyProfile(this.baseUrl, timer, profile, token)
+    );
+  }
+
+  /**
+   * Change the open event's name and details. Resolves to the event as it now is, and the
+   * session's open event follows.
+   */
+  async updateEvent(
+    id: EventMeta['id'],
+    request: CreateEventRequest
+  ): Promise<EventMeta | undefined> {
+    const meta = await this.#privilegedWrite((token) =>
+      this.#api.updateEvent(this.baseUrl, id, request, token)
+    );
+    if (meta && this.currentEvent?.id === meta.id) this.currentEvent = meta;
+    return meta;
   }
 
   /**

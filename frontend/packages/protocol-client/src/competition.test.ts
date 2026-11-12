@@ -49,6 +49,7 @@ describe('the event snapshot', () => {
     const view: EventView = {
       cursor: 7,
       now: 1_700_000_000_000_000,
+      lap_rules: { min_lap_micros: 2_000_000 },
       rosters: [],
       phases: [],
       races: [],

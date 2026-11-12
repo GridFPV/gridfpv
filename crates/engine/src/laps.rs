@@ -34,6 +34,9 @@ pub struct LapFilters {
     /// are left out. `None` (a timer whose clock Grid cannot line up with the tone) leaves
     /// every crossing in and times lap 1 from the hole shot.
     pub start_at: Option<SourceTime>,
+    /// Crossings in this many microseconds after `start_at` are left out too. It does
+    /// nothing without `start_at`.
+    pub ignore_before_micros: Option<i64>,
     /// What starts lap 1. [`FirstLap::FromTone`] needs `start_at`.
     pub first_lap: FirstLap,
     /// Which run of the timer's clock `start_at` is on (see [`RaceLaps::clock_run`]). A
@@ -176,6 +179,9 @@ struct Crossing {
     at: SourceTime,
     removed: Option<Option<RemovalReason>>,
     restart: bool,
+    /// A person put this crossing in, or ruled that it counts. The lap filters are for
+    /// what a timer reports; they never leave out a person's call.
+    by_hand: bool,
     /// Which run of the timer's clock `at` is on.
     clock_run: u32,
 }
@@ -225,6 +231,7 @@ impl RaceLaps {
                             at: pass.at,
                             removed: None,
                             restart: false,
+                            by_hand: false,
                             clock_run: self.clock_run(&pass.adapter),
                         },
                     );
@@ -245,6 +252,7 @@ impl RaceLaps {
                         at: *at,
                         removed: None,
                         restart: false,
+                        by_hand: true,
                         clock_run: self.clock_run(adapter),
                     },
                 );
@@ -267,6 +275,11 @@ impl RaceLaps {
             Event::LapRestored { race, crossing } => {
                 if let Some(found) = self.target(race, crossing) {
                     found.removed = None;
+                }
+            }
+            Event::LapCounted { race, crossing } => {
+                if let Some(found) = self.target(race, crossing) {
+                    found.by_hand = true;
                 }
             }
             Event::LapAdjusted { race, crossing, at } => {
@@ -352,13 +365,16 @@ impl RaceLaps {
                 });
                 continue;
             }
-            // The start only means something on the clock run it was placed on. A marked
-            // restart is a person's call and is never filtered away.
-            if !crossing.restart
+            // A marked restart, a lap put in by hand and a crossing ruled to count are a
+            // person's call. No filter leaves one out.
+            let ruled = crossing.restart || crossing.by_hand;
+            // The start only means something on the clock run it was placed on.
+            if !ruled
                 && crossing.clock_run == filters.start_clock_run
-                && filters
-                    .start_at
-                    .is_some_and(|start| crossing.at.micros < start.micros)
+                && filters.start_at.is_some_and(|start| {
+                    crossing.at.micros
+                        < start.micros + filters.ignore_before_micros.unwrap_or(0).max(0)
+                })
             {
                 out.uncounted.push(UncountedCrossing {
                     crossing: *offset,
@@ -387,7 +403,7 @@ impl RaceLaps {
             let too_short = filters
                 .min_lap_micros
                 .is_some_and(|min| crossing.at.micros_since(started_at) < min);
-            if too_short && !crossing.restart {
+            if too_short && !ruled {
                 out.uncounted.push(UncountedCrossing {
                     crossing: *offset,
                     at: crossing.at,
@@ -816,6 +832,48 @@ mod tests {
         assert!(!fold.is_crossing_of(&RaceId("other".into()), &LogRef(1)));
         assert!(!fold.is_crossing_of(&race(), &LogRef(99)));
         assert_eq!(times(&read(&events, none())), vec![10 * S, 9 * S]);
+    }
+
+    #[test]
+    fn a_crossing_a_person_put_in_or_ruled_to_count_is_never_filtered_out() {
+        // A five second minimum lap, and the first two seconds after the tone ignored.
+        let filters = LapFilters {
+            min_lap_micros: Some(5 * S),
+            start_at: Some(SourceTime::from_micros(0)),
+            ignore_before_micros: Some(2 * S),
+            ..LapFilters::default()
+        };
+        // 1 s is inside the ignored stretch; 12 s is too soon after 10 s.
+        let mut events = vec![pass(S), pass(10 * S), pass(12 * S), pass(20 * S)];
+        assert_eq!(times(&read(&events, filters)), vec![10 * S]);
+        // The marshal rules that the quick one was a real lap.
+        events.push(Event::LapCounted {
+            race: race(),
+            crossing: LogRef(2),
+        });
+        assert_eq!(times(&read(&events, filters)), vec![2 * S, 8 * S]);
+        // And that the early one was the real hole shot.
+        events.push(Event::LapCounted {
+            race: race(),
+            crossing: LogRef(0),
+        });
+        assert_eq!(times(&read(&events, filters)), vec![9 * S, 2 * S, 8 * S]);
+        // A lap put in by hand counts however close it is to the one before it.
+        events.push(Event::LapInserted {
+            race: race(),
+            adapter: AdapterId("oft".into()),
+            seat: SeatRef("seat-0".into()),
+            at: SourceTime::from_micros(21 * S),
+        });
+        assert_eq!(times(&read(&events, filters)), vec![9 * S, 2 * S, 8 * S, S]);
+        // Removing it is the way back.
+        events.push(Event::LapRemoved {
+            race: race(),
+            crossing: LogRef(2),
+            reason: None,
+            note: None,
+        });
+        assert_eq!(times(&read(&events, filters)), vec![9 * S, 10 * S, S]);
     }
 
     #[test]

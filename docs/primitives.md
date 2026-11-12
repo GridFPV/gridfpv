@@ -1,6 +1,6 @@
 # Grid primitives
 
-**Status:** revision 7 (2026-11-09): the design to build against, with build progress in §8.
+**Status:** revision 8 (2026-11-12): the design to build against, with build progress in §8.
 Revision 1 was written from the design discussion of that day; revisions 2 to 7 fold in
 Ryan's notes and answers. Sections marked **Agreed** record what Ryan decided.
 
@@ -27,6 +27,11 @@ events and pilots carry outside ids (§4); a field can be seeded from an importe
 
 **What changed in revision 5:** removing a lap always folds its time into the next lap; a
 restart point is the separate case (§5.7).
+
+**What changed in revision 8** (Ryan, after the first night on real hardware): the minimum
+lap and "ignore crossings before" are lap rules of the **event**, set once (§5.1, §5.6). A
+timer keeps a separate lap cooldown for bounce (§3.2). A crossing a lap rule left out can be
+ruled to count (§5.7). Full mode is built first, shaped like grid-rh's pages (§7).
 
 **What changed in revision 7:** the six questions from building the engine are answered (§9
 says where each answer went). A disqualified pilot's earned place passes down by default and
@@ -119,6 +124,11 @@ samples. Grid never tells it a race is starting or stopping.
   Players a sim sees are offered for adding to the roster. They are never added silently.
 - A **profile** is a saved set of seat settings for a timer.
 - Seats and profiles belong to the **timer**, outside any event.
+- A timer may keep a **lap cooldown**: after a crossing on a seat it reports no other on
+  that seat for a short while (2 seconds by default on OFT). It is there to swallow the
+  bounce of one pass at the timer, so Grid is not shown a handful of crossings for one
+  trip through the gate. It is a timer setting, saved in the profile. It is **not** the
+  minimum lap (§5.1), and it should be shorter than it.
 - A heat's lineup puts pilots on seats (§5.4). That lineup **is** the link between a pilot and
   a seat. There is no separate registration step.
 
@@ -209,7 +219,12 @@ format in force for the heat (§5.6).
 
 - Start procedure: staging time, random hold, start tone. The console plays the tone.
 - End condition: first to N laps, a fixed time plus a grace window, or open until stopped.
-- Lap filters: minimum lap time, and "ignore crossings before" at the start.
+- Lap filters: minimum lap time, and "ignore crossings before" at the start. These two are
+  **lap rules of the event** (Agreed, 2026-11-12): set once, on the Event page, and in force
+  for every race of the event, flown or still to fly. A format may carry a minimum lap of
+  its own for the rare phase that needs one; the nearest wins. Grid applies them to what the
+  timer reports. A crossing they leave out stays in the log as "not counted", so nothing is
+  lost. Nothing is written to a timer when a race starts.
 
 ### 5.2 Phase (Agreed)
 
@@ -373,6 +388,10 @@ to the hole shot and filters nothing at the start. OFT can give it.
 A ruling is a human decision recorded as a fact in the log. Rulings are never automatic.
 
 - Lap corrections: remove, insert, adjust, split.
+- **Count a crossing** (Agreed, 2026-11-12): a crossing left out by a lap rule (too soon
+  after the one before, or in the ignored stretch after the start) can be ruled to count.
+  From then on no lap rule leaves it out. A lap put in by hand is the same: the lap rules
+  are for what a timer reports, never for a person's call. Removing it is the way back.
 - **There is one way to remove a lap, and it always behaves the same.** Take laps A, B and C
   in a row. Removing B leaves A as it was, because A was a full lap. C now starts where A
   ended, so B's time becomes part of C. Like a race discard, a removal takes an optional
@@ -555,6 +574,14 @@ Open (class)
 
 A mode chooses what the UI shows. It never changes the model underneath.
 
+**Full mode is built first** (Ryan, 2026-11-12). The other modes come once a single pilot
+can run a home series in full mode. Full mode takes its shape from grid-rh, one page per
+job along the top: Event, Seats (with Timers), Pilots (with Classes), Phases, Formats, Run,
+Marshal, Results, Overlays, Help. What it keeps from grid-rh: lap rules set once on the
+event, seat profiles, the format list, the Run and Marshal pages, tuning on a recording,
+and built-in help. What it leaves behind: teams (individual is the norm), archives, and
+RotorHazard's shape of stages, heats and rounds.
+
 - **Single pilot mode:** close to what RaceGOW mode shows in grid-rh. Hides locking and
   protests.
 - **Simple mode.**
@@ -651,13 +678,16 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      can keep its settings across a restart is asked to keep them after every change; this
      part is tested against a fake only, because `oftd` cannot keep settings. The timer's
      network address and restart are left to the timer's own page.
-   - **Minimum lap and seats per receiver (2026-11-12, Ryan):** the minimum lap is a race
-     rule in the format, not a timer setting. It is typed when a heat or a bracket is
-     added. Grid sets it on each OFT timer the heat uses when a race starts, and again if
-     the timer comes back in the middle of the race, because a crossing the timer drops
-     never reaches Grid. A format with no minimum lap sets the timer to 0. A start is
-     refused when a timer cannot be set. Seats per receiver is set on the timer's own page
-     only. The Tune page shows both and changes neither.
+   - **Minimum lap and lap cooldown (2026-11-12, Ryan):** the minimum lap is a lap rule of
+     the event (§5.1), applied by Grid. The timer's own `min_lap_ms` is treated as a lap
+     cooldown for bounce: a timer setting on the Seats page, 2 seconds by default, saved in
+     the seat profile. Grid no longer writes to a timer when a race starts. (For one
+     evening Grid set the timer's minimum lap to the format's at every start; that is
+     gone.)
+   - **OFT spec v0.5 (2026-11-12):** `seats_per_node` is gone from the protocol; the timer
+     decides how seats are spread over its receivers. Grid no longer reads, shows or sends
+     it. A v0.4 timer, which needs the field in a write, refuses "Apply to timer" until its
+     firmware is updated.
    - **A timer that restarts mid-race:** its clock begins again. The laps either side are
      kept, and the stretch across the restart has no time.
    - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):
@@ -665,6 +695,27 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
 7. Rewrite each as-built doc (protocol, live state, testing, marshaling) when its area is
    rebuilt, not before. **Started:** `docs/api.md` lists every route as built, and the
    Protocol doc's banner points at it.
+
+8. Full mode in the console (2026-11-12). **Built**, one page per job under one nav row:
+   - **Event:** details with Edit (`PUT /events/{id}`), the event's lap rules, classes.
+   - **Seats:** one timer's seats, live signal and timer settings, as a draft that is
+     applied and read back. Seat **profiles** (`GET`/`POST /timers/{id}/profiles`, apply
+     writes to the timer). **Tune** on a seat records its signal and sets the enter and
+     exit levels on the recording; the passes shown follow the timer's own rule with its
+     exit hold. A recording lives in the page only.
+   - **Timers:** the directory, with timers found on the network.
+   - **Pilots** and **Classes:** the lists that outlive events.
+   - **Phases:** the tree, Up next, and Add phase, Add heat, Add bracket. A phase or heat
+     is given a saved format; a heat under a phase can use the phase's.
+   - **Formats:** the saved formats (`/formats`) as a table, with an editor over the same
+     rules-as-data the engine reads (§5.5). A new Director starts with four.
+   - **Run:** a phase, then one of its heats, on the timer. Keyboard shortcuts, lap
+     callouts, and the best run of N laps on a seat card.
+   - **Marshal:** opens on the race that most needs a look; the race list shows one phase
+     at a time and leaves discarded races out unless asked.
+   - **Results:** class standings and each phase's ranking with the numbers behind it.
+   - **Help:** one page per console page, Markdown in `docs/help/`, bundled into the
+     console so it works with no internet.
 
 **Built in the engine since the first pass:** the run queue (§5.9: the ready heats, the
 director's order, and a helper that spaces pilots out), class standings (§5.3), a first-to-N
@@ -678,8 +729,15 @@ seat, the higher seed keeps it. A director's override of the result is not built
 
 **Known loose ends** (as of 2026-11-10; none blocks a race):
 
-- The overlay works out "best N consecutive laps" itself, as the engine also does. The
-  Director should serve it, so the rule lives in one place.
+- The overlay, the Run page and the Results page work out "best N consecutive laps"
+  themselves (one shared helper), as the engine also does. The Director should serve it, so
+  the rule lives in one place.
+- A phase's format cannot be changed in the console once it is added; the phase is removed
+  and added again. A phase cannot be renamed or moved.
+- Tune recordings live in the page. §5.10 says they belong to the timer and are stored
+  with it; that is not built.
+- The event's lap rules apply to races under a locked phase too. Changing them after a
+  lock changes an official result without an unlock.
 - A race has no "saved at" time in the snapshot, so the overlay infers how long to keep a
   result on screen.
 - The trace of a race in which the timer restarted is drawn on two clocks at once. The lap
@@ -689,7 +747,8 @@ seat, the higher seed keeps it. A director's override of the result is not built
 - A class cannot be removed from an event in the console. A timer can be removed while a
   heat still uses it.
 - Every unlocked phase row has a Lock button, which is a lot on a big bracket.
-- The timer list and the active event are polled, not pushed.
+- The timer list and the active event are polled, not pushed. So are the saved formats
+  and the seat profiles: a second console sees a change on its next read.
 - Refusing a start with no countdown on a timer that needs warning is not enforced.
 - The desktop app is not compiled or run by any gate on this machine.
 

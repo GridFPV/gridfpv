@@ -27,6 +27,7 @@ import type {
   EventId,
   EventMeta,
   EventView,
+  Format,
   MainsRequest,
   PassRequest,
   Pilot,
@@ -34,11 +35,15 @@ import type {
   ProtocolError,
   RaceId,
   RaceSignal,
+  SavedFormat,
   SeatLevels,
+  SeatProfile,
+  SeatProfileRequest,
   SetClassHiddenRequest,
   SignalChunk,
   Timer,
   TimerConfig,
+  TimerProfiles,
   TimerView,
   UpdateClassRequest,
   UpdatePilotRequest
@@ -459,6 +464,169 @@ export async function putTimerConfig(
     `/timers/${encodeURIComponent(id)}/config`,
     { method: 'PUT', body: config, token, fetch: options.fetch },
     "change the timer's settings"
+  );
+}
+
+/**
+ * Change an event's name and details (`PUT /events/{id}`). RD-gated. The body is the same
+ * shape an event is created from. Resolves to the event as it now is. An empty name is a
+ * **400**; an unknown id is a **404**.
+ */
+export async function updateEvent(
+  baseUrl: string,
+  id: EventId,
+  request: CreateEventRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventMeta> {
+  return apiJson<EventMeta>(
+    baseUrl,
+    `/events/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the event'
+  );
+}
+
+/** The saved formats (`GET /formats`). An open read. */
+export async function listFormats(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<SavedFormat[]> {
+  return apiJson<SavedFormat[]>(baseUrl, '/formats', options, 'list the formats');
+}
+
+/**
+ * Save a new format (`POST /formats`). RD-gated. A name another saved format has is a
+ * **409** with a sentence for the director.
+ */
+export async function createFormat(
+  baseUrl: string,
+  format: Format,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<SavedFormat> {
+  return apiJson<SavedFormat>(
+    baseUrl,
+    '/formats',
+    { method: 'POST', body: format, token, fetch: options.fetch },
+    'save the format'
+  );
+}
+
+/** Replace a saved format (`PUT /formats/{id}`). RD-gated. */
+export async function updateFormat(
+  baseUrl: string,
+  id: string,
+  format: Format,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<SavedFormat> {
+  return apiJson<SavedFormat>(
+    baseUrl,
+    `/formats/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: format, token, fetch: options.fetch },
+    'change the format'
+  );
+}
+
+/** Remove a saved format (`DELETE /formats/{id}`). RD-gated. */
+export async function deleteFormat(
+  baseUrl: string,
+  id: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    `/formats/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the format'
+  );
+}
+
+/** A timer's saved seat profiles (`GET /timers/{id}/profiles`). An open read. */
+export async function listProfiles(
+  baseUrl: string,
+  timer: AdapterId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<TimerProfiles> {
+  return apiJson<TimerProfiles>(
+    baseUrl,
+    `/timers/${encodeURIComponent(timer)}/profiles`,
+    options,
+    "list the timer's profiles"
+  );
+}
+
+/**
+ * Save settings as a new profile of a timer (`POST /timers/{id}/profiles`). RD-gated.
+ * Nothing is written to the timer. The new profile becomes the timer's active one.
+ */
+export async function createProfile(
+  baseUrl: string,
+  timer: AdapterId,
+  request: SeatProfileRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<SeatProfile> {
+  return apiJson<SeatProfile>(
+    baseUrl,
+    `/timers/${encodeURIComponent(timer)}/profiles`,
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'save the profile'
+  );
+}
+
+/** Rename a profile or replace its settings (`PUT /timers/{id}/profiles/{pid}`). RD-gated. */
+export async function updateProfile(
+  baseUrl: string,
+  timer: AdapterId,
+  profile: string,
+  request: SeatProfileRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<SeatProfile> {
+  return apiJson<SeatProfile>(
+    baseUrl,
+    `/timers/${encodeURIComponent(timer)}/profiles/${encodeURIComponent(profile)}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the profile'
+  );
+}
+
+/** Remove a profile (`DELETE /timers/{id}/profiles/{pid}`). RD-gated. */
+export async function deleteProfile(
+  baseUrl: string,
+  timer: AdapterId,
+  profile: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    `/timers/${encodeURIComponent(timer)}/profiles/${encodeURIComponent(profile)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'delete the profile'
+  );
+}
+
+/**
+ * Write a profile to its timer (`POST /timers/{id}/profiles/{pid}/apply`). RD-gated.
+ * Resolves to the settings as the timer reports them afterwards. A timer that refuses or
+ * cannot be reached answers **409** with a sentence for the director.
+ */
+export async function applyProfile(
+  baseUrl: string,
+  timer: AdapterId,
+  profile: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<TimerConfig> {
+  return apiJson<TimerConfig>(
+    baseUrl,
+    `/timers/${encodeURIComponent(timer)}/profiles/${encodeURIComponent(profile)}/apply`,
+    { method: 'POST', token, fetch: options.fetch },
+    'apply the profile'
   );
 }
 

@@ -79,7 +79,7 @@ pub fn router(registry: EventRegistry) -> Router {
         )
         // The event registry: an open list, an RD-gated create and a permanent delete.
         .route("/events", get(list_events).post(create_event))
-        .route("/events/{event_id}", axum::routing::delete(delete_event))
+        .route("/events/{event_id}", put(update_event).delete(delete_event))
         // The Director's active event: an open read so any client resumes into the selected
         // event on connect/reload, and an RD-gated write to set it.
         .route("/active-event", get(get_active_event).put(set_active_event))
@@ -133,6 +133,26 @@ pub fn router(registry: EventRegistry) -> Router {
             "/timers/{timer_id}/live",
             get(crate::timers::get_timer_live),
         )
+        .route(
+            "/timers/{timer_id}/profiles",
+            get(crate::library::list_profiles).post(crate::library::create_profile),
+        )
+        .route(
+            "/timers/{timer_id}/profiles/{profile_id}",
+            put(crate::library::update_profile).delete(crate::library::delete_profile),
+        )
+        .route(
+            "/timers/{timer_id}/profiles/{profile_id}/apply",
+            post(crate::library::apply_profile),
+        )
+        .route(
+            "/formats",
+            get(crate::library::list_formats).post(crate::library::create_format),
+        )
+        .route(
+            "/formats/{format_id}",
+            put(crate::library::update_format).delete(crate::library::delete_format),
+        )
         // Any path that matched no route above is a typed 404, not the SPA shell — see
         // [`api_fallback`] / [`smart_fallback`].
         .fallback(api_fallback)
@@ -159,6 +179,26 @@ async fn create_event(
     Json(body): Json<CreateEventRequest>,
 ) -> Result<Json<EventMeta>, ProtocolError> {
     let meta = registry.create(&body).map_err(registry_error_to_protocol)?;
+    Ok(Json(meta))
+}
+
+/// `PUT /events/{event_id}` — change an event's name and details, RD-gated. The id never
+/// changes. A name that is empty is `BadRequest`.
+async fn update_event(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<CreateEventRequest>,
+) -> Result<Json<EventMeta>, ProtocolError> {
+    if body.name.trim().is_empty() {
+        return Err(ProtocolError::new(
+            ErrorCode::BadRequest,
+            "An event needs a name.",
+        ));
+    }
+    let meta = registry
+        .update(&event_id, &body)
+        .map_err(registry_error_to_protocol)?;
     Ok(Json(meta))
 }
 
@@ -825,6 +865,34 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(registry.active().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_events_name_and_details_can_be_changed() {
+        let registry = new_registry();
+        let created = registry
+            .create(&CreateEventRequest::named("Draft"))
+            .unwrap();
+        let uri = format!("/events/{}", created.id.0);
+        let body =
+            serde_json::json!({"name": " Friday whoops ", "location": "Garage", "date": " "});
+        let (status, raw) = send(registry.clone(), "PUT", &uri, Some(body), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let meta: EventMeta = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(meta.id, created.id);
+        assert_eq!(meta.created_at, created.created_at);
+        assert_eq!(meta.name, "Friday whoops");
+        assert_eq!(meta.location.as_deref(), Some("Garage"));
+        // A blank detail is unset.
+        assert_eq!(meta.date, None);
+        assert_eq!(registry.meta_of(&created.id), Some(meta));
+        // No name is refused, and an unknown event is a 404.
+        let nameless = serde_json::json!({"name": "  "});
+        let (status, _) = send(registry.clone(), "PUT", &uri, Some(nameless), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = serde_json::json!({"name": "x"});
+        let (status, _) = send(registry, "PUT", "/events/nope", Some(body), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

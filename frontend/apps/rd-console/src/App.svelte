@@ -1,23 +1,20 @@
 <script lang="ts">
   /**
-   * The RD console shell (#51; two-level app IA per #118).
+   * The RD console shell.
    *
-   * The console is a **home hub of pages** plus the open event's page. The shell shows an
-   * **app-level route**: the {@link HomeHub} (landing), or one of its pages — {@link EventPicker}
-   * (the Events page), {@link PilotsPage}, {@link ClassesPage}, {@link TimersPage}. A timer's Tune
-   * button opens its {@link TunePage}. Selecting an event on the Events
-   * page opens {@link EventPage}; a heat on it opens that heat's {@link RunPage}, and its
-   * Marshal link opens the {@link MarshalPage}.
+   * One row of pages ({@link AppNav}) over the page that is showing. Some pages belong to
+   * the open event (Event, Phases, Run, Marshal, Results, Overlays) and some to the whole
+   * Director (Seats and Timers, Pilots and Classes, Formats, Help, and the Events page
+   * where an event is opened). `lib/route.ts` has the URL of each.
    *
    * An **overlay** route (`#/overlay/‹name›`) is the exception to all of it: a page for an OBS
-   * browser source, drawn bare on a see-through page. It gets no brand, no token dialog and no
+   * browser source, drawn bare on a see-through page. It gets no nav, no token dialog and no
    * toasts, it does not open the event in this session, and nothing that makes sound is ever
-   * mounted for it (the start tone lives in {@link RunPage} alone).
+   * mounted for it (the start tone and the lap callouts live in {@link RunPage} alone).
    *
-   * On load the shell resolves the Director's active event (server state, #90) so an `#/event`
-   * URL can render, but the hash is authoritative for *which* view to show (#118): a bare/hub
-   * load stays on the hub and never opens an event — the user only gets there by navigating in or
-   * loading the event URL.
+   * On load the shell resolves the Director's active event (server state) so an event URL
+   * can render. The hash is authoritative for *which* page to show; an event page with no
+   * event open lands on the Events page.
    *
    * The RD token is handled **lazily**: reads need none, and a write the Director refuses prompts
    * for it via {@link TokenDialog} (registered as the session's token provider).
@@ -28,19 +25,26 @@
    */
   import '@gridfpv/components/tokens.css';
   import { ToastHost } from '@gridfpv/components';
+  import AppNav from './AppNav.svelte';
   import { Session } from './lib/session.svelte.js';
   import { EventLive } from './lib/eventLive.svelte.js';
-  import HomeHub from './screens/HomeHub.svelte';
-  import EventPicker from './screens/EventPicker.svelte';
-  import EventPage from './screens/EventPage.svelte';
-  import RunPage from './screens/RunPage.svelte';
-  import MarshalPage from './screens/MarshalPage.svelte';
-  import PilotsPage from './screens/PilotsPage.svelte';
+  import { marshalCount } from './lib/marshal.js';
+  import CapturePage from './screens/CapturePage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
-  import TimersPage from './screens/TimersPage.svelte';
-  import TunePage from './screens/TunePage.svelte';
-  import TokenDialog from './screens/TokenDialog.svelte';
+  import EventPage from './screens/EventPage.svelte';
+  import EventPicker from './screens/EventPicker.svelte';
+  import FormatsPage from './screens/FormatsPage.svelte';
+  import HelpPage from './screens/HelpPage.svelte';
+  import MarshalPage from './screens/MarshalPage.svelte';
+  import OverlaysPage from './screens/OverlaysPage.svelte';
+  import PhasesPage from './screens/PhasesPage.svelte';
+  import PilotsPage from './screens/PilotsPage.svelte';
   import RaceOverlay from './screens/RaceOverlay.svelte';
+  import ResultsPage from './screens/ResultsPage.svelte';
+  import RunPage from './screens/RunPage.svelte';
+  import SeatsPage from './screens/SeatsPage.svelte';
+  import TimersPage from './screens/TimersPage.svelte';
+  import TokenDialog from './screens/TokenDialog.svelte';
   import {
     parseHash,
     formatHash,
@@ -48,13 +52,12 @@
     resolveInitialRoute,
     inEvent,
     isOverlay,
-    type Route,
-    type AppPage
+    type Route
   } from './lib/route.js';
 
   const session = new Session();
 
-  // ── Hash-based URL routing (#118) ──────────────────────────────────────────
+  // ── Hash-based URL routing ─────────────────────────────────────────────────
   // The view is reflected in `location.hash` so a refresh stays on the same page and
   // back/forward + bookmarks work. The hash is the source of truth: navigating sets it, and the
   // reactive `route` is parsed from it on load and on every `hashchange`/`popstate`. We use a hash
@@ -62,8 +65,7 @@
   // stays client-side and can't collide. See `lib/route.ts` for the scheme + reconciliation rules.
   //
   // `route` is the *intended* view. It's reconciled against the live active event (server state)
-  // for rendering: an event route with no active event reconciles to the Events page. The hash
-  // is authoritative — an empty/hub hash stays on the hub even when an event is active.
+  // for rendering: an event route with no active event reconciles to the Events page.
   let route = $state<Route>(parseHash(location.hash));
 
   // Navigate to a route: this is the single mutation point. It updates `location.hash`, which (for
@@ -74,10 +76,6 @@
     route = next;
     if (location.hash !== hash) location.hash = hash;
   }
-
-  // Page navigations (hub cards, breadcrumbs, the brand).
-  const goPage = (page: AppPage) => navigate({ kind: 'page', page });
-  const goHome = () => goPage('home');
 
   // On `hashchange`/`popstate` (back/forward, manual edit, or our own `navigate`) re-derive the
   // route from the hash. Reconcile against the live active event so an event hash with no event
@@ -108,21 +106,12 @@
     })();
   });
 
-  // Opening an event happens *inside* the EventPicker via session state (`chooseEvent` /
-  // `createEventAndEnter` set `session.currentEvent`), not through a `navigate` call here. So when
-  // an event becomes open while we're on the Events page, flip the route to the event page so
-  // the hash becomes `#/event`.
-  $effect(() => {
-    if (session.currentEvent && route.kind === 'page' && route.page === 'events') {
-      navigate({ kind: 'event' });
-    }
-  });
-
-  // The live competition of the open event: one store, shared by the event page and the Run
-  // view, so moving between them does not read everything again. It lives only while an event
-  // screen is showing; on the hub or a directory page there is nothing to keep fresh.
+  // The live competition of the open event: one store, shared by every page, so moving
+  // between them does not read everything again. It lives for as long as an event is open,
+  // on whatever page: the nav shows how many races need a marshal from anywhere.
   let live = $state.raw<EventLive | undefined>(undefined);
-  const liveEventId = $derived(inEvent(route) ? session.currentEvent?.id : undefined);
+  const liveEventId = $derived(bare ? undefined : session.currentEvent?.id);
+  const toMarshal = $derived(live?.view ? marshalCount(live.view) : 0);
   $effect(() => {
     const id = liveEventId;
     if (!id) {
@@ -144,13 +133,6 @@
       delete document.documentElement.dataset.overlay;
     };
   });
-
-  // Leaving the event page closes the event in this console (the Director's active event is left
-  // alone) and lands on the page asked for.
-  function leaveEventTo(page: AppPage) {
-    session.leaveEvent();
-    goPage(page);
-  }
 </script>
 
 <svelte:window onhashchange={onHashChange} onpopstate={onHashChange} />
@@ -175,71 +157,64 @@
 {/if}
 
 {#snippet shell()}
+  <AppNav {route} eventName={session.currentEvent?.name} {toMarshal} />
   {#if session.resolvingActiveEvent && !session.currentEvent}
-    <!-- Resolving the Director's active event (#90): a brief loading state before we know
-         whether an event page can render. -->
+    <!-- Resolving the Director's active event: a brief loading state before we know whether
+         an event page can render. -->
     <div class="resume-loading" role="status">
       <span class="resume-spinner" aria-hidden="true"></span>
       <span>Resuming…</span>
     </div>
   {:else if route.kind === 'page'}
-    <!-- App-level routes (#118): the home hub, or one of its pages. The view is driven by the
-         hash, not just `session.currentEvent` — an explicit page hash (e.g. `#/pilots`) shows that
-         page even if an event is active on the Director, so a refresh on a top-level page stays
-         put. Each page owns its own breadcrumb back to Home. -->
-    {#if route.page === 'home'}
-      <HomeHub
-        {session}
-        onpilots={() => goPage('pilots')}
-        onclasses={() => goPage('classes')}
-        ontimers={() => goPage('timers')}
-        onevents={() => goPage('events')}
-      />
-    {:else if route.page === 'events'}
-      <EventPicker {session} onhome={goHome} />
+    {#if route.page === 'events'}
+      <!-- Arriving here with an event already open stays here: this is where another one is
+           opened. Opening or creating one goes to its page. -->
+      <EventPicker {session} onopened={() => navigate({ kind: 'event', section: 'event' })} />
     {:else if route.page === 'pilots'}
-      <PilotsPage {session} onhome={goHome} />
+      <PilotsPage {session} />
     {:else if route.page === 'classes'}
-      <ClassesPage {session} onhome={goHome} />
+      <ClassesPage {session} />
+    {:else if route.page === 'formats'}
+      <FormatsPage {session} />
     {:else if route.page === 'timers'}
-      <TimersPage {session} onhome={goHome} ontune={(timer) => navigate({ kind: 'tune', timer })} />
+      <TimersPage {session} ontune={(timer) => navigate({ kind: 'seats', timer })} />
     {/if}
-  {:else if route.kind === 'tune'}
-    <!-- A timer's Tune page. Keyed on the timer, so a different timer starts a fresh page. -->
-    {#key route.timer}
-      <TunePage {session} timer={route.timer} onhome={goHome} ontimers={() => goPage('timers')} />
+  {:else if route.kind === 'seats'}
+    <SeatsPage
+      {session}
+      timer={route.timer}
+      onpick={(timer) => navigate({ kind: 'seats', timer })}
+    />
+  {:else if route.kind === 'capture'}
+    <!-- Keyed on the seat, so another seat starts with a fresh recording. -->
+    {#key `${route.timer}\u0000${route.seat}`}
+      <CapturePage {session} timer={route.timer} seat={route.seat} />
     {/key}
-  {:else if session.currentEvent && live}
+  {:else if route.kind === 'help'}
+    <HelpPage slug={route.slug} />
+  {:else if session.currentEvent && live && inEvent(route)}
     {#if route.kind === 'run'}
       <RunPage
-        event={session.currentEvent}
         {live}
         heat={route.heat}
-        onhome={() => leaveEventTo('home')}
-        onevents={() => leaveEventTo('events')}
-        onevent={() => navigate({ kind: 'event' })}
         onrun={(heat) => navigate({ kind: 'run', heat })}
+        ontune={(timer, seat) => navigate({ kind: 'capture', timer, seat })}
       />
     {:else if route.kind === 'marshal'}
       <MarshalPage
-        event={session.currentEvent}
         {live}
         race={route.race}
-        onhome={() => leaveEventTo('home')}
-        onevents={() => leaveEventTo('events')}
-        onevent={() => navigate({ kind: 'event' })}
         onopen={(race) => navigate({ kind: 'marshal', race })}
         onrun={(heat) => navigate({ kind: 'run', heat })}
       />
+    {:else if route.kind === 'event' && route.section === 'phases'}
+      <PhasesPage {live} onrun={(heat) => navigate({ kind: 'run', heat })} />
+    {:else if route.kind === 'event' && route.section === 'results'}
+      <ResultsPage {live} />
+    {:else if route.kind === 'event' && route.section === 'overlays'}
+      <OverlaysPage />
     {:else}
-      <EventPage
-        event={session.currentEvent}
-        {live}
-        onhome={() => leaveEventTo('home')}
-        onevents={() => leaveEventTo('events')}
-        onmarshal={() => navigate({ kind: 'marshal' })}
-        onrun={(heat) => navigate({ kind: 'run', heat })}
-      />
+      <EventPage {session} event={session.currentEvent} {live} />
     {/if}
   {:else}
     <!-- Edge case: an event route with no open event (e.g. the event was just deleted).
@@ -259,7 +234,7 @@
     align-items: center;
     justify-content: center;
     gap: var(--gf-space-3);
-    min-height: 100vh;
+    min-height: 60vh;
     color: var(--gf-text-muted);
     font-family: var(--gf-font-family);
     font-size: var(--gf-font-size-sm);

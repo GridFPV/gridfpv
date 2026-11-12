@@ -1,8 +1,8 @@
 <script lang="ts">
   /**
-   * EventPicker — the home hub's **Events** page (#118).
+   * EventPicker — the **Events** page, reached from the open event's name in the nav.
    *
-   * The select/create/delete surface for events (Home › Events). On load it reads the open event
+   * The select/create/delete surface for events. On load it reads the open event
    * list (`listEvents()`, no token) and renders the events the RD has created. Selecting one
    * makes it the Director's active event and opens it. "+ New event" opens a `Dialog` →
    * `createEventAndEnter(name)` → opens the new event.
@@ -18,10 +18,16 @@
   import { Badge, Button, Card, Dialog, Field, Input, toast } from '@gridfpv/components';
   import type { EventMeta } from '@gridfpv/types';
   import type { Session, CreateEventFields } from '../lib/session.svelte.js';
-  import Brand from '../Brand.svelte';
-  import Breadcrumbs from '../Breadcrumbs.svelte';
+  import Page from '../Page.svelte';
 
-  let { session, onhome }: { session: Session; onhome: () => void } = $props();
+  let {
+    session,
+    onopened
+  }: {
+    session: Session;
+    /** An event was opened or created here: go to its page. */
+    onopened?: () => void;
+  } = $props();
 
   type LoadState =
     | { kind: 'loading' }
@@ -152,6 +158,7 @@
     try {
       const chosen = await session.chooseEvent(meta);
       if (!chosen) toast.info('A control token is required to switch the active event.');
+      else onopened?.();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     }
@@ -193,6 +200,7 @@
       }
       newOpen = false;
       toast.success(`Created “${meta.name}”.`);
+      onopened?.();
     } catch (err) {
       newError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -201,20 +209,15 @@
   }
 </script>
 
-<div class="picker">
+<Page
+  title="Events"
+  help="event"
+  lede="An event is one race day. Open one to work in it, or add a new one."
+>
+  {#snippet actions()}
+    <Button variant="primary" onclick={openNew}>+ New event</Button>
+  {/snippet}
   <div class="picker-inner">
-    <!-- The brand is the home root (#118): every page carries the same top-left GridFPV mark,
-         leaving for the hub. -->
-    <div class="brand-row"><Brand onclick={onhome} /></div>
-    <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Events' }]} />
-
-    <header class="head">
-      <h1 class="title">Choose an event</h1>
-      <div class="head-actions">
-        <Button variant="primary" onclick={openNew}>+ New event</Button>
-      </div>
-    </header>
-
     {#if loadState.kind === 'loading'}
       <div class="state-msg" role="status">
         <span class="spinner" aria-hidden="true"></span>
@@ -274,7 +277,7 @@
       </section>
     {/if}
   </div>
-</div>
+</Page>
 
 <Dialog bind:open={newOpen} title="New event" onclose={() => (newError = undefined)}>
   <form class="new-form" onsubmit={submitNew} aria-label="New event">
@@ -364,41 +367,11 @@
 </Dialog>
 
 <style>
-  .brand-row {
-    margin-bottom: var(--gf-space-4);
-  }
-
-  .picker {
-    display: grid;
-    place-items: start center;
-    min-height: 100vh;
-    padding: var(--gf-space-8) var(--gf-space-6);
-    color: var(--gf-text);
-    font-family: var(--gf-font-family);
-    overflow: auto;
-  }
   .picker-inner {
     width: min(44rem, 100%);
     display: flex;
     flex-direction: column;
     gap: var(--gf-space-5);
-    padding-top: var(--gf-space-6);
-  }
-  .head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--gf-space-4);
-  }
-  .head-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-2);
-  }
-  .title {
-    margin: 0;
-    font-size: var(--gf-font-size-2xl);
-    letter-spacing: var(--gf-tracking-tight);
   }
 
   .state-msg {

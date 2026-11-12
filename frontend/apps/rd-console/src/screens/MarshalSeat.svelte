@@ -321,6 +321,20 @@
                   act({ Record: { LapRestored: { ...ref, crossing: crossing.crossing } } })}
                 >Restore</Button
               >
+            {:else if editable}
+              <!-- Left out by a lap filter. A marshal who saw the lap can rule that it counts. -->
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                title="Rule that this crossing was a real lap. No lap rule leaves it out after that."
+                aria-label="Count the crossing of {who}{base
+                  ? ` at ${formatOffset(crossing.at, base.at)} s`
+                  : ''}"
+                onclick={() =>
+                  act({ Record: { LapCounted: { ...ref, crossing: crossing.crossing } } })}
+                >Count it</Button
+              >
             {/if}
           </li>
         {/each}

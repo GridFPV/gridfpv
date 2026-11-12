@@ -237,13 +237,14 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     })
     .await;
 
-    // ── Settings: a change is written to the timer and read back. The timer's own minimum
-    //    lap starts at 2 s, which would swallow every other 1.5 s crossing. A settings
-    //    write leaves it alone; starting a race sets it to the format's (0.5 s here). ───
+    // ── Settings: a change is written to the timer and read back. The timer's lap
+    //    cooldown starts at 2 s, which would swallow every other 1.5 s crossing, so it is
+    //    set to half a second here. Starting a race never touches it. ───
     let uri = format!("/timers/{}/config", timer.0);
     let (status, mut config) = call(&registry, "GET", &uri, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(config["set_on_timer"]["min_lap_ms"], json!(2000));
+    assert_eq!(config["lap_cooldown_ms"], json!(2000));
+    config["lap_cooldown_ms"] = json!(500);
     // The exit hold is on the timer and comes through; a changed one is written back.
     assert!(config["exit_hold_ms"].is_u64(), "{config}");
     config["exit_hold_ms"] = json!(45);
@@ -297,7 +298,7 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     // ── A race: laps from the timer, lap 1 from the tone, signal and levels logged ──────
     start(&registry, &event).await;
     let (_, racing) = call(&registry, "GET", &uri, None).await;
-    assert_eq!(racing["set_on_timer"]["min_lap_ms"], json!(500));
+    assert_eq!(racing["lap_cooldown_ms"], json!(500));
     tokio::time::sleep(Duration::from_millis(6_500)).await;
     let first = RaceId("heat#1".into());
     let times = laps(&registry, &event, &timer, &first);
@@ -404,7 +405,7 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     eventually("the timer to come back", 30, || connected(&registry)).await;
     // A restarted daemon is back on its own defaults: settings live on the timer.
     let (_, after_reboot) = call(&registry, "GET", &uri, None).await;
-    assert_eq!(after_reboot["set_on_timer"]["min_lap_ms"], json!(2000));
+    assert_eq!(after_reboot["lap_cooldown_ms"], json!(2000));
     let (status, _) = call(&registry, "PUT", &uri, Some(config.clone())).await;
     assert_eq!(status, StatusCode::OK);
     // The new clock has to be in the log before a race is placed on it.

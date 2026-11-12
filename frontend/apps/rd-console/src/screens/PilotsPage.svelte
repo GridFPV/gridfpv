@@ -1,18 +1,18 @@
 <script lang="ts">
   /**
-   * PilotsPage — the app-level **Pilots** page (#118 / #74).
+   * PilotsPage — the Pilots page: the pilot list, which outlives events.
    *
-   * A real route in the two-level IA's home hub (Home › Pilots). It hosts the
-   * {@link PilotManager} (directory CRUD: the add / edit / remove form). `Breadcrumbs` + the brand
-   * root get you home from here.
+   * It hosts the {@link PilotManager} (add, edit, remove). The Classes list sits beside it,
+   * one tab over. Who races in which class at an event is set on the Event page.
    */
-  import { Button, Card, InfoTip } from '@gridfpv/components';
+  import { Button, Card } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
-  import Brand from '../Brand.svelte';
-  import Breadcrumbs from '../Breadcrumbs.svelte';
+  import Page from '../Page.svelte';
+  import PageTabs from '../PageTabs.svelte';
+  import { PEOPLE_TABS } from '../lib/tabs.js';
   import PilotManager from './PilotManager.svelte';
 
-  let { session, onhome }: { session: Session; onhome: () => void } = $props();
+  let { session }: { session: Session } = $props();
 
   let manager = $state<PilotManager | undefined>(undefined);
 
@@ -22,76 +22,23 @@
   });
 </script>
 
-<div class="page">
-  <div class="page-inner">
-    <!-- The brand is the home root (#118): every page carries the same top-left GridFPV mark,
-         leaving for the hub. -->
-    <div class="brand-row"><Brand onclick={onhome} /></div>
-    <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Pilots' }]} />
-
-    <header class="page-head">
-      <div class="page-titles">
-        <div class="page-titleline">
-          <h1 class="page-title">Pilots</h1>
-          <!-- #466: moved off the page. "Callsign is the only required field" is already carried by
-               the required marker on the field itself. -->
-          <InfoTip
-            label="About the pilot directory"
-            text="The application-level pilot directory — maintained once here, shared by every event. Each pilot needs only a callsign; the rest (team, country, colour, VTX, IDs) is optional."
-          />
-        </div>
-      </div>
-      <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add pilot</Button>
-    </header>
-
-    <Card elevation="sm">
-      <div class="manager-wrap">
-        <PilotManager bind:this={manager} {session} />
-      </div>
-    </Card>
-  </div>
-</div>
+<Page
+  title="Pilots"
+  help="pilots"
+  lede="Everyone who flies with you. Kept once here and used by every event. A pilot needs only a callsign."
+>
+  {#snippet actions()}
+    <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add pilot</Button>
+  {/snippet}
+  <PageTabs tabs={PEOPLE_TABS} current="pilots" label="Pilots and classes" />
+  <Card elevation="sm">
+    <div class="manager-wrap">
+      <PilotManager bind:this={manager} {session} />
+    </div>
+  </Card>
+</Page>
 
 <style>
-  .brand-row {
-    margin-bottom: var(--gf-space-4);
-  }
-
-  .page {
-    min-height: 100vh;
-    padding: var(--gf-space-6) var(--gf-space-8) var(--gf-space-8);
-    color: var(--gf-text);
-    font-family: var(--gf-font-family);
-    overflow: auto;
-  }
-  .page-inner {
-    width: min(52rem, 100%);
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-5);
-  }
-  .page-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--gf-space-4);
-  }
-  .page-titles {
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-2);
-    min-width: 0;
-  }
-  .page-titleline {
-    display: flex;
-    align-items: center;
-  }
-  .page-title {
-    margin: 0;
-    font-size: var(--gf-font-size-2xl);
-    letter-spacing: var(--gf-tracking-tight);
-  }
   .manager-wrap {
     padding: var(--gf-space-2);
   }

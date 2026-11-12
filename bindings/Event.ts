@@ -2,6 +2,7 @@
 import type { AdapterId } from "./AdapterId";
 import type { ClassId } from "./ClassId";
 import type { DiscardReason } from "./DiscardReason";
+import type { LapRules } from "./LapRules";
 import type { LogRef } from "./LogRef";
 import type { Pass } from "./Pass";
 import type { PhaseDef } from "./PhaseDef";
@@ -36,7 +37,7 @@ export type Event = { "AdapterConnected": { adapter: AdapterId, } } | { "Adapter
 /**
  * Flags the race for the marshal's to-do list.
  */
-needs_marshal: boolean, note?: string, } } | { "RaceDiscarded": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "MarshalFlagSet": { race: RaceId, needs_marshal: boolean, } } | { "LapRemoved": { race: RaceId, crossing: LogRef, reason?: RemovalReason, note?: string, } } | { "LapRestored": { race: RaceId, crossing: LogRef, } } | { "LapInserted": { race: RaceId, adapter: AdapterId, seat: SeatRef, at: SourceTime, } } | { "LapAdjusted": { race: RaceId, crossing: LogRef, at: SourceTime, } } | { "RestartMarked": { race: RaceId, crossing: LogRef, } } | { "RestartUnmarked": { race: RaceId, crossing: LogRef, } } | { "PhaseDefined": { def: PhaseDef, } } | { "PhaseRemoved": { phase: PhaseId, } } | { "HeatDone": { heat: PhaseId, } } | { "HeatReopened": { heat: PhaseId, } } | { "FalseStart": { race: RaceId, pilot: PilotId, } } | { "FalseStartCleared": { race: RaceId, pilot: PilotId, } } | { "Disqualified": { phase: PhaseId, pilot: PilotId, reason?: string, 
+needs_marshal: boolean, note?: string, } } | { "RaceDiscarded": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "MarshalFlagSet": { race: RaceId, needs_marshal: boolean, } } | { "LapRemoved": { race: RaceId, crossing: LogRef, reason?: RemovalReason, note?: string, } } | { "LapRestored": { race: RaceId, crossing: LogRef, } } | { "LapCounted": { race: RaceId, crossing: LogRef, } } | { "LapInserted": { race: RaceId, adapter: AdapterId, seat: SeatRef, at: SourceTime, } } | { "LapAdjusted": { race: RaceId, crossing: LogRef, at: SourceTime, } } | { "RestartMarked": { race: RaceId, crossing: LogRef, } } | { "RestartUnmarked": { race: RaceId, crossing: LogRef, } } | { "PhaseDefined": { def: PhaseDef, } } | { "PhaseRemoved": { phase: PhaseId, } } | { "HeatDone": { heat: PhaseId, } } | { "HeatReopened": { heat: PhaseId, } } | { "FalseStart": { race: RaceId, pilot: PilotId, } } | { "FalseStartCleared": { race: RaceId, pilot: PilotId, } } | { "Disqualified": { phase: PhaseId, pilot: PilotId, reason?: string, 
 /**
  * What happens to a place the pilot had already earned that feeds another heat (a
  * bump-up spot). `false`, the default: the next pilot moves up and takes it.
@@ -46,4 +47,4 @@ keep_place_empty: boolean, } } | { "PositionSet": { heat: PhaseId, pilot: PilotI
 /**
  * 1 for the top.
  */
-position: number, note?: string, } } | { "PositionCleared": { heat: PhaseId, pilot: PilotId, } } | { "Reinstated": { phase: PhaseId, pilot: PilotId, } } | { "PhaseLocked": { phase: PhaseId, } } | { "PhaseUnlocked": { phase: PhaseId, } } | { "RosterSet": { class: ClassId, pilots: Array<PilotId>, } } | { "RosterRemoved": { class: ClassId, } } | { "StandingsSet": { class: ClassId, phases: Array<PhaseId>, } } | { "QueueSet": { heats: Array<PhaseId>, } } | { "ProtestFiled": { protest: ProtestId, race: RaceId, by?: PilotId, note?: string, } } | { "ProtestResolved": { protest: ProtestId, outcome: ProtestOutcome, note?: string, } };
+position: number, note?: string, } } | { "PositionCleared": { heat: PhaseId, pilot: PilotId, } } | { "Reinstated": { phase: PhaseId, pilot: PilotId, } } | { "PhaseLocked": { phase: PhaseId, } } | { "PhaseUnlocked": { phase: PhaseId, } } | { "RosterSet": { class: ClassId, pilots: Array<PilotId>, } } | { "RosterRemoved": { class: ClassId, } } | { "StandingsSet": { class: ClassId, phases: Array<PhaseId>, } } | { "LapRulesSet": { rules: LapRules, } } | { "QueueSet": { heats: Array<PhaseId>, } } | { "ProtestFiled": { protest: ProtestId, race: RaceId, by?: PilotId, note?: string, } } | { "ProtestResolved": { protest: ProtestId, outcome: ProtestOutcome, note?: string, } };

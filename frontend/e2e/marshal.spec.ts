@@ -21,7 +21,7 @@
  */
 import type { Locator, Page } from '@playwright/test';
 import { expect, test } from './observability.js';
-import { gotoEvents, gotoHub } from './nav.js';
+import { gotoEvents, gotoPage, heatOnTimer, openPage, pagesNav } from './nav.js';
 
 const STAMP = Date.now();
 const EVENT = `Review Night ${STAMP}`;
@@ -66,11 +66,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
 
   try {
     // ── Two pilots, an event, and one bench heat ─────────────────────────────────────────
-    await gotoHub(page);
-    await page.getByRole('button', { name: /Pilots/ }).click();
-    await expect(page.getByRole('heading', { name: 'Pilots', level: 1 })).toBeVisible({
-      timeout: 15_000
-    });
+    await gotoPage(page, 'Pilots');
     await addPilot(page, ACE);
     await addPilot(page, BEE);
 
@@ -90,6 +86,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     eventId = active.event?.id;
     expect(eventId).toBeTruthy();
 
+    await openPage(page, 'Phases');
     await page.getByRole('button', { name: '+ Add heat' }).click();
     const form = page.getByRole('form', { name: 'Add a heat' });
     await form.getByLabel('Heat name').fill(HEAT);
@@ -104,13 +101,13 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
       .locator('li.phase')
       .filter({ hasText: HEAT });
     await expect(phase).toContainText('Ready', { timeout: 15_000 });
-    // Nothing needs a look yet, so the Marshal link carries no count.
+    // Nothing needs a look yet, so the Marshal entry in the row carries no count.
     await expect(page.getByTestId('marshal-count')).toHaveCount(0);
 
     // ── Run the race. Ace's second crossing after the hole shot is the stray one. ────────
     // The heat is first in the run queue; run it from there.
     await page.getByRole('button', { name: `Run ${HEAT} next` }).click();
-    await expect(page.getByRole('heading', { name: HEAT, level: 1 })).toBeVisible();
+    await expect(heatOnTimer(page)).toHaveText(HEAT);
     const status = page.getByTestId('run-status');
     const runAce = page.getByRole('listitem', { name: `Seat 1, ${ACE}` });
     const runBee = page.getByRole('listitem', { name: `Seat 2, ${BEE}` });
@@ -150,19 +147,15 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     await expect(earlier.first()).toContainText('Needs a look');
     await expect(earlier.first()).toContainText(NOTE);
 
-    // ── The event page counts it; the Marshal page lists it with why ─────────────────────
-    const crumbs = page.getByRole('navigation', { name: 'Breadcrumb' });
-    await crumbs.getByRole('button', { name: EVENT }).click();
+    // ── The row of pages counts it; the Marshal page lists it with why ───────────────────
     await expect(page.getByTestId('marshal-count')).toHaveText('1', { timeout: 15_000 });
-    const marshalLink = page.getByRole('button', { name: /^Marshal/ });
+    const marshalLink = pagesNav(page).getByRole('link', { name: /^Marshal/ });
     await marshalLink.click();
     await expect(page).toHaveURL(/#\/event\/marshal$/);
     await expect(page.getByRole('heading', { name: 'Marshal', level: 1 })).toBeVisible();
-    await expect(crumbs).toContainText(EVENT);
-    await expect(crumbs.getByText('Marshal', { exact: true })).toHaveAttribute(
-      'aria-current',
-      'page'
-    );
+    await expect(marshalLink).toHaveAttribute('aria-current', 'page');
+    // With no race named, the page opens on the one that needs a look.
+    await expect(page.getByTestId('review-title')).toHaveText(RACE_NAME);
 
     const todo = page.getByRole('list', { name: 'Races that need a look' });
     const todoItem = todo.getByRole('listitem').filter({ hasText: RACE_NAME });
@@ -267,7 +260,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     for (const handle of raw) expect(marshalText).not.toContain(handle);
 
     // ── A heat with an open protest cannot be locked: the Director says why ──────────────
-    await crumbs.getByRole('button', { name: EVENT }).click();
+    await openPage(page, 'Phases');
     await expect(phase).toContainText('Complete', { timeout: 15_000 });
     await phase.getByRole('button', { name: `Lock ${HEAT}` }).click();
     const refusal = page.getByRole('alert').filter({ hasText: 'That didn’t work.' });
@@ -302,7 +295,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     await expect(page.getByText('Nothing needs a look.')).toBeVisible({ timeout: 15_000 });
 
     // ── Lock the heat: the race is official and read-only ────────────────────────────────
-    await crumbs.getByRole('button', { name: EVENT }).click();
+    await openPage(page, 'Phases');
     await expect(page.getByTestId('marshal-count')).toHaveCount(0);
     await phase.getByRole('button', { name: `Lock ${HEAT}` }).click();
     await expect(phase).toContainText('Locked', { timeout: 15_000 });
@@ -329,7 +322,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     for (const handle of raw) expect(lockedText).not.toContain(handle);
 
     // ── Unlock: rulings are offered again ────────────────────────────────────────────────
-    await crumbs.getByRole('button', { name: EVENT }).click();
+    await openPage(page, 'Phases');
     await phase.getByRole('button', { name: `Unlock ${HEAT}` }).click();
     await expect(phase).toContainText('Complete', { timeout: 15_000 });
     const eventText = await page.locator('body').innerText();

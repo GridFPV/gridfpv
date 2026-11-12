@@ -12,10 +12,11 @@ import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { EventMeta, EventView, LapView, Pilot, RaceSignal, RaceView } from '@gridfpv/types';
 import MarshalPage from '../src/screens/MarshalPage.svelte';
-import { EventLive, type LiveSession } from '../src/lib/eventLive.svelte.js';
+import type { LiveSession } from '../src/lib/eventLive.svelte.js';
 import { traceMarks } from '../src/lib/marshal.js';
 import { RaceTrace, timeAtX, wholeWindow } from '../src/lib/signal.js';
 import { eventView, group, heat, race, raceSeat, timerView } from './competition.js';
+import { openLive } from './support.js';
 
 const EVENT: EventMeta = { id: 'evt-77', name: 'Club Night', created_at: 0, persistent: true };
 const PILOTS: Pilot[] = [
@@ -91,30 +92,17 @@ async function open(
   over: Partial<LiveSession> = {},
   timers = [timerView('gate-x1y2', 'Gate', 2)]
 ) {
-  const session: LiveSession = {
-    getEventState: vi.fn(async () => view),
-    subscribeChanges: vi.fn(() => () => {}),
-    sendCommand: vi.fn(async () => ({ cursor: view.cursor })),
-    createBracket: vi.fn(async () => ({ cursor: view.cursor })),
-    postPass: vi.fn(async () => ({ cursor: view.cursor })),
-    listPilots: vi.fn(async () => PILOTS),
-    listTimers: vi.fn(async () => timers),
-    listClasses: vi.fn(async () => []),
-    getRaceSignal: vi.fn(async (_id: string, id: string) => ({ race: id, seats: [] })),
-    ...over
-  };
-  const live = new EventLive(session, EVENT.id);
-  await live.reload();
-  await live.reloadPilots();
-  await live.reloadTimers();
-  const nav = {
-    onhome: vi.fn(),
-    onevents: vi.fn(),
-    onevent: vi.fn(),
-    onopen: vi.fn(),
-    onrun: vi.fn()
-  };
-  render(MarshalPage, { event: EVENT, live, race: raceId, ...nav });
+  const { session, live } = await openLive(
+    view,
+    {
+      listPilots: vi.fn(async () => PILOTS),
+      listTimers: vi.fn(async () => timers),
+      ...over
+    },
+    EVENT.id
+  );
+  const nav = { onopen: vi.fn(), onrun: vi.fn() };
+  render(MarshalPage, { live, race: raceId, ...nav });
   return { session, live, nav };
 }
 
@@ -149,13 +137,20 @@ function expectNoRawIds() {
 afterEach(() => vi.restoreAllMocks());
 
 describe('MarshalPage lists', () => {
-  it('lists what needs a look with why, and every other race by heat', async () => {
+  it('lists what needs a look with why, and the other races by heat', async () => {
     const flagged = savedRace();
     const protested = race(HEAT, 2, 'Saved');
     const stopped = race(HEAT, 4, 'Stopped');
     const view = eventView({
       phases: tree(),
-      races: [flagged, protested, race(HEAT, 3, 'Discarded', { discard_reason: 'Other' }), stopped],
+      races: [
+        flagged,
+        protested,
+        race(HEAT, 3, 'Discarded', { discard_reason: 'Other' }),
+        stopped,
+        race(HEAT, 5, 'Saved'),
+        race(HEAT, 6, 'Saved')
+      ],
       current_race: stopped.race,
       protests: [{ protest: 'pr-9z', race: protested.race }]
     });
@@ -171,15 +166,55 @@ describe('MarshalPage lists', () => {
     expect(items[1]).toHaveTextContent('1 open protest.');
     expect(items[2]).toHaveTextContent('Stopped. Not saved or discarded yet.');
 
+    // The other races: newest first, without the ones on the to-do list and without the
+    // discarded one. A race keeps its number in the heat whatever is left out around it.
     const rest = within(screen.getByRole('region', { name: 'Qualifying Heat 1' }));
-    expect(rest.getAllByRole('listitem')).toHaveLength(1);
-    await fireEvent.click(rest.getByRole('button', { name: /race 3, Discarded: other/ }));
-    expect(nav.onopen).toHaveBeenCalledWith(`${HEAT}#3`);
+    expect(
+      rest.getAllByRole('listitem').map((item) => item.textContent?.replace(/\s+/g, ' ').trim())
+    ).toEqual(['Race 6 Saved', 'Race 5 Saved']);
+    await fireEvent.click(rest.getByRole('button', { name: /race 5, Saved/ }));
+    expect(nav.onopen).toHaveBeenCalledWith(`${HEAT}#5`);
 
     await fireEvent.click(todo.getByRole('button', { name: /race 2/ }));
     expect(nav.onopen).toHaveBeenCalledWith(protested.race);
-    expect(screen.getByText('Pick a race on the left to look at it.')).toBeVisible();
     expectNoRawIds();
+  });
+
+  it('hides discarded races until they are asked for', async () => {
+    const view = eventView({
+      phases: tree(),
+      races: [
+        race(HEAT, 1, 'Saved'),
+        race(HEAT, 2, 'Discarded', { discard_reason: 'Other' }),
+        race(HEAT, 3, 'Saved')
+      ]
+    });
+    const { nav } = await open(view);
+    const rest = () => within(screen.getByRole('region', { name: 'Qualifying Heat 1' }));
+    const listed = () =>
+      rest()
+        .getAllByRole('listitem')
+        .map((item) => item.textContent?.replace(/\s+/g, ' ').trim());
+    const box = screen.getByRole('checkbox', { name: 'Show discarded races' });
+    expect(box).not.toBeChecked();
+    expect(listed()).toEqual(['Race 3 Saved', 'Race 1 Saved']);
+
+    await fireEvent.click(box);
+    expect(listed()).toEqual(['Race 3 Saved', 'Race 2 Discarded: other', 'Race 1 Saved']);
+    await fireEvent.click(rest().getByRole('button', { name: /race 2, Discarded: other/ }));
+    expect(nav.onopen).toHaveBeenCalledWith(`${HEAT}#2`);
+    expectNoRawIds();
+  });
+
+  it('says so when the only other races are discarded ones', async () => {
+    await open(
+      eventView({
+        phases: tree(),
+        races: [savedRace(), race(HEAT, 2, 'Discarded')]
+      })
+    );
+    expect(screen.getByText('No other race to show.')).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Qualifying Heat 1' })).toBeNull();
   });
 
   it('says so when nothing needs a look and nothing has been flown', async () => {
@@ -188,17 +223,127 @@ describe('MarshalPage lists', () => {
     expect(screen.getByText('No race has been flown yet.')).toBeVisible();
   });
 
-  it('the breadcrumb ends on Marshal and leads back to the event', async () => {
-    const { nav } = await open(eventView({ phases: tree() }));
-    const crumbs = screen.getByRole('navigation', { name: 'Breadcrumb' });
-    expect(within(crumbs).getByText('Marshal')).toHaveAttribute('aria-current', 'page');
-    await fireEvent.click(within(crumbs).getByRole('button', { name: 'Club Night' }));
-    expect(nav.onevent).toHaveBeenCalled();
-  });
-
   it('says so for a race that is not in the event', async () => {
     await open(eventView({ phases: tree() }), 'gone#1');
     expect(screen.getByText('This race is not in the event.')).toBeVisible();
+    expect(document.body.textContent).not.toContain('gone#1');
+  });
+});
+
+describe('MarshalPage with no race named', () => {
+  it('opens on the first race that needs a look', async () => {
+    const view = eventView({
+      phases: tree(),
+      races: [race(HEAT, 1, 'Saved'), savedRace({ race: `${HEAT}#2` }), race(HEAT, 3, 'Saved')]
+    });
+    const { session } = await open(view);
+    expect(screen.getByTestId('review-title')).toHaveTextContent('Qualifying Heat 1 · race 2');
+    // It is marked in the to-do list as the one on the right, and its signal is read.
+    const todo = within(screen.getByRole('list', { name: 'Races that need a look' }));
+    expect(todo.getByRole('button', { name: /race 2/ })).toHaveAttribute('aria-current', 'true');
+    await waitFor(() => expect(session.getRaceSignal).toHaveBeenCalledWith(EVENT.id, `${HEAT}#2`));
+  });
+
+  it('with nothing to look at, opens on the newest race that was not discarded', async () => {
+    const view = eventView({
+      phases: tree(),
+      races: [race(HEAT, 1, 'Saved'), race(HEAT, 2, 'Saved'), race(HEAT, 3, 'Discarded')]
+    });
+    await open(view);
+    expect(screen.getByTestId('review-title')).toHaveTextContent('Qualifying Heat 1 · race 2');
+    const rest = within(screen.getByRole('region', { name: 'Qualifying Heat 1' }));
+    expect(rest.getByRole('button', { name: /race 2, Saved/ })).toHaveAttribute(
+      'aria-current',
+      'true'
+    );
+    expect(rest.getByRole('button', { name: /race 1, Saved/ })).not.toHaveAttribute('aria-current');
+  });
+
+  it('says there is nothing to look at when no race has been flown', async () => {
+    const { session } = await open(eventView({ phases: tree() }));
+    expect(
+      screen.getByText('No race has been flown yet. There is nothing to look at.')
+    ).toBeVisible();
+    expect(screen.queryByTestId('review-title')).toBeNull();
+    expect(session.getRaceSignal).not.toHaveBeenCalled();
+  });
+
+  it('shows the race the URL names, not the one that needs a look', async () => {
+    const view = eventView({
+      phases: tree(),
+      races: [race(HEAT, 1, 'Saved'), savedRace({ race: `${HEAT}#2` })]
+    });
+    await open(view, `${HEAT}#1`);
+    expect(screen.getByTestId('review-title')).toHaveTextContent('Qualifying Heat 1 · race 1');
+  });
+});
+
+describe('MarshalPage: which phase the list shows', () => {
+  const FINAL = 'final-k3k3';
+  const day = (races: RaceView[]) =>
+    eventView({
+      phases: [
+        ...tree(),
+        heat('quali-2b2b', 'Qualifying Heat 2', ['p-2b'], { parent: 'quali' }),
+        group('finals', 'Finals'),
+        heat(FINAL, 'Final', ['p-1a', 'p-2b'], { parent: 'finals' })
+      ],
+      races
+    });
+  const RACES = () => [
+    race(HEAT, 1, 'Saved'),
+    race('quali-2b2b', 1, 'Saved'),
+    race(HEAT, 2, 'Saved'),
+    race(FINAL, 1, 'Saved'),
+    race(FINAL, 2, 'Saved')
+  ];
+  const picker = () => screen.getByLabelText('Show the races of') as HTMLSelectElement;
+  const sections = () =>
+    within(screen.getByRole('navigation', { name: 'Races' }))
+      .queryAllByRole('region')
+      .map((section) => section.getAttribute('aria-label'));
+
+  it('has no phase box when every heat is in one phase', async () => {
+    await open(eventView({ phases: tree(), races: [race(HEAT, 1, 'Saved')] }));
+    expect(screen.queryByLabelText('Show the races of')).toBeNull();
+  });
+
+  it('follows the phase of the race under review, and lists only its heats', async () => {
+    await open(day(RACES()), `${HEAT}#1`);
+    expect([...picker().options].map((option) => option.textContent)).toEqual([
+      'All phases',
+      'Qualifying',
+      'Finals'
+    ]);
+    expect(picker().selectedOptions[0]).toHaveTextContent('Qualifying');
+    expect(sections()).toEqual(['Qualifying Heat 1', 'Qualifying Heat 2']);
+  });
+
+  it('with no race named it follows the newest race, so the race just flown is at hand', async () => {
+    await open(day(RACES()));
+    expect(screen.getByTestId('review-title')).toHaveTextContent('Final · race 2');
+    expect(picker().selectedOptions[0]).toHaveTextContent('Finals');
+    expect(sections()).toEqual(['Final']);
+  });
+
+  it('shows another phase, or all of them, when the director picks', async () => {
+    await open(day(RACES()), `${FINAL}#2`);
+    const valueOf = (label: string) =>
+      [...picker().options].find((option) => option.textContent === label)!.value;
+    await fireEvent.change(picker(), { target: { value: valueOf('Qualifying') } });
+    expect(sections()).toEqual(['Qualifying Heat 1', 'Qualifying Heat 2']);
+    await fireEvent.change(picker(), { target: { value: valueOf('All phases') } });
+    expect(sections()).toEqual(['Qualifying Heat 1', 'Qualifying Heat 2', 'Final']);
+    // The race under review does not change with the list.
+    expect(screen.getByTestId('review-title')).toHaveTextContent('Final · race 2');
+    expectNoRawIds();
+  });
+
+  it('says so when the phase has no other race', async () => {
+    await open(day([race(HEAT, 1, 'Saved', { needs_marshal: true }), race(FINAL, 1, 'Saved')]));
+    // Race 1 of qualifying needs a look, so it is on the to-do list and under review.
+    expect(picker().selectedOptions[0]).toHaveTextContent('Qualifying');
+    expect(screen.getByText('No other race in this phase.')).toBeVisible();
   });
 });
 
@@ -232,8 +377,9 @@ describe('MarshalPage race review', () => {
     expect(uncounted).toHaveTextContent('18.400 s');
     expect(uncounted).toHaveTextContent('under the minimum lap time');
     expect(uncounted).toHaveTextContent('Removed by a marshal: false detection.');
-    // Only the removed one can be restored.
+    // Only the removed one can be restored; the one a lap rule left out can be counted.
     expect(within(uncounted).getAllByRole('button', { name: /Restore/ })).toHaveLength(1);
+    expect(within(uncounted).getAllByRole('button', { name: /^Count/ })).toHaveLength(1);
 
     const ranking = within(screen.getByRole('list', { name: 'Heat ranking' })).getAllByRole(
       'listitem'
@@ -275,6 +421,54 @@ describe('MarshalPage race review', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Keep it' }));
     expect(screen.queryByRole('group', { name: 'Why remove lap 1?' })).toBeNull();
     expect(session.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('Count it rules that a crossing a lap rule left out was a real lap', async () => {
+    const early = savedRace();
+    early.seats[1].uncounted = [{ crossing: 19, at: START - 0.5 * S, why: 'BeforeStart' }];
+    const { session } = await open(eventView({ phases: tree(), races: [early] }), RACE);
+
+    const ace = within(
+      within(screen.getByRole('listitem', { name: 'Seat 1, Ace' })).getByRole('list', {
+        name: 'Crossings of Ace that do not count'
+      })
+    ).getAllByRole('listitem');
+    // Under the minimum lap: Count it, and no Restore (nobody removed it).
+    expect(ace[0]).toHaveTextContent('18.400 s');
+    expect(within(ace[0]).getByRole('button', { name: /^Count the crossing/ })).toHaveTextContent(
+      'Count it'
+    );
+    expect(within(ace[0]).queryByRole('button', { name: /^Restore/ })).toBeNull();
+    // Removed by a marshal: Restore only.
+    expect(within(ace[1]).getByRole('button', { name: /^Restore the crossing/ })).toBeVisible();
+    expect(within(ace[1]).queryByRole('button', { name: /^Count/ })).toBeNull();
+
+    await fireEvent.click(
+      screen.getByRole('button', { name: 'Count the crossing of Ace at 18.400 s' })
+    );
+    await waitFor(() =>
+      expect(sent(session)).toEqual([{ Record: { LapCounted: { race: RACE, crossing: 14 } } }])
+    );
+
+    // A crossing before the start can be counted too.
+    await clickWhenReady(screen.getByRole('button', { name: /^Count the crossing of Bee/ }));
+    await waitFor(() =>
+      expect(sent(session)[1]).toEqual({ Record: { LapCounted: { race: RACE, crossing: 19 } } })
+    );
+    expectNoRawIds();
+  });
+
+  it("a refused Count it is shown in the Director's words", async () => {
+    const SAID = 'That crossing is already a lap.';
+    await open(view(), RACE, {
+      sendCommand: vi.fn(async () =>
+        Promise.reject(Object.assign(new Error(SAID), { status: 409, code: 'Refused' }))
+      )
+    });
+    await fireEvent.click(
+      screen.getByRole('button', { name: 'Count the crossing of Ace at 18.400 s' })
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent(SAID);
   });
 
   it('Restore, Mark as restart and Unmark restart each send their fact', async () => {
@@ -407,7 +601,7 @@ describe('MarshalPage race review', () => {
     );
     // The laps are still there to read.
     expect(screen.getByRole('table', { name: 'Laps for Ace' })).toBeVisible();
-    for (const name of [/^Remove/, /Mark .* as a restart/, /Restore/, /False start by/]) {
+    for (const name of [/^Remove/, /Mark .* as a restart/, /Restore/, /^Count/, /False start by/]) {
       expect(screen.queryByRole('button', { name })).toBeNull();
     }
     expect(screen.queryByRole('button', { name: 'Looked at' })).toBeNull();
@@ -420,11 +614,12 @@ describe('MarshalPage race review', () => {
     await open(eventView({ phases: tree(), races: [savedRace({ state: 'Discarded' })] }), RACE);
     expect(screen.getByTestId('review-status')).toHaveTextContent('This race was discarded.');
     expect(screen.queryByRole('button', { name: /^Remove/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Count/ })).toBeNull();
   });
 
-  it('Open the heat leads to the Run view of the race heat', async () => {
+  it('Run this heat leads to the Run page of the race heat', async () => {
     const { nav } = await open(view(), RACE);
-    await fireEvent.click(screen.getByRole('button', { name: 'Open the heat' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Run this heat' }));
     expect(nav.onrun).toHaveBeenCalledWith(HEAT);
   });
 });

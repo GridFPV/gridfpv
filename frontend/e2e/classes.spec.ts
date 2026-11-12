@@ -16,19 +16,15 @@
  * full-stack dump (browser console, page errors, the Director's server log).
  */
 import { expect, test } from './observability.js';
-import { gotoHub } from './nav.js';
+import { gotoPage, openTab } from './nav.js';
 
 test('Classes page lists the locked built-ins (org badges, not removable) and full CRUD on a Custom class', async ({
   page
 }) => {
   const NAME = `E2E-Class-${Date.now()}`;
-  await gotoHub(page);
-
-  // ── Hub → Classes page ─────────────────────────────────────────────────────────────────
-  await page.getByRole('button', { name: /Classes/ }).click();
-  await expect(page.getByRole('heading', { name: 'Classes', level: 1 })).toBeVisible({
-    timeout: 15_000
-  });
+  // ── Pilots → the Classes tab beside it ─────────────────────────────────────────────────
+  await gotoPage(page, 'Pilots');
+  await openTab(page, 'Pilots and classes', 'Classes');
 
   // ── The built-ins are present, org-badged, locked (no Remove) ──────────────────────────
   const list = page.getByRole('list', { name: 'Class directory' });
@@ -77,13 +73,9 @@ test('Classes page lists the locked built-ins (org badges, not removable) and fu
 test('RD hides a class on the Classes page; it stays hidden across a reload; unhide restores it', async ({
   page
 }) => {
-  await gotoHub(page);
-
   // ── Open the Classes page and hide a built-in (a visibility preference, allowed for built-ins) ─
-  await page.getByRole('button', { name: /Classes/ }).click();
-  await expect(page.getByRole('heading', { name: 'Classes', level: 1 })).toBeVisible({
-    timeout: 15_000
-  });
+  await gotoPage(page, 'Pilots');
+  await openTab(page, 'Pilots and classes', 'Classes');
   const whoop = page
     .getByRole('list', { name: 'Class directory' })
     .getByRole('listitem')

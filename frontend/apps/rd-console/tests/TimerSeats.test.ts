@@ -1,7 +1,9 @@
 /**
- * The Tune page against a mocked session and a fake live feed: the timer's name and status,
- * the settings read from the timer, live levels shown as numbers, the draft and its apply, a
- * refusal shown in the Director's words, and everything stopping when the page closes.
+ * One timer's seats and settings (the body of the Seats page) against a mocked session and a
+ * fake live feed: the settings read from the timer, live levels shown as numbers, the draft
+ * and its apply, a refusal shown in the Director's words, the profile bar, and the live feed
+ * stopping when the page closes. The timer list is the Seats page's and is handed in; what
+ * the Seats page does with it is in `SeatsPage.test.ts`.
  *
  * The trace is a canvas, which jsdom does not draw; `tests/signal.test.ts` covers what it
  * draws from. Here the canvas only has to be present, named, and beside its numbers.
@@ -10,8 +12,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { TimerLiveHandlers } from '@gridfpv/protocol-client';
-import type { SeatLevels, SignalChunk, TimerConfig, TimerView } from '@gridfpv/types';
-import TunePage from '../src/screens/TunePage.svelte';
+import type {
+  SeatLevels,
+  SeatProfile,
+  SeatProfileRequest,
+  SignalChunk,
+  TimerConfig,
+  TimerProfiles,
+  TimerView
+} from '@gridfpv/types';
+import TimerSeats from '../src/screens/TimerSeats.svelte';
 import { timerView } from './competition.js';
 import { makeTestSession, type SessionSeams } from './support.js';
 
@@ -31,8 +41,7 @@ const CONFIG: TimerConfig = {
     { seat: '0', freq_mhz: 5658, enabled: true },
     { seat: '1', freq_mhz: 5700, enabled: false }
   ],
-  threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-  set_on_timer: { min_lap_ms: 2500 }
+  threshold: { Auto: { snr_enter: 150, hysteresis: 50 } }
 };
 
 const LEVELS: SeatLevels[] = [
@@ -74,16 +83,15 @@ function open(seams: SessionSeams = {}, view: TimerView = GATE) {
   );
   const { session } = makeTestSession({
     noEnter: true,
-    listTimersImpl: vi.fn(async () => [view]),
     getTimerConfigImpl,
+    // No profile is saved unless a test says so.
+    listProfilesImpl: vi.fn(async (): Promise<TimerProfiles> => ({ profiles: [] })),
     putTimerConfigImpl,
     subscribeTimerLiveImpl: feed.subscribeTimerLiveImpl,
     ...seams
   });
-  const onhome = vi.fn();
-  const ontimers = vi.fn();
-  const rendered = render(TunePage, { session, timer: ID, onhome, ontimers });
-  return { feed, getTimerConfigImpl, putTimerConfigImpl, onhome, ontimers, ...rendered };
+  const rendered = render(TimerSeats, { session, timer: ID, timers: [view] });
+  return { session, feed, getTimerConfigImpl, putTimerConfigImpl, ...rendered };
 }
 
 const seatRow = (name: string) =>
@@ -98,21 +106,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('TunePage', () => {
-  it("shows the timer's name, status and breadcrumbs, and never its id", async () => {
-    const { ontimers, onhome } = open();
-    expect(await screen.findByRole('heading', { name: 'Gate', level: 1 })).toBeVisible();
-    expect(screen.getByText('Connected')).toBeVisible();
-    const crumbs = screen.getByRole('navigation', { name: 'Breadcrumb' });
-    expect(crumbs).toHaveTextContent('Home');
-    expect(crumbs).toHaveTextContent('Timers');
-    expect(crumbs).toHaveTextContent('Gate');
-    await fireEvent.click(within(crumbs).getByRole('button', { name: 'Timers' }));
-    expect(ontimers).toHaveBeenCalled();
-    await fireEvent.click(within(crumbs).getByRole('button', { name: 'Home' }));
-    expect(onhome).toHaveBeenCalled();
-    await screen.findByRole('list', { name: 'Seats' });
+describe('TimerSeats', () => {
+  it("shows the seats by name with a Tune link on each seat that is on, and never the timer's id", async () => {
+    open();
+    const one = await waitFor(() => seatRow('Seat 1'));
     expect(screen.queryByTestId('not-connected')).toBeNull();
+    expect(screen.queryByTestId('settings-problem')).toBeNull();
+    // The link's address holds the ids; nothing a person reads does.
+    expect(within(one).getByRole('link', { name: 'Tune Seat 1' })).toHaveAttribute(
+      'href',
+      `#/seats/${ID}/0`
+    );
+    // Seat 2 is off on the timer, so there is no signal to record.
+    expect(within(seatRow('Seat 2')).queryByRole('link')).toBeNull();
     expect(document.body.textContent).not.toContain(ID);
   });
 
@@ -133,16 +139,19 @@ describe('TunePage', () => {
     expect(within(two).getByRole('switch', { name: 'Seat 2 on' })).not.toBeChecked();
     expect(within(two).getByTestId('seat-live')).toHaveTextContent('Off on the timer');
 
-    // Detection, in dB and seconds.
+    // The timer's own settings, in dB.
+    expect(screen.getByRole('heading', { name: 'Timer settings' })).toBeVisible();
+    expect(screen.queryByRole('heading', { name: 'Detection' })).toBeNull();
     expect(screen.getByRole('radio', { name: 'Follow the noise floor' })).toBeChecked();
     expect(screen.getByLabelText('Enter this far above the floor, in dB')).toHaveValue(15);
     expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(5);
-    // Shown, and not a field: the minimum lap comes from a race's format. Seats per receiver
-    // is the timer's own business and is not on this page at all.
+    // The minimum lap is the event's rule and is not on this page. Seats per receiver is the
+    // timer's own business and is not here either. A timer that reports no lap cooldown and
+    // no exit hold is offered neither.
     expect(screen.queryByLabelText('Minimum lap time, in seconds')).toBeNull();
     expect(screen.queryByText(/Seats per receiver/i)).toBeNull();
-    const own = screen.getByTestId('set-on-timer');
-    expect(own).toHaveTextContent('Minimum lap time 2.5 seconds');
+    expect(screen.queryByLabelText('Lap cooldown, in seconds')).toBeNull();
+    expect(screen.queryByLabelText('Exit hold, in milliseconds')).toBeNull();
 
     // Nothing is changed yet.
     expect(screen.getByText('This is what the timer is using.')).toBeVisible();
@@ -527,7 +536,6 @@ describe('TunePage', () => {
     const banner = await screen.findByTestId('not-connected');
     expect(banner).toHaveTextContent('Gate is not connected.');
     expect(banner).toHaveTextContent(SAID);
-    expect(screen.getByText('Not connected')).toBeVisible();
     const problem = await screen.findByTestId('settings-problem');
     expect(problem).toHaveTextContent("The timer's settings could not be read.");
     expect(problem).toHaveTextContent(REACH);
@@ -537,55 +545,380 @@ describe('TunePage', () => {
   });
 
   it('reads the settings again when the timer connects, and on Try again', async () => {
-    let view = OFF;
     let reachable = false;
     const getTimerConfigImpl = vi.fn(async () => {
       if (!reachable)
         throw Object.assign(new Error('Could not reach Gate: timed out'), { status: 409 });
       return structuredClone(CONFIG);
     });
-    vi.useFakeTimers();
-    open({ listTimersImpl: vi.fn(async () => [view]), getTimerConfigImpl });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(screen.getByTestId('settings-problem')).toBeVisible();
+    const { rerender } = open({ getTimerConfigImpl }, OFF);
+    expect(await screen.findByTestId('settings-problem')).toBeVisible();
     expect(getTimerConfigImpl).toHaveBeenCalledTimes(1);
 
     // Still not connected: a manual try, still refused.
     await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await vi.advanceTimersByTimeAsync(0);
+    await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(2));
+
+    // The same list again changes nothing.
+    await rerender({ timers: [structuredClone(OFF)] });
     expect(getTimerConfigImpl).toHaveBeenCalledTimes(2);
 
-    // The timer connects; the next read of the list brings the settings by itself.
-    view = GATE;
+    // The timer connects; the next list the Seats page hands in brings the settings by itself.
     reachable = true;
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(getTimerConfigImpl).toHaveBeenCalledTimes(3);
-    expect(screen.getByRole('list', { name: 'Seats' })).toBeVisible();
+    await rerender({ timers: [GATE] });
+    await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(3));
+    expect(await screen.findByRole('list', { name: 'Seats' })).toBeVisible();
     expect(screen.queryByTestId('settings-problem')).toBeNull();
     expect(screen.queryByTestId('not-connected')).toBeNull();
   });
 
-  it('says so when the timer is not in the list any more, without its id', async () => {
-    const { ontimers } = open({ listTimersImpl: vi.fn(async () => []) });
-    expect(await screen.findByText('This timer is not in the list any more.')).toBeVisible();
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Unknown timer');
-    await fireEvent.click(screen.getByRole('button', { name: 'Back to Timers' }));
-    expect(ontimers).toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain(ID);
-  });
-
-  it('stops the live feed and the reads when it closes', async () => {
-    vi.useFakeTimers();
-    const listTimersImpl = vi.fn(async () => [GATE]);
-    const { feed, unmount } = open({ listTimersImpl });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(listTimersImpl).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(4000);
-    expect(listTimersImpl).toHaveBeenCalledTimes(3);
+  it('stops the live feed when it closes', async () => {
+    const { feed, unmount } = open();
+    await waitFor(() => seatRow('Seat 1'));
+    expect(feed.opened).toEqual([ID]);
     expect(feed.stopped).toBe(0);
     unmount();
     expect(feed.stopped).toBe(1);
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(listTimersImpl).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('the lap cooldown', () => {
+  const WITH_COOLDOWN: TimerConfig = { ...CONFIG, lap_cooldown_ms: 1500, exit_hold_ms: 40 };
+  const cooldown = () => screen.getByLabelText('Lap cooldown, in seconds');
+
+  it('shows it in seconds on a timer that has one, and sends it in milliseconds', async () => {
+    const { putTimerConfigImpl } = open({
+      getTimerConfigImpl: vi.fn(async () => structuredClone(WITH_COOLDOWN))
+    });
+    await waitFor(() => seatRow('Seat 1'));
+    expect(cooldown()).toHaveValue(1.5);
+    expect(screen.getByLabelText('Exit hold, in milliseconds')).toHaveValue(40);
+    expect(screen.getByRole('button', { name: 'Apply to timer' })).toBeDisabled();
+
+    await fireEvent.input(cooldown(), { target: { value: '0.8' } });
+    expect(screen.getByText('These changes are not on the timer yet.')).toBeVisible();
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+    await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalledTimes(1));
+    expect(putTimerConfigImpl.mock.calls[0][2]).toEqual({ ...WITH_COOLDOWN, lap_cooldown_ms: 800 });
+    // What came back is what the timer is using.
+    await waitFor(() => expect(screen.getByText('This is what the timer is using.')).toBeVisible());
+    expect(cooldown()).toHaveValue(0.8);
+  });
+
+  it('will not apply a cooldown below 0, and says so', async () => {
+    const { putTimerConfigImpl } = open({
+      getTimerConfigImpl: vi.fn(async () => structuredClone(WITH_COOLDOWN))
+    });
+    await waitFor(() => seatRow('Seat 1'));
+    await fireEvent.input(cooldown(), { target: { value: '-1' } });
+    expect(
+      screen.getByText('The lap cooldown must be a number of seconds, 0 or more.')
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Apply to timer' })).toBeDisabled();
+    expect(putTimerConfigImpl).not.toHaveBeenCalled();
+  });
+
+  it('points at the Event page for the minimum lap time', async () => {
+    open({ getTimerConfigImpl: vi.fn(async () => structuredClone(WITH_COOLDOWN)) });
+    await waitFor(() => seatRow('Seat 1'));
+    expect(screen.getByText(/Keep it shorter than the event's minimum lap time/)).toBeVisible();
+  });
+});
+
+describe('the profile bar', () => {
+  const GARAGE: SeatProfile = { id: 'prof-garage-3k9d', name: 'Garage whoops', config: CONFIG };
+  const FIELD_CONFIG: TimerConfig = {
+    seats: [
+      { seat: '0', freq_mhz: 5732, enabled: true },
+      { seat: '1', freq_mhz: 5843, enabled: true }
+    ],
+    threshold: { Manual: { enter: -700, exit: -750 } }
+  };
+  const FIELD: SeatProfile = { id: 'prof-field-8w2q', name: 'Field 5 inch', config: FIELD_CONFIG };
+
+  /**
+   * A page over a Director that keeps profiles the way the real one does: each change is
+   * there on the next read.
+   */
+  function openWith(start: TimerProfiles, seams: SessionSeams = {}) {
+    let kept = structuredClone(start);
+    const listProfilesImpl = vi.fn(async () => structuredClone(kept));
+    const createProfileImpl = vi.fn(
+      async (_base: string, _timer: string, request: SeatProfileRequest) => {
+        const made = { id: `prof-new-${kept.profiles.length}z7`, ...request };
+        kept = { active: made.id, profiles: [...kept.profiles, made] };
+        return made;
+      }
+    );
+    const updateProfileImpl = vi.fn(
+      async (_base: string, _timer: string, id: string, request: SeatProfileRequest) => {
+        const changed = { id, ...request };
+        kept = {
+          ...kept,
+          profiles: kept.profiles.map((profile) => (profile.id === id ? changed : profile))
+        };
+        return changed;
+      }
+    );
+    const deleteProfileImpl = vi.fn(async (_base: string, _timer: string, id: string) => {
+      kept = { profiles: kept.profiles.filter((profile) => profile.id !== id) };
+    });
+    const applyProfileImpl = vi.fn(async (_base: string, _timer: string, id: string) => {
+      kept = { ...kept, active: id };
+      return structuredClone(kept.profiles.find((profile) => profile.id === id)!.config);
+    });
+    const opened = open({
+      listProfilesImpl,
+      createProfileImpl,
+      updateProfileImpl,
+      deleteProfileImpl,
+      applyProfileImpl,
+      ...seams
+    });
+    return {
+      ...opened,
+      listProfilesImpl,
+      createProfileImpl,
+      updateProfileImpl,
+      deleteProfileImpl,
+      applyProfileImpl
+    };
+  }
+
+  const bar = () => screen.findByTestId('profile-bar');
+  const state = () => screen.getByTestId('profile-state');
+  const picker = (within_: HTMLElement) =>
+    within(within_).getByLabelText('Profile') as HTMLSelectElement;
+  const optionTexts = (select: HTMLSelectElement) =>
+    [...select.options].map((option) => option.textContent?.trim());
+
+  it('with no profile saved it says what a profile is, and offers only Save as new', async () => {
+    const { listProfilesImpl } = openWith({ profiles: [] });
+    const profile = await bar();
+    await waitFor(() => expect(state()).toHaveTextContent(/^A profile keeps these settings/));
+    expect(listProfilesImpl).toHaveBeenCalledWith('http://d.local', ID, { token: 'tok' });
+    expect(optionTexts(picker(profile))).toEqual(['No profile']);
+    expect(within(profile).getByRole('button', { name: 'Save as new…' })).toBeEnabled();
+    for (const name of ['Save', 'Rename', /^Delete/]) {
+      expect(within(profile).queryByRole('button', { name })).toBeNull();
+    }
+  });
+
+  it('lists the profiles by name; with none active it says the timer is on no saved profile', async () => {
+    openWith({ profiles: [GARAGE, FIELD] });
+    const profile = await bar();
+    await waitFor(() => expect(state()).toHaveTextContent('The timer is not on a saved profile.'));
+    expect(optionTexts(picker(profile))).toEqual(['No profile', 'Garage whoops', 'Field 5 inch']);
+    expect(picker(profile)).toHaveValue('');
+    expect(profile.textContent).not.toContain('prof-');
+  });
+
+  it('says the timer is set as the active profile says, with nothing to save', async () => {
+    openWith({ active: GARAGE.id, profiles: [GARAGE, FIELD] });
+    const profile = await bar();
+    await waitFor(() =>
+      expect(state()).toHaveTextContent('The timer is set as this profile says.')
+    );
+    expect(picker(profile)).toHaveValue(GARAGE.id);
+    // An active profile is always one of the choices, so "No profile" is not offered.
+    expect(optionTexts(picker(profile))).toEqual(['Garage whoops', 'Field 5 inch']);
+    expect(within(profile).getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(within(profile).getByRole('button', { name: 'Rename' })).toBeEnabled();
+  });
+
+  it('picking a profile writes it to the timer, and the page shows what the timer answered', async () => {
+    const { applyProfileImpl, putTimerConfigImpl } = openWith({
+      active: GARAGE.id,
+      profiles: [GARAGE, FIELD]
+    });
+    const profile = await bar();
+    await waitFor(() => expect(picker(profile)).toHaveValue(GARAGE.id));
+    await fireEvent.change(picker(profile), { target: { value: FIELD.id } });
+    await waitFor(() => expect(applyProfileImpl).toHaveBeenCalledTimes(1));
+    expect(applyProfileImpl.mock.calls[0].slice(1, 3)).toEqual([ID, FIELD.id]);
+    // The draft is now the profile's settings, with nothing left to apply.
+    await waitFor(() => expect(screen.getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5732));
+    expect(screen.getByRole('radio', { name: 'Fixed levels' })).toBeChecked();
+    expect(screen.getByText('This is what the timer is using.')).toBeVisible();
+    await waitFor(() => expect(picker(profile)).toHaveValue(FIELD.id));
+    expect(state()).toHaveTextContent('The timer is set as this profile says.');
+    // The profile went through its own endpoint, not as a plain apply.
+    expect(putTimerConfigImpl).not.toHaveBeenCalled();
+  });
+
+  it('says Changed once the timer has moved away from its profile, and Save writes the timer back into it', async () => {
+    const { updateProfileImpl } = openWith({ active: GARAGE.id, profiles: [GARAGE] });
+    const profile = await bar();
+    await waitFor(() => expect(picker(profile)).toHaveValue(GARAGE.id));
+
+    // An edit that is still a draft blocks the profile buttons that would lose it.
+    await fireEvent.click(screen.getByRole('switch', { name: 'Seat 2 on' }));
+    expect(picker(profile)).toBeDisabled();
+    expect(picker(profile)).toHaveAttribute('title', 'Apply or discard the changes first.');
+    expect(within(profile).getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(within(profile).getByRole('button', { name: 'Save as new…' })).toBeDisabled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+    await waitFor(() =>
+      expect(state()).toHaveTextContent('The timer has been changed since this profile was saved.')
+    );
+    expect(state()).toHaveTextContent('Changed');
+    expect(picker(profile)).toBeEnabled();
+
+    await fireEvent.click(within(profile).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(updateProfileImpl).toHaveBeenCalledTimes(1));
+    const [, timer, id, request] = updateProfileImpl.mock.calls[0];
+    expect([timer, id]).toEqual([ID, GARAGE.id]);
+    expect(request).toEqual({
+      name: 'Garage whoops',
+      config: {
+        ...CONFIG,
+        seats: [CONFIG.seats[0], { ...CONFIG.seats[1], enabled: true }]
+      }
+    });
+    await waitFor(() =>
+      expect(state()).toHaveTextContent('The timer is set as this profile says.')
+    );
+  });
+
+  it('Save as new asks for a name and keeps what the timer has now', async () => {
+    const { createProfileImpl } = openWith({ profiles: [] });
+    const profile = await bar();
+    await waitFor(() => expect(picker(profile)).toBeEnabled());
+    await fireEvent.click(within(profile).getByRole('button', { name: 'Save as new…' }));
+    const form = await screen.findByRole('form', { name: 'Save as a new profile' });
+    // The hint names the timer, by name.
+    expect(form).toHaveTextContent('Keeps the settings Gate has now');
+    expect(screen.getByRole('button', { name: 'Save profile' })).toBeDisabled();
+    await fireEvent.input(within(form).getByLabelText('Profile name'), {
+      target: { value: '  Garage whoops ' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save profile' }));
+    await waitFor(() => expect(createProfileImpl).toHaveBeenCalledTimes(1));
+    expect(createProfileImpl.mock.calls[0].slice(1, 3)).toEqual([
+      ID,
+      { name: 'Garage whoops', config: CONFIG }
+    ]);
+    // The new profile is the active one, and the dialog closed.
+    await waitFor(() => expect(optionTexts(picker(profile))).toEqual(['Garage whoops']));
+    expect(state()).toHaveTextContent('The timer is set as this profile says.');
+    expect(form.closest('dialog')).not.toHaveAttribute('open');
+  });
+
+  it("shows the Director's sentence under the name when it is taken, and stays open", async () => {
+    const TAKEN = 'A profile called Garage whoops is already saved for this timer.';
+    openWith(
+      { profiles: [GARAGE] },
+      {
+        createProfileImpl: vi.fn(async () =>
+          Promise.reject(Object.assign(new Error(TAKEN), { status: 409, code: 'Refused' }))
+        )
+      }
+    );
+    const profile = await bar();
+    await waitFor(() => expect(picker(profile)).toBeEnabled());
+    await fireEvent.click(within(profile).getByRole('button', { name: 'Save as new…' }));
+    const form = await screen.findByRole('form', { name: 'Save as a new profile' });
+    await fireEvent.input(within(form).getByLabelText('Profile name'), {
+      target: { value: 'Garage whoops' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save profile' }));
+    expect(await within(form).findByText(TAKEN)).toBeVisible();
+    expect(form.closest('dialog')).toHaveAttribute('open');
+    expect(screen.queryByTestId('profile-problem')).toBeNull();
+  });
+
+  it('Rename changes the name and keeps the settings the profile has, not the timer now', async () => {
+    // The timer has moved on from the profile: a rename must not save that by the back door.
+    const moved: TimerConfig = {
+      ...CONFIG,
+      threshold: { Auto: { snr_enter: 200, hysteresis: 50 } }
+    };
+    const { updateProfileImpl } = openWith(
+      { active: GARAGE.id, profiles: [GARAGE] },
+      { getTimerConfigImpl: vi.fn(async () => structuredClone(moved)) }
+    );
+    const profile = await bar();
+    await waitFor(() => expect(state()).toHaveTextContent('Changed'));
+    await fireEvent.click(within(profile).getByRole('button', { name: 'Rename' }));
+    const form = await screen.findByRole('form', { name: 'Rename the profile' });
+    expect(within(form).getByLabelText('Profile name')).toHaveValue('Garage whoops');
+    await fireEvent.input(within(form).getByLabelText('Profile name'), {
+      target: { value: 'Garage tinywhoops' }
+    });
+    await fireEvent.click(
+      within(form.closest('dialog') as HTMLElement).getByRole('button', { name: 'Rename' })
+    );
+    await waitFor(() => expect(updateProfileImpl).toHaveBeenCalledTimes(1));
+    expect(updateProfileImpl.mock.calls[0].slice(1, 4)).toEqual([
+      ID,
+      GARAGE.id,
+      { name: 'Garage tinywhoops', config: CONFIG }
+    ]);
+    await waitFor(() => expect(optionTexts(picker(profile))).toEqual(['Garage tinywhoops']));
+    // Still changed: only the name was saved.
+    expect(state()).toHaveTextContent('Changed');
+  });
+
+  it('Delete asks first, deletes the active profile and leaves the timer as it is', async () => {
+    const { deleteProfileImpl, putTimerConfigImpl, applyProfileImpl } = openWith({
+      active: GARAGE.id,
+      profiles: [GARAGE, FIELD]
+    });
+    const profile = await bar();
+    await waitFor(() => expect(picker(profile)).toHaveValue(GARAGE.id));
+    await fireEvent.click(within(profile).getByRole('button', { name: /^Delete / }));
+    expect(deleteProfileImpl).not.toHaveBeenCalled();
+    await fireEvent.click(within(profile).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(deleteProfileImpl).toHaveBeenCalledTimes(1));
+    expect(deleteProfileImpl.mock.calls[0].slice(1, 3)).toEqual([ID, GARAGE.id]);
+    await waitFor(() =>
+      expect(optionTexts(picker(profile))).toEqual(['No profile', 'Field 5 inch'])
+    );
+    expect(state()).toHaveTextContent('The timer is not on a saved profile.');
+    expect(putTimerConfigImpl).not.toHaveBeenCalled();
+    expect(applyProfileImpl).not.toHaveBeenCalled();
+    // The seats are as they were.
+    expect(screen.getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5658);
+  });
+
+  it("shows the Director's sentence when a profile cannot be put on the timer, and the timer's settings stay", async () => {
+    const REFUSED = 'Gate did not answer. The profile was not applied.';
+    openWith(
+      { active: GARAGE.id, profiles: [GARAGE, FIELD] },
+      {
+        applyProfileImpl: vi.fn(async () =>
+          Promise.reject(Object.assign(new Error(REFUSED), { status: 409, code: 'Refused' }))
+        )
+      }
+    );
+    const profile = await bar();
+    await waitFor(() => expect(picker(profile)).toHaveValue(GARAGE.id));
+    await fireEvent.change(picker(profile), { target: { value: FIELD.id } });
+    const problem = await screen.findByTestId('profile-problem');
+    expect(problem).toHaveTextContent('The profile was not changed.');
+    expect(problem).toHaveTextContent(REFUSED);
+    expect(screen.getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5658);
+    // The picker goes back to the profile the timer is still on.
+    await waitFor(() => expect(picker(profile)).toHaveValue(GARAGE.id));
+    expect(document.body.textContent).not.toContain('prof-');
+  });
+
+  it('says so when the profiles cannot be read, and the seats still work', async () => {
+    openWith(
+      { profiles: [] },
+      {
+        listProfilesImpl: vi.fn(async () =>
+          Promise.reject(new Error('The profiles could not be read from disk.'))
+        )
+      }
+    );
+    expect(await screen.findByTestId('profile-problem')).toHaveTextContent(
+      'The profiles could not be read from disk.'
+    );
+    const profile = await bar();
+    expect(picker(profile)).toBeDisabled();
+    expect(within(profile).getByRole('button', { name: 'Save as new…' })).toBeDisabled();
+    expect(seatRow('Seat 1')).toBeVisible();
   });
 });

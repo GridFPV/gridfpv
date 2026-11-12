@@ -3,8 +3,10 @@
  * the session without a real server.
  */
 import { vi } from 'vitest';
-import type { EventMeta } from '@gridfpv/types';
+import type { EventMeta, EventView } from '@gridfpv/types';
+import { EventLive, type LiveSession } from '../src/lib/eventLive.svelte.js';
 import { Session, type SessionApi } from '../src/lib/session.svelte.js';
+import { SAVED_FORMATS } from './competition.js';
 
 /** The event the screen tests open by default — an ordinary created event. */
 const PRACTICE: EventMeta = {
@@ -77,4 +79,45 @@ export function makeTestSession(
   );
 
   return { session };
+}
+
+/**
+ * A stand-in for the part of the session the live event store uses. Every read answers with
+ * something inert (the given snapshot, empty directories, the saved formats of
+ * `competition.ts`) and every write succeeds, unless `over` says otherwise.
+ */
+export function fakeLiveSession(view: EventView, over: Partial<LiveSession> = {}): LiveSession {
+  return {
+    getEventState: vi.fn(async () => view),
+    subscribeChanges: vi.fn(() => () => {}),
+    sendCommand: vi.fn(async () => ({ cursor: view.cursor })),
+    createBracket: vi.fn(async () => ({ cursor: view.cursor })),
+    postPass: vi.fn(async () => ({ cursor: view.cursor })),
+    getRaceSignal: vi.fn(async (_id: string, race: string) => ({ race, seats: [] })),
+    listPilots: vi.fn(async () => []),
+    listTimers: vi.fn(async () => []),
+    listClasses: vi.fn(async () => []),
+    listFormats: vi.fn(async () => SAVED_FORMATS),
+    ...over
+  };
+}
+
+/**
+ * A live event store over {@link fakeLiveSession}, with the snapshot and every directory
+ * already read, so a screen renders its settled state on the first paint. The store is not
+ * started: nothing polls and nothing listens.
+ */
+export async function openLive(
+  view: EventView,
+  over: Partial<LiveSession> = {},
+  eventId = 'evt-77'
+): Promise<{ session: LiveSession; live: EventLive }> {
+  const session = fakeLiveSession(view, over);
+  const live = new EventLive(session, eventId);
+  await live.reload();
+  await live.reloadPilots();
+  await live.reloadTimers();
+  await live.reloadClasses();
+  await live.reloadFormats();
+  return { session, live };
 }

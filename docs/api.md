@@ -1,6 +1,6 @@
 # The Director's API, as built
 
-**Status:** as built on the `primitives` branch, 2026-11-10. This page lists what the
+**Status:** as built on the `primitives` branch, 2026-11-12. This page lists what the
 Director serves today. The design behind it is [Grid primitives](primitives.md). The older
 [Protocol](protocol.html) doc still holds for auth, TLS and versioning, but its snapshot and
 stream sections describe a design that was not rebuilt (see "What changed" at the end).
@@ -48,11 +48,30 @@ laptop), writes are open too.
 | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | The class list |
 | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | The timer list, each with its live status |
 | `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added |
-| `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer: seats, frequencies, thresholds and the exit hold. `set_on_timer` (seats per receiver, and the timer's minimum lap right now) is shown and never written here. A timer that can keep its settings across a restart (`keeps_settings` in its status) is asked to keep them after every write |
+| `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer: seats, frequencies, thresholds, the exit hold and the lap cooldown. A write that leaves the lap cooldown out keeps the timer's. A timer that can keep its settings across a restart (`keeps_settings` in its status) is asked to keep them after every write |
 | `GET /timers/{id}/live` | Live signal and levels for tuning (server-sent events) |
+| `GET /timers/{id}/profiles`, `POST /timers/{id}/profiles` | A timer's saved seat profiles and which one is active; save settings as a new one |
+| `PUT /timers/{id}/profiles/{pid}`, `DELETE /timers/{id}/profiles/{pid}` | Rename a profile or replace its settings; remove one. Neither writes to the timer |
+| `POST /timers/{id}/profiles/{pid}/apply` | Write a profile to its timer, with the same readback as a settings write. The profile becomes the active one |
+| `GET /formats`, `POST /formats`, `PUT /formats/{id}`, `DELETE /formats/{id}` | The saved formats. A new Director starts with four |
 
 **Timer settings live on the timer.** The Director keeps no copy. A write is followed by a
 read, and if the timer does not then report what was sent, the answer is `Refused`.
+
+**The lap cooldown is not the minimum lap.** The cooldown (`lap_cooldown_ms`, OFT's
+`min_lap_ms`) is a timer setting: after a crossing on a seat the timer reports no other on
+that seat for that long, which swallows the bounce of one pass. The minimum lap is the
+event's lap rule (below), and the Director applies it to what the timer reports. Nothing is
+written to a timer when a race starts.
+
+**A seat profile is the Director's saved copy** of one timer's settings, kept in
+`profiles.json`. Applying one is the only profile call that writes to the timer. A console
+compares the active profile with the timer's settings to say whether the timer has been
+changed since.
+
+**A saved format is a template.** Setting one on a phase copies it into the event's log, so
+changing or deleting a saved format never changes a phase that uses it. They are kept in
+`formats.json`.
 
 **Live signal is not logged.** `GET /timers/{id}/live` sends `signal` events (a batch of
 samples for one seat) and `levels` events (each seat's level, noise floor, enter and exit
@@ -62,7 +81,7 @@ levels, and whether it is in a crossing). It is for the Tune page and is gone on
 
 | Route | What |
 |---|---|
-| `GET /events`, `POST /events`, `DELETE /events/{id}` | The events |
+| `GET /events`, `POST /events`, `PUT /events/{id}`, `DELETE /events/{id}` | The events. `PUT` changes the name and details |
 | `GET /active-event`, `PUT /active-event` | The event every screen opens into |
 | `POST /events/{id}/auth/join-token` | A read-only token for a pilot or spectator |
 
@@ -72,7 +91,7 @@ levels, and whether it is in a crossing). It is for the Tune page and is gone on
 |---|---|
 | `GET /events/{id}/state` | One snapshot of everything |
 | `GET /events/{id}/changes` | Tells a client when to read the snapshot again (server-sent events) |
-| `POST /events/{id}/commands` | One command. Before `StartRace`, each OFT timer the heat uses is set to the minimum lap of the heat's format (0 when it has none); if a timer cannot be set, the start is refused |
+| `POST /events/{id}/commands` | One command |
 | `POST /events/{id}/presets/bracket` | Generate a bracket's phases |
 | `POST /events/{id}/presets/mains` | Generate stacked mains |
 | `POST /events/{id}/passes` | A gate crossing from outside (the bench, tools, tests) |
@@ -82,6 +101,10 @@ levels, and whether it is in a crossing). It is for the Tune page and is gone on
 
 `GET /events/{id}/state` gives an `EventView`:
 
+- `lap_rules`: the event's minimum lap, and how long after the start crossings are
+  ignored. Set with the fact `LapRulesSet`. They hold for every race of the event, flown or
+  still to fly. A format may carry a minimum lap of its own, which then wins for the heats
+  under it.
 - `rosters`: each class in the event, its pilots, the phases that count toward its
   standings, and the standings from 1 to n.
 - `phases`: every phase with its format, its field, a heat's lineup, its ranking, and

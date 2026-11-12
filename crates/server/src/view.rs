@@ -13,8 +13,8 @@ use gridfpv_engine::phase::{PhaseResult, SeatWho};
 use gridfpv_engine::race::{Race, RaceState};
 use gridfpv_engine::state::EventState;
 use gridfpv_events::{
-    AdapterId, ClassId, DiscardReason, EndCondition, Format, LogRef, PhaseDef, PhaseId, PilotId,
-    ProtestId, ProtestOutcome, RaceId, RemovalReason, SeatRef, SourceTime, StartOwner,
+    AdapterId, ClassId, DiscardReason, EndCondition, Format, LapRules, LogRef, PhaseDef, PhaseId,
+    PilotId, ProtestId, ProtestOutcome, RaceId, RemovalReason, SeatRef, SourceTime, StartOwner,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -30,6 +30,9 @@ pub struct EventView {
     /// The Director's clock when this was worked out, in epoch microseconds.
     #[ts(type = "number")]
     pub now: i64,
+    /// The event's lap rules: the minimum lap, and how long after the start crossings are
+    /// ignored.
+    pub lap_rules: LapRules,
     /// The classes in the event and their rosters.
     pub rosters: Vec<RosterView>,
     /// Every phase, in the order they were added (a parent before its children).
@@ -374,6 +377,7 @@ impl EventView {
         Self {
             cursor: state.applied,
             now,
+            lap_rules: state.lap_rules,
             rosters: state
                 .rosters
                 .iter()

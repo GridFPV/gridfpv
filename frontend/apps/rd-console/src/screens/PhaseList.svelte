@@ -2,7 +2,9 @@
   /**
    * PhaseList — every phase of the event as a tree: a phase that holds phases, with its
    * heats indented beneath it. Each row shows the phase's name and where it stands. A heat
-   * also shows its lineup, and a button that opens its Run view.
+   * also shows its lineup, and a button that opens its Run view. Each row names the format
+   * in force. A phase that holds phases has "+ Heat", which adds a heat under it, and a
+   * phase with nothing raced and nothing beneath it can be removed.
    *
    * The rulings on a heat or a phase are made here too, each one a person's decision sent to
    * the Director as a fact:
@@ -28,6 +30,7 @@
     ProtocolError
   } from '@gridfpv/types';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
+  import ConfirmButton from '../lib/ConfirmButton.svelte';
   import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
   import type { Names } from '../lib/names.js';
   import { hasRanking, openProposals, positionChoices, proposalSentence } from '../lib/rulings.js';
@@ -46,7 +49,8 @@
     view,
     names,
     live,
-    onrun
+    onrun,
+    onaddheat
   }: {
     view: EventView;
     names: Names;
@@ -54,7 +58,15 @@
     live: Pick<EventLive, 'send'>;
     /** Open the Run view for a heat. */
     onrun: (heat: PhaseView['def']['id']) => void;
+    /** Add a heat under a phase. Left out, the rows offer no "+ Heat". */
+    onaddheat?: (under: PhaseId) => void;
   } = $props();
+
+  /** Whether a phase can be removed: nothing beneath it, nothing raced, not locked. */
+  const removable = (phase: PhaseView): boolean =>
+    !phase.locked &&
+    !view.phases.some((other) => other.def.parent === phase.def.id) &&
+    racesOfHeat(view, phase.def.id).length === 0;
 
   const rows = $derived(phaseTree(view.phases));
 
@@ -148,7 +160,30 @@
       <div class="head">
         <span class="label">{phase.def.label}</span>
         <Badge tone={TONES[status]} dot={status === 'racing'}>{PHASE_STATUS_LABELS[status]}</Badge>
+        {#if phase.format}
+          <span class="format" title={phase.def.format ? undefined : 'From the phase above'}>
+            {phase.format.name}
+          </span>
+        {/if}
         <span class="action">
+          {#if !heat && onaddheat && !phase.locked}
+            <Button
+              size="sm"
+              variant="secondary"
+              aria-label="Add a heat under {phase.def.label}"
+              onclick={() => onaddheat(phase.def.id)}>+ Heat</Button
+            >
+          {/if}
+          {#if removable(phase)}
+            <ConfirmButton
+              size="sm"
+              variant="danger"
+              disabled={busy}
+              title="Remove {phase.def.label}"
+              onconfirm={() => act({ Record: { PhaseRemoved: { phase: phase.def.id } } })}
+              >Remove</ConfirmButton
+            >
+          {/if}
           {#if phase.locked_here}
             <Button
               size="sm"
@@ -312,6 +347,10 @@
 {/if}
 
 <style>
+  .format {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
   .phases {
     list-style: none;
     margin: 0;

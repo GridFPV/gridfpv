@@ -16,8 +16,8 @@
 use std::collections::BTreeMap;
 
 use gridfpv_events::{
-    AdapterId, ClassId, Command, EndCondition, Event, Format, LineupEntry, PhaseId, PhaseKind,
-    PilotId, ProtestId, RaceId, RaceSetup, SourceTime, StartOwner,
+    AdapterId, ClassId, Command, EndCondition, Event, Format, LapRules, LineupEntry, PhaseId,
+    PhaseKind, PilotId, ProtestId, RaceId, RaceSetup, SourceTime, StartOwner,
 };
 use thiserror::Error;
 
@@ -36,6 +36,8 @@ pub enum Refusal {
     Lock(#[from] LockError),
     #[error("there is no phase {0:?}")]
     UnknownPhase(PhaseId),
+    #[error("a lap rule cannot be a negative time")]
+    NegativeLapRule,
     #[error("{0:?} is not a heat")]
     NotAHeat(PhaseId),
     #[error("{0:?} is locked; unlock it first")]
@@ -106,6 +108,8 @@ pub struct EventState {
     /// The order the director set for the run queue. Heats not in it follow in the default
     /// order.
     pub queue_order: Vec<PhaseId>,
+    /// The event's lap rules, as last set.
+    pub lap_rules: LapRules,
     /// Where in the log each race begins: the offset of its first fact. A race's signal is
     /// logged from there on, so this is where to start reading for it.
     pub race_log_start: BTreeMap<RaceId, u64>,
@@ -137,6 +141,7 @@ impl EventState {
                 self.rosters.remove(class);
             }
             Event::QueueSet { heats } => self.queue_order = heats.clone(),
+            Event::LapRulesSet { rules } => self.lap_rules = *rules,
             Event::StandingsSet { class, phases } => {
                 self.class_phases.insert(class.clone(), phases.clone());
             }
@@ -418,7 +423,10 @@ impl EventState {
             .starts_on_timer
             .get(&(race.setup.race.clone(), adapter.clone()));
         LapFilters {
-            min_lap_micros: rules.and_then(|rules| rules.min_lap_micros),
+            min_lap_micros: rules
+                .and_then(|rules| rules.min_lap_micros)
+                .or(self.lap_rules.min_lap_micros),
+            ignore_before_micros: self.lap_rules.ignore_before_micros,
             start_at: start.map(|(at, _)| *at),
             first_lap: rules.map(|rules| rules.first_lap).unwrap_or_default(),
             start_clock_run: start.map_or(0, |(_, run)| *run),
@@ -672,6 +680,14 @@ impl EventState {
                 Ok(())
             }
             Event::RosterSet { .. } | Event::RosterRemoved { .. } => Ok(()),
+            Event::LapRulesSet { rules } => {
+                let negative = |value: Option<i64>| value.is_some_and(|micros| micros < 0);
+                if negative(rules.min_lap_micros) || negative(rules.ignore_before_micros) {
+                    Err(Refusal::NegativeLapRule)
+                } else {
+                    Ok(())
+                }
+            }
             Event::QueueSet { heats } => heats.iter().try_for_each(|heat| self.heat(heat)),
             Event::StandingsSet { phases, .. } => phases.iter().try_for_each(|phase| {
                 if self.tree.get(phase).is_none() {
@@ -682,6 +698,7 @@ impl EventState {
 
             Event::LapRemoved { race, crossing, .. }
             | Event::LapRestored { race, crossing }
+            | Event::LapCounted { race, crossing }
             | Event::LapAdjusted { race, crossing, .. }
             | Event::RestartMarked { race, crossing }
             | Event::RestartUnmarked { race, crossing } => {
@@ -1530,6 +1547,80 @@ mod tests {
                 .seat(&rid("heat#1"), &oft(), &SeatRef("seat-0".into()), filters);
         assert_eq!(laps.lap_count(), 1);
         assert!(laps.hole_shot.is_some());
+    }
+
+    #[test]
+    fn the_events_lap_rules_hold_for_every_race_and_a_formats_own_minimum_lap_wins() {
+        use gridfpv_events::LapRules;
+        let mut director = solo_heat(FirstLap::HoleShot);
+        director.append(
+            0,
+            Event::ClockOffset {
+                adapter: oft(),
+                offset_micros: 0,
+                error_micros: 200,
+            },
+        );
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        // Staging is 3 s, so the tone is at 3 s on the timer's clock too.
+        director.now = 60 * S;
+        // A take-off under the gate, the hole shot, a bounce, then two laps.
+        for at in [4, 10, 11, 20, 30] {
+            director.cross("seat-0", at * S);
+        }
+        let times = |director: &Director| -> Vec<i64> {
+            let race = director.state.races.get(&rid("heat#1")).unwrap();
+            director
+                .state
+                .laps
+                .seat(
+                    &rid("heat#1"),
+                    &oft(),
+                    &SeatRef("seat-0".into()),
+                    director.state.filters_for(race, &oft()),
+                )
+                .laps()
+                .map(|lap| lap.micros())
+                .collect()
+        };
+        // No rules: every crossing after the tone counts.
+        assert_eq!(times(&director), vec![6 * S, S, 9 * S, 10 * S]);
+        // The rules are set after the laps were flown, and still apply to them.
+        director
+            .record(Event::LapRulesSet {
+                rules: LapRules {
+                    min_lap_micros: Some(5 * S),
+                    ignore_before_micros: Some(2 * S),
+                },
+            })
+            .unwrap();
+        assert_eq!(times(&director), vec![10 * S, 10 * S]);
+        assert_eq!(director.replayed(), director.state);
+        // A negative time is refused.
+        assert_eq!(
+            director.record(Event::LapRulesSet {
+                rules: LapRules {
+                    min_lap_micros: Some(-1),
+                    ignore_before_micros: None,
+                },
+            }),
+            Err(Refusal::NegativeLapRule)
+        );
+
+        // A format that carries its own minimum lap keeps it.
+        let mut own = format(EndCondition::Open, 0);
+        own.race.min_lap_micros = Some(20 * S);
+        let race = director.state.races.get(&rid("heat#1")).unwrap().clone();
+        let mut state = director.state.clone();
+        let mut def = state.tree.get(&pid("heat")).unwrap().clone();
+        def.format = Some(own);
+        state.tree.apply(&Event::PhaseDefined { def });
+        assert_eq!(
+            state.filters_for(&race, &oft()).min_lap_micros,
+            Some(20 * S)
+        );
     }
 
     /// Two pilots, first to one lap, stopping `wait` after both finish (or never).

@@ -248,8 +248,6 @@ pub struct RaceNow {
     pub starts_at: i64,
     /// The timers its lineup uses.
     pub timers: Vec<gridfpv_events::AdapterId>,
-    /// The minimum lap of the format in force, in milliseconds. 0 when it has none.
-    pub min_lap_ms: u32,
 }
 
 impl Live {
@@ -291,6 +289,8 @@ struct Registry {
     classes: ClassDirectory,
     /// The Director-wide timer directory, held here for the same reason.
     timers: crate::timers::TimerDirectory,
+    /// The saved formats and the saved seat profiles, held here for the same reason.
+    library: crate::library::Library,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -346,6 +346,7 @@ impl EventRegistry {
                 pilots,
                 classes,
                 timers: crate::timers::TimerDirectory::new(data_dir.clone()),
+                library: crate::library::Library::new(data_dir.clone()),
                 data_dir,
                 active_event,
             })),
@@ -431,6 +432,11 @@ impl EventRegistry {
         let reg = self.read();
         let live = &reg.events.get(reg.active_event.as_ref()?)?.live;
         live.race_now.lock().ok()?.clone()
+    }
+
+    /// The saved formats and the saved seat profiles.
+    pub fn library(&self) -> crate::library::Library {
+        self.read().library.clone()
     }
 
     /// The Director-wide timer directory.
@@ -522,6 +528,37 @@ impl EventRegistry {
         Ok(meta)
     }
 
+    /// Change an event's name and details. The id, the creation time and the log are left
+    /// alone. A blank detail is stored as unset. An unknown id is a not-found error.
+    pub fn update(
+        &self,
+        id: &EventId,
+        request: &CreateEventRequest,
+    ) -> Result<EventMeta, RegistryError> {
+        let mut reg = self.write();
+        let data_dir = reg.data_dir.clone();
+        let event = reg
+            .events
+            .get_mut(id)
+            .ok_or_else(|| RegistryError::not_found(format!("no event with id {:?}", id.0)))?;
+        let meta = EventMeta {
+            name: request.name.trim().to_owned(),
+            date: normalize_optional(&request.date),
+            location: normalize_optional(&request.location),
+            description: normalize_optional(&request.description),
+            organizer: normalize_optional(&request.organizer),
+            ..event.meta.clone()
+        };
+        if meta.persistent {
+            if let Some(dir) = data_dir {
+                persist_event_meta(&dir, &meta)?;
+            }
+        }
+        event.meta = meta.clone();
+        Ok(meta)
+    }
+
+    /// Delete an event and everything it holds.
     ///
     /// Removes the registry entry, deletes the event's on-disk state (its `<id>.sqlite` log plus
     /// the WAL/SHM sidecars under the data dir), and — if it was the Director's active event —

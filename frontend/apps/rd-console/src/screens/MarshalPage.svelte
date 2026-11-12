@@ -1,10 +1,15 @@
 <script lang="ts">
   /**
-   * MarshalPage — look at races again and make rulings (Home › Events › ‹event› › Marshal).
+   * MarshalPage — look at races again and make rulings.
    *
    * On the left, the **to-do list**: saved races flagged "needs a look", races with an open
    * protest, and stopped races that are not saved or discarded yet, each with why it is
-   * listed. Under it, every other race by heat, so any race can be opened.
+   * listed. Under it, the other races by heat, newest first. That list shows one phase at a
+   * time, the one being raced unless another is picked, and leaves discarded races out
+   * unless they are asked for, so the race just flown is never far to find.
+   *
+   * With no race named in the URL the page opens on the first race that needs a look, or
+   * else on the newest race.
    *
    * On the right, the **race review** for the chosen race: each seat with its trace and laps
    * (`MarshalSeat`), the heat's ranking as the Director works it out after each ruling, and
@@ -18,20 +23,13 @@
    * A race is always named by its heat and its number in that heat. Its id is only in the URL.
    */
   import { Badge, Banner, Button, Card, Input, Select, formatMicros } from '@gridfpv/components';
-  import type {
-    Command,
-    EventMeta,
-    PhaseId,
-    ProtocolError,
-    RaceId,
-    RaceSignal
-  } from '@gridfpv/types';
-  import Brand from '../Brand.svelte';
-  import Breadcrumbs from '../Breadcrumbs.svelte';
+  import type { Command, PhaseId, ProtocolError, RaceId, RaceSignal } from '@gridfpv/types';
+  import Page from '../Page.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
   import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
   import {
     canRule,
+    defaultRace,
     lockedBy,
     otherRaces,
     PROTEST_OUTCOMES,
@@ -40,27 +38,23 @@
     signalForSeat,
     todoList
   } from '../lib/marshal.js';
+  import { bestRunInHeat, consecutiveLaps } from '../lib/overlay.js';
+  import { defaultHeat, groupOfHeat, heatGroups } from '../lib/phases.js';
   import { raceStateLabel } from '../lib/run.js';
   import MarshalSeat from './MarshalSeat.svelte';
 
   let {
-    event,
     live,
-    race: raceId = undefined,
-    onhome,
-    onevents,
-    onevent,
+    race: named = undefined,
     onopen,
     onrun
   }: {
-    event: EventMeta;
     live: EventLive;
-    /** The race under review. A wire handle; its name is what is shown. */
+    /**
+     * The race under review, when the URL names one. A wire handle; its name is what is
+     * shown. With none named the page opens on the race that most needs a look.
+     */
     race?: RaceId | undefined;
-    onhome: () => void;
-    onevents: () => void;
-    /** Back to the event page. */
-    onevent: () => void;
     /** Open a race for review. */
     onopen: (race: RaceId) => void;
     /** Open a heat's Run view. */
@@ -70,9 +64,33 @@
   const names = $derived(live.names);
   const view = $derived(live.view);
   const todo = $derived(view ? todoList(view, names) : []);
-  const others = $derived(view ? otherRaces(view, names) : []);
+  /** The race on the right: the one named, or the one that most needs a look. */
+  const raceId = $derived(named ?? (view ? defaultRace(view, names) : undefined));
   const race = $derived(view?.races.find((r) => r.race === raceId));
+
+  // ── Which races the list shows ─────────────────────────────────────────────
+  const ALL_PHASES = '*';
+  const groups = $derived(view ? heatGroups(view.phases) : []);
+  /** The director's pick. Until they pick, the list follows the phase being raced. */
+  let pickedPhase = $state<string | undefined>(undefined);
+  let showDiscarded = $state(false);
+  const currentPhase = $derived.by(() => {
+    if (!view) return ALL_PHASES;
+    const heat = race?.heat ?? defaultHeat(view);
+    return (heat === undefined ? undefined : groupOfHeat(groups, heat)?.key) ?? ALL_PHASES;
+  });
+  const phaseFilter = $derived(pickedPhase ?? currentPhase);
+  const others = $derived.by(() => {
+    if (!view) return [];
+    const group = groups.find((g) => g.key === phaseFilter);
+    return otherRaces(view, names, {
+      heats: group ? new Set(group.heats.map((h) => h.def.id)) : undefined,
+      discarded: showDiscarded
+    });
+  });
   const heat = $derived(view?.phases.find((p) => p.def.id === race?.heat));
+  /** The N of a heat ranked on its best N laps in a row, else `undefined`. */
+  const runLength = $derived(consecutiveLaps(heat?.format));
   const title = $derived(view && race ? raceName(view, names, race) : undefined);
   const editable = $derived(!!race && canRule(race));
   const lockPhase = $derived(view && race?.locked ? lockedBy(view.phases, race.heat) : undefined);
@@ -156,23 +174,12 @@
   } as const;
 </script>
 
-<div class="page">
+<Page
+  title="Marshal"
+  help="marshal"
+  lede="Look at a race again, fix its laps, and settle protests."
+>
   <div class="page-inner">
-    <div class="brand-row"><Brand onclick={onhome} /></div>
-    <Breadcrumbs
-      crumbs={[
-        { label: 'Home', onclick: onhome },
-        { label: 'Events', onclick: onevents },
-        { label: event.name, onclick: onevent },
-        { label: 'Marshal' }
-      ]}
-    />
-
-    <header class="page-head">
-      <h1 class="page-title">Marshal</h1>
-      <span class="muted">Look at a race again, fix its laps, and settle protests.</span>
-    </header>
-
     <ErrorBanner {error} ondismiss={() => (error = undefined)} />
     {#if live.loadError}
       <ErrorBanner error={{ code: 'Internal', message: live.loadError }} />
@@ -208,10 +215,36 @@
             {/if}
           </Card>
 
-          <Card title="All other races" elevation="sm">
+          <Card title="Races" elevation="sm">
+            <div class="filter">
+              {#if groups.length > 1}
+                <Select
+                  size="sm"
+                  aria-label="Show the races of"
+                  value={phaseFilter}
+                  onchange={(e: Event) =>
+                    (pickedPhase = (e.currentTarget as HTMLSelectElement).value)}
+                >
+                  <option value={ALL_PHASES}>All phases</option>
+                  {#each groups as g (g.key)}
+                    <option value={g.key}>{g.label}</option>
+                  {/each}
+                </Select>
+              {/if}
+              <label class="option">
+                <input type="checkbox" bind:checked={showDiscarded} />
+                Show discarded races
+              </label>
+            </div>
             {#if others.length === 0}
               <p class="muted">
-                {view.races.length === 0 ? 'No race has been flown yet.' : 'Every race is above.'}
+                {#if view.races.length === 0}
+                  No race has been flown yet.
+                {:else if phaseFilter !== ALL_PHASES && groups.length > 1}
+                  No other race in this phase.
+                {:else}
+                  No other race to show.
+                {/if}
               </p>
             {:else}
               {#each others as group (group.heat)}
@@ -242,7 +275,7 @@
         <section class="review" aria-label="Race review">
           {#if raceId === undefined}
             <Card elevation="sm">
-              <p class="muted">Pick a race on the left to look at it.</p>
+              <p class="muted">No race has been flown yet. There is nothing to look at.</p>
             </Card>
           {:else if !race || !title}
             <Card elevation="sm">
@@ -282,7 +315,7 @@
                     {/if}
                   {/if}
                   <Button size="sm" variant="ghost" onclick={() => onrun(race.heat)}>
-                    Open the heat
+                    Run this heat
                   </Button>
                 </span>
               </div>
@@ -290,7 +323,7 @@
               <p class="muted" data-testid="review-status">
                 {#if race.locked}
                   {lockPhase === undefined ? 'A phase above this race' : names.phase(lockPhase)} is locked,
-                  so this race is official and cannot be changed. Unlock it on the event page to make
+                  so this race is official and cannot be changed. Unlock it on the Phases page to make
                   a ruling.
                 {:else if race.state === 'Discarded'}
                   This race was discarded. Its laps do not count, so there is nothing to rule on.
@@ -329,8 +362,14 @@
                     <li>
                       <span class="place">{placed.position}</span>
                       <span class="who">{names.pilot(placed.pilot)}</span>
+                      {#if runLength !== undefined && view}
+                        <span class="num strong" data-stat="rank-run">
+                          best {runLength}
+                          {formatMicros(bestRunInHeat(view, heat.def.id, placed.pilot, runLength))}
+                        </span>
+                      {/if}
                       <span class="num">{placed.laps} {placed.laps === 1 ? 'lap' : 'laps'}</span>
-                      <span class="num">best {formatMicros(placed.best_lap_micros)}</span>
+                      <span class="num">best lap {formatMicros(placed.best_lap_micros)}</span>
                       {#if placed.position_set}<Badge tone="violet">Set by hand</Badge>{/if}
                       {#if placed.disqualified}<Badge tone="danger">Disqualified</Badge>{/if}
                       {#if !placed.flew}<Badge tone="neutral">Did not fly</Badge>{/if}
@@ -433,36 +472,25 @@
       </div>
     {/if}
   </div>
-</div>
+</Page>
 
 <style>
-  .brand-row {
-    margin-bottom: var(--gf-space-4);
+  .filter {
+    display: grid;
+    gap: var(--gf-space-2);
+    margin-bottom: var(--gf-space-3);
   }
-  .page {
-    min-height: 100vh;
-    padding: var(--gf-space-6) var(--gf-space-8) var(--gf-space-8);
-    color: var(--gf-text);
-    font-family: var(--gf-font-family);
-    overflow: auto;
+  .option {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-secondary);
   }
   .page-inner {
-    width: min(84rem, 100%);
-    margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-5);
-  }
-  .page-head {
-    display: flex;
-    align-items: baseline;
     gap: var(--gf-space-4);
-    flex-wrap: wrap;
-  }
-  .page-title {
-    margin: 0;
-    font-size: var(--gf-font-size-2xl);
-    letter-spacing: var(--gf-tracking-tight);
   }
   .muted {
     margin: 0;
@@ -580,6 +608,10 @@
   .resolve,
   .file {
     align-items: center;
+  }
+  .num.strong {
+    color: var(--gf-text);
+    font-weight: var(--gf-font-weight-bold);
   }
   .place {
     min-width: 1.5rem;

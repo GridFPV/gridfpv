@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  CreateEventRequest,
   CreateTimerRequest,
   DiscoveredTimer,
+  EventMeta,
   ProtocolError,
   Timer,
   TimerView
@@ -91,6 +93,84 @@ describe('events lifecycle helpers (#72)', () => {
     });
     expect(meta.date).toBe('2026-06-20');
     expect(meta.location).toBe('Main field');
+  });
+
+  it('updateEvent PUTs the name and details to /events/{id} with the id encoded and the token, and returns the event as it now is', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const now: EventMeta = {
+      id: 'club night/1',
+      name: 'Club Night',
+      created_at: 4,
+      persistent: true,
+      location: 'Back field'
+    };
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => now
+      } as unknown as Response;
+    };
+    const { updateEvent } = await import('./client.js');
+    const request: CreateEventRequest = { name: 'Club Night', location: 'Back field' };
+    expect(
+      await updateEvent('http://director.local:8080/', 'club night/1', request, 'rd-tok', { fetch })
+    ).toEqual(now);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe('http://director.local:8080/events/club%20night%2F1');
+    expect(seen[0].init?.method).toBe('PUT');
+    const headers = seen[0].init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer rd-tok');
+    expect(headers['Content-Type']).toBe('application/json');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual(request);
+  });
+
+  it('updateEvent omits Authorization when no token is given', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => ({
+          id: 'e1',
+          name: 'A',
+          created_at: 1,
+          persistent: true
+        })
+      } as unknown as Response;
+    };
+    const { updateEvent } = await import('./client.js');
+    await updateEvent('http://director.local:8080', 'e1', { name: 'A' }, undefined, { fetch });
+    const headers = seen[0].init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("updateEvent rejects an empty name with the Director's sentence and the 400", async () => {
+    const SAID = 'An event needs a name.';
+    const fetch: FetchLike = async () =>
+      ({
+        ok: false,
+        status: 400,
+        json: async (): Promise<unknown> => ({ code: 'BadRequest', message: SAID })
+      }) as unknown as Response;
+    const { updateEvent, isRequestFailure } = await import('./client.js');
+    const err: unknown = await updateEvent(
+      'http://director.local:8080',
+      'evt-9f3a7c',
+      { name: '' },
+      'rd-tok',
+      { fetch }
+    ).then(
+      () => undefined,
+      (e: unknown) => e
+    );
+    expect(isRequestFailure(err)).toBe(true);
+    if (!isRequestFailure(err)) return;
+    expect(err.message).toBe(SAID);
+    expect(err.status).toBe(400);
+    expect(err.code).toBe('BadRequest');
   });
 });
 
@@ -214,8 +294,10 @@ describe("request failures carry the Director's words (#433)", () => {
   const PILOT = 'pilot-3c4d';
   const CLASS = 'class-88ee';
   const TIMER = 'gate-x1y2';
+  const FORMAT = 'format-5a6b';
+  const PROFILE = 'profile-7c8d';
   /** Every raw handle the sweep hands the client — none may come back out in a message. */
-  const RAW_IDS = [EVT, PILOT, CLASS, TIMER];
+  const RAW_IDS = [EVT, PILOT, CLASS, TIMER, FORMAT, PROFILE];
 
   /**
    * A stand-in request body. The failing fetch never reads one, and `never` satisfies every
@@ -294,6 +376,16 @@ describe("request failures carry the Director's words (#433)", () => {
       ['deleteTimer', (fetch) => c.deleteTimer(BASE, TIMER, TOKEN, { fetch })],
       ['getTimerConfig', (fetch) => c.getTimerConfig(BASE, TIMER, { fetch })],
       ['putTimerConfig', (fetch) => c.putTimerConfig(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['updateEvent', (fetch) => c.updateEvent(BASE, EVT, REQ, TOKEN, { fetch })],
+      ['listFormats', (fetch) => c.listFormats(BASE, { fetch })],
+      ['createFormat', (fetch) => c.createFormat(BASE, REQ, TOKEN, { fetch })],
+      ['updateFormat', (fetch) => c.updateFormat(BASE, FORMAT, REQ, TOKEN, { fetch })],
+      ['deleteFormat', (fetch) => c.deleteFormat(BASE, FORMAT, TOKEN, { fetch })],
+      ['listProfiles', (fetch) => c.listProfiles(BASE, TIMER, { fetch })],
+      ['createProfile', (fetch) => c.createProfile(BASE, TIMER, REQ, TOKEN, { fetch })],
+      ['updateProfile', (fetch) => c.updateProfile(BASE, TIMER, PROFILE, REQ, TOKEN, { fetch })],
+      ['deleteProfile', (fetch) => c.deleteProfile(BASE, TIMER, PROFILE, TOKEN, { fetch })],
+      ['applyProfile', (fetch) => c.applyProfile(BASE, TIMER, PROFILE, TOKEN, { fetch })],
       ['getEventState', (fetch) => c.getEventState(BASE, EVT, { fetch })],
       ['sendCommand', (fetch) => c.sendCommand(BASE, EVT, REQ, TOKEN, { fetch })],
       ['createBracket', (fetch) => c.createBracket(BASE, EVT, REQ, TOKEN, { fetch })],

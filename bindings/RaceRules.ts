@@ -17,6 +17,7 @@ end: EndCondition,
 staging_micros: number, 
 /**
  * The shortest time a lap may take, in microseconds. A faster crossing is filtered out.
+ * `None`, the usual case, takes the event's minimum lap ([`LapRules`]).
  */
 min_lap_micros?: number, 
 /**

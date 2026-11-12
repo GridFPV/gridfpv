@@ -17,7 +17,7 @@
     onclick,
     sub = 'RD Console'
   }: {
-    /** Navigate home (the hub) — the button's only action. */
+    /** Go to the open event's page — the button's only action. */
     onclick: () => void;
     /** The small caps sub-line under the wordmark. */
     sub?: string;
@@ -28,7 +28,7 @@
   const version = $derived(directorVersion());
 </script>
 
-<button type="button" class="brand" {onclick} title="Home — GridFPV hub">
+<button type="button" class="brand" {onclick} title="GridFPV">
   <svg class="brand-mark" viewBox="20 20 60 60" role="img" aria-label="GridFPV">
     <path
       d="M71 33 H40 Q31 33 31 42 V58 Q31 67 40 67 H60 Q69 67 69 58 V51 H53"

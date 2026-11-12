@@ -1,4 +1,4 @@
-/** The Tune page's numbers and its draft: formatting, draft ↔ settings, dirty, mode, seats. */
+/** The Seats page's numbers and its draft: formatting, draft ↔ settings, dirty, mode, seats. */
 import { describe, expect, it } from 'vitest';
 import type { SeatLevels, TimerConfig } from '@gridfpv/types';
 import {
@@ -28,8 +28,7 @@ const AUTO: TimerConfig = {
     { seat: '0', freq_mhz: 5658, enabled: true },
     { seat: '1', freq_mhz: 5695, enabled: false }
   ],
-  threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-  set_on_timer: { min_lap_ms: 2500 }
+  threshold: { Auto: { snr_enter: 150, hysteresis: 50 } }
 };
 const MANUAL: TimerConfig = { ...AUTO, threshold: { Manual: { enter: -700, exit: -765 } } };
 /** A timer that takes levels per seat, with seat 2 on its own fixed levels. */
@@ -131,10 +130,9 @@ describe('the draft', () => {
   });
 
   it('turns back into the very same settings', () => {
-    for (const config of [AUTO, MANUAL, OWN]) {
-      // All but what is set on the timer itself: that is shown, and never sent.
-      const { set_on_timer: _shown, ...sent } = config;
-      expect(draftConfig(draftFrom(config), seatName)).toEqual({ ok: true, config: sent });
+    const everything: TimerConfig = { ...OWN, exit_hold_ms: 30, lap_cooldown_ms: 2500 };
+    for (const config of [AUTO, MANUAL, OWN, everything]) {
+      expect(draftConfig(draftFrom(config), seatName)).toEqual({ ok: true, config });
     }
   });
 
@@ -338,8 +336,6 @@ describe('dirty', () => {
     expect(isDirty(addSeat(draftFrom(AUTO)), AUTO)).toBe(true);
     expect(isDirty(draftFrom(MANUAL), AUTO)).toBe(true);
     expect(isDirty(draftFrom(OWN), AUTO)).toBe(true);
-    // What is set on the timer itself is not the draft's to change.
-    expect(isDirty(draftFrom(AUTO), { ...AUTO, set_on_timer: { min_lap_ms: 0 } })).toBe(false);
   });
 
   it('sameConfig compares every part', () => {
@@ -361,6 +357,50 @@ describe('dirty', () => {
     const moved = structuredClone(OWN);
     moved.seats[1].threshold = { Manual: { enter: -600, exit: -670 } };
     expect(sameConfig(OWN, moved)).toBe(false);
+  });
+
+  it('sameConfig compares each seat: which seat, its frequency, and whether it is on', () => {
+    const changed = (change: (seat: TimerConfig['seats'][number]) => void): TimerConfig => {
+      const config = structuredClone(AUTO);
+      change(config.seats[1]);
+      return config;
+    };
+    expect(
+      sameConfig(
+        AUTO,
+        changed((seat) => (seat.freq_mhz = 5732))
+      )
+    ).toBe(false);
+    expect(
+      sameConfig(
+        AUTO,
+        changed((seat) => (seat.enabled = true))
+      )
+    ).toBe(false);
+    expect(
+      sameConfig(
+        AUTO,
+        changed((seat) => (seat.seat = '2'))
+      )
+    ).toBe(false);
+    expect(sameConfig(AUTO, { ...AUTO, seats: [...AUTO.seats].reverse() })).toBe(false);
+  });
+
+  it('sameConfig compares the lap cooldown and the exit hold, there or not', () => {
+    const cooled: TimerConfig = { ...AUTO, lap_cooldown_ms: 2500 };
+    expect(sameConfig(cooled, { ...AUTO, lap_cooldown_ms: 2500 })).toBe(true);
+    expect(sameConfig(cooled, { ...AUTO, lap_cooldown_ms: 3000 })).toBe(false);
+    expect(sameConfig(cooled, AUTO)).toBe(false);
+    expect(sameConfig(AUTO, cooled)).toBe(false);
+    // A cooldown of 0 is a setting; it is not the same as a timer that has none.
+    expect(sameConfig({ ...AUTO, lap_cooldown_ms: 0 }, AUTO)).toBe(false);
+
+    const held: TimerConfig = { ...AUTO, exit_hold_ms: 30 };
+    expect(sameConfig(held, { ...AUTO, exit_hold_ms: 30 })).toBe(true);
+    expect(sameConfig(held, { ...AUTO, exit_hold_ms: 40 })).toBe(false);
+    expect(sameConfig(held, AUTO)).toBe(false);
+    // One is not mistaken for the other.
+    expect(sameConfig({ ...AUTO, exit_hold_ms: 30 }, { ...AUTO, lap_cooldown_ms: 30 })).toBe(false);
   });
 });
 
@@ -490,6 +530,85 @@ describe('the exit hold', () => {
     expect(draftConfig(draft, name)).toEqual({
       ok: false,
       problem: 'The exit hold must be a whole number of milliseconds, 0 or more.'
+    });
+    for (const exitHoldMs of [12.5, -1, 'abc']) {
+      expect(draftConfig({ ...draft, exitHoldMs }, name)).toEqual({
+        ok: false,
+        problem: 'The exit hold must be a whole number of milliseconds, 0 or more.'
+      });
+    }
+    const zero = draftConfig({ ...draft, exitHoldMs: '0' }, name);
+    expect(zero.ok && zero.config.exit_hold_ms).toBe(0);
+  });
+});
+
+describe('the lap cooldown', () => {
+  const name = () => 'Seat';
+  const has: TimerConfig = { ...AUTO, lap_cooldown_ms: 2500 };
+  const PROBLEM = 'The lap cooldown must be a number of seconds, 0 or more.';
+
+  it('is in the draft, in seconds, only for a timer that has it', () => {
+    expect('lapCooldownS' in draftFrom(AUTO)).toBe(false);
+    expect(draftFrom(has).lapCooldownS).toBe(2.5);
+    // A cooldown of 0 is still a setting the timer has.
+    expect(draftFrom({ ...AUTO, lap_cooldown_ms: 0 }).lapCooldownS).toBe(0);
+  });
+
+  it('is sent back in milliseconds only to a timer that has it', () => {
+    const without = draftConfig(draftFrom(AUTO), name);
+    if (!without.ok) throw new Error(without.problem);
+    expect('lap_cooldown_ms' in without.config).toBe(false);
+
+    const sent = draftConfig(draftFrom(has), name);
+    if (!sent.ok) throw new Error(sent.problem);
+    expect(sent.config.lap_cooldown_ms).toBe(2500);
+  });
+
+  it('carries an edit, typed or picked, to the nearest tenth of a second', () => {
+    const sentFor = (lapCooldownS: number | string) => {
+      const result = draftConfig({ ...draftFrom(has), lapCooldownS }, name);
+      if (!result.ok) throw new Error(result.problem);
+      return result.config.lap_cooldown_ms;
+    };
+    expect(sentFor(3)).toBe(3000);
+    expect(sentFor('1.5')).toBe(1500);
+    expect(sentFor(1.26)).toBe(1300);
+    expect(sentFor(0)).toBe(0);
+  });
+
+  it('must be a number of seconds, 0 or more', () => {
+    for (const lapCooldownS of ['', '  ', 'abc', -1, '-2.5']) {
+      expect(draftConfig({ ...draftFrom(has), lapCooldownS }, name)).toEqual({
+        ok: false,
+        problem: PROBLEM
+      });
+    }
+  });
+
+  it('makes the draft dirty when it changes, and clean again when it is put back', () => {
+    const draft = draftFrom(has);
+    expect(isDirty(draft, has)).toBe(false);
+    draft.lapCooldownS = 3;
+    expect(isDirty(draft, has)).toBe(true);
+    draft.lapCooldownS = '2.5';
+    expect(isDirty(draft, has)).toBe(false);
+    draft.lapCooldownS = '';
+    expect(isDirty(draft, has)).toBe(true);
+  });
+
+  it('is its own setting: changing it leaves the exit hold alone, and the other way round', () => {
+    const both: TimerConfig = { ...AUTO, exit_hold_ms: 30, lap_cooldown_ms: 2500 };
+    const draft = draftFrom(both);
+    draft.lapCooldownS = 4;
+    expect(draftConfig(draft, name)).toMatchObject({
+      ok: true,
+      config: { exit_hold_ms: 30, lap_cooldown_ms: 4000 }
+    });
+    const other = draftFrom(both);
+    other.exitHoldMs = 50;
+    expect(draftConfig(other, name)).toMatchObject({
+      ok: true,
+      config: { exit_hold_ms: 50, lap_cooldown_ms: 2500 }
     });
   });
 });

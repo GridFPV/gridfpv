@@ -97,11 +97,20 @@ export interface HeatRaces {
   races: { race: RaceId; name: string; state: string }[];
 }
 
+/** What the list of races is narrowed to. */
+export interface RaceFilter {
+  /** Only these heats. Left out, every heat. */
+  heats?: ReadonlySet<PhaseId>;
+  /** List discarded races too. They never count, so they are left out unless asked for. */
+  discarded?: boolean;
+}
+
 /**
- * Every race that is not on the to-do list, grouped by heat. Heats are in the event's own
+ * Every race that is not on the to-do list, grouped by heat, the newest race of each heat
+ * first: the race just flown is the one most often opened. Heats are in the event's own
  * order; a heat with no such race is left out.
  */
-export function otherRaces(view: EventView, names: Names): HeatRaces[] {
+export function otherRaces(view: EventView, names: Names, filter: RaceFilter = {}): HeatRaces[] {
   const listed = new Set(todoList(view, names).map((item) => item.race));
   const groups: HeatRaces[] = [];
   const seen = new Set<PhaseId>();
@@ -109,17 +118,30 @@ export function otherRaces(view: EventView, names: Names): HeatRaces[] {
   for (const heat of heats) {
     if (seen.has(heat)) continue;
     seen.add(heat);
+    if (filter.heats && !filter.heats.has(heat)) continue;
     const races = racesOfHeat(view, heat)
       .map((race, index) => ({ race, index }))
       .filter(({ race }) => !listed.has(race.race))
+      .filter(({ race }) => filter.discarded || race.state !== 'Discarded')
       .map(({ race, index }) => ({
         race: race.race,
         name: `Race ${index + 1}`,
         state: raceStateLabel(race)
-      }));
+      }))
+      .reverse();
     if (races.length > 0) groups.push({ heat, label: names.phase(heat), races });
   }
   return groups;
+}
+
+/**
+ * The race the Marshal page opens on when none is named: the first on the to-do list, else
+ * the newest race that was not discarded. `undefined` before any race is flown.
+ */
+export function defaultRace(view: EventView, names: Names): RaceId | undefined {
+  const first = todoList(view, names)[0];
+  if (first) return first.race;
+  return view.races.filter((race) => race.state !== 'Discarded').at(-1)?.race;
 }
 
 /**

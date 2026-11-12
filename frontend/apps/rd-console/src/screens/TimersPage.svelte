@@ -32,8 +32,9 @@
     TimerKind,
     TimerView
   } from '@gridfpv/types';
-  import Brand from '../Brand.svelte';
-  import Breadcrumbs from '../Breadcrumbs.svelte';
+  import Page from '../Page.svelte';
+  import PageTabs from '../PageTabs.svelte';
+  import { TIMING_TABS } from '../lib/tabs.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import type { Session } from '../lib/session.svelte.js';
   import {
@@ -47,12 +48,10 @@
 
   let {
     session,
-    onhome,
     ontune
   }: {
     session: Session;
-    onhome: () => void;
-    /** Open a timer's Tune page. */
+    /** Open a timer's own settings. */
     ontune?: (timer: AdapterId) => void;
   } = $props();
 
@@ -180,16 +179,16 @@
   }
 </script>
 
-<div class="page">
+<Page
+  title="Timers"
+  help="seats"
+  lede="The timing gates Grid listens to. A timer found on the network is added with one click."
+>
+  {#snippet actions()}
+    <Button variant="primary" onclick={openAdd}>+ Add timer</Button>
+  {/snippet}
+  <PageTabs tabs={TIMING_TABS} current="timers" label="Seats and timers" />
   <div class="page-inner">
-    <div class="brand-row"><Brand onclick={onhome} /></div>
-    <Breadcrumbs crumbs={[{ label: 'Home', onclick: onhome }, { label: 'Timers' }]} />
-
-    <header class="page-head">
-      <h1 class="page-title">Timers</h1>
-      <Button variant="primary" onclick={openAdd}>+ Add timer</Button>
-    </header>
-
     {#if loadError}
       <Banner tone="danger" title="The timers could not be read.">{loadError}</Banner>
     {/if}
@@ -228,8 +227,8 @@
                   {#if ontune && view.timer.kind === 'Oft'}
                     <Button
                       variant="secondary"
-                      title="Tune {view.timer.name}"
-                      onclick={() => ontune(view.timer.id)}>Tune</Button
+                      title="Settings of {view.timer.name}"
+                      onclick={() => ontune(view.timer.id)}>Settings</Button
                     >
                   {/if}
                   <ConfirmButton
@@ -297,7 +296,7 @@
       </div>
     </Card>
   </div>
-</div>
+</Page>
 
 {#if addOpen}
   <Dialog open={true} title="Add timer" onclose={() => (addOpen = false)}>
@@ -339,33 +338,10 @@
 {/if}
 
 <style>
-  .brand-row {
-    margin-bottom: var(--gf-space-4);
-  }
-  .page {
-    min-height: 100vh;
-    padding: var(--gf-space-6) var(--gf-space-8) var(--gf-space-8);
-    color: var(--gf-text);
-    font-family: var(--gf-font-family);
-    overflow: auto;
-  }
   .page-inner {
-    width: min(52rem, 100%);
-    margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: var(--gf-space-5);
-  }
-  .page-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
     gap: var(--gf-space-4);
-  }
-  .page-title {
-    margin: 0;
-    font-size: var(--gf-font-size-2xl);
-    letter-spacing: var(--gf-tracking-tight);
   }
   .wrap {
     padding: var(--gf-space-2);

@@ -80,6 +80,7 @@ function open(
     createBracket: vi.fn(async () => ({ cursor: 1 })),
     postPass: vi.fn(async () => ({ cursor: 1 })),
     listPilots: vi.fn(async () => PILOTS),
+    listFormats: vi.fn(async () => []),
     listTimers: vi.fn(async () => []),
     listClasses: vi.fn(async () => []),
     getRaceSignal: vi.fn(async (_id: string, raceId: string) => ({ race: raceId, seats: [] }))

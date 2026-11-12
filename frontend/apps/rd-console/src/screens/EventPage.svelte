@@ -1,244 +1,362 @@
 <script lang="ts">
   /**
-   * EventPage — the open event's page (Home › Events › ‹event name›).
+   * EventPage — the open event: what it is, the lap rules every race in it runs under, and
+   * the classes racing in it.
    *
-   * From the top: the details card shows what the event is (date, location, organizer and
-   * description). "Up next" is the run queue: the heats that can be raced now, in a suggested
-   * order the director can change. The Phases card shows the competition: every phase as a
-   * tree, each heat with its lineup, its ranking and rulings, and a button that opens its Run
-   * view. Heats and brackets are added from here. The Classes card holds each class's roster
-   * and standings. The Overlays card, last, gives the URLs of the pages that go on top of
-   * video in OBS. The Marshal link at the top opens the Marshal page.
+   * - **Details**: date, location, organizer and a description. **Edit** changes them and
+   *   the name.
+   * - **Lap rules**: the minimum lap time, and how long after the start crossings are
+   *   ignored. They are set once here and hold for every race of the event, the ones
+   *   already flown included. Each saves when its field is left, and what is shown
+   *   afterwards is what the Director has.
+   * - **Classes**: each class at the event with its roster and standings.
    *
-   * The competition comes from the live event store, so the list follows the Director as
-   * races are run, from this console or another one.
+   * What is raced is on the Phases page; the saved results are on the Results page.
    */
-  import { Badge, Banner, Button, Card } from '@gridfpv/components';
-  import type { EventMeta, PhaseId } from '@gridfpv/types';
-  import Brand from '../Brand.svelte';
-  import Breadcrumbs from '../Breadcrumbs.svelte';
+  import { Banner, Button, Card, Dialog, Field, Input } from '@gridfpv/components';
+  import type { EventMeta, LapRules } from '@gridfpv/types';
+  import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { marshalCount } from '../lib/marshal.js';
-  import AddBracketDialog from './AddBracketDialog.svelte';
-  import AddHeatDialog from './AddHeatDialog.svelte';
+  import { isHeat } from '../lib/phases.js';
+  import { formatHash } from '../lib/route.js';
+  import type { Session } from '../lib/session.svelte.js';
   import ClassRosterDialog from './ClassRosterDialog.svelte';
   import EventClasses from './EventClasses.svelte';
-  import EventOverlays from './EventOverlays.svelte';
-  import PhaseList from './PhaseList.svelte';
-  import RunQueue from './RunQueue.svelte';
 
   let {
+    session,
     event,
-    live,
-    onhome,
-    onevents,
-    onrun,
-    onmarshal
+    live
   }: {
+    session: Session;
     event: EventMeta;
     /** The live competition of this event. */
     live: EventLive;
-    /** Leave for the home hub. */
-    onhome: () => void;
-    /** Leave for the Events page. */
-    onevents: () => void;
-    /** Open the Run view for a heat. */
-    onrun: (heat: PhaseId) => void;
-    /** Open the Marshal page. */
-    onmarshal: () => void;
   } = $props();
 
-  // Each dialog is mounted only while open, so a closed one never sits in the page.
-  let addHeatOpen = $state(false);
-  let addBracketOpen = $state(false);
+  const say = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  const SECOND = 1_000_000;
+
+  const view = $derived(live.view);
+  const details = $derived([
+    { label: 'Date', value: event.date },
+    { label: 'Location', value: event.location },
+    { label: 'Organizer', value: event.organizer },
+    { label: 'Description', value: event.description }
+  ]);
+  /** What the event holds, in a few numbers. */
+  const counts = $derived.by(() => {
+    if (!view) return [];
+    const pilots = new Set(view.rosters.flatMap((roster) => roster.pilots));
+    return [
+      { label: 'Classes', value: view.rosters.length },
+      { label: 'Pilots in them', value: pilots.size },
+      { label: 'Heats', value: view.phases.filter((phase) => isHeat(phase.def)).length },
+      { label: 'Saved races', value: view.races.filter((race) => race.state === 'Saved').length }
+    ];
+  });
+
+  // ── Lap rules ──────────────────────────────────────────────────────────────
+  // Each field shows what the Director has until it is typed in. Leaving it sends the pair.
+  // An emptied number field binds `null`; it is kept as `''` so it reads as "typed, and
+  // empty" (no rule) rather than "not typed" (which would show the Director's value again).
+  let typed = $state<{ minLap?: number | string; ignore?: number | string }>({});
+  let rulesBusy = $state(false);
+  let rulesError = $state<string | undefined>(undefined);
+  let rulesSaved = $state(false);
+  const seconds = (micros: number | undefined): number | string =>
+    micros === undefined ? '' : micros / SECOND;
+  const minLap = $derived(typed.minLap ?? seconds(view?.lap_rules.min_lap_micros));
+  const ignore = $derived(typed.ignore ?? seconds(view?.lap_rules.ignore_before_micros));
+
+  /** Seconds from a field as microseconds. Empty or 0 is "none". `null` is not a time. */
+  function micros(value: number | string): number | undefined | null {
+    if (typeof value === 'string' && value.trim() === '') return undefined;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return n === 0 ? undefined : Math.round(n * SECOND);
+  }
+
+  async function saveRules() {
+    if (rulesBusy || !view) return;
+    const min = micros(minLap);
+    const ign = micros(ignore);
+    rulesSaved = false;
+    if (min === null || ign === null) {
+      rulesError = 'A lap rule is a number of seconds, 0 or more.';
+      return;
+    }
+    const rules: LapRules = {
+      ...(min === undefined ? {} : { min_lap_micros: min }),
+      ...(ign === undefined ? {} : { ignore_before_micros: ign })
+    };
+    const now = view.lap_rules;
+    if (
+      rules.min_lap_micros === now.min_lap_micros &&
+      rules.ignore_before_micros === now.ignore_before_micros
+    ) {
+      typed = {};
+      rulesError = undefined;
+      return;
+    }
+    rulesBusy = true;
+    rulesError = undefined;
+    try {
+      if (await live.send({ Record: { LapRulesSet: { rules } } })) {
+        typed = {};
+        rulesSaved = true;
+      }
+    } catch (e) {
+      rulesError = say(e);
+    } finally {
+      rulesBusy = false;
+    }
+  }
+
+  // ── Edit the details ───────────────────────────────────────────────────────
+  let editOpen = $state(false);
+  let edit = $state({ name: '', date: '', location: '', organizer: '', description: '' });
+  let editBusy = $state(false);
+  let editError = $state<string | undefined>(undefined);
+
+  function openEdit() {
+    edit = {
+      name: event.name,
+      date: event.date ?? '',
+      location: event.location ?? '',
+      organizer: event.organizer ?? '',
+      description: event.description ?? ''
+    };
+    editError = undefined;
+    editOpen = true;
+  }
+
+  async function submitEdit(e?: Event) {
+    e?.preventDefault();
+    if (editBusy || !edit.name.trim()) return;
+    editBusy = true;
+    editError = undefined;
+    try {
+      if (await session.updateEvent(event.id, edit)) editOpen = false;
+    } catch (err) {
+      editError = say(err);
+    } finally {
+      editBusy = false;
+    }
+  }
+
   let addClassOpen = $state(false);
-
-  /** How many races need a look or have an open protest. */
-  const toMarshal = $derived(live.view ? marshalCount(live.view) : 0);
-
-  /** The detail rows that have a value — an unset detail is left out rather than shown blank. */
-  const details = $derived(
-    [
-      { label: 'Date', value: event.date },
-      { label: 'Location', value: event.location },
-      { label: 'Organizer', value: event.organizer },
-      { label: 'Description', value: event.description }
-    ].filter((row): row is { label: string; value: string } => !!row.value?.trim())
-  );
 </script>
 
-<div class="page">
-  <div class="page-inner">
-    <!-- The brand is the home root (#118): every page carries the same top-left GridFPV mark,
-         leaving for the hub. -->
-    <div class="brand-row"><Brand onclick={onhome} /></div>
-    <Breadcrumbs
-      crumbs={[
-        { label: 'Home', onclick: onhome },
-        { label: 'Events', onclick: onevents },
-        { label: event.name }
-      ]}
-    />
+<Page
+  title={event.name}
+  help="event"
+  lede="What this event is, the lap rules its races run under, and who is racing in it."
+>
+  {#snippet actions()}
+    <Button variant="secondary" onclick={openEdit}>Edit</Button>
+  {/snippet}
 
-    <header class="page-head">
-      <h1 class="page-title">{event.name}</h1>
-      <span class="head-links">
-        <Button
-          variant="secondary"
-          aria-label={toMarshal === 0
-            ? 'Marshal'
-            : `Marshal, ${toMarshal} ${toMarshal === 1 ? 'race needs' : 'races need'} a look`}
-          onclick={onmarshal}
-        >
-          Marshal
-          {#if toMarshal > 0}
-            <span data-testid="marshal-count"
-              ><Badge tone="warn" variant="solid">{toMarshal}</Badge></span
-            >
-          {/if}
-        </Button>
-      </span>
-    </header>
+  {#if live.loadError}
+    <Banner tone="danger" title="The event could not be read.">{live.loadError}</Banner>
+  {/if}
 
-    <Card elevation="sm">
-      <div class="details-wrap">
-        {#if details.length > 0}
-          <dl class="details" aria-label="Event details">
-            {#each details as row (row.label)}
-              <div class="detail">
-                <dt>{row.label}</dt>
-                <dd>{row.value}</dd>
-              </div>
-            {/each}
-          </dl>
-        {:else}
-          <p class="no-details">No date, location, organizer or description was added.</p>
-        {/if}
-      </div>
+  <div class="two">
+    <Card title="Details" elevation="sm">
+      <dl class="facts" aria-label="Event details">
+        {#each details as row (row.label)}
+          <div>
+            <dt>{row.label}</dt>
+            <dd class:unset={!row.value?.trim()}>{row.value?.trim() || '—'}</dd>
+          </div>
+        {/each}
+      </dl>
     </Card>
-
-    {#if live.view && live.view.phases.length > 0}
-      <Card title="Up next" elevation="sm">
-        <RunQueue view={live.view} names={live.names} {live} {onrun} />
-      </Card>
-    {/if}
-
-    <Card title="Phases" elevation="sm">
-      {#snippet actions()}
-        <Button size="sm" variant="secondary" onclick={() => (addBracketOpen = true)}>
-          + Add bracket
-        </Button>
-        <Button size="sm" variant="primary" onclick={() => (addHeatOpen = true)}>+ Add heat</Button>
-      {/snippet}
-      {#if live.loadError}
-        <Banner tone="danger" title="The event could not be read.">{live.loadError}</Banner>
-      {/if}
-      {#if !live.view}
+    <Card title="In this event" elevation="sm">
+      {#if !view}
         {#if !live.loadError}<p class="muted" role="status">Loading…</p>{/if}
-      {:else if live.view.phases.length === 0}
-        <p class="muted">Nothing to race yet. Add a heat or a bracket to start.</p>
       {:else}
-        <PhaseList view={live.view} names={live.names} {live} {onrun} />
+        <dl class="facts" aria-label="In this event">
+          {#each counts as row (row.label)}
+            <div>
+              <dt>{row.label}</dt>
+              <dd>{row.value}</dd>
+            </div>
+          {/each}
+        </dl>
+        <p class="muted">
+          Heats are added on the
+          <a href={formatHash({ kind: 'event', section: 'phases' })}>Phases page</a>. Pilots,
+          classes, formats and seat profiles are kept outside the event and carry over.
+        </p>
       {/if}
-    </Card>
-
-    {#if live.view}
-      <Card title="Classes" elevation="sm">
-        {#snippet actions()}
-          <Button size="sm" variant="secondary" onclick={() => (addClassOpen = true)}>
-            + Add class
-          </Button>
-        {/snippet}
-        <EventClasses {live} />
-      </Card>
-    {/if}
-
-    <Card title="Overlays" elevation="sm">
-      <EventOverlays />
     </Card>
   </div>
-</div>
+
+  {#if view}
+    <Card
+      title="Lap rules"
+      subtitle="Set once for the whole event. They apply to every race in it, flown or still to fly."
+      elevation="sm"
+    >
+      <form
+        class="rules"
+        aria-label="Lap rules"
+        onsubmit={(e) => {
+          e.preventDefault();
+          void saveRules();
+        }}
+      >
+        <Field
+          label="Minimum lap time (seconds)"
+          hint="A crossing sooner than this after the pilot's last one is not counted as a lap. It stays in the race, and Marshal can count it. Empty or 0 means no minimum."
+        >
+          <Input
+            type="number"
+            inputmode="decimal"
+            min="0"
+            step="0.1"
+            aria-label="Minimum lap time, in seconds"
+            bind:value={
+              () => minLap, (value) => ((typed.minLap = value ?? ''), (rulesSaved = false))
+            }
+            onblur={() => void saveRules()}
+            disabled={rulesBusy}
+          />
+        </Field>
+        <Field
+          label="Ignore crossings before (seconds)"
+          hint="Crossings in the first seconds after the start are not counted: a take-off right under the gate. Crossings before the start never count. Empty or 0 ignores nothing after it."
+        >
+          <Input
+            type="number"
+            inputmode="decimal"
+            min="0"
+            step="0.1"
+            aria-label="Ignore crossings before, in seconds"
+            bind:value={
+              () => ignore, (value) => ((typed.ignore = value ?? ''), (rulesSaved = false))
+            }
+            onblur={() => void saveRules()}
+            disabled={rulesBusy}
+          />
+        </Field>
+        <!-- Enter in a field saves, as leaving it does. -->
+        <button type="submit" class="hidden-submit" tabindex="-1" aria-hidden="true"></button>
+      </form>
+      <p class="rules-state" role="status" data-testid="lap-rules-state">
+        {#if rulesError}
+          <span class="bad">{rulesError}</span>
+        {:else if rulesBusy}
+          Saving…
+        {:else if rulesSaved}
+          Saved. The Director has these rules.
+        {/if}
+      </p>
+      <p class="muted">
+        A timer also has a lap cooldown of its own, set on the
+        <a href={formatHash({ kind: 'seats' })}>Seats page</a>. It swallows the bounce of one pass
+        at the timer. Keep it shorter than the minimum lap time here.
+      </p>
+    </Card>
+
+    <Card title="Classes" elevation="sm">
+      {#snippet actions()}
+        <Button size="sm" variant="secondary" onclick={() => (addClassOpen = true)}>
+          + Add class
+        </Button>
+      {/snippet}
+      <EventClasses {live} />
+    </Card>
+  {/if}
+</Page>
 
 {#if addClassOpen}
   <ClassRosterDialog {live} onclose={() => (addClassOpen = false)} />
 {/if}
-{#if addHeatOpen}
-  <AddHeatDialog {live} onclose={() => (addHeatOpen = false)} />
-{/if}
-{#if addBracketOpen}
-  <AddBracketDialog {live} onclose={() => (addBracketOpen = false)} />
-{/if}
+
+<Dialog bind:open={editOpen} title="Edit the event" onclose={() => (editError = undefined)}>
+  <form class="edit" aria-label="Edit the event" onsubmit={submitEdit}>
+    <Field label="Event name" required error={editError}>
+      <Input bind:value={edit.name} aria-label="Event name" autocomplete="off" />
+    </Field>
+    <Field label="Date">
+      <Input type="date" bind:value={edit.date} aria-label="Event date" />
+    </Field>
+    <Field label="Location">
+      <Input bind:value={edit.location} aria-label="Event location" autocomplete="off" />
+    </Field>
+    <Field label="Organizer">
+      <Input bind:value={edit.organizer} aria-label="Event organizer" autocomplete="off" />
+    </Field>
+    <Field label="Description">
+      <Input bind:value={edit.description} aria-label="Event description" autocomplete="off" />
+    </Field>
+  </form>
+  {#snippet footer()}
+    <Button variant="ghost" onclick={() => (editOpen = false)} disabled={editBusy}>Cancel</Button>
+    <Button variant="primary" onclick={() => submitEdit()} disabled={editBusy || !edit.name.trim()}>
+      {editBusy ? 'Saving…' : 'Save'}
+    </Button>
+  {/snippet}
+</Dialog>
 
 <style>
-  .brand-row {
-    margin-bottom: var(--gf-space-4);
-  }
-
-  .page {
-    min-height: 100vh;
-    padding: var(--gf-space-6) var(--gf-space-8) var(--gf-space-8);
-    color: var(--gf-text);
-    font-family: var(--gf-font-family);
-    overflow: auto;
-  }
-  .page-inner {
-    width: min(52rem, 100%);
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-5);
-  }
-  .page-head {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-4);
-    flex-wrap: wrap;
-  }
-  .head-links {
-    margin-left: auto;
-  }
-  .page-title {
-    margin: 0;
-    font-size: var(--gf-font-size-2xl);
-    letter-spacing: var(--gf-tracking-tight);
-  }
-  .details-wrap {
-    padding: var(--gf-space-2);
-  }
-  .details {
-    margin: 0;
-    display: flex;
-    flex-direction: column;
+  .two {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
     gap: var(--gf-space-4);
   }
-  .detail {
+  .facts {
+    margin: 0;
+    display: grid;
+    gap: var(--gf-space-2);
+  }
+  .facts div {
     display: grid;
     grid-template-columns: 8rem 1fr;
-    gap: var(--gf-space-4);
+    gap: var(--gf-space-3);
     align-items: baseline;
   }
-  .detail dt {
-    font-size: var(--gf-font-size-xs);
-    font-weight: var(--gf-font-weight-semibold);
-    text-transform: uppercase;
-    letter-spacing: var(--gf-tracking-caps);
-    color: var(--gf-text-muted);
-  }
-  .detail dd {
-    margin: 0;
-    font-size: var(--gf-font-size-md);
-    overflow-wrap: anywhere;
-  }
-  .no-details,
-  .muted {
-    margin: 0;
+  .facts dt {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }
-  @media (max-width: 36rem) {
-    .detail {
-      grid-template-columns: 1fr;
-      gap: var(--gf-space-1);
-    }
+  .facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .facts dd.unset {
+    color: var(--gf-text-faint);
+  }
+  .muted {
+    margin: var(--gf-space-3) 0 0;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  .muted a {
+    color: var(--gf-accent);
+  }
+  .rules {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: var(--gf-space-4);
+  }
+  .hidden-submit {
+    display: none;
+  }
+  .rules-state {
+    margin: var(--gf-space-2) 0 0;
+    min-height: 1.2em;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-success);
+  }
+  .rules-state .bad {
+    color: var(--gf-danger);
+  }
+  .edit {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-4);
   }
 </style>

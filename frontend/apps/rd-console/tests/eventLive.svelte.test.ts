@@ -4,9 +4,9 @@
  * sends writes through the session.
  */
 import { describe, expect, it, vi } from 'vitest';
-import type { EventView, Pilot, TimerView } from '@gridfpv/types';
+import type { EventView, Pilot, SavedFormat, TimerView } from '@gridfpv/types';
 import { EventLive, toProtocolError, type LiveSession } from '../src/lib/eventLive.svelte.js';
-import { eventView, heat, timerView } from './competition.js';
+import { eventView, heat, SAVED_FORMATS, timerView } from './competition.js';
 
 /** A promise the test settles by hand. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -37,6 +37,7 @@ function fakeSession(over: Partial<LiveSession> = {}): {
     listPilots: vi.fn(async (): Promise<Pilot[]> => []),
     listTimers: vi.fn(async (): Promise<TimerView[]> => []),
     listClasses: vi.fn(async () => []),
+    listFormats: vi.fn(async (): Promise<SavedFormat[]> => []),
     ...over
   };
   return { session, cursor: (n) => onCursor(n), stopped: () => stopped };
@@ -186,6 +187,45 @@ describe('EventLive', () => {
     expect(live.classes.map((c) => c.name)).toEqual(['Open']);
     expect(live.names.klass('cls-9k')).toBe('Open');
     expect(live.names.klass('gone')).toBe('Unknown class');
+  });
+
+  it('reads the saved formats on start, for the format pickers', async () => {
+    const { session } = fakeSession({ listFormats: vi.fn(async () => SAVED_FORMATS) });
+    const live = new EventLive(session, 'evt');
+    expect(live.formats).toEqual([]);
+    live.start();
+    await settle();
+    expect(session.listFormats).toHaveBeenCalledTimes(1);
+    expect(live.formats).toEqual(SAVED_FORMATS);
+  });
+
+  it('reloadFormats reads them again, and keeps the last list when a read fails', async () => {
+    let answer: () => Promise<SavedFormat[]> = async () => SAVED_FORMATS.slice(0, 1);
+    const { session } = fakeSession({ listFormats: vi.fn(() => answer()) });
+    const live = new EventLive(session, 'evt');
+    await live.reloadFormats();
+    expect(live.formats).toEqual(SAVED_FORMATS.slice(0, 1));
+
+    answer = async () => SAVED_FORMATS;
+    await live.reloadFormats();
+    expect(live.formats).toEqual(SAVED_FORMATS);
+
+    answer = async () => Promise.reject(new Error('The Director is not answering.'));
+    await expect(live.reloadFormats()).resolves.toBeUndefined();
+    expect(live.formats).toEqual(SAVED_FORMATS);
+    // A failed directory read is not the event failing to load.
+    expect(live.loadError).toBeUndefined();
+  });
+
+  it('a formats read that lands after stop is dropped', async () => {
+    const formats = deferred<SavedFormat[]>();
+    const { session } = fakeSession({ listFormats: vi.fn(() => formats.promise) });
+    const live = new EventLive(session, 'evt');
+    live.start();
+    live.stop();
+    formats.resolve(SAVED_FORMATS);
+    await settle();
+    expect(live.formats).toEqual([]);
   });
 
   it("raceSignal reads the race's signal for this event", async () => {

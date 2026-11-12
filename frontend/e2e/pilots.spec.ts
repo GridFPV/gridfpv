@@ -14,20 +14,15 @@
  * this spec uses a unique callsign and cleans up after itself (the final remove) to stay isolated.
  */
 import { expect, test } from './observability.js';
-import { gotoHub } from './nav.js';
+import { gotoPage } from './nav.js';
 
 const CALLSIGN = `E2E-Pilot-${Date.now()}`;
 
 test('RD adds, edits (clearing color + country), and removes a directory pilot', async ({
   page
 }) => {
-  await gotoHub(page);
-
-  // ── Hub → Pilots page ────────────────────────────────────────────────────────────────
-  await page.getByRole('button', { name: /Pilots/ }).click();
-  await expect(page.getByRole('heading', { name: 'Pilots', level: 1 })).toBeVisible({
-    timeout: 15_000
-  });
+  // ── The Pilots page, from the row of pages ───────────────────────────────────────────
+  await gotoPage(page, 'Pilots');
 
   // ── Add a pilot: callsign + real name + country + color ────────────────────────────────
   await page.getByRole('button', { name: '+ Add pilot' }).click();

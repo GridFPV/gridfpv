@@ -13,26 +13,27 @@
   import { Banner, Button, Dialog, Field, Input, Select } from '@gridfpv/components';
   import type { AdapterId, BracketRequest, EliminationKind, PilotId } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import {
-    BUILT_IN_FORMATS,
-    LIMIT_CHOICES,
-    STOP_CHOICES,
-    canHaveLimit,
-    canStopItself,
-    formatByKey,
-    withLimitChoice,
-    withMinLap,
-    withStopChoice
-  } from '../lib/formats.js';
-  import { newPhaseId } from '../lib/phases.js';
+  import { isRanked } from '../lib/formats.js';
+  import { holderChoices, newPhaseId } from '../lib/phases.js';
   import { canChoose, chosenSource, presetSeats, sourceOptionLabel } from '../lib/seats.js';
   import { rosterPrefill } from '../lib/rulings.js';
+  import FormatPicker from './FormatPicker.svelte';
   import PilotPicker from './PilotPicker.svelte';
 
-  let { live, onclose }: { live: EventLive; onclose: () => void } = $props();
+  let {
+    live,
+    under,
+    onclose
+  }: {
+    live: EventLive;
+    /** The phase the bracket starts under, when it was opened from one. */
+    under?: string;
+    onclose: () => void;
+  } = $props();
 
-  /** "First to 3 laps": a bracket heat needs a ranking to know who moves on. */
-  const DEFAULT_FORMAT = BUILT_IN_FORMATS.find((choice) => choice.format.ranking)?.key ?? '';
+  // svelte-ignore state_referenced_locally
+  let parent = $state(under ?? '');
+  const holders = $derived(holderChoices(live.view?.phases ?? []));
 
   let name = $state('');
   let chosen = $state<PilotId[]>([]);
@@ -47,13 +48,22 @@
   let heatSize = $state('4');
   let advance = $state('2');
   let elimination = $state<EliminationKind>('Double');
-  let formatKey = $state(
-    BUILT_IN_FORMATS.find((choice) => choice.key === 'first-to-3')?.key ?? DEFAULT_FORMAT
+  /**
+   * The saved format picked. A bracket heat needs a ranking to know who moves on, so only
+   * ranked formats are offered, and the first one that races to a lap count is the default.
+   */
+  let formatId = $state<string | undefined>(undefined);
+  const ranked = $derived(live.formats.filter((saved) => isRanked(saved.format)));
+  const formatValue = $derived(
+    formatId ??
+      (
+        ranked.find((saved) => {
+          const end = saved.format.race.end;
+          return typeof end === 'object' && 'FirstToLaps' in end;
+        }) ?? ranked[0]
+      )?.id ??
+      ''
   );
-  let stopKey = $state(STOP_CHOICES[0].key);
-  let limitKey = $state(LIMIT_CHOICES[0].key);
-  /** The minimum lap time in seconds, as typed. Empty means none. */
-  let minLap = $state<number | string>('');
   let busy = $state(false);
   let nameError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
@@ -78,6 +88,7 @@
   $effect(() => {
     void live.reloadPilots();
     void live.reloadTimers();
+    void live.reloadFormats();
   });
 
   /** The classes at the event, as a shortcut for picking pilots. */
@@ -106,16 +117,15 @@
       error = `A bracket heat needs at least two seats. ${source.name} has ${source.seats.length}.`;
       return;
     }
-    const picked = formatByKey(formatKey);
-    if (!picked) return;
-    const format = withMinLap(withLimitChoice(withStopChoice(picked, stopKey), limitKey), minLap);
+    const format = ranked.find((saved) => saved.id === formatValue)?.format;
     if (!format) {
-      error = 'The minimum lap time must be 0 seconds or more.';
+      error = 'Pick a format that ranks the heat. It decides who moves on.';
       return;
     }
     const request: BracketRequest = {
       id: newPhaseId(label),
       label,
+      ...(parent ? { parent } : {}),
       field: [{ Imported: chosen }],
       entrants: chosen.map((pilot) => ({ Pilot: pilot })),
       seats: presetSeats(source, Number(heatSize)),
@@ -145,6 +155,18 @@
         autocomplete="off"
       />
     </Field>
+    {#if holders.length > 0}
+      <Field label="Under" hint="The phase it belongs to. Leave it at the top if it stands alone.">
+        <Select bind:value={parent} aria-label="Under" disabled={busy}>
+          <option value="">The top of the event</option>
+          {#each holders as holder (holder.id)}
+            <option value={holder.id} disabled={holder.locked}>
+              {holder.label}{holder.locked ? ' (locked)' : ''}
+            </option>
+          {/each}
+        </Select>
+      </Field>
+    {/if}
     <Field
       label="Timed by"
       hint={source.bench
@@ -212,45 +234,12 @@
         <option value="Double">Double: a pilot is out after two losses</option>
       </Select>
     </Field>
-    <Field label="Format">
-      <Select bind:value={formatKey} aria-label="Format" disabled={busy}>
-        {#each BUILT_IN_FORMATS as choice (choice.key)}
-          <option value={choice.key}>{choice.label}</option>
-        {/each}
-      </Select>
-    </Field>
-    {#if canStopItself(formatByKey(formatKey))}
-      <Field label="The race stops">
-        <Select bind:value={stopKey} aria-label="The race stops" disabled={busy}>
-          {#each STOP_CHOICES as choice (choice.key)}
-            <option value={choice.key}>{choice.label}</option>
-          {/each}
-        </Select>
-      </Field>
-    {/if}
-    {#if canHaveLimit(formatByKey(formatKey))}
-      <Field label="Time limit">
-        <Select bind:value={limitKey} aria-label="Time limit" disabled={busy}>
-          {#each LIMIT_CHOICES as choice (choice.key)}
-            <option value={choice.key}>{choice.label}</option>
-          {/each}
-        </Select>
-      </Field>
-    {/if}
-    <Field
-      label="Minimum lap time (seconds)"
-      hint="A crossing sooner than this after a pilot's last one is not counted as a lap. Leave empty for no minimum."
-    >
-      <Input
-        type="number"
-        inputmode="decimal"
-        min="0"
-        step="0.1"
-        aria-label="Minimum lap time, in seconds"
-        bind:value={minLap}
-        disabled={busy}
-      />
-    </Field>
+    <FormatPicker
+      formats={live.formats}
+      bind:value={() => formatValue, (id) => (formatId = id)}
+      rankedOnly
+      disabled={busy}
+    />
     {#if error}
       <Banner tone="danger">{error}</Banner>
     {/if}
