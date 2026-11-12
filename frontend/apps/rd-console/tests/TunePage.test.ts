@@ -32,7 +32,7 @@ const CONFIG: TimerConfig = {
     { seat: '1', freq_mhz: 5700, enabled: false }
   ],
   threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-  set_on_timer: { seats_per_node: 4, min_lap_ms: 2500 }
+  set_on_timer: { min_lap_ms: 2500 }
 };
 
 const LEVELS: SeatLevels[] = [
@@ -137,12 +137,11 @@ describe('TunePage', () => {
     expect(screen.getByRole('radio', { name: 'Follow the noise floor' })).toBeChecked();
     expect(screen.getByLabelText('Enter this far above the floor, in dB')).toHaveValue(15);
     expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(5);
-    // Shown, and not fields: seats per receiver is set on the timer, and the minimum lap
-    // comes from a race's format.
+    // Shown, and not a field: the minimum lap comes from a race's format. Seats per receiver
+    // is the timer's own business and is not on this page at all.
     expect(screen.queryByLabelText('Minimum lap time, in seconds')).toBeNull();
-    expect(screen.queryByLabelText('Seats per receiver')).toBeNull();
+    expect(screen.queryByText(/Seats per receiver/i)).toBeNull();
     const own = screen.getByTestId('set-on-timer');
-    expect(own).toHaveTextContent('Seats per receiver 4');
     expect(own).toHaveTextContent('Minimum lap time 2.5 seconds');
 
     // Nothing is changed yet.

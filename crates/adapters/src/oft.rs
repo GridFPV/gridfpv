@@ -95,10 +95,12 @@ pub enum OftThreshold {
 /// threshold is the Timer-wide one. From spec v0.4 a seat may carry its own. A `PUT`
 /// replaces the whole config, so per-seat thresholds must be sent every time or they are
 /// cleared.
+///
+/// Spec v0.5 dropped `seats_per_node`: how seats are spread over Nodes is the Timer's job.
+/// Grid does not read it from an older Timer and never sends it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OftConfig {
     pub seats: Vec<OftSeatConfig>,
-    pub seats_per_node: u32,
     pub threshold: OftThreshold,
     pub min_lap_ms: u32,
     /// How long the signal must stay below the exit level before a crossing closes, in
@@ -844,7 +846,7 @@ mod tests {
     #[test]
     fn a_timers_settings_round_trip_in_the_timers_own_shape() {
         // The default `/config` of `oftd`.
-        let body = r#"{"seats":[{"seat":0,"freq_mhz":5800,"enabled":true}],"seats_per_node":8,
+        let body = r#"{"seats":[{"seat":0,"freq_mhz":5800,"enabled":true}],
             "threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000}"#;
         let config: OftConfig = serde_json::from_str(body).unwrap();
         assert_eq!(
@@ -887,7 +889,7 @@ mod tests {
 
     #[test]
     fn the_exit_hold_is_kept_when_the_timer_has_it_and_never_sent_when_it_does_not() {
-        let with = r#"{"seats":[],"seats_per_node":8,"threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000,"exit_hold_ms":30}"#;
+        let with = r#"{"seats":[],"threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000,"exit_hold_ms":30}"#;
         let config: OftConfig = serde_json::from_str(with).unwrap();
         assert_eq!(config.exit_hold_ms, Some(30));
         assert_eq!(serde_json::to_string(&config).unwrap(), with);
@@ -911,13 +913,23 @@ mod tests {
     }
 
     #[test]
+    fn seats_per_node_from_an_older_timer_is_read_past_and_never_sent() {
+        // A v0.4 `/config` still has the field; spec v0.5 dropped it.
+        let body = r#"{"seats":[{"seat":0,"freq_mhz":5800,"enabled":true}],"seats_per_node":8,
+            "threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000}"#;
+        let config: OftConfig = serde_json::from_str(body).unwrap();
+        let sent = serde_json::to_value(&config).unwrap();
+        assert!(sent.get("seats_per_node").is_none(), "{sent}");
+    }
+
+    #[test]
     fn a_v0_4_timer_says_it_takes_a_threshold_per_seat_and_its_settings_carry_them() {
         // The capability, as `oftd` sends it from spec v0.4.
         let hello = HELLO.replace(
             r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 }"#,
             r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 },
                "config": { "persist": false, "threshold_modes": ["auto", "manual"],
-                           "min_lap_ms": true, "seats_per_node": true, "seat_thresholds": true }"#,
+                           "min_lap_ms": true, "seat_thresholds": true }"#,
         );
         let OftMessage::Hello { capabilities, .. } = OftMessage::parse(&hello).unwrap() else {
             panic!("expected a hello");
@@ -931,7 +943,7 @@ mod tests {
         assert!(!capabilities.config.seat_thresholds);
 
         // The example `/config` body from the spec: seat 1 has its own, seat 0 does not.
-        let body = r#"{"seats":[{"seat":0,"freq_mhz":5658,"enabled":true},{"seat":1,"freq_mhz":5732,"enabled":true,"threshold":{"mode":"manual","enter":-700,"exit":-760}}],"seats_per_node":8,"threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000}"#;
+        let body = r#"{"seats":[{"seat":0,"freq_mhz":5658,"enabled":true},{"seat":1,"freq_mhz":5732,"enabled":true,"threshold":{"mode":"manual","enter":-700,"exit":-760}}],"threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000}"#;
         let config: OftConfig = serde_json::from_str(body).unwrap();
         assert_eq!(config.seats[0].threshold, None);
         assert_eq!(

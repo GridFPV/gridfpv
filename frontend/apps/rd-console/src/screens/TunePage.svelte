@@ -551,18 +551,13 @@
           >
             <dl class="own" data-testid="set-on-timer">
               <div>
-                <dt>Seats per receiver</dt>
-                <dd>{config.set_on_timer.seats_per_node}</dd>
-              </div>
-              <div>
                 <dt>Minimum lap time</dt>
                 <dd>{msToSeconds(config.set_on_timer.min_lap_ms).toFixed(1)} seconds</dd>
               </div>
             </dl>
             <p class="own-note">
-              Seats per receiver is set on the timer's own page. The minimum lap time is part of a
-              race's format, chosen when a heat is added. Grid sets it on the timer each time a race
-              starts.
+              The minimum lap time is part of a race's format, chosen when a heat is added. Grid
+              sets it on the timer each time a race starts.
             </p>
           </Card>
         {/if}

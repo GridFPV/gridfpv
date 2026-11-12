@@ -29,7 +29,7 @@ const AUTO: TimerConfig = {
     { seat: '1', freq_mhz: 5695, enabled: false }
   ],
   threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-  set_on_timer: { seats_per_node: 4, min_lap_ms: 2500 }
+  set_on_timer: { min_lap_ms: 2500 }
 };
 const MANUAL: TimerConfig = { ...AUTO, threshold: { Manual: { enter: -700, exit: -765 } } };
 /** A timer that takes levels per seat, with seat 2 on its own fixed levels. */
@@ -339,9 +339,7 @@ describe('dirty', () => {
     expect(isDirty(draftFrom(MANUAL), AUTO)).toBe(true);
     expect(isDirty(draftFrom(OWN), AUTO)).toBe(true);
     // What is set on the timer itself is not the draft's to change.
-    expect(
-      isDirty(draftFrom(AUTO), { ...AUTO, set_on_timer: { seats_per_node: 8, min_lap_ms: 0 } })
-    ).toBe(false);
+    expect(isDirty(draftFrom(AUTO), { ...AUTO, set_on_timer: { min_lap_ms: 0 } })).toBe(false);
   });
 
   it('sameConfig compares every part', () => {

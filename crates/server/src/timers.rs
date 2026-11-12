@@ -183,9 +183,6 @@ pub enum TimerThreshold {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct TimerOwnSettings {
-    /// The most seats one receiver may share. It is a fact about how the timer is built
-    /// and wired, so it is set there.
-    pub seats_per_node: u32,
     /// The timer's minimum lap right now: it does not report a second crossing on a seat
     /// within this many milliseconds. The minimum lap is a race rule in the format, and Grid
     /// sets the timer to it when a race starts (see [`match_min_lap`]).
@@ -226,7 +223,6 @@ impl From<OftConfig> for TimerConfig {
                 .collect(),
             threshold: config.threshold.into(),
             set_on_timer: Some(TimerOwnSettings {
-                seats_per_node: config.seats_per_node,
                 min_lap_ms: config.min_lap_ms,
             }),
             exit_hold_ms: config.exit_hold_ms,
@@ -254,7 +250,6 @@ impl TimerConfig {
             .collect::<Result<_, TimerError>>()?;
         Ok(OftConfig {
             seats,
-            seats_per_node: now.seats_per_node,
             threshold: self.threshold.into(),
             min_lap_ms: now.min_lap_ms,
             exit_hold_ms: self.exit_hold_ms,
@@ -966,7 +961,6 @@ mod tests {
     async fn fake_timer(kind: Fake) -> String {
         let stored: Arc<Mutex<serde_json::Value>> = Arc::new(Mutex::new(serde_json::json!({
             "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true}],
-            "seats_per_node": 8,
             "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
             "min_lap_ms": 2000,
         })));
@@ -1006,7 +1000,6 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         let stored = Arc::new(Mutex::new(serde_json::json!({
             "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true}],
-            "seats_per_node": 8,
             "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
             "min_lap_ms": 2000,
             "exit_hold_ms": 30,
@@ -1102,14 +1095,14 @@ mod tests {
         let (registry, uri) = with_timer(Fake::Honest).await;
         let mut body = changed();
         // Whatever a client sends here is ignored.
-        body["set_on_timer"] = serde_json::json!({"seats_per_node": 1, "min_lap_ms": 0});
+        body["set_on_timer"] = serde_json::json!({"min_lap_ms": 0});
         let (status, written) = call(&registry, "PUT", &uri, Some(body)).await;
         assert_eq!(status, StatusCode::OK, "{written}");
         assert_eq!(written, changed());
         let (_, read_back) = call(&registry, "GET", &uri, None).await;
         assert_eq!(
             read_back["set_on_timer"],
-            serde_json::json!({"seats_per_node": 8, "min_lap_ms": 2000})
+            serde_json::json!({"min_lap_ms": 2000})
         );
     }
 
@@ -1197,7 +1190,7 @@ mod tests {
             ],
             "threshold": {"Manual": {"enter": -700, "exit": -760}},
             // As the fake timer has them: a write never changes these.
-            "set_on_timer": {"seats_per_node": 8, "min_lap_ms": 2000},
+            "set_on_timer": {"min_lap_ms": 2000},
         })
     }
 

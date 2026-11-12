@@ -5,11 +5,6 @@
  */
 export type TimerOwnSettings = { 
 /**
- * The most seats one receiver may share. It is a fact about how the timer is built
- * and wired, so it is set there.
- */
-seats_per_node: number, 
-/**
  * The timer's minimum lap right now: it does not report a second crossing on a seat
  * within this many milliseconds. The minimum lap is a race rule in the format, and Grid
  * sets the timer to it when a race starts (see [`match_min_lap`]).

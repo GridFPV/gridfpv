@@ -72,7 +72,7 @@ describe("a timer's settings", () => {
   it('putTimerConfig PUTs the whole settings with the token and returns what the timer kept', async () => {
     const kept: TimerConfig = {
       ...CONFIG,
-      set_on_timer: { seats_per_node: 4, min_lap_ms: 2500 }
+      set_on_timer: { min_lap_ms: 2500 }
     };
     const { fetch, seen } = recording(kept);
     const { putTimerConfig } = await import('./client.js');
