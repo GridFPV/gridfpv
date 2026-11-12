@@ -1,7 +1,10 @@
 # Timer hardware research — November 2026
 
-> **Under review (2026-11-09).** The hardware research stands. The "GridNode" protocol and
-> adapter it sketches are replaced by OFT (Open FPV Timer). See [Grid primitives](primitives.md).
+> **Old, kept for history (2026-11-12).** Grid does not have a timer or a timing protocol of
+> its own. Timer hardware and its protocol are the Open FPV Timer (OFT) project, a separate
+> project that any race software can use, and Grid talks to it through its OFT adapter. The
+> hardware research below was carried into OFT. The "GridNode" protocol and adapter sketched
+> in sections 6 and 8 were never built. See [Grid primitives](../primitives.md).
 
 **Status:** research and direction only. Nothing is built and nothing is decided.
 Written 2026-11-08 from a working session with Ryan.

@@ -59,6 +59,7 @@
     formatLevel,
     isDirty,
     levelsInUse,
+    msToSeconds,
     nextSeat,
     ownLevels,
     type TuneDraft
@@ -524,34 +525,47 @@
             group="threshold-mode"
             legend="Enter and exit levels"
           >
-            <Field
-              label="Minimum lap time (seconds)"
-              hint="A second crossing on a seat sooner than this is ignored."
-            >
-              <Input
-                type="number"
-                inputmode="decimal"
-                min="0"
-                step="0.1"
-                aria-label="Minimum lap time, in seconds"
-                bind:value={draft.minLapSeconds}
-              />
-            </Field>
-            <Field
-              label="Seats per receiver"
-              hint="More seats on one receiver means each seat's signal is read less often."
-            >
-              <Input
-                type="number"
-                inputmode="numeric"
-                min="1"
-                step="1"
-                aria-label="Seats per receiver"
-                bind:value={draft.seatsPerReceiver}
-              />
-            </Field>
+            {#if draft.exitHoldMs !== undefined}
+              <Field
+                label="Exit hold (milliseconds)"
+                hint="The signal must stay below the exit level this long before the crossing ends. A longer hold stops one pass from being split in two."
+              >
+                <Input
+                  type="number"
+                  inputmode="numeric"
+                  min="0"
+                  step="1"
+                  aria-label="Exit hold, in milliseconds"
+                  bind:value={draft.exitHoldMs}
+                />
+              </Field>
+            {/if}
           </LevelsFields>
         </Card>
+
+        {#if config.set_on_timer}
+          <!-- ── Set on the timer ──────────────────────────────────────────── -->
+          <Card
+            title="On the timer"
+            subtitle="What the timer has right now. This page does not change these."
+          >
+            <dl class="own" data-testid="set-on-timer">
+              <div>
+                <dt>Seats per receiver</dt>
+                <dd>{config.set_on_timer.seats_per_node}</dd>
+              </div>
+              <div>
+                <dt>Minimum lap time</dt>
+                <dd>{msToSeconds(config.set_on_timer.min_lap_ms).toFixed(1)} seconds</dd>
+              </div>
+            </dl>
+            <p class="own-note">
+              Seats per receiver is set on the timer's own page. The minimum lap time is part of a
+              race's format, chosen when a heat is added. Grid sets it on the timer each time a race
+              starts.
+            </p>
+          </Card>
+        {/if}
 
         <!-- ── Apply ─────────────────────────────────────────────────────── -->
         <div class="apply" data-dirty={dirty}>
@@ -813,6 +827,29 @@
   }
 
   /* Apply: stays in reach at the bottom of the window while the director scrolls. */
+  .own {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-4) var(--gf-space-6);
+    margin: 0;
+  }
+
+  .own dt {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+
+  .own dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .own-note {
+    margin: var(--gf-space-3) 0 0;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+
   .apply {
     position: sticky;
     bottom: var(--gf-space-3);

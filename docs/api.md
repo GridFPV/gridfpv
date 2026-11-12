@@ -48,7 +48,7 @@ laptop), writes are open too.
 | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | The class list |
 | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | The timer list, each with its live status |
 | `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added |
-| `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer |
+| `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer: seats, frequencies, thresholds and the exit hold. `set_on_timer` (seats per receiver, and the timer's minimum lap right now) is shown and never written here. A timer that can keep its settings across a restart (`keeps_settings` in its status) is asked to keep them after every write |
 | `GET /timers/{id}/live` | Live signal and levels for tuning (server-sent events) |
 
 **Timer settings live on the timer.** The Director keeps no copy. A write is followed by a
@@ -72,7 +72,7 @@ levels, and whether it is in a crossing). It is for the Tune page and is gone on
 |---|---|
 | `GET /events/{id}/state` | One snapshot of everything |
 | `GET /events/{id}/changes` | Tells a client when to read the snapshot again (server-sent events) |
-| `POST /events/{id}/commands` | One command |
+| `POST /events/{id}/commands` | One command. Before `StartRace`, each OFT timer the heat uses is set to the minimum lap of the heat's format (0 when it has none); if a timer cannot be set, the start is refused |
 | `POST /events/{id}/presets/bracket` | Generate a bracket's phases |
 | `POST /events/{id}/presets/mains` | Generate stacked mains |
 | `POST /events/{id}/passes` | A gate crossing from outside (the bench, tools, tests) |

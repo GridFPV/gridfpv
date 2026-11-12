@@ -23,4 +23,9 @@ clock_error_micros?: number,
  * Whether each seat can carry its own threshold. A timer that cannot has one
  * threshold for all its seats.
  */
-seat_thresholds?: boolean, };
+seat_thresholds?: boolean, 
+/**
+ * Whether the timer can keep its settings across a restart. Grid asks such a timer to
+ * keep them after every change. A timer that cannot starts on its defaults.
+ */
+keeps_settings?: boolean, };

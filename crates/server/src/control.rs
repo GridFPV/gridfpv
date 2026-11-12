@@ -102,10 +102,40 @@ pub fn with_event<R>(
     f(&mut session)
 }
 
+/// The minimum lap of the format in force for a heat, in milliseconds. 0 when it has none.
+fn min_lap_ms(state: &EventState, heat: &PhaseId) -> u32 {
+    let micros = state
+        .tree
+        .format_for(heat)
+        .and_then(|format| format.race.min_lap_micros)
+        .unwrap_or(0);
+    u32::try_from(micros.max(0) / 1000).unwrap_or(u32::MAX)
+}
+
 impl Session<'_> {
     /// The event's state, caught up.
     pub fn state(&self) -> &EventState {
         self.state
+    }
+
+    /// What starting a heat's next race needs from its timers: the timers the heat is flown
+    /// on, and the minimum lap of the format in force, in milliseconds (0 when the format
+    /// has none). `None` when the race would not start anyway; the command itself then says
+    /// why.
+    fn start_needs(&self, heat: &PhaseId) -> Option<(Vec<AdapterId>, u32)> {
+        let start = Command::StartRace { heat: heat.clone() };
+        self.state.check(start, self.now).ok()?;
+        let mut timers: Vec<AdapterId> = self
+            .state
+            .results()
+            .get(heat)?
+            .lineup
+            .iter()
+            .map(|seat| seat.adapter.clone())
+            .collect();
+        timers.sort();
+        timers.dedup();
+        Some((timers, min_lap_ms(self.state, heat)))
     }
 
     fn catch_up(&mut self) -> Result<(), ProtocolError> {
@@ -140,6 +170,7 @@ impl Session<'_> {
                     race: race.setup.race.clone(),
                     starts_at: race.started_at.or(race.tone_at)?,
                     timers,
+                    min_lap_ms: min_lap_ms(self.state, &race.setup.heat),
                 })
             });
         self.race_on
@@ -284,6 +315,32 @@ pub async fn post_command(
     Path(event_id): Path<EventId>,
     Json(command): Json<Command>,
 ) -> Result<Json<CommandOutcome>, ProtocolError> {
+    // The minimum lap is a race rule, and a timer has one of its own: a crossing the timer
+    // drops never reaches Grid. So before a race starts, each of its timers is set to the
+    // race's minimum lap. A timer that cannot be set stops the start: better said now than
+    // found in the lap list.
+    if let Command::StartRace { heat } = &command {
+        let needs = with_event(
+            &registry,
+            &event_id,
+            |session| Ok(session.start_needs(heat)),
+        )?;
+        if let Some((timers, min_lap_ms)) = needs {
+            let directory = registry.timers();
+            for timer in &timers {
+                crate::timers::match_min_lap(&directory, timer, min_lap_ms)
+                    .await
+                    .map_err(|e| {
+                        ProtocolError::new(
+                            ErrorCode::Refused,
+                            format!(
+                                "The race was not started, because its minimum lap time could not be set on the timer. {e}"
+                            ),
+                        )
+                    })?;
+            }
+        }
+    }
     with_event(&registry, &event_id, |session| {
         session.commands(vec![command])?;
         Ok(Json(session.outcome()))

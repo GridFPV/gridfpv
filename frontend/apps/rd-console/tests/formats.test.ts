@@ -3,7 +3,13 @@
  * each one is pinned in full: a slip here would start a different race than the picker says.
  */
 import { describe, expect, it } from 'vitest';
-import { BUILT_IN_FORMATS, directorEndsHeat, formatByKey, isRanked } from '../src/lib/formats.js';
+import {
+  BUILT_IN_FORMATS,
+  directorEndsHeat,
+  formatByKey,
+  isRanked,
+  withMinLap
+} from '../src/lib/formats.js';
 
 const S = 1_000_000;
 
@@ -131,5 +137,24 @@ describe('the time limit choice', () => {
     expect(format.race.max_micros).toBeUndefined();
     const timed = formatByKey('timed-2-min')!;
     expect(withLimitChoice(timed, '300')).toBe(timed);
+  });
+});
+
+describe('the minimum lap time', () => {
+  const format = BUILT_IN_FORMATS[0].format;
+
+  it('is set on the format from the seconds typed', () => {
+    expect(withMinLap(format, 2.5)?.race.min_lap_micros).toBe(2_500_000);
+    expect(withMinLap(format, '1.2')?.race.min_lap_micros).toBe(1_200_000);
+  });
+
+  it('is left off when the field is empty or 0', () => {
+    expect(withMinLap(format, '')).toBe(format);
+    expect(withMinLap(format, 0)).toBe(format);
+  });
+
+  it('is refused when it is not a time', () => {
+    expect(withMinLap(format, -1)).toBeUndefined();
+    expect(withMinLap(format, 'soon')).toBeUndefined();
   });
 });

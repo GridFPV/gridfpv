@@ -108,6 +108,11 @@ pub struct TimerStatus {
     #[serde(default)]
     #[ts(as = "Option<bool>", optional)]
     pub seat_thresholds: bool,
+    /// Whether the timer can keep its settings across a restart. Grid asks such a timer to
+    /// keep them after every change. A timer that cannot starts on its defaults.
+    #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
+    pub keeps_settings: bool,
 }
 
 /// A timer with its status (`GET /timers`).
@@ -174,18 +179,36 @@ pub enum TimerThreshold {
     Manual { enter: i32, exit: i32 },
 }
 
-/// A timer's settings. `threshold` is the timer-wide one; a seat may carry its own on a timer
-/// that takes them (OFT from protocol v0.4).
+/// What a timer holds that is not changed from its settings page in Grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct TimerOwnSettings {
+    /// The most seats one receiver may share. It is a fact about how the timer is built
+    /// and wired, so it is set there.
+    pub seats_per_node: u32,
+    /// The timer's minimum lap right now: it does not report a second crossing on a seat
+    /// within this many milliseconds. The minimum lap is a race rule in the format, and Grid
+    /// sets the timer to it when a race starts (see [`match_min_lap`]).
+    pub min_lap_ms: u32,
+}
+
+/// A timer's settings, as Grid changes them. `threshold` is the timer-wide one; a seat may
+/// carry its own on a timer that takes them (OFT from protocol v0.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct TimerConfig {
     pub seats: Vec<TimerSeatConfig>,
-    /// The most seats one receiver may share. More seats on a receiver means a lower
-    /// sample rate for each.
-    pub seats_per_node: u32,
     pub threshold: TimerThreshold,
-    /// The timer ignores a second crossing on a seat within this many milliseconds.
-    pub min_lap_ms: u32,
+    /// What the settings page shows and does not change. Read from the timer; ignored in a
+    /// write, which always leaves these as the timer has them.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub set_on_timer: Option<TimerOwnSettings>,
+    /// How long the signal must stay below the exit level before a crossing closes, in
+    /// milliseconds. Absent on a timer that does not have the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exit_hold_ms: Option<u32>,
 }
 
 impl From<OftConfig> for TimerConfig {
@@ -201,17 +224,22 @@ impl From<OftConfig> for TimerConfig {
                     threshold: seat.threshold.map(Into::into),
                 })
                 .collect(),
-            seats_per_node: config.seats_per_node,
             threshold: config.threshold.into(),
-            min_lap_ms: config.min_lap_ms,
+            set_on_timer: Some(TimerOwnSettings {
+                seats_per_node: config.seats_per_node,
+                min_lap_ms: config.min_lap_ms,
+            }),
+            exit_hold_ms: config.exit_hold_ms,
         }
     }
 }
 
 impl TimerConfig {
-    /// The settings in an OFT Timer's own shape. A seat handle that is not an OFT seat
-    /// number cannot be sent, and is an error rather than a guess.
-    fn to_oft(&self) -> Result<OftConfig, TimerError> {
+    /// The settings in an OFT Timer's own shape. A write replaces the whole of a Timer's
+    /// settings, so what Grid does not change is carried over from `now`, the settings the
+    /// Timer has. A seat handle that is not an OFT seat number cannot be sent, and is an
+    /// error rather than a guess.
+    fn to_oft(&self, now: &OftConfig) -> Result<OftConfig, TimerError> {
         let seats = self
             .seats
             .iter()
@@ -226,9 +254,10 @@ impl TimerConfig {
             .collect::<Result<_, TimerError>>()?;
         Ok(OftConfig {
             seats,
-            seats_per_node: self.seats_per_node,
+            seats_per_node: now.seats_per_node,
             threshold: self.threshold.into(),
-            min_lap_ms: self.min_lap_ms,
+            min_lap_ms: now.min_lap_ms,
+            exit_hold_ms: self.exit_hold_ms,
         })
     }
 }
@@ -305,6 +334,10 @@ pub enum TimerError {
     #[error("The timer did not take the change. It is still set the way it was.")]
     NotTaken,
     #[error(
+        "The timer took the change, but did not keep it for its next start. Apply it again after the timer restarts."
+    )]
+    NotKept,
+    #[error(
         "Changing a RotorHazard timer's settings from Grid is not built yet. Use its own Settings page for now."
     )]
     NotBuilt,
@@ -317,9 +350,10 @@ impl From<TimerError> for ProtocolError {
             | TimerError::BadAddress
             | TimerError::BadSeat
             | TimerError::OneThreshold => ErrorCode::BadRequest,
-            TimerError::Unreachable(_) | TimerError::NotTaken | TimerError::NotBuilt => {
-                ErrorCode::Refused
-            }
+            TimerError::Unreachable(_)
+            | TimerError::NotTaken
+            | TimerError::NotKept
+            | TimerError::NotBuilt => ErrorCode::Refused,
             TimerError::NotFound => ErrorCode::UnknownScope,
             TimerError::Io(_) => ErrorCode::Internal,
         };
@@ -598,6 +632,56 @@ async fn write_config(timer: &Timer, config: &OftConfig) -> Result<OftConfig, Ti
     Ok(now)
 }
 
+/// Ask a timer to keep the settings it is using as its power-on settings (OFT
+/// `POST /config/save`). The write only counts if the timer then says they are kept.
+async fn keep_config(timer: &Timer) -> Result<(), TimerError> {
+    #[derive(Deserialize)]
+    struct Kept {
+        #[serde(default)]
+        current_is_saved: bool,
+    }
+    let unreachable = |e: reqwest::Error| unreachable(timer, &e);
+    let kept: Kept = reqwest::Client::new()
+        .post(format!("{}/save", config_url(timer)))
+        .timeout(TIMER_ANSWER)
+        .send()
+        .await
+        .map_err(unreachable)?
+        .error_for_status()
+        .map_err(unreachable)?
+        .json()
+        .await
+        .map_err(unreachable)?;
+    if kept.current_is_saved {
+        Ok(())
+    } else {
+        Err(TimerError::NotKept)
+    }
+}
+
+/// Make a timer's minimum lap the one a race is about to use. Nothing is sent when the timer
+/// already has it. The change is not kept for the timer's next start: the next race sets it
+/// again. A timer that is not in the directory, or is not an OFT timer, is left alone.
+pub async fn match_min_lap(
+    directory: &TimerDirectory,
+    id: &AdapterId,
+    min_lap_ms: u32,
+) -> Result<(), TimerError> {
+    let Some(timer) = directory.get(id) else {
+        return Ok(());
+    };
+    if timer.kind != TimerKind::Oft {
+        return Ok(());
+    }
+    let mut config = read_config(&timer).await?;
+    if config.min_lap_ms == min_lap_ms {
+        return Ok(());
+    }
+    config.min_lap_ms = min_lap_ms;
+    write_config(&timer, &config).await?;
+    Ok(())
+}
+
 fn save(inner: &Inner) -> Result<(), TimerError> {
     let Some(dir) = &inner.data_dir else {
         return Ok(());
@@ -702,16 +786,24 @@ pub async fn put_timer_config(
     }
     // A timer that has one threshold for every seat would drop a seat's own without a
     // word, and the write would then fail its readback with a vaguer message. Say it here.
-    let takes_seat_thresholds = registry
+    let status = registry
         .timers()
         .list()
-        .iter()
-        .any(|view| view.timer.id == timer_id && view.status.seat_thresholds);
-    if !takes_seat_thresholds && body.seats.iter().any(|seat| seat.threshold.is_some()) {
+        .into_iter()
+        .find(|view| view.timer.id == timer_id)
+        .map(|view| view.status)
+        .unwrap_or_default();
+    if !status.seat_thresholds && body.seats.iter().any(|seat| seat.threshold.is_some()) {
         return Err(TimerError::OneThreshold.into());
     }
-    let config = body.to_oft()?;
-    Ok(Json(write_config(&timer, &config).await?.into()))
+    let config = body.to_oft(&read_config(&timer).await?)?;
+    let written = write_config(&timer, &config).await?;
+    // A timer that can keep its settings is asked to, every time: after "Apply" the timer
+    // is set, and a power cycle at the field must not quietly put its defaults back.
+    if status.keeps_settings {
+        keep_config(&timer).await?;
+    }
+    Ok(Json(written.into()))
 }
 
 /// `GET /timers/{timer_id}/live` — server-sent events for tuning. Open read.
@@ -908,6 +1000,159 @@ mod tests {
         addr.to_string()
     }
 
+    /// A fake OFT timer that takes every write and counts how often it is asked to keep its
+    /// settings. `keeps` is whether the settings in use are then the kept ones.
+    async fn fake_keeper(keeps: bool) -> (String, Arc<std::sync::atomic::AtomicU32>) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let stored = Arc::new(Mutex::new(serde_json::json!({
+            "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true}],
+            "seats_per_node": 8,
+            "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
+            "min_lap_ms": 2000,
+            "exit_hold_ms": 30,
+        })));
+        let asked = Arc::new(AtomicU32::new(0));
+        let read = {
+            let stored = stored.clone();
+            move || {
+                let stored = stored.clone();
+                async move { Json(stored.lock().unwrap().clone()) }
+            }
+        };
+        let write = move |Json(body): Json<serde_json::Value>| {
+            let stored = stored.clone();
+            async move {
+                *stored.lock().unwrap() = body.clone();
+                Json(body)
+            }
+        };
+        let keep = {
+            let asked = asked.clone();
+            move || {
+                let asked = asked.clone();
+                async move {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({"saved": keeps, "current_is_saved": keeps}))
+                }
+            }
+        };
+        let app = axum::Router::new()
+            .route("/oft/v1/config", axum::routing::get(read).put(write))
+            .route("/oft/v1/config/save", axum::routing::post(keep));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr.to_string(), asked)
+    }
+
+    /// A registry with one timer at a [`fake_keeper`], whose status says whether it can keep
+    /// settings.
+    async fn with_keeper(
+        can_keep: bool,
+        keeps: bool,
+    ) -> (EventRegistry, String, Arc<std::sync::atomic::AtomicU32>) {
+        let registry = EventRegistry::new(None).unwrap();
+        let (address, asked) = fake_keeper(keeps).await;
+        let timer = registry
+            .timers()
+            .create(&request("Gate", &address))
+            .unwrap();
+        registry
+            .timers()
+            .report(&timer.id, |status| status.keeps_settings = can_keep);
+        (registry, format!("/timers/{}/config", timer.id.0), asked)
+    }
+
+    #[tokio::test]
+    async fn a_timers_minimum_lap_is_made_the_races_and_the_rest_is_left_alone() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let id = registry.timers().records()[0].id.clone();
+        let (_, before) = call(&registry, "GET", &uri, None).await;
+        match_min_lap(&registry.timers(), &id, 1500).await.unwrap();
+        let (_, after) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(after["set_on_timer"]["min_lap_ms"], serde_json::json!(1500));
+        assert_eq!(after["seats"], before["seats"]);
+        assert_eq!(after["threshold"], before["threshold"]);
+        // No minimum lap in the format is 0 on the timer.
+        match_min_lap(&registry.timers(), &id, 0).await.unwrap();
+        let (_, after) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(after["set_on_timer"]["min_lap_ms"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn a_minimum_lap_the_timer_did_not_take_is_an_error_and_an_unknown_timer_is_skipped() {
+        let (registry, _) = with_timer(Fake::Forgetful).await;
+        let id = registry.timers().records()[0].id.clone();
+        assert_eq!(
+            match_min_lap(&registry.timers(), &id, 1500).await,
+            Err(TimerError::NotTaken)
+        );
+        // Already what the timer has: nothing is sent, so nothing can fail.
+        assert_eq!(match_min_lap(&registry.timers(), &id, 2000).await, Ok(()));
+        // The bench, or a timer since removed.
+        let nobody = AdapterId("bench".into());
+        assert_eq!(
+            match_min_lap(&registry.timers(), &nobody, 1500).await,
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn what_is_set_on_the_timer_itself_is_shown_and_never_changed() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let mut body = changed();
+        // Whatever a client sends here is ignored.
+        body["set_on_timer"] = serde_json::json!({"seats_per_node": 1, "min_lap_ms": 0});
+        let (status, written) = call(&registry, "PUT", &uri, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        assert_eq!(written, changed());
+        let (_, read_back) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(
+            read_back["set_on_timer"],
+            serde_json::json!({"seats_per_node": 8, "min_lap_ms": 2000})
+        );
+    }
+
+    #[tokio::test]
+    async fn the_exit_hold_is_read_from_the_timer_and_written_back() {
+        let (registry, uri, _) = with_keeper(false, false).await;
+        let (status, mut config) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(config["exit_hold_ms"], serde_json::json!(30));
+        config["exit_hold_ms"] = serde_json::json!(80);
+        let (status, written) = call(&registry, "PUT", &uri, Some(config.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        assert_eq!(written["exit_hold_ms"], serde_json::json!(80));
+    }
+
+    #[tokio::test]
+    async fn a_timer_that_can_keep_its_settings_is_asked_to_after_a_change() {
+        use std::sync::atomic::Ordering;
+        let (registry, uri, asked) = with_keeper(true, true).await;
+        let (_, config) = call(&registry, "GET", &uri, None).await;
+        let (status, _) = call(&registry, "PUT", &uri, Some(config)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_timer_that_cannot_keep_its_settings_is_not_asked_to() {
+        use std::sync::atomic::Ordering;
+        let (registry, uri, asked) = with_keeper(false, false).await;
+        let (_, config) = call(&registry, "GET", &uri, None).await;
+        let (status, _) = call(&registry, "PUT", &uri, Some(config)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_change_the_timer_did_not_keep_is_refused() {
+        let (registry, uri, _) = with_keeper(true, false).await;
+        let (_, config) = call(&registry, "GET", &uri, None).await;
+        let (status, body) = call(&registry, "PUT", &uri, Some(config)).await;
+        assert_ne!(status, StatusCode::OK, "{body}");
+    }
+
     async fn call(
         registry: &EventRegistry,
         method: &str,
@@ -950,9 +1195,9 @@ mod tests {
                 {"seat": "0", "freq_mhz": 5658, "enabled": true},
                 {"seat": "1", "freq_mhz": 5917, "enabled": true},
             ],
-            "seats_per_node": 4,
             "threshold": {"Manual": {"enter": -700, "exit": -760}},
-            "min_lap_ms": 3000,
+            // As the fake timer has them: a write never changes these.
+            "set_on_timer": {"seats_per_node": 8, "min_lap_ms": 2000},
         })
     }
 

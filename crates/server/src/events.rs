@@ -248,6 +248,8 @@ pub struct RaceNow {
     pub starts_at: i64,
     /// The timers its lineup uses.
     pub timers: Vec<gridfpv_events::AdapterId>,
+    /// The minimum lap of the format in force, in milliseconds. 0 when it has none.
+    pub min_lap_ms: u32,
 }
 
 impl Live {

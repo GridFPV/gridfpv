@@ -6,8 +6,11 @@
  * timer's settings into a draft, a draft back into settings (or a sentence saying what is
  * missing), and says whether the two differ.
  *
- * The wire holds thresholds in tenths of a dB and the minimum lap in milliseconds. People
- * read dB with one decimal and seconds with one decimal, so the draft holds those.
+ * The wire holds thresholds in tenths of a dB. People read dB with one decimal, so the draft
+ * holds that.
+ *
+ * Two things are set on the timer itself and only shown here: how many seats share a receiver,
+ * and the timer's own minimum lap. The minimum lap a race uses is a rule in its format.
  */
 import type {
   SeatLevels,
@@ -115,11 +118,13 @@ export interface DraftSeat {
 /** The settings as the director is editing them. */
 export interface TuneDraft {
   seats: DraftSeat[];
-  seatsPerReceiver: FieldValue;
   /** The timer's levels: what every seat with none of its own uses. */
   levels: LevelsDraft;
-  /** The minimum lap time in seconds. */
-  minLapSeconds: FieldValue;
+  /**
+   * How long the signal must stay below the exit level before a crossing closes, in
+   * milliseconds. `undefined` on a timer that does not have the setting.
+   */
+  exitHoldMs?: FieldValue;
 }
 
 /** Which mode a threshold is in. */
@@ -161,9 +166,8 @@ export function draftFrom(config: TimerConfig): TuneDraft {
       enabled: seat.enabled,
       ...(seat.threshold ? { levels: levelsFrom(seat.threshold) } : {})
     })),
-    seatsPerReceiver: config.seats_per_node,
     levels: levelsFrom(config.threshold),
-    minLapSeconds: msToSeconds(config.min_lap_ms)
+    ...(config.exit_hold_ms !== undefined ? { exitHoldMs: config.exit_hold_ms } : {})
   };
 }
 
@@ -250,28 +254,24 @@ export function draftConfig(
     seats.push(sent);
   }
 
-  const perReceiver = fieldNumber(draft.seatsPerReceiver);
-  if (perReceiver === undefined || !Number.isInteger(perReceiver) || perReceiver < 1) {
-    return problem('Seats per receiver must be a whole number, 1 or more.');
-  }
-
   const timerWide = thresholdFrom(draft.levels);
   if (!timerWide.ok) return problem(timerWide.problem);
 
-  const minLap = secondsToMs(draft.minLapSeconds);
-  if (minLap === undefined || minLap < 0) {
-    return problem('The minimum lap time must be 0 seconds or more.');
+  const config: TimerConfig = {
+    seats,
+    threshold: timerWide.threshold
+  };
+  // Sent only to a timer that has the setting. Left out, the timer would go back to its
+  // default, so a timer that has it always gets a number.
+  if (draft.exitHoldMs !== undefined) {
+    const exitHold = fieldNumber(draft.exitHoldMs);
+    if (exitHold === undefined || !Number.isInteger(exitHold) || exitHold < 0) {
+      return problem('The exit hold must be a whole number of milliseconds, 0 or more.');
+    }
+    config.exit_hold_ms = exitHold;
   }
 
-  return {
-    ok: true,
-    config: {
-      seats,
-      seats_per_node: perReceiver,
-      threshold: timerWide.threshold,
-      min_lap_ms: minLap
-    }
-  };
+  return { ok: true, config };
 }
 
 function sameThreshold(a: TimerThreshold, b: TimerThreshold): boolean {
@@ -285,11 +285,13 @@ function sameThreshold(a: TimerThreshold, b: TimerThreshold): boolean {
   return 'Manual' in b && a.Manual.enter === b.Manual.enter && a.Manual.exit === b.Manual.exit;
 }
 
-/** Whether two sets of settings say the same thing. */
+/**
+ * Whether two sets of settings say the same thing. What is set on the timer itself is not
+ * compared: Grid never changes it.
+ */
 export function sameConfig(a: TimerConfig, b: TimerConfig): boolean {
   return (
-    a.seats_per_node === b.seats_per_node &&
-    a.min_lap_ms === b.min_lap_ms &&
+    a.exit_hold_ms === b.exit_hold_ms &&
     sameThreshold(a.threshold, b.threshold) &&
     a.seats.length === b.seats.length &&
     a.seats.every((seat, index) => {

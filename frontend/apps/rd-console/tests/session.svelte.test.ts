@@ -371,9 +371,7 @@ describe('Session', () => {
   describe("a timer's settings and live feed", () => {
     const CONFIG: TimerConfig = {
       seats: [{ seat: '0', freq_mhz: 5658, enabled: true }],
-      seats_per_node: 4,
-      threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-      min_lap_ms: 2000
+      threshold: { Auto: { snr_enter: 150, hysteresis: 50 } }
     };
     const tuneSession = (overrides?: SessionOverrides) =>
       new Session({ baseUrl: 'http://d.local', autoRestore: false, api: { ...overrides } });

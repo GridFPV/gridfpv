@@ -315,7 +315,7 @@
       <Field
         label="Address"
         required
-        hint="The timer's address and port. {kindInfo.label} listens on port {kindInfo.port}."
+        hint="The timer's address and port. The port is {kindInfo.port} unless it was changed."
       >
         <Input
           bind:value={address}

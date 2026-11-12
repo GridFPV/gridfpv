@@ -14,9 +14,7 @@ const CONFIG: TimerConfig = {
     { seat: '0', freq_mhz: 5658, enabled: true },
     { seat: '1', freq_mhz: 5917, enabled: false }
   ],
-  seats_per_node: 4,
-  threshold: { Manual: { enter: -700, exit: -760 } },
-  min_lap_ms: 3000
+  threshold: { Manual: { enter: -700, exit: -760 } }
 };
 
 function recording(body: unknown): {
@@ -72,7 +70,10 @@ describe("a timer's settings", () => {
   });
 
   it('putTimerConfig PUTs the whole settings with the token and returns what the timer kept', async () => {
-    const kept: TimerConfig = { ...CONFIG, min_lap_ms: 2500 };
+    const kept: TimerConfig = {
+      ...CONFIG,
+      set_on_timer: { seats_per_node: 4, min_lap_ms: 2500 }
+    };
     const { fetch, seen } = recording(kept);
     const { putTimerConfig } = await import('./client.js');
     expect(await putTimerConfig(BASE, TIMER, CONFIG, 'rd-tok', { fetch })).toEqual(kept);

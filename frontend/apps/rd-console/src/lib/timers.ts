@@ -24,9 +24,9 @@ export const TIMER_KINDS: readonly {
 }[] = [
   {
     kind: 'Oft',
-    label: 'An OFT timer',
+    label: 'Open FPV Timer',
     port: OFT_PORT,
-    hint: 'An Open FPV Timer gate.'
+    hint: ''
   }
 ];
 

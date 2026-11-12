@@ -101,6 +101,12 @@ pub struct OftConfig {
     pub seats_per_node: u32,
     pub threshold: OftThreshold,
     pub min_lap_ms: u32,
+    /// How long the signal must stay below the exit level before a crossing closes, in
+    /// milliseconds (protocol v0.4, capability `config.exit_hold_ms`). Absent on a Timer
+    /// that does not have the setting. A `PUT` without it puts the Timer's default back,
+    /// so what was read is always sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_hold_ms: Option<u32>,
 }
 
 /// The capabilities Grid reads from a Timer's `hello` (spec §6.2). An absent key means the
@@ -117,6 +123,9 @@ pub struct OftConfigCapability {
     /// Whether each seat can carry its own threshold (spec v0.4).
     #[serde(default)]
     pub seat_thresholds: bool,
+    /// Whether `/config/save` works: the Timer can keep its settings across a restart.
+    #[serde(default)]
+    pub persist: bool,
 }
 
 /// One message from a Timer's WebSocket. Fields Grid does not use are left out; unknown
@@ -877,6 +886,31 @@ mod tests {
     }
 
     #[test]
+    fn the_exit_hold_is_kept_when_the_timer_has_it_and_never_sent_when_it_does_not() {
+        let with = r#"{"seats":[],"seats_per_node":8,"threshold":{"mode":"auto","snr_enter":150,"hysteresis":50},"min_lap_ms":2000,"exit_hold_ms":30}"#;
+        let config: OftConfig = serde_json::from_str(with).unwrap();
+        assert_eq!(config.exit_hold_ms, Some(30));
+        assert_eq!(serde_json::to_string(&config).unwrap(), with);
+        let without = with.replace(r#","exit_hold_ms":30"#, "");
+        let config: OftConfig = serde_json::from_str(&without).unwrap();
+        assert_eq!(config.exit_hold_ms, None);
+        assert_eq!(serde_json::to_string(&config).unwrap(), without);
+    }
+
+    #[test]
+    fn a_timer_says_whether_it_can_keep_its_settings() {
+        let hello = HELLO.replace(
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 }"#,
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 },
+               "config": { "persist": true }"#,
+        );
+        let OftMessage::Hello { capabilities, .. } = OftMessage::parse(&hello).unwrap() else {
+            panic!("expected a hello");
+        };
+        assert!(capabilities.config.persist);
+    }
+
+    #[test]
     fn a_v0_4_timer_says_it_takes_a_threshold_per_seat_and_its_settings_carry_them() {
         // The capability, as `oftd` sends it from spec v0.4.
         let hello = HELLO.replace(
@@ -889,6 +923,7 @@ mod tests {
             panic!("expected a hello");
         };
         assert!(capabilities.config.seat_thresholds);
+        assert!(!capabilities.config.persist);
         // A v0.3 hello has no such key.
         let OftMessage::Hello { capabilities, .. } = OftMessage::parse(HELLO).unwrap() else {
             panic!("expected a hello");

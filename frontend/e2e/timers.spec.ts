@@ -61,7 +61,7 @@ test('RD adds a timer nothing answers at, sees why, opens its Tune page, cannot 
     // ── A bad address is refused in the Director's words, and the dialog stays open ──────
     await page.getByRole('button', { name: '+ Add timer' }).click();
     const form = page.getByRole('form', { name: 'Add timer' });
-    await expect(form).toContainText('An OFT timer listens on port 7270.');
+    await expect(form).toContainText('The port is 7270 unless it was changed.');
     await form.getByLabel('Name', { exact: true }).fill(TIMER);
     await form.getByLabel('Address', { exact: true }).fill('not an address');
     await page.getByRole('button', { name: 'Add timer', exact: true }).click();

@@ -21,6 +21,7 @@
     canStopItself,
     formatByKey,
     withLimitChoice,
+    withMinLap,
     withStopChoice
   } from '../lib/formats.js';
   import { newPhaseId } from '../lib/phases.js';
@@ -39,6 +40,8 @@
   let formatKey = $state(BUILT_IN_FORMATS[0].key);
   let stopKey = $state(STOP_CHOICES[0].key);
   let limitKey = $state(LIMIT_CHOICES[0].key);
+  /** The minimum lap time in seconds, as typed. Empty means none. */
+  let minLap = $state<number | string>('');
   let busy = $state(false);
   let nameError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
@@ -77,7 +80,11 @@
     }
     const picked = formatByKey(formatKey);
     if (!picked) return;
-    const format = withLimitChoice(withStopChoice(picked, stopKey), limitKey);
+    const format = withMinLap(withLimitChoice(withStopChoice(picked, stopKey), limitKey), minLap);
+    if (!format) {
+      error = 'The minimum lap time must be 0 seconds or more.';
+      return;
+    }
     const lineup: HeatSeat[] = chosen.map((pilot, index) => ({
       adapter: seats[index].adapter,
       seat: seats[index].seat,
@@ -180,6 +187,20 @@
         </Select>
       </Field>
     {/if}
+    <Field
+      label="Minimum lap time (seconds)"
+      hint="A crossing sooner than this after a pilot's last one is not counted as a lap. Leave empty for no minimum."
+    >
+      <Input
+        type="number"
+        inputmode="decimal"
+        min="0"
+        step="0.1"
+        aria-label="Minimum lap time, in seconds"
+        bind:value={minLap}
+        disabled={busy}
+      />
+    </Field>
     {#if error}
       <Banner tone="danger">{error}</Banner>
     {/if}

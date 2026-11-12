@@ -116,6 +116,7 @@ export type * from '@bindings/SourceTime';
 export type * from '@bindings/StartOwner';
 export type * from '@bindings/Timer';
 export type * from '@bindings/TimerConfig';
+export type * from '@bindings/TimerOwnSettings';
 export type * from '@bindings/TimerKind';
 export type * from '@bindings/TimerLive';
 export type * from '@bindings/TimerSeatConfig';

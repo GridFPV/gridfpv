@@ -73,7 +73,7 @@ describe('TimersPage', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: '+ Add timer' }));
     const form = await screen.findByRole('form', { name: 'Add timer' });
-    expect(form).toHaveTextContent('An OFT timer listens on port 7270.');
+    expect(form).toHaveTextContent('The port is 7270 unless it was changed.');
     expect(within(form).getByLabelText('Address')).toHaveAttribute(
       'placeholder',
       '192.168.1.50:7270'

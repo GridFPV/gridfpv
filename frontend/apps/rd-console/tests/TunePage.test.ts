@@ -31,9 +31,8 @@ const CONFIG: TimerConfig = {
     { seat: '0', freq_mhz: 5658, enabled: true },
     { seat: '1', freq_mhz: 5700, enabled: false }
   ],
-  seats_per_node: 4,
   threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-  min_lap_ms: 2500
+  set_on_timer: { seats_per_node: 4, min_lap_ms: 2500 }
 };
 
 const LEVELS: SeatLevels[] = [
@@ -138,9 +137,13 @@ describe('TunePage', () => {
     expect(screen.getByRole('radio', { name: 'Follow the noise floor' })).toBeChecked();
     expect(screen.getByLabelText('Enter this far above the floor, in dB')).toHaveValue(15);
     expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(5);
-    expect(screen.getByLabelText('Minimum lap time, in seconds')).toHaveValue(2.5);
-    expect(screen.getByLabelText('Seats per receiver')).toHaveValue(4);
-    expect(screen.getByText(/each seat's signal is read less often/)).toBeVisible();
+    // Shown, and not fields: seats per receiver is set on the timer, and the minimum lap
+    // comes from a race's format.
+    expect(screen.queryByLabelText('Minimum lap time, in seconds')).toBeNull();
+    expect(screen.queryByLabelText('Seats per receiver')).toBeNull();
+    const own = screen.getByTestId('set-on-timer');
+    expect(own).toHaveTextContent('Seats per receiver 4');
+    expect(own).toHaveTextContent('Minimum lap time 2.5 seconds');
 
     // Nothing is changed yet.
     expect(screen.getByText('This is what the timer is using.')).toBeVisible();
@@ -194,8 +197,8 @@ describe('TunePage', () => {
         { seat: '0', freq_mhz: 5806, enabled: true },
         { seat: '1', freq_mhz: 5700, enabled: true }
       ],
-      // The timer rounds the lap time its own way; the page must show the timer's answer.
-      min_lap_ms: 3000
+      // The timer rounds a level its own way; the page must show the timer's answer.
+      threshold: { Auto: { snr_enter: 150, hysteresis: 40 } }
     };
     const putTimerConfigImpl = vi.fn(async () => structuredClone(kept));
     open({ putTimerConfigImpl });
@@ -207,8 +210,8 @@ describe('TunePage', () => {
     await waitFor(() => expect(within(one).getByTestId('seat-channel')).toHaveTextContent('R5'));
     expect(within(one).getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5806);
     await fireEvent.click(screen.getByRole('switch', { name: 'Seat 2 on' }));
-    await fireEvent.input(screen.getByLabelText('Minimum lap time, in seconds'), {
-      target: { value: '3.2' }
+    await fireEvent.input(screen.getByLabelText('Exit this far below enter, in dB'), {
+      target: { value: '4.4' }
     });
 
     // Nothing was sent by editing.
@@ -226,15 +229,13 @@ describe('TunePage', () => {
             { seat: '0', freq_mhz: 5806, enabled: true },
             { seat: '1', freq_mhz: 5700, enabled: true }
           ],
-          seats_per_node: 4,
-          threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-          min_lap_ms: 3200
+          threshold: { Auto: { snr_enter: 150, hysteresis: 44 } }
         },
         'tok'
       )
     );
     expect(await screen.findByText('This is what the timer is using.')).toBeVisible();
-    expect(screen.getByLabelText('Minimum lap time, in seconds')).toHaveValue(3);
+    expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(4);
     // Seat 2 is on now, so it has a trace.
     expect(
       within(screen.getByRole('list', { name: 'Signal' })).getAllByRole('listitem')
@@ -249,13 +250,15 @@ describe('TunePage', () => {
       })
     });
     await waitFor(() => seatRow('Seat 1'));
-    await fireEvent.input(screen.getByLabelText('Seats per receiver'), { target: { value: '2' } });
+    await fireEvent.input(screen.getByLabelText('Exit this far below enter, in dB'), {
+      target: { value: '2' }
+    });
     await fireEvent.click(await screen.findByRole('button', { name: 'Apply to timer' }));
 
     const problem = await screen.findByTestId('apply-problem');
     expect(problem).toHaveTextContent('The timer was not changed.');
     expect(problem).toHaveTextContent(REFUSED);
-    expect(screen.getByLabelText('Seats per receiver')).toHaveValue(2);
+    expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(2);
     expect(screen.getByText('These changes are not on the timer yet.')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Apply to timer' })).toBeEnabled();
   });
@@ -282,10 +285,12 @@ describe('TunePage', () => {
     const { getTimerConfigImpl } = open();
     await waitFor(() => seatRow('Seat 1'));
     expect(getTimerConfigImpl).toHaveBeenCalledTimes(1);
-    await fireEvent.input(screen.getByLabelText('Seats per receiver'), { target: { value: '2' } });
+    await fireEvent.input(screen.getByLabelText('Exit this far below enter, in dB'), {
+      target: { value: '2' }
+    });
     await fireEvent.click(await screen.findByRole('button', { name: 'Discard changes' }));
     await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(2));
-    expect(screen.getByLabelText('Seats per receiver')).toHaveValue(4);
+    expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(5);
     expect(await screen.findByText('This is what the timer is using.')).toBeVisible();
   });
 

@@ -2,7 +2,8 @@
 //!
 //! An OFT timer advertises itself over mDNS as `_oft._tcp` (spec §6.1): its name, its port
 //! and a few facts about itself. [`spawn`] listens for those for as long as the Director
-//! runs and keeps the timer directory's "found on the network" list up to date.
+//! runs and keeps the timer directory's "found on the network" list up to date. It asks the
+//! network again every few seconds, so a timer switched on later is seen soon after.
 //!
 //! Finding a timer adds nothing. A person adds it, from that list, and then it is a timer
 //! like any other.
@@ -11,7 +12,9 @@
 //! locked-down networks) nothing is found, a line goes in the log, and everything else
 //! works: a timer can always be added by typing its address.
 
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
+use std::time::{Duration, Instant};
 
 use gridfpv_server::events::EventRegistry;
 use gridfpv_server::timers::DiscoveredTimer;
@@ -49,7 +52,7 @@ fn describe(
 /// on a race network, and short enough that an address that goes nowhere costs little.
 fn answers(ip: Ipv4Addr, port: u16) -> bool {
     let address = std::net::SocketAddr::from((ip, port));
-    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_ok()
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
 }
 
 /// The name a timer advertises under, from its full mDNS name
@@ -59,6 +62,12 @@ fn instance_name(fullname: &str) -> &str {
         .strip_suffix(SERVICE)
         .map_or(fullname, |name| name.trim_end_matches('.'))
 }
+
+/// How often the network is asked again. A search that is only started once asks less and
+/// less often (the library backs off to once an hour), so a timer switched on after the
+/// Director would wait a long time to be seen. A timer that announced itself a moment
+/// before it could answer would be missed for good.
+const ASK_AGAIN: Duration = Duration::from_secs(5);
 
 /// Start listening for timers. The listener runs on its own thread until the returned
 /// handle is dropped.
@@ -70,7 +79,8 @@ pub fn spawn(registry: EventRegistry) -> Option<Discovery> {
             return None;
         }
     };
-    let found = match daemon.browse(SERVICE) {
+    // Asked once here so a network that does not allow it is reported at startup.
+    let mut found = match daemon.browse(SERVICE) {
         Ok(found) => found,
         Err(e) => {
             eprintln!("WARNING: cannot look for timers on the network (mDNS): {e}");
@@ -78,32 +88,64 @@ pub fn spawn(registry: EventRegistry) -> Option<Discovery> {
             return None;
         }
     };
+    let asker = daemon.clone();
     std::thread::spawn(move || {
-        // Ends when the daemon is shut down: the channel closes.
-        while let Ok(event) = found.recv() {
-            match event {
-                ServiceEvent::ServiceResolved(service) => {
-                    let name = service
-                        .txt_properties
-                        .get_property_val_str("id")
-                        .unwrap_or_else(|| instance_name(&service.fullname))
-                        .to_owned();
-                    let seats = service.txt_properties.get_property_val_str("seats");
-                    let described = describe(
-                        &name,
-                        service.get_addresses_v4(),
-                        service.port,
-                        seats,
-                        answers,
-                    );
-                    match described {
-                        Some(timer) => registry.timers().found(&service.fullname, timer),
-                        None => registry.timers().lost(&service.fullname),
+        // The timers listed after the round before this one, by the name they advertise under.
+        let mut listed: BTreeSet<String> = BTreeSet::new();
+        loop {
+            // One round: everything the network says for a few seconds. Each round starts
+            // with a fresh question, and the library answers it first from what it already
+            // knows, so every timer still there is heard from again and checked again.
+            let mut heard: BTreeSet<String> = BTreeSet::new();
+            let until = Instant::now() + ASK_AGAIN;
+            loop {
+                match found.recv_deadline(until) {
+                    Ok(ServiceEvent::ServiceResolved(service)) => {
+                        let name = service
+                            .txt_properties
+                            .get_property_val_str("id")
+                            .unwrap_or_else(|| instance_name(&service.fullname))
+                            .to_owned();
+                        let seats = service.txt_properties.get_property_val_str("seats");
+                        let described = describe(
+                            &name,
+                            service.get_addresses_v4(),
+                            service.port,
+                            seats,
+                            answers,
+                        );
+                        match described {
+                            Some(timer) => {
+                                registry.timers().found(&service.fullname, timer);
+                                heard.insert(service.fullname.clone());
+                            }
+                            None => {
+                                registry.timers().lost(&service.fullname);
+                                heard.remove(&service.fullname);
+                            }
+                        }
                     }
+                    Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                        registry.timers().lost(&fullname);
+                        heard.remove(&fullname);
+                    }
+                    Ok(_) => {}
+                    // The daemon was shut down: the Director is stopping.
+                    Err(_) if found.is_disconnected() => return,
+                    // The round is over.
+                    Err(_) => break,
                 }
-                ServiceEvent::ServiceRemoved(_, fullname) => registry.timers().lost(&fullname),
-                _ => {}
             }
+            // A timer listed before and not heard from in a whole round has gone.
+            for gone in listed.difference(&heard) {
+                registry.timers().lost(gone);
+            }
+            listed = heard;
+            let _ = asker.stop_browse(SERVICE);
+            found = match asker.browse(SERVICE) {
+                Ok(found) => found,
+                Err(_) => return,
+            };
         }
     });
     Some(Discovery(daemon))

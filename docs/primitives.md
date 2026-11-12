@@ -645,6 +645,19 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      that says it takes them, and OFT timers are found on the network (`GET
      /timers/discovered`). The Tune page has a seat's own levels and the Timers page has
      "Found on the network". Both were checked in a browser against the real daemon.
+   - **OFT changes of 2026-11-12:** the exit hold (how long the signal must stay below the
+     exit level before a crossing ends) is read, shown on the Tune page and written back.
+     Before this, every "Apply to timer" put it back to the timer's default. A timer that
+     can keep its settings across a restart is asked to keep them after every change; this
+     part is tested against a fake only, because `oftd` cannot keep settings. The timer's
+     network address and restart are left to the timer's own page.
+   - **Minimum lap and seats per receiver (2026-11-12, Ryan):** the minimum lap is a race
+     rule in the format, not a timer setting. It is typed when a heat or a bracket is
+     added. Grid sets it on each OFT timer the heat uses when a race starts, and again if
+     the timer comes back in the middle of the race, because a crossing the timer drops
+     never reaches Grid. A format with no minimum lap sets the timer to 0. A start is
+     refused when a timer cannot be set. Seats per receiver is set on the timer's own page
+     only. The Tune page shows both and changes neither.
    - **A timer that restarts mid-race:** its clock begins again. The laps either side are
      kept, and the stretch across the restart has no time.
    - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):
@@ -761,6 +774,7 @@ moved to `docs/archive/`. Docs under review stay in `docs/` until they are rewri
 | `release-audit-2026-07.html` | An audit of code that is being rebuilt |
 | `board-reconciliation-2026-08.md` | A finished working ledger |
 | `portable-race-day-2026-11.md` | The proposal this doc grew out of; its vocabulary advice was rejected |
+| `timer-hardware-research-2026-11.md` | Research toward a timer of Grid's own. Grid has none: timers and their protocol are the OFT project |
 
 **Under review.** The spine parts still stand. The competition vocabulary is old. Every one
 of these was read in full on 2026-11-09, and its banner names the sections that are old.
@@ -779,6 +793,5 @@ of these was read in full on 2026-11-09, and its banner names the sections that 
 | `cloud.html` | The push, the warehouse, accounts; its season layer is old |
 | `code-conventions.html` | Workspace rules; the crate list will change |
 | `mock-race-day.md` | The mock harness; its steps follow the old heat flow |
-| `timer-hardware-research-2026-11.md` | The hardware research; its GridNode protocol is replaced by OFT |
 
 **Current:** this doc, and `conventions.html` (how docs are written).

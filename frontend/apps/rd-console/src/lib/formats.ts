@@ -126,6 +126,20 @@ export function withLimitChoice(format: Format, limitKey: string): Format {
   return { ...format, race: { ...format.race, max_micros: seconds * SECOND } };
 }
 
+/**
+ * A copy of `format` with a minimum lap time, from the seconds a field holds. A crossing
+ * sooner than this after the pilot's last one is not counted as a lap; Marshal can still
+ * count it. An empty field or 0 means no minimum, and the format comes back unchanged.
+ * `undefined` when the field holds something that is not a time (a word, a negative number).
+ */
+export function withMinLap(format: Format, seconds: number | string): Format | undefined {
+  if (typeof seconds === 'string' && seconds.trim() === '') return format;
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return undefined;
+  if (value === 0) return format;
+  return { ...format, race: { ...format.race, min_lap_micros: Math.round(value * SECOND) } };
+}
+
 /** The format for a picker key, or `undefined` for a key that is not in the list. */
 export function formatByKey(key: string): Format | undefined {
   return BUILT_IN_FORMATS.find((choice) => choice.key === key)?.format;

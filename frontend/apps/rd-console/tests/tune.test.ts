@@ -28,9 +28,8 @@ const AUTO: TimerConfig = {
     { seat: '0', freq_mhz: 5658, enabled: true },
     { seat: '1', freq_mhz: 5695, enabled: false }
   ],
-  seats_per_node: 4,
   threshold: { Auto: { snr_enter: 150, hysteresis: 50 } },
-  min_lap_ms: 2500
+  set_on_timer: { seats_per_node: 4, min_lap_ms: 2500 }
 };
 const MANUAL: TimerConfig = { ...AUTO, threshold: { Manual: { enter: -700, exit: -765 } } };
 /** A timer that takes levels per seat, with seat 2 on its own fixed levels. */
@@ -103,9 +102,7 @@ describe('the draft', () => {
         { seat: '0', mhz: 5658, enabled: true },
         { seat: '1', mhz: 5695, enabled: false }
       ],
-      seatsPerReceiver: 4,
-      levels: { mode: 'Auto', aboveFloorDb: 15, belowEnterDb: 5, enterDb: '', exitDb: '' },
-      minLapSeconds: 2.5
+      levels: { mode: 'Auto', aboveFloorDb: 15, belowEnterDb: 5, enterDb: '', exitDb: '' }
     });
     const manual = draftFrom(MANUAL).levels;
     expect(manual.mode).toBe('Manual');
@@ -135,7 +132,9 @@ describe('the draft', () => {
 
   it('turns back into the very same settings', () => {
     for (const config of [AUTO, MANUAL, OWN]) {
-      expect(draftConfig(draftFrom(config), seatName)).toEqual({ ok: true, config });
+      // All but what is set on the timer itself: that is shown, and never sent.
+      const { set_on_timer: _shown, ...sent } = config;
+      expect(draftConfig(draftFrom(config), seatName)).toEqual({ ok: true, config: sent });
     }
   });
 
@@ -143,10 +142,8 @@ describe('the draft', () => {
     const draft = draftFrom(AUTO);
     draft.seats[1].enabled = true;
     draft.seats[1].mhz = '5800';
-    draft.seatsPerReceiver = 2;
     draft.levels.aboveFloorDb = '12.5';
     draft.levels.belowEnterDb = 4;
-    draft.minLapSeconds = '3.2';
     expect(draftConfig(draft, seatName)).toEqual({
       ok: true,
       config: {
@@ -154,9 +151,7 @@ describe('the draft', () => {
           { seat: '0', freq_mhz: 5658, enabled: true },
           { seat: '1', freq_mhz: 5800, enabled: true }
         ],
-        seats_per_node: 2,
-        threshold: { Auto: { snr_enter: 125, hysteresis: 40 } },
-        min_lap_ms: 3200
+        threshold: { Auto: { snr_enter: 125, hysteresis: 40 } }
       }
     });
   });
@@ -172,9 +167,6 @@ describe('the draft', () => {
     expect(problemOf((d) => (d.seats[0].mhz = 5658.5))).toBe(
       'Seat 1 needs a frequency in whole MHz.'
     );
-    expect(problemOf((d) => (d.seatsPerReceiver = 0))).toBe(
-      'Seats per receiver must be a whole number, 1 or more.'
-    );
     expect(problemOf((d) => (d.levels.aboveFloorDb = ''))).toBe(
       'Say how far above the noise floor to enter.'
     );
@@ -187,12 +179,6 @@ describe('the draft', () => {
     );
     expect(problemOf((d) => (d.levels.exitDb = -70), MANUAL)).toBe(
       'The exit level must be below the enter level.'
-    );
-    expect(problemOf((d) => (d.minLapSeconds = -1))).toBe(
-      'The minimum lap time must be 0 seconds or more.'
-    );
-    expect(problemOf((d) => (d.minLapSeconds = ''))).toBe(
-      'The minimum lap time must be 0 seconds or more.'
     );
   });
 });
@@ -352,8 +338,10 @@ describe('dirty', () => {
     expect(isDirty(addSeat(draftFrom(AUTO)), AUTO)).toBe(true);
     expect(isDirty(draftFrom(MANUAL), AUTO)).toBe(true);
     expect(isDirty(draftFrom(OWN), AUTO)).toBe(true);
-    expect(isDirty({ ...draftFrom(AUTO), minLapSeconds: 2.6 }, AUTO)).toBe(true);
-    expect(isDirty({ ...draftFrom(AUTO), seatsPerReceiver: 8 }, AUTO)).toBe(true);
+    // What is set on the timer itself is not the draft's to change.
+    expect(
+      isDirty(draftFrom(AUTO), { ...AUTO, set_on_timer: { seats_per_node: 8, min_lap_ms: 0 } })
+    ).toBe(false);
   });
 
   it('sameConfig compares every part', () => {
@@ -476,5 +464,34 @@ describe('adding a seat', () => {
     expect(draft.seats.map((seat) => seat.seat)).toEqual(['0', '1', '2', '3', '4', '5', '6', '7']);
     expect(nextSeat(draft)).toBeUndefined();
     expect(addSeat(draft)).toBe(draft);
+  });
+});
+
+describe('the exit hold', () => {
+  const name = () => 'Seat';
+
+  it('is in the draft and sent back only for a timer that has it', () => {
+    expect(draftFrom(AUTO).exitHoldMs).toBeUndefined();
+    const without = draftConfig(draftFrom(AUTO), name);
+    expect(without.ok && 'exit_hold_ms' in without.config).toBe(false);
+
+    const has: TimerConfig = { ...AUTO, exit_hold_ms: 30 };
+    const draft = draftFrom(has);
+    expect(draft.exitHoldMs).toBe(30);
+    const sent = draftConfig(draft, name);
+    expect(sent.ok && sent.config.exit_hold_ms).toBe(30);
+  });
+
+  it('makes the draft dirty when it changes, and must be a whole number', () => {
+    const has: TimerConfig = { ...AUTO, exit_hold_ms: 30 };
+    const draft = draftFrom(has);
+    expect(isDirty(draft, has)).toBe(false);
+    draft.exitHoldMs = 80;
+    expect(isDirty(draft, has)).toBe(true);
+    draft.exitHoldMs = '';
+    expect(draftConfig(draft, name)).toEqual({
+      ok: false,
+      problem: 'The exit hold must be a whole number of milliseconds, 0 or more.'
+    });
   });
 });
