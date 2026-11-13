@@ -1,21 +1,20 @@
-//! The GridFPV **Director server** wiring (#13, v0.4 Director wiring).
+//! The GridFPV **Director server** wiring.
 //!
-//! This is the app-level glue that turns the protocol [`server`] crate into a runnable
-//! Director: it opens the one append-only event log, builds the protocol router over it,
+//! This is the app-level glue that turns the [`gridfpv_server`] crate into a runnable
+//! Director: it opens the event registry over the data dir, builds the API router over it,
 //! serves the built RD console as a static SPA, and applies a permissive CORS layer so a
-//! different-origin client (the Windows Tauri RD app) can call the API and open the WS.
+//! different-origin client (the Tauri RD app) can call the API.
 //!
-//! The **live-timer pipeline is deliberately not here** — this commit only wires the app
-//! so a race *can* be served; feeding real timer passes into the log (the RH adapter →
-//! engine → `AppState::append`) is the next step (see the crate roadmap / #13 follow-up).
+//! This is the skeleton: **no timer is connected here yet.** Timer adapters and the race
+//! engine are rebuilt on the primitives in `docs/primitives.md` and wired in from here.
 //!
 //! # Layout (why a builder, not just `main`)
 //!
-//! [`build_app`] assembles the full [`axum::Router`] — protocol routes + static SPA +
-//! CORS — from an [`AppState`] and a resolved [`Config`]. Keeping it a pure function (no
-//! binding, no process exit) lets the Director integration test (`tests/director.rs`)
-//! drive the exact same router over an in-memory log via `tower::ServiceExt::oneshot`,
-//! with no real socket and no dependency on a built frontend `dist/`.
+//! [`build_app`] assembles the full [`axum::Router`] — API routes + static SPA + CORS — from
+//! an [`EventRegistry`] and an assets dir. Keeping it a pure function (no binding, no process
+//! exit) lets the Director integration test (`tests/director.rs`) drive the exact same router
+//! via `tower::ServiceExt::oneshot`, with no real socket and no dependency on a built
+//! frontend `dist/`.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -28,14 +27,11 @@ use axum::response::Response;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
-use gridfpv_events::AdapterId;
 use gridfpv_server::app::{router, smart_fallback};
 use gridfpv_server::events::EventRegistry;
 use tower_http::cors::CorsLayer;
 #[cfg(not(feature = "embed-assets"))]
 use tower_http::services::ServeDir;
-
-use crate::source::{SIM_ADAPTER, SourceConfig, spawn_presence_reconciler, spawn_registry_bridge};
 
 /// The default listen address: every interface on port 8080, so the RD console and the
 /// LAN spectators reach the Director without extra config.
@@ -44,15 +40,15 @@ pub const DEFAULT_ADDR: &str = "0.0.0.0:8080";
 /// Resolved Director configuration, read from the environment with sane defaults.
 ///
 /// See [`Config::from_env`] for the env vars; the defaults make `gridfpv` runnable with
-/// no configuration at all (in-memory log, bundled console).
+/// no configuration at all (in-memory events, bundled console).
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The socket address to bind (`GRIDFPV_ADDR`, default [`DEFAULT_ADDR`]).
     pub addr: SocketAddr,
     /// Where **persistent events' SQLite files** live (`GRIDFPV_DATA_DIR`) — one file per
-    /// created event (issue #72). `None` ⇒ no data dir configured: the built-in Practice
-    /// event is always in-memory, and any *created* event falls back to an in-memory log
-    /// (non-durable, fresh every start). `Some(dir)` ⇒ created events persist there.
+    /// created event, beside the pilot and class directories. `None` ⇒ no data dir
+    /// configured: everything is in-memory (non-durable, fresh every start). `Some(dir)` ⇒
+    /// it all persists there.
     pub data_dir: Option<PathBuf>,
     /// The directory of the built RD console SPA to serve (`GRIDFPV_ASSETS`); defaults to
     /// the repo's `frontend/apps/rd-console/dist`. May not exist — the server still serves
@@ -65,10 +61,8 @@ impl Config {
     ///
     /// - `GRIDFPV_ADDR` — listen address (default `0.0.0.0:8080`).
     /// - `GRIDFPV_DATA_DIR` — directory for persistent events' SQLite files (one per created
-    ///   event, #72); unset ⇒ created events are in-memory (non-durable). The deprecated
-    ///   `GRIDFPV_DB` (a single flat log path) is read as a *fallback* — its parent directory
-    ///   is used as the data dir — so an old config still persists *somewhere*, though the
-    ///   single-flat-log model it named is gone.
+    ///   event) and the pilot/class directories; unset ⇒ everything is in-memory
+    ///   (non-durable).
     /// - `GRIDFPV_ASSETS` — RD console `dist/` directory; unset ⇒ the repo's
     ///   `frontend/apps/rd-console/dist`, resolved relative to the workspace root.
     pub fn from_env() -> Result<Self, String> {
@@ -83,14 +77,7 @@ impl Config {
 
         let data_dir = match std::env::var("GRIDFPV_DATA_DIR") {
             Ok(value) if !value.trim().is_empty() => Some(PathBuf::from(value)),
-            _ => match std::env::var("GRIDFPV_DB") {
-                // Back-compat: a `GRIDFPV_DB=<file>` resolves its parent dir as the data dir.
-                Ok(value) if !value.trim().is_empty() => PathBuf::from(value)
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .filter(|p| !p.as_os_str().is_empty()),
-                _ => None,
-            },
+            _ => None,
         };
 
         let assets = match std::env::var("GRIDFPV_ASSETS") {
@@ -119,8 +106,6 @@ pub struct DirectorReady {
     /// The registered RD token, if `GRIDFPV_RD_TOKEN` configured one; `None` ⇒ control is
     /// open (full-trust, safe on loopback).
     pub rd_token: Option<String>,
-    /// A one-line description of the active lap source (for the startup banner).
-    pub source_desc: String,
     /// The always-on diagnostics log file this process is writing (#380), or `None` if no
     /// writable log directory could be resolved. Reported here so **every** caller — the
     /// `gridfpv` banner and the Tauri shell alike — can tell the operator where it is without
@@ -129,20 +114,16 @@ pub struct DirectorReady {
 }
 
 /// Run the GridFPV Director server to completion: open the event registry, register an
-/// optional RD token, spawn the built-in lap-source bridge + presence reconciler, build the
-/// router, bind `addr`, hand the resolved [`DirectorReady`] to `on_ready`, then serve until
-/// `shutdown` resolves.
+/// optional RD token, build the router, bind `addr`, hand the resolved [`DirectorReady`] to
+/// `on_ready`, then serve until `shutdown` resolves.
 ///
 /// This is the **single reusable Director entry point**, shared by:
 /// - the `gridfpv` binary (`main.rs`), which passes the env-resolved [`Config`] address, the
-///   process Ctrl-C signal as `shutdown`, and an `on_ready` that prints the startup banner —
-///   so the binary's behavior is unchanged; and
-/// - the Tauri native app, which passes a per-user app-data dir, a `127.0.0.1:0` address
-///   (ephemeral free port on loopback ⇒ no auth per the auth model), and an `on_ready` that
-///   records `bound.port()` so it can point the window at `http://127.0.0.1:<port>`.
-///
-/// The token / bridge / presence wiring matches what `serve()` did inline before this was
-/// extracted, so both callers get identical Director behavior.
+///   process Ctrl-C signal as `shutdown`, and an `on_ready` that prints the startup banner;
+///   and
+/// - the Tauri native app, which passes a per-user app-data dir, a loopback address (⇒ no
+///   auth per the auth model), and an `on_ready` that records `bound.port()` so it can point
+///   the window at `http://127.0.0.1:<port>`.
 ///
 /// `addr` is the requested bind address (use a `:0` port for an OS-assigned ephemeral one).
 /// `data_dir` is where created events' SQLite files live (`None` ⇒ in-memory, non-durable).
@@ -166,11 +147,10 @@ where
     // stderr goes nowhere and this file is the only surviving record.
     let log_file = crate::logging::init().map(Path::to_path_buf);
 
-    // Events are first-class containers (#72): the built-in Practice event is always present
-    // (in-memory); created events persist as a SQLite file under `data_dir` when set.
+    // Each created event persists as its own SQLite file under `data_dir` when set.
     let registry = EventRegistry::new(data_dir)?;
 
-    // Control auth is full-trust (open) by default (#72, Slice 1b): register an RD token only
+    // Control auth is full-trust (open) by default: register an RD token only
     // when `GRIDFPV_RD_TOKEN` is set to a non-blank value. On loopback (the Tauri app) this is
     // unset, so control is open — matching the loopback-no-auth model.
     let tokens = registry.tokens();
@@ -179,30 +159,31 @@ where
         _ => None,
     };
 
-    // The built-in lap source (default `sim`) + the per-event control→source bridge: each
-    // event gets a bridge feeding sim passes into ITS log when a heat goes `Running`. Plus the
-    // sim auto-presence reconciler (race redesign Slice 1a). Both run until the process exits.
-    let source = SourceConfig::from_env();
-    let source_desc = source.describe();
-    let _bridge =
-        spawn_registry_bridge(registry.clone(), source, AdapterId(SIM_ADAPTER.to_string()));
-    let _presence = spawn_presence_reconciler(registry.clone());
-
-    let app = build_app(registry, &assets);
-
+    // Bind first. If the port is taken this returns here, before anything long-lived has
+    // been started: the desktop app tries again on another port, and a first try that had
+    // already started the timer connections would leave a second set running.
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
+
+    // Keep a connection to every timer in the directory, for as long as the Director runs.
+    let timers = crate::links::spawn(registry.clone());
+    // Look for OFT timers on the network, for the "found on the network" list. Held until
+    // the Director stops.
+    let _discovery = crate::discovery::spawn(registry.clone());
+
+    let app = build_app(registry, &assets);
 
     on_ready(&DirectorReady {
         bound,
         rd_token,
-        source_desc,
         log_file,
     });
 
-    axum::serve(listener, app)
+    let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
-        .await?;
+        .await;
+    timers.abort();
+    served?;
     Ok(())
 }
 
@@ -221,19 +202,18 @@ pub fn default_assets_dir() -> PathBuf {
     workspace_root.join("frontend/apps/rd-console/dist")
 }
 
-/// Build the full Director [`Router`]: the protocol API, the static RD-console SPA, and a
-/// permissive CORS layer — all over the shared [`AppState`].
+/// Build the full Director [`Router`]: the API, the static RD-console SPA, and a permissive
+/// CORS layer — all over the one [`EventRegistry`].
 ///
-/// The protocol router ([`server::app::router`]) is mounted first so its routes (`/health`,
-/// `/snapshot/...`, `/stream`, the control surface) take precedence. A
+/// The API router ([`gridfpv_server::app::router`]) is mounted first so its routes
+/// (`/health`, `/events`, `/pilots`, …) take precedence. A
 /// [`ServeDir`](tower_http::services::ServeDir) then serves `assets` as the SPA root with a
 /// **fallback to `index.html`** so client-side routes (deep links into the console) resolve
 /// to the SPA shell instead of 404ing — wrapped in
-/// [`smart_fallback`](gridfpv_server::app::smart_fallback) (#64) so a *mistyped API* path
-/// (a wrong `/snapshot/...`, `/control/...`, `/auth/...`) returns a typed `ProtocolError`
-/// 404 instead of the SPA shell, while genuine client-side routes still resolve to it.
-/// Finally [`CorsLayer::permissive`] is applied so a different-origin client (the Tauri RD
-/// app) can call the API and upgrade the WS.
+/// [`smart_fallback`](gridfpv_server::app::smart_fallback) so a *mistyped API* path (a wrong
+/// `/events/...`) returns a typed `ProtocolError` 404 instead of the SPA shell, while genuine
+/// client-side routes still resolve to it. Finally [`CorsLayer::permissive`] is applied so a
+/// different-origin client (the Tauri RD app) can call the API.
 ///
 /// If `assets` does not exist the static service is *still* mounted (so the binary runs
 /// without a prior `npm run build`); requests for `/` then yield a 404 from `ServeDir`
@@ -250,12 +230,12 @@ pub fn default_assets_dir() -> PathBuf {
 /// disk exactly as before, keeping the hosted dev loop's rebuild-dist-only workflow intact.
 pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
     router(registry)
-        // Where the diagnostics log is (#380). Mounted HERE rather than in the protocol
+        // Where the diagnostics log is (#380). Mounted HERE rather than in the API
         // router because the log file is an *app*-level concern (`crate::logging` owns it)
         // and `gridfpv-server` knows nothing about it.
         .route("/diagnostics", get(diagnostics))
-        // Anything the protocol router does not handle falls through to `smart_fallback`:
-        // a mistyped API path → a typed `ProtocolError` 404 (#64), any other path → the SPA.
+        // Anything the API router does not handle falls through to `smart_fallback`:
+        // a mistyped API path → a typed `ProtocolError` 404, any other path → the SPA.
         .fallback_service(smart_fallback(spa_service(assets)))
         // SPA cache policy. Vite content-hashes every asset, so `assets/*` may be cached forever —
         // a changed file gets a new name. `index.html` must NOT be: it is the one file that names
@@ -266,7 +246,7 @@ pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
         // bundle, so a rebuilt console looked unchanged and even a hard reload was unreliable —
         // hours were lost to "is the new version up?" during a live bench session.
         .layer(axum::middleware::from_fn(spa_cache_headers))
-        // Permissive CORS so the cross-origin Tauri RD app can reach the API + WS.
+        // Permissive CORS so the cross-origin Tauri RD app can reach the API.
         .layer(CorsLayer::permissive())
 }
 

@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · system shape, stack, and the one-protocol contract</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> Sections 2, 3, 6, 7, 8, 10 and the storage parts of section 4 (Storage tiers through "Why the scoping lives in storage") still stand. Old: the entity list in section 4 (event pipeline, class registry, entry, heat and round), the Race engine entry in section 5, the identity-binding paragraph in section 9, and items 6 and 8 of section 11. "Node" means seat throughout. Where this doc disagrees with <a href="primitives.md">Grid primitives</a>, that doc wins.
+      </p>
+    </div>
+
     <p class="lead">
       The technical shape of GridFPV: the components, the chosen technology stack and
       why, the append-only spine that makes everything else derived, and the single
@@ -300,7 +306,7 @@ flowchart TB
       There is <strong>no built-in event</strong> (#414). A fresh Director holds none at all, so
       the RD's first act is to create one — and warming up is an ordinary event with an
       <strong>open-practice round</strong> in it
-      (<a href="pipeline-practice.html">Pipeline: Practice</a>, <em>Roadmap</em> v0.4
+      (<a href="archive/pipeline-practice.html">Pipeline: Practice</a>, <em>Roadmap</em> v0.4
       Slice&nbsp;1). An earlier design seeded a non-persistent "Practice" event into every
       registry; it was removed because an RD-created practice event is strictly better — it
       persists, takes a roster and classes, holds rounds, and produces a log that can be
@@ -427,7 +433,7 @@ CREATE TABLE event_log (
       advance → next</code>), advancement rules, and a pluggable registry of bracket /
       qualifying generators. It consumes canonical timing events and appends race-state
       events. Its design — the generator registry, advancement, and multi-class
-      scheduling — is specified in <a href="race-engine.html">Race Engine</a>.</dd>
+      scheduling — is specified in <a href="archive/race-engine.html">Race Engine</a>.</dd>
 
       <dt>Append-only log + projection engine</dt>
       <dd>The source of truth and the derivation layer. Projections are maintained
@@ -671,7 +677,7 @@ CREATE TABLE event_log (
       evolves while keeping old events readable for long-term open data — paired with the
       <a href="protocol.html">Protocol</a> contract versioning.</li>
       <li><span class="q">Race engine design.</span> The pluggable generator registry,
-      advancement, and multi-class scheduling — <a href="race-engine.html">Race Engine</a>.</li>
+      advancement, and multi-class scheduling — <a href="archive/race-engine.html">Race Engine</a>.</li>
     </ol>
 
     <footer class="doc-footer">

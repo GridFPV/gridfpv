@@ -17,6 +17,7 @@
     confirm = true,
     disabled = false,
     variant = 'default',
+    size = 'md',
     title = undefined,
     children
   }: {
@@ -24,6 +25,7 @@
     confirm?: boolean;
     disabled?: boolean;
     variant?: 'default' | 'primary' | 'danger';
+    size?: 'sm' | 'md' | 'lg';
     title?: string | undefined;
     children: Snippet;
   } = $props();
@@ -59,10 +61,12 @@
          Restart / Abort / Discard) is unmistakable on a sunlit field. We tag it with a forwarded
          `data-confirm-danger` attribute (NOT a `class` — a spread `class` would clobber the Button
          primitive's own `gf-btn` class) and restyle that below. -->
-    <Button variant="danger" data-confirm-danger {disabled} onclick={click}>Confirm</Button>
-    <Button variant="ghost" onclick={cancel}>Cancel</Button>
+    <Button variant="danger" {size} data-confirm-danger {disabled} onclick={click}>Confirm</Button>
+    <Button variant="ghost" {size} onclick={cancel}>Cancel</Button>
   {:else}
-    <Button variant={btnVariant} {disabled} {title} onclick={click}>
+    <!-- The title names what the button acts on ("Remove Heat 2"); it is the name a screen
+         reader gets too, since a page can hold many buttons that all read "Remove". -->
+    <Button variant={btnVariant} {size} {disabled} {title} aria-label={title} onclick={click}>
       {@render children()}
     </Button>
   {/if}

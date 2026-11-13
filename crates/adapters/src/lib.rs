@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 pub mod clock;
 pub mod dedup;
 pub mod diag;
+pub mod oft;
 pub mod rotorhazard;
-pub mod velocidrone;
 
 /// One thing a timing source may or may not be able to do. The engine queries
 /// these to adapt its UI and marshaling instead of special-casing source kinds.
@@ -174,9 +174,9 @@ pub trait Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_events::{CompetitorRef, GateIndex, Pass, SourceTime};
+    use gridfpv_events::{GateIndex, Pass, SeatRef, SourceTime};
 
-    /// A trivial manual adapter: raw input is `(competitor, micros)` and it emits a
+    /// A trivial manual adapter: raw input is `(seat, micros)` and it emits a
     /// single lap-gate `Pass`. Proves the interface + capability model compile and
     /// translate end to end (the #19 done-when).
     struct ManualAdapter {
@@ -195,15 +195,15 @@ mod tests {
             Capabilities::none().with_live_passes()
         }
 
-        fn translate(&mut self, (competitor, micros): Self::Raw) -> Vec<Event> {
+        fn translate(&mut self, (seat, micros): Self::Raw) -> Vec<Event> {
             vec![Event::Pass(Pass {
                 adapter: self.id.clone(),
-                competitor: CompetitorRef(competitor.to_string()),
+                seat: SeatRef(seat.to_string()),
                 at: SourceTime::from_micros(micros),
                 sequence: None,
                 gate: GateIndex::LAP,
                 signal: None,
-                heat: None,
+                race: None,
             })]
         }
     }
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             Event::Pass(pass) => {
-                assert_eq!(pass.competitor.0, "Ace");
+                assert_eq!(pass.seat.0, "Ace");
                 assert_eq!(pass.at, SourceTime::from_micros(12_000_000));
                 assert!(pass.gate.is_lap_gate());
             }

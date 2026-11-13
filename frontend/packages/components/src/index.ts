@@ -1,26 +1,20 @@
 /**
  * @gridfpv/components — shared GridFPV Svelte 5 component library.
  *
- * Race-domain widgets built once and themed per surface (RD console, spectator
- * PWA, OBS overlays), per docs/clients.html §3 ("one component, three
- * presentations") and §5 (one token set, three contexts). Every component takes
- * **typed projection data from `@gridfpv/types`** as props — never a hand-written
- * wire shape — and styles itself only through the design tokens in `tokens.css`,
- * so a surface re-themes the whole set by overriding CSS custom properties.
+ * The design-system kit the console is built from: token-styled primitives (buttons, fields,
+ * cards, dialogs, pills, toasts) plus a few pure display pieces. Every component styles itself
+ * only through the design tokens in `tokens.css`, so a surface re-themes the whole set by
+ * overriding CSS custom properties.
  *
- * The library is framework-pure: it depends on `@gridfpv/types` (types only) and
- * Svelte, never on `@gridfpv/protocol-client`. Apps wire data in.
+ * The library is framework-pure: it depends only on Svelte, never on
+ * `@gridfpv/protocol-client`. Apps wire data in.
  *
  * Design tokens ship as a stylesheet a surface imports once:
  *   import '@gridfpv/components/tokens.css';
  */
 
-// Race-domain components
-export { default as Leaderboard } from './Leaderboard.svelte';
-export { default as StandingsTable } from './StandingsTable.svelte';
-export { default as HeatSheet } from './HeatSheet.svelte';
+// Display components
 export { default as RaceClock } from './RaceClock.svelte';
-export { default as PilotCard } from './PilotCard.svelte';
 
 // Base UI primitives (framework-pure, token-styled) — the design-system kit the
 // whole console inherits (#71, Slice 0). See ./primitives/*.
@@ -40,4 +34,4 @@ export { default as ToastHost } from './primitives/ToastHost.svelte';
 export { toast, toasts, type Toast, type ToastTone } from './primitives/toast.svelte.js';
 
 // Presentational helpers (pure, framework-agnostic)
-export { formatClock, formatMicros, formatMetric, medalFor } from './format.js';
+export { formatClock, formatMicros, medalFor } from './format.js';

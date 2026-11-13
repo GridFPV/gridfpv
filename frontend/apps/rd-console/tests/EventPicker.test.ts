@@ -18,16 +18,11 @@ import EventPicker from '../src/screens/EventPicker.svelte';
 import SOURCE from '../src/screens/EventPicker.svelte?raw';
 import { makeTestSession } from './support.js';
 
-const noop = () => {};
-
 const EVENT: EventMeta = {
   id: 'friday-series',
   name: 'Friday Night Series',
   created_at: 0,
-  persistent: true,
-  timers: [],
-  roster: [],
-  classes: []
+  persistent: true
 };
 
 /** A picker whose open list resolves [EVENT], with no active event. */
@@ -38,7 +33,7 @@ function renderPicker() {
     getActiveEventImpl: vi.fn(async () => ({ event: null })),
     deleteEventImpl: vi.fn(async () => undefined)
   });
-  render(EventPicker, { session, onhome: noop });
+  render(EventPicker, { session });
 }
 
 /** Open the hard-delete dialog for EVENT and return its scope. */
@@ -55,19 +50,134 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('EventPicker — the brand home root (#118)', () => {
-  it('renders the GridFPV brand top-left and clicking it goes home', async () => {
-    const onhome = vi.fn();
+/** What the Director answers when control needs a token and none was sent. */
+const needsToken = () =>
+  Object.assign(new Error('Control on this Director needs a token.'), {
+    status: 401,
+    code: 'Unauthorized'
+  });
+
+describe('EventPicker — the page frame', () => {
+  it('is the Events page: no brand and no way home of its own (the nav above has both)', async () => {
+    renderPicker();
+    expect(screen.getByRole('heading', { level: 1, name: /Events/ })).toBeVisible();
+    await screen.findByRole('button', { name: `Delete ${EVENT.name}` });
+    expect(screen.queryByTitle('Home — GridFPV hub')).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'Breadcrumb' })).toBeNull();
+    // The event is listed by name, never by its id.
+    expect(document.body.textContent).not.toContain(EVENT.id);
+  });
+});
+
+describe('EventPicker — onopened: an event was opened or created here', () => {
+  const NEW: EventMeta = {
+    id: 'club-night-7f3a',
+    name: 'Club Night',
+    created_at: 1,
+    persistent: true
+  };
+
+  /** A picker over a session that holds no token, so a 401 leads to the token prompt. */
+  function renderGated(seams: Parameters<typeof makeTestSession>[0] = {}) {
     const { session } = makeTestSession({
       noEnter: true,
       listEventsImpl: vi.fn(async () => [EVENT]),
-      getActiveEventImpl: vi.fn(async () => ({ event: null }))
+      getActiveEventImpl: vi.fn(async () => ({ event: null })),
+      ...seams
     });
-    render(EventPicker, { session, onhome });
-    // The button's accessible name comes from its wordmark content; the title is the tooltip.
-    const brand = await screen.findByTitle('Home — GridFPV hub');
-    await fireEvent.click(brand);
-    expect(onhome).toHaveBeenCalledTimes(1);
+    session.clearToken();
+    const onopened = vi.fn();
+    render(EventPicker, { session, onopened });
+    return { session, onopened };
+  }
+
+  const openRow = async () => {
+    const row = (await screen.findByText(EVENT.name)).closest('button.event-row') as HTMLElement;
+    await fireEvent.click(row);
+  };
+
+  async function createClubNight() {
+    await fireEvent.click(await screen.findByRole('button', { name: '+ New event' }));
+    const form = await screen.findByRole('form', { name: 'New event' });
+    await fireEvent.input(within(form).getByLabelText('Event name'), {
+      target: { value: 'Club Night' }
+    });
+    await fireEvent.submit(form);
+    return form;
+  }
+
+  it('is called once the Director has made the event the active one', async () => {
+    const setActiveEvent = vi.fn(async () => EVENT);
+    const { session, onopened } = renderGated({ setActiveEventImpl: setActiveEvent });
+    await openRow();
+    await waitFor(() => expect(onopened).toHaveBeenCalledTimes(1));
+    expect(setActiveEvent.mock.calls[0]).toContain(EVENT.id);
+    expect(session.currentEvent).toEqual(EVENT);
+  });
+
+  it('is not called when the token prompt for opening is cancelled', async () => {
+    const setActiveEvent = vi.fn(async () => Promise.reject(needsToken()));
+    const { session, onopened } = renderGated({ setActiveEventImpl: setActiveEvent });
+    const asked = vi.fn(async () => undefined);
+    session.setTokenProvider(asked);
+    await openRow();
+    await waitFor(() => expect(asked).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(setActiveEvent).toHaveBeenCalledTimes(1));
+    expect(onopened).not.toHaveBeenCalled();
+    expect(session.currentEvent).toBeUndefined();
+  });
+
+  it('is not called when the Director refuses to open the event', async () => {
+    const { session, onopened } = renderGated({
+      setActiveEventImpl: vi.fn(async () =>
+        Promise.reject(
+          Object.assign(new Error('That event is gone.'), { status: 404, code: 'NotFound' })
+        )
+      )
+    });
+    await openRow();
+    // The refusal lands (as a toast); nothing was opened.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onopened).not.toHaveBeenCalled();
+    expect(session.currentEvent).toBeUndefined();
+  });
+
+  it('is called after a new event is created and opened', async () => {
+    const createEvent = vi.fn(async () => NEW);
+    const { session, onopened } = renderGated({
+      createEventImpl: createEvent,
+      setActiveEventImpl: vi.fn(async () => NEW)
+    });
+    await createClubNight();
+    await waitFor(() => expect(onopened).toHaveBeenCalledTimes(1));
+    expect(createEvent.mock.calls[0]).toContain('Club Night');
+    expect(session.currentEvent).toEqual(NEW);
+  });
+
+  it('is not called when the token prompt for creating is cancelled, and the dialog says why', async () => {
+    const createEvent = vi.fn(async () => Promise.reject(needsToken()));
+    const { session, onopened } = renderGated({ createEventImpl: createEvent });
+    const asked = vi.fn(async () => undefined);
+    session.setTokenProvider(asked);
+    const form = await createClubNight();
+    expect(
+      await within(form).findByText('A control token is required to create an event.')
+    ).toBeVisible();
+    expect(asked).toHaveBeenCalledTimes(1);
+    expect(onopened).not.toHaveBeenCalled();
+    expect(session.currentEvent).toBeUndefined();
+  });
+
+  it('is not called when the Director refuses the new event, and its sentence is shown', async () => {
+    const SAID = 'An event called Club Night already exists.';
+    const { onopened } = renderGated({
+      createEventImpl: vi.fn(async () =>
+        Promise.reject(Object.assign(new Error(SAID), { status: 409, code: 'Refused' }))
+      )
+    });
+    const form = await createClubNight();
+    expect(await within(form).findByText(SAID)).toBeVisible();
+    expect(onopened).not.toHaveBeenCalled();
   });
 });
 
@@ -119,13 +229,13 @@ describe('EventPicker — the empty picker is a first run, not an empty list (#4
       listEventsImpl: vi.fn(async () => []),
       getActiveEventImpl: vi.fn(async () => ({ event: null }))
     });
-    render(EventPicker, { session, onhome: noop });
+    render(EventPicker, { session });
   }
 
   it('offers a create-your-first-event call to action when no events exist', async () => {
     renderEmptyPicker();
-    // A heading + a primary button, not a dashed "nothing here" apology: with the built-in
-    // Practice event gone, creating an event is the whole job of a first run.
+    // A heading + a primary button, not a dashed "nothing here" apology: creating an event is
+    // the whole job of a first run.
     expect(
       await screen.findByRole('heading', { name: 'Create your first event' })
     ).toBeInTheDocument();
@@ -137,10 +247,6 @@ describe('EventPicker — the empty picker is a first run, not an empty list (#4
     const cta = await screen.findByRole('button', { name: 'Create your first event' });
     await fireEvent.click(cta);
     const form = await screen.findByRole('form', { name: 'New event' });
-    // "Set up event after creating" is ticked by default, so creating hands straight off to the
-    // existing setup wizard (#97) — there is no second wizard here.
-    const setup = screen.getByRole('checkbox', { name: 'Set up event after creating' });
-    expect(setup).toBeChecked();
     expect(within(form).getByLabelText('Event name')).toBeInTheDocument();
   });
 

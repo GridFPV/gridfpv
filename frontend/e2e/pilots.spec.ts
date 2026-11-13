@@ -14,31 +14,15 @@
  * this spec uses a unique callsign and cleans up after itself (the final remove) to stay isolated.
  */
 import { expect, test } from './observability.js';
+import { gotoPage } from './nav.js';
 
 const CALLSIGN = `E2E-Pilot-${Date.now()}`;
 
 test('RD adds, edits (clearing color + country), and removes a directory pilot', async ({
   page
 }) => {
-  await page.goto('/');
-
-  // The worker's Director may have an active event left by a prior spec (#90): if we resumed into
-  // the workspace, use the breadcrumb Home to get back to the hub.
-  const pilotsCard = page.getByRole('heading', { name: 'Pilots' });
-  const liveNav = page.getByRole('button', { name: /Race control/ });
-  await expect(pilotsCard.or(liveNav).first()).toBeVisible({ timeout: 15_000 });
-  if (await liveNav.isVisible().catch(() => false)) {
-    await page
-      .getByRole('navigation', { name: 'Breadcrumb' })
-      .getByRole('button', { name: 'Home' })
-      .click();
-  }
-
-  // ── Hub → Pilots page ────────────────────────────────────────────────────────────────
-  await page.getByRole('button', { name: /Pilots/ }).click();
-  await expect(page.getByRole('heading', { name: 'Pilots', level: 1 })).toBeVisible({
-    timeout: 15_000
-  });
+  // ── The Pilots page, from the row of pages ───────────────────────────────────────────
+  await gotoPage(page, 'Pilots');
 
   // ── Add a pilot: callsign + real name + country + color ────────────────────────────────
   await page.getByRole('button', { name: '+ Add pilot' }).click();

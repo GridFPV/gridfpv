@@ -2,6 +2,22 @@
 
 Standing rules for working in this repo. These bind every change (human or agent).
 
+## The design is `docs/primitives.md`, and it wins
+
+**Grid is being rebuilt from primitives (decided 2026-11-09, on the `primitives` branch).**
+`docs/primitives.md` is the design to build against: timer, seat, pass, pilot, class, race,
+phase, heat, ranking rule, completion rule, format and ruling. Read it before any design or
+engine work.
+
+- **Every other doc carries a banner.** "Old design, kept for history" docs live in
+  `docs/archive/`; do not build against them. "Under review" docs stay in `docs/`, and each
+  banner names which sections are old. Where any
+  doc, or a rule further down this file, disagrees with `docs/primitives.md`, that doc wins.
+- **Old docs are never deleted.** They move to `docs/archive/` and stay as the record of decisions we moved away from.
+- **RotorHazard is not the reference.** Its vocabulary stays inside the RotorHazard adapter.
+- **Some rules below describe code that is being rebuilt** (the competitor-name resolvers, the
+  RotorHazard transport, the e2e suite). The principles hold; the file paths may not.
+
 ## Display: always use the friendly name, never a raw id
 
 **Anywhere a value that has a human-friendly name is shown to a user, render the
@@ -125,7 +141,8 @@ about RH's behaviour — that file is the record.
 `cargo xtask ci` = `fmt` → `lint` → `test` → `live-check` → `gen` → `barrel`. The
 frontend adds `build`/`check`/`lint`/`test`/`contract`, and `cargo xtask e2e` runs the
 browser suite in Microsoft's Playwright image. **CI runs all of it**, including the e2e
-job (~20 min).
+job. (After the 2026-11 cut to a skeleton the e2e suite is small and takes seconds, and
+`live-check` is a no-op until there is a live target again. Both grow back with the rebuild.)
 
 Each of those last few gates exists because something slipped through, and the pattern
 is always the same shape — *a check that could not see the thing it was supposed to check*:

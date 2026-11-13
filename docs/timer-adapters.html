@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · the canonical event model and the one timing interface</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> Sections 1, 3 and 4, the capability table in section 5, the wire facts in sections 7 and 8, and items 2, 4 and 6 of section 9 still stand. Old: section 6 (identity binding), the channel callout in section 5, items 3 and 5 of section 9, and in section 2 the <code>CompetitorSeen</code> binding and the heat tag. OFT is missing from this doc, the RotorHazard and Velocidrone adapters are due a rewrite, and "node" means seat outside RotorHazard's own payloads. Where this doc disagrees with <a href="primitives.md">Grid primitives</a>, that doc wins.
+      </p>
+    </div>
+
     <p class="lead">
       The foundational wall. Every live timing source — Velocidrone, RotorHazard, LapRF,
       manual entry — sits behind one interface and is translated into the same small set of
@@ -84,7 +90,7 @@
       player name, transponder id), later bound to a GridFPV pilot.</li>
       <li><strong>source timestamp</strong> — in the source's own clock (see §4), plus a
       monotonic sequence number where the source provides one.</li>
-      <li><strong>heat tag</strong> (<a href="decisions.html">D20</a>) — the adapter leaves it
+      <li><strong>heat tag</strong> (<a href="archive/decisions.html">D20</a>) — the adapter leaves it
       empty; the bridge sink <strong>stamps the running heat at append</strong>, and every fold
       attributes the pass by tag (positional attribution is the legacy fallback). Once a heat's
       result is <em>Final</em>, late passes are frozen out of its window entirely.</li>
@@ -216,12 +222,12 @@ flowchart LR
         catalog is built-in; what a given timer can actually tune to lives in <em>that timer's
         config</em>. The race engine assigns channels from this declared set (first-fit + RD override),
         capped by the node count, and the adapter <strong>dynamically tunes</strong> its nodes to the
-        assignment at race time (<a href="race-engine.html">Race Engine</a> §5,
-        <a href="pipeline-setup.html">Setup</a>). Sim sources declare no channel capability. <em>As
+        assignment at race time (<a href="archive/race-engine.html">Race Engine</a> §5,
+        <a href="archive/pipeline-setup.html">Setup</a>). Sim sources declare no channel capability. <em>As
         built (v0.4), this is the Timer-registry model (#73/#117): channels are configured on the timer,
         not on the event — and crucially a timer's <strong>available channels can exceed its node
         count</strong>. The full model (channels ≠ nodes, the standard catalog, Fixed/Flexible, static
-        vs per-heat assignment) has its own deep dive: <a href="channel-model.html">Channel Model</a>.</em>
+        vs per-heat assignment) has its own deep dive: <a href="archive/channel-model.html">Channel Model</a>.</em>
       </p>
     </div>
 
@@ -233,7 +239,7 @@ flowchart LR
       refs it sees (<code>CompetitorSeen</code>), which for sim drives <strong>auto-membership</strong>
       — auto-adding seen players to the class roster (membership = presence) and auto-binding name
       matches ("everyone in the room at 8 PM gets bracketed") — and gives the RD the list to bind
-      against (<a href="pipeline-setup.html">Setup</a>).
+      against (<a href="archive/pipeline-setup.html">Setup</a>).
     </p>
 
     <h2>7. Velocidrone — the first adapter</h2>
@@ -307,7 +313,7 @@ flowchart LR
     <div class="callout">
       <p>
         <strong>Direction (2026-06-26) — the RH integration becomes a required GridFPV plugin
-        (<a href="decisions.html">D16</a>).</strong> The <strong>socket-only</strong> path described
+        (<a href="archive/decisions.html">D16</a>).</strong> The <strong>socket-only</strong> path described
         here works against stock RH but is limiting: the dense per-tick signal needs a
         <strong>save-then-pull</strong>, staging is zeroed with an <code>alter_race_format</code>
         hack, seating needs an <code>add_pilot</code>/<code>alter_heat</code> dance, and the ~0.9&nbsp;s
@@ -321,7 +327,7 @@ flowchart LR
         owns start/stop timing while RH owns start/stop/get-data. "Required" is a <strong>guided
         one-step install</strong>, not a hard-fail. The plugin <strong>supersedes the socket
         workarounds</strong> and becomes the <strong>primary RH integration</strong>. It also
-        <strong>replaces the dropped own-the-stack timer-server</strong> (<a href="decisions.html">D15</a>,
+        <strong>replaces the dropped own-the-stack timer-server</strong> (<a href="archive/decisions.html">D15</a>,
         superseded).
       </p>
       <p>

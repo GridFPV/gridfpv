@@ -2,15 +2,15 @@
  * Reusable Director-boot harness (#13, v0.4 observability harness).
  *
  * `startDirector(opts?)` spawns the **real** built `gridfpv` binary — the actual Director that
- * serves the protocol API + the RD console SPA — on an ephemeral (or given) port, buffers its
+ * serves the HTTP API + the RD console SPA — on an ephemeral (or given) port, buffers its
  * whole stdout+stderr, waits until it is actually serving (polls `GET /health`), and hands back
  * a small handle: the `baseUrl` to point a client at, the known RD `token`, `readLogs()` to read
  * everything the Director has printed so far, and `stop()` for a clean shutdown.
  *
  * It is deliberately framework-agnostic — no Playwright, no vitest imports — so it works equally
  * from the browser e2e (the Playwright observability fixture stands one up and taps its logs into
- * the failure dump) and from the upcoming Node-only contract suite (vitest), which drives the
- * protocol directly with no browser at all.
+ * the failure dump) and from the Node-only contract suite (vitest), which drives the API directly
+ * with no browser at all.
  *
  * The binary is built on demand (`cargo build -p gridfpv-app`) if it is missing, so a fresh
  * checkout / CI run just works; pass `build: false` to require a pre-built binary.
@@ -28,7 +28,7 @@ const repoRoot = resolve(frontendRoot, '..');
 /** Absolute path to the built Director binary the harness boots. */
 export const DIRECTOR_BIN = resolve(repoRoot, 'target', 'debug', 'gridfpv');
 
-/** Options for {@link startDirector}. All optional — the defaults give a fast in-memory sim. */
+/** Options for {@link startDirector}. All optional — the defaults give an in-memory Director. */
 export interface StartDirectorOptions {
   /** Port to bind. Default: an ephemeral free port picked by the OS. */
   port?: number;
@@ -37,16 +37,12 @@ export interface StartDirectorOptions {
    *
    * Pass **`false`** to start the Director with **no token configured** — `GRIDFPV_RD_TOKEN`
    * is left unset, so the control path is **open** (full-trust by default, #72 Slice 1b). The
-   * returned handle's `token` is then the empty string. This is the posture the no-token e2e
-   * exercises (picker → Practice → build heat → control with no token step).
+   * returned handle's `token` is then the empty string. This is the posture the e2e exercises
+   * (every write goes through with no token step).
    */
   token?: string | false;
   /** Built RD console `dist/` dir to serve as the SPA (`GRIDFPV_ASSETS`). Default: unset (API only). */
   assets?: string;
-  /** Number of sim laps per heat (`GRIDFPV_SIM_LAPS`). Default: `4`. */
-  simLaps?: number;
-  /** Sim lap duration in ms (`GRIDFPV_SIM_LAP_MS`). Default: `250`. */
-  simLapMs?: number;
   /** Extra env to layer onto the Director process. */
   env?: Record<string, string>;
   /** Build the binary first if it is missing. Default: `true`. */
@@ -57,7 +53,7 @@ export interface StartDirectorOptions {
 
 /** A running Director plus the captured output and a clean shutdown. */
 export interface Director {
-  /** Base URL the protocol/SPA is served at, e.g. `http://127.0.0.1:54123`. */
+  /** Base URL the API/SPA is served at, e.g. `http://127.0.0.1:54123`. */
   readonly baseUrl: string;
   /** The RD control token registered for this run (the one printed in the logs). */
   readonly token: string;
@@ -94,8 +90,6 @@ export async function startDirector(opts: StartDirectorOptions = {}): Promise<Di
   const {
     token = `harness-rd-${Math.random().toString(36).slice(2, 10)}`,
     assets,
-    simLaps = 4,
-    simLapMs = 250,
     env = {},
     build = true,
     readyTimeoutMs = 30_000
@@ -136,8 +130,6 @@ export async function startDirector(opts: StartDirectorOptions = {}): Promise<Di
       ...process.env,
       GRIDFPV_ADDR: `127.0.0.1:${port}`,
       ...tokenEnv,
-      GRIDFPV_SIM_LAPS: String(simLaps),
-      GRIDFPV_SIM_LAP_MS: String(simLapMs),
       ...(assets ? { GRIDFPV_ASSETS: assets } : {}),
       ...env
     },

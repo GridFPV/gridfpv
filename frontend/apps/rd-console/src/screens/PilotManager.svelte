@@ -4,17 +4,16 @@
    *
    * The single home for pilot CRUD: it lists every directory pilot (callsign + an optional flag,
    * team, color swatch, and VTX badge) and drives **add** / **edit** / **remove** (with confirm)
-   * through one stacked {@link Dialog} — mirroring {@link TimerManager} exactly, including the
-   * full-trust-first → lazy-token write flow on the {@link Session}. Ids are auto-generated
+   * through one stacked {@link Dialog}, with the full-trust-first → lazy-token write flow on the
+   * {@link Session}. Ids are auto-generated
    * server-side, never shown or asked for.
    *
-   * It is built **reusable** so the same CRUD lives in one place:
-   *  - the {@link PilotsPage} embeds it for directory CRUD now;
-   *  - the next slice's **in-event Roster** embeds it and layers **per-event selection** on top, via
-   *    the optional `rowLead` snippet (a checkbox per row), the `listHeader`/`listFooter` snippets
-   *    (the selection count + Save), and `rowChecked` (the selected-row highlight) — the very seam
-   *    {@link TimerManager} exposes for {@link EventTimers}. **Selection/roster concerns live in that
-   *    host, not here** — this component is purely the directory + form.
+   * It is built **reusable** so the same CRUD lives in one place. The {@link PilotsPage} embeds
+   * it for directory CRUD. A host that wants to *select* pilots can layer that on top via the
+   * optional `rowLead` snippet (a checkbox per row), the `listHeader`/`listFooter` snippets, and
+   * `rowChecked` (the selected-row highlight). No host uses the selection seam at the moment.
+   * **Selection concerns live in the host, not here** — this component is purely the directory +
+   * form.
    *
    * The list refreshes after every create/edit/delete; the latest `pilots` are exposed back through
    * the bindable `pilots` prop and an `onchange` callback so a selection owner can reconcile.
@@ -51,7 +50,7 @@
     pilots?: Pilot[];
     /** Called after every create/edit/delete (and the reload it triggers) with the fresh list. */
     onchange?: (pilots: Pilot[]) => void;
-    /** Rendered at the **start** of each row (e.g. the in-event roster checkbox — the next slice). */
+    /** Rendered at the **start** of each row (e.g. a selection checkbox). */
     rowLead?: Snippet<[Pilot]>;
     /** Rendered **above** the list (reserved for selection chrome). */
     listHeader?: Snippet;
@@ -203,7 +202,7 @@
   {:else if loadState.pilots.length === 0}
     <div class="empty">
       <p>No pilots in the directory yet.</p>
-      <p class="empty-sub">Add one to start building your roster.</p>
+      <p class="empty-sub">Add one to start building your pilot directory.</p>
     </div>
   {:else}
     {@render listHeader?.()}
@@ -346,8 +345,7 @@
   title="Remove pilot"
 >
   <p class="confirm-text">
-    Remove <strong>{confirming?.callsign}</strong> from the directory? Any event that rostered them keeps
-    running; this only removes the directory entry.
+    Remove <strong>{confirming?.callsign}</strong> from the directory? This cannot be undone.
   </p>
   {#snippet footer()}
     <Button

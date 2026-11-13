@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · the one read/realtime contract every client speaks</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (updated 2026-11-10).</strong> For what the Director serves today, read <a href="api.md">The Director's API, as built</a>. In this doc, sections 5 (auth), 6 (generated types) and 7 (versioning) still stand. Sections 1 to 4 and 8 (projections, the snapshot endpoints, the delta stream with resume cursors, subscription scoping) describe a design that was not rebuilt: the server now gives one snapshot per event and a feed that says when to read it again. Where this doc disagrees with <a href="primitives.md">Grid primitives</a> or the as-built page, those win.
+      </p>
+    </div>
+
     <p class="lead">
       The single read/realtime contract. A client opens it, fetches a <strong>snapshot</strong>
       of the projections it cares about, then subscribes to a <strong>realtime change
@@ -28,7 +34,7 @@
         change stream</strong>, <strong>subscription scoping</strong>, <strong>auth &amp;
         authorization</strong>, and <strong>contract versioning</strong>. It deliberately
         does <strong>not</strong> redefine the projections themselves — those belong to the
-        engines that derive them (<a href="race-engine.html">Race Engine</a>,
+        engines that derive them (<a href="archive/race-engine.html">Race Engine</a>,
         <a href="cloud.html">Cloud &amp; Season</a>) — nor the timing vocabulary
         (<a href="timer-adapters.html">Timer Adapters</a>). The live race-state projection, its
         server-time race clock get their own deep-dive in <a href="live-state-clock.html">Live
@@ -63,7 +69,7 @@
       <dt>Live race-state</dt>
       <dd>The current heat and its loop phase (<code>Scheduled → Staged → Armed → Running →
       Unofficial → Final</code>, the projected <code>HeatPhase</code>; see
-      <a href="race-engine.html">Race Engine</a> §2), the active pilots and their live lap progress,
+      <a href="archive/race-engine.html">Race Engine</a> §2), the active pilots and their live lap progress,
       the running order, the on-deck heat, and the <strong>server-authoritative race clock</strong>
       (<code>race_started_at</code> / <code>race_ended_at</code>). The latency-sensitive core every
       overlay and spectator watches. Its full fold and the clock model are the subject of
@@ -343,7 +349,7 @@ sequenceDiagram
       "whole venue screen."</dd>
       <dt>Class scope</dt>
       <dd>One class's phases, schedule, and standings — a class running in parallel with
-      others (<a href="race-engine.html">Race Engine</a> §5).</dd>
+      others (<a href="archive/race-engine.html">Race Engine</a> §5).</dd>
       <dt>Heat scope</dt>
       <dd>One heat's live race-state and lap lists — the tightest, lowest-latency scope, ideal
       for a phone watching the current heat or a leaderboard overlay.</dd>

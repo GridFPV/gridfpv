@@ -6,7 +6,7 @@ import type { VtxType } from "./VtxType";
  *
  * The `callsign` is required; everything else is optional. The **id is auto-generated**
  * server-side (a slug of the callsign + a short random suffix), never user-entered, mirroring
- * `POST /timers` / `POST /events`.
+ * `POST /events`.
  */
 export type CreatePilotRequest = { 
 /**

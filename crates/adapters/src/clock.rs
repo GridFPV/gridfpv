@@ -17,8 +17,8 @@
 //!   session**: alignment exists to *order and display* events from multiple sources
 //!   on one axis, nothing more.
 //! - [`pass_order_key`] / [`compare_passes`] — the ordering rule that prefers a
-//!   present monotonic `sequence` and falls back to source `at`, mirroring the lap
-//!   projection so the whole system orders passes identically.
+//!   present monotonic `sequence` and falls back to source `at`, so the whole system
+//!   orders passes identically.
 //!
 //! # Intervals stay on source time
 //!
@@ -147,9 +147,8 @@ pub const fn source_interval_micros(earlier: SourceTime, later: SourceTime) -> i
 /// Ordering key for a pass: sequenced passes first (ascending `sequence`), then
 /// unsequenced ones, with `at` (source timestamp) as the final tie-break.
 ///
-/// This is the **same rule the lap projection uses** (`gridfpv_projection::lap_list`),
-/// reproduced here so adapters order passes identically before the projection ever
-/// sees them. The key is `(sequence.is_none(), sequence, at)`:
+/// This is the one ordering rule for passes: any fold that derives laps must order by
+/// it too, so adapters and folds agree. The key is `(sequence.is_none(), sequence, at)`:
 ///
 /// - `sequence.is_none()` is `false` for sequenced passes, so they sort *first*, then
 ///   by `sequence` ascending — the source's monotonic counter is authoritative when
@@ -158,7 +157,7 @@ pub const fn source_interval_micros(earlier: SourceTime, later: SourceTime) -> i
 /// - `at` is the final tie-break in every case, keeping equal keys deterministic.
 ///
 /// Use with a **stable** sort so passes with fully equal keys keep their original log
-/// order. Mixing sequenced and unsequenced passes for one competitor is not expected
+/// order. Mixing sequenced and unsequenced passes for one seat is not expected
 /// from a real source (a source either numbers its passes or it does not); this rule
 /// just keeps ordering total and deterministic if it happens.
 pub fn pass_order_key(pass: &Pass) -> (bool, Option<u64>, SourceTime) {
@@ -176,17 +175,17 @@ pub fn compare_passes(a: &Pass, b: &Pass) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_events::{AdapterId, CompetitorRef, GateIndex};
+    use gridfpv_events::{AdapterId, GateIndex, SeatRef};
 
     fn pass(at: i64, sequence: Option<u64>) -> Pass {
         Pass {
             adapter: AdapterId("vd".into()),
-            competitor: CompetitorRef("A".into()),
+            seat: SeatRef("A".into()),
             at: SourceTime::from_micros(at),
             sequence,
             gate: GateIndex::LAP,
             signal: None,
-            heat: None,
+            race: None,
         }
     }
 

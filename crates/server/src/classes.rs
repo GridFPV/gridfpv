@@ -1,31 +1,21 @@
-//! Classes as **application-level configuration** — the `ClassDirectory` and `Class` (issue #84).
+//! Classes as **application-level configuration** — the `ClassDirectory` and `Class`.
 //!
 //! A class is a *racing category in the Director's address book*: a name and a little optional
-//! metadata (where it came from, a reference id, a description). The model parallels the pilot
-//! directory ([`PilotDirectory`](crate::pilots::PilotDirectory)): the Race Director maintains
-//! their classes **once** at the application level (a persisted directory) and each event simply
-//! builds a **selection** of which directory classes run at it (see
-//! [`EventMeta::classes`](crate::events::EventMeta::classes)). Type a class in once, and every new
-//! event just picks them.
+//! metadata (where it came from, a reference id, a description). Like the pilot directory
+//! ([`PilotDirectory`](crate::pilots::PilotDirectory)), the Race Director maintains their classes
+//! **once** at the application level (a persisted directory), outside any event.
 //!
-//! # Two pieces, mirroring pilots
+//! The [`ClassDirectory`] holds every configured [`Class`] behind a lock and **persists** the
+//! user/Custom ones to `<GRIDFPV_DATA_DIR>/classes.json` (restored on boot; in-memory only when
+//! no data dir is configured). On top of those it always seeds **9 code-defined built-in
+//! classes** — the standard FPV classes (MultiGP / Five33 / FreedomSpec / Street League / UDL) —
+//! with **fixed ids**, identical on every Director, so cross-event / cross-Director standings
+//! aggregate with zero reconciliation. The built-ins are **read-only** (non-editable,
+//! non-deletable) and are **never** written to `classes.json` (re-seeded on every boot). Users
+//! only ever create [`Custom`](ClassSource::Custom) classes (full CRUD).
 //!
-//! - **App-level directory (this module).** The [`ClassDirectory`] holds every configured
-//!   [`Class`] behind a lock and **persists** the user/Custom ones to
-//!   `<GRIDFPV_DATA_DIR>/classes.json` (restored on boot; in-memory only when no data dir is
-//!   configured). On top of those it always seeds **9 code-defined built-in classes** (issue #84) —
-//!   the standard FPV classes (MultiGP / Five33 / FreedomSpec / Street League / UDL) — with **fixed
-//!   ids**, identical on every Director, so cross-event / cross-Director standings aggregate with
-//!   zero reconciliation. The built-ins are **read-only** (non-editable, non-deletable, like the
-//!   Mock timer) and are **never** written to `classes.json` (re-seeded on every boot). Users only
-//!   ever create [`Custom`](ClassSource::Custom) classes (full CRUD).
-//! - **Per-event selection (`crate::events`).** Each [`EventMeta`](crate::events::EventMeta)
-//!   carries a `classes: Vec<ClassId>` of the directory classes that run at that event; new events
-//!   default to an **empty** selection.
-//!
-//! This is the **registry slice only** (issue #84's lineage): the directory of *which classes
-//! exist* plus the per-event selection of *which run here*. The rounds / phase engine that a class
-//! later drives is a separate concern and is not modelled here.
+//! This is the directory of *which classes exist*. Which classes run at an event, and who races
+//! in each, belongs to the event and is built on the primitives (`docs/primitives.md` §5.3).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -35,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::pilots::OptionalEdit;
-use crate::scope::ClassId;
+use gridfpv_events::ClassId;
 
 /// The file name (under the data dir) the class directory is persisted to (issue #84).
 pub const CLASSES_FILE: &str = "classes.json";
@@ -399,9 +389,8 @@ impl ClassDirectory {
         dir.classes.values().map(|c| dir.view(c)).collect()
     }
 
-    /// Whether a class with `id` exists — the per-event selection validates each id through this.
-    /// (A *hidden* class still exists; hiding only affects what the picker *offers*, never the
-    /// validity of an id already selected on an event.)
+    /// Whether a class with `id` exists. (A *hidden* class still exists; hiding only affects
+    /// what a picker *offers*, never the validity of the id.)
     pub fn exists(&self, id: &ClassId) -> bool {
         self.read().classes.contains_key(id)
     }
@@ -509,10 +498,8 @@ impl ClassDirectory {
     }
 
     /// Delete a class (issue #84). A **built-in** class is read-only and cannot be deleted (it is
-    /// always present); attempting to is rejected — mirroring the Mock timer's protected delete. An
-    /// unknown id is a [`ClassError`]. The directory is **persisted** on success. (Removing a class
-    /// does not touch any event selection that still names it; a stale selection id is harmless —
-    /// see the events module.)
+    /// always present); attempting to is rejected. An unknown id is a [`ClassError`]. The
+    /// directory is **persisted** on success.
     pub fn delete(&self, id: &ClassId) -> Result<(), ClassError> {
         if is_builtin_id(id) {
             return Err(ClassError::read_only(format!(
@@ -644,8 +631,7 @@ pub struct ClassError {
 pub enum ClassErrorKind {
     /// A bad request value (missing name, …) → 400.
     Invalid,
-    /// An attempt to edit/delete a read-only **built-in** class → 400 (rejected, like the Mock
-    /// timer's protected delete).
+    /// An attempt to edit/delete a read-only **built-in** class → 400 (rejected).
     ReadOnly,
     /// The addressed class id does not exist → 404.
     NotFound,

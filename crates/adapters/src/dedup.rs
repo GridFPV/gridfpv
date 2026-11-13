@@ -16,14 +16,14 @@
 //! A [`Pass`] is identified by a [`PassKey`]:
 //!
 //! - When the pass carries a `sequence`, the key is
-//!   `(adapter, competitor, Seq(sequence))`. The source's own monotonic counter is
+//!   `(adapter, seat, Seq(sequence))`. The source's own monotonic counter is
 //!   authoritative — it survives clock adjustments and disambiguates passes that
 //!   share a timestamp.
 //! - When `sequence` is `None`, the key falls back to
-//!   `(adapter, competitor, Time(at))`, using the source timestamp.
+//!   `(adapter, seat, Time(at))`, using the source timestamp.
 //!
-//! `adapter` and `competitor` are always part of the key, so two different
-//! competitors — or two different sources — that happen to emit the same sequence
+//! `adapter` and `seat` are always part of the key, so two different
+//! seats — or two different sources — that happen to emit the same sequence
 //! number or the same timestamp are **never** collapsed into one.
 //!
 //! ## When the sequence is not an identity
@@ -51,10 +51,10 @@
 //!
 //! The fallback is only as good as the timestamps. A source that provides **no**
 //! stable sequence counter **and** can emit two genuinely distinct passes for the
-//! same `(adapter, competitor, at)` (identical source timestamps) cannot be
+//! same `(adapter, seat, at)` (identical source timestamps) cannot be
 //! perfectly deduplicated: the second such pass is indistinguishable from a replay
 //! of the first and will be dropped. Sources whose timestamps are unique per
-//! competitor (the common case), or that supply a sequence counter at all, are not
+//! seat (the common case), or that supply a sequence counter at all, are not
 //! affected. The fix where it matters is upstream — have the adapter carry a real
 //! `sequence` (see [`clock`](crate::clock), #20).
 //!
@@ -77,9 +77,9 @@
 
 use std::collections::HashSet;
 
-use gridfpv_events::{AdapterId, CompetitorRef, Event, Pass, SourceTime};
+use gridfpv_events::{AdapterId, Event, Pass, SeatRef, SourceTime};
 
-/// The discriminator within a `(adapter, competitor)` pair: the authoritative
+/// The discriminator within a `(adapter, seat)` pair: the authoritative
 /// source sequence number when present, otherwise the source timestamp.
 ///
 /// Kept private to the key — callers never construct it directly; it is derived
@@ -100,7 +100,7 @@ enum Discriminator {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PassKey {
     adapter: AdapterId,
-    competitor: CompetitorRef,
+    seat: SeatRef,
     discriminator: Discriminator,
 }
 
@@ -144,7 +144,7 @@ impl PassKey {
         };
         Self {
             adapter: pass.adapter.clone(),
-            competitor: pass.competitor.clone(),
+            seat: pass.seat.clone(),
             discriminator,
         }
     }
@@ -210,7 +210,7 @@ impl Deduplicator {
     ///
     /// Each [`Event::Pass`] is run through [`observe`](Self::observe); duplicates are
     /// removed. Every non-`Pass` event (connect/disconnect, session lifecycle,
-    /// competitor-seen) has no pass identity and is always retained, in order. This
+    /// seat-seen) has no pass identity and is always retained, in order. This
     /// is the entry point an adapter runs each translated batch through — including
     /// the overlapping tail a reconnect replays.
     pub fn retain_new(&mut self, events: &mut Vec<Event>) {
@@ -238,15 +238,15 @@ mod tests {
 
     /// Build a pass with the fields dedup actually keys on; gate/signal are
     /// irrelevant to identity here.
-    fn pass(adapter: &str, competitor: &str, at: i64, sequence: Option<u64>) -> Pass {
+    fn pass(adapter: &str, seat: &str, at: i64, sequence: Option<u64>) -> Pass {
         Pass {
             adapter: AdapterId(adapter.into()),
-            competitor: CompetitorRef(competitor.into()),
+            seat: SeatRef(seat.into()),
             at: SourceTime::from_micros(at),
             sequence,
             gate: GateIndex::LAP,
             signal: None,
-            heat: None,
+            race: None,
         }
     }
 
@@ -348,12 +348,12 @@ mod tests {
     }
 
     #[test]
-    fn distinct_competitors_with_equal_sequence_not_collapsed() {
+    fn distinct_seats_with_equal_sequence_not_collapsed() {
         let mut dedup = Deduplicator::new();
         assert!(dedup.observe(&pass("velo", "Ace", 1_000_000, Some(1))));
         assert!(
             dedup.observe(&pass("velo", "Bee", 1_000_000, Some(1))),
-            "same sequence, different competitor is a different pass"
+            "same sequence, different seat is a different pass"
         );
         assert_eq!(dedup.len(), 2);
     }
@@ -370,13 +370,13 @@ mod tests {
     }
 
     #[test]
-    fn distinct_competitors_with_equal_timestamp_not_collapsed() {
-        // The fallback path must also keep competitors apart.
+    fn distinct_seats_with_equal_timestamp_not_collapsed() {
+        // The fallback path must also keep seats apart.
         let mut dedup = Deduplicator::new();
         assert!(dedup.observe(&pass("manual", "Ace", 7_000_000, None)));
         assert!(
             dedup.observe(&pass("manual", "Bee", 7_000_000, None)),
-            "same timestamp, different competitor is a different pass"
+            "same timestamp, different seat is a different pass"
         );
     }
 
@@ -416,7 +416,7 @@ mod tests {
         );
     }
 
-    /// Crossing-time keying still keeps competitors and adapters apart, and still suppresses the
+    /// Crossing-time keying still keeps seats and adapters apart, and still suppresses the
     /// replay it exists for: a re-sent snapshot repeats both the stamp and the number.
     #[test]
     fn crossing_time_keying_still_dedups_replays_and_separates_seats() {
@@ -442,7 +442,7 @@ mod tests {
         let mut dedup = Deduplicator::new();
         let adapter = AdapterId("rh".into());
         let session = SessionId("heat-1".into());
-        let competitor = CompetitorRef("node-2".into());
+        let seat = SeatRef("node-2".into());
 
         let events = vec![
             Event::AdapterConnected {
@@ -452,9 +452,9 @@ mod tests {
                 adapter: adapter.clone(),
                 session: session.clone(),
             },
-            Event::CompetitorSeen {
+            Event::SeatSeen {
                 adapter: adapter.clone(),
-                competitor: competitor.clone(),
+                seat: seat.clone(),
             },
             Event::Pass(pass("rh", "node-2", 1_000_000, Some(0))),
             Event::SessionEnded {

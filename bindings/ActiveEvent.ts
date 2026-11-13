@@ -3,7 +3,7 @@ import type { EventMeta } from "./EventMeta";
 
 /**
  * The wire shape of `GET /active-event` — the **Director's currently-active event**, or
- * `null` when none is set (issue #90).
+ * `null` when none is set.
  *
  * The active event is **Director (server-side) state**: there is exactly one Race Director
  * running one event, so the selected event lives on the Director, not in each browser. Every

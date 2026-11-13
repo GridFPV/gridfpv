@@ -2,7 +2,7 @@
   "name": "@gridfpv/rd-console",
   "version": "0.4.0",
   "private": true,
-  "description": "GridFPV RD console surface — control-oriented, dense, authenticated. Minimal shell; filled by #51+.",
+  "description": "GridFPV RD console surface — control-oriented, dense, authenticated.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {

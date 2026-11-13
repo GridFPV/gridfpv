@@ -23,9 +23,6 @@
     "check": "svelte-check --tsconfig ./tsconfig.json && svelte-check --tsconfig ./tsconfig.test.json",
     "test": "vitest run"
   },
-  "dependencies": {
-    "@gridfpv/types": "*"
-  },
   "peerDependencies": {
     "svelte": "^5.0.0"
   },
