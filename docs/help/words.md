@@ -38,7 +38,7 @@ Grid uses a small set of words, and each one always means the same thing.
 
 - **Minimum lap time** is a rule of the event. A pass that comes too soon after the one
   before it is not counted as a lap. It is still kept, so Marshal can count it. Set it on
-  the [Event](#/help/event) page.
+  the [Details](#/help/event) page.
 - **Lap cooldown** is a setting of the timer. After a pass, the timer stays quiet on that
   seat for a moment, so one bouncy pass is not reported twice. Set it on the
   [Seats](#/help/seats) page. Keep it shorter than the minimum lap time.

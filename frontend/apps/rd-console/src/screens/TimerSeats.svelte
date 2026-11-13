@@ -701,7 +701,7 @@
           {#if draft.lapCooldownS !== undefined}
             <Field
               label="Lap cooldown (seconds)"
-              hint="After a crossing, the timer reports no other on that seat for this long. It swallows the bounce of one pass. Keep it shorter than the event's minimum lap time, which is set on the Event page."
+              hint="After a crossing, the timer reports no other on that seat for this long. It swallows the bounce of one pass. Keep it shorter than the event's minimum lap time, which is set on the event's Details page."
             >
               <Input
                 type="number"

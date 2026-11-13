@@ -3,7 +3,7 @@
  *
  * One pilot times themself on a home track, the way a RaceGOW evening goes:
  *
- *   1. **Event**: set the minimum lap time once, for the whole event.
+ *   1. **Details**: set the minimum lap time once, for the whole event.
  *   2. **Formats**: make a format in the editor.
  *   3. **Phases**: add a phase with that format, and a heat under it that uses the phase's.
  *   4. **Run**: start with the keyboard, fly laps (one crossing comes too soon), stop, save.
@@ -63,7 +63,7 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
   try {
     expect((await page.request.put('/active-event', { data: { id: eventId } })).ok()).toBe(true);
 
-    // ── Event: the minimum lap, set once. It saves when the field is left. ───────────────
+    // ── Details: the minimum lap, set once. It saves when the field is left. ───────────────
     await page.goto('/#/event');
     await expect(page.getByRole('heading', { name: EVENT, level: 1 })).toBeVisible({
       timeout: 15_000

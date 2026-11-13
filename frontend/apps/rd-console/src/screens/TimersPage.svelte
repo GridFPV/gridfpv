@@ -33,8 +33,6 @@
     TimerView
   } from '@gridfpv/types';
   import Page from '../Page.svelte';
-  import PageTabs from '../PageTabs.svelte';
-  import { TIMING_TABS } from '../lib/tabs.js';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import type { Session } from '../lib/session.svelte.js';
   import {
@@ -189,7 +187,6 @@
   {#snippet actions()}
     <Button variant="primary" onclick={openAdd}>+ Add timer</Button>
   {/snippet}
-  <PageTabs tabs={TIMING_TABS} current="timers" label="Seats and timers" />
   <div class="page-inner">
     {#if loadError}
       <Banner tone="danger" title="The timers could not be read.">{loadError}</Banner>

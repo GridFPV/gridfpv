@@ -14,16 +14,16 @@ loud. Lap callouts on the Run page use it.
 
 A pilot is put into a race in one of two ways. A heat can name them directly on the
 [Phases](#/help/phases) page. Or they are put on a class's roster on the
-[Event](#/help/event) page, and a heat is filled from that class.
+[Details](#/help/event) page, and a heat is filled from that class.
 
 ## Classes
 
-The **Classes** tab holds the classes an event can race. The standard FPV classes are
+The **Classes** page, also under Setup, holds the classes an event can race. The standard FPV classes are
 built in and locked. **Add class** makes one of your own; it needs only a name. A built-in
 class you never use can be hidden.
 
 A class in this list is only a name. Which classes an event races, and who is in each, is
-set on the [Event](#/help/event) page.
+set on the [Details](#/help/event) page.
 
 ## Teams
 

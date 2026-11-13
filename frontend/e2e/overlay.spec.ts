@@ -18,7 +18,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Locator, Page } from '@playwright/test';
-import { heatOnTimer } from './nav.js';
+import { heatOnTimer, openEvent } from './nav.js';
 import { expect, test } from './observability.js';
 
 const STAMP = Date.now();
@@ -90,7 +90,7 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
     await expect(page.getByRole('heading', { name: 'Phases', level: 1 })).toBeVisible({
       timeout: 15_000
     });
-    await expect(page.locator('header a.event')).toContainText(EVENT);
+    await expect(openEvent(page)).toContainText(EVENT);
     await page.getByRole('button', { name: '+ Add heat' }).click();
     const form = page.getByRole('form', { name: 'Add a heat' });
     await form.getByLabel('Heat name').fill(HEAT);
@@ -229,7 +229,7 @@ test('the Overlays page lists the overlay with its URL and a live preview', asyn
     await expect(page.getByRole('heading', { name: 'Overlays', level: 1 })).toBeVisible({
       timeout: 15_000
     });
-    await expect(page.locator('header a.event')).toContainText(name);
+    await expect(openEvent(page)).toContainText(name);
 
     const card = page.getByRole('region', { name: 'Race overlay' });
     const origin = new URL(baseURL ?? '').origin;

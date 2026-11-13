@@ -154,23 +154,14 @@ describe('TimersPage', () => {
     expect(within(rh).getByRole('button', { name: /^Remove / })).toBeVisible();
   });
 
-  it('sits beside Seats in one tab row, and is the current tab', async () => {
+  it('has no tab row: Seats is its own page under Setup', async () => {
     const { session } = makeTestSession({ noEnter: true });
     render(TimersPage, { session });
-    const tabs = within(screen.getByRole('navigation', { name: 'Seats and timers' })).getAllByRole(
-      'link'
+    expect(screen.queryByRole('navigation')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Help for Timers' })).toHaveAttribute(
+      'href',
+      '#/help/seats'
     );
-    expect(
-      tabs.map((tab) => [
-        tab.textContent,
-        tab.getAttribute('href'),
-        tab.getAttribute('aria-current')
-      ])
-    ).toEqual([
-      ['Seats', '#/seats', null],
-      ['Timers', '#/timers', 'page']
-    ]);
-    expect(screen.getByRole('heading', { level: 1, name: /Timers/ })).toBeVisible();
   });
 
   it('reads both lists every 2 seconds while open, and stops when it closes', async () => {

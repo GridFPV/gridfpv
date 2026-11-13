@@ -1,7 +1,7 @@
 /**
  * The timer directory through the console UI.
  *
- * A person opens the Timers tab of the Seats page and adds a timer at an address nothing
+ * A person opens the Timers page, under Setup, and adds a timer at an address nothing
  * listens on. The Director tries to reach it by itself and fails, so the timer is listed as not
  * connected, with the Director's own sentence for why. Its seats open from the row and
  * say the same, with the Director's sentence for why the settings could not be read. The
@@ -18,7 +18,7 @@
  * made and puts the active event back.
  */
 import { expect, test } from './observability.js';
-import { gotoEvents, gotoPage, openPage, openTab } from './nav.js';
+import { gotoEvents, gotoPage, openPage } from './nav.js';
 
 const STAMP = Date.now();
 const TIMER = `E2E Gate ${STAMP}`;
@@ -44,9 +44,8 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
     );
 
   try {
-    // ── Seats → the Timers tab beside it ─────────────────────────────────────────────────
-    await gotoPage(page, 'Seats');
-    await openTab(page, 'Seats and timers', 'Timers');
+    // ── Setup → Timers ───────────────────────────────────────────────────────────────────
+    await gotoPage(page, 'Timers');
     await expect(page).toHaveURL(/#\/timers$/);
 
     // ── Found on the network: nothing here ───────────────────────────────────────────────
@@ -123,8 +122,8 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
     await expect(page.getByTestId('settings-problem')).toContainText(`Could not reach ${TIMER}`);
     expect(await page.locator('body').innerText()).not.toContain(timerId);
 
-    // The Timers tab goes back to the list.
-    await openTab(page, 'Seats and timers', 'Timers');
+    // Timers, beside Seats in the row, goes back to the list.
+    await openPage(page, 'Timers');
     await expect(page).toHaveURL(/#\/timers$/);
     await expect(row).toBeVisible();
 
@@ -159,8 +158,7 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
     await expect(heatForm).toBeHidden();
 
     // ── Remove it: one click arms the button, the second one removes ─────────────────────
-    await openPage(page, 'Seats');
-    await openTab(page, 'Seats and timers', 'Timers');
+    await openPage(page, 'Timers');
     await expect(row).toBeVisible();
     await row.getByRole('button', { name: 'Remove' }).click();
     expect(await ours()).toBeDefined();

@@ -16,15 +16,14 @@
  * full-stack dump (browser console, page errors, the Director's server log).
  */
 import { expect, test } from './observability.js';
-import { gotoPage, openTab } from './nav.js';
+import { gotoPage } from './nav.js';
 
 test('Classes page lists the locked built-ins (org badges, not removable) and full CRUD on a Custom class', async ({
   page
 }) => {
   const NAME = `E2E-Class-${Date.now()}`;
-  // ── Pilots → the Classes tab beside it ─────────────────────────────────────────────────
-  await gotoPage(page, 'Pilots');
-  await openTab(page, 'Pilots and classes', 'Classes');
+  // ── Setup → Classes ────────────────────────────────────────────────────────────────────
+  await gotoPage(page, 'Classes');
 
   // ── The built-ins are present, org-badged, locked (no Remove) ──────────────────────────
   const list = page.getByRole('list', { name: 'Class directory' });
@@ -74,8 +73,7 @@ test('RD hides a class on the Classes page; it stays hidden across a reload; unh
   page
 }) => {
   // ── Open the Classes page and hide a built-in (a visibility preference, allowed for built-ins) ─
-  await gotoPage(page, 'Pilots');
-  await openTab(page, 'Pilots and classes', 'Classes');
+  await gotoPage(page, 'Classes');
   const whoop = page
     .getByRole('list', { name: 'Class directory' })
     .getByRole('listitem')

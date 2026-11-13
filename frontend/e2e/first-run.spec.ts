@@ -47,7 +47,7 @@ test('a fresh Director lists no events and the Events page offers the create pat
     timeout: 15_000
   });
   await expect.poll(() => new URL(page.url()).hash).toBe('#/events');
-  await expect(page.locator('header a.event')).toContainText('None open');
+  await expect(page.getByRole('link', { name: 'Event: none open' })).toBeVisible();
 
   // The empty page is a call to action, not an empty list.
   const cta = page.getByRole('button', { name: 'Create your first event' });

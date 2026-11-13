@@ -1,8 +1,8 @@
 # Seats
 
 A seat is one pilot's place on a timer. The Seats page sets the channel each seat listens
-on and the levels that turn a signal into a pass. The **Timers** tab beside it is where
-timers are added and removed.
+on and the levels that turn a signal into a pass. The **Timers** page, next to it under
+Setup, is where timers are added and removed.
 
 With more than one timer, a box at the top picks which timer's seats are shown.
 
@@ -53,11 +53,11 @@ These belong to the timer, whatever is flown on it.
   longer hold stops one pass from being split in two.
 - **Lap cooldown**: after a pass, the timer reports no other pass on that seat for this
   long. It swallows the bounce of one pass. Two seconds is a good start. Keep it shorter
-  than the event's minimum lap time, which is on the [Event](#/help/event) page.
+  than the event's minimum lap time, which is on the [Details](#/help/event) page.
 
 ## Timers
 
-On the **Timers** tab, a timer that Grid finds on the network is listed under **Found on
+On the **Timers** page, a timer that Grid finds on the network is listed under **Found on
 the network**. Press **Add**. A timer can also be added by its address. **Settings** opens
 that timer's seats. If a timer gets a new address from the network, Grid finds it again by
 itself and keeps using it. You do not add it a second time. **Remove** takes a timer out of

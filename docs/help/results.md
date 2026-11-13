@@ -5,7 +5,7 @@ What the event has decided so far.
 ## Class standings
 
 Each class is listed from first to last, with the phase that placed each pilot. A class's
-standings come from the phases picked under **What counts** on the [Event](#/help/event)
+standings come from the phases picked under **What counts** on the [Details](#/help/event)
 page. The first phase decides. A later one is only used for pilots the first one did not
 place.
 

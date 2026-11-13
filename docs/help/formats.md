@@ -47,7 +47,7 @@ last tie-break is the order the pilots came into the heat.
 ## More
 
 **Minimum lap time for this format** is almost always left empty. Then the format uses the
-event's minimum lap time, set on the [Event](#/help/event) page.
+event's minimum lap time, set on the [Details](#/help/event) page.
 
 ## Changing a format later
 

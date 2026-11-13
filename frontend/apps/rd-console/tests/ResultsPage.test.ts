@@ -289,14 +289,14 @@ describe('class standings', () => {
     expectNoRawIds();
   });
 
-  it('says so when no phase counts toward a class, and points at the Event page', async () => {
+  it('says so when no phase counts toward a class, and points at the Details page', async () => {
     await open(
       eventView({
         rosters: [{ class: 'cls-open', pilots: ['p-1a'], counted_phases: [], standings: [] }]
       })
     );
     expect(screen.getByText(/No phase counts toward this class yet\./)).toBeVisible();
-    expect(screen.getByRole('link', { name: 'Event page' })).toHaveAttribute('href', '#/event');
+    expect(screen.getByRole('link', { name: 'Details page' })).toHaveAttribute('href', '#/event');
     expect(screen.queryByRole('table', { name: 'Standings of Open' })).toBeNull();
   });
 });

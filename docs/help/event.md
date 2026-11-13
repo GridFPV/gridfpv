@@ -1,12 +1,13 @@
-# Event
+# Details
 
-An event is one race day. The Event page shows what the open event is, the lap rules its
-races run under, and the classes racing in it.
+An event is one race day. Its Details page shows what the open event is, the lap rules its
+races run under, and the classes racing in it. It is the first page on the Event side.
 
 ## Opening and adding events
 
-The open event's name is at the top right of every page. Click it to reach the **Events**
-page. There you can open another event, add a new one, or delete one. Deleting an event
+The open event's name is at the top right of every page. Click it, or switch to **Setup**
+and open the **Events** page, to change events. There you can open another event, add a
+new one, or delete one. Deleting an event
 removes all of its races for good, so Grid asks you to type its name first.
 
 ## Details

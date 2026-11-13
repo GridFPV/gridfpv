@@ -17,7 +17,7 @@
  * (browser console, page errors, the Director's log).
  */
 import { expect, test } from './observability.js';
-import { gotoEvents } from './nav.js';
+import { gotoEvents, openPage } from './nav.js';
 
 test('create an event, then permanently delete it through the hard-confirm dialog', async ({
   page
@@ -37,10 +37,7 @@ test('create an event, then permanently delete it through the hard-confirm dialo
 
   // The new event's page opened; return to the Events page to see/delete it in the list.
   await expect(page.getByRole('heading', { name, level: 1 })).toBeVisible({ timeout: 15_000 });
-  await page.locator('header a.event').click();
-  await expect(page.getByRole('heading', { name: 'Events', level: 1 })).toBeVisible({
-    timeout: 15_000
-  });
+  await openPage(page, 'Events');
   const row = page.getByRole('button', { name: `Delete ${name}` });
   await expect(row).toBeVisible({ timeout: 15_000 });
 

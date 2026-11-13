@@ -8,8 +8,10 @@
  * API routes** — a path router would collide with the server. The `#` fragment stays entirely
  * client-side and can never reach the Director, so it is collision-proof.
  *
- * The console is one row of pages (see `AppNav.svelte`). Some belong to the open event and
- * some to the whole Director:
+ * The console has two sides (see `AppNav.svelte` and {@link sideOf}). **Event** is the open
+ * event's pages, the ones used all race day. **Setup** is what is kept for every event:
+ * the events themselves, timers, seats, pilots, classes and formats. A switch at the top
+ * moves between the two, and the row under it shows that side's pages.
  *
  *   - `#/` (or empty)   → the open event's page
  *   - `#/events`        → the Events page: open, add or delete an event
@@ -181,6 +183,19 @@ export function formatHash(route: Route): string {
     case 'page':
       return `#/${route.page}`;
   }
+}
+
+/** The two sides of the console. */
+export type Side = 'setup' | 'event';
+
+/**
+ * Which side of the console a route is on. Help and the overlays are on neither: help
+ * stays on whichever side it was opened from.
+ */
+export function sideOf(route: Route): Side | undefined {
+  if (inEvent(route)) return 'event';
+  if (route.kind === 'page' || route.kind === 'seats' || route.kind === 'capture') return 'setup';
+  return undefined;
 }
 
 /** Whether a route shows part of the open event, so it needs one. */

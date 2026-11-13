@@ -581,8 +581,10 @@ A mode chooses what the UI shows. It never changes the model underneath.
 
 **Full mode is built first** (Ryan, 2026-11-12). The other modes come once a single pilot
 can run a home series in full mode. Full mode takes its shape from grid-rh, one page per
-job along the top: Event, Seats (with Timers), Pilots (with Classes), Phases, Formats, Run,
-Marshal, Results, Overlays, Help. What it keeps from grid-rh: lap rules set once on the
+job. The pages are on two sides with a switch between them (Ryan, 2026-11-13). **Setup** is
+what is kept for every event: Events, Timers, Seats, Pilots, Classes, Formats. **Event** is
+the open event: Details, Phases, Run, Marshal, Results, Overlays. Each side remembers its
+page, and Help is on both. What it keeps from grid-rh: lap rules set once on the
 event, seat profiles, the format list, the Run and Marshal pages, tuning on a recording,
 and built-in help. What it leaves behind: teams (individual is the norm), archives, and
 RotorHazard's shape of stages, heats and rounds.
@@ -701,8 +703,10 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
    rebuilt, not before. **Started:** `docs/api.md` lists every route as built, and the
    Protocol doc's banner points at it.
 
-8. Full mode in the console (2026-11-12). **Built**, one page per job under one nav row:
-   - **Event:** details with Edit (`PUT /events/{id}`), the event's lap rules, classes.
+8. Full mode in the console (2026-11-12). **Built**, one page per job, on two sides
+   (Setup and Event) with a switch between them:
+   - **Details** (the event's first page): details with Edit (`PUT /events/{id}`), the
+     event's lap rules, classes.
    - **Seats:** one timer's seats, live signal and timer settings, as a draft that is
      applied and read back. Seat **profiles** (`GET`/`POST /timers/{id}/profiles`, apply
      writes to the timer). **Tune** on a seat records its signal and sets the enter and

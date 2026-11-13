@@ -17,7 +17,7 @@
  */
 import type { Locator, Page } from '@playwright/test';
 import { expect, test } from './observability.js';
-import { gotoEvents, gotoPage, heatOnTimer, openPage } from './nav.js';
+import { gotoEvents, gotoPage, heatOnTimer, openEvent, openPage } from './nav.js';
 
 const STAMP = Date.now();
 const EVENT = `Run Heat Night ${STAMP}`;
@@ -101,7 +101,7 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     await expect(page.getByRole('heading', { name: 'Run', level: 1 })).toBeVisible();
     // The heat is on the timer, with its format and what times it said in words.
     await expect(heatOnTimer(page)).toHaveText(HEAT);
-    await expect(page.locator('header a.event')).toContainText(EVENT);
+    await expect(openEvent(page)).toContainText(EVENT);
     await expect(page.getByTestId('run-rules')).toContainText('First to 3 laps');
     await expect(page.getByTestId('timed-by')).toHaveText('Timed by Bench');
     const status = page.getByTestId('run-status');

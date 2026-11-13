@@ -618,7 +618,7 @@ describe('the lap cooldown', () => {
     expect(putTimerConfigImpl).not.toHaveBeenCalled();
   });
 
-  it('points at the Event page for the minimum lap time', async () => {
+  it("points at the event's Details page for the minimum lap time", async () => {
     open({ getTimerConfigImpl: vi.fn(async () => structuredClone(WITH_COOLDOWN)) });
     await waitFor(() => seatRow('Seat 1'));
     expect(screen.getByText(/Keep it shorter than the event's minimum lap time/)).toBeVisible();

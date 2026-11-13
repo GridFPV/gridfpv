@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * EventPage — the open event: what it is, the lap rules every race in it runs under, and
+   * EventPage — the open event's Details page: what it is, the lap rules every race in it runs under, and
    * the classes racing in it.
    *
    * - **Details**: date, location, organizer and a description. **Edit** changes them and

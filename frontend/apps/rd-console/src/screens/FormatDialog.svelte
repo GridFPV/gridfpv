@@ -230,7 +230,7 @@
       <summary>More</summary>
       <Field
         label="Minimum lap time for this format (seconds)"
-        hint="Leave empty to use the event's, set on the Event page. That is right for almost every format."
+        hint="Leave empty to use the event's, set on its Details page. That is right for almost every format."
       >
         <Input
           type="number"

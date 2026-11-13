@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { render, screen } from '@testing-library/svelte';
 import { waitFor } from '@testing-library/dom';
 import type { Pilot } from '@gridfpv/types';
 import PilotsPage from '../src/screens/PilotsPage.svelte';
@@ -36,22 +36,10 @@ describe('PilotsPage (#74) — hosts the shared PilotManager', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 
-  it('sits beside Classes in one tab row, and is the current tab', () => {
+  it('has its help beside the title, and no tab row: Classes is its own page under Setup', () => {
     const { session } = makeTestSession({ noEnter: true });
     render(PilotsPage, { session });
-    const tabs = within(
-      screen.getByRole('navigation', { name: 'Pilots and classes' })
-    ).getAllByRole('link');
-    expect(
-      tabs.map((tab) => [
-        tab.textContent,
-        tab.getAttribute('href'),
-        tab.getAttribute('aria-current')
-      ])
-    ).toEqual([
-      ['Pilots', '#/pilots', 'page'],
-      ['Classes', '#/classes', null]
-    ]);
+    expect(screen.queryByRole('navigation')).toBeNull();
     expect(screen.getByRole('link', { name: 'Help for Pilots' })).toHaveAttribute(
       'href',
       '#/help/pilots'

@@ -12,6 +12,7 @@ import {
   DEFAULT_ROUTE,
   OVERLAYS,
   inEvent,
+  sideOf,
   isOverlay,
   type AppPage,
   type EventSection,
@@ -305,6 +306,38 @@ describe('the help routes', () => {
     expect(inEvent(page)).toBe(false);
     expect(reconcileRoute(page, false)).toEqual(page);
     expect(resolveInitialRoute('#/help', false)).toEqual({ kind: 'help' });
+  });
+});
+
+describe('sideOf', () => {
+  it("the open event's pages are on the event side", () => {
+    for (const route of [
+      { kind: 'event', section: 'event' },
+      { kind: 'event', section: 'phases' },
+      { kind: 'run' },
+      { kind: 'marshal', race: 'q#1' }
+    ] as Route[]) {
+      expect(sideOf(route)).toBe('event');
+    }
+  });
+
+  it('what is kept for every event is on the setup side', () => {
+    for (const route of [
+      { kind: 'page', page: 'events' },
+      { kind: 'page', page: 'timers' },
+      { kind: 'page', page: 'pilots' },
+      { kind: 'page', page: 'classes' },
+      { kind: 'page', page: 'formats' },
+      { kind: 'seats' },
+      { kind: 'capture', timer: 'gate', seat: '0' }
+    ] as Route[]) {
+      expect(sideOf(route)).toBe('setup');
+    }
+  });
+
+  it('help and the overlays are on neither', () => {
+    expect(sideOf({ kind: 'help' })).toBeUndefined();
+    expect(sideOf({ kind: 'overlay', overlay: 'race' })).toBeUndefined();
   });
 });
 

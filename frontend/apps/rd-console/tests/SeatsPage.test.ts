@@ -67,21 +67,9 @@ afterEach(() => {
 });
 
 describe('SeatsPage', () => {
-  it('sits beside Timers in one tab row, and is the current tab', async () => {
+  it('has no tab row: Timers is its own page under Setup', async () => {
     open([]);
-    const tabs = within(screen.getByRole('navigation', { name: 'Seats and timers' })).getAllByRole(
-      'link'
-    );
-    expect(
-      tabs.map((tab) => [
-        tab.textContent,
-        tab.getAttribute('href'),
-        tab.getAttribute('aria-current')
-      ])
-    ).toEqual([
-      ['Seats', '#/seats', 'page'],
-      ['Timers', '#/timers', null]
-    ]);
+    expect(screen.queryByRole('navigation')).toBeNull();
     expect(screen.getByRole('link', { name: 'Help for Seats' })).toHaveAttribute(
       'href',
       '#/help/seats'

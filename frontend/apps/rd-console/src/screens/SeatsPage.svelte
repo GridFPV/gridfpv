@@ -8,15 +8,13 @@
    * picks between them. Everything under it is {@link TimerSeats}.
    *
    * The timer list (names and status) is read here, again every {@link TIMER_POLL_MS}, and
-   * handed down. Timers are added and removed on the Timers page, one tab over.
+   * handed down. Timers are added and removed on the Timers page.
    */
   import { Banner, Card, Select, StatusPill } from '@gridfpv/components';
   import type { AdapterId, TimerView } from '@gridfpv/types';
   import Page from '../Page.svelte';
-  import PageTabs from '../PageTabs.svelte';
   import { formatHash } from '../lib/route.js';
   import type { Session } from '../lib/session.svelte.js';
-  import { TIMING_TABS } from '../lib/tabs.js';
   import { TIMER_POLL_MS } from '../lib/timers.js';
   import TimerSeats from './TimerSeats.svelte';
 
@@ -66,8 +64,6 @@
   help="seats"
   lede="The channel each seat listens on and the levels that make a crossing. Changes are a draft until they are applied, and the timer's answer is read back."
 >
-  <PageTabs tabs={TIMING_TABS} current="seats" label="Seats and timers" />
-
   {#if listError}
     <Banner tone="danger" title="The timers could not be read.">{listError}</Banner>
   {/if}

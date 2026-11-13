@@ -2,14 +2,12 @@
   /**
    * PilotsPage — the Pilots page: the pilot list, which outlives events.
    *
-   * It hosts the {@link PilotManager} (add, edit, remove). The Classes list sits beside it,
-   * one tab over. Who races in which class at an event is set on the Event page.
+   * It hosts the {@link PilotManager} (add, edit, remove). Who races in which class at an
+   * event is set on that event's Details page.
    */
   import { Button, Card } from '@gridfpv/components';
   import type { Session } from '../lib/session.svelte.js';
   import Page from '../Page.svelte';
-  import PageTabs from '../PageTabs.svelte';
-  import { PEOPLE_TABS } from '../lib/tabs.js';
   import PilotManager from './PilotManager.svelte';
 
   let { session }: { session: Session } = $props();
@@ -30,7 +28,6 @@
   {#snippet actions()}
     <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add pilot</Button>
   {/snippet}
-  <PageTabs tabs={PEOPLE_TABS} current="pilots" label="Pilots and classes" />
   <Card elevation="sm">
     <div class="manager-wrap">
       <PilotManager bind:this={manager} {session} />

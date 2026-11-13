@@ -63,7 +63,7 @@
         <p class="muted">
           {#if roster.counted_phases.length === 0}
             No phase counts toward this class yet. Choose what counts on the
-            <a href={formatHash({ kind: 'event', section: 'event' })}>Event page</a>.
+            <a href={formatHash({ kind: 'event', section: 'event' })}>Details page</a>.
           {:else}
             From {roster.counted_phases.map((id) => names.phase(id)).join(', then ')}.
           {/if}
