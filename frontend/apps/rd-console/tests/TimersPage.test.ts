@@ -310,6 +310,35 @@ describe('TimersPage', () => {
       expect(document.body.textContent).not.toContain(created.id);
     });
 
+    it('a found timer that announces an id of its own is added with it, so it can be followed to a new address', async () => {
+      const announced: DiscoveredTimer = { ...FAR, name: 'oft-a867', id: 'oft-a867' };
+      const createTimerImpl = vi.fn(async () => ({
+        id: 'oft-a867-2khp',
+        name: 'oft-a867',
+        kind: 'Oft' as const,
+        address: announced.address,
+        own_id: 'oft-a867'
+      }));
+      const { session } = makeTestSession({
+        noEnter: true,
+        listTimersImpl: vi.fn(async () => []),
+        listDiscoveredTimersImpl: vi.fn(async () => [announced]),
+        createTimerImpl
+      });
+      render(TimersPage, { session });
+      const row = await waitFor(() =>
+        within(foundList()).getByRole('listitem', { name: 'oft-a867' })
+      );
+      await fireEvent.click(within(row).getByRole('button', { name: 'Add' }));
+      await waitFor(() =>
+        expect(createTimerImpl).toHaveBeenCalledWith(
+          'http://d.local',
+          { name: 'oft-a867', kind: 'Oft', address: '10.0.0.9:7270', own_id: 'oft-a867' },
+          'tok'
+        )
+      );
+    });
+
     it("shows the Director's sentence when the add is refused, and keeps the timer listed", async () => {
       const REFUSED = 'A timer needs a name.';
       const { session } = makeTestSession({

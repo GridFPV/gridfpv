@@ -153,6 +153,11 @@ trace, and adjust the thresholds against it.
 - A laptop, a timer and a plain switch have no DHCP server, so discovery must work on
   link-local addresses. IPv6 link-local is always present; IPv4 link-local is the fallback.
 - A typed address always works as a last resort.
+- **A timer keeps its identity when its address changes** (Ryan, 2026-11-13). An OFT timer
+  has an id of its own. Grid keeps it with the timer, and when the timer shows up on the
+  network at a new address (a new DHCP lease), Grid follows it there. It is still the same
+  timer: its heats, its profiles and its laps are untouched. The id is an OFT thing; a kind
+  of timer without one stays at the address it was given.
 
 ---
 

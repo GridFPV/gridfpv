@@ -220,6 +220,7 @@ async fn a_timer_in_the_directory_is_connected_and_its_crossings_become_laps() {
             name: "Gate".into(),
             kind: TimerKind::Oft,
             address: addr.to_string(),
+            own_id: None,
         })
         .unwrap()
         .id;
@@ -362,6 +363,7 @@ async fn a_timer_that_cannot_be_reached_says_why_and_is_dropped_when_removed() {
             name: "Gate".into(),
             kind: TimerKind::Oft,
             address: addr.to_string(),
+            own_id: None,
         })
         .unwrap();
     let links = gridfpv_app::oft::spawn(registry.clone());

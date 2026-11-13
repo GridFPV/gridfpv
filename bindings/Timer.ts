@@ -15,6 +15,15 @@ id: AdapterId,
  */
 name: string, kind: TimerKind, 
 /**
- * Where it is on the network: `host:port`.
+ * Where it is on the network: `host:port`. For a timer with an id of its own this
+ * follows the timer: when it is found on the network at a new address (a new DHCP
+ * lease, say), the Director moves the record there by itself.
  */
-address: string, };
+address: string, 
+/**
+ * The id the timer gives itself, where its kind has one. An OFT timer does
+ * ("oft-3fa2"): it says it when it connects and when it announces itself on the
+ * network. It is what makes a timer the same timer at a new address. Other kinds
+ * leave it out.
+ */
+own_id?: string, };

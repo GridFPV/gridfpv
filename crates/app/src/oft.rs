@@ -231,12 +231,16 @@ impl Link {
                     };
                     match &message {
                         OftMessage::Hello {
+                            timer: own_id,
                             boot_id,
                             seats,
                             calibrated,
                             capabilities,
                             ..
                         } => {
+                            // The timer's own id is what lets it be followed to a new
+                            // address later.
+                            self.registry.timers().learn_own_id(&self.id, own_id);
                             self.unit = if *calibrated {
                                 SignalUnit::TenthsDbm
                             } else {

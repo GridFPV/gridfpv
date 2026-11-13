@@ -11,6 +11,10 @@ export type DiscoveredTimer = {
  */
 name: string, 
 /**
+ * The id the timer gives itself, when it announces one.
+ */
+id?: string, 
+/**
  * Where it is: `host:port`, ready to be used as a timer's address.
  */
 address: string, 
@@ -19,6 +23,7 @@ address: string,
  */
 seats?: number, 
 /**
- * Whether a timer at this address is already in the directory.
+ * Whether this timer is already in the directory: one with its id, or one at this
+ * address.
  */
 added: boolean, };

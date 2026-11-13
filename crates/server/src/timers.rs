@@ -72,8 +72,17 @@ pub struct Timer {
     /// The name people see ("Gate").
     pub name: String,
     pub kind: TimerKind,
-    /// Where it is on the network: `host:port`.
+    /// Where it is on the network: `host:port`. For a timer with an id of its own this
+    /// follows the timer: when it is found on the network at a new address (a new DHCP
+    /// lease, say), the Director moves the record there by itself.
     pub address: String,
+    /// The id the timer gives itself, where its kind has one. An OFT timer does
+    /// ("oft-3fa2"): it says it when it connects and when it announces itself on the
+    /// network. It is what makes a timer the same timer at a new address. Other kinds
+    /// leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub own_id: Option<String>,
 }
 
 /// What `POST /timers` takes.
@@ -84,6 +93,11 @@ pub struct CreateTimerRequest {
     pub kind: TimerKind,
     /// `host:port`.
     pub address: String,
+    /// The timer's own id, when it is known already (it was found on the network). Left
+    /// out, the Director learns it when the timer first connects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub own_id: Option<String>,
 }
 
 /// A timer's state right now.
@@ -287,13 +301,18 @@ pub enum TimerLive {
 pub struct DiscoveredTimer {
     /// The name the timer gives itself.
     pub name: String,
+    /// The id the timer gives itself, when it announces one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
     /// Where it is: `host:port`, ready to be used as a timer's address.
     pub address: String,
     /// How many seats it says it has on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub seats: Option<u32>,
-    /// Whether a timer at this address is already in the directory.
+    /// Whether this timer is already in the directory: one with its id, or one at this
+    /// address.
     pub added: bool,
 }
 
@@ -456,6 +475,12 @@ impl TimerDirectory {
             name: name.to_owned(),
             kind: request.kind,
             address: address.to_owned(),
+            own_id: request
+                .own_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned),
         };
         inner.timers.insert(id, timer.clone());
         if let Err(e) = save(&inner) {
@@ -496,8 +521,61 @@ impl TimerDirectory {
 impl TimerDirectory {
     /// A timer was found on the network, or what it says about itself changed. `key` is the
     /// full name it advertises under.
+    ///
+    /// A timer in the directory with the same id of its own is the same timer. If it is
+    /// now at another address, its record is moved there, and whatever holds its connection
+    /// is told to connect again. Discovery only reports an address that answered.
     pub fn found(&self, key: &str, timer: DiscoveredTimer) {
-        self.write().discovered.insert(key.to_owned(), timer);
+        let mut inner = self.write();
+        let mut moved = false;
+        if let Some(own_id) = timer.id.as_deref() {
+            let before = inner.timers.clone();
+            for record in inner.timers.values_mut() {
+                if record.own_id.as_deref() == Some(own_id) && record.address != timer.address {
+                    eprintln!(
+                        "Timer {:?} moved from {} to {}.",
+                        record.name, record.address, timer.address
+                    );
+                    record.address = timer.address.clone();
+                    moved = true;
+                }
+            }
+            if moved && let Err(e) = save(&inner) {
+                // Not saved, so not moved: the next announcement tries again.
+                eprintln!("WARNING: a timer's new address could not be saved: {e}");
+                inner.timers = before;
+                moved = false;
+            }
+        }
+        inner.discovered.insert(key.to_owned(), timer);
+        drop(inner);
+        if moved {
+            self.generation.send_modify(|g| *g += 1);
+        }
+    }
+
+    /// Note the id a timer gave for itself when it connected. Kept with its record, so the
+    /// timer can be followed to a new address later. Nothing changes when it is already
+    /// known.
+    pub fn learn_own_id(&self, id: &AdapterId, own_id: &str) {
+        let own_id = own_id.trim();
+        if own_id.is_empty() {
+            return;
+        }
+        let mut inner = self.write();
+        let Some(record) = inner.timers.get_mut(id) else {
+            return;
+        };
+        if record.own_id.as_deref() == Some(own_id) {
+            return;
+        }
+        let before = record.own_id.replace(own_id.to_owned());
+        if let Err(e) = save(&inner) {
+            eprintln!("WARNING: a timer's own id could not be saved: {e}");
+            if let Some(record) = inner.timers.get_mut(id) {
+                record.own_id = before;
+            }
+        }
     }
 
     /// A timer found earlier has gone from the network.
@@ -513,7 +591,9 @@ impl TimerDirectory {
             .discovered
             .values()
             .map(|timer| DiscoveredTimer {
-                added: inner.timers.values().any(|t| t.address == timer.address),
+                added: inner.timers.values().any(|t| {
+                    t.address == timer.address || (timer.id.is_some() && t.own_id == timer.id)
+                }),
                 ..timer.clone()
             })
             .collect();
@@ -828,6 +908,7 @@ mod tests {
             name: name.into(),
             kind: TimerKind::Oft,
             address: address.into(),
+            own_id: None,
         }
     }
 
@@ -1394,10 +1475,85 @@ mod tests {
     }
 
     #[test]
+    fn a_timer_found_at_a_new_address_under_its_own_id_is_the_same_timer() {
+        let directory = TimerDirectory::new(None);
+        let announced = |id: Option<&str>, address: &str| DiscoveredTimer {
+            name: "oft-a867".into(),
+            id: id.map(str::to_owned),
+            address: address.into(),
+            seats: Some(1),
+            added: false,
+        };
+        let gate = directory
+            .create(&request("Gate", "192.168.36.3:7270"))
+            .unwrap();
+        let mut watch = directory.watch();
+        watch.mark_unchanged();
+
+        // Its own id is not known yet (it has never connected), so the timer announced at
+        // another address is not taken for it: nothing is guessed from a name.
+        let key = "oft-a867._oft._tcp.local.";
+        directory.found(key, announced(Some("oft-a867"), "192.168.36.23:7270"));
+        assert_eq!(
+            directory.get(&gate.id).unwrap().address,
+            "192.168.36.3:7270"
+        );
+        assert!(!directory.discovered()[0].added);
+        assert!(!watch.has_changed().unwrap());
+
+        // It connects and says its id. Learning it is not a reason to reconnect.
+        directory.learn_own_id(&gate.id, " oft-a867 ");
+        directory.learn_own_id(&gate.id, "");
+        assert_eq!(
+            directory.get(&gate.id).unwrap().own_id.as_deref(),
+            Some("oft-a867")
+        );
+        assert!(!watch.has_changed().unwrap());
+
+        // Announced again at the new address: the record moves there, it is listed as
+        // added, and whatever holds its connection is told to look again.
+        directory.found(key, announced(Some("oft-a867"), "192.168.36.23:7270"));
+        let moved = directory.get(&gate.id).unwrap();
+        assert_eq!(moved.address, "192.168.36.23:7270");
+        assert_eq!((moved.id, moved.name), (gate.id.clone(), gate.name));
+        assert!(directory.discovered()[0].added);
+        assert!(watch.has_changed().unwrap());
+        watch.mark_unchanged();
+
+        // The same announcement again changes nothing. Nor does one with another id, or
+        // with none.
+        directory.found(key, announced(Some("oft-a867"), "192.168.36.23:7270"));
+        directory.found("other", announced(Some("oft-ffff"), "192.168.36.40:7270"));
+        directory.found("anon", announced(None, "192.168.36.41:7270"));
+        assert_eq!(
+            directory.get(&gate.id).unwrap().address,
+            "192.168.36.23:7270"
+        );
+        assert!(!watch.has_changed().unwrap());
+        assert_eq!(directory.list().len(), 1);
+    }
+
+    #[test]
+    fn a_timer_added_from_the_network_carries_its_own_id_from_the_start() {
+        let directory = TimerDirectory::new(None);
+        let mut request = request("oft-a867", "192.168.36.3:7270");
+        request.own_id = Some("oft-a867".into());
+        let gate = directory.create(&request).unwrap();
+        assert_eq!(gate.own_id.as_deref(), Some("oft-a867"));
+        // A record saved before timers had ids of their own still loads.
+        let old: Timer = serde_json::from_str(
+            r#"{"id":"gate-1","name":"Gate","kind":"Oft","address":"10.0.0.5:7270"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.own_id, None);
+    }
+
+    #[test]
     fn timers_found_on_the_network_are_listed_and_marked_once_added() {
         let directory = TimerDirectory::new(None);
         let found = |name: &str, address: &str| DiscoveredTimer {
             name: name.into(),
+            id: None,
             address: address.into(),
             seats: Some(1),
             added: false,

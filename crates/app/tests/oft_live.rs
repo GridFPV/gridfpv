@@ -179,6 +179,7 @@ async fn races_are_timed_by_the_real_oft_daemon() {
             name: "Gate".into(),
             kind: TimerKind::Oft,
             address: addr.clone(),
+            own_id: None,
         })
         .unwrap()
         .id;

@@ -121,6 +121,7 @@ async fn a_grid_race_is_timed_by_a_stock_rotorhazard() {
             name: "Gate".into(),
             kind: TimerKind::RotorHazard,
             address: addr.clone(),
+            own_id: None,
         })
         .unwrap()
         .id;

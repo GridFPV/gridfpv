@@ -59,5 +59,7 @@ These belong to the timer, whatever is flown on it.
 
 On the **Timers** tab, a timer that Grid finds on the network is listed under **Found on
 the network**. Press **Add**. A timer can also be added by its address. **Settings** opens
-that timer's seats. **Remove** takes a timer out of Grid. Its laps stay in the events it
+that timer's seats. If a timer gets a new address from the network, Grid finds it again by
+itself and keeps using it. You do not add it a second time. **Remove** takes a timer out of
+Grid. Its laps stay in the events it
 timed.

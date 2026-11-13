@@ -8,4 +8,9 @@ export type CreateTimerRequest = { name: string, kind: TimerKind,
 /**
  * `host:port`.
  */
-address: string, };
+address: string, 
+/**
+ * The timer's own id, when it is known already (it was found on the network). Left
+ * out, the Director learns it when the timer first connects.
+ */
+own_id?: string, };

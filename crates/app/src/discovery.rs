@@ -6,7 +6,8 @@
 //! network again every few seconds, so a timer switched on later is seen soon after.
 //!
 //! Finding a timer adds nothing. A person adds it, from that list, and then it is a timer
-//! like any other.
+//! like any other. A timer that is already added is followed: found again at a new address
+//! under the same id of its own, its record moves there (`TimerDirectory::found`).
 //!
 //! mDNS needs the network to allow multicast. Where it does not (some sandboxes, some
 //! locked-down networks) nothing is found, a line goes in the log, and everything else
@@ -32,6 +33,7 @@ const SERVICE: &str = "_oft._tcp.local.";
 /// loopback first, so the entry does not flip between two that both answer.
 fn describe(
     name: &str,
+    id: Option<&str>,
     addresses: impl IntoIterator<Item = Ipv4Addr>,
     port: u16,
     seats: Option<&str>,
@@ -42,6 +44,7 @@ fn describe(
     let ip = addresses.iter().find(|ip| reachable(**ip, port))?;
     Some(DiscoveredTimer {
         name: name.to_owned(),
+        id: id.map(str::to_owned),
         address: format!("{ip}:{port}"),
         seats: seats.and_then(|seats| seats.parse().ok()),
         added: false,
@@ -101,14 +104,17 @@ pub fn spawn(registry: EventRegistry) -> Option<Discovery> {
             loop {
                 match found.recv_deadline(until) {
                     Ok(ServiceEvent::ServiceResolved(service)) => {
-                        let name = service
-                            .txt_properties
-                            .get_property_val_str("id")
+                        // The id a timer gives itself is also the best name for it. One
+                        // that announces no id is named by what it advertises under, and
+                        // cannot be followed to a new address.
+                        let id = service.txt_properties.get_property_val_str("id");
+                        let name = id
                             .unwrap_or_else(|| instance_name(&service.fullname))
                             .to_owned();
                         let seats = service.txt_properties.get_property_val_str("seats");
                         let described = describe(
                             &name,
+                            id,
                             service.get_addresses_v4(),
                             service.port,
                             seats,
@@ -170,8 +176,17 @@ mod tests {
         let lan = Ipv4Addr::new(192, 168, 1, 50);
         let bridge = Ipv4Addr::new(172, 17, 0, 1);
         let all = |_: Ipv4Addr, _: u16| true;
-        let timer = describe("oft-dev", [loopback, lan, bridge], 7270, Some("2"), all).unwrap();
+        let timer = describe(
+            "oft-dev",
+            Some("oft-dev"),
+            [loopback, lan, bridge],
+            7270,
+            Some("2"),
+            all,
+        )
+        .unwrap();
         assert_eq!(timer.name, "oft-dev");
+        assert_eq!(timer.id.as_deref(), Some("oft-dev"));
         // With every address answering: not loopback, and the lowest so it does not flip.
         assert_eq!(timer.address, "172.17.0.1:7270");
         assert_eq!(timer.seats, Some(2));
@@ -180,27 +195,36 @@ mod tests {
         // one that does is taken.
         let only_lan = |ip: Ipv4Addr, _: u16| ip == lan;
         assert_eq!(
-            describe("oft-dev", [loopback, lan, bridge], 7270, None, only_lan)
-                .unwrap()
-                .address,
+            describe(
+                "oft-dev",
+                None,
+                [loopback, lan, bridge],
+                7270,
+                None,
+                only_lan
+            )
+            .unwrap()
+            .address,
             "192.168.1.50:7270"
         );
         // Only loopback answers: still usable from this machine.
         let only_loopback = |ip: Ipv4Addr, _: u16| ip.is_loopback();
         assert_eq!(
-            describe("oft-dev", [loopback, lan], 7270, None, only_loopback)
+            describe("oft-dev", None, [loopback, lan], 7270, None, only_loopback)
                 .unwrap()
                 .address,
             "127.0.0.1:7270"
         );
         // A seat count that is not a number is left out, not guessed.
         assert_eq!(
-            describe("x", [lan], 7270, Some("many"), all).unwrap().seats,
+            describe("x", None, [lan], 7270, Some("many"), all)
+                .unwrap()
+                .seats,
             None
         );
         // Nothing answers, or no address at all: no entry.
-        assert_eq!(describe("x", [lan], 7270, None, |_, _| false), None);
-        assert_eq!(describe("x", [], 7270, None, all), None);
+        assert_eq!(describe("x", None, [lan], 7270, None, |_, _| false), None);
+        assert_eq!(describe("x", None, [], 7270, None, all), None);
     }
 
     #[test]

@@ -149,7 +149,9 @@
       const created = await session.createTimer({
         name: timer.name,
         kind: 'Oft',
-        address: timer.address
+        address: timer.address,
+        // The timer's own id, so it is followed if its address changes later.
+        ...(timer.id === undefined ? {} : { own_id: timer.id })
       });
       if (!created) return;
       toast.success(`Added “${created.name}”.`);

@@ -47,13 +47,20 @@ laptop), writes are open too.
 | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | The pilot list |
 | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | The class list |
 | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | The timer list, each with its live status |
-| `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added |
+| `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added (by its own id, or by its address) |
 | `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer: seats, frequencies, thresholds, the exit hold and the lap cooldown. A write that leaves the lap cooldown out keeps the timer's. A timer that can keep its settings across a restart (`keeps_settings` in its status) is asked to keep them after every write |
 | `GET /timers/{id}/live` | Live signal and levels for tuning (server-sent events) |
 | `GET /timers/{id}/profiles`, `POST /timers/{id}/profiles` | A timer's saved seat profiles and which one is active; save settings as a new one |
 | `PUT /timers/{id}/profiles/{pid}`, `DELETE /timers/{id}/profiles/{pid}` | Rename a profile or replace its settings; remove one. Neither writes to the timer |
 | `POST /timers/{id}/profiles/{pid}/apply` | Write a profile to its timer, with the same readback as a settings write. The profile becomes the active one |
 | `GET /formats`, `POST /formats`, `PUT /formats/{id}`, `DELETE /formats/{id}` | The saved formats. A new Director starts with four |
+
+**A timer is followed to a new address.** An OFT timer has an id of its own. The Director
+keeps it with the timer's record (`own_id`): from `POST /timers` when the timer was added
+from the network, or else from the timer when it first connects. When a timer with that id
+is found on the network at another address, the record's address is changed and the
+connection is made again. The record's `id`, which heats and passes carry, never changes.
+Other kinds of timer have no id of their own and stay at the address they were given.
 
 **Timer settings live on the timer.** The Director keeps no copy. A write is followed by a
 read, and if the timer does not then report what was sent, the answer is `Refused`.

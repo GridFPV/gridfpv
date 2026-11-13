@@ -2,8 +2,9 @@
 //!
 //! [`spawn`] starts a task that watches the timer directory. For every timer in it there is
 //! one task holding that timer's connection, of the kind the timer is. A timer that is
-//! removed, or whose record changes, has its connection dropped; a new one is started for
-//! the new record.
+//! removed, or whose kind or address changes, has its connection dropped; a new one is
+//! started for the new record. A change that does not move the connection (the timer's own
+//! id being learned) leaves it alone.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +30,9 @@ async fn supervise(registry: EventRegistry) {
             .collect();
         // Drop connections to timers that were removed or changed.
         held.retain(|id, (timer, task)| {
-            let keep = wanted.get(id) == Some(timer);
+            let keep = wanted
+                .get(id)
+                .is_some_and(|now| now.kind == timer.kind && now.address == timer.address);
             if !keep {
                 task.abort();
             }
