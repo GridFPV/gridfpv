@@ -1,5 +1,11 @@
 # Mock race days — drive the app, let the test plugin emulate the races
 
+> **Under review (2026-11-09, audited).** The autopilot, the scenarios and the restart commands
+> stand. "Run a race day" is old: its steps follow Stage, Start, finish, advance, and the new
+> flow is start, stop, then save or discard ([Grid primitives](primitives.md), section 5.1). The
+> harness is RotorHazard-only, and that adapter is due a rewrite. "Node" here means a
+> RotorHazard node; the Grid word is "seat".
+
 A hands-on harness for exercising GridFPV end-to-end without hardware: **you** drive the
 Director (build an event, seat pilots, Stage → Start heats, marshal, advance), and the
 `gridfpv_mock` **test plugin** emulates each race over the wire — realistic per-pilot laps

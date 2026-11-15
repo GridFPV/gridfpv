@@ -1,9 +1,8 @@
 //! Diagnostic output for adapters, routed to whatever the host process logs to (#380).
 //!
 //! Adapters sit **below** `gridfpv-app`, so they cannot call its logging module directly. But
-//! their diagnostics are exactly the ones an operator needs in the field — the pass-source
-//! selection line, the "plugin advertised `live_pass` but never delivered lap N" fallback
-//! warning, and the per-heat pass summary (#389). Writing those to `stderr` loses them on the
+//! their diagnostics are exactly the ones an operator needs in the field (which source a pass
+//! came from, a fallback that kicked in). Writing those to `stderr` loses them on the
 //! shipped Windows desktop build, which is GUI-subsystem and therefore has no stderr at all —
 //! the precise failure #380 exists to fix.
 //!

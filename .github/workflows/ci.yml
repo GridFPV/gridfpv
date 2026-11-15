@@ -1,9 +1,7 @@
 name: CI
 
-# Core, deterministic checks — the same suite local dev runs, now including the
-# frontend + contract suite (which the GitLab pipeline never ran). The heavier
-# browser e2e and the dockerized-RotorHazard live suite are gated separately
-# (see heavy.yml) per the runner-cost policy.
+# Core, deterministic checks — the same suite local dev runs, including the
+# frontend + contract suite and the browser e2e.
 on:
   push:
     branches: [main, devel, "milestone/**"]
@@ -83,9 +81,8 @@ jobs:
   e2e:
     # The browser click-through against a REAL Director. Split from the job above because it needs
     # Chromium's system libraries, and kept in CI rather than release-gated because the bugs it
-    # catches — routing, screen lifecycle, subscription teardown across navigation — are shell-level
-    # and have historically reached real hardware before anyone noticed. The dockerized-RotorHazard
-    # live matrix stays separate; that one genuinely needs containers and minutes.
+    # catches — routing and screen lifecycle across navigation — are shell-level and have
+    # historically reached real hardware before anyone noticed.
     #
     # Locally the same specs run via `cargo xtask e2e`, which borrows Microsoft's Playwright image
     # so a build box needs no system packages. Same specs, same config, both places.

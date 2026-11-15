@@ -28,7 +28,7 @@ mod memory;
 mod sqlite;
 
 pub use memory::InMemoryLog;
-pub use sqlite::SqliteLog;
+pub use sqlite::{SqliteLog, snapshot};
 
 use gridfpv_events::Event;
 

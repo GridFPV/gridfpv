@@ -1,756 +1,1228 @@
-//! The RD control path (protocol.html §5): the privileged commands the Race Director
-//! issues, and the acknowledgements they get back.
+//! The competition over HTTP: commands in, facts logged, a snapshot and a change feed out.
 //!
-//! Control is **authenticated and Director-local** (§5): race control, marshaling, and
-//! scheduling require the RD's authenticated role and run only against the Director —
-//! the Cloud exposes no control path at all. This module is the *command vocabulary*;
-//! the auth that gates it (#44) and the axum endpoints that carry it (#45) are later
-//! issues.
+//! The rules live in `gridfpv-engine` and are pure. This module is the plumbing around
+//! them, and it keeps to one pattern:
 //!
-//! Every [`Command`] maps to an action the engine/marshaling layer already models — a
-//! heat-loop transition ([`HeatTransition`](gridfpv_events::HeatTransition)), a
-//! schedule ([`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled)), a
-//! registration binding, or one of the five marshaling adjudications. A command is a
-//! *request* to append the corresponding event(s); the engine validates legality
-//! against current state and answers with a [`CommandAck`].
+//! 1. Lock the event's log, then its folded [`EventState`].
+//! 2. **Catch up**: apply any log entries the state has not seen, then append the facts
+//!    that time alone has made true (a countdown reaching its tone, a timed race running
+//!    out), each stamped with the moment it fell due.
+//! 3. Do the one thing asked: read a snapshot, or check a command and append its facts.
+//! 4. Tell the change feed the log grew.
 //!
-//! > **Note (scope/addressing deferred):** commands address heats and competitors by
-//! > the ids the event model already uses ([`HeatId`](gridfpv_events::HeatId),
-//! > [`CompetitorRef`](gridfpv_events::CompetitorRef),
-//! > [`LogRef`](gridfpv_events::LogRef)). The richer scope grammar and any
-//! > event/class addressing on commands (protocol.html §9.6) are refined alongside the
-//! > control endpoints (#45) and the doc-reconciliation pass.
+//! Every read and every write goes through [`with_event`], so nothing ever sees a state
+//! that is behind its log or behind the clock.
+//!
+//! | route | what |
+//! |-------|------|
+//! | `GET /events/{id}/state` | the [`EventView`] snapshot |
+//! | `POST /events/{id}/commands` | one [`Command`]; refused with `Refused` (409) and a reason |
+//! | `POST /events/{id}/presets/bracket` | generate a bracket's phases |
+//! | `POST /events/{id}/presets/mains` | generate stacked mains |
+//! | `POST /events/{id}/passes` | a gate crossing from outside |
+//! | `GET /events/{id}/changes` | server-sent `cursor` events |
+//! | `GET /events/{id}/signal?race=…` | a race's logged signal, for the marshal |
+//!
+//! **The change feed** carries no data, only the log cursor. A console that hears a new
+//! cursor reads the snapshot again. That is simple and cannot drift; the snapshot is small
+//! at club scale. Deltas can come later without changing this contract.
 
+use std::convert::Infallible;
+use std::time::Duration;
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use futures_util::stream::{self, Stream};
+use gridfpv_engine::presets::{self, Bracket, Elimination, Mains};
+use gridfpv_engine::state::EventState;
 use gridfpv_events::{
-    AdapterId, ClassId, CompetitorRef, HeatId, LayoutId, LogRef, Penalty, ProtestOutcome, RoundId,
-    SourceTime,
+    AdapterId, Command, Event, FieldSlice, Format, GateIndex, Pass, PhaseDef, PhaseId, RaceId,
+    SeatRef, SeatSource, SignalChunk, SignalThresholds, SourceTime,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use ts_rs::TS;
 
-use crate::error::ProtocolError;
+use crate::app::now_micros;
+use crate::auth::ControlAuth;
+use crate::error::{ErrorCode, ProtocolError};
+use crate::events::{EventId, EventRegistry, EventSource};
+use crate::view::EventView;
 
-/// A privileged RD control command (protocol.html §5). Externally tagged like the
-/// event model, so it maps to a TS discriminated union.
-///
-/// The variants fall into four groups:
-///
-/// - **Heat-loop transitions** — [`Stage`](Command::Stage), [`Start`](Command::Start),
-///   [`Finalize`](Command::Finalize), [`Advance`](Command::Advance), the off-ramps
-///   [`Revert`](Command::Revert), [`Abort`](Command::Abort),
-///   [`Restart`](Command::Restart), [`Discard`](Command::Discard), and the runtime-clock
-///   **overrides** [`SkipCountdown`](Command::SkipCountdown) / [`ForceEnd`](Command::ForceEnd).
-///   Each requests the matching [`HeatTransition`](gridfpv_events::HeatTransition); the engine
-///   validates it against the heat's current state (race-engine.html §2). The ordinary
-///   `Armed → Running` and `Running → Unofficial` transitions are appended by the Director's
-///   **runtime clock** (heat-lifecycle Slice 2), not by a command — `SkipCountdown`/`ForceEnd`
-///   are the manual overrides for when the clock must be bypassed.
-/// - **Scheduling** — [`ScheduleHeat`](Command::ScheduleHeat) creates a heat with its
-///   lineup ([`Event::HeatScheduled`](gridfpv_events::Event::HeatScheduled)).
-/// - **Registration** — [`Register`](Command::Register) binds a source-local
-///   competitor to a pilot (the binding the adapter never does itself; Architecture §9).
-/// - **Marshaling adjudications** — the corrections
-///   ([`VoidDetection`](Command::VoidDetection), [`InsertLap`](Command::InsertLap),
-///   [`AdjustLap`](Command::AdjustLap), [`SplitLap`](Command::SplitLap),
-///   [`VoidHeat`](Command::VoidHeat), [`ApplyPenalty`](Command::ApplyPenalty),
-///   [`ReverseRuling`](Command::ReverseRuling)), each requesting the corresponding
-///   marshaling event the projection/scorer folds in (never a mutation; architecture.html §3).
+/// One event, locked and caught up, for the length of one request.
+pub struct Session<'a> {
+    log: &'a mut (dyn EventSource + Send),
+    state: &'a mut EventState,
+    changed: &'a watch::Sender<u64>,
+    race_on: &'a std::sync::atomic::AtomicBool,
+    race_now: &'a std::sync::Mutex<Option<crate::events::RaceNow>>,
+    registry: &'a EventRegistry,
+    /// The Director's clock for this request, in epoch microseconds.
+    pub now: i64,
+}
+
+fn internal(what: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::new(ErrorCode::Internal, what.to_string())
+}
+
+fn unknown_event(id: &EventId) -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::UnknownScope,
+        format!("no event with id {:?}", id.0),
+    )
+}
+
+/// Lock an event, catch its state up to its log and to the clock, and run `f` on it.
+pub fn with_event<R>(
+    registry: &EventRegistry,
+    id: &EventId,
+    f: impl FnOnce(&mut Session<'_>) -> Result<R, ProtocolError>,
+) -> Result<R, ProtocolError> {
+    let log = registry.log(id).ok_or_else(|| unknown_event(id))?;
+    let live = registry.live(id).ok_or_else(|| unknown_event(id))?;
+    // Always the log first, then the state.
+    let mut log = log
+        .lock()
+        .map_err(|_| internal("the event log is poisoned"))?;
+    let mut state = live
+        .state
+        .lock()
+        .map_err(|_| internal("the event state is poisoned"))?;
+    let mut session = Session {
+        log: &mut *log,
+        state: &mut state,
+        changed: &live.changed,
+        race_on: &live.race_on,
+        race_now: &live.race_now,
+        registry,
+        now: now_micros(),
+    };
+    session.catch_up()?;
+    f(&mut session)
+}
+
+impl Session<'_> {
+    /// The event's state, caught up.
+    pub fn state(&self) -> &EventState {
+        self.state
+    }
+
+    fn catch_up(&mut self) -> Result<(), ProtocolError> {
+        for stored in self.log.read_from(self.state.applied).map_err(internal)? {
+            self.state
+                .apply(stored.offset, stored.recorded_at, &stored.event);
+        }
+        for (at, fact) in self.state.due(self.now) {
+            self.append(at, fact)?;
+        }
+        self.note_race_on();
+        Ok(())
+    }
+
+    fn note_race_on(&self) {
+        use gridfpv_engine::race::RaceState;
+        let now = self
+            .state
+            .races
+            .undecided()
+            .filter(|race| matches!(race.state, RaceState::Staging | RaceState::Running))
+            .and_then(|race| {
+                let mut timers: Vec<AdapterId> = race
+                    .setup
+                    .lineup
+                    .iter()
+                    .map(|entry| entry.adapter.clone())
+                    .collect();
+                timers.sort();
+                timers.dedup();
+                Some(crate::events::RaceNow {
+                    race: race.setup.race.clone(),
+                    starts_at: race.started_at.or(race.tone_at)?,
+                    timers,
+                })
+            });
+        self.race_on
+            .store(now.is_some(), std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut held) = self.race_now.lock() {
+            *held = now;
+        }
+    }
+
+    fn append(&mut self, at: i64, event: Event) -> Result<(), ProtocolError> {
+        self.append_quietly(at, event)?;
+        self.changed.send_replace(self.state.applied);
+        Ok(())
+    }
+
+    /// Append without waking the change feed.
+    fn append_quietly(&mut self, at: i64, event: Event) -> Result<(), ProtocolError> {
+        let offset = self.log.append(event.clone(), Some(at)).map_err(internal)?;
+        self.state.apply(offset, Some(at), &event);
+        self.note_race_on();
+        Ok(())
+    }
+
+    /// Check commands in order, each against the state the ones before it would leave, and
+    /// append the facts of all of them — or none, if any is refused.
+    pub fn commands(&mut self, commands: Vec<Command>) -> Result<(), ProtocolError> {
+        let mut scratch;
+        let mut facts = Vec::new();
+        // One command needs no scratch copy of the state.
+        if let [only] = &commands[..] {
+            facts = self
+                .state
+                .check(only.clone(), self.now)
+                .map_err(|refusal| self.refused(self.state, refusal))?;
+        } else {
+            scratch = self.state.clone();
+            for command in commands {
+                let checked = scratch
+                    .check(command, self.now)
+                    .map_err(|refusal| self.refused(&scratch, refusal))?;
+                for fact in checked {
+                    scratch.apply(scratch.applied, Some(self.now), &fact);
+                    facts.push(fact);
+                }
+            }
+        }
+        for fact in facts {
+            self.append(self.now, fact)?;
+        }
+        Ok(())
+    }
+
+    /// Log an observation from a timer. A pass is stamped with the race it belongs to: the
+    /// one running now, or one stopped a moment ago that the crossing was part of (see
+    /// `EventState::race_for_pass`). Otherwise it belongs to no race.
+    pub fn observe(&mut self, mut event: Event) -> Result<(), ProtocolError> {
+        if let Event::Pass(pass) = &mut event {
+            pass.race = self.state.race_for_pass(pass, self.now);
+        }
+        // Signal is logged for the marshal and shown on no live screen, so it does not
+        // wake the change feed: a console must not reload once a second for it.
+        if matches!(event, Event::SignalChunk(_)) {
+            return self.append_quietly(self.now, event);
+        }
+        self.append(self.now, event)
+    }
+
+    fn outcome(&self) -> CommandOutcome {
+        CommandOutcome {
+            cursor: self.state.applied,
+        }
+    }
+}
+
+impl Session<'_> {
+    /// A refusal as the sentence a director reads. The engine names things by id, because
+    /// ids are all it has. A raw id must never reach a screen, so each quoted id is swapped
+    /// here for its name: a race for "race N of ‹heat›", a phase for its label, a pilot for
+    /// their callsign. `state` is the state the command was checked against.
+    fn refused(&self, state: &EventState, refusal: impl std::fmt::Display) -> ProtocolError {
+        let mut message = refusal.to_string();
+        // An id appears as the engine's debug form, `RaceId("…")`, or as a bare `"…"`.
+        let swap = |message: String, kind: &str, id: &str, name: &str| {
+            message
+                .replace(&format!("{kind}({id:?})"), name)
+                .replace(&format!("{id:?}"), name)
+        };
+        let label = |phase: &PhaseId| {
+            state.tree.get(phase).map_or_else(
+                || "a phase that no longer exists".to_owned(),
+                |def| def.label.clone(),
+            )
+        };
+        // Races first: a race id contains its heat's id.
+        for race in state.races.iter() {
+            let number = state
+                .races
+                .of_heat(&race.setup.heat)
+                .position(|other| other.setup.race == race.setup.race)
+                .map_or(1, |index| index + 1);
+            let name = format!("{number} of {}", label(&race.setup.heat));
+            message = swap(message, "RaceId", &race.setup.race.0, &name);
+        }
+        // Longest ids first, so a phase is never swapped inside a longer id that holds it.
+        let mut phases: Vec<&PhaseDef> = state.tree.iter().collect();
+        phases.sort_by_key(|def| std::cmp::Reverse(def.id.0.len()));
+        for def in phases {
+            message = swap(message, "PhaseId", &def.id.0, &def.label);
+        }
+        for pilot in self.registry.pilots().list() {
+            message = swap(message, "PilotId", &pilot.id.0, &pilot.callsign);
+        }
+        ProtocolError::new(ErrorCode::Refused, message)
+    }
+}
+
+/// What a write answers: where the log is now. The snapshot at this cursor (or later)
+/// shows the change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct CommandOutcome {
+    #[ts(type = "number")]
+    pub cursor: u64,
+}
+
+/// `GET /events/{event_id}/state` — the competition snapshot. An open read.
+pub async fn get_state(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Json<EventView>, ProtocolError> {
+    with_event(&registry, &event_id, |session| {
+        Ok(Json(EventView::build(session.state(), session.now)))
+    })
+}
+
+/// `POST /events/{event_id}/commands` — one [`Command`], RD-gated. Allowed: its facts are
+/// logged and the new cursor returned. Not allowed: `Refused` (409) with the reason, and
+/// nothing is logged.
+pub async fn post_command(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(command): Json<Command>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    with_event(&registry, &event_id, |session| {
+        session.commands(vec![command])?;
+        Ok(Json(session.outcome()))
+    })
+}
+
+/// A seat every heat of a generated bracket is flown on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PresetSeat {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+}
+
+/// Single or double elimination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum EliminationKind {
+    Single,
+    Double,
+}
+
+impl From<EliminationKind> for Elimination {
+    fn from(kind: EliminationKind) -> Self {
+        match kind {
+            EliminationKind::Single => Elimination::Single,
+            EliminationKind::Double => Elimination::Double,
+        }
+    }
+}
+
+/// What `POST /events/{id}/presets/bracket` takes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
-pub enum Command {
-    // --- Heat-loop transitions (race-engine.html §2) ---
-    /// Begin staging the heat — countdown starts, frequencies are assigned.
-    Stage {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Start the heat — arm it (open the gate to detections) and run the start procedure. The
-    /// Director's runtime clock then auto-advances the heat to `Running` after the logged start
-    /// delay. (Renamed from the former `Arm` in the heat-lifecycle command collapse, Slice 2.)
-    Start {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// **Override:** force the heat `Armed → Running` immediately, skipping the start countdown —
-    /// the race-day escape hatch when the runtime's auto-start can't be trusted. Records the same
-    /// `Running` transition the auto-start would (Slice 2).
-    SkipCountdown {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// **Override:** force the heat `Running → Unofficial` now — call the race when the runtime's
-    /// completion clock must be bypassed. Records the same `Finished` transition the auto-complete
-    /// would (Slice 2).
-    ForceEnd {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Finalize the heat — lock in the result (Unofficial → Final).
-    Finalize {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Advance the finalized heat — hand its result to the format generator.
-    Advance {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Revert a finalized heat — re-open its result for correction (Final → Unofficial).
-    Revert {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Abort the heat — abandon it before finalizing (an off-ramp).
-    Abort {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Restart a committed heat — reset to `Scheduled` for a re-run (the RD re-Stages).
-    Restart {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-    /// Discard a finalized heat — drop its result for a re-run.
-    Discard {
-        /// The heat to transition.
-        heat: HeatId,
-    },
-
-    // --- Live-control selection ---
-    /// **Manually select the current heat** in Live control (the RD's explicit "show/control
-    /// *this* heat"). Validates the heat exists in the event and appends an
-    /// [`Event::CurrentHeatSelected`](gridfpv_events::Event::CurrentHeatSelected) — the live
-    /// `current_heat` derivation then follows the RD's choice. Not a heat-loop transition: it
-    /// only moves Live control's focus (the sheet/clock/leaderboard + the transition buttons
-    /// target the chosen heat); it does not change the heat's state.
-    SetCurrentHeat {
-        /// The heat to bring into focus — one already scheduled in the event.
-        heat: HeatId,
-    },
-
-    // --- Scheduling ---
-    /// Create a heat with its lineup (`Event::HeatScheduled`). Additively carries the
-    /// class/round the heat runs in, the per-pilot frequency assignment, and an optional
-    /// human `label`; all are optional and default-absent, so the free-text NewHeat path
-    /// (which assigns none of them) is unchanged on the wire.
-    ScheduleHeat {
-        /// The id the new heat will carry.
-        heat: HeatId,
-        /// The competitors in the heat, in lineup order.
-        lineup: Vec<CompetitorRef>,
-        /// The class this heat runs in, when the scheduler assigns one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        class: Option<ClassId>,
-        /// The round within the class's schedule, when the scheduler assigns one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        round: Option<RoundId>,
-        /// Per-pilot frequency assignment in raw MHz (e.g. `5800`); empty when none is
-        /// assigned (a sim race, or the free-text path).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        frequencies: Vec<(CompetitorRef, u16)>,
-        /// An **optional human label** for a manually-built heat. When set it becomes the
-        /// heat's display name everywhere (overriding the derived "‹Round› Heat N" / tier
-        /// convention); `None` (the default / the generator path) keeps the auto-name.
-        /// Threaded straight into the emitted [`Event::HeatScheduled`].
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        label: Option<String>,
-    },
-
-    /// **Bind a heat to a channel layout** (#117 S3) — *"this heat flies the Whoop layout"*.
-    ///
-    /// A layout is a complete `node → channel` tuning of the event's timer; binding one re-tunes
-    /// the heat, so the command re-emits the heat's [`Event::HeatScheduled`] with the channels the
-    /// layout gives each seat, alongside the [`Event::HeatLayoutSet`] that records the choice.
-    ///
-    /// Refused unless the heat is still **`Scheduled`**: past that the heat is staged, on the timer
-    /// or raced, and *a heat that has raced keeps the channels it raced on*. Also refused when the
-    /// layout is not one the heat's round names — the round is where the RD decided which layouts
-    /// this phase of the event may use.
-    ///
-    /// `layout: None` clears the bind, returning the heat to its round's default.
-    SetHeatLayout {
-        /// The heat to bind — one already scheduled in this event, still `Scheduled`.
-        heat: HeatId,
-        /// The layout it flies, or `None` to clear the bind.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        layout: Option<LayoutId>,
-    },
-
-    /// **Set a heat's pilots and their channels by hand** (#117 S3) — the RD's escape hatch for
-    /// when the automatic answer is wrong.
-    ///
-    /// Records an [`Event::HeatSeatingOverridden`] and re-emits the heat's schedule from it. The
-    /// override is **sticky**: a round re-fill and a round edit's re-materialization both re-apply
-    /// it, because an override silently lost when the round is refilled is worse than no override
-    /// at all (#419).
-    ///
-    /// Refused unless the heat is still **`Scheduled`**, and refused when the lineup will not fit
-    /// the timer's *enabled* node set or repeats a pilot. An **empty `lineup` clears** the
-    /// override and returns the heat to its round's plan.
-    OverrideHeatSeating {
-        /// The heat to re-seat — one already scheduled in this event, still `Scheduled`.
-        heat: HeatId,
-        /// The RD's lineup, in seat order. **Empty clears the override.**
-        lineup: Vec<CompetitorRef>,
-        /// The RD's per-pilot channels in raw MHz. Omit for *"my pilots, the layout's channels"* —
-        /// the lineup is overridden and the channels still come from the heat's layout, so
-        /// swapping two pilots does not mean retyping four frequencies.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        frequencies: Vec<(CompetitorRef, u16)>,
-    },
-
-    /// **Fill a round** (race redesign Slice 3a) — the round-driven engine's one command.
-    /// Build the round's format generator from the eligible classes' membership (the field)
-    /// and the round's completed heats read back from the log, then schedule the **next**
-    /// heat the generator emits — a [`Event::HeatScheduled`] tagged with `round` (and
-    /// `class` when the round is single-class), lineup from the generator's plan.
-    ///
-    /// The advance closes through the log: once the scheduled heat is driven to `Score`, the
-    /// next `FillRound` rebuilds the generator, sees the new completed heat, and emits the
-    /// following one — including the qualifying→bracket carry when the round seeds
-    /// [`FromRanking`](crate::events::SeedingRule::FromRanking). A round whose generator has
-    /// no more heats is **complete** — a successful ack, not an error.
-    FillRound {
-        /// The round to fill — one of the event's [`rounds`](crate::events::EventMeta::rounds).
-        round: RoundId,
-        /// How much of the round to fill in this one command (#216):
-        ///
-        /// - [`FillMode::Next`] (the default — wire-compatible with the original `{ round }`
-        ///   shape) schedules the **single** next heat the generator emits.
-        /// - [`FillMode::All`] loops the generator — append a heat, re-fold the round's state,
-        ///   draw the next — until the round reports **complete** (no more heats producible now),
-        ///   filling a whole deterministic round in one round-trip.
-        ///
-        /// Either way an already-complete round (or one whose outstanding heat must be scored
-        /// first) appends nothing and acks a typed ok — `All` is just `Next` iterated to that
-        /// terminal state, so it stays idempotent on re-run.
-        #[serde(default)]
-        mode: FillMode,
-    },
-
-    // --- Registration ---
-    /// Bind a source-local competitor to a GridFPV pilot (Architecture §9) — the
-    /// registration the adapter never performs. The pilot handle is the event-scoped
-    /// [`PilotId`](crate::scope::PilotId).
-    Register {
-        /// The timing source the competitor belongs to.
-        adapter: AdapterId,
-        /// The source-local competitor handle being bound.
-        competitor: CompetitorRef,
-        /// The event-scoped pilot the competitor is bound to.
-        pilot: crate::scope::PilotId,
-    },
-
-    // --- Marshaling adjudications (architecture.html §3, the five corrections) ---
-    /// Void a previously-detected pass, referenced by its log offset
-    /// (`Event::DetectionVoided`).
-    VoidDetection {
-        /// The log offset of the pass (or ruling) to void.
-        target: LogRef,
-    },
-    /// Insert a lap-gate pass the timer missed (`Event::LapInserted`).
-    InsertLap {
-        /// The timing source to attribute the inserted pass to.
-        adapter: AdapterId,
-        /// The competitor the inserted lap belongs to.
-        competitor: CompetitorRef,
-        /// When the inserted crossing happened, on the source clock.
-        at: SourceTime,
-        /// The heat the inserted lap belongs to, so the scorer routes it by tag even when a
-        /// different heat is live (marshaling a finished heat mid-event). `None` only from a
-        /// legacy client — that insertion attributes positionally, the old behavior.
-        #[serde(default)]
-        #[ts(optional)]
-        heat: Option<HeatId>,
-    },
-    /// Re-time a previously-detected pass (`Event::LapAdjusted`).
-    AdjustLap {
-        /// The log offset of the pass to re-time.
-        target: LogRef,
-        /// The corrected crossing time, on the source clock.
-        at: SourceTime,
-    },
-    /// **Split** one over-long lap (the lap *ending* at `target`) into two by inserting a
-    /// synthetic mid-lap pass at `at` (`Event::LapSplit`) — the FPVTrackside split action for
-    /// a missed mid-lap detection. A distinct command from `InsertLap` so the audit names it.
-    SplitLap {
-        /// The log offset of the pass that ends the over-long lap to split.
-        target: LogRef,
-        /// When the inserted mid-lap crossing happened, on the source clock.
-        at: SourceTime,
-    },
-    /// Void an entire heat (`Event::HeatVoided`).
-    VoidHeat {
-        /// The heat to void.
-        heat: HeatId,
-    },
-    /// Apply a penalty to a competitor in a heat (`Event::PenaltyApplied`). Covers the full
-    /// penalty set: a (reversible) DQ with an optional reason, added time, and the standings-only
-    /// points adjustments (`PointsDeducted` / `PointsAdded`). `DeductPoints` is sugar over this for
-    /// the points case; either path appends the same `PenaltyApplied`.
-    ApplyPenalty {
-        /// The heat the penalty applies in.
-        heat: HeatId,
-        /// The competitor penalized.
-        competitor: CompetitorRef,
-        /// The penalty applied.
-        penalty: Penalty,
-    },
-    /// **Deduct standings points** from a competitor in a heat (marshaling Slice 6) — sugar over
-    /// [`ApplyPenalty`](Command::ApplyPenalty) with a
-    /// [`Penalty::PointsDeducted`](gridfpv_events::Penalty::PointsDeducted), so the console can offer
-    /// a dedicated points control. Points affect the **season / event standings**, not the per-heat
-    /// lap result.
-    DeductPoints {
-        /// The heat the deduction is recorded against.
-        heat: HeatId,
-        /// The competitor losing points.
-        competitor: CompetitorRef,
-        /// How many standings points to deduct.
-        points: u32,
-    },
-    /// **Throw out a single valid lap** from a competitor's scored count (`Event::LapThrownOut`),
-    /// referenced by the lap's **end-pass** log offset. The lap stays real in the lap list/audit;
-    /// it is only excluded from scoring. Distinct from `VoidDetection` (which removes the pass).
-    ThrowOutLap {
-        /// The log offset of the pass that *ends* the lap to throw out.
-        target: LogRef,
-    },
-    /// **File a protest** against a heat result (`Event::ProtestFiled`) — the append-only filing
-    /// half of the protest pair (resolved later by `ResolveProtest`). No actor (no-login; filed at
-    /// the RD console on a pilot's behalf).
-    FileProtest {
-        /// The heat the protest concerns.
-        heat: HeatId,
-        /// The competitor the protest is about.
-        competitor: CompetitorRef,
-        /// A free-text note describing the protest.
-        note: String,
-    },
-    /// **Resolve a filed protest** (`Event::ProtestResolved`), referenced by the
-    /// `ProtestFiled`'s log offset, recording the `outcome`.
-    ResolveProtest {
-        /// The log offset of the `ProtestFiled` this resolves.
-        target: LogRef,
-        /// How the protest was resolved.
-        outcome: ProtestOutcome,
-    },
-    /// **Reverse a prior ruling** (`Event::RulingReversed`), referenced by its log offset.
-    /// Generalized (Slice 6) to undo **any** ruling — a [`PenaltyApplied`](gridfpv_events::Event::PenaltyApplied)
-    /// (DQ / time / points), a [`LapThrownOut`](gridfpv_events::Event::LapThrownOut), a
-    /// [`ProtestResolved`](gridfpv_events::Event::ProtestResolved), or a
-    /// [`HeatVoided`](gridfpv_events::Event::HeatVoided). A distinct command from `VoidDetection` so
-    /// the audit reads "DQ reversed" / "throw-out reversed".
-    ReverseRuling {
-        /// The log offset of the ruling to reverse.
-        target: LogRef,
-    },
-}
-
-/// How much of a round a [`Command::FillRound`] fills (#216). Externally tagged like the rest
-/// of the control vocabulary, so it maps to a TS string-union (`"Next" | "All"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum FillMode {
-    /// Schedule the **single** next heat the round's generator emits — the original
-    /// (interactive) fill, and the building block `All` iterates. The default, so an older
-    /// `FillRound { round }` payload (no `mode`) still deserializes to it.
-    #[default]
-    Next,
-    /// Fill the **whole** round: loop the generator (append a heat → re-fold the round's
-    /// state → draw the next) until it reports complete — a deterministic round drawn in one
-    /// command. Idempotent on a round already at its terminal state (appends nothing).
-    All,
-}
-
-/// Why a [`Command::FillRound`] stopped drawing heats (#395).
-///
-/// Every value here is a **success**; they differ in what the RD has to do next, which is
-/// exactly what `ok: true` alone could not say. Externally tagged, so it maps to a TS
-/// string-union (`"SingleStep" | "Complete" | "AwaitingResult" | "Blocked"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum FillStop {
-    /// [`FillMode::Next`] drew its **one** heat and stopped there — the mode's contract, not a
-    /// limit reached. Always paired with exactly one scheduled heat, and the round's own state
-    /// (finished? waiting?) is simply not known: asking would have meant drawing again.
-    SingleStep,
-    /// The round is **finished**: every heat its format wants exists. Nothing more to do.
-    Complete,
-    /// The next heat is **already scheduled** and awaiting its result — the RD drives the
-    /// outstanding heat before another can be drawn. Not finished; come back after scoring.
-    AwaitingResult,
-    /// The round's format **refuses this field** and cannot draw a heat for it at all (#394) —
-    /// Head-to-Head with a single pilot. Nothing has raced and nothing can until the RD changes
-    /// the round: [`detail`](FillRoundOutcome::detail) says what to change.
-    Blocked,
-}
-
-/// A heat a command **put in front of the RD**, identified for the caller (#395, #401) — the
-/// heat a [`FillRound`](Command::FillRound) scheduled, or the one an [`Advance`](Command::Advance)
-/// loaded (whether it generated that heat or found it already on deck).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub struct ScheduledHeat {
-    /// The heat's id — a **wire handle**, for addressing it in follow-up commands. Never shown
-    /// to a user; [`name`](Self::name) is what a message prints (repo display rule).
-    pub heat: HeatId,
-    /// The heat's **friendly display name** ("Test Round Heat 1", "A-Main", "Practice Heat"),
-    /// resolved server-side by the same convention the console uses.
-    pub name: String,
-    /// Who is racing in it, in the generator's seeding order.
-    pub lineup: Vec<CompetitorRef>,
-    /// The per-pilot channel assignment in raw MHz, as logged on the heat. Empty when the round
-    /// assigns none (open practice, or no timer channels to hand out).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub frequencies: Vec<(CompetitorRef, u16)>,
-}
-
-/// What a [`Command::FillRound`] actually **did** (#395).
-///
-/// The scheduling commands' useful answer is their *effect*, not their acceptance: a fill that
-/// appended nothing — round finished, outstanding heat unscored, field too small for the format
-/// — was reported byte-identically to one that scheduled a heat. That is not merely unhelpful,
-/// it actively misleads: `ok: true` reads as "the thing you asked for happened", so a caller
-/// debugging an empty log searches downstream through the projection and the read routes, all of
-/// which are working correctly. Both halves are here, so nobody has to diff the event log to
-/// find out which happened.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub struct FillRoundOutcome {
-    /// The heats this fill scheduled, in append order — one for
-    /// [`FillMode::Next`](FillMode::Next), zero or more for [`All`](FillMode::All). **Empty
-    /// means the fill appended nothing**, and [`stopped`](Self::stopped) says why.
-    ///
-    /// Always serialized, empty included: "this fill scheduled nothing" is the very signal this
-    /// type exists to carry, and omitting the field would leave a caller inferring it from an
-    /// absence again — the exact shape of the bug (#395).
-    #[serde(default)]
-    pub scheduled: Vec<ScheduledHeat>,
-    /// Why the fill stopped drawing — the machine-readable discriminator.
-    pub stopped: FillStop,
-    /// The same thing in one RD-facing sentence, naming the round by its **label** and any heat
-    /// by its friendly name (never an id). Safe to show verbatim.
-    pub detail: String,
-}
-
-/// What a [`Command::Advance`] **did** with the next heat (#401).
-///
-/// Every value here is a **success** — `Advance` recorded its `Final -> Advanced` transition in
-/// all of them; they differ in whether Live control moved on, and if not, why. Externally tagged,
-/// so it maps to a TS string-union
-/// (`"LoadedOnDeck" | "Generated" | "RoundComplete" | "AwaitingResult" | "Blocked" | "Untagged"`).
-///
-/// The "nothing to advance to" values are stated **positively**, never inferred from an absent
-/// [`AdvanceOutcome::loaded`]: inferring a no-op from an absence is precisely the bug (#395, #401)
-/// this type exists to end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum AdvanceStop {
-    /// Loaded the heat that was **already on deck** — the next still-`Scheduled` heat existed and
-    /// Live control now follows it. [`loaded`](AdvanceOutcome::loaded) names it.
-    LoadedOnDeck,
-    /// **Generated** the next heat for the advanced heat's round (one generator draw, the same
-    /// single-step path [`FillMode::Next`] uses) and loaded that.
-    /// [`loaded`](AdvanceOutcome::loaded) names it.
-    Generated,
-    /// **Nothing to advance to**: the round is finished — every heat its format wants exists.
-    /// The routine end-of-round state, and the one that used to arrive as a bare `{"ok":true}`.
-    RoundComplete,
-    /// **Nothing to advance to**: the round's next heat is already scheduled and awaiting its
-    /// result. Not finished — come back after scoring the outstanding heat.
-    AwaitingResult,
-    /// **Nothing to advance to**: the round's format **refuses this field** and cannot draw a heat
-    /// for it at all (#394) — Head-to-Head with a single pilot.
-    /// [`detail`](AdvanceOutcome::detail) carries the shortfall.
-    Blocked,
-    /// **Nothing to advance to**: the advanced heat belongs to **no round** (a manually built,
-    /// untagged heat), so there is no generator to draw from — and nothing was on deck either.
-    Untagged,
-}
-
-/// What a [`Command::Advance`] actually **did** (#401).
-///
-/// `Advance` is two steps, not one: it records the heat's `Final -> Advanced` transition *and*
-/// loads the next heat to run. Only the first always happens, and a bare `{"ok":true}` reported
-/// all three second steps identically — loaded the on-deck heat, generated one, found nothing.
-/// That is the same defect #395 fixed for [`FillRound`](Command::FillRound), and worse in
-/// practice: "nothing to advance to" is a *routine* end-of-round state rather than a
-/// misconfiguration, so the ambiguous ack was hit on every round rather than rarely.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub struct AdvanceOutcome {
-    /// The heat Live control is now on, when the advance loaded one — `null` for every
-    /// "nothing to advance to" [`stopped`](Self::stopped).
-    ///
-    /// Always serialized, `null` included, and never the thing a caller reads to learn that
-    /// nothing happened: [`stopped`](Self::stopped) says that outright.
-    pub loaded: Option<ScheduledHeat>,
-    /// What the advance did with the next heat — the machine-readable discriminator, always
-    /// present.
-    pub stopped: AdvanceStop,
-    /// The same thing in one RD-facing sentence, naming the advanced heat, the loaded heat and
-    /// the round by their **friendly names** (never an id). Safe to show verbatim.
-    pub detail: String,
-}
-
-/// What a command **did**, for the commands whose useful result is the effect rather than the
-/// acceptance (#395).
-///
-/// Externally tagged and keyed by command, so each command's outcome is its own shape and a new
-/// one is an additive variant. Rides along in [`CommandAck::outcome`], which is optional — a
-/// command with nothing interesting to report (a transition either happened or was rejected)
-/// omits it entirely and its ack is byte-identical to before.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum CommandOutcome {
-    /// The result of a [`Command::FillRound`].
-    FillRound(FillRoundOutcome),
-    /// The result of a [`Command::Advance`] (#401).
-    Advance(AdvanceOutcome),
-}
-
-/// The acknowledgement of a [`Command`] (protocol.html §5): commands up,
-/// acknowledgements down.
-///
-/// `ok` is the success flag; on failure `error` carries the single shared
-/// [`ProtocolError`](crate::error::ProtocolError) (§9.8) — an illegal transition for
-/// the heat's state, an unauthorized caller, an unknown heat. On success `error` is
-/// `None`. (The resulting projection state flows back separately as
-/// [`ChangeEnvelope`](crate::stream::ChangeEnvelope)s on the read stream, not in the
-/// ack.)
-///
-/// `ok` answers *"was the command accepted?"* — which for some commands is not the question the
-/// caller is actually asking. `FillRound`'s "did nothing" is a routine, expected result, not an
-/// error, so it acks ok; a caller then has no way to tell it from a fill that scheduled a heat
-/// (#395), and `Advance`'s "nothing to advance to" is the same shape, hit far more often (#401).
-/// [`outcome`](Self::outcome) carries **what the command did** for those commands, and
-/// is absent for the ones where acceptance *is* the whole answer — so it is purely additive:
-/// every existing client keeps parsing every ack unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub struct CommandAck {
-    /// Whether the command was accepted and applied.
-    pub ok: bool,
-    /// The failure detail when `ok` is `false`; `None` on success.
+pub struct BracketRequest {
+    /// The id for the bracket phase. Its rounds and heats get ids beneath it.
+    pub id: PhaseId,
+    /// The director's name for it.
+    pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub error: Option<ProtocolError>,
-    /// **What the command did**, for the commands whose effect is the useful answer —
-    /// [`FillRound`](Command::FillRound) (#395) and [`Advance`](Command::Advance) (#401). `None`
-    /// for every other command (and for a failure, where `error` is the answer).
+    pub parent: Option<PhaseId>,
+    /// The bracket's field, in seed order.
+    pub field: Vec<FieldSlice>,
+    /// Who starts on each seeded place, top seed first.
+    pub entrants: Vec<SeatSource>,
+    /// The seats every heat is flown on. How many there are is the heat size.
+    pub seats: Vec<PresetSeat>,
+    /// How many pilots move on from each heat (at most half of it).
+    pub advance: u32,
+    pub elimination: EliminationKind,
+    pub format: Format,
+    /// A different format for the final only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub outcome: Option<CommandOutcome>,
+    pub final_format: Option<Format>,
 }
 
-impl CommandAck {
-    /// A successful acknowledgement, reporting acceptance only.
-    pub fn ok() -> Self {
-        Self {
-            ok: true,
-            error: None,
-            outcome: None,
+/// What `POST /events/{id}/presets/mains` takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct MainsRequest {
+    /// The id for the phase that holds every main.
+    pub id: PhaseId,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent: Option<PhaseId>,
+    /// The phase the mains are seeded from (qualifying).
+    pub seeded_from: PhaseId,
+    /// How many pilots that phase ranks.
+    pub pilots: u32,
+    /// The names of the mains, best first. Left out: as many as the field needs, named
+    /// "A-Main", "B-Main", and so on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub names: Option<Vec<String>>,
+    /// How many pilots start in each main, bump-ups included.
+    pub per_main: u32,
+    /// How many pilots bump up from each main into the one above.
+    pub bump: u32,
+    pub seats: Vec<PresetSeat>,
+    pub advance: u32,
+    pub elimination: EliminationKind,
+    pub format: Format,
+    /// A different format for the top main's final only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub top_final_format: Option<Format>,
+}
+
+fn seats(seats: Vec<PresetSeat>) -> Vec<(AdapterId, SeatRef)> {
+    seats.into_iter().map(|s| (s.adapter, s.seat)).collect()
+}
+
+/// "A-Main", "B-Main", … and past Z, "Main 27".
+fn main_names(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|index| match u8::try_from(index) {
+            Ok(letter) if letter < 26 => format!("{}-Main", char::from(b'A' + letter)),
+            _ => format!("Main {}", index + 1),
+        })
+        .collect()
+}
+
+/// Log generated phases, all or none.
+fn define(session: &mut Session<'_>, defs: Vec<PhaseDef>) -> Result<(), ProtocolError> {
+    session.commands(
+        defs.into_iter()
+            .map(|def| Command::Record(Box::new(Event::PhaseDefined { def })))
+            .collect(),
+    )
+}
+
+/// `POST /events/{event_id}/presets/bracket` — generate a bracket's phases, RD-gated.
+pub async fn post_bracket(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<BracketRequest>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    let defs = presets::bracket(Bracket {
+        id: body.id,
+        label: body.label,
+        parent: body.parent,
+        field: body.field,
+        entrants: body.entrants,
+        seats: seats(body.seats),
+        advance: body.advance,
+        elimination: body.elimination.into(),
+        format: body.format,
+        final_format: body.final_format,
+    })
+    .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    with_event(&registry, &event_id, |session| {
+        define(session, defs)?;
+        Ok(Json(session.outcome()))
+    })
+}
+
+/// `POST /events/{event_id}/presets/mains` — generate stacked mains, RD-gated.
+pub async fn post_mains(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<MainsRequest>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    let names = body.names.unwrap_or_else(|| {
+        main_names(presets::mains_needed(body.pilots, body.per_main, body.bump))
+    });
+    let defs = presets::mains(Mains {
+        id: body.id,
+        label: body.label,
+        parent: body.parent,
+        seeded_from: body.seeded_from,
+        pilots: body.pilots,
+        names,
+        per_main: body.per_main,
+        bump: body.bump,
+        seats: seats(body.seats),
+        advance: body.advance,
+        elimination: body.elimination.into(),
+        format: body.format,
+        top_final_format: body.top_final_format,
+    })
+    .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    with_event(&registry, &event_id, |session| {
+        define(session, defs)?;
+        Ok(Json(session.outcome()))
+    })
+}
+
+/// A gate crossing from outside the Director (`POST /events/{id}/passes`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PassRequest {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+    /// When, on the timer's own clock.
+    pub at: SourceTime,
+}
+
+/// `POST /events/{event_id}/passes` — log one gate crossing, RD-gated.
+///
+/// This is the door a timer's passes come in by: the pass is stamped with the race that is
+/// running now. Until the timer adapters are wired back in it is used by tools and tests.
+pub async fn post_pass(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<PassRequest>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    with_event(&registry, &event_id, |session| {
+        session.observe(Event::Pass(Pass {
+            adapter: body.adapter,
+            seat: body.seat,
+            at: body.at,
+            sequence: None,
+            gate: GateIndex::LAP,
+            signal: None,
+            race: None,
+        }))?;
+        Ok(Json(session.outcome()))
+    })
+}
+
+/// Which race `GET /events/{id}/signal` is asked about. A race id holds characters a path
+/// segment cannot, so it travels as a query value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SignalQuery {
+    pub race: RaceId,
+}
+
+/// One seat's logged signal in a race.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SeatSignal {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+    /// The race's start on this timer's clock, where the timer's clock was measured. The
+    /// trace, the crossings and this are all on that one clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start_at: Option<SourceTime>,
+    /// The trace, oldest first, in the chunks it was logged in (about a second each). Each
+    /// chunk has its own start time; a gap in the signal is a gap between chunks.
+    pub chunks: Vec<SignalChunk>,
+    /// The enter and exit levels the timer was using, oldest first. The timer logs them
+    /// when the race comes on and again whenever they move by more than a dB.
+    pub thresholds: Vec<SignalThresholds>,
+}
+
+/// A race's logged signal (`GET /events/{id}/signal?race=…`). Seats are in lineup order. A
+/// timer that reports no signal gives seats with no chunks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RaceSignal {
+    pub race: RaceId,
+    pub seats: Vec<SeatSignal>,
+}
+
+/// `GET /events/{event_id}/signal?race=…` — a race's logged signal. An open read.
+///
+/// The signal is read from the log on request and is not kept in memory: it is large, and
+/// only a marshal reviewing a race needs it.
+pub async fn get_signal(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    axum::extract::Query(query): axum::extract::Query<SignalQuery>,
+) -> Result<Json<RaceSignal>, ProtocolError> {
+    with_event(&registry, &event_id, |session| {
+        let state = session.state();
+        let unknown =
+            || ProtocolError::new(ErrorCode::UnknownScope, "There is no such race.".to_owned());
+        let race = state.races.get(&query.race).ok_or_else(unknown)?;
+        let (from, to) = state.race_log_range(&query.race).ok_or_else(unknown)?;
+        let mut seats: Vec<SeatSignal> = race
+            .setup
+            .lineup
+            .iter()
+            .map(|entry| SeatSignal {
+                adapter: entry.adapter.clone(),
+                seat: entry.seat.clone(),
+                start_at: state
+                    .starts_on_timer
+                    .get(&(query.race.clone(), entry.adapter.clone()))
+                    .map(|(at, _)| *at),
+                chunks: Vec::new(),
+                thresholds: Vec::new(),
+            })
+            .collect();
+        for stored in session.log.read_range(from, to).map_err(internal)? {
+            match stored.event {
+                Event::SignalChunk(chunk) => {
+                    let Some(seat) = seats
+                        .iter_mut()
+                        .find(|s| s.adapter == chunk.adapter && s.seat == chunk.seat)
+                    else {
+                        continue;
+                    };
+                    seat.chunks.push(chunk);
+                }
+                Event::SignalThresholds(thresholds) => {
+                    if let Some(seat) = seats
+                        .iter_mut()
+                        .find(|s| s.adapter == thresholds.adapter && s.seat == thresholds.seat)
+                    {
+                        seat.thresholds.push(thresholds);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(Json(RaceSignal {
+            race: query.race.clone(),
+            seats,
+        }))
+    })
+}
+
+/// `GET /events/{event_id}/changes` — server-sent events. An open read.
+///
+/// Sends a `cursor` event with the log's length on connect, then again each time it moves.
+/// The feed also keeps time: it wakes when a countdown or a timed race falls due, so the
+/// start and the stop are logged on time while anyone is listening. (When nobody is, they
+/// are logged with the same timestamps the next time anyone looks.)
+pub async fn get_changes(
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ProtocolError> {
+    let live = registry
+        .live(&event_id)
+        .ok_or_else(|| unknown_event(&event_id))?;
+    let feed = Feed {
+        registry,
+        event_id,
+        changes: live.changed.subscribe(),
+        sent: None,
+    };
+    let stream = stream::unfold(feed, |mut feed| async move {
+        let cursor = feed.next().await?;
+        let event = SseEvent::default().event("cursor").data(cursor.to_string());
+        Some((Ok(event), feed))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+struct Feed {
+    registry: EventRegistry,
+    event_id: EventId,
+    changes: watch::Receiver<u64>,
+    /// The last cursor sent.
+    sent: Option<u64>,
+}
+
+impl Feed {
+    /// The next cursor to send, once it differs from the last. `None` ends the feed: the
+    /// event is gone.
+    async fn next(&mut self) -> Option<u64> {
+        loop {
+            // Catching up here is what logs a start or a stop that has fallen due.
+            let (cursor, next_due) = with_event(&self.registry, &self.event_id, |session| {
+                Ok((session.state().applied, session.state().next_due()))
+            })
+            .ok()?;
+            if self.sent != Some(cursor) {
+                self.sent = Some(cursor);
+                return Some(cursor);
+            }
+            let until_due = next_due
+                .map(|at| Duration::from_micros(u64::try_from(at - now_micros()).unwrap_or(0)));
+            tokio::select! {
+                changed = self.changes.changed() => changed.ok()?,
+                () = sleep_until_due(until_due) => {}
+            }
         }
     }
+}
 
-    /// A successful acknowledgement that also reports **what the command did**.
-    pub fn ok_with(outcome: CommandOutcome) -> Self {
-        Self {
-            ok: true,
-            error: None,
-            outcome: Some(outcome),
-        }
-    }
-
-    /// A failed acknowledgement carrying the error detail.
-    pub fn failed(error: ProtocolError) -> Self {
-        Self {
-            ok: false,
-            error: Some(error),
-            outcome: None,
-        }
+/// Sleep for `wait`, or for ever when nothing is due.
+async fn sleep_until_due(wait: Option<Duration>) {
+    match wait {
+        Some(wait) => tokio::time::sleep(wait).await,
+        None => std::future::pending().await,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorCode;
-    use crate::scope::PilotId;
+    use crate::app::router;
+    use crate::events::CreateEventRequest;
+    use crate::view::{RaceStateView, SeatWhoView};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use gridfpv_events::{
+        CompletionRule, EndCondition, FirstLap, Measure, PilotId, RaceId, RaceRules, RankingRule,
+    };
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use tower::ServiceExt;
 
-    #[test]
-    fn heat_transition_commands_round_trip() {
-        let commands = vec![
-            Command::Stage {
-                heat: HeatId("q-1".into()),
+    const S: i64 = 1_000_000;
+
+    fn new_event(registry: &EventRegistry) -> EventId {
+        registry
+            .create(&CreateEventRequest::named("Test Event"))
+            .unwrap()
+            .id
+    }
+
+    async fn send(
+        registry: &EventRegistry,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        token: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let body = match body {
+            Some(json) => {
+                builder = builder.header("Content-Type", "application/json");
+                Body::from(json.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = router(registry.clone())
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    async fn command(registry: &EventRegistry, event: &EventId, command: Command) -> StatusCode {
+        let body = serde_json::to_value(command).unwrap();
+        send(
+            registry,
+            "POST",
+            &format!("/events/{}/commands", event.0),
+            Some(body),
+            None,
+        )
+        .await
+        .0
+    }
+
+    async fn state(registry: &EventRegistry, event: &EventId) -> EventView {
+        let (status, body) = send(
+            registry,
+            "GET",
+            &format!("/events/{}/state", event.0),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        serde_json::from_value(body).unwrap()
+    }
+
+    fn format(staging_micros: i64) -> Format {
+        Format {
+            name: "First to 1".into(),
+            race: RaceRules {
+                end: EndCondition::FirstToLaps(1),
+                staging_micros,
+                min_lap_micros: None,
+                first_lap: FirstLap::default(),
+                stop_after_all_finish_micros: None,
+                max_micros: None,
             },
-            Command::Start {
-                heat: HeatId("q-1".into()),
-            },
-            Command::SkipCountdown {
-                heat: HeatId("q-1".into()),
-            },
-            Command::ForceEnd {
-                heat: HeatId("q-1".into()),
-            },
-            Command::Finalize {
-                heat: HeatId("q-1".into()),
-            },
-            Command::Advance {
-                heat: HeatId("q-1".into()),
-            },
-            Command::Revert {
-                heat: HeatId("q-1".into()),
-            },
-            Command::Abort {
-                heat: HeatId("q-1".into()),
-            },
-            Command::Restart {
-                heat: HeatId("q-1".into()),
-            },
-            Command::Discard {
-                heat: HeatId("q-1".into()),
-            },
-            Command::SetCurrentHeat {
-                heat: HeatId("q-1".into()),
-            },
-        ];
-        for command in commands {
-            let json = serde_json::to_string(&command).unwrap();
-            let back: Command = serde_json::from_str(&json).unwrap();
-            assert_eq!(command, back);
+            completion: CompletionRule::SavedRaces(1),
+            ranking: Some(RankingRule {
+                sort: vec![Measure::LastFinish],
+            }),
+            points: Vec::new(),
         }
     }
 
-    #[test]
-    fn scheduling_and_registration_round_trip() {
-        let commands = vec![
-            Command::ScheduleHeat {
-                heat: HeatId("q-1".into()),
-                lineup: vec![
-                    CompetitorRef("node-0".into()),
-                    CompetitorRef("node-1".into()),
-                ],
-                class: None,
-                round: None,
-                frequencies: vec![],
-                label: None,
-            },
-            Command::ScheduleHeat {
-                heat: HeatId("main-a".into()),
-                lineup: vec![
-                    CompetitorRef("node-0".into()),
-                    CompetitorRef("node-1".into()),
-                ],
-                class: Some(ClassId("open".into())),
-                round: Some(RoundId("r1".into())),
-                frequencies: vec![
-                    (CompetitorRef("node-0".into()), 5658),
-                    (CompetitorRef("node-1".into()), 5695),
-                ],
-                label: Some("Featured Heat".into()),
-            },
-            Command::FillRound {
-                round: RoundId("qualifying-r1-abc".into()),
-                mode: FillMode::Next,
-            },
-            Command::FillRound {
-                round: RoundId("qualifying-r1-abc".into()),
-                mode: FillMode::All,
-            },
-            Command::Register {
-                adapter: AdapterId("rh".into()),
-                competitor: CompetitorRef("node-2".into()),
-                pilot: PilotId("acroace".into()),
-            },
-        ];
-        for command in commands {
-            let json = serde_json::to_string(&command).unwrap();
-            let back: Command = serde_json::from_str(&json).unwrap();
-            assert_eq!(command, back);
+    /// Four pilots in one bracket with four seats: a single final heat, "finals/final".
+    fn bracket_request(staging_micros: i64) -> serde_json::Value {
+        let pilots: Vec<PilotId> = ["ana", "ben", "cat", "dee"]
+            .iter()
+            .map(|name| PilotId((*name).into()))
+            .collect();
+        serde_json::to_value(BracketRequest {
+            id: PhaseId("finals".into()),
+            label: "Finals".into(),
+            parent: None,
+            field: vec![FieldSlice::Imported(pilots.clone())],
+            entrants: pilots.into_iter().map(SeatSource::Pilot).collect(),
+            seats: (0..4)
+                .map(|i| PresetSeat {
+                    adapter: AdapterId("oft".into()),
+                    seat: SeatRef(format!("seat-{i}")),
+                })
+                .collect(),
+            advance: 2,
+            elimination: EliminationKind::Double,
+            format: format(staging_micros),
+            final_format: None,
+        })
+        .unwrap()
+    }
+
+    async fn with_bracket(staging_micros: i64) -> (EventRegistry, EventId) {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = new_event(&registry);
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/presets/bracket", event.0),
+            Some(bracket_request(staging_micros)),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        (registry, event)
+    }
+
+    async fn pass(registry: &EventRegistry, event: &EventId, seat: &str, at: i64) {
+        let (status, _) = send(
+            registry,
+            "POST",
+            &format!("/events/{}/passes", event.0),
+            Some(json!({ "adapter": "oft", "seat": seat, "at": at })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_heat_is_raced_start_to_save_over_http_and_the_snapshot_shows_it() {
+        let (registry, event) = with_bracket(0).await;
+        let heat = PhaseId("finals/final".into());
+        let before = state(&registry, &event).await;
+        assert_eq!(before.phases.len(), 2);
+        assert_eq!(before.phases[1].lineup.len(), 4);
+        assert_eq!(
+            before.phases[1].lineup[0].who,
+            SeatWhoView::Pilot(PilotId("ana".into()))
+        );
+        assert_eq!(before.current_race, None);
+
+        assert_eq!(
+            command(&registry, &event, Command::StartRace { heat: heat.clone() }).await,
+            StatusCode::OK
+        );
+        let race = RaceId("finals/final#1".into());
+        // Dee (seat 3) flies the lap fastest; Ana never crosses.
+        for (seat, at) in [("seat-1", 0), ("seat-2", 0), ("seat-3", 0)] {
+            pass(&registry, &event, seat, at).await;
+        }
+        for (seat, at) in [("seat-3", 9 * S), ("seat-1", 10 * S), ("seat-2", 11 * S)] {
+            pass(&registry, &event, seat, at).await;
+        }
+        let running = state(&registry, &event).await;
+        assert_eq!(running.current_race, Some(race.clone()));
+        assert_eq!(running.races[0].state, RaceStateView::Running);
+        assert!(running.races[0].started_at.is_some());
+        assert_eq!(running.races[0].seats[3].finish, Some(1));
+        assert_eq!(running.races[0].seats[3].laps.len(), 1);
+        assert_eq!(running.races[0].seats[3].laps[0].micros, 9 * S);
+        assert_eq!(running.races[0].seats[0].finish, Some(4));
+
+        assert_eq!(
+            command(&registry, &event, Command::StopRace { race: race.clone() }).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            command(
+                &registry,
+                &event,
+                Command::SaveRace {
+                    race,
+                    needs_marshal: false,
+                    note: None
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        let after = state(&registry, &event).await;
+        assert_eq!(after.current_race, None);
+        assert!(after.phases.iter().all(|phase| phase.complete));
+        let order: Vec<&str> = after.phases[0]
+            .ranking
+            .iter()
+            .map(|placed| placed.pilot.0.as_str())
+            .collect();
+        assert_eq!(order, vec!["dee", "ben", "cat", "ana"]);
+        assert!(!after.phases[0].ranking[3].flew);
+        assert!(after.cursor > before.cursor);
+    }
+
+    #[tokio::test]
+    async fn a_refused_command_is_a_409_with_the_reason_and_logs_nothing() {
+        let (registry, event) = with_bracket(0).await;
+        let before = state(&registry, &event).await.cursor;
+        let (status, body) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/commands", event.0),
+            Some(json!({ "StopRace": { "race": "nope" } })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let error: ProtocolError = serde_json::from_value(body).unwrap();
+        assert_eq!(error.code, ErrorCode::Refused);
+        assert!(error.message.contains("no race"), "{}", error.message);
+        assert_eq!(state(&registry, &event).await.cursor, before);
+    }
+
+    #[tokio::test]
+    async fn a_preset_is_all_or_nothing() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = new_event(&registry);
+        let mut request = bracket_request(0);
+        request["parent"] = json!("no-such-phase");
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/presets/bracket", event.0),
+            Some(request),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(state(&registry, &event).await.phases.is_empty());
+
+        // A shape that cannot work is a bad request, not a refusal.
+        let mut request = bracket_request(0);
+        request["advance"] = json!(3);
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/presets/bracket", event.0),
+            Some(request),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn mains_are_named_for_the_field_when_no_names_are_given() {
+        let (registry, event) = with_bracket(0).await;
+        let request = serde_json::to_value(MainsRequest {
+            id: PhaseId("mains".into()),
+            label: "Mains".into(),
+            parent: None,
+            seeded_from: PhaseId("finals".into()),
+            pilots: 20,
+            names: None,
+            per_main: 8,
+            bump: 2,
+            seats: (0..4)
+                .map(|i| PresetSeat {
+                    adapter: AdapterId("oft".into()),
+                    seat: SeatRef(format!("seat-{i}")),
+                })
+                .collect(),
+            advance: 2,
+            elimination: EliminationKind::Double,
+            format: format(0),
+            top_final_format: None,
+        })
+        .unwrap();
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/presets/mains", event.0),
+            Some(request),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let view = state(&registry, &event).await;
+        let labels: Vec<&str> = view
+            .phases
+            .iter()
+            .filter(|phase| phase.def.parent == Some(PhaseId("mains".into())))
+            .map(|phase| phase.def.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["A-Main", "B-Main", "C-Main"]);
+    }
+
+    #[tokio::test]
+    async fn writes_need_the_rd_token_and_reads_do_not() {
+        let (registry, event) = with_bracket(0).await;
+        let token = registry.tokens().issue_rd_token();
+        let start = json!({ "StartRace": { "heat": "finals/final" } });
+        let uri = format!("/events/{}/commands", event.0);
+        let (status, _) = send(&registry, "POST", &uri, Some(start.clone()), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = send(&registry, "POST", &uri, Some(start), Some(&token)).await;
+        assert_eq!(status, StatusCode::OK);
+        // The snapshot is an open read.
+        assert_eq!(state(&registry, &event).await.races.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_event_is_a_404_on_every_route() {
+        let registry = EventRegistry::new(None).unwrap();
+        for (method, uri, body) in [
+            ("GET", "/events/nope/state", None),
+            ("GET", "/events/nope/changes", None),
+            (
+                "POST",
+                "/events/nope/commands",
+                Some(json!({ "StartRace": { "heat": "h" } })),
+            ),
+            (
+                "POST",
+                "/events/nope/presets/bracket",
+                Some(bracket_request(0)),
+            ),
+        ] {
+            let (status, _) = send(&registry, method, uri, body, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
         }
     }
 
-    #[test]
-    fn all_marshaling_adjudications_round_trip() {
-        let commands = vec![
-            Command::VoidDetection { target: LogRef(42) },
-            Command::InsertLap {
-                adapter: AdapterId("vd".into()),
-                competitor: CompetitorRef("A".into()),
-                at: SourceTime::from_micros(5_000_000),
-                heat: Some(HeatId("main-a".into())),
-            },
-            Command::AdjustLap {
-                target: LogRef(43),
-                at: SourceTime::from_micros(5_100_000),
-            },
-            Command::SplitLap {
-                target: LogRef(44),
-                at: SourceTime::from_micros(5_050_000),
-            },
-            Command::VoidHeat {
-                heat: HeatId("q-1".into()),
-            },
-            Command::ApplyPenalty {
-                heat: HeatId("main-a".into()),
-                competitor: CompetitorRef("A".into()),
-                penalty: Penalty::TimeAdded { micros: 2_000_000 },
-            },
-            Command::ApplyPenalty {
-                heat: HeatId("main-a".into()),
-                competitor: CompetitorRef("A".into()),
-                penalty: Penalty::Disqualify {
-                    reason: Some("unsafe".into()),
-                },
-            },
-            Command::DeductPoints {
-                heat: HeatId("main-a".into()),
-                competitor: CompetitorRef("A".into()),
-                points: 5,
-            },
-            Command::ThrowOutLap { target: LogRef(46) },
-            Command::FileProtest {
-                heat: HeatId("main-a".into()),
-                competitor: CompetitorRef("B".into()),
-                note: "contact on lap 2".into(),
-            },
-            Command::ResolveProtest {
-                target: LogRef(47),
-                outcome: ProtestOutcome::Denied,
-            },
-            Command::ReverseRuling { target: LogRef(45) },
-        ];
-        for command in commands {
-            let json = serde_json::to_string(&command).unwrap();
-            let back: Command = serde_json::from_str(&json).unwrap();
-            assert_eq!(command, back);
-        }
-    }
-
-    #[test]
-    fn command_ack_ok_omits_error() {
-        let ack = CommandAck::ok();
-        let json = serde_json::to_string(&ack).unwrap();
-        assert!(!json.contains("error"), "ok ack omits error: {json}");
-        let back: CommandAck = serde_json::from_str(&json).unwrap();
-        assert_eq!(ack, back);
-    }
-
-    #[test]
-    fn command_ack_failed_carries_the_error() {
-        let ack = CommandAck::failed(ProtocolError::new(
-            ErrorCode::BadRequest,
-            "cannot Arm a heat that is not Staged",
+    #[tokio::test]
+    async fn the_competition_is_rebuilt_from_the_log_after_a_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "gridfpv-control-restart-{}-{}",
+            std::process::id(),
+            now_micros()
         ));
-        let json = serde_json::to_string(&ack).unwrap();
-        let back: CommandAck = serde_json::from_str(&json).unwrap();
-        assert_eq!(ack, back);
-        assert!(!ack.ok);
+        std::fs::create_dir_all(&dir).unwrap();
+        let before = {
+            let registry = EventRegistry::new(Some(dir.clone())).unwrap();
+            let event = new_event(&registry);
+            let (status, _) = send(
+                &registry,
+                "POST",
+                &format!("/events/{}/presets/bracket", event.0),
+                Some(bracket_request(0)),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            command(
+                &registry,
+                &event,
+                Command::StartRace {
+                    heat: PhaseId("finals/final".into()),
+                },
+            )
+            .await;
+            pass(&registry, &event, "seat-0", 0).await;
+            (event.clone(), state(&registry, &event).await)
+        };
+        let registry = EventRegistry::new(Some(dir.clone())).unwrap();
+        let mut after = state(&registry, &before.0).await;
+        after.now = before.1.now;
+        assert_eq!(after, before.1);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn feed(registry: &EventRegistry, event: &EventId) -> Feed {
+        Feed {
+            registry: registry.clone(),
+            event_id: event.clone(),
+            changes: registry.live(event).unwrap().changed.subscribe(),
+            sent: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_change_feed_sends_the_cursor_on_connect_and_each_time_it_moves() {
+        let (registry, event) = with_bracket(0).await;
+        let mut feed = feed(&registry, &event);
+        let first = feed.next().await.unwrap();
+        assert_eq!(first, state(&registry, &event).await.cursor);
+
+        let waiting = tokio::spawn(async move { feed.next().await });
+        command(
+            &registry,
+            &event,
+            Command::StartRace {
+                heat: PhaseId("finals/final".into()),
+            },
+        )
+        .await;
+        let second = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the feed did not wake")
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, first + 1);
+    }
+
+    #[tokio::test]
+    async fn the_change_feed_logs_the_start_when_the_countdown_ends() {
+        // A 50 ms countdown.
+        let (registry, event) = with_bracket(50_000).await;
+        command(
+            &registry,
+            &event,
+            Command::StartRace {
+                heat: PhaseId("finals/final".into()),
+            },
+        )
+        .await;
+        let mut feed = feed(&registry, &event);
+        let staged = feed.next().await.unwrap();
+        // Nothing else happens; the feed wakes by itself at the tone.
+        let started = tokio::time::timeout(Duration::from_secs(5), feed.next())
+            .await
+            .expect("the feed did not wake at the tone")
+            .unwrap();
+        assert_eq!(started, staged + 1);
+        let view = state(&registry, &event).await;
+        assert_eq!(view.races[0].state, RaceStateView::Running);
+        // Logged at the tone itself, not at the moment the feed woke.
+        assert_eq!(view.races[0].started_at, view.races[0].tone_at);
+    }
+
+    #[tokio::test]
+    async fn the_change_feed_ends_when_its_event_is_deleted() {
+        let (registry, event) = with_bracket(0).await;
+        let mut feed = feed(&registry, &event);
+        feed.next().await.unwrap();
+        registry.delete(&event).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), feed.next())
+            .await
+            .expect("the feed did not end");
+        assert_eq!(ended, None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_names_things_by_their_names_never_by_id() {
+        let (registry, event) = with_bracket(0).await;
+        let heat = PhaseId("finals/final".into());
+        command(&registry, &event, Command::StartRace { heat: heat.clone() }).await;
+        let refuse = |body: serde_json::Value| {
+            let registry = registry.clone();
+            let uri = format!("/events/{}/commands", event.0);
+            async move {
+                let (status, body) = send(&registry, "POST", &uri, Some(body), None).await;
+                assert_eq!(status, StatusCode::CONFLICT);
+                serde_json::from_value::<ProtocolError>(body)
+                    .unwrap()
+                    .message
+            }
+        };
+        // Saving a race that is still running.
+        let message = refuse(json!({ "SaveRace": { "race": "finals/final#1" } })).await;
+        assert_eq!(message, "cannot save race 1 of Final while it is Running");
+        // Starting again while it runs.
+        let message = refuse(json!({ "StartRace": { "heat": "finals/final" } })).await;
+        assert!(message.contains("race 1 of Final"), "{message}");
+        assert!(!message.contains("finals"), "{message}");
+        assert!(!message.contains('#'), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_races_logged_signal_is_read_back_and_kept_apart_from_the_next_race() {
+        use gridfpv_events::{SignalChunk, SignalThresholds, SignalUnit};
+        let (registry, event) = with_bracket(0).await;
+        let heat = PhaseId("finals/final".into());
+        let chunk = |from: i64, level: i32| {
+            Event::SignalChunk(SignalChunk {
+                adapter: AdapterId("oft".into()),
+                seat: SeatRef("seat-0".into()),
+                from: SourceTime::from_micros(from),
+                period_micros: 1000,
+                levels: vec![level; 100],
+                unit: SignalUnit::TenthsDb,
+                noise_floor: Some(-900),
+            })
+        };
+        let observe = |events: Vec<Event>| {
+            with_event(&registry, &event, |session| {
+                for event in events {
+                    session.observe(event)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        };
+        let cursor_before = state(&registry, &event).await.cursor;
+        command(&registry, &event, Command::StartRace { heat: heat.clone() }).await;
+        observe(vec![
+            Event::SignalThresholds(SignalThresholds {
+                adapter: AdapterId("oft".into()),
+                seat: SeatRef("seat-0".into()),
+                enter: -750,
+                exit: -800,
+                unit: SignalUnit::TenthsDb,
+            }),
+            chunk(0, -900),
+            chunk(100_000, -700),
+            // 100 ms are missing before this one.
+            chunk(300_000, -900),
+        ]);
+        let first = RaceId("finals/final#1".into());
+        command(
+            &registry,
+            &event,
+            Command::DiscardRace {
+                race: first.clone(),
+                reason: None,
+                note: None,
+            },
+        )
+        .await;
+        command(&registry, &event, Command::StartRace { heat }).await;
+        observe(vec![chunk(9_000_000, -850)]);
+
+        let read = |race: &str| {
+            let registry = registry.clone();
+            let uri = format!(
+                "/events/{}/signal?race={}",
+                event.0,
+                race.replace('/', "%2F").replace('#', "%23")
+            );
+            async move { send(&registry, "GET", &uri, None, None).await }
+        };
+        let (status, body) = read("finals/final#1").await;
+        assert_eq!(status, StatusCode::OK);
+        let signal: RaceSignal = serde_json::from_value(body).unwrap();
+        // Four seats in the lineup; only seat 0 has signal.
+        assert_eq!(signal.seats.len(), 4);
+        let seat = &signal.seats[0];
+        // The chunks come back as they were logged, each with its own start.
+        assert_eq!(seat.chunks.len(), 3);
+        assert_eq!(seat.chunks[0].levels[99], -900);
+        assert_eq!(seat.chunks[1].levels[0], -700);
+        assert_eq!(seat.chunks[2].from, SourceTime::from_micros(300_000));
+        assert_eq!(seat.thresholds.len(), 1);
+        assert_eq!(seat.thresholds[0].enter, -750);
+        assert!(signal.seats[1].chunks.is_empty());
+
+        // The second race has only its own signal.
+        let (_, body) = read("finals/final#2").await;
+        let signal: RaceSignal = serde_json::from_value(body).unwrap();
+        assert_eq!(signal.seats[0].chunks.len(), 1);
+        assert_eq!(
+            signal.seats[0].chunks[0].from,
+            SourceTime::from_micros(9_000_000)
+        );
+
+        let (status, _) = read("no-such-race").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Signal moved the log on, but did not wake the change feed for each chunk: the
+        // feed's cursor is the one sent with the last race fact.
+        let live = registry.live(&event).unwrap();
+        assert!(*live.changed.borrow() > cursor_before);
+        assert!(*live.changed.borrow() < state(&registry, &event).await.cursor);
     }
 }

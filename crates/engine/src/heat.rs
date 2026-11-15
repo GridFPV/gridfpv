@@ -1,854 +1,717 @@
-//! Heat-loop state machine (#29) — the one reusable FSM that runs every heat, in
-//! every phase (race-engine.html §2).
+//! The heat: a lineup that is raced one or more times, and what its saved races add up to
+//! (`docs/primitives.md` §5.4, §5.5).
 //!
-//! ```text
-//! [*] --> Scheduled
-//! Scheduled  --> Staged     : stage
-//! Staged     --> Armed      : start          (runs the start procedure)
-//! Armed      --> Running    : (auto) countdown elapsed  /  SkipCountdown (override)
-//! Running    --> Unofficial : (auto) win condition + grace  /  ForceEnd (override)
-//! Unofficial --> Final      : finalize
-//! Final      --> Unofficial : revert
-//! Final      --> [*]        : advance
-//! Staged     --> Scheduled  : abort
-//! Armed      --> Scheduled  : abort
-//! Running    --> Scheduled  : abort
-//! Running    --> Scheduled  : restart
-//! Armed      --> Scheduled  : restart
-//! Unofficial --> Scheduled  : restart
-//! Unofficial --> Scheduled  : discard & re-run
-//! Final      --> Scheduled  : discard & re-run
-//! ```
+//! Three pure steps, each built on the one before:
 //!
-//! # The command collapse + the runtime clock (heat-lifecycle redesign, Slice 2)
+//! 1. [`race_finish`] — the finishing order of one race, from each pilot's laps.
+//! 2. [`heat_standings`] — every pilot's measures across the heat's saved races, sorted by
+//!    the format's ranking rule into a strict order of the whole field.
+//! 3. [`heat_complete`] — whether the format's completion rule says the heat is done.
 //!
-//! The two middle forward steps — `Armed → Running` and `Running → Unofficial` — are no
-//! longer **manual** commands. They are **runtime-driven**: the Director's clock appends the
-//! transition itself when the start countdown elapses (after a logged, deterministic delay) and
-//! when the round's win condition + grace window are met. So the manual command set drops the old
-//! `Start`/`Finish` (the engine *transitions* `Running`/`Finished` they produced still exist —
-//! the runtime records them). The old `Arm` command is renamed **`Start`** (the RD presses
-//! "Start", which arms the heat and runs the start procedure).
-//!
-//! For the race-day cases where the clock can't be trusted (a stuck countdown, a race that must be
-//! called now), two **manual overrides** remain, legal only in the right state:
-//! [`SkipCountdown`](HeatCommand::SkipCountdown) forces `Armed → Running` (skip the countdown) and
-//! [`ForceEnd`](HeatCommand::ForceEnd) forces `Running → Unofficial` now. They record the same
-//! `Running`/`Finished` transitions the auto-path does.
-//!
-//! This module is **pure** (race-engine.html §6): it reads no clock and rolls no
-//! dice, so a recorded session always replays identically. Live race control is just
-//! [`HeatCommand`]s driven against the current [`HeatState`]; each legal command
-//! records a [`HeatTransition`] (the events-crate vocabulary, #28), which is what
-//! lands in the append-only log as an [`Event::HeatStateChanged`].
-//!
-//! The split of responsibilities:
-//! - [`HeatCommand`] — the *imperative* (what the RD asks for). Kept distinct from
-//!   the recorded transition so the off-ramps (abort/restart/discard) read clearly.
-//! - [`HeatTransition`] (events crate) — the *fact* appended to the log.
-//! - [`apply`] — validates a command against a state and yields its transition.
-//! - [`next_state`] — the state a recorded transition lands in.
-//! - [`heat_state`] — folds a heat's events back to its current state.
+//! The rules themselves are data ([`gridfpv_events::RankingRule`],
+//! [`gridfpv_events::CompletionRule`]); nothing here knows what "Chase the Ace" is.
 
-use std::fmt;
+use std::cmp::Ordering;
 
-use gridfpv_events::{Event, HeatId, HeatTransition};
-use serde::{Deserialize, Serialize};
+use gridfpv_events::{CompletionRule, EndCondition, Format, Measure, PilotId, RankingRule};
 
-/// The states of the heat loop (race-engine.html §2). `Scheduled` is the entry
-/// state a [`Event::HeatScheduled`] creates; `Final` is reached when the result is
-/// finalized (via the `Finalize` command); `advance` leaves the machine (terminal for
-/// this heat).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeatState {
-    /// Created with a lineup, not yet staged (`[*] → Scheduled`).
-    Scheduled,
-    /// Countdown / IRL frequency assignment underway.
-    Staged,
-    /// The gate is open to detections.
-    Armed,
-    /// The race is running; passes are consumed from here (plus the grace window).
-    Running,
-    /// The race closed — time elapsed or all landed — but the result is not yet
-    /// finalized (the grace window for late crossings is still open).
-    Unofficial,
-    /// The result is finalized.
-    Final,
+use crate::laps::SeatLaps;
+
+/// One pilot's laps in one saved race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaceEntry {
+    pub pilot: PilotId,
+    pub laps: SeatLaps,
 }
 
-/// The imperative commands of live race control (race-engine.html §2). A command is
-/// validated against the current [`HeatState`] by [`apply`] and, on success, records
-/// the corresponding [`HeatTransition`]. Commands are kept distinct from the recorded
-/// transitions so the off-ramps stay legible:
+/// One pilot's line in the finishing order of one race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finish {
+    pub pilot: PilotId,
+    /// 1 for the winner. Every pilot in the race has a different position.
+    pub position: u32,
+    /// The laps that counted toward the finish (capped at the target in a first-to-N race).
+    pub laps: u32,
+}
+
+/// The finishing order of one race.
 ///
-/// | command         | records                       |
-/// |-----------------|-------------------------------|
-/// | `Stage`         | [`HeatTransition::Staged`]    |
-/// | `Start`         | [`HeatTransition::Armed`]     |
-/// | `SkipCountdown` | [`HeatTransition::Running`]   |
-/// | `ForceEnd`      | [`HeatTransition::Finished`]  |
-/// | `Finalize`      | [`HeatTransition::Finalized`] |
-/// | `Advance`       | [`HeatTransition::Advanced`]  |
-/// | `Revert`        | [`HeatTransition::Reverted`]  |
-/// | `Abort`         | [`HeatTransition::Aborted`]   |
-/// | `Restart`       | [`HeatTransition::Restarted`] |
-/// | `Discard`       | [`HeatTransition::Discarded`] |
+/// - **First to N laps:** pilots who finished N laps, in the order they finished the Nth.
+///   Laps flown after the Nth do not count. Then everyone else, as below.
+/// - **Timed or open:** more laps first; on equal laps, whoever finished their last lap
+///   first.
+/// - A pilot with a hole shot and no lap goes below every pilot with a lap; a pilot with no
+///   crossing at all goes last. Any tie left is broken by `seed_of` (lower is better), so
+///   the order is always strict.
 ///
-/// The `Armed → Running` and `Running → Unofficial` transitions are normally appended by the
-/// **runtime clock**, not an RD command (the command collapse, see the module docs).
-/// [`SkipCountdown`](Self::SkipCountdown) / [`ForceEnd`](Self::ForceEnd) are the manual overrides
-/// that record those same transitions when the clock must be bypassed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeatCommand {
-    /// Begin the countdown (Scheduled → Staged).
-    Stage,
-    /// Start the heat (Staged → Armed) — opens the gate to detections and **runs the start
-    /// procedure**. The runtime then auto-advances to `Running` after the logged start delay.
-    /// (Renamed from the former `Arm` in the command collapse.)
-    Start,
-    /// **Override:** force `Armed → Running` immediately, skipping the start countdown — the
-    /// race-day escape hatch when the clock's auto-start can't be trusted. Records the same
-    /// [`HeatTransition::Running`] the runtime's auto-start would.
-    SkipCountdown,
-    /// **Override:** force `Running → Unofficial` now — call the race when the completion clock
-    /// must be bypassed. Records the same [`HeatTransition::Finished`] the runtime's auto-complete
-    /// would.
-    ForceEnd,
-    /// Finalize the result (Unofficial → Final).
-    Finalize,
-    /// Hand results to the format generator (Final → terminal).
-    Advance,
-    /// Re-open a finalized result for correction (Final → Unofficial).
-    Revert,
-    /// Abandon before finalizing — always resets the heat to `Scheduled`, from any
-    /// abortable state (Staged/Armed/Running), so the RD re-Stages it.
-    Abort,
-    /// Restart a committed heat — always resets it to `Scheduled`, from any committed
-    /// state (Armed/Running/Unofficial), so the RD re-Stages it.
-    Restart,
-    /// Discard a raced heat for a re-run — throw the result away (Unofficial or Final →
-    /// Scheduled).
-    Discard,
-}
-
-/// Rejection returned by [`apply`] when a command is illegal in the current state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IllegalTransition {
-    /// The state the heat was in.
-    pub state: HeatState,
-    /// The command that was rejected.
-    pub command: HeatCommand,
-}
-
-impl fmt::Display for IllegalTransition {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "illegal heat command {:?} in state {:?}",
-            self.command, self.state
-        )
-    }
-}
-
-impl std::error::Error for IllegalTransition {}
-
-/// Validate `command` against `state` per the heat-loop diagram (race-engine.html
-/// §2) and, on success, return the [`HeatTransition`] it records.
-///
-/// On an illegal command, returns [`IllegalTransition`] naming the state and the
-/// rejected command. This is the single source of FSM legality: [`next_state`] only
-/// describes where a *recorded* transition lands.
-pub fn apply(state: HeatState, command: HeatCommand) -> Result<HeatTransition, IllegalTransition> {
-    use HeatCommand as C;
-    use HeatState as S;
-
-    let transition = match (state, command) {
-        // Forward path. `Start` arms the heat (the runtime then auto-advances to Running after the
-        // logged start delay); the manual Armed→Running / Running→Unofficial steps are gone — they
-        // are runtime-appended, with the overrides below as the only manual route.
-        (S::Scheduled, C::Stage) => HeatTransition::Staged,
-        (S::Staged, C::Start) => HeatTransition::Armed,
-        (S::Unofficial, C::Finalize) => HeatTransition::Finalized,
-        (S::Final, C::Advance) => HeatTransition::Advanced,
-
-        // Overrides for when the runtime clock can't be trusted (race-day escape hatches). They
-        // record exactly the transitions the auto-path would; legal only in the matching state.
-        (S::Armed, C::SkipCountdown) => HeatTransition::Running,
-        (S::Running, C::ForceEnd) => HeatTransition::Finished,
-
-        // Off-ramps. Abort is legal from Staged/Armed/Running; it always resets the
-        // heat to `Scheduled` (see `next_state`), so the RD re-Stages it.
-        (S::Staged | S::Armed | S::Running, C::Abort) => HeatTransition::Aborted,
-        // Restart applies to any committed heat short of finalized (Armed/Running/
-        // Unofficial); it always resets the heat to `Scheduled` (see `next_state`), so
-        // the RD re-Stages it for a clean re-run.
-        (S::Armed | S::Running | S::Unofficial, C::Restart) => HeatTransition::Restarted,
-        // Revert re-opens a finalized result for correction (Final → Unofficial).
-        (S::Final, C::Revert) => HeatTransition::Reverted,
-        // Discard-and-re-run applies to a raced heat (Unofficial or Final) — throw the
-        // result away and reset to Scheduled (see `next_state`) for a clean re-run.
-        (S::Unofficial | S::Final, C::Discard) => HeatTransition::Discarded,
-
-        // Everything else is illegal in this state.
-        _ => return Err(IllegalTransition { state, command }),
+/// Times are compared on the timer's clock, so this assumes the race's seats are on one
+/// timer.
+pub fn race_finish(
+    entries: &[RaceEntry],
+    end: &EndCondition,
+    seed_of: impl Fn(&PilotId) -> usize,
+) -> Vec<Finish> {
+    let target = match end {
+        EndCondition::FirstToLaps(n) => Some(*n as usize),
+        EndCondition::Timed { .. } | EndCondition::Open => None,
     };
-    Ok(transition)
+    // (laps counted, when the last counted lap ended, made any crossing, seed, pilot)
+    let mut lines: Vec<(usize, Option<i64>, bool, usize, &PilotId)> = entries
+        .iter()
+        .map(|entry| {
+            let ends: Vec<i64> = entry.laps.laps().map(|lap| lap.ended_at.micros).collect();
+            let counted = target.map_or(ends.len(), |n| ends.len().min(n));
+            let finished_at = counted.checked_sub(1).map(|last| ends[last]);
+            let crossed = entry.laps.hole_shot.is_some();
+            (
+                counted,
+                finished_at,
+                crossed,
+                seed_of(&entry.pilot),
+                &entry.pilot,
+            )
+        })
+        .collect();
+    lines.sort_by(|a, b| {
+        b.0.cmp(&a.0) // more laps first
+            .then_with(|| a.1.cmp(&b.1)) // then the earlier finish (both Some when laps > 0)
+            .then_with(|| b.2.cmp(&a.2)) // then a pilot who at least crossed
+            .then_with(|| a.3.cmp(&b.3)) // then seed
+    });
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, (laps, _, _, _, pilot))| Finish {
+            pilot: pilot.clone(),
+            position: index as u32 + 1,
+            laps: laps as u32,
+        })
+        .collect()
 }
 
-/// The state a recorded [`HeatTransition`] lands in, given the state it left.
-///
-/// The forward transitions name their target state directly. The off-ramps land per
-/// the diagram:
-/// - `Aborted` → `Scheduled` (from any abortable state — Staged/Armed/Running — so the
-///   RD re-Stages it).
-/// - `Restarted` → `Scheduled` (a committed heat fully reset, so the RD re-Stages it).
-/// - `Reverted` → `Unofficial` (a finalized heat re-opened for correction).
-/// - `Discarded` → `Scheduled` (a raced heat — Unofficial or Final — queued for re-run).
-/// - `Advanced` is terminal for the heat; it stays `Final`.
-///
-/// `from` is no longer consulted for any transition (every target is now state-
-/// independent), but is kept in the signature so the fold reads uniformly. If a
-/// transition is replayed from an unexpected state it still resolves to its canonical
-/// target; legality is [`apply`]'s job, not this function's.
-pub fn next_state(_from: HeatState, transition: HeatTransition) -> HeatState {
-    use HeatState as S;
-    use HeatTransition as T;
+/// One pilot's place in a heat, with the numbers behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Standing {
+    pub pilot: PilotId,
+    /// 1 for the top of the heat. Every pilot in the field has a different position.
+    pub position: u32,
+    /// The pilot's place in the heat's field, 0 first. The last tie-break.
+    pub seed: usize,
+    /// Whether the pilot made at least one crossing in a saved race of this heat. A pilot
+    /// who never flew ranks below everyone who did, whatever their seed.
+    pub flew: bool,
+    pub wins: u32,
+    pub points: u32,
+    /// The most laps in one race.
+    pub laps: u32,
+    pub best_lap_micros: Option<i64>,
+    pub best_finish: Option<u32>,
+    pub last_finish: Option<u32>,
+    /// The pilot's laps in each saved race they were in, oldest first. Kept so a measure
+    /// such as "best 3 consecutive" can be read for any N.
+    pub races: Vec<SeatLaps>,
+}
 
-    match transition {
-        T::Staged => S::Staged,
-        T::Armed => S::Armed,
-        T::Running => S::Running,
-        T::Finished => S::Unofficial,
-        T::Finalized => S::Final,
-        // Advance hands off to the format generator; the heat itself stays Final
-        // (terminal). The state machine for this heat ends here.
-        T::Advanced => S::Final,
-        // Revert re-opens a finalized result back to Unofficial for correction.
-        T::Reverted => S::Unofficial,
-        // Abort always resets the heat to Scheduled (from any abortable state), so the
-        // RD re-Stages it.
-        T::Aborted => S::Scheduled,
-        // Restart always resets the heat to Scheduled (from any committed state), so the
-        // RD re-Stages it — consistent with Abort.
-        T::Restarted => S::Scheduled,
-        T::Discarded => S::Scheduled,
+impl Standing {
+    /// The pilot's value for a measure, or `None` when they have none (no lap, no finish).
+    pub fn value(&self, measure: Measure) -> Option<i64> {
+        match measure {
+            Measure::Wins => Some(i64::from(self.wins)),
+            Measure::Points => Some(i64::from(self.points)),
+            Measure::Laps => Some(i64::from(self.laps)),
+            Measure::BestLap => self.best_lap_micros,
+            Measure::BestConsecutive(n) => self
+                .races
+                .iter()
+                .filter_map(|laps| laps.best_consecutive_micros(n as usize))
+                .min(),
+            Measure::BestFinish => self.best_finish.map(i64::from),
+            Measure::LastFinish => self.last_finish.map(i64::from),
+        }
     }
 }
 
-/// Fold a heat's events back to its current [`HeatState`].
+/// Whether a bigger value of the measure is the better one.
+fn more_is_better(measure: Measure) -> bool {
+    matches!(measure, Measure::Wins | Measure::Points | Measure::Laps)
+}
+
+/// Compare two pilots on one measure: `Less` means `a` ranks above `b`. A pilot with no
+/// value ranks below one with a value.
+fn compare_on(measure: Measure, a: &Standing, b: &Standing) -> Ordering {
+    match (a.value(measure), b.value(measure)) {
+        (Some(x), Some(y)) if more_is_better(measure) => y.cmp(&x),
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// The standings of a heat: every pilot in `field` exactly once, in a strict order.
 ///
-/// Scans `events` for those concerning `heat`: an [`Event::HeatScheduled`] seeds the
-/// state at [`HeatState::Scheduled`]; each [`Event::HeatStateChanged`] advances it via
-/// [`next_state`]. Returns `None` if the heat was never scheduled. A second
-/// `HeatScheduled` for the same id re-seeds to `Scheduled` (a discard-and-re-run is
-/// modelled as a `Discarded` transition, not a re-schedule, but re-seeding keeps the
-/// fold robust). Pure and order-preserving, so replaying the same slice twice yields
-/// the same state.
-pub fn heat_state<'a>(
-    events: impl IntoIterator<Item = &'a Event>,
-    heat: &HeatId,
-) -> Option<HeatState> {
-    let mut state: Option<HeatState> = None;
-    for event in events {
-        match event {
-            Event::HeatScheduled { heat: h, .. } if h == heat => {
-                state = Some(HeatState::Scheduled);
-            }
-            Event::HeatStateChanged {
-                heat: h,
-                transition,
-            } if h == heat => {
-                if let Some(current) = state {
-                    state = Some(next_state(current, *transition));
+/// `field` is the heat's pilots in seed order. `races` is the heat's **saved** races, oldest
+/// first; each holds the laps of the pilots who were in that race's lineup. The order is:
+/// pilots who flew above pilots who never did, then the ranking rule's measures in turn,
+/// then seed. With no ranking rule (an unranked heat) the order is flew-then-seed.
+pub fn heat_standings(
+    field: &[PilotId],
+    races: &[Vec<RaceEntry>],
+    format: &Format,
+) -> Vec<Standing> {
+    let seed_of = |pilot: &PilotId| field.iter().position(|p| p == pilot).unwrap_or(usize::MAX);
+    let mut standings: Vec<Standing> = field
+        .iter()
+        .enumerate()
+        .map(|(seed, pilot)| Standing {
+            pilot: pilot.clone(),
+            position: 0,
+            seed,
+            flew: false,
+            wins: 0,
+            points: 0,
+            laps: 0,
+            best_lap_micros: None,
+            best_finish: None,
+            last_finish: None,
+            races: Vec::new(),
+        })
+        .collect();
+
+    for race in races {
+        let finish = race_finish(race, &format.race.end, seed_of);
+        for entry in race {
+            let Some(standing) = standings.iter_mut().find(|s| s.pilot == entry.pilot) else {
+                continue; // a pilot in the race who is not in the heat's field
+            };
+            let line = finish
+                .iter()
+                .find(|f| f.pilot == entry.pilot)
+                .expect("every race entry has a finish line");
+            let crossed = entry.laps.hole_shot.is_some();
+            standing.flew |= crossed;
+            standing.laps = standing.laps.max(entry.laps.lap_count() as u32);
+            standing.best_lap_micros =
+                match (standing.best_lap_micros, entry.laps.best_lap_micros()) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+            // A pilot who never crossed in this race did not finish it: no position, no
+            // win, no points.
+            if crossed {
+                standing.last_finish = Some(line.position);
+                standing.best_finish = Some(
+                    standing
+                        .best_finish
+                        .map_or(line.position, |b| b.min(line.position)),
+                );
+                if line.position == 1 && line.laps > 0 {
+                    standing.wins += 1;
                 }
-                // A transition before the heat was scheduled is ignored — there is
-                // no state to advance from; legality lives in `apply`.
+                standing.points += format
+                    .points
+                    .get(line.position as usize - 1)
+                    .copied()
+                    .unwrap_or(0);
+            } else {
+                standing.last_finish = None;
             }
-            _ => {}
+            standing.races.push(entry.laps.clone());
         }
     }
-    state
-}
 
-/// The grace window after the **race window expires**: how long the heat stays `Running` so each
-/// pilot can *finish the lap they were already flying* (#505).
-///
-/// The runtime completion clock reads this at the heat's fixed end (the round's
-/// `time_limit_secs`, or a Timed window): with a non-zero window it appends the `RaceExpired`
-/// marker and holds the heat `Running` until the window elapses — or **earlier**, once every
-/// still-flying pilot has taken their one post-expiry crossing
-/// ([`grace_satisfied`](crate::scoring::grace_satisfied)). The marker's log position is the
-/// scoring boundary: a competitor's first lap-gate pass appended after it still counts; every
-/// later one is auto-voided by the corrected fold (`AfterRaceEnd`), marshal-restorable.
-///
-/// Derives serde + `ts_rs::TS` so it can be carried as a per-round config
-/// ([`RoundDef::grace_window`](../../server/events/struct.RoundDef.html)) and read by the
-/// frontend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum GraceWindow {
-    /// The grace has **no time bound**: the heat holds `Running` after expiry until every
-    /// still-flying pilot has taken their post-expiry crossing (or the RD `ForceEnd`s). A
-    /// *completion-clock* round config instead defaults to a bounded
-    /// [`Duration`](Self::Duration) so the auto-transition always fires on its own.
-    #[default]
-    UntilScored,
-    /// The heat holds `Running` for at most `micros` microseconds after the race window
-    /// expires. `micros: 0` is the "no grace" spelling — the heat closes at the fixed end and
-    /// no `RaceExpired` marker is appended.
-    Duration {
-        /// Length of the grace window, in microseconds on the source clock.
-        #[ts(type = "number")]
-        micros: i64,
-    },
-}
-
-/// The grace window that **actually applies** to a heat raced under `condition` — the round's
-/// configured window for every condition that has one, and *no window at all* for
-/// [`WinCondition::FirstToLaps`] (#471).
-///
-/// A grace window buys trailing pilots time to bank a lap after the race-end criterion fires. That
-/// makes sense for [`WinCondition::Timed`], where the criterion is a **buzzer**: the window closes
-/// on everyone at once, mid-lap, and the grace is what lets a pilot two metres from the gate finish
-/// the lap they were already flying. It makes no sense for first-to-N, where the criterion is now
-/// "**every** still-flying pilot has reached `n`"
-/// ([`race_end_reached`](crate::scoring::race_end_reached)): by the time it fires there is nobody
-/// left with a lap to bank, so a grace window can only add dead air to the end of a race the
-/// maintainer asked to end immediately — and any crossing it did admit would be a post-target lap
-/// that [`score_first_to_laps`](crate::scoring) refuses to score anyway.
-///
-/// Returned rather than enforced here so it stays a **pure** rule the runtime clock reads (like
-/// [`grace_satisfied`](crate::scoring::grace_satisfied)), testable without a Director.
-/// `Duration { micros: 0 }` is the "no window"
-/// spelling — an explicit zero-length window, not [`GraceWindow::UntilScored`], which would mean
-/// the opposite (an *open* window) to every reader of this type.
-pub fn effective_grace_window(
-    condition: crate::scoring::WinCondition,
-    configured: GraceWindow,
-) -> GraceWindow {
-    match condition {
-        crate::scoring::WinCondition::FirstToLaps { .. } => GraceWindow::Duration { micros: 0 },
-        _ => configured,
+    let no_rule = RankingRule::default();
+    let rule = format.ranking.as_ref().unwrap_or(&no_rule);
+    standings.sort_by(|a, b| {
+        b.flew
+            .cmp(&a.flew)
+            .then_with(|| {
+                rule.sort
+                    .iter()
+                    .map(|measure| compare_on(*measure, a, b))
+                    .find(|order| *order != Ordering::Equal)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| a.seed.cmp(&b.seed))
+    });
+    for (index, standing) in standings.iter_mut().enumerate() {
+        standing.position = index as u32 + 1;
     }
+    standings
 }
 
-/// The **protest window** for the provisional → official lifecycle (marshaling Slice 5,
-/// marshaling.html §3.3): an optional, OFF-by-default **auto-official timer**.
+/// Whether a heat is done, by its format's completion rule.
 ///
-/// A heat sits in [`Unofficial`](HeatState::Unofficial) (provisional, correctable) after the race
-/// closes. When a protest window is configured, the runtime **auto-finalizes** it
-/// (`Unofficial → Final`) once the window elapses from the race-end instant; the RD can always
-/// finalize early (manually) or correct during the window, and [`Revert`](HeatCommand::Revert)
-/// re-opens a finalized result. This is **not** a gate that blocks `Finalize` — it is an additive
-/// auto-finalize. The default ([`Off`](Self::Off)) is today's behaviour: manual `Finalize` only.
-///
-/// Derives serde + `ts_rs::TS` so it can be carried as a per-round config
-/// ([`RoundDef::protest_window`](../../server/events/struct.RoundDef.html)) and read by the
-/// frontend; it mirrors [`GraceWindow`]'s shape (an off variant + a bounded duration).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum ProtestWindow {
-    /// No auto-official timer (the default): the heat stays `Unofficial` until the RD manually
-    /// finalizes it. Today's behaviour, unchanged.
-    #[default]
-    Off,
-    /// Auto-finalize `micros` microseconds after the race-end instant: once the window elapses the
-    /// runtime appends the `Finalize` the RD would have pressed. The RD may still finalize early.
-    After {
-        /// Length of the protest window, in microseconds (server wall clock), counted from the
-        /// `Running → Unofficial` race-end instant.
-        #[ts(type = "number")]
-        micros: i64,
-    },
-}
-
-/// Whether an `Unofficial` heat's auto-official timer is **due** (marshaling Slice 5): the protest
-/// window has elapsed, so the runtime should append the auto `Finalize` (`Unofficial → Final`).
-///
-/// Pure — it reads no clock: the elapsed time is an **input**. The runtime
-/// supplies `since_finished_micros` (now − the race-end instant) and emits the `Finalize` itself.
-///
-/// Inputs:
-/// - `state` — the heat's current [`HeatState`]. Only an `Unofficial` heat can auto-finalize.
-/// - `window` — the configured [`ProtestWindow`]. [`Off`](ProtestWindow::Off) never fires.
-/// - `since_finished_micros` — microseconds elapsed since the race-end instant (server clock).
-///   `None` (the race-end instant is unknown / the heat has not finished) is never due.
-///
-/// Returns `true` iff `state` is `Unofficial`, `window` is [`After`](ProtestWindow::After), and the
-/// elapsed time is at least the window (inclusive — exactly at the deadline is due).
-pub fn auto_official_due(
-    state: HeatState,
-    window: ProtestWindow,
-    since_finished_micros: Option<i64>,
+/// `saved_races` is how many of the heat's races are saved. `director_done` is whether the
+/// director has said the heat is done, which is the only thing that completes a
+/// "director decides" heat.
+pub fn heat_complete(
+    rule: &CompletionRule,
+    standings: &[Standing],
+    saved_races: usize,
+    director_done: bool,
 ) -> bool {
-    match (state, window) {
-        (HeatState::Unofficial, ProtestWindow::After { micros }) => {
-            since_finished_micros.is_some_and(|elapsed| elapsed >= micros)
-        }
-        _ => false,
+    // The director can always call a heat done: a lone pilot who advances without flying,
+    // or a heat cut short.
+    if director_done {
+        return true;
+    }
+    match rule {
+        CompletionRule::SavedRaces(n) => saved_races >= *n as usize,
+        CompletionRule::AnyPilotReaches { measure, at_least } => standings.iter().any(|s| {
+            s.value(*measure).is_some_and(|value| {
+                if more_is_better(*measure) {
+                    value >= *at_least
+                } else {
+                    value <= *at_least
+                }
+            })
+        }),
+        CompletionRule::DirectorDecides => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gridfpv_events::CompetitorRef;
+    use crate::laps::{LapFilters, RaceLaps};
+    use gridfpv_events::{
+        AdapterId, Event, GateIndex, LogRef, Pass, RaceId, RaceRules, SeatRef, SourceTime,
+    };
 
-    const ALL_STATES: [HeatState; 6] = [
-        HeatState::Scheduled,
-        HeatState::Staged,
-        HeatState::Armed,
-        HeatState::Running,
-        HeatState::Unofficial,
-        HeatState::Final,
-    ];
+    const S: i64 = 1_000_000;
 
-    const ALL_COMMANDS: [HeatCommand; 10] = [
-        HeatCommand::Stage,
-        HeatCommand::Start,
-        HeatCommand::SkipCountdown,
-        HeatCommand::ForceEnd,
-        HeatCommand::Finalize,
-        HeatCommand::Advance,
-        HeatCommand::Revert,
-        HeatCommand::Abort,
-        HeatCommand::Restart,
-        HeatCommand::Discard,
-    ];
-
-    /// The complete legality table: (state, command) → recorded transition. Every
-    /// pair *not* listed here must be rejected by `apply`.
-    fn legal_table() -> Vec<(HeatState, HeatCommand, HeatTransition)> {
-        use HeatCommand as C;
-        use HeatState as S;
-        use HeatTransition as T;
-        vec![
-            // forward path (the Armed→Running / Running→Unofficial steps are runtime-appended,
-            // not manual commands — see the overrides below)
-            (S::Scheduled, C::Stage, T::Staged),
-            (S::Staged, C::Start, T::Armed),
-            (S::Unofficial, C::Finalize, T::Finalized),
-            (S::Final, C::Advance, T::Advanced),
-            // overrides (manual route for the runtime-driven transitions)
-            (S::Armed, C::SkipCountdown, T::Running),
-            (S::Running, C::ForceEnd, T::Finished),
-            // off-ramps
-            (S::Staged, C::Abort, T::Aborted),
-            (S::Armed, C::Abort, T::Aborted),
-            (S::Running, C::Abort, T::Aborted),
-            (S::Armed, C::Restart, T::Restarted),
-            (S::Running, C::Restart, T::Restarted),
-            (S::Unofficial, C::Restart, T::Restarted),
-            (S::Final, C::Revert, T::Reverted),
-            (S::Unofficial, C::Discard, T::Discarded),
-            (S::Final, C::Discard, T::Discarded),
-        ]
+    fn pilot(name: &str) -> PilotId {
+        PilotId(name.into())
     }
 
-    #[test]
-    fn every_legal_transition_is_accepted() {
-        for (state, command, expected) in legal_table() {
-            assert_eq!(
-                apply(state, command),
-                Ok(expected),
-                "{state:?} + {command:?} should record {expected:?}",
-            );
+    /// A pilot's laps from crossing times in seconds, with optional restart marks (by
+    /// crossing index).
+    fn laps_with(crossings: &[i64], restarts: &[u64]) -> SeatLaps {
+        let race = RaceId("r".into());
+        let mut events: Vec<Event> = crossings
+            .iter()
+            .map(|at| {
+                Event::Pass(Pass {
+                    adapter: AdapterId("oft".into()),
+                    seat: SeatRef("s".into()),
+                    at: SourceTime::from_micros(at * S),
+                    sequence: None,
+                    gate: GateIndex::LAP,
+                    signal: None,
+                    race: Some(race.clone()),
+                })
+            })
+            .collect();
+        for crossing in restarts {
+            events.push(Event::RestartMarked {
+                race: race.clone(),
+                crossing: LogRef(*crossing),
+            });
+        }
+        RaceLaps::fold(events.iter().enumerate().map(|(i, e)| (i as u64, e))).seat(
+            &race,
+            &AdapterId("oft".into()),
+            &SeatRef("s".into()),
+            LapFilters::default(),
+        )
+    }
+
+    fn entry(name: &str, crossings: &[i64]) -> RaceEntry {
+        RaceEntry {
+            pilot: pilot(name),
+            laps: laps_with(crossings, &[]),
         }
     }
 
-    #[test]
-    fn every_illegal_command_is_rejected_with_the_right_error() {
-        let legal: Vec<(HeatState, HeatCommand)> =
-            legal_table().into_iter().map(|(s, c, _)| (s, c)).collect();
-
-        for &state in &ALL_STATES {
-            for &command in &ALL_COMMANDS {
-                let is_legal = legal.contains(&(state, command));
-                let result = apply(state, command);
-                if is_legal {
-                    assert!(result.is_ok(), "{state:?} + {command:?} should be legal");
-                } else {
-                    assert_eq!(
-                        result,
-                        Err(IllegalTransition { state, command }),
-                        "{state:?} + {command:?} should be rejected",
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn legal_table_is_exhaustive_over_the_diagram() {
-        // 4 manual forward edges + 2 overrides + 3 aborts + 3 restarts + revert + 2 discards = 15.
-        assert_eq!(legal_table().len(), 15);
-    }
-
-    #[test]
-    fn overrides_are_legal_only_in_their_state() {
-        use HeatCommand as C;
-        use HeatState as S;
-        use HeatTransition as T;
-        // SkipCountdown forces Armed → Running; ForceEnd forces Running → Unofficial.
-        assert_eq!(apply(S::Armed, C::SkipCountdown), Ok(T::Running));
-        assert_eq!(apply(S::Running, C::ForceEnd), Ok(T::Finished));
-        // Each is illegal in every other state.
-        for &state in &ALL_STATES {
-            if state != S::Armed {
-                assert!(apply(state, C::SkipCountdown).is_err(), "{state:?} + Skip");
-            }
-            if state != S::Running {
-                assert!(apply(state, C::ForceEnd).is_err(), "{state:?} + ForceEnd");
-            }
-        }
-    }
-
-    #[test]
-    fn forward_transitions_land_on_their_named_states() {
-        use HeatState as S;
-        use HeatTransition as T;
-        assert_eq!(next_state(S::Scheduled, T::Staged), S::Staged);
-        assert_eq!(next_state(S::Staged, T::Armed), S::Armed);
-        assert_eq!(next_state(S::Armed, T::Running), S::Running);
-        assert_eq!(next_state(S::Running, T::Finished), S::Unofficial);
-        assert_eq!(next_state(S::Unofficial, T::Finalized), S::Final);
-        // advance is terminal: the heat stays Final.
-        assert_eq!(next_state(S::Final, T::Advanced), S::Final);
-    }
-
-    #[test]
-    fn finalize_is_legal_only_from_unofficial() {
-        use HeatCommand as C;
-        use HeatState as S;
-        use HeatTransition as T;
-        assert_eq!(apply(S::Unofficial, C::Finalize), Ok(T::Finalized));
-        for &state in &ALL_STATES {
-            if state != S::Unofficial {
-                assert!(apply(state, C::Finalize).is_err(), "{state:?} + Finalize");
-            }
-        }
-    }
-
-    #[test]
-    fn revert_is_legal_only_from_final_and_lands_unofficial() {
-        use HeatCommand as C;
-        use HeatState as S;
-        use HeatTransition as T;
-        // Legal from Final, recording Reverted, landing back at Unofficial.
-        assert_eq!(apply(S::Final, C::Revert), Ok(T::Reverted));
-        assert_eq!(next_state(S::Final, T::Reverted), S::Unofficial);
-        // Illegal everywhere else.
-        for &state in &ALL_STATES {
-            if state != S::Final {
-                assert!(apply(state, C::Revert).is_err(), "{state:?} + Revert");
-            }
-        }
-    }
-
-    #[test]
-    fn restart_is_legal_from_armed_running_unofficial_landing_scheduled() {
-        use HeatCommand as C;
-        use HeatState as S;
-        use HeatTransition as T;
-        for &state in &[S::Armed, S::Running, S::Unofficial] {
-            assert_eq!(apply(state, C::Restart), Ok(T::Restarted), "{state:?}");
-            assert_eq!(next_state(state, T::Restarted), S::Scheduled, "{state:?}");
-        }
-        // Not legal before the heat is committed, nor once finalized.
-        for &state in &[S::Scheduled, S::Staged, S::Final] {
-            assert!(apply(state, C::Restart).is_err(), "{state:?} + Restart");
-        }
-    }
-
-    #[test]
-    fn abort_always_resets_to_scheduled() {
-        use HeatState as S;
-        use HeatTransition as T;
-        // Abort always lands in Scheduled, from any abortable state, so the RD
-        // re-Stages the heat.
-        assert_eq!(next_state(S::Staged, T::Aborted), S::Scheduled);
-        assert_eq!(next_state(S::Armed, T::Aborted), S::Scheduled);
-        assert_eq!(next_state(S::Running, T::Aborted), S::Scheduled);
-    }
-
-    #[test]
-    fn discard_is_legal_from_unofficial_and_final_landing_scheduled() {
-        use HeatCommand as C;
-        use HeatState as S;
-        use HeatTransition as T;
-        // A raced heat (Unofficial or Final) can be thrown away; Discarded resets it to
-        // Scheduled for a clean re-run (the UI offers Discard in both states).
-        for &state in &[S::Unofficial, S::Final] {
-            assert_eq!(apply(state, C::Discard), Ok(T::Discarded), "{state:?}");
-            assert_eq!(next_state(state, T::Discarded), S::Scheduled, "{state:?}");
-        }
-        // Illegal before the heat has any result to throw away.
-        for &state in &[S::Scheduled, S::Staged, S::Armed, S::Running] {
-            assert!(apply(state, C::Discard).is_err(), "{state:?} + Discard");
-        }
-    }
-
-    #[test]
-    fn restart_and_discard_land_correctly() {
-        use HeatState as S;
-        use HeatTransition as T;
-        assert_eq!(next_state(S::Running, T::Restarted), S::Scheduled);
-        assert_eq!(next_state(S::Final, T::Discarded), S::Scheduled);
-    }
-
-    #[test]
-    fn revert_round_trips_unofficial_final_unofficial() {
-        // Finalize then Revert returns a finalized heat to Unofficial, and it can be
-        // finalized again — a full correction loop.
-        let mut state = HeatState::Unofficial;
-        let t = apply(state, HeatCommand::Finalize).expect("Unofficial → Final");
-        state = next_state(state, t);
-        assert_eq!(state, HeatState::Final);
-        let t = apply(state, HeatCommand::Revert).expect("Final → Unofficial");
-        state = next_state(state, t);
-        assert_eq!(state, HeatState::Unofficial);
-        let t = apply(state, HeatCommand::Finalize).expect("Unofficial → Final again");
-        state = next_state(state, t);
-        assert_eq!(state, HeatState::Final);
-    }
-
-    #[test]
-    fn apply_then_next_state_round_trips_the_forward_path() {
-        // Drive the whole forward path command-by-command, checking each landing.
-        let mut state = HeatState::Scheduled;
-        let path = [
-            (HeatCommand::Stage, HeatState::Staged),
-            (HeatCommand::Start, HeatState::Armed),
-            // The Armed→Running / Running→Unofficial steps are runtime-driven; the overrides
-            // record the same transitions, so the forward path is driven by them here.
-            (HeatCommand::SkipCountdown, HeatState::Running),
-            (HeatCommand::ForceEnd, HeatState::Unofficial),
-            (HeatCommand::Finalize, HeatState::Final),
-            (HeatCommand::Advance, HeatState::Final),
-        ];
-        for (command, expected) in path {
-            let transition = apply(state, command).expect("legal on forward path");
-            state = next_state(state, transition);
-            assert_eq!(state, expected, "after {command:?}");
-        }
-    }
-
-    fn heat() -> HeatId {
-        HeatId("q-1".into())
-    }
-
-    fn scheduled() -> Event {
-        Event::HeatScheduled {
-            heat: heat(),
-            lineup: vec![
-                CompetitorRef("node-0".into()),
-                CompetitorRef("node-1".into()),
-            ],
-            class: None,
-            round: None,
-            frequencies: vec![],
-            label: None,
-        }
-    }
-
-    fn changed(transition: HeatTransition) -> Event {
-        Event::HeatStateChanged {
-            heat: heat(),
-            transition,
-        }
-    }
-
-    #[test]
-    fn heat_state_returns_none_when_never_scheduled() {
-        let events = vec![changed(HeatTransition::Staged)];
-        assert_eq!(heat_state(&events, &heat()), None);
-    }
-
-    #[test]
-    fn heat_state_folds_a_full_run_to_scored() {
-        let events = vec![
-            scheduled(),
-            changed(HeatTransition::Staged),
-            changed(HeatTransition::Armed),
-            changed(HeatTransition::Running),
-            changed(HeatTransition::Finished),
-            changed(HeatTransition::Finalized),
-        ];
-        assert_eq!(heat_state(&events, &heat()), Some(HeatState::Final));
-    }
-
-    #[test]
-    fn heat_state_reconstructs_an_abort_and_re_run() {
-        // Stage, arm, run, abort (back to Scheduled), then re-stage, re-arm and run on.
-        let events = vec![
-            scheduled(),
-            changed(HeatTransition::Staged),
-            changed(HeatTransition::Armed),
-            changed(HeatTransition::Running),
-            changed(HeatTransition::Aborted), // Running → Scheduled
-            changed(HeatTransition::Staged),
-            changed(HeatTransition::Armed),
-            changed(HeatTransition::Running),
-        ];
-        assert_eq!(heat_state(&events, &heat()), Some(HeatState::Running));
-    }
-
-    #[test]
-    fn heat_state_reconstructs_a_discard() {
-        let events = vec![
-            scheduled(),
-            changed(HeatTransition::Staged),
-            changed(HeatTransition::Armed),
-            changed(HeatTransition::Running),
-            changed(HeatTransition::Finished),
-            changed(HeatTransition::Finalized),
-            changed(HeatTransition::Discarded), // Final → Scheduled
-        ];
-        assert_eq!(heat_state(&events, &heat()), Some(HeatState::Scheduled));
-    }
-
-    #[test]
-    fn heat_state_ignores_other_heats() {
-        let other = HeatId("q-2".into());
-        let events = vec![
-            scheduled(),
-            Event::HeatScheduled {
-                heat: other.clone(),
-                lineup: vec![],
-                class: None,
-                round: None,
-                frequencies: vec![],
-                label: None,
+    fn format(
+        end: EndCondition,
+        completion: CompletionRule,
+        sort: &[Measure],
+        points: &[u32],
+    ) -> Format {
+        Format {
+            name: "test".into(),
+            race: RaceRules {
+                end,
+                staging_micros: 0,
+                min_lap_micros: None,
+                first_lap: Default::default(),
+                stop_after_all_finish_micros: None,
+                max_micros: None,
             },
-            changed(HeatTransition::Staged),
-            Event::HeatStateChanged {
-                heat: other.clone(),
-                transition: HeatTransition::Staged,
-            },
+            completion,
+            ranking: Some(RankingRule {
+                sort: sort.to_vec(),
+            }),
+            points: points.to_vec(),
+        }
+    }
+
+    fn order(standings: &[Standing]) -> Vec<&str> {
+        standings.iter().map(|s| s.pilot.0.as_str()).collect()
+    }
+
+    fn finish_order(finish: &[Finish]) -> Vec<(&str, u32)> {
+        finish
+            .iter()
+            .map(|f| (f.pilot.0.as_str(), f.laps))
+            .collect()
+    }
+
+    #[test]
+    fn first_to_n_laps_is_won_by_whoever_finishes_lap_n_first() {
+        // Ana finishes lap 3 at 31 s, Ben at 29 s. Ben flew a 4th lap; it does not count.
+        let race = vec![
+            entry("ana", &[1, 11, 21, 31]),
+            entry("ben", &[2, 10, 20, 29, 40]),
+            entry("cat", &[1, 12, 30]), // only 2 laps
         ];
-        assert_eq!(heat_state(&events, &heat()), Some(HeatState::Staged));
-        assert_eq!(heat_state(&events, &other), Some(HeatState::Staged));
+        let finish = race_finish(&race, &EndCondition::FirstToLaps(3), |_| 0);
+        assert_eq!(
+            finish_order(&finish),
+            vec![("ben", 3), ("ana", 3), ("cat", 2)]
+        );
+        assert_eq!(finish[0].position, 1);
+        assert_eq!(finish[2].position, 3);
     }
 
     #[test]
-    fn folding_the_same_events_twice_is_identical() {
-        // Determinism (race-engine.html §6): a pure fold gives the same answer every
-        // time, with no hidden clock/RNG state between runs.
-        let events = vec![
-            scheduled(),
-            changed(HeatTransition::Staged),
-            changed(HeatTransition::Armed),
-            changed(HeatTransition::Running),
-            changed(HeatTransition::Aborted),
+    fn a_timed_race_is_most_laps_then_whoever_finished_their_last_lap_first() {
+        let race = vec![
+            entry("ana", &[1, 11, 21, 31]),    // 3 laps, done at 31
+            entry("ben", &[2, 12, 22, 30]),    // 3 laps, done at 30
+            entry("cat", &[1, 9, 17, 25, 33]), // 4 laps
         ];
-        let first = heat_state(&events, &heat());
-        let second = heat_state(&events, &heat());
-        assert_eq!(first, second);
-        assert_eq!(first, Some(HeatState::Scheduled));
+        let end = EndCondition::Timed {
+            micros: 30 * S,
+            grace_micros: 5 * S,
+        };
+        let finish = race_finish(&race, &end, |_| 0);
+        assert_eq!(
+            finish_order(&finish),
+            vec![("cat", 4), ("ben", 3), ("ana", 3)]
+        );
     }
 
     #[test]
-    fn grace_default_is_until_scored() {
-        // The type default stays the open window; a completion-clock round config defaults to a
-        // bounded Duration on its own (`default_grace_window`), so the auto-transition fires.
-        assert_eq!(GraceWindow::default(), GraceWindow::UntilScored);
-    }
-
-    // --- the effective grace window (#471) --------------------------------------------
-
-    #[test]
-    fn first_to_laps_has_no_grace_window_whatever_the_round_configured() {
-        use crate::scoring::WinCondition;
-        // #471(c). Every spelling of a configured window collapses to a zero-length one.
-        for configured in [
-            GraceWindow::UntilScored,
-            GraceWindow::Duration { micros: 30_000_000 },
-            GraceWindow::Duration { micros: 0 },
-        ] {
-            assert_eq!(
-                effective_grace_window(WinCondition::FirstToLaps { n: 3 }, configured),
-                GraceWindow::Duration { micros: 0 },
-                "a first-to-N round has no grace window (configured: {configured:?})",
-            );
-        }
+    fn a_pilot_with_no_lap_or_no_crossing_finishes_below_everyone_who_lapped() {
+        let field = [pilot("dee"), pilot("eli"), pilot("ana")];
+        let seed_of = |p: &PilotId| field.iter().position(|f| f == p).unwrap();
+        let race = vec![
+            entry("dee", &[]),      // never crossed (top seed)
+            entry("eli", &[3]),     // hole shot only
+            entry("ana", &[1, 11]), // one lap (bottom seed)
+        ];
+        let finish = race_finish(&race, &EndCondition::Open, seed_of);
+        assert_eq!(
+            finish_order(&finish),
+            vec![("ana", 1), ("eli", 0), ("dee", 0)]
+        );
     }
 
     #[test]
-    fn every_other_win_condition_keeps_the_round_configured_grace_window() {
-        use crate::scoring::WinCondition;
-        // The exception is first-to-N and ONLY first-to-N: a Timed round's buzzer still buys
-        // trailing pilots the round's window, and the qualifying pair are untouched.
-        let configured = GraceWindow::Duration { micros: 30_000_000 };
-        for condition in [
-            WinCondition::Timed {
-                window_micros: 120_000_000,
+    fn a_dead_heat_is_broken_by_seed_so_positions_are_always_different() {
+        let field = [pilot("ben"), pilot("ana")];
+        let seed_of = |p: &PilotId| field.iter().position(|f| f == p).unwrap();
+        let race = vec![entry("ana", &[1, 11]), entry("ben", &[1, 11])];
+        let finish = race_finish(&race, &EndCondition::Open, seed_of);
+        assert_eq!(finish_order(&finish), vec![("ben", 1), ("ana", 1)]);
+        assert_eq!((finish[0].position, finish[1].position), (1, 2));
+    }
+
+    #[test]
+    fn a_one_race_heat_is_ranked_by_finish_order() {
+        let field = [pilot("ana"), pilot("ben"), pilot("cat")];
+        let fmt = format(
+            EndCondition::FirstToLaps(2),
+            CompletionRule::SavedRaces(1),
+            &[Measure::LastFinish],
+            &[],
+        );
+        let race = vec![
+            entry("ana", &[1, 12, 23]),
+            entry("ben", &[1, 11, 21]),
+            entry("cat", &[1, 13, 26]),
+        ];
+        let standings = heat_standings(&field, &[race], &fmt);
+        assert_eq!(order(&standings), vec!["ben", "ana", "cat"]);
+        assert_eq!(standings[0].wins, 1);
+        assert!(heat_complete(&fmt.completion, &standings, 1, false));
+        assert!(!heat_complete(&fmt.completion, &standings, 0, false));
+    }
+
+    #[test]
+    fn chase_the_ace_runs_until_a_pilot_has_two_wins() {
+        let field = [pilot("ana"), pilot("ben"), pilot("cat")];
+        let fmt = format(
+            EndCondition::FirstToLaps(1),
+            CompletionRule::AnyPilotReaches {
+                measure: Measure::Wins,
+                at_least: 2,
             },
-            WinCondition::BestLap,
-            WinCondition::BestConsecutive { n: 3 },
-        ] {
-            assert_eq!(
-                effective_grace_window(condition, configured),
-                configured,
-                "{condition:?} must keep the round's window",
-            );
-            assert_eq!(
-                effective_grace_window(condition, GraceWindow::UntilScored),
-                GraceWindow::UntilScored,
-            );
-        }
-    }
+            &[Measure::Wins, Measure::LastFinish],
+            &[],
+        );
+        let ana_wins = vec![
+            entry("ana", &[1, 10]),
+            entry("ben", &[1, 11]),
+            entry("cat", &[1, 12]),
+        ];
+        let ben_wins = vec![
+            entry("ana", &[1, 11]),
+            entry("ben", &[1, 10]),
+            entry("cat", &[1, 12]),
+        ];
+        let cat_wins = vec![
+            entry("ana", &[1, 12]),
+            entry("ben", &[1, 11]),
+            entry("cat", &[1, 10]),
+        ];
 
-    // --- the auto-official timer (marshaling Slice 5) ---------------------------------
+        // Three races, three different winners: nobody has two wins yet.
+        let mut races = vec![ana_wins.clone(), ben_wins.clone(), cat_wins];
+        let standings = heat_standings(&field, &races, &fmt);
+        assert!(!heat_complete(
+            &fmt.completion,
+            &standings,
+            races.len(),
+            false
+        ));
 
-    #[test]
-    fn protest_window_off_never_auto_finalizes() {
-        // OFF = manual Finalize only (today's behaviour): no elapsed value ever makes it due.
-        for elapsed in [None, Some(-1), Some(0), Some(1_000_000), Some(i64::MAX)] {
-            assert!(
-                !auto_official_due(HeatState::Unofficial, ProtestWindow::Off, elapsed),
-                "Off must never be due (elapsed {elapsed:?})",
-            );
-        }
-    }
-
-    #[test]
-    fn protest_window_after_is_due_once_the_window_elapses() {
-        let window = ProtestWindow::After { micros: 2_000_000 };
-        // Before the window — not due.
-        assert!(!auto_official_due(
-            HeatState::Unofficial,
-            window,
-            Some(1_999_999)
+        // Ben wins again: done, and Ben is on top with two wins.
+        races.push(ben_wins);
+        let standings = heat_standings(&field, &races, &fmt);
+        assert!(heat_complete(
+            &fmt.completion,
+            &standings,
+            races.len(),
+            false
         ));
-        // Exactly at the deadline — due (inclusive).
-        assert!(auto_official_due(
-            HeatState::Unofficial,
-            window,
-            Some(2_000_000)
-        ));
-        // Past the deadline — due.
-        assert!(auto_official_due(
-            HeatState::Unofficial,
-            window,
-            Some(2_500_000)
-        ));
-        // An unknown race-end instant is never due (the runtime can't place the deadline yet).
-        assert!(!auto_official_due(HeatState::Unofficial, window, None));
+        assert_eq!(order(&standings), vec!["ben", "ana", "cat"]);
+        assert_eq!(standings[0].wins, 2);
+        // Ana and Cat both have one win; the last race's finish order splits them.
+        assert_eq!((standings[1].wins, standings[2].wins), (1, 1));
     }
 
     #[test]
-    fn auto_official_is_due_only_from_unofficial() {
-        let window = ProtestWindow::After { micros: 0 };
-        // Even a zero-length window only fires from Unofficial; any other state is never due,
-        // so the timer can never skip the provisional phase or re-fire on a finalized heat.
-        for &state in &ALL_STATES {
-            let due = auto_official_due(state, window, Some(10_000_000));
-            assert_eq!(
-                due,
-                state == HeatState::Unofficial,
-                "{state:?} auto-official due should be {}",
-                state == HeatState::Unofficial,
-            );
+    fn points_are_summed_across_the_races_of_one_heat() {
+        // The pro-spec style: one heat, three races, points per race, total decides.
+        let field = [pilot("ana"), pilot("ben"), pilot("cat")];
+        let fmt = format(
+            EndCondition::FirstToLaps(1),
+            CompletionRule::SavedRaces(3),
+            &[Measure::Points, Measure::BestFinish],
+            &[10, 6, 3],
+        );
+        let r1 = vec![
+            entry("ana", &[1, 10]),
+            entry("ben", &[1, 11]),
+            entry("cat", &[1, 12]),
+        ];
+        let r2 = vec![
+            entry("ana", &[1, 12]),
+            entry("ben", &[1, 10]),
+            entry("cat", &[1, 11]),
+        ];
+        let r3 = vec![
+            entry("ana", &[1, 11]),
+            entry("ben", &[1, 10]),
+            entry("cat", &[1, 12]),
+        ];
+        let races = vec![r1, r2, r3];
+        let standings = heat_standings(&field, &races, &fmt);
+        // ana 10+3+6 = 19, ben 6+10+10 = 26, cat 3+6+3 = 12
+        assert_eq!(order(&standings), vec!["ben", "ana", "cat"]);
+        assert_eq!(
+            standings.iter().map(|s| s.points).collect::<Vec<_>>(),
+            vec![26, 19, 12]
+        );
+        assert!(heat_complete(&fmt.completion, &standings, 3, false));
+        assert!(!heat_complete(&fmt.completion, &standings, 2, false));
+    }
+
+    #[test]
+    fn a_time_trial_takes_each_pilots_best_three_consecutive_across_their_runs() {
+        let field = [pilot("ana"), pilot("ben")];
+        let fmt = format(
+            EndCondition::Open,
+            CompletionRule::DirectorDecides,
+            &[Measure::BestConsecutive(3), Measure::BestLap],
+            &[],
+        );
+        // Ana: run 1 best three = 10+10+10 = 30; run 2 best three = 9+9+9 = 27.
+        // Ben: one run, best three = 9+9+10 = 28.
+        let run1 = vec![
+            entry("ana", &[0, 10, 20, 30]),
+            entry("ben", &[0, 9, 18, 28]),
+        ];
+        let run2 = vec![entry("ana", &[0, 9, 18, 27])];
+        let standings = heat_standings(&field, &[run1, run2], &fmt);
+        assert_eq!(order(&standings), vec!["ana", "ben"]);
+        assert_eq!(
+            standings[0].value(Measure::BestConsecutive(3)),
+            Some(27 * S)
+        );
+        assert_eq!(
+            standings[1].value(Measure::BestConsecutive(3)),
+            Some(28 * S)
+        );
+        // Only the director ends it.
+        assert!(!heat_complete(&fmt.completion, &standings, 2, false));
+        assert!(heat_complete(&fmt.completion, &standings, 2, true));
+    }
+
+    #[test]
+    fn best_consecutive_in_standings_does_not_span_a_restart() {
+        let field = [pilot("ana")];
+        let fmt = format(
+            EndCondition::Open,
+            CompletionRule::DirectorDecides,
+            &[Measure::BestConsecutive(3)],
+            &[],
+        );
+        // Laps 10, 9, [restart], 8, 7: no stretch of three.
+        let run = vec![RaceEntry {
+            pilot: pilot("ana"),
+            laps: laps_with(&[0, 10, 19, 23, 31, 38], &[3]),
+        }];
+        let standings = heat_standings(&field, &[run], &fmt);
+        assert_eq!(standings[0].value(Measure::BestConsecutive(3)), None);
+        assert_eq!(
+            standings[0].value(Measure::BestConsecutive(2)),
+            Some(15 * S)
+        );
+    }
+
+    #[test]
+    fn a_pilot_with_fewer_laps_than_the_window_ranks_below_one_with_a_time() {
+        let field = [pilot("ana"), pilot("ben")];
+        let fmt = format(
+            EndCondition::Open,
+            CompletionRule::DirectorDecides,
+            &[Measure::BestConsecutive(3)],
+            &[],
+        );
+        // Ana (top seed) flew two fast laps; Ben flew three slow ones.
+        let run = vec![entry("ana", &[0, 5, 10]), entry("ben", &[0, 20, 40, 60])];
+        let standings = heat_standings(&field, &[run], &fmt);
+        assert_eq!(order(&standings), vec!["ben", "ana"]);
+    }
+
+    #[test]
+    fn a_pilot_who_never_flew_ranks_below_everyone_who_did_whatever_their_seed() {
+        // The top seed misses the heat; everyone else races.
+        let field = [pilot("top"), pilot("ana"), pilot("ben")];
+        let fmt = format(
+            EndCondition::FirstToLaps(1),
+            CompletionRule::SavedRaces(1),
+            &[Measure::LastFinish],
+            &[],
+        );
+        let race = vec![
+            entry("top", &[]),
+            entry("ana", &[1, 12]),
+            entry("ben", &[1, 10]),
+        ];
+        let standings = heat_standings(&field, &[race], &fmt);
+        assert_eq!(order(&standings), vec!["ben", "ana", "top"]);
+        assert!(!standings[2].flew);
+        // And a pilot removed from the lineup altogether is still in the standings, last.
+        let race = vec![entry("ana", &[1, 12]), entry("ben", &[1, 10])];
+        let standings = heat_standings(&field, &[race], &fmt);
+        assert_eq!(order(&standings), vec!["ben", "ana", "top"]);
+    }
+
+    #[test]
+    fn several_no_shows_are_ordered_by_seed() {
+        let field = [pilot("a"), pilot("b"), pilot("c"), pilot("d")];
+        let fmt = format(
+            EndCondition::FirstToLaps(1),
+            CompletionRule::SavedRaces(1),
+            &[Measure::LastFinish],
+            &[],
+        );
+        let race = vec![entry("c", &[1, 10])];
+        let standings = heat_standings(&field, &[race], &fmt);
+        assert_eq!(order(&standings), vec!["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn standings_hold_every_pilot_exactly_once_in_positions_one_to_n() {
+        let field: Vec<PilotId> = ["a", "b", "c", "d", "e"].iter().map(|n| pilot(n)).collect();
+        let fmt = format(
+            EndCondition::Open,
+            CompletionRule::DirectorDecides,
+            &[Measure::Laps, Measure::BestLap],
+            &[],
+        );
+        // Two pilots tie exactly, one never flies, and the heat has not been raced by "e".
+        let race = vec![
+            entry("a", &[0, 10, 20]),
+            entry("b", &[0, 10, 20]),
+            entry("c", &[]),
+            entry("d", &[0, 9]),
+        ];
+        for races in [vec![], vec![race]] {
+            let standings = heat_standings(&field, &races, &fmt);
+            let mut names = order(&standings);
+            let positions: Vec<u32> = standings.iter().map(|s| s.position).collect();
+            assert_eq!(positions, vec![1, 2, 3, 4, 5]);
+            names.sort_unstable();
+            assert_eq!(names, vec!["a", "b", "c", "d", "e"]);
         }
+    }
+
+    #[test]
+    fn an_unraced_heat_is_in_seed_order() {
+        let field = [pilot("a"), pilot("b"), pilot("c")];
+        let fmt = format(
+            EndCondition::Open,
+            CompletionRule::SavedRaces(1),
+            &[Measure::LastFinish],
+            &[],
+        );
+        assert_eq!(
+            order(&heat_standings(&field, &[], &fmt)),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn an_unranked_heat_orders_by_who_flew_then_seed() {
+        let field = [pilot("a"), pilot("b"), pilot("c")];
+        let mut fmt = format(
+            EndCondition::Open,
+            CompletionRule::DirectorDecides,
+            &[],
+            &[],
+        );
+        fmt.ranking = None;
+        // "c" flew far more laps than "b"; practice ranks nobody by laps.
+        let race = vec![entry("b", &[0, 10]), entry("c", &[0, 5, 10, 15])];
+        assert_eq!(
+            order(&heat_standings(&field, &[race], &fmt)),
+            vec!["b", "c", "a"]
+        );
+    }
+
+    #[test]
+    fn a_no_show_in_one_race_scores_nothing_for_it() {
+        let field = [pilot("ana"), pilot("ben")];
+        let fmt = format(
+            EndCondition::FirstToLaps(1),
+            CompletionRule::SavedRaces(2),
+            &[Measure::Points],
+            &[10, 6],
+        );
+        let r1 = vec![entry("ana", &[1, 10]), entry("ben", &[1, 11])];
+        // Ben does not show for race 2: second "place" by default must not score 6.
+        let r2 = vec![entry("ana", &[1, 10]), entry("ben", &[])];
+        let standings = heat_standings(&field, &[r1, r2], &fmt);
+        assert_eq!(standings[0].points, 20);
+        assert_eq!(standings[1].points, 6);
+        assert_eq!(standings[1].last_finish, None);
+        assert!(standings[1].flew, "ben flew race 1");
     }
 }

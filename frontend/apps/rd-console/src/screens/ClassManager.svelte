@@ -8,13 +8,12 @@
    * full-trust-first → lazy-token write flow on the {@link Session}. Ids are auto-generated
    * server-side, never shown or asked for.
    *
-   * It is built **reusable** so the same CRUD lives in one place:
-   *  - the {@link ClassesPage} embeds it for directory CRUD;
-   *  - the in-event {@link EventClassesRoster} embeds it and layers **per-event selection** on top,
-   *    via the optional `rowLead` snippet (a checkbox per row), the `listHeader`/`listFooter` snippets
-   *    (the selection count + Save), and `rowChecked` (the selected-row highlight) — the very seam
-   *    {@link PilotManager} exposes for the in-event roster. **Selection concerns live in that host,
-   *    not here** — this component is purely the directory + form.
+   * It is built **reusable** so the same CRUD lives in one place. The {@link ClassesPage} embeds
+   * it for directory CRUD. A host that wants to *select* classes can layer that on top via the
+   * optional `rowLead` snippet (a checkbox per row), the `listHeader`/`listFooter` snippets, and
+   * `rowChecked` (the selected-row highlight) — the same seam {@link PilotManager} exposes. No
+   * host uses the selection seam at the moment. **Selection concerns live in the host, not
+   * here** — this component is purely the directory + form.
    *
    * New classes the RD creates are always **`Custom`** (the create form has no org source picker).
    * The canonical org classes ship as locked, fixed-id **built-ins** the Director seeds: each is
@@ -56,7 +55,7 @@
     classes?: Class[];
     /** Called after every create/edit/delete (and the reload it triggers) with the fresh list. */
     onchange?: (classes: Class[]) => void;
-    /** Rendered at the **start** of each row (e.g. the in-event selection checkbox). */
+    /** Rendered at the **start** of each row (e.g. a selection checkbox). */
     rowLead?: Snippet<[Class]>;
     /** Rendered **above** the list (reserved for selection chrome). */
     listHeader?: Snippet;
@@ -66,15 +65,15 @@
     rowChecked?: (cls: Class) => boolean;
     /**
      * Whether to offer the **hide / unhide** affordance per row and surface hidden classes
-     * (hide/archive classes). The main Classes view sets this `true` (manageable, marked); the
-     * in-event picker leaves it `false`.
+     * (hide/archive classes). The Classes page sets this `true` (manageable, marked); a selecting
+     * host would leave it `false`.
      */
     manageHidden?: boolean;
     /**
-     * Whether to **filter out hidden classes** from the rendered list (hide/archive classes) — the
-     * per-event picker sets this so the offered list excludes archived classes. A row the
-     * {@link keepRow} predicate keeps (e.g. one already selected on the event) is shown even when
-     * hidden, so a previously-selected class never silently vanishes.
+     * Whether to **filter out hidden classes** from the rendered list (hide/archive classes) — a
+     * selecting host sets this so the offered list excludes archived classes. A row the
+     * {@link keepRow} predicate keeps (e.g. one already selected) is shown even when hidden, so a
+     * previously-selected class never silently vanishes.
      */
     filterHidden?: boolean;
     /** When {@link filterHidden} is set, keep a row that would otherwise be filtered (e.g. selected). */
@@ -204,7 +203,7 @@
 
   // ── Hide / un-hide (hide/archive classes) ────────────────────────────────────
   // A visibility toggle, valid for built-ins too (hiding is a preference, not an edit). Hidden
-  // classes stay listed here (marked) so the RD can un-hide them; the per-event picker filters them.
+  // classes stay listed here (marked) so the RD can un-hide them; `filterHidden` drops them.
   let togglingHidden = $state<string | undefined>(undefined);
   async function setHidden(cls: Class, hidden: boolean) {
     if (togglingHidden) return;
@@ -224,9 +223,9 @@
     }
   }
 
-  // The rows actually rendered. In the per-event picker (`filterHidden`) hidden classes drop out,
-  // except a row `keepRow` keeps (e.g. one already selected on the event), so a selected class never
-  // silently disappears. Everywhere else (the main view) all classes show; hidden ones are marked.
+  // The rows actually rendered. With `filterHidden`, hidden classes drop out, except a row
+  // `keepRow` keeps (e.g. one already selected), so a selected class never silently disappears.
+  // Otherwise (the Classes page) all classes show; hidden ones are marked.
   const renderedClasses = $derived(
     loadState.kind === 'ready'
       ? filterHidden

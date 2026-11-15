@@ -12,8 +12,7 @@
  *
  * ## Why it is a module singleton
  *
- * {@link Brand} is mounted six times over (the workspace sidebar and five directory pages), and the
- * version now rides with it rather than in a page-corner watermark App.svelte alone could own. One
+ * {@link Brand} is mounted on several pages, and the version rides with it. One
  * fetch for the app, started on first read and never repeated: the Director's version cannot change
  * without the page reloading with it.
  *

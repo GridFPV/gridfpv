@@ -1,262 +1,411 @@
 /**
- * Format identity + friendly-name + per-format field shaping (Rounds form redesign).
+ * Formats, as the console reads and edits them.
  *
- * The engine's `FormatRegistry` keys (`open_practice`, `head_to_head`, `timed_qual`, …) are the wire values stored
- * on a {@link RoundDef.format}; they are not human-readable. This module is the single source of
- * truth that maps each key to a friendly label and decides **which fields the Rounds create/edit
- * form shows for that format**, so the form is field-driven rather than a wall of every control.
+ * A format is a named bundle of rules: how one race ends, when the heat is done, and how
+ * the heat is ranked (`docs/primitives.md` §5.6). The saved formats live on the Director
+ * (`GET /formats`). This module holds what the screens need around them, all pure:
  *
- * Reused by:
- *  - the Rounds create/edit form (field order + dynamic per-format sections),
- *  - the Rounds list + Heats area (which show the friendly name in place of the raw key).
+ * - the words for a format ({@link formatSummary}), so a list can say what each one does;
+ * - a **draft** a form binds to, and the two conversions between a draft and a format;
+ * - the two questions the Run page asks of a format.
  *
- * Kept framework-pure (no Svelte) so it unit-tests directly and every surface shares one map.
+ * The wire holds times in microseconds. People type seconds, so the draft holds those.
  */
+import type { Format, Measure } from '@gridfpv/types';
 
-/** The casual open-practice format key — a channel-seated, scoring-free practice run. */
-export const OPEN_PRACTICE = 'open_practice';
+const SECOND = 1_000_000;
 
-/**
- * The **Head-to-Head** racing format key (D17) — the atomic racing round: a field split into heats of
- * `group_size`, each won by the round's win condition, then ranked by `scoring` (Placement, or Points
- * from a per-position table authored in the round form). It is the building block tournament
- * structures compose; as a directly-addable round it is one of the three round types the Add-round
- * picker offers.
- */
-export const HEAD_TO_HEAD = 'head_to_head';
+/** What a form field holds: a number, or text (empty while nothing is typed). */
+export type FieldValue = number | string;
 
-/** Whether a format key is the Head-to-Head racing format. */
-export function isHeadToHeadFormat(format: string | undefined | null): boolean {
-  return format === HEAD_TO_HEAD;
+/** The number a field holds, or `undefined` when it is empty or not a number. */
+function fieldNumber(value: FieldValue): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/**
- * The **Time Trials** (qualifying) format key. The wire key is the persistence-stable `timed_qual`
- * (only the friendly label was renamed Qualifying → Time Trials, #218 / D11); a time-trial round is
- * ranked by its win-condition metric — **Best of N laps** (N = 1 being the best single lap).
- *
- * *Not* "Timed — Most Laps": that was reclassified head-to-head-only in #472. Pilots flying
- * simultaneously and competing on lap count in one window are racing each other; "time trial"
- * means the solo/async run against the clock.
- */
-export const TIMED_QUAL = 'timed_qual';
+const isEmpty = (value: FieldValue): boolean => typeof value === 'string' && value.trim() === '';
 
-/** Whether a format key is the Time Trials (time-trial / qualifying) format. */
-export function isTimedQualFormat(format: string | undefined | null): boolean {
-  return format === TIMED_QUAL;
+/** Whether a heat under this format is done only when the director says so. */
+export function directorEndsHeat(format: Format | undefined): boolean {
+  return format?.completion === 'DirectorDecides';
 }
 
-/**
- * The **qualifying** format keys — currently just `timed_qual`. For these the cross-round
- * ranking metric *is* the win condition (the qualifying metric is derived from the win condition,
- * not a separate stored param — Rounds form redesign), so the win-condition dropdown offers only
- * the qualifying-applicable condition (Best of N laps) and the separate metric field is gone.
- */
-export const QUALIFYING_FORMATS: readonly string[] = ['timed_qual'];
-
-/** Whether a format key is a qualifying format (its win condition drives the qualifying metric). */
-export function isQualifyingFormat(format: string | undefined | null): boolean {
-  return !!format && QUALIFYING_FORMATS.includes(format);
+/** Whether a heat under this format is ranked. Practice is not. */
+export function isRanked(format: Format | undefined): boolean {
+  return format?.ranking !== undefined;
 }
 
-/**
- * The win-condition kinds the Rounds form authors — the discriminator, not the wire shape.
- *
- * `BestOfN` is the converged time-trial metric: N = 1 is the best single lap (serialised as
- * `BestLap`), N > 1 the best N consecutive laps (`BestConsecutive`). `Timed` is most-laps-in-a-
- * window; `FirstToLaps` is the race to a lap target.
- */
-export type WinConditionKind = 'Timed' | 'FirstToLaps' | 'BestOfN';
+// ── How a heat is ranked ─────────────────────────────────────────────────────────
 
-/** Every win-condition kind, in picker order — the offering for a format with no family rule. */
-export const WIN_CONDITION_KINDS: readonly WinConditionKind[] = ['Timed', 'FirstToLaps', 'BestOfN'];
+/** The ways to rank a heat that the editor offers. `custom` is a rule it did not make. */
+export type RankKey =
+  | 'none'
+  | 'finish'
+  | 'laps'
+  | 'best-lap'
+  | 'consecutive'
+  | 'wins'
+  | 'points'
+  | 'custom';
 
-/**
- * Which win-condition kinds `format` may be raced under — **the format↔win-condition taxonomy**,
- * and the single source the Rounds form's win-condition picker groups by (#472).
- *
- * - **Head-to-Head** → `Timed` | `FirstToLaps`. Both are ways to *decide a race between pilots on
- *   track together*: most laps inside one shared window, or first to a lap target. `BestOfN` is a
- *   time-trial metric, not how you decide a race.
- * - **Qualifying / Time Trials** → `BestOfN` only. A time trial is a solo/async run against the
- *   clock, ranked by your best result. **`Timed` — Most Laps was moved out of this bucket in
- *   #472**: pilots flying simultaneously and competing on lap count in one window are racing each
- *   other, which is head-to-head. (Qualifying a field *by* total laps is a round-level seeding
- *   concern, not a claim about what kind of format this is.)
- * - Anything else (a tournament structure round reached by editing) → all three, unchanged.
- *
- * Returns kinds in {@link WIN_CONDITION_KINDS} order so the picker's option order is stable.
- */
-export function winConditionKindsFor(
-  format: string | undefined | null
-): readonly WinConditionKind[] {
-  if (isHeadToHeadFormat(format)) return ['Timed', 'FirstToLaps'];
-  if (isQualifyingFormat(format)) return ['BestOfN'];
-  return WIN_CONDITION_KINDS;
-}
+/** The ranking choices, in the order the editor lists them. */
+export const RANK_CHOICES: readonly { key: Exclude<RankKey, 'custom'>; label: string }[] = [
+  { key: 'none', label: 'Not ranked (practice)' },
+  { key: 'finish', label: 'Finishing order of the race' },
+  { key: 'laps', label: 'Most laps, then finishing order' },
+  { key: 'best-lap', label: 'Fastest single lap' },
+  { key: 'consecutive', label: 'Fastest laps in a row' },
+  { key: 'wins', label: 'Most wins, then finishing order' },
+  { key: 'points', label: 'Most points over the races' }
+];
 
-/**
- * The win-condition kind a fresh round of `format` opens on: the first kind the format offers
- * ({@link winConditionKindsFor}). So Head-to-Head defaults to `Timed` (unchanged) and a Time Trial
- * defaults to `BestOfN` rather than to a `Timed` its family no longer offers.
- */
-export function defaultWinConditionKindFor(format: string | undefined | null): WinConditionKind {
-  return winConditionKindsFor(format)[0];
-}
+const sameSort = (a: readonly Measure[], b: readonly Measure[]): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
 
-/** The picker's human-readable label for a win-condition kind. */
-export const WIN_CONDITION_LABELS: Readonly<Record<WinConditionKind, string>> = {
-  Timed: 'Timed — Most Laps',
-  FirstToLaps: 'First to N laps',
-  BestOfN: 'Best of N laps'
-};
-
-/**
- * The **default channel mode** for a format — the mirror of the backend's
- * `ChannelMode::default_for_format` (race redesign Slice 7a): the static fixed-channel qualifying
- * formats (`timed_qual`, `round_robin`) default to **Static** — their whole schedule is
- * channel-balanced up front, so "Generate heats" materializes every rotation at once — and every
- * other format (brackets, multi-main, head-to-head) to **Per-heat**.
- *
- * The form MUST seed its picker from this rather than a flat `'PerHeat'`: it always sends
- * `channel_mode` explicitly, so the backend's by-format default never gets to apply, and a Time
- * Trial hardcoded to Per-heat degenerated to one-heat-at-a-time generation (#506 — the per-heat
- * generator only advances a rotation once the previous rotation's heats are finalized).
- */
-export function defaultChannelModeFor(format: string | undefined | null): 'Static' | 'PerHeat' {
-  return format === TIMED_QUAL || format === 'round_robin' ? 'Static' : 'PerHeat';
-}
-
-/**
- * The three **round types** the Add-round picker offers (D17 taxonomy): Practice ({@link OPEN_PRACTICE}),
- * Time Trial (`timed_qual`), and Head-to-Head ({@link HEAD_TO_HEAD}). Everything an RD flies directly is
- * one of these. Tournament *structures* (round-robin, single/double elim, multi-main) are **not** round
- * types — they are composed from Head-to-Head via the tournament builder, so they never appear in the
- * Add-round menu (only via editing an existing structure round, or the builder).
- */
-export const ROUND_TYPE_FORMATS: readonly string[] = [OPEN_PRACTICE, 'timed_qual', HEAD_TO_HEAD];
-
-/** Whether a format key is one of the three directly-addable round types (vs a tournament structure). */
-export function isRoundTypeFormat(format: string | undefined | null): boolean {
-  return !!format && ROUND_TYPE_FORMATS.includes(format);
-}
-
-/**
- * The friendly, human-readable label for each known format key (the engine's
- * `FormatRegistry::standard` names). The form selector, the Rounds list, and the Heats area all
- * render this in place of the raw key while the key stays the stored wire value.
- *
- * An unknown key (a format the engine added after this map) falls back to a de-slugged title-case
- * of the key via {@link formatLabel}, so the UI never shows a bare `snake_case` token.
- */
-export const FORMAT_LABELS: Readonly<Record<string, string>> = {
-  // The `open_practice` wire key is unchanged (persistence-stable); only the friendly label was
-  // shortened "Open Practice" → "Practice".
-  open_practice: 'Practice',
-  // The `timed_qual` wire key is unchanged (persistence-stable); only the friendly label was
-  // renamed Qualifying → Time Trials (#218 / decisions D11).
-  timed_qual: 'Time Trials',
-  // NOTE: ZippyQ shelved (#218) — the generator stays registered (so persisted `zippyq` rounds
-  // still load) but the format is excluded from the offered set, so a new round can't select it.
-  // Its label is kept here so any persisted `zippyq` round still renders a friendly name.
-  zippyq: 'ZippyQ',
-  head_to_head: 'Head-to-Head'
-};
-
-/**
- * The friendly label for a format key: the {@link FORMAT_LABELS} entry, else a de-slugged
- * title-case of the key (`some_new_format` → `Some New Format`) so an unmapped key is still
- * readable. A blank/undefined key yields an empty string.
- */
-export function formatLabel(format: string | undefined | null): string {
-  if (!format) return '';
-  const known = FORMAT_LABELS[format];
-  if (known) return known;
-  return format
-    .split(/[_-]+/)
-    .filter((w) => w.length > 0)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-/**
- * Which fields a given format's section shows in the Rounds form (Rounds form redesign).
- *
- * The form always shows **Label** then **Format**; the remaining fields are driven by this shape so
- * only the controls a format actually uses appear. Mirrors the backend's actual usage:
- *
- *  - **Open Practice** — a channel-seated, scoring-free run: the active-channels picker + an optional
- *    time limit. No eligible class, no win condition, no seeding, no channel mode.
- *  - **Bracket formats** (single/double elim, multi-main) — seeded from a prior round's ranking:
- *    eligible class + seeding (incl. the `FromRanking` source/top-N) + channel mode + win condition.
- *  - **Roster-seeded formats** (qualifying, round-robin, ZippyQ) — eligible class + win condition +
- *    seeding + channel mode.
- *
- * Every non-open-practice format also surfaces its declared **params** as proper labeled fields (the
- * caller renders them from the format's `FormatSchema`), so a format's knobs (`rounds`, `heat_size`,
- * `metric`, `bracket_reset`, `main_size`) appear inline in its section.
- */
-export interface FormatFields {
-  /** The eligible-class single-select dropdown (every format but open practice). */
-  eligibleClass: boolean;
-  /** The win-condition control (every format but open practice). */
-  winCondition: boolean;
-  /** The seeding control — From roster / From ranking (every format but open practice). */
-  seeding: boolean;
-  /** The Static / Per-heat channel-mode control (every format but open practice). */
-  channelMode: boolean;
-  /** The active-channels picker (open practice only). */
-  activeChannels: boolean;
-  /** The optional practice time-limit field (open practice only). */
-  timeLimit: boolean;
-  /** Whether to surface the format's declared params as labeled fields (non-open-practice). */
-  params: boolean;
-}
-
-/** Whether a format key is the open-practice format. */
-export function isOpenPracticeFormat(format: string | undefined | null): boolean {
-  return format === OPEN_PRACTICE;
-}
-
-/**
- * Whether a format's heats are **deterministic** — its whole set of heats is a pure function of the
- * field (and, across rounds, the prior heats' results), so the round can be filled in **one action**
- * ("Generate heats", #216). Every format *except* Open Practice is deterministic: Time Trials and
- * Head-to-Head draw a fixed schedule from the roster/ranking.
- *
- * Open Practice is the lone **dynamic** format — its channel-seated practice heats are created on
- * demand, with no fixed set — so it single-steps ("Add next heat") instead. Defined as "not open
- * practice" (with a guard for a missing format) so a future deterministic format is included by
- * default rather than silently excluded.
- */
-export function isDeterministicFormat(format: string | undefined | null): boolean {
-  return !!format && !isOpenPracticeFormat(format);
-}
-
-/**
- * The set of fields the Rounds form shows for `format`. Open practice swaps the class/win/seeding/
- * channel-mode block for the active-channels picker + time limit; every other format shows the full
- * roster/bracket block plus its declared params.
- */
-export function fieldsForFormat(format: string | undefined | null): FormatFields {
-  if (isOpenPracticeFormat(format)) {
-    return {
-      eligibleClass: false,
-      winCondition: false,
-      seeding: false,
-      channelMode: false,
-      activeChannels: true,
-      timeLimit: true,
-      params: false
-    };
+/** The measures each choice sorts by. `consecutive` takes its N from the draft. */
+function sortFor(rank: RankKey, consecutive: number): Measure[] | undefined {
+  switch (rank) {
+    case 'finish':
+      return ['LastFinish'];
+    case 'laps':
+      return ['Laps', 'LastFinish'];
+    case 'best-lap':
+      return ['BestLap'];
+    case 'consecutive':
+      return [{ BestConsecutive: consecutive }];
+    case 'wins':
+      return ['Wins', 'LastFinish'];
+    case 'points':
+      return ['Points', 'BestFinish'];
+    default:
+      return undefined;
   }
+}
+
+/** Which choice a ranking rule is, and its N when it is "laps in a row". */
+function rankOf(sort: readonly Measure[] | undefined): { rank: RankKey; consecutive: number } {
+  if (sort === undefined) return { rank: 'none', consecutive: 3 };
+  const first = sort[0];
+  if (
+    sort.length === 1 &&
+    typeof first === 'object' &&
+    first !== null &&
+    'BestConsecutive' in first
+  ) {
+    return { rank: 'consecutive', consecutive: first.BestConsecutive };
+  }
+  for (const choice of RANK_CHOICES) {
+    const made = sortFor(choice.key, 3);
+    if (made && sameSort(made, sort)) return { rank: choice.key, consecutive: 3 };
+  }
+  return { rank: 'custom', consecutive: 3 };
+}
+
+// ── The words for a format ───────────────────────────────────────────────────────
+
+/** A length of time in words: "2:00", "1:30", "45 s", "0.5 s". */
+export function durationWords(micros: number): string {
+  const seconds = micros / SECOND;
+  if (seconds >= 60 && Number.isInteger(seconds)) {
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+  return `${Number(seconds.toFixed(1))} s`;
+}
+
+const measureWords = (measure: Measure): string => {
+  if (typeof measure === 'object') {
+    return measure.BestConsecutive === 1
+      ? 'fastest lap'
+      : `fastest ${measure.BestConsecutive} laps in a row`;
+  }
+  switch (measure) {
+    case 'Wins':
+      return 'most wins';
+    case 'Points':
+      return 'most points';
+    case 'Laps':
+      return 'most laps';
+    case 'BestLap':
+      return 'fastest lap';
+    case 'BestFinish':
+      return 'best finish';
+    case 'LastFinish':
+      return 'finishing order';
+  }
+};
+
+/** How one race ends: "First to 3 laps", "2:00, then 10 s to finish the lap", "Until stopped". */
+export function raceWords(format: Format): string {
+  const { end, max_micros: limit, stop_after_all_finish_micros: wait } = format.race;
+  const limitWords = limit === undefined ? '' : `, ${durationWords(limit)} at most`;
+  if (end === 'Open') return `Until stopped${limitWords}`;
+  if ('FirstToLaps' in end) {
+    const laps = end.FirstToLaps;
+    const stops = wait === undefined ? '' : `, stops ${durationWords(wait)} after the last finish`;
+    return `First to ${laps} ${laps === 1 ? 'lap' : 'laps'}${stops}${limitWords}`;
+  }
+  const grace = end.Timed.grace_micros;
+  return grace > 0
+    ? `${durationWords(end.Timed.micros)}, then ${durationWords(grace)} to finish the lap`
+    : `${durationWords(end.Timed.micros)}, then it stops`;
+}
+
+/** How a heat is ranked: "Ranked by most laps, then finishing order", or "Not ranked". */
+export function rankingWords(format: Format): string {
+  if (!format.ranking || format.ranking.sort.length === 0) return 'Not ranked';
+  return `Ranked by ${format.ranking.sort.map(measureWords).join(', then ')}`;
+}
+
+/** When a heat is done: "One race", "3 races", "Until a pilot has 2 wins", "Until you call it done". */
+export function completionWords(format: Format): string {
+  const rule = format.completion;
+  if (rule === 'DirectorDecides') return 'Until you call it done';
+  if ('SavedRaces' in rule) {
+    return rule.SavedRaces === 1 ? 'One race' : `${rule.SavedRaces} races`;
+  }
+  const { measure, at_least: count } = rule.AnyPilotReaches;
+  if (measure === 'Wins') return `Until a pilot has ${count} ${count === 1 ? 'win' : 'wins'}`;
+  return `Until a pilot reaches ${count} (${measureWords(measure)})`;
+}
+
+/** How a race starts: "5 s countdown", or "Starts at once", with what starts lap 1. */
+export function startWords(format: Format): string {
+  const { staging_micros: staging, first_lap: firstLap } = format.race;
+  const countdown = staging > 0 ? `${durationWords(staging)} countdown` : 'Starts at once';
+  return firstLap === 'FromTone' ? `${countdown}, lap 1 timed from the tone` : countdown;
+}
+
+/** A format in one line, for a list or a picker: the race, the ranking, the heat. */
+export function formatSummary(format: Format): string {
+  return [raceWords(format), rankingWords(format), completionWords(format)].join(' · ');
+}
+
+// ── The draft ────────────────────────────────────────────────────────────────────
+
+/** How one race ends, as the editor offers it. */
+export type EndKey = 'Open' | 'Laps' | 'Timed';
+/** When a heat is done, as the editor offers it. */
+export type DoneKey = 'Director' | 'Races' | 'Wins';
+
+/** A format as the director is editing it. Fields that do not apply keep what was typed. */
+export interface FormatDraft {
+  name: string;
+  end: EndKey;
+  /** First to this many laps. */
+  laps: FieldValue;
+  /** A timed race's length, in seconds. */
+  timedSeconds: FieldValue;
+  /** After the time is up, this long to finish the lap in progress, in seconds. */
+  graceSeconds: FieldValue;
+  /** The countdown before the start tone, in seconds. 0 starts at once. */
+  stagingSeconds: FieldValue;
+  /** Lap 1 timed from the start tone, not from the first crossing. */
+  fromTone: boolean;
+  /** First to N: stop by itself this long after everyone finishes. Empty: the director stops it. */
+  autoStopSeconds: FieldValue;
+  /** A race that is not timed: the longest it may run, in seconds. Empty: no limit. */
+  limitSeconds: FieldValue;
+  done: DoneKey;
+  /** How many races, or how many wins, end the heat. */
+  doneCount: FieldValue;
+  rank: RankKey;
+  /** The N of "fastest N laps in a row". */
+  consecutive: FieldValue;
+  /** Points by finishing position, first place first: "10, 8, 6, 4". */
+  points: string;
+  /** This format's own minimum lap, in seconds. Empty: the event's. */
+  minLapSeconds: FieldValue;
+  /** A ranking rule the editor did not make, kept so saving does not lose it. */
+  customSort?: Measure[];
+}
+
+const seconds = (micros: number): number => micros / SECOND;
+
+/** A draft for a new format: an open race, a 5 second countdown, ended by the director. */
+export function blankDraft(): FormatDraft {
   return {
-    eligibleClass: true,
-    winCondition: true,
-    seeding: true,
-    channelMode: true,
-    activeChannels: false,
-    timeLimit: false,
-    params: true
+    name: '',
+    end: 'Open',
+    laps: 3,
+    timedSeconds: 120,
+    graceSeconds: 10,
+    stagingSeconds: 5,
+    fromTone: false,
+    autoStopSeconds: '',
+    limitSeconds: '',
+    done: 'Director',
+    doneCount: 1,
+    rank: 'consecutive',
+    consecutive: 3,
+    points: '',
+    minLapSeconds: ''
   };
+}
+
+/** A draft that says what a format says. */
+export function draftFromFormat(format: Format): FormatDraft {
+  const draft = blankDraft();
+  draft.name = format.name;
+  const { end } = format.race;
+  if (end === 'Open') draft.end = 'Open';
+  else if ('FirstToLaps' in end) {
+    draft.end = 'Laps';
+    draft.laps = end.FirstToLaps;
+  } else {
+    draft.end = 'Timed';
+    draft.timedSeconds = seconds(end.Timed.micros);
+    draft.graceSeconds = seconds(end.Timed.grace_micros);
+  }
+  draft.stagingSeconds = seconds(format.race.staging_micros);
+  draft.fromTone = format.race.first_lap === 'FromTone';
+  const wait = format.race.stop_after_all_finish_micros;
+  draft.autoStopSeconds = wait === undefined ? '' : seconds(wait);
+  const limit = format.race.max_micros;
+  draft.limitSeconds = limit === undefined ? '' : seconds(limit);
+  const minLap = format.race.min_lap_micros;
+  draft.minLapSeconds = minLap === undefined ? '' : seconds(minLap);
+
+  const rule = format.completion;
+  if (rule === 'DirectorDecides') draft.done = 'Director';
+  else if ('SavedRaces' in rule) {
+    draft.done = 'Races';
+    draft.doneCount = rule.SavedRaces;
+  } else {
+    // The editor offers wins; any other measure is kept as a count of wins would be shown.
+    draft.done = 'Wins';
+    draft.doneCount = rule.AnyPilotReaches.at_least;
+  }
+
+  const { rank, consecutive } = rankOf(format.ranking?.sort);
+  draft.rank = rank;
+  draft.consecutive = consecutive;
+  if (rank === 'custom') draft.customSort = format.ranking?.sort;
+  draft.points = (format.points ?? []).join(', ');
+  return draft;
+}
+
+/** The format a draft would save, or a sentence saying what is missing. */
+export type FormatResult = { ok: true; format: Format } | { ok: false; problem: string };
+
+const problem = (sentence: string): FormatResult => ({ ok: false, problem: sentence });
+
+/** A whole number of 1 or more from a field, or `undefined`. */
+function count(value: FieldValue): number | undefined {
+  const n = fieldNumber(value);
+  return n !== undefined && Number.isInteger(n) && n >= 1 ? n : undefined;
+}
+
+/** Seconds from a field as microseconds, or `undefined` when it is not 0 or more. */
+function micros(value: FieldValue): number | undefined {
+  const n = fieldNumber(value);
+  return n !== undefined && n >= 0 ? Math.round(n * SECOND) : undefined;
+}
+
+/**
+ * Turn a draft into the format to save. Only what cannot be a format at all is caught here
+ * (an empty name, a count that is not a number). Whether the Director takes it (a name
+ * already in use) is the Director's call.
+ */
+export function formatFromDraft(draft: FormatDraft): FormatResult {
+  const name = draft.name.trim();
+  if (!name) return problem('Give the format a name.');
+
+  const staging = micros(draft.stagingSeconds);
+  if (staging === undefined) return problem('The countdown must be 0 seconds or more.');
+
+  const race: Format['race'] = {
+    end: 'Open',
+    staging_micros: staging,
+    first_lap: draft.fromTone ? 'FromTone' : 'HoleShot'
+  };
+  if (draft.end === 'Laps') {
+    const laps = count(draft.laps);
+    if (laps === undefined) return problem('Say how many laps win the race: 1 or more.');
+    race.end = { FirstToLaps: laps };
+    if (!isEmpty(draft.autoStopSeconds)) {
+      const wait = micros(draft.autoStopSeconds);
+      if (wait === undefined) {
+        return problem('The wait before the race stops by itself must be 0 seconds or more.');
+      }
+      race.stop_after_all_finish_micros = wait;
+    }
+  } else if (draft.end === 'Timed') {
+    const length = micros(draft.timedSeconds);
+    if (length === undefined || length === 0) {
+      return problem('A timed race needs a length in seconds, more than 0.');
+    }
+    const grace = micros(draft.graceSeconds);
+    if (grace === undefined)
+      return problem('The time to finish the lap must be 0 seconds or more.');
+    race.end = { Timed: { micros: length, grace_micros: grace } };
+  }
+  if (draft.end !== 'Timed' && !isEmpty(draft.limitSeconds)) {
+    const limit = micros(draft.limitSeconds);
+    if (limit === undefined || limit === 0) {
+      return problem('The time limit must be more than 0 seconds. Leave it empty for no limit.');
+    }
+    race.max_micros = limit;
+  }
+  if (!isEmpty(draft.minLapSeconds)) {
+    const minLap = micros(draft.minLapSeconds);
+    if (minLap === undefined) {
+      return problem(
+        "The minimum lap must be 0 seconds or more. Leave it empty to use the event's."
+      );
+    }
+    race.min_lap_micros = minLap;
+  }
+
+  let completion: Format['completion'] = 'DirectorDecides';
+  if (draft.done !== 'Director') {
+    const n = count(draft.doneCount);
+    if (n === undefined) {
+      return problem(
+        draft.done === 'Races'
+          ? 'Say how many races the heat has: 1 or more.'
+          : 'Say how many wins end the heat: 1 or more.'
+      );
+    }
+    completion =
+      draft.done === 'Races'
+        ? { SavedRaces: n }
+        : { AnyPilotReaches: { measure: 'Wins', at_least: n } };
+  }
+
+  const format: Format = { name, race, completion };
+  if (draft.rank === 'custom') {
+    if (draft.customSort) format.ranking = { sort: draft.customSort };
+  } else if (draft.rank !== 'none') {
+    const n = count(draft.consecutive);
+    if (draft.rank === 'consecutive' && n === undefined) {
+      return problem('Say how many laps in a row are timed: 1 or more.');
+    }
+    const sort = sortFor(draft.rank, n ?? 3);
+    if (sort) format.ranking = { sort };
+  }
+  // A rule the editor did not make may sort on points too; its table must not be lost.
+  const scored = draft.rank === 'points' || format.ranking?.sort.includes('Points') === true;
+  if (scored && (draft.rank === 'points' || draft.points.trim() !== '')) {
+    const points = draft.points
+      .split(/[\s,]+/)
+      .filter((part) => part !== '')
+      .map(Number);
+    if (points.length === 0 || points.some((p) => !Number.isInteger(p) || p < 0)) {
+      return problem('List the points for each place, first place first, like 10, 8, 6, 4.');
+    }
+    format.points = points;
+  }
+  return { ok: true, format };
+}
+
+/** A name for a copy of a format that no saved format has yet: "‹name› copy", "… copy 2". */
+export function copyName(name: string, taken: readonly string[]): string {
+  const used = new Set(taken.map((other) => other.trim().toLowerCase()));
+  for (let n = 1; ; n += 1) {
+    const candidate = n === 1 ? `${name} copy` : `${name} copy ${n}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
 }

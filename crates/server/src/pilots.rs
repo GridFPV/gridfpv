@@ -1,25 +1,15 @@
-//! Pilots as **application-level configuration** — the `PilotDirectory` and `Pilot` (issue #74).
+//! Pilots as **application-level configuration** — the `PilotDirectory` and `Pilot`.
 //!
 //! A pilot is a *racer in the Director's address book*: a callsign and a little optional metadata
-//! (real name, VTX type, external service ids). The model parallels the timer model
-//! ([`TimerRegistry`](crate::timers::TimerRegistry)): the Race Director maintains their pilots
-//! **once** at the application level (a persisted directory) and each event simply builds a
-//! **roster** of which directory pilots race it (see [`EventMeta::roster`](crate::events::EventMeta::roster)).
-//! Type a pilot in once, and every new event just picks them.
+//! (real name, VTX type, external service ids). The Race Director maintains their pilots **once**
+//! at the application level (a persisted directory), outside any event.
 //!
-//! # Two pieces, mirroring timers
+//! The [`PilotDirectory`] holds every configured [`Pilot`] behind a lock and **persists** them to
+//! `<GRIDFPV_DATA_DIR>/pilots.json` (restored on boot; in-memory only when no data dir is
+//! configured). There is no built-in pilot — a fresh Director starts with an empty directory.
 //!
-//! - **App-level directory (this module).** The [`PilotDirectory`] holds every configured
-//!   [`Pilot`] behind a lock and **persists** them to `<GRIDFPV_DATA_DIR>/pilots.json`
-//!   (restored on boot; in-memory only when no data dir is configured). Unlike timers there is
-//!   no built-in pilot — a fresh Director starts with an empty directory.
-//! - **Per-event roster (`crate::events`).** Each [`EventMeta`](crate::events::EventMeta) carries
-//!   a `roster: Vec<PilotId>` of the directory pilots that event races; new events default to an
-//!   **empty** roster.
-//!
-//! Channels (which pilot flies which frequency in a given heat) are **not** modelled here — that
-//! is a separate concern (#117). The directory is purely *who exists*; the roster is *who races
-//! this event*.
+//! The directory is purely *who exists*. Who races a given event, and in which class, belongs to
+//! the event and is built on the primitives (`docs/primitives.md` §4).
 //!
 //! # Cloud-pull future hook (#74)
 //!
@@ -35,7 +25,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::scope::PilotId;
+use gridfpv_events::PilotId;
 
 /// The file name (under the data dir) the pilot directory is persisted to (issue #74).
 pub const PILOTS_FILE: &str = "pilots.json";
@@ -197,7 +187,7 @@ pub struct Pilot {
 ///
 /// The `callsign` is required; everything else is optional. The **id is auto-generated**
 /// server-side (a slug of the callsign + a short random suffix), never user-entered, mirroring
-/// `POST /timers` / `POST /events`.
+/// `POST /events`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct CreatePilotRequest {
@@ -421,8 +411,7 @@ impl<T> OptionalEdit<T> {
 /// Maps each [`PilotId`] to its [`Pilot`]. The set is **persisted** to `<data_dir>/pilots.json`
 /// (restored on boot) so the RD's address book survives a Director restart; with no data dir
 /// configured it is in-memory only. Cloning shares the one directory (`Arc<RwLock<…>>`), so it is
-/// reached through the axum router state ([`EventRegistry`](crate::events::EventRegistry)) exactly
-/// like the [`TimerRegistry`](crate::timers::TimerRegistry).
+/// reached through the axum router state ([`EventRegistry`](crate::events::EventRegistry)).
 #[derive(Clone)]
 pub struct PilotDirectory {
     inner: Arc<RwLock<Directory>>,
@@ -439,7 +428,7 @@ struct Directory {
 impl PilotDirectory {
     /// Build a directory, restoring `<data_dir>/pilots.json` when a data dir is given.
     ///
-    /// Starts empty (unlike timers, there is no built-in pilot). When `data_dir` is `Some` and a
+    /// Starts empty (there is no built-in pilot). When `data_dir` is `Some` and a
     /// `pilots.json` already exists, the saved pilots are restored (an unreadable/corrupt file
     /// degrades to an empty directory rather than failing to boot). When `data_dir` is `None` the
     /// directory is in-memory only.
@@ -467,7 +456,7 @@ impl PilotDirectory {
         self.read().pilots.values().cloned().collect()
     }
 
-    /// Whether a pilot with `id` exists — the per-event roster validates each id through this.
+    /// Whether a pilot with `id` exists.
     pub fn exists(&self, id: &PilotId) -> bool {
         self.read().pilots.contains_key(id)
     }
@@ -558,8 +547,7 @@ impl PilotDirectory {
     }
 
     /// Delete a pilot (issue #74). An unknown id is a [`PilotError`]. The directory is
-    /// **persisted** on success. (Removing a pilot does not touch any event roster that still
-    /// names them; a stale roster id is harmless — see the events module.)
+    /// **persisted** on success.
     pub fn delete(&self, id: &PilotId) -> Result<(), PilotError> {
         let mut dir = self.write();
         if dir.pilots.remove(id).is_none() {
@@ -750,7 +738,7 @@ fn validate_country_edit(
     validate_edit_with(edit, normalize_country)
 }
 
-/// Slugify a callsign into an id-friendly stem (the same rule as the event/timer registries):
+/// Slugify a callsign into an id-friendly stem (the same rule as the event registry):
 /// lowercase ASCII alphanumerics kept, every other run collapsed to a single `-`, trimmed of
 /// dashes; an empty/symbol-only callsign yields `pilot`.
 fn slugify(name: &str) -> String {
@@ -774,7 +762,7 @@ fn slugify(name: &str) -> String {
 }
 
 /// A short random lowercase-alphanumeric suffix making an auto-generated id unique (same source as
-/// the event/timer registries — the OS CSPRNG).
+/// the event registry — the OS CSPRNG).
 fn short_suffix() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut bytes = [0u8; 6];

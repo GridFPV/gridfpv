@@ -1,8 +1,8 @@
-//! Director-server wiring tests (#13, v0.4 Director wiring).
+//! Director-server wiring tests.
 //!
 //! These drive the *exact* router `main` serves — [`gridfpv_app::director::build_app`]
-//! over an [`AppState`] — with no real socket, via `tower::ServiceExt::oneshot`. They
-//! assert the protocol API is reachable (a `GET /health` 200) and that the static SPA is
+//! over an [`EventRegistry`] — with no real socket, via `tower::ServiceExt::oneshot`. They
+//! assert the API is reachable (a `GET /health` 200) and that the static SPA is
 //! served with an `index.html` fallback when `GRIDFPV_ASSETS` points at a built dir. The
 //! committed tests never depend on the real frontend `dist/`: the SPA case writes its own
 //! tiny `index.html` into a temp dir.
@@ -31,9 +31,9 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// `GET <uri>` against the Director router over an empty in-memory log.
+/// `GET <uri>` against the Director router over an in-memory registry.
 async fn get(assets: &Path, uri: &str) -> (StatusCode, String) {
-    let (registry, _event) = registry_with_event();
+    let registry = registry_with_event();
     let app = build_app(registry, assets);
     let response = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -44,16 +44,14 @@ async fn get(assets: &Path, uri: &str) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// A registry holding one **created** event, plus its id. There is no built-in event any more
-/// (#414), so anything driving a per-event route creates one through the real creation path.
-fn registry_with_event() -> (EventRegistry, String) {
+/// A registry holding one **created** event. There is no built-in event, so the test makes
+/// one through the real creation path.
+fn registry_with_event() -> EventRegistry {
     let registry = EventRegistry::new(None).unwrap();
-    let id = registry
+    registry
         .create(&CreateEventRequest::named("Test Event"))
-        .expect("create the test event")
-        .id
-        .0;
-    (registry, id)
+        .expect("create the test event");
+    registry
 }
 
 #[tokio::test]
@@ -66,22 +64,30 @@ async fn health_endpoint_is_served() {
 }
 
 #[tokio::test]
-async fn snapshot_endpoint_returns_ok() {
+async fn the_event_list_is_served_through_the_director_router() {
     let assets = std::env::temp_dir().join("gridfpv-director-no-assets");
-    // The event scope folds the whole (empty) log into idle live state — a 200 either way.
-    // `get` builds its own registry, so ask a matching one for the id shape it will hold.
-    let (registry, event) = registry_with_event();
-    let app = build_app(registry, &assets);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/events/{event}/snapshot/event/spring-cup"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let (status, body) = get(&assets, "/events").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("Test Event"),
+        "lists the created event: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_mistyped_api_path_is_a_typed_404_even_with_the_spa_mounted() {
+    let dir = temp_dir("api-404");
+    std::fs::write(dir.join("index.html"), "<title>RD Console</title>").unwrap();
+
+    let (status, body) = get(&dir, "/events/nope/not-a-route").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body.contains("UnknownScope"),
+        "a ProtocolError body: {body}"
+    );
+    assert!(!body.contains("RD Console"), "not the SPA shell: {body}");
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]
@@ -132,13 +138,12 @@ async fn cors_preflight_is_permissive() {
     let dir = temp_dir("cors");
     std::fs::write(dir.join("index.html"), "<title>shell</title>").unwrap();
 
-    let (registry, event) = registry_with_event();
-    let app = build_app(registry, &dir);
+    let app = build_app(registry_with_event(), &dir);
     let response = app
         .oneshot(
             Request::builder()
                 .method("OPTIONS")
-                .uri(format!("/events/{event}/snapshot/event/spring-cup"))
+                .uri("/events")
                 .header("Origin", "http://tauri.localhost")
                 .header("Access-Control-Request-Method", "GET")
                 .body(Body::empty())
@@ -148,7 +153,7 @@ async fn cors_preflight_is_permissive() {
         .unwrap();
 
     // A permissive CORS layer answers the preflight with an allow-origin header so the
-    // cross-origin Tauri RD app may call the API + open the WS.
+    // cross-origin Tauri RD app may call the API.
     assert!(
         response
             .headers()

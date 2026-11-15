@@ -44,6 +44,16 @@ use crate::{EventLog, Offset, Result, StorageError, StoredEvent};
 use gridfpv_events::Event;
 use rusqlite::{Connection, OptionalExtension, params};
 
+/// Write a whole copy of the log at `from` into a new file at `to`, safe to take while the
+/// log is open and being written. The copy is one file: nothing waits beside it in a
+/// write-ahead file. `to` must not exist yet.
+pub fn snapshot(from: impl AsRef<std::path::Path>, to: impl AsRef<std::path::Path>) -> Result<()> {
+    let conn = Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let to = to.as_ref().to_string_lossy().into_owned();
+    conn.execute("VACUUM INTO ?1", params![to])?;
+    Ok(())
+}
+
 /// An append-only event log persisted in SQLite.
 pub struct SqliteLog {
     conn: Connection,

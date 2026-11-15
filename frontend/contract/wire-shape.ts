@@ -18,9 +18,9 @@
  * For an object type: every non-optional field is present, no field is present that the
  * binding does not declare (a wire key the frontend cannot see is drift too), and every
  * present value matches its declared type — recursing through `Array<…>`, unions, inline
- * objects and named sibling bindings (`TimerId`, `NodeSignal`, …).
+ * objects and named sibling bindings (`EventId`, `ClassSource`, …).
  *
- * `#[ts(optional)]` fields (`rssi?: number`) may be absent or `undefined`; that is the
+ * `#[ts(optional)]` fields (`date?: string`) may be absent or `undefined`; that is the
  * contract, since the Rust side skips serializing `None`.
  */
 import { readFileSync } from 'node:fs';
@@ -36,7 +36,7 @@ export interface FieldSpec {
   name: string;
   /** `true` for a `name?: T` field — the Rust side omits it when `None`. */
   optional: boolean;
-  /** The declared type expression, verbatim (`Array<NodeSignal>`, `number | null`, …). */
+  /** The declared type expression, verbatim (`Array<VtxType>`, `EventMeta | null`, …). */
   type: string;
 }
 
@@ -204,7 +204,7 @@ function problemsFor(value: unknown, type: string, path: string, seen: string[])
       break;
   }
 
-  // A string/number literal type (`"Mock"`, `4`).
+  // A string/number literal type (`"Custom"`, `4`).
   if (/^["'].*["']$/.test(expr)) return value === expr.slice(1, -1) ? [] : mismatch();
   if (/^-?\d+(\.\d+)?$/.test(expr)) return value === Number(expr) ? [] : mismatch();
 

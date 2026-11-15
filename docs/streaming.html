@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · the broadcast subsystem — overlays, OBS control, and the capture boundary</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> Sections 1, 2.2, 3.1, 4 and 5.1 still stand: overlays are plain read clients, OBS is driven over obs-websocket, and OBS owns all video. Section 3.2 is old: its scene triggers are the six-state heat, replaced by the race states and phase lock in <a href="primitives.md">Grid primitives</a>. Sections 2.1, 3.3, 5 and 6 stand in shape but use old words (current heat, armed, finalized, advance, classes live at once).
+      </p>
+    </div>
+
     <p class="lead">
       Integrated broadcast, built the same way as everything else: overlays are ordinary
       clients of the one protocol, and the thing that drives OBS is an <em>optional</em>
@@ -34,7 +40,7 @@
         itself are <strong>out of scope</strong> — they belong to OBS and the streaming
         platform, by design (§4). It builds on <a href="architecture.html">Architecture</a>
         §10 (Streaming &amp; broadcast) and §6 (one protocol), and the race-state events from
-        <a href="race-engine.html">Race Engine</a> §2. When this doc and the
+        <a href="archive/race-engine.html">Race Engine</a> §2. When this doc and the
         <a href="vision.html">Vision</a> disagree, the Vision wins.
       </p>
     </div>

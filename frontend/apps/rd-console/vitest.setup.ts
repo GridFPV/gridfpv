@@ -24,3 +24,12 @@ if (typeof HTMLDialogElement !== 'undefined') {
     };
   }
 }
+
+// jsdom has no ResizeObserver, and a `bind:clientHeight` needs one. Nothing is ever measured.
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}

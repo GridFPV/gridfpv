@@ -1,323 +1,90 @@
 /**
- * Channel presentation + selection helpers (race redesign Slice 4b).
+ * The standard 5.8 GHz video channels, and the one place a frequency gets its channel name.
  *
- * Pure mappers shared by the timer channel-config picker (which offers the standard FPV catalog
- * grouped by band, plus custom raw-MHz entries) and the per-heat channel display (which resolves a
- * heat's assigned raw MHz back to a human band+channel label). No I/O — the session owns the
- * `GET /channels` read; these just shape the catalog and the timer's capability for the UI.
+ * A seat on a video timer watches one frequency. People know those frequencies by band and
+ * channel ("R1", "F4"), so wherever a frequency is shown its channel name goes beside it. A
+ * frequency that is not in the table is still a fine frequency: it shows as plain MHz and can
+ * be typed by hand.
  */
-import type { ChannelCapability, ChannelCatalogEntry } from '@gridfpv/types';
 
-/** A band and its catalog entries, in the catalog's stable channel order. */
-export interface ChannelBand {
-  /** The band name (e.g. `"Raceband"`, `"Fatshark"`, `"DJI"`). */
-  band: string;
-  /** The band's entries (label + MHz), in catalog order. */
-  entries: ChannelCatalogEntry[];
+/** One band of eight channels. */
+export interface Band {
+  /** The letter people write before the channel number: "R". */
+  letter: string;
+  /** The band's name: "Raceband". */
+  name: string;
+  /** The eight frequencies in MHz, channel 1 first. */
+  mhz: readonly number[];
 }
 
-/**
- * Group a flat catalog into bands, preserving the catalog's order both within and across bands
- * (the server emits a stable, deterministic order — Raceband, Fatshark, Boscam A/B/E, DJI, HDZero).
- */
-export function groupByBand(catalog: ChannelCatalogEntry[]): ChannelBand[] {
-  const bands: ChannelBand[] = [];
-  const byName = new Map<string, ChannelBand>();
-  for (const entry of catalog) {
-    let band = byName.get(entry.band);
-    if (!band) {
-      band = { band: entry.band, entries: [] };
-      byName.set(entry.band, band);
-      bands.push(band);
-    }
-    band.entries.push(entry);
+/** The bands, in the order they are offered. Raceband is first: it is what races fly. */
+export const BANDS: readonly Band[] = [
+  { letter: 'R', name: 'Raceband', mhz: [5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917] },
+  { letter: 'F', name: 'Fatshark', mhz: [5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880] },
+  { letter: 'A', name: 'Boscam A', mhz: [5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725] },
+  { letter: 'B', name: 'Boscam B', mhz: [5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866] },
+  { letter: 'E', name: 'Boscam E', mhz: [5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945] }
+];
+
+/** Every channel name a frequency has, in band order. 5880 MHz is both R7 and F8. */
+function namesFor(mhz: number): string[] {
+  const names: string[] = [];
+  for (const band of BANDS) {
+    const index = band.mhz.indexOf(mhz);
+    if (index >= 0) names.push(`${band.letter}${index + 1}`);
   }
-  return bands;
+  return names;
 }
 
 /**
- * How a band's select-all box reads: `'all'` (every offered channel of the band is chosen),
- * `'none'`, or `'some'` — the **indeterminate** middle state (#429).
- *
- * The middle state has to exist. A partial band is a normal, deliberate configuration — an RD may
- * run four of Raceband's eight — so a two-state box would have to either lie about the band or
- * treat "partial" as "on" and wipe the subset on the next click.
- *
- * `entries` is what the picker actually **offered**, not the raw catalog: a `Fixed` timer's picker
- * is narrowed to its declared set, and a box that measured "all" against the full catalog would sit
- * unchecked forever on a band the RD had fully ticked. An empty offer is `'none'` — there is
- * nothing to select.
+ * The channel name of a frequency: "R1". A frequency two bands share carries both names
+ * ("R7 / F8"). A frequency that is not in the table has no name, and the answer is
+ * `undefined`.
  */
-export type BandSelection = 'all' | 'none' | 'some';
-
-export function bandSelection(
-  entries: readonly ChannelCatalogEntry[],
-  chosen: ReadonlySet<number>
-): BandSelection {
-  if (entries.length === 0) return 'none';
-  let on = 0;
-  for (const entry of entries) if (chosen.has(entry.mhz)) on += 1;
-  if (on === 0) return 'none';
-  return on === entries.length ? 'all' : 'some';
+export function channelLabel(mhz: number): string | undefined {
+  const names = namesFor(mhz);
+  return names.length === 0 ? undefined : names.join(' / ');
 }
 
-/**
- * The chosen set after clicking a band's select-all box: a **fully** selected band clears, and any
- * other state — empty *or* partial — fills.
- *
- * Partial → full is the deliberate direction, and it is the standard tri-state one: the
- * indeterminate box clicks to checked. The alternative would throw away a subset the RD picked
- * channel by channel, on a control they reached for in order to *add*. Filling a partial band is
- * undone by one more click; clearing it is not.
- *
- * Only the band's own offered entries move; everything else in `chosen` — other bands, and the
- * custom raw MHz a Flexible timer may carry — is passed through untouched.
- */
-export function toggleBandSelection(
-  entries: readonly ChannelCatalogEntry[],
-  chosen: ReadonlySet<number>,
-  offered: readonly ChannelCatalogEntry[] = entries
-): Set<number> {
-  const next = new Set(chosen);
-  const clearing = bandSelection(entries, chosen) === 'all';
-  // #464: bands overlap in frequency (Raceband R7 and Fatshark F8 are both 5880), and the
-  // selection is frequency-keyed — so clearing a band must not delete a frequency another band
-  // is plainly using, or toggling Fatshark off silently turns R7 off. "Plainly using" is the
-  // guard both ways: the sharing band must have some OTHER channel chosen (all-Raceband keeps
-  // 5880; a selection that was only ever Fatshark's clears it — the RD asked for the band off,
-  // and no one else holds the frequency). The cleared band then honestly reads 'some' when a
-  // shared frequency survives — it IS still enabled. Known edge, accepted: a sharing band whose
-  // only chosen channel is the shared one shows no evidence and loses it. `offered` is the
-  // picker's full offer (all bands); the default keeps single-band callers unchanged.
-  const keptByAnotherBand = (mhz: number) =>
-    offered.some(
-      (other) =>
-        other.mhz === mhz &&
-        !entries.includes(other) &&
-        offered.some((peer) => peer.band === other.band && peer.mhz !== mhz && next.has(peer.mhz))
-    );
-  for (const entry of entries) {
-    if (clearing) {
-      if (!keptByAnotherBand(entry.mhz)) next.delete(entry.mhz);
-    } else {
-      next.add(entry.mhz);
-    }
-  }
-  return next;
+/** A frequency in words: "5658 MHz". */
+export function formatMhz(mhz: number): string {
+  return `${mhz} MHz`;
 }
 
-/**
- * The human label for a raw frequency, resolved through the catalog: `"Raceband R1"` (band +
- * channel) when a catalog entry matches, else a bare `"5800 MHz"` fall-back for a custom/unknown
- * channel. The **first** catalog entry whose MHz matches wins (the catalog is offered in a stable
- * order, so Raceband is preferred over a coincident grid).
- */
-export function channelLabel(mhz: number, catalog: ChannelCatalogEntry[]): string {
-  const hit = catalog.find((e) => e.mhz === mhz);
-  return hit ? `${hit.band} ${hit.channel}` : `${mhz} MHz`;
+/** A frequency with its channel name when it has one: "R1 · 5658 MHz", or "5700 MHz". */
+export function frequencyLabel(mhz: number): string {
+  const label = channelLabel(mhz);
+  return label ? `${label} · ${formatMhz(mhz)}` : formatMhz(mhz);
 }
 
-/**
- * The label for a channel **inside a picker**, where the frequency itself is wanted:
- * `"Raceband R7 — 5880"`, or `"Custom — 5891"` for a frequency that is not in the catalog.
- *
- * Deliberately different from {@link channelLabel}, which is the label for a channel being
- * *reported* — a heading, a seat, a summary — where a bare number would be the raw handle standing
- * in for the name the display rule exists to prevent.
- *
- * Choosing is the opposite situation. An RD picking a channel is matching it against a VTX, a
- * printed sheet, or RotorHazard's own screen, and those speak in MHz. Here the number is *extra*
- * information sitting beside the friendly name, never a substitute for it — which is why the band
- * and channel still lead.
- */
-export function channelOptionLabel(mhz: number, catalog: ChannelCatalogEntry[]): string {
-  const hit = catalog.find((e) => e.mhz === mhz);
-  return hit ? entryOptionLabel(hit, catalog) : `Custom — ${mhz}`;
-}
-
-/**
- * The picker label for a **known catalog entry** — used when the caller already has the entry it
- * offered, which is the only way to keep bands apart at a **coincident frequency**.
- *
- * `HDZero R7` and `Raceband R7` are both 5880. Re-deriving the label from the number alone finds
- * whichever the catalog lists first, silently relabelling the RD's choice as the other band. So an
- * option built from an entry must be labelled from that entry.
- */
-export function entryOptionLabel(
-  entry: ChannelCatalogEntry,
-  catalog: readonly ChannelCatalogEntry[] = []
-): string {
-  const alt = alternateNames(entry, catalog);
-  const also = alt.length > 0 ? ` (${alt.join(', ')})` : '';
-  return `${entry.band} ${entry.channel}${also} — ${entry.mhz}`;
-}
-
-/**
- * The OTHER common names for this entry's frequency — `5880` is Raceband R7 **and** Fatshark F8.
- *
- * A pilot who knows their VTX as "F8" must still be able to find it, but a picker that lists both
- * as separate rows shows the same frequency twice with no way to tell which is "the" one. So the
- * catalog leads with one name and carries the rest in parentheses: one row per frequency, no name
- * lost.
- *
- * Returns just the channel code, not the band: `(F8)` reads cleanly where `(Fatshark F8)` crowds
- * the row, and the code is what a pilot says out loud.
- */
-export function alternateNames(
-  entry: ChannelCatalogEntry,
-  catalog: readonly ChannelCatalogEntry[]
-): string[] {
-  const seen = new Set<string>([entry.channel]);
-  const out: string[] = [];
-  for (const other of catalog) {
-    if (other.mhz !== entry.mhz || other === entry) continue;
-    if (other.band === entry.band && other.channel === entry.channel) continue;
-    if (seen.has(other.channel)) continue;
-    seen.add(other.channel);
-    out.push(other.channel);
-  }
-  return out;
-}
-
-/** The catalog entry an MHz resolves to (the first match), or `undefined` for a custom/unknown one. */
-export function catalogEntryFor(
-  mhz: number,
-  catalog: ChannelCatalogEntry[]
-): ChannelCatalogEntry | undefined {
-  return catalog.find((e) => e.mhz === mhz);
-}
-
-/** Whether a frequency is a catalog channel (vs. a custom raw-MHz entry the RD typed). */
-export function isCatalogChannel(mhz: number, catalog: ChannelCatalogEntry[]): boolean {
-  return catalog.some((e) => e.mhz === mhz);
-}
-
-/** The discriminant tag of a capability (`'Fixed'` | `'Flexible'`). */
-export type CapabilityTag = 'Fixed' | 'Flexible';
-
-export function capabilityTag(cap: ChannelCapability | undefined): CapabilityTag {
-  return cap && typeof cap === 'object' && 'Fixed' in cap ? 'Fixed' : 'Flexible';
-}
-
-/** A Fixed capability's allowed built-in set (its `channels`), or `[]` for a Flexible one. */
-export function fixedAllowed(cap: ChannelCapability | undefined): number[] {
-  return cap && typeof cap === 'object' && 'Fixed' in cap ? cap.Fixed.channels : [];
-}
-
-/**
- * One channel a picker offers, and the catalog entry behind it if there is one.
- *
- * `entry` is absent for a frequency a **Fixed** timer declares that the catalog does not know
- * (#449) — a module built for a non-standard grid, or a catalog that has moved on since the RD
- * typed the timer's allowed set. Such a channel has no band and no channel code, so a caller labels
- * it from its raw MHz through {@link channelOptionLabel}, which is where "there is no friendly name
- * for this one" is spelled honestly (`"Custom — 5891"`) rather than invented.
- */
-export interface OfferedChannel {
-  /** The centre frequency in MHz — the wire handle, and the only thing every offer has. */
+/** One choice in a frequency picker. */
+export interface ChannelChoice {
   mhz: number;
-  /** The catalog entry this frequency resolves to, or `undefined` when the catalog has no name. */
-  entry?: ChannelCatalogEntry;
+  /** What the choice reads as: "R1 · 5658 MHz". */
+  label: string;
+}
+
+/** A band's choices in a frequency picker. */
+export interface ChannelGroup {
+  /** The band's name: "Raceband". */
+  band: string;
+  choices: ChannelChoice[];
 }
 
 /**
- * The channels a picker offers for a given capability: a **Fixed** timer is limited to its declared
- * allowed set (no custom), a **Flexible** one offers the whole catalog (and may add custom raw MHz
- * on top). Catalog order is preserved.
- *
- * ## A declared channel is offered whether or not the catalog knows it (#449)
- *
- * This used to be `catalog.filter(...)`, which silently dropped every Fixed channel the catalog had
- * no entry for — so a timer whose module runs a non-standard grid could *never* be offered the
- * channels it actually supports, and a node sitting on one of them had no option to select. The
- * declared set is the timer's own statement about itself; the catalog is a naming table, and a
- * missing name is not a missing channel. So the known ones come back in catalog order, and the rest
- * follow ascending with no entry to name them.
+ * The list a frequency picker offers, grouped by band. Each frequency is offered once: one
+ * that two bands share is listed under the first band, with both names.
  */
-export function offeredCatalog(
-  cap: ChannelCapability | undefined,
-  catalog: ChannelCatalogEntry[]
-): OfferedChannel[] {
-  if (capabilityTag(cap) === 'Flexible') return catalog.map((entry) => ({ mhz: entry.mhz, entry }));
-  const allowed = new Set(fixedAllowed(cap));
-  const named = catalog.filter((e) => allowed.has(e.mhz));
-  const namedMhz = new Set(named.map((e) => e.mhz));
-  const unnamed = [...allowed].filter((mhz) => !namedMhz.has(mhz)).sort((a, b) => a - b);
-  return [...named.map((entry) => ({ mhz: entry.mhz, entry })), ...unnamed.map((mhz) => ({ mhz }))];
-}
-
-/** A plausible 5.8 GHz centre frequency (the band the catalog lives in). Guards custom-MHz entry. */
-export function isPlausibleMhz(mhz: number): boolean {
-  return Number.isInteger(mhz) && mhz >= 5300 && mhz <= 6000;
-}
-
-/**
- * Parse the node index out of an open-practice competitor ref (`node-{i}` → `i`), or `undefined`
- * for any other ref. Open-practice heats lay their channels out as `node-{i}` refs (the timer-seat
- * index), so this is the join key back onto the timer's `available_channels`.
- */
-export function nodeIndexOf(ref: string): number | undefined {
-  const m = /^node-(\d+)$/.exec(ref);
-  if (!m) return undefined;
-  return Number(m[1]);
-}
-
-/*
- * `poolChannel(node, pool)` used to live here — the channel a node was "configured for", read as
- * `Timer.available_channels[node]`. It is gone as of #117 S3, and its absence is the point.
- *
- * `available_channels` is a **set**: the channels the RD has said this timer may ever use. It has
- * no per-node meaning whatsoever, so position `n` in it bore no relationship to node `n` — the
- * answer was invented, and only looked harmless because the list is **empty on every Flexible
- * timer** (measured on the bench: the Mock lists eight, both RotorHazard timers list none), so on
- * real hardware it returned `undefined` every time and the seat degraded to a bare `Node N`.
- *
- * A **channel layout** (`ChannelLayout.nodes`) is the per-node mapping the allowed set never had:
- * one channel per node, chosen by the RD, and named by the heat that flies it. Resolve a seat's
- * channel through `buildCompetitorNames` (`competitorName.ts`), which knows the order to try —
- * the heat's own assignment, what the node reports, then the heat's layout.
- *
- * When every source is silent the channel is **genuinely unknown**, and unknown is not "none": the
- * seat reads as `Node N` and a caller showing a channel column must say "unknown".
- */
-
-/**
- * The display label for one node seat: **node + channel**, which is the pair an RD actually needs.
- *
- * - a seat whose channel is known → `"Node 7 · Raceband R7"` — the node number is what the RD reads
- *   off the hardware, the channel is what the pilot needs to dial in, and neither alone is enough;
- * - a seat whose channel is genuinely **unknown** → `"Node 7"`, the node alone. Not "no channel":
- *   the timer may well be tuned to something GridFPV has not been told about.
- *
- * `node` is the 0-based wire index; the label is 1-based, per the repo display rule (index `6` is
- * the node the RD calls "Node 7"). The one place that boundary is crossed for a seat name — the
- * server's `Timer::node_label` is its twin, and `NodeSignal.node`'s doc names this same convention.
- *
- * Resolve `mhz` through `buildCompetitorNames` (`competitorName.ts`) rather than reaching for a
- * single source: it is the one place that knows which sources to try, and in what order.
- */
-export function nodeSeatLabel(
-  node: number,
-  mhz: number | undefined,
-  catalog: readonly ChannelCatalogEntry[]
-): string {
-  const seat = `Node ${node + 1}`;
-  if (mhz === undefined) return seat;
-  return `${seat} · ${channelLabel(mhz, [...catalog])}`;
-}
-
-/**
- * Auto-assign channels to an ordered list of pilots, deterministic round-robin (first-fit) across an
- * ordered `pool` of available channels: the `i`-th pilot gets `pool[i % pool.length]`. When there are
- * fewer channels than pilots the assignment wraps and repeats — that's fine, repeated pilots simply
- * fly in different heats. The input order is the caller's stable order (roster order), so the result
- * is reproducible. An empty pool yields an empty map (nothing to assign).
- *
- * Returns a `pilotId → channel(MHz)` map covering every input pilot (when the pool is non-empty).
- */
-export function assignChannelsRoundRobin<Id>(pilots: Id[], pool: number[]): Map<Id, number> {
-  const out = new Map<Id, number>();
-  if (pool.length === 0) return out;
-  pilots.forEach((id, i) => out.set(id, pool[i % pool.length]));
-  return out;
-}
+export const CHANNEL_GROUPS: readonly ChannelGroup[] = (() => {
+  const seen = new Set<number>();
+  return BANDS.map((band) => ({
+    band: band.name,
+    choices: band.mhz
+      .filter((mhz) => {
+        if (seen.has(mhz)) return false;
+        seen.add(mhz);
+        return true;
+      })
+      .map((mhz) => ({ mhz, label: frequencyLabel(mhz) }))
+  }));
+})();
