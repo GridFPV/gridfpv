@@ -93,8 +93,9 @@ levels, and whether it is in a crossing). It is for the Tune page and is gone on
 | `POST /video/render` | Draw the overlay onto one race's clean recording (`{event, race}`), or onto every race of the event that needs it (`{event}`). Answers how many were asked for; `409` for a race with no clean recording. The drawing runs in the background and `GET /video/status` follows it |
 | `POST /video/ffmpeg` | Download ffmpeg and keep it in the `tools` folder of the data folder. Answers `202` at once; `GET /video/status` says `tools.fetching`, then `tools.ffmpeg` or `tools.fetch_problem`. `409` on a computer Grid has no build for (`tools.can_fetch` is false) |
 
-**OBS does the capturing; the Director says when.** While video is on, the Director keeps
-a connection to OBS's WebSocket server (obs-websocket 5). It starts OBS's recording when a
+**OBS does the capturing; the Director says when.** The Director keeps a connection to
+OBS's WebSocket server (obs-websocket 5) whether or not video is on, so the scenes can be
+read before recording is switched on. While video is on (`enabled`), it starts OBS's recording when a
 race begins its countdown, stops it a few seconds after the race is stopped, and sets OBS's
 file naming to the race's name just before the start (and puts OBS's own back after the
 stop). A saved race's recording is logged into its event (`VideoRecorded`: the file, and

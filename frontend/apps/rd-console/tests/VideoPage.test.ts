@@ -57,7 +57,8 @@ describe('VideoPage settings', () => {
     expect(within(f).getByRole('checkbox', { name: 'Record every race' })).not.toBeChecked();
     expect(within(f).getByLabelText('OBS address')).toHaveValue('127.0.0.1:4455');
     expect(within(f).getByLabelText('Seconds to keep recording after the stop')).toHaveValue(3);
-    expect(screen.getByText('Off')).toBeVisible();
+    // The pill is about OBS, not the switch: OBS is reached even while recording is off.
+    expect(screen.getByText('Not connected')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     expect(screen.getByTestId('no-runs')).toHaveTextContent('Video is off.');
   });
@@ -210,6 +211,7 @@ describe('VideoPage: recording a scene of its own', () => {
   it('offers OBS\'s scenes once "a scene of its own" is picked, and saves the choice', async () => {
     const { putVideoSettingsImpl } = open(ON, CONNECTED);
     const f = await form();
+    expect(screen.queryByTestId('scenes-need-obs')).toBeNull();
     // OBS's own recording has no scenes to pick.
     expect(within(f).queryByLabelText('Clean scene')).toBeNull();
     await fireEvent.change(within(f).getByLabelText('What records each race'), {
@@ -234,11 +236,38 @@ describe('VideoPage: recording a scene of its own', () => {
     });
   });
 
+  it('Connect stores only the address and password, and leaves the rest of the form unsaved', async () => {
+    const { putVideoSettingsImpl } = open(VIDEO_OFF, IDLE);
+    const f = await form();
+    await fireEvent.change(within(f).getByLabelText('What records each race'), {
+      target: { value: 'Scenes' }
+    });
+    await fireEvent.input(within(f).getByLabelText('OBS password'), {
+      target: { value: 'secret' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await waitFor(() => expect(putVideoSettingsImpl).toHaveBeenCalledTimes(1));
+    // What is stored for the rest goes back as it was: no scene is needed to connect.
+    expect(putVideoSettingsImpl.mock.calls[0]?.[1]).toMatchObject({
+      enabled: false,
+      obs_address: '127.0.0.1:4455',
+      obs_password: 'secret',
+      record_from: 'Obs',
+      clean_scene: ''
+    });
+    // The choice made in the form is still there, and still waiting for Save.
+    expect(within(f).getByLabelText('What records each race')).toHaveValue('Scenes');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
   it('keeps a stored scene in the picker while OBS is closed', async () => {
     open({ ...ON, record_from: 'Scenes', clean_scene: 'Camera', overlay_scene: '' }, IDLE);
     const f = await form();
     expect(within(f).getByLabelText('Clean scene')).toHaveValue('Camera');
     expect(within(f).getByLabelText('Scene with the overlay')).toHaveValue('');
+    expect(screen.getByTestId('scenes-need-obs')).toHaveTextContent(
+      'The scenes show here once OBS is connected.'
+    );
   });
 
   it('says so when OBS has no Source Record plugin', async () => {

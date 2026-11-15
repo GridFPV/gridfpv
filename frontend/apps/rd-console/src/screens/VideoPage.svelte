@@ -179,6 +179,43 @@
     }
   }
 
+  /**
+   * Try the address and password now, and leave the rest of the form alone. It stores just
+   * those two (the Director connects from what is stored), so the scenes can be read and
+   * picked before the one real Save.
+   */
+  async function connect() {
+    if (saving || !settings) return;
+    saving = true;
+    saveError = undefined;
+    try {
+      const saved = await session.putVideoSettings({
+        enabled: settings.enabled,
+        obs_address: form.address.trim(),
+        ...(passwordTyped ? { obs_password: form.password } : {}),
+        tail_seconds: settings.tail_seconds,
+        trash_discarded: settings.trash_discarded,
+        record_from: settings.record_from,
+        clean_scene: settings.clean_scene,
+        overlay_scene: settings.overlay_scene,
+        render_when: settings.render_when,
+        browser_path: settings.browser_path,
+        ffmpeg_path: settings.ffmpeg_path
+      });
+      if (!saved) return;
+      // Only the stored copy moves: what else is typed in the form stays, still unsaved.
+      settings = saved;
+      form.address = saved.obs_address;
+      form.password = '';
+      passwordTyped = false;
+      await loadStatus();
+    } catch (err) {
+      saveError = say(err);
+    } finally {
+      saving = false;
+    }
+  }
+
   const obs = $derived(status?.obs);
   const tools = $derived(status?.tools);
 
@@ -244,15 +281,13 @@
   {#if settings}
     <Card title="OBS" elevation="sm">
       {#snippet actions()}
-        {#if !settings?.enabled}
-          <StatusPill status="Disconnected" label="Off" size="sm" />
-        {:else if obs?.connected}
+        {#if obs?.connected}
           <StatusPill status="Connected" label="Connected" size="sm" />
         {:else}
           <StatusPill status="Disconnected" label="Not connected" size="sm" />
         {/if}
       {/snippet}
-      {#if settings.enabled && obs && !obs.connected && obs.problem}
+      {#if obs && !obs.connected && obs.problem}
         <div data-testid="obs-problem">
           <Banner tone="warn" title="OBS is not connected.">{obs.problem}</Banner>
         </div>
@@ -308,6 +343,16 @@
             />
           </Field>
         </div>
+        <div>
+          <Button
+            size="sm"
+            disabled={saving || form.address.trim() === ''}
+            title="Try this address and password now. Nothing else on the page is saved."
+            onclick={() => connect()}
+          >
+            Connect
+          </Button>
+        </div>
         <div class="row">
           <Field label="What records each race">
             <Select
@@ -342,6 +387,12 @@
             </Field>
           {/if}
         </div>
+        {#if form.recordFrom === 'Scenes' && !obs?.connected}
+          <p class="facts" data-testid="scenes-need-obs">
+            The scenes show here once OBS is connected. Type the address and password, then press
+            Connect.
+          </p>
+        {/if}
         {#if form.recordFrom === 'Scenes' && obs?.connected && !obs.source_record}
           <div data-testid="no-source-record">
             <Banner tone="warn" title="OBS does not have the Source Record plugin.">

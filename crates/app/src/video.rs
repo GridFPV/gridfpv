@@ -183,17 +183,15 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
     tokio::spawn(async move {
         let desk = registry.video();
         let mut changed = desk.watch();
+        // The reason OBS last could not be reached, so the log says it once and not every try.
+        let mut logged: Option<String> = None;
         loop {
+            // OBS is connected to whether or not races are recorded: the Video page needs
+            // its scenes before recording is switched on. The switch only stops `begin`.
             let settings = desk.stored();
-            if !settings.enabled {
-                desk.report_obs(|obs| *obs = Default::default());
-                if changed.changed().await.is_err() {
-                    return;
-                }
-                continue;
-            }
             match obs::connect(&settings.obs_address, &settings.obs_password).await {
                 Ok(obs) => {
+                    logged = None;
                     let mut recorder = Recorder {
                         registry: registry.clone(),
                         obs,
@@ -219,6 +217,10 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                     }
                 }
                 Err(problem) => {
+                    if logged.as_deref() != Some(problem.as_str()) {
+                        eprintln!("WARNING: {problem}");
+                        logged = Some(problem.clone());
+                    }
                     desk.report_obs(|obs| {
                         *obs = Default::default();
                         obs.problem = Some(problem);
@@ -329,6 +331,8 @@ impl Recorder {
         );
         match decision {
             Decision::Nothing => {}
+            // Connected but not asked to record: the race goes by unrecorded.
+            Decision::Begin(_) if !settings.enabled => {}
             Decision::Begin(race) => self.begin(race).await,
             Decision::StartTail { until } => {
                 if let Some(active) = self.active.as_mut() {

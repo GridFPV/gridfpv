@@ -71,12 +71,17 @@ test('RD switches video on with no OBS there, is told so on the Video and Run pa
       { timeout: 15_000 }
     );
 
-    // ── Off again: both pages go quiet ───────────────────────────────────────────────────
+    // ── Off again: the Run page goes quiet. The Video page still says OBS is not there, ──
+    // because Grid stays connected to OBS with recording off (the scenes are picked first).
     await openPage(page, 'Video');
     const again = page.getByRole('form', { name: 'Video settings' });
     await again.getByRole('checkbox', { name: 'Record every race' }).uncheck();
-    await page.getByRole('button', { name: 'Save', exact: true }).click();
-    await expect(page.getByTestId('obs-problem')).toHaveCount(0, { timeout: 15_000 });
+    const saveAgain = page.getByRole('button', { name: 'Save', exact: true });
+    await saveAgain.click();
+    await expect(saveAgain).toBeDisabled({ timeout: 15_000 });
+    await expect(page.getByTestId('obs-problem')).toContainText(
+      `Could not reach OBS at ${NOWHERE}`
+    );
     await openPage(page, 'Run');
     await expect(page.getByTestId('video-warning')).toHaveCount(0, { timeout: 15_000 });
   } finally {

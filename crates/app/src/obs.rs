@@ -64,10 +64,7 @@ pub async fn connect(address: &str, password: &str) -> Result<Obs, String> {
     let (mut socket, _) = tokio::time::timeout(ANSWER, tokio_tungstenite::connect_async(&url))
         .await
         .map_err(|_| unreachable())?
-        .map_err(|e| {
-            eprintln!("WARNING: OBS at {address} did not answer: {e}");
-            unreachable()
-        })?;
+        .map_err(|_| unreachable())?;
 
     // Hello, then Identify, then Identified.
     let hello = next_json(&mut socket).await.ok_or_else(unreachable)?;

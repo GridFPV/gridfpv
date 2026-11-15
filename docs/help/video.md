@@ -12,10 +12,14 @@ The Video page is under **Setup**.
 2. In Grid, on the Video page, type the **OBS address**. When OBS and Grid are on the same
    computer it is `127.0.0.1:4455`.
 3. Type the **OBS password**.
-4. Tick **Record every race** and press **Save**.
+4. Press **Connect**.
 
 The pill at the top of the card turns to **Connected**. Under it Grid shows which OBS
-answered and the folder OBS records into.
+answered and the folder OBS records into. Connect keeps the address and password and
+nothing else, so you can pick scenes before you save the rest.
+
+When the rest is set the way you want, tick **Record every race** and press **Save**.
+From then on each race is recorded.
 
 Grid never shows the password again. The field says a password is stored. Type in it only
 to change it.
