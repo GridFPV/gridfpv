@@ -524,6 +524,25 @@ describe('RunPage: video', () => {
     expect(warning).toHaveTextContent('This race is not being recorded.');
     expect(warning).toHaveTextContent(/OBS was already recording/);
   });
+
+  it('warns during the race when the recording is getting no video', async () => {
+    const running = race(HEAT, 1, 'Running', { started_at: 0 });
+    await open(
+      eventView({ phases: [quali()], races: [running], current_race: running.race }),
+      video({ connected: true }, [
+        {
+          event: EVENT.id,
+          race: running.race,
+          name: 'Night Quali race 1',
+          state: 'Recording',
+          note: 'No video is reaching the file.'
+        }
+      ])
+    );
+    const warning = screen.getByTestId('video-warning');
+    expect(warning).toHaveTextContent('The recording has a problem.');
+    expect(warning).toHaveTextContent('No video is reaching the file.');
+  });
 });
 
 describe('RunPage: best laps in a row', () => {

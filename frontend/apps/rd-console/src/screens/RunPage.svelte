@@ -412,6 +412,10 @@
           {video.run.note ?? 'OBS did not start a recording.'}
         </Banner>
       </div>
+    {:else if video.kind === 'run' && video.run.note && (video.run.state === 'Recording' || video.run.state === 'Finishing')}
+      <div data-testid="video-warning">
+        <Banner tone="warn" title="The recording has a problem.">{video.run.note}</Banner>
+      </div>
     {/if}
 
     {#if !view}

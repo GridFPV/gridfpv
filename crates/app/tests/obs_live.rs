@@ -17,6 +17,8 @@
 
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 use gridfpv_events::{
     AdapterId, Command, CompletionRule, EndCondition, Event, FirstLap, Format, HeatSeat, PhaseDef,
     PhaseId, PhaseKind, PilotId, RaceId, RaceRules, SeatRef, SeatSource,
@@ -395,8 +397,8 @@ async fn two_scenes_are_recorded_to_their_own_files_by_a_real_obs() {
     let recorder = gridfpv_app::video::spawn(registry.clone());
     let settings = VideoSettingsRequest {
         enabled: true,
-        obs_address: address,
-        obs_password: Some(password),
+        obs_address: address.clone(),
+        obs_password: Some(password.clone()),
         tail_seconds: 1,
         trash_discarded: true,
         record_from: RecordFrom::Scenes,
@@ -436,7 +438,14 @@ async fn two_scenes_are_recorded_to_their_own_files_by_a_real_obs() {
     .await;
     // OBS's own recording is not touched: it stays free for whatever else it is doing.
     assert!(!registry.video().status().obs.recording);
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // Long enough for the recorder to look at the file twice: video is reaching it, so
+    // nothing is said about a recording with no video.
+    tokio::time::sleep(Duration::from_millis(5000)).await;
+    let run = run_of(&registry, &race).unwrap();
+    assert_eq!(
+        (run.state, run.note.clone()),
+        (VideoRunState::Recording, None)
+    );
     send(&registry, &event, Command::StopRace { race: race.clone() });
     let written = eventually("the scenes to be written", 30, || {
         let run = run_of(&registry, &race)?;
@@ -506,4 +515,49 @@ async fn two_scenes_are_recorded_to_their_own_files_by_a_real_obs() {
     assert_eq!(video.overlay, VideoOverlay::Filmed);
     assert_eq!(video.overlaid_file.as_deref(), Some(overlay.as_str()));
     recorder.abort();
+
+    // ── The way out of a recording that will not stop ────────────────────────────────────
+    // A recording is started on the clean scene and its filter is reset under it: the
+    // recording ends, and the filter is back with the settings it had.
+    let obs = gridfpv_app::obs::connect(&address, &password)
+        .await
+        .unwrap();
+    let filter = format!("Grid record {clean_scene}");
+    let named = json!({ "sourceName": clean_scene, "filterName": filter });
+    let before = obs.call("GetSourceFilter", named.clone()).await.unwrap();
+    obs.call(
+        "CallVendorRequest",
+        json!({
+            "vendorName": "source-record",
+            "requestType": "record_start",
+            "requestData": { "source": clean_scene, "filter": filter, "filename": format!("Reset {stamp}") },
+        }),
+    )
+    .await
+    .unwrap();
+    let active = |obs: gridfpv_app::obs::Obs, filter: String| async move {
+        obs.call("GetOutputStatus", json!({ "outputName": filter }))
+            .await
+            .is_ok_and(|status| status["outputActive"] == true)
+    };
+    for _ in 0..50 {
+        if active(obs.clone(), filter.clone()).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(active(obs.clone(), filter.clone()).await);
+    gridfpv_app::tape::scene_reset(&obs, &clean_scene, &filter)
+        .await
+        .unwrap();
+    assert!(!active(obs.clone(), filter.clone()).await);
+    let after = obs.call("GetSourceFilter", named).await.unwrap();
+    for kept in ["encoder", "path", "rec_format"] {
+        assert_eq!(
+            after["filterSettings"][kept], before["filterSettings"][kept],
+            "{kept}"
+        );
+    }
+    // And it is not left set to record by itself.
+    assert_eq!(after["filterSettings"]["record_mode"], 0);
 }

@@ -197,6 +197,7 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                         obs,
                         active: None,
                         tape: None,
+                        progress: None,
                         saved: Vec::new(),
                     };
                     recorder.hello().await;
@@ -241,6 +242,8 @@ struct Recorder {
     active: Option<Active>,
     /// What is recording the race in hand, while it is being recorded.
     tape: Option<Tape>,
+    /// How far that recording had got at the last look, to tell when it stops moving.
+    progress: Option<(u64, u64)>,
     /// Saved runs still watched for a late discard: the event, the race, its name, and
     /// what was recorded.
     saved: Vec<(EventId, RaceId, String, Written)>,
@@ -306,9 +309,40 @@ impl Recorder {
                     self.registry.video().report_obs(|obs| obs.scenes = scenes);
                 }
                 self.late_discards();
+                self.watch_video().await;
             }
             self.step().await;
         }
+    }
+
+    /// About every two seconds while a scene is recorded: is video still reaching the file?
+    /// A recording can start, write a file's first bytes and then get no video at all (an
+    /// encoder that would not start is one way). Said at once, the director can fix it
+    /// before the race is over rather than find an empty file afterwards.
+    async fn watch_video(&mut self) {
+        let (Some(active), Some(tape)) = (self.active.as_ref(), self.tape.as_ref()) else {
+            self.progress = None;
+            return;
+        };
+        if !matches!(active.phase, Phase::Recording | Phase::Tail { .. }) {
+            return;
+        }
+        let Some(now) = tape::progress(&self.obs, tape).await else {
+            return;
+        };
+        let stalled = self.progress == Some(now);
+        self.progress = Some(now);
+        let state = if matches!(active.phase, Phase::Recording) {
+            VideoRunState::Recording
+        } else {
+            VideoRunState::Finishing
+        };
+        let note = stalled.then(|| {
+            "No video is reaching the file. Check the encoder of the scene's Source Record filter in OBS, and OBS's log.".to_owned()
+        });
+        self.registry
+            .video()
+            .report_run(run_of(active, state, None, note));
     }
 
     /// One look at the race, and whatever it calls for.
@@ -393,6 +427,7 @@ impl Recorder {
             desk.report_obs(|obs| obs.recording = true);
         }
         self.tape = Some(tape);
+        self.progress = None;
         self.active = Some(active);
     }
 

@@ -107,6 +107,19 @@ Grid tells OBS to use that folder just for the race, then puts OBS's own folder 
 If OBS runs on a different computer than Grid, it cannot see Grid's folder. Then set
 **Where videos are saved** to **OBS's own recording folder**.
 
+## When a recording has no video in it
+
+Sometimes OBS starts a file but no video reaches it. The file stays tiny, and OBS will not
+stop it. Grid checks for this every two seconds while a scene is recorded. If it happens,
+the Run page says **The recording has a problem.**
+
+When such a recording will not stop, Grid takes the scene's Source Record filter off and
+puts it back with the same settings. That lets the next race record.
+
+The cause is in OBS. Open the scene's filters, pick the Source Record filter, and look at
+its **encoder**. Then look at OBS's log (**Help**, **Log Files**) for a line about the
+encoder failing to start.
+
 ## What Grid does during a race
 
 - **Start**: when the countdown begins, Grid names the file after the race and starts the

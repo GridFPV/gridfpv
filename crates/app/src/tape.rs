@@ -458,6 +458,74 @@ async fn scene_active(obs: &Obs, filter: &str) -> bool {
         .is_ok_and(|status| status["outputActive"] == true)
 }
 
+/// How far a scene's recording has got: the frames and the bytes written so far.
+async fn scene_progress(obs: &Obs, filter: &str) -> Option<(u64, u64)> {
+    let status = obs
+        .call("GetOutputStatus", json!({ "outputName": filter }))
+        .await
+        .ok()?;
+    Some((
+        status["outputTotalFrames"].as_u64().unwrap_or(0),
+        status["outputBytes"].as_u64().unwrap_or(0),
+    ))
+}
+
+/// Whether a scene's recording is writing video: it got further in half a second.
+async fn scene_moving(obs: &Obs, filter: &str) -> bool {
+    let before = scene_progress(obs, filter).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = scene_progress(obs, filter).await;
+    matches!((before, after), (Some(before), Some(after)) if after != before)
+}
+
+/// How far the recording in hand has got, for a watcher to compare from one look to the
+/// next. `None` for OBS's own recording, which OBS itself reports on.
+pub async fn progress(obs: &Obs, tape: &Tape) -> Option<(u64, u64)> {
+    match tape {
+        Tape::Own => None,
+        Tape::Scenes { clean, .. } => scene_progress(obs, &clean.filter).await,
+    }
+}
+
+/// Take a scene's Source Record filter off and put it back as it was. This is the way out
+/// of a recording that will not stop: taking the filter off ends its output. Its settings
+/// (the encoder, the folder, the format) are read first and given to the new one.
+pub async fn scene_reset(obs: &Obs, scene: &str, filter: &str) -> Result<(), String> {
+    let was = obs
+        .call(
+            "GetSourceFilter",
+            json!({ "sourceName": scene, "filterName": filter }),
+        )
+        .await?;
+    // While it records, the plugin keeps "record always" in the filter's settings. A copy
+    // of that would start recording again the moment it was made.
+    let mut settings = was["filterSettings"].clone();
+    if settings.is_object() {
+        settings["record_mode"] = json!(0);
+    }
+    obs.call(
+        "RemoveSourceFilter",
+        json!({ "sourceName": scene, "filterName": filter }),
+    )
+    .await?;
+    obs.call(
+        "CreateSourceFilter",
+        json!({
+            "sourceName": scene,
+            "filterName": filter,
+            "filterKind": FILTER_KIND,
+            "filterSettings": settings,
+        }),
+    )
+    .await?;
+    // Give OBS a moment to let go of the old output before a start is asked for.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while scene_active(obs, filter).await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
 async fn scene_start(
     obs: &Obs,
     scene: &str,
@@ -490,9 +558,18 @@ async fn scene_start(
     let folder = grid.map_or(folder, str::to_owned);
     let filter = scene_filter(obs, scene, &folder).await?;
     if scene_active(obs, &filter).await {
-        return Err(format!(
-            "The scene \"{scene}\" was already being recorded, so this race is inside that recording. Grid left it alone."
-        ));
+        // Something else may be recording the scene: a recording that is moving is left
+        // alone. One that is not moving is stuck (a recording that never got any video does
+        // not stop when asked), and would block every race from here on. That one is cleared.
+        if scene_moving(obs, &filter).await {
+            return Err(format!(
+                "The scene \"{scene}\" was already being recorded, so this race is inside that recording. Grid left it alone."
+            ));
+        }
+        eprintln!(
+            "WARNING: the scene \"{scene}\" had a recording stuck with no video. Resetting its Source Record filter."
+        );
+        scene_reset(obs, scene, &filter).await?;
     }
     vendor(
         obs,
@@ -531,9 +608,16 @@ async fn scene_finish(obs: &Obs, tape: &SceneTape) -> Result<String, String> {
     let deadline = tokio::time::Instant::now() + STOPPED;
     while scene_active(obs, &tape.filter).await {
         if tokio::time::Instant::now() >= deadline {
+            // Left like this, the next race would find the scene "already being recorded".
+            let reset = scene_reset(obs, &tape.scene, &tape.filter).await;
             return Err(format!(
-                "The scene \"{}\" did not stop recording.",
-                tape.scene
+                "The scene \"{}\" did not stop recording. {} Its file is likely empty: check the encoder of the scene's Source Record filter in OBS, and OBS's log.",
+                tape.scene,
+                match reset {
+                    Ok(()) => "Grid reset its Source Record filter, so the next race can record."
+                        .to_owned(),
+                    Err(e) => format!("Grid could not reset its Source Record filter ({e})."),
+                }
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
