@@ -3,10 +3,8 @@ resolver = "3"
 members = [
     "crates/events",
     "crates/storage",
-    "crates/projection",
     "crates/adapters",
     "crates/engine",
-    "crates/testkit",
     "crates/server",
     "crates/app",
     "xtask",
@@ -26,21 +24,19 @@ exclude = ["src-tauri"]
 # The ONE product version (v0.4.0-alpha.1 scheme: 0.x milestones, -alpha/-beta pre-releases;
 # bump with `cargo xtask version <x.y.z[-pre]>`). Crates inherit it; tauri.conf.json and the
 # console package.json are kept in lock-step by the same xtask command.
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/GridFPV/gridfpv"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Internal crates (path deps; versioned together).
 gridfpv-events = { path = "crates/events" }
 gridfpv-storage = { path = "crates/storage" }
-gridfpv-projection = { path = "crates/projection" }
 gridfpv-adapters = { path = "crates/adapters" }
 gridfpv-engine = { path = "crates/engine" }
 gridfpv-server = { path = "crates/server" }
-gridfpv-testkit = { path = "crates/testkit" }
 
 # Third-party.
 serde = { version = "1", features = ["derive"] }

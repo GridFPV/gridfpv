@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { searchForWorkspaceRoot } from 'vite';
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { svelteTesting } from '@testing-library/svelte/vite';
@@ -31,6 +32,17 @@ export default defineConfig({
         new URL('../../packages/protocol-client/src/index.ts', import.meta.url)
       ),
       '@gridfpv/types': fileURLToPath(new URL('../../packages/types/src/index.ts', import.meta.url))
+    }
+  },
+  // The help pages are Markdown in the repo's `docs/help`, bundled by `src/lib/help.ts` with a
+  // `?raw` glob. That folder is outside the frontend workspace, and Vitest's Vite refuses to
+  // read a file from outside it unless it is allowed here. Only that one folder is added.
+  server: {
+    fs: {
+      allow: [
+        searchForWorkspaceRoot(process.cwd()),
+        fileURLToPath(new URL('../../../docs/help', import.meta.url))
+      ]
     }
   },
   test: {

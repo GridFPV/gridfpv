@@ -28,10 +28,10 @@ frontend/
 ├── eslint.config.js        # flat config, TS + Svelte
 ├── packages/
 │   ├── types/              # @gridfpv/types — re-exports the generated bindings/*.ts
-│   ├── protocol-client/    # @gridfpv/protocol-client — thin transport+subscribe layer (snapshot + WS, #49)
+│   ├── protocol-client/    # @gridfpv/protocol-client — thin typed HTTP client for the Director
 │   └── components/         # @gridfpv/components — shared Svelte 5 component library (svelte-package)
 └── apps/
-    └── rd-console/         # @gridfpv/rd-console — the RD console surface (minimal shell, filled by #51+)
+    └── rd-console/         # @gridfpv/rd-console — the RD console surface
 ```
 
 Future surfaces (`apps/spectator-pwa`, `apps/overlays`) slot in beside `rd-console` as new
@@ -48,7 +48,7 @@ into the repo-root `bindings/` directory (one file per type, per `docs/clients.h
 generated bindings so every app and package imports protocol types from one place:
 
 ```ts
-import type { Snapshot, ChangeEnvelope, Command, LapList } from '@gridfpv/types';
+import type { EventMeta, Pilot, Class, ProtocolError } from '@gridfpv/types';
 ```
 
 How regenerated bindings flow in:
@@ -72,7 +72,8 @@ consumers resolve `@gridfpv/types` straight to its TypeScript source. It type-ch
 npm install            # from frontend/ — installs all workspaces
 npm run build          # build components + rd-console (and any other workspace)
 npm run check          # svelte-check / tsc across workspaces
-npm run test           # vitest across workspaces (protocol-client unit tests)
+npm run test           # vitest across workspaces
+npm run contract       # the client↔server contract suite, against the real Director
 npm run lint           # eslint + prettier --check
 npm run format         # prettier --write
 npm run dev:rd-console # vite dev server for the RD console

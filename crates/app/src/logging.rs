@@ -9,10 +9,9 @@
 //! release is a **GUI-subsystem process with no console**. Such a process has no stderr to
 //! write to — the writes are discarded, and even shell redirection
 //! (`gridfpv-desktop.exe > log.txt 2>&1`) produces an *empty file*. That is exactly what
-//! happened in the field on 2026-08-24: a RotorHazard timer showed `Error` and the carefully
-//! built connect **error chain** in [`crate::source::rotorhazard`] — the one line that tells
-//! a refused TCP connect apart from a TLS fault or an engine.io handshake reject — was
-//! thrown away.
+//! happened in the field on 2026-08-24: a timer showed `Error` and the carefully built
+//! connect **error chain** — the one line that tells a refused TCP connect apart from a TLS
+//! fault or a handshake reject — was thrown away.
 //!
 //! So this module **does not depend on stderr in any way**. It opens a real file itself with
 //! `OpenOptions` and writes to it with `write_all` + `flush`. Whether a console exists is
@@ -24,7 +23,7 @@
 //!
 //! - It captures the **`log` crate facade**, not `eprintln!`. Every existing diagnostic in
 //!   this crate is an `eprintln!`, so the plugin would file exactly *none* of them without
-//!   rewriting every call site — including the RH error chain, the whole point of the issue.
+//!   rewriting every call site — including that error chain, the whole point of the issue.
 //! - It lives in `src-tauri`, a **separate workspace** deliberately excluded from the root one
 //!   (CI runners have no webkit2gtk), so it is never compiled by `cargo xtask ci`. Putting
 //!   the field-diagnostics lifeline behind a dependency nothing in CI compiles is the same
@@ -38,7 +37,7 @@
 //!
 //! `lib.rs` declares this module with `#[macro_use]`, which puts the `macro_rules!`
 //! `eprintln!` defined at the bottom of this file into textual scope for **every module
-//! declared after it** — `director`, `source`, `source::rotorhazard`, and so on. That local
+//! declared after it** (`director`, and whatever is added below it). That local
 //! macro **shadows the std prelude's `eprintln!`**, so every existing and *future*
 //! `eprintln!` in this crate is routed through [`record`] and lands in the file, with no
 //! call-site churn and no way for a new diagnostic to silently regress the fix. The
@@ -106,9 +105,8 @@ pub fn init() -> Option<&'static Path> {
     let path = sink().map(|s| s.path.as_path());
     // Adapters sit BELOW this crate, so they cannot call `record` and their `eprintln!`s are not
     // covered by the shadow macro — on the GUI-subsystem Windows build those writes vanish, which
-    // would silently drop exactly the #389 pass-source diagnostics the field needs. Hand them a
-    // sink pointing back here so they land in the same file. Idempotent: first caller wins.
-    #[cfg(feature = "live")]
+    // would silently drop exactly the timer diagnostics the field needs. Hand them a sink
+    // pointing back here so they land in the same file. Idempotent: first caller wins.
     gridfpv_adapters::diag::set_sink(|line| record(format_args!("{line}")));
     path
 }
@@ -136,8 +134,8 @@ pub fn record(args: fmt::Arguments<'_>) {
 
 /// Like [`record`], but the console echo goes to **stdout** — used by the `println!` shadow
 /// in the `gridfpv` binary so the startup banner keeps landing on stdout while *also* being
-/// filed. The banner carries the bound address, the RD-token state, the data dir and the
-/// active lap source: precisely the context a field log needs above the errors.
+/// filed. The banner carries the bound address, the RD-token state and the data dir:
+/// precisely the context a field log needs above the errors.
 pub fn record_stdout(args: fmt::Arguments<'_>) {
     emit(args, Stream::Stdout);
 }
@@ -378,10 +376,15 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// Route **every** `eprintln!` in this crate to the log file (and still to stderr).
 ///
 /// This deliberately shadows the std prelude's `eprintln!` for every module declared after
-/// `#[macro_use] pub mod logging;` in `lib.rs`. It is the whole reason the RotorHazard
-/// connect error chain — written as a plain `eprintln!` — reaches the file with no change to
-/// `source/rotorhazard.rs`, and the reason a *future* `eprintln!` cannot silently re-break
-/// #380. Use `std::eprintln!` explicitly if you ever want a console-only write.
+/// `#[macro_use] pub mod logging;` in `lib.rs`. It is the whole reason a diagnostic written
+/// as a plain `eprintln!` reaches the file with no change at its call site, and the reason a
+/// *future* `eprintln!` cannot silently re-break #380. Use `std::eprintln!` explicitly if you
+/// ever want a console-only write.
+///
+/// Nothing in this crate's library calls `eprintln!` right now (the skeleton has no timer
+/// connection to report on), hence the `allow`: the shadow stays so the first diagnostic added
+/// below `logging` is filed without anyone having to remember this.
+#[allow(unused_macros)]
 macro_rules! eprintln {
     ($($arg:tt)*) => {
         $crate::logging::record(::std::format_args!($($arg)*))

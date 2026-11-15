@@ -1,6 +1,5 @@
 /**
- * Unit tests for the two-step confirm button used by destructive heat off-ramps
- * (Revert / Restart / Abort / Discard). Covers the confirm flow *and* the prominent
+ * Unit tests for the two-step confirm button used for destructive actions. Covers the confirm flow *and* the prominent
  * "active confirm" styling: when armed, the Confirm button carries the `confirm-danger`
  * class that paints it a solid red (danger) fill with near-black text — an unmistakable
  * destructive affordance (vs. the restrained default danger style).

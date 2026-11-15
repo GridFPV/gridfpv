@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · how a log frame becomes the live projection and the server-authoritative clock</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> The rules still stand: the live state is a pure fold of the log (section 1), the race clock is set by the server (section 2), and snapshot and stream share one fold (section 3). Old: every field definition in section 1, the transition names and diagram in section 2, and all of section 4, which are written against the six-state heat, rounds and <code>CompetitorRegistered</code>. This is an as-built doc and gets rewritten when the live fold is rebuilt; until then <a href="primitives.md">Grid primitives</a> wins.
+      </p>
+    </div>
+
     <p class="lead">
       The <strong>live race-state</strong> projection (<code>LiveRaceState</code>) is the
       latency-sensitive core every overlay, HUD, and spectator watches — the heat on the timer,
@@ -31,7 +37,7 @@
         race clock. It builds on <a href="architecture.html">Architecture</a> §3 (the append-only
         spine) and <a href="protocol.html">Protocol</a> §1–§3 (what the contract serves and the
         change stream). It does <strong>not</strong> redefine the projections (<a
-        href="race-engine.html">Race Engine</a>) or the timing vocabulary (<a
+        href="archive/race-engine.html">Race Engine</a>) or the timing vocabulary (<a
         href="timer-adapters.html">Timer Adapters</a>). Where this doc and the
         <a href="vision.html">Vision</a> disagree, the Vision wins. The code is the source of
         truth: <code>crates/server/src/live_state.rs</code>,
@@ -237,7 +243,7 @@ sequenceDiagram
       Open practice is casual flying: a round is one open heat over the active <strong>channels</strong>
       (<code>node-{i}</code> seats). Its laps used to be <strong>in-memory only</strong>, held in an
       <code>OpenPracticeLive</code> accumulator and spliced onto the log fold by a
-      <code>merge_into</code> overlay. That is gone (see <a href="decisions.html#d5">D5</a>, reversed
+      <code>merge_into</code> overlay. That is gone (see <a href="archive/decisions.html#d5">D5</a>, reversed
       2026-08-24): a practice heat's passes are appended to the durable log by
       <code>AppState::append</code> like any other heat's, stamped with the heat, and the live state
       is a <strong>pure fold of the log</strong> at every scope.

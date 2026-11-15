@@ -14,6 +14,12 @@
       <p class="doc-kind">Internal design doc · the outside world — MultiGP, imports, open data, secrets</p>
     </header>
 
+    <div class="callout doc-status doc-status-review">
+      <p>
+        <strong>Under review (2026-11-09, audited section by section).</strong> Sections 1, 4 and 5 still stand, as do chapter authentication in section 2 and the rule in section 3 that imports are not timer adapters. The Velocidrone leaderboard part of section 3 and item 5 of section 6 are old: there is no qualifying pipeline stage and no rounds, so seeding and push triggers must be restated on fields, saved races and locked phases. The rest of sections 2, 3 and 6 uses old words (entries, registration, seed ranking, round, finalize). Where this doc disagrees with <a href="primitives.md">Grid primitives</a>, that doc wins.
+      </p>
+    </div>
+
     <p class="lead">
       Everything that crosses the boundary between GridFPV and another system: MultiGP
       RaceSync (roster in, results out), the leaderboard / roster <strong>imports</strong>
@@ -32,7 +38,7 @@
         hosts the public dashboards (<a href="cloud.html">Cloud &amp; Season</a>), the
         canonical timing model imports deliberately bypass (<a href="timer-adapters.html">Timer
         Adapters</a>), and where imports plug into setup and qualifying
-        (<a href="event-pipeline.html">Event Pipeline</a>). Cloud-specific secrets and
+        (<a href="archive/event-pipeline.html">Event Pipeline</a>). Cloud-specific secrets and
         deployment config are <strong>out of the FOSS repo</strong> entirely. When this doc
         and the <a href="vision.html">Vision</a> disagree, the Vision wins.
       </p>
@@ -119,7 +125,7 @@ flowchart LR
 
     <h3>Roster import at setup</h3>
     <p>
-      At Setup &amp; Registration (<a href="event-pipeline.html">Event Pipeline</a>, Phase 1)
+      At Setup &amp; Registration (<a href="archive/event-pipeline.html">Event Pipeline</a>, Phase 1)
       the RD can pull the chapter roster from RaceSync to assemble the field without manual
       entry. This is an <strong>import / ingestion</strong>, covered in §3 — it produces
       GridFPV entries and a pilot-id mapping, not live passes. The same mapping is what
@@ -190,7 +196,7 @@ flowchart LR
     <h3>The Velocidrone leaderboard (qualifying ingestion)</h3>
     <p>
       In sim racing the leaderboard for a spec track <em>is</em> the qualifying ranking —
-      "leaderboard bashing" (<a href="event-pipeline.html">Event Pipeline</a>, Phase 3).
+      "leaderboard bashing" (<a href="archive/event-pipeline.html">Event Pipeline</a>, Phase 3).
       Importing it produces the ordered seed that the mains build from, treated as an equal
       to running qualifying live or skipping it. It is a ranking, full stop: no per-pass
       timing, no signal context, nothing the adapter model would carry.

@@ -1,21 +1,31 @@
-//! GridFPV race engine — the heat-loop state machine, scoring, marshaling, and
-//! format generators that turn canonical passes + a format into a run race.
+//! The competition engine: Grid's primitives as pure folds over the event log.
 //!
-//! The engine is a **pure function of the log** (race-engine.html §6): it consumes
-//! canonical `Pass`/lifecycle events and appends race-state events; laps, results,
-//! and standings remain projections. Time/RNG are injected, never read, so a
-//! recorded session always replays identically.
+//! `docs/primitives.md` is the design. Everything here is **pure**: a fold takes logged
+//! events and gives a state; a check takes that state and a command and gives either the
+//! facts to append or the reason it is refused. Nothing in this crate reads a clock, talks
+//! to a timer or touches storage, so every rule can be tested by replaying events.
+//!
+//! Built so far:
+//! - [`race`] — one start-to-stop flight, the atom (§5.1).
+//! - [`laps`] — a race's laps per seat, with the lap rulings (§5.7).
+//! - [`heat`] — a race's finishing order, a heat's standings under a ranking rule, and
+//!   whether its completion rule says it is done (§5.4, §5.5).
+//! - [`phase`] — the phase tree: fields, seat references, combined rankings, completion and
+//!   inherited formats (§5.2 – §5.6).
+//! - [`presets`] — generators that write plain phases: brackets of any shape, and mains
+//!   stacked with bump-ups (§6).
+//! - [`rulings`] — false starts counted against a phase's limit, disqualification, hand-set
+//!   positions, locking and protests (§5.7, §5.8).
+//! - [`state`] — all of the above folded together for one event, with the one check every
+//!   console command goes through and the facts that time alone makes true.
+//!
+//! Still to come: time and points penalties, class standings, and the run queue.
 #![forbid(unsafe_code)]
 
-pub mod event;
-pub mod format;
 pub mod heat;
-pub mod imd;
-pub mod preconditions;
-pub mod schedule;
-pub mod scoring;
-
-// Concrete formats on the `format::Generator` interface (#33/#34/#35).
-pub mod head_to_head;
-pub mod timed_qual;
-pub mod zippyq;
+pub mod laps;
+pub mod phase;
+pub mod presets;
+pub mod race;
+pub mod rulings;
+pub mod state;

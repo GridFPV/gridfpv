@@ -130,6 +130,10 @@ tbody tr:nth-child(even) { background: var(--surface-2); }
 .callout p:first-child { margin-top: 0; }
 .callout p:last-child { margin-bottom: 0; }
 
+/* Doc status banners (2026-11): old = kept for history, review = partly current. */
+.callout.doc-status-old { border-left-color: #cf222e; background: #fff5f5; }
+.callout.doc-status-review { border-left-color: #bf8700; background: #fffbea; }
+
 /* A principle: a named, emphasized rule. */
 .principle { margin: 1.1rem 0; }
 .principle .name {

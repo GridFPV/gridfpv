@@ -203,7 +203,7 @@ describe('ClassManager — hide / archive (manageHidden)', () => {
   });
 });
 
-describe('ClassManager — per-event picker filter (filterHidden)', () => {
+describe('ClassManager — the hidden filter (filterHidden)', () => {
   const HIDDEN: Class = { id: 'c3', name: 'Archived', source: 'Custom', hidden: true };
 
   it('filters hidden classes out of the offered list', async () => {
@@ -213,7 +213,7 @@ describe('ClassManager — per-event picker filter (filterHidden)', () => {
 
     await screen.findByText('Open Class');
     expect(screen.getByText('House')).toBeInTheDocument();
-    // The hidden class is excluded from the picker.
+    // The hidden class is excluded from the list.
     expect(screen.queryByText('Archived')).not.toBeInTheDocument();
   });
 

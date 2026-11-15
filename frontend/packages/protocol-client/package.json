@@ -2,7 +2,7 @@
   "name": "@gridfpv/protocol-client",
   "version": "0.0.0",
   "private": true,
-  "description": "Thin, framework-agnostic protocol client: connect to a base URL, snapshot + WS subscribe, typed state. STUB — filled by #49.",
+  "description": "Thin, framework-agnostic protocol client: typed HTTP calls to a Director base URL.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "types": "./src/index.ts",
