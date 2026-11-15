@@ -408,7 +408,13 @@ describe('video', () => {
       obs_address: '127.0.0.1:4455',
       obs_password: 'secret',
       tail_seconds: 3,
-      trash_discarded: true
+      trash_discarded: true,
+      record_from: 'Obs' as const,
+      clean_scene: '',
+      overlay_scene: '',
+      render_when: 'Asked' as const,
+      browser_path: '',
+      ffmpeg_path: ''
     };
     expect(await putVideoSettings('http://d.local', request, 'tok', { fetch })).toEqual(settings);
     expect(calls.map((call) => call.url)).toEqual([
