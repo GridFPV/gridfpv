@@ -229,6 +229,7 @@
         race={route.race}
         onopen={(race) => navigate({ kind: 'marshal', race })}
         onrun={(heat) => navigate({ kind: 'run', heat })}
+        videoUrl={(event, race, which) => session.raceVideoUrl(event, race, which)}
       />
     {:else if route.kind === 'event' && route.section === 'phases'}
       <PhasesPage {live} onrun={(heat) => navigate({ kind: 'run', heat })} />

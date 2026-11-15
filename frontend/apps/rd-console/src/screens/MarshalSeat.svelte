@@ -40,7 +40,9 @@
     signalState,
     editable,
     busy,
-    act
+    act,
+    playhead = undefined,
+    onseek = undefined
   }: {
     race: RaceView;
     seat: RaceSeatView;
@@ -56,6 +58,10 @@
     busy: boolean;
     /** Send one ruling. Resolves `true` when the Director took it. */
     act: (command: Command) => Promise<boolean>;
+    /** Where the race's video is, in microseconds into the race. Left out with no video open. */
+    playhead?: number | undefined;
+    /** Move the race's video to a moment of the race, in microseconds from its start. */
+    onseek?: ((raceMicros: number) => void) | undefined;
   } = $props();
 
   const who = $derived(seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot));
@@ -81,6 +87,47 @@
 
   function pick(crossing: LogRef) {
     selected = selected === crossing ? undefined : crossing;
+  }
+
+  // The video and this seat's times only line up when the times are counted from the race's
+  // start. Counted from the seat's first crossing, there is nothing to line them up with.
+  const aligned = $derived(base?.words === 'into the race' ? base.at : undefined);
+  const cursor = $derived(
+    aligned !== undefined && playhead !== undefined ? aligned + playhead : undefined
+  );
+  const seekTo = $derived(
+    aligned !== undefined && onseek ? (at: number) => onseek(at - aligned) : undefined
+  );
+  // With the video open, "add a lap" is always where the video is: play it, step it or
+  // click the trace, and the time in the box follows. So what the marshal sees on the
+  // screen is the moment a lap would be added at. Typing in the box works the other way
+  // round: the video goes to the time typed. While the box is being typed in, it is left
+  // alone.
+  let typing = $state(false);
+  $effect(() => {
+    if (!editable || typing || cursor === undefined || aligned === undefined) return;
+    if (cursor < aligned) {
+      // Before the start there is no lap to add.
+      pickedAt = undefined;
+      addText = '';
+      return;
+    }
+    pickedAt = cursor;
+    addText = ((cursor - aligned) / 1_000_000).toFixed(3);
+    addError = undefined;
+  });
+  function typed() {
+    pickedAt = undefined;
+    if (!base || !seekTo) return;
+    const at = parseOffset(addText, base.at);
+    if (at !== undefined) seekTo(at);
+  }
+
+  /** Pick a lap in the list, and show its crossing in the video. */
+  function pickRow(crossing: LogRef) {
+    pick(crossing);
+    const mark = marks.find((entry) => entry.crossing === crossing);
+    if (mark) seekTo?.(mark.at);
   }
 
   function pickOnTrace(at: number) {
@@ -112,7 +159,8 @@
     const done = await act({
       Record: { LapInserted: { ...ref, adapter: seat.adapter, seat: seat.seat, at: addAt } }
     });
-    if (done) {
+    // With the video open the box stays on the video's moment. Without it, it is cleared.
+    if (done && cursor === undefined) {
       addText = '';
       pickedAt = undefined;
     }
@@ -181,6 +229,8 @@
       label="Signal for {who} on {seatName} over the whole race, with the start, each crossing and the enter and exit levels. The lap list below says the same in words."
       onselect={pick}
       onpick={editable ? pickOnTrace : undefined}
+      {cursor}
+      onseek={seekTo}
     />
   {:else if signalState === 'loading'}
     <p class="muted" role="status">Reading the signal…</p>
@@ -217,7 +267,7 @@
                 class="pick"
                 aria-pressed={selected === row.crossing}
                 title="Show on the trace"
-                onclick={() => pick(row.crossing)}
+                onclick={() => pickRow(row.crossing)}
               >
                 {#if row.kind === 'holeshot'}Hole shot{:else if row.kind === 'restart'}Restart{:else if row.kind === 'timerRestart'}Timer
                   restarted{:else}Lap
@@ -304,7 +354,7 @@
               class="pick"
               aria-pressed={selected === crossing.crossing}
               title="Show on the trace"
-              onclick={() => pick(crossing.crossing)}
+              onclick={() => pickRow(crossing.crossing)}
             >
               {base ? `${formatOffset(crossing.at, base.at)} s` : 'Crossing'}
             </button>
@@ -357,7 +407,9 @@
             placeholder="e.g. 12.5"
             autocomplete="off"
             aria-label="Seconds {base.words}, for {who}"
-            oninput={() => (pickedAt = undefined)}
+            oninput={typed}
+            onfocus={() => (typing = true)}
+            onblur={() => (typing = false)}
             disabled={busy}
           />
         </span>

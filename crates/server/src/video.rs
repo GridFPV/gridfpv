@@ -938,6 +938,65 @@ pub async fn post_ffmpeg(
     }
 }
 
+/// Which of a race's videos to play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhichVideo {
+    /// The recording itself: clean, when it was recorded from a scene of its own.
+    Recording,
+    /// A video with the overlay in it, whether or not its laps are still right.
+    Overlay,
+}
+
+/// Where one of a race's videos is on this machine. `None` when the race has no such video.
+/// Only a path the event's own log names is ever given: a client cannot ask for a file.
+pub fn race_video_path(
+    registry: &EventRegistry,
+    event: &EventId,
+    race: &RaceId,
+    which: WhichVideo,
+) -> Option<PathBuf> {
+    with_event(registry, event, |session| {
+        let video = session.state().videos.get(race);
+        Ok(video.and_then(|video| match which {
+            WhichVideo::Recording => Some(video.file.clone()),
+            WhichVideo::Overlay => crate::view::any_overlaid_file(video),
+        }))
+    })
+    .ok()
+    .flatten()
+    .map(PathBuf::from)
+}
+
+/// `GET /events/{event}/races/{race}/video/{which}` — play a race's recording. `which` is
+/// `recording` or `overlay`. An open read, like the snapshot that names the file. The
+/// answer honours byte ranges, which is how a video player seeks. `404` when the race has
+/// no such video, or the file is not on this machine any more.
+pub async fn get_race_video(
+    State(registry): State<EventRegistry>,
+    axum::extract::Path((event, race, which)): axum::extract::Path<(String, String, String)>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use tower::ServiceExt;
+    let which = match which.as_str() {
+        "recording" => WhichVideo::Recording,
+        "overlay" => WhichVideo::Overlay,
+        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+    let found = race_video_path(&registry, &EventId(event), &RaceId(race), which)
+        .filter(|path| path.is_file());
+    let Some(path) = found else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    match tower_http::services::ServeFile::new(path)
+        .oneshot(request)
+        .await
+    {
+        Ok(answer) => answer.into_response(),
+        Err(never) => match never {},
+    }
+}
+
 /// `GET /video/status` — the link to OBS and this session's runs. An open read.
 pub async fn get_status(State(registry): State<EventRegistry>) -> Json<VideoStatus> {
     Json(registry.video().status())
@@ -1134,5 +1193,218 @@ mod tests {
             ("heat#2", VideoRunState::Recording)
         );
         assert_eq!(runs[1].state, VideoRunState::Saved);
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    use crate::events::CreateEventRequest;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use gridfpv_events::{
+        AdapterId, Command, CompletionRule, EndCondition, Event, FirstLap, Format, HeatSeat,
+        PhaseDef, PhaseId, PhaseKind, PilotId, RaceRules, SeatRef, SeatSource,
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// An event with one heat and one race started, and a place for its files.
+    fn race_with_files(tag: &str) -> (EventRegistry, EventId, RaceId, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("gridfpv-play-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = EventRegistry::new(None).unwrap();
+        let event = registry
+            .create(&CreateEventRequest::named("Night"))
+            .unwrap()
+            .id;
+        let heat = PhaseDef {
+            id: PhaseId("heat".into()),
+            label: "Track 2".into(),
+            parent: None,
+            kind: PhaseKind::Heat {
+                lineup: vec![HeatSeat {
+                    adapter: AdapterId("bench".into()),
+                    seat: SeatRef("seat-1".into()),
+                    source: SeatSource::Pilot(PilotId("ana".into())),
+                }],
+            },
+            format: Some(Format {
+                name: "Open".into(),
+                race: RaceRules {
+                    end: EndCondition::Open,
+                    staging_micros: 1_000_000,
+                    min_lap_micros: None,
+                    first_lap: FirstLap::HoleShot,
+                    stop_after_all_finish_micros: None,
+                    max_micros: None,
+                },
+                completion: CompletionRule::DirectorDecides,
+                ranking: None,
+                points: Vec::new(),
+            }),
+            false_start_limit: None,
+            display_hint: None,
+        };
+        with_event(&registry, &event, |session| {
+            session.commands(vec![
+                Command::Record(Box::new(Event::PhaseDefined { def: heat })),
+                Command::StartRace {
+                    heat: PhaseId("heat".into()),
+                },
+            ])
+        })
+        .unwrap();
+        (registry, event, RaceId("heat#1".into()), dir)
+    }
+
+    async fn get(
+        registry: &EventRegistry,
+        path: &str,
+        range: Option<&str>,
+    ) -> (StatusCode, Option<String>, Vec<u8>) {
+        let mut request = Request::builder().uri(path);
+        if let Some(range) = range {
+            request = request.header(header::RANGE, range);
+        }
+        let answer = crate::app::router(registry.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = answer.status();
+        let kind = answer
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let bytes = answer.into_body().collect().await.unwrap().to_bytes();
+        (status, kind, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn a_race_s_videos_are_played_with_byte_ranges_and_nothing_else_is_served() {
+        let (registry, event, race, dir) = race_with_files("ranges");
+        let base = format!("/events/{}/races/heat%231/video", event.0);
+
+        // No recording yet: nothing to play.
+        assert_eq!(
+            get(&registry, &format!("{base}/recording"), None).await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        let clean = dir.join("Night Track 2 race 1 - Clean.mp4");
+        let overlay = dir.join("Night Track 2 race 1 - Overlay.mp4");
+        std::fs::write(&clean, b"0123456789").unwrap();
+        std::fs::write(&overlay, b"overlay-bytes").unwrap();
+        log_video(
+            &registry,
+            &event,
+            Event::VideoRecorded {
+                race: race.clone(),
+                file: clean.to_string_lossy().into_owned(),
+                first_frame_at: 0,
+                clean: true,
+                overlay_file: Some(overlay.to_string_lossy().into_owned()),
+                overlay_first_frame_at: None,
+                laps_key: Some("not the laps now".into()),
+            },
+        );
+
+        // The whole file, typed as a video.
+        let (status, kind, bytes) = get(&registry, &format!("{base}/recording"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(kind.as_deref(), Some("video/mp4"));
+        assert_eq!(bytes, b"0123456789");
+        // A part of it, which is how a player seeks.
+        let (status, _, bytes) =
+            get(&registry, &format!("{base}/recording"), Some("bytes=2-5")).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(bytes, b"2345");
+        // The overlay video is played even though its laps are out of date.
+        let (status, _, bytes) = get(&registry, &format!("{base}/overlay"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, b"overlay-bytes");
+
+        // Only those two names, only that race, and never a path of the client's choosing.
+        for path in [
+            format!("{base}/other"),
+            format!("{base}/..%2F..%2Fetc%2Fpasswd"),
+            format!("/events/{}/races/heat%232/video/recording", event.0),
+            "/events/nope/races/heat%231/video/recording".to_owned(),
+        ] {
+            assert_eq!(
+                get(&registry, &path, None).await.0,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+
+        // A file that has been moved away is a 404, not an error.
+        std::fs::remove_file(&clean).unwrap();
+        assert_eq!(
+            get(&registry, &format!("{base}/recording"), None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_snapshot_offers_an_overlay_video_whose_laps_are_out_of_date() {
+        let (registry, event, race, dir) = race_with_files("stale");
+        let read = |registry: &EventRegistry| {
+            with_event(registry, &event, |session| {
+                Ok(crate::view::EventView::build(session.state(), session.now))
+            })
+            .unwrap()
+            .races[0]
+                .video
+                .clone()
+        };
+        let key_now = with_event(&registry, &event, |session| {
+            let state = session.state();
+            Ok(crate::view::race_laps_key(
+                state,
+                state.races.get(&race).unwrap(),
+            ))
+        })
+        .unwrap();
+        let record = |laps_key: &str| Event::VideoRecorded {
+            race: race.clone(),
+            file: "clean.mp4".into(),
+            first_frame_at: 0,
+            clean: true,
+            overlay_file: Some("overlay.mp4".into()),
+            overlay_first_frame_at: Some(130_000),
+            laps_key: Some(laps_key.to_owned()),
+        };
+        // Filmed with the laps as they are: the overlay is right, and there is no old one.
+        log_video(&registry, &event, record(&key_now));
+        let video = read(&registry).unwrap();
+        assert_eq!(video.overlaid_file.as_deref(), Some("overlay.mp4"));
+        assert_eq!(video.old_overlaid_file, None);
+        // The overlay scene began a moment after the clean one, and keeps its own start.
+        assert_eq!(video.first_frame_at, 0);
+        assert_eq!(video.overlaid_first_frame_at, Some(130_000));
+        // Filmed with other laps: it is out of date, and still offered as the old one.
+        log_video(&registry, &event, record("other laps"));
+        let video = read(&registry).unwrap();
+        assert_eq!(video.overlaid_file, None);
+        assert_eq!(video.old_overlaid_file.as_deref(), Some("overlay.mp4"));
+        assert_eq!(video.overlaid_first_frame_at, Some(130_000));
+        // A render is drawn onto the clean recording, so it begins where that does.
+        log_video(
+            &registry,
+            &event,
+            Event::VideoRendered {
+                race: race.clone(),
+                file: "redrawn.mp4".into(),
+                laps_key: key_now.clone(),
+            },
+        );
+        let video = read(&registry).unwrap();
+        assert_eq!(video.overlaid_file.as_deref(), Some("redrawn.mp4"));
+        assert_eq!(video.overlaid_first_frame_at, Some(0));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

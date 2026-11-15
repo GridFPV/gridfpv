@@ -214,6 +214,7 @@ async fn the_overlay_is_drawn_onto_a_clean_recording() {
             first_frame_at,
             clean: true,
             overlay_file: None,
+            overlay_first_frame_at: None,
             laps_key: None,
         },
     );

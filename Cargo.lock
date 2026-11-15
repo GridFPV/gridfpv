@@ -462,6 +462,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+ "tower-http",
  "ts-rs",
  "zip",
 ]
