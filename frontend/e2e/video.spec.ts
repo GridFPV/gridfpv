@@ -98,7 +98,8 @@ test('RD switches video on with no OBS there, is told so on the Video and Run pa
         overlay_scene: '',
         render_when: 'Asked',
         browser_path: '',
-        ffmpeg_path: ''
+        ffmpeg_path: '',
+        save_in: 'Obs'
       }
     });
   }

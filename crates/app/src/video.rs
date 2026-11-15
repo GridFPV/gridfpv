@@ -277,7 +277,7 @@ impl Recorder {
             obs.source_record = source_record;
         });
         if !recording {
-            tape::restore_naming(&self.obs, &desk).await;
+            tape::restore(&self.obs, &desk).await;
         }
     }
 

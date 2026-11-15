@@ -97,6 +97,16 @@ You can also put `ffmpeg` next to Grid, or install it so it is on the PATH.
 
 The clean recording must be on the same computer as Grid.
 
+## Where the videos go
+
+Grid saves them in a folder called `videos` inside its own data folder. The Video page
+shows the full path. That way your race data and your videos sit in one place.
+
+Grid tells OBS to use that folder just for the race, then puts OBS's own folder back.
+
+If OBS runs on a different computer than Grid, it cannot see Grid's folder. Then set
+**Where videos are saved** to **OBS's own recording folder**.
+
 ## What Grid does during a race
 
 - **Start**: when the countdown begins, Grid names the file after the race and starts the

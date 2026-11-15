@@ -135,6 +135,7 @@ export type * from '@bindings/RenderRequest';
 export type * from '@bindings/RenderState';
 export type * from '@bindings/RenderTools';
 export type * from '@bindings/RenderWhen';
+export type * from '@bindings/SaveIn';
 export type * from '@bindings/VideoOverlay';
 export type * from '@bindings/DataCopy';
 export type * from '@bindings/DataExport';

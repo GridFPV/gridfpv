@@ -24,7 +24,7 @@ use gridfpv_events::{
 use gridfpv_server::control::with_event;
 use gridfpv_server::events::{CreateEventRequest, EventId, EventRegistry};
 use gridfpv_server::video::{
-    RecordFrom, RenderWhen, VideoRun, VideoRunState, VideoSettingsRequest,
+    RecordFrom, RenderWhen, SaveIn, VideoRun, VideoRunState, VideoSettingsRequest,
 };
 use gridfpv_server::view::VideoOverlay;
 
@@ -102,13 +102,41 @@ fn define_heat(registry: &EventRegistry, event: &EventId) {
     );
 }
 
+/// `GRIDFPV_OBS_DATA_DIR`: a data folder OBS can see by the same path. Set, the recordings
+/// go into Grid's own `videos` folder there; unset, they go where OBS records.
+fn data_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("GRIDFPV_OBS_DATA_DIR").map(Into::into)
+}
+
+fn save_in() -> SaveIn {
+    if data_dir().is_some() {
+        SaveIn::Grid
+    } else {
+        SaveIn::Obs
+    }
+}
+
+/// With a data folder, the file is in Grid's `videos` folder and really there.
+fn assert_in_grid_folder(registry: &EventRegistry, file: &str) {
+    if data_dir().is_none() {
+        return;
+    }
+    let videos = registry.video().videos_dir().unwrap();
+    assert!(
+        std::path::Path::new(file).starts_with(&videos),
+        "{file} is not in {}",
+        videos.display()
+    );
+    assert!(std::path::Path::new(file).is_file(), "{file} is not there");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an OBS with its WebSocket server on: set GRIDFPV_OBS_ADDR"]
 async fn races_are_recorded_named_logged_and_dropped_by_a_real_obs() {
     let address = std::env::var("GRIDFPV_OBS_ADDR").unwrap_or_else(|_| "127.0.0.1:4455".into());
     let password = std::env::var("GRIDFPV_OBS_PASS").unwrap_or_default();
 
-    let registry = EventRegistry::new(None).unwrap();
+    let registry = EventRegistry::new(data_dir()).unwrap();
     // A name with characters OBS and Windows would trip on, to prove they are cleaned.
     let stamp = std::process::id();
     let event_name = format!("Live 100% {stamp}: night");
@@ -119,10 +147,7 @@ async fn races_are_recorded_named_logged_and_dropped_by_a_real_obs() {
     registry.set_active(&event).unwrap();
     define_heat(&registry, &event);
 
-    // Switched off, the recorder does nothing and says nothing is wrong.
     let recorder = gridfpv_app::video::spawn(registry.clone());
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(registry.video().status().obs, Default::default());
 
     // A wrong password is said in words, and the right one connects.
     let settings = |password: &str| VideoSettingsRequest {
@@ -137,6 +162,7 @@ async fn races_are_recorded_named_logged_and_dropped_by_a_real_obs() {
         render_when: RenderWhen::Asked,
         browser_path: String::new(),
         ffmpeg_path: String::new(),
+        save_in: save_in(),
     };
     if !password.is_empty() {
         registry
@@ -196,6 +222,7 @@ async fn races_are_recorded_named_logged_and_dropped_by_a_real_obs() {
     let file = written.file.clone().unwrap();
     let stem = format!("Live 100 {stamp} night Track 2 race 1");
     assert!(file.contains(&stem), "{file}");
+    assert_in_grid_folder(&registry, &file);
     // The countdown was one second, and recording began as it did: the tone is in the
     // file, within a couple of seconds of its first frame.
     let start = written.start_at_ms.unwrap();
@@ -316,15 +343,35 @@ async fn races_are_recorded_named_logged_and_dropped_by_a_real_obs() {
 
     // OBS's own file naming is back as it was, and nothing is left to put back.
     assert_eq!(registry.video().stored().obs_naming_before, None);
+    // The same for its recording folder: OBS records where it did before the race.
+    assert_eq!(registry.video().stored().obs_folder_before, None);
+    let folder_now = eventually("OBS to connect again", 15, || {
+        registry.video().status().obs.record_folder
+    })
+    .await;
+    assert_eq!(Some(folder_now), obs.record_folder);
 
-    // Switched off again: the link to OBS is let go.
+    // Switched off, the link to OBS stays (the scenes are read with recording off), and a
+    // race that starts is not recorded.
     let mut off = settings(&password);
     off.enabled = false;
     registry.video().update(&off).unwrap();
-    eventually("OBS to be let go", 5, || {
-        (!registry.video().status().obs.connected).then_some(())
+    eventually("OBS to connect again", 15, || {
+        registry.video().status().obs.connected.then_some(())
     })
     .await;
+    let runs_before = registry.video().status().runs.len();
+    send(
+        &registry,
+        &event,
+        Command::StartRace {
+            heat: PhaseId("heat".into()),
+        },
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let status = registry.video().status();
+    assert_eq!(status.runs.len(), runs_before, "{:?}", status.runs);
+    assert!(!status.obs.recording);
     recorder.abort();
 }
 
@@ -336,7 +383,7 @@ async fn two_scenes_are_recorded_to_their_own_files_by_a_real_obs() {
     let clean_scene = std::env::var("GRIDFPV_OBS_CLEAN").unwrap_or_else(|_| "Clean".into());
     let overlay_scene = std::env::var("GRIDFPV_OBS_OVERLAY").unwrap_or_else(|_| "Scene".into());
 
-    let registry = EventRegistry::new(None).unwrap();
+    let registry = EventRegistry::new(data_dir()).unwrap();
     let stamp = std::process::id();
     let event = registry
         .create(&CreateEventRequest::named(format!("Scenes {stamp}")))
@@ -358,6 +405,7 @@ async fn two_scenes_are_recorded_to_their_own_files_by_a_real_obs() {
         render_when: RenderWhen::Asked,
         browser_path: String::new(),
         ffmpeg_path: String::new(),
+        save_in: save_in(),
     };
     registry.video().update(&settings).unwrap();
     let obs = eventually("OBS to connect", 15, || {
@@ -401,6 +449,7 @@ async fn two_scenes_are_recorded_to_their_own_files_by_a_real_obs() {
         file.contains(&format!("Scenes {stamp} Track 2 race 1 - Clean.")),
         "{file}"
     );
+    assert_in_grid_folder(&registry, &file);
     let start = written.start_at_ms.unwrap();
     assert!(
         (0..3000).contains(&start),

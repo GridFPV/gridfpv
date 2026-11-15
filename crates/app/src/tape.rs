@@ -27,7 +27,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use gridfpv_server::video::{RecordFrom, StoredVideoSettings, VideoDesk};
+use gridfpv_server::video::{RecordFrom, SaveIn, StoredVideoSettings, VideoDesk};
 use serde_json::{Value, json};
 
 use crate::obs::Obs;
@@ -118,6 +118,42 @@ pub async fn restore_naming(obs: &Obs, desk: &VideoDesk) {
     }
 }
 
+/// Put OBS's own recording folder back, if the Director pointed it at Grid's for a race.
+pub async fn restore_folder(obs: &Obs, desk: &VideoDesk) {
+    if let Some(before) = desk.stored().obs_folder_before
+        && obs
+            .call("SetRecordDirectory", json!({ "recordDirectory": before }))
+            .await
+            .is_ok()
+    {
+        desk.remember_obs_folder(None);
+    }
+}
+
+/// Put back what the Director changed in OBS for a race: the file naming and the folder.
+pub async fn restore(obs: &Obs, desk: &VideoDesk) {
+    restore_naming(obs, desk).await;
+    restore_folder(obs, desk).await;
+}
+
+/// Grid's own videos folder, made if it is not there, when the recordings are to go into
+/// it. `None` when they go where OBS itself records.
+fn grid_folder(desk: &VideoDesk, settings: &StoredVideoSettings) -> Result<Option<String>, String> {
+    if settings.save_in != SaveIn::Grid {
+        return Ok(None);
+    }
+    let dir = desk.videos_dir().ok_or(
+        "Grid has no data folder to keep videos in. Pick OBS's own folder on the Video page.",
+    )?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "Grid could not make its videos folder {}: {e}",
+            dir.display()
+        )
+    })?;
+    Ok(Some(dir.to_string_lossy().into_owned()))
+}
+
 /// Wait for OBS to say its own recording reached `state`.
 async fn own_state(
     events: &mut tokio::sync::broadcast::Receiver<crate::obs::ObsEvent>,
@@ -149,19 +185,34 @@ pub async fn start(
     settings: &StoredVideoSettings,
     name: &str,
 ) -> Result<Tape, String> {
+    let folder = grid_folder(desk, settings)?;
     match settings.record_from {
-        RecordFrom::Obs => start_own(obs, desk, name).await.map(|()| Tape::Own),
+        RecordFrom::Obs => start_own(obs, desk, name, folder.as_deref())
+            .await
+            .map(|()| Tape::Own),
         RecordFrom::Scenes => {
             if settings.clean_scene.is_empty() {
                 return Err("No scene is picked to record. Pick one on the Video page.".into());
             }
             // The clean recording starts first and alone: its first frame is the moment
             // the caller notes. The overlaid one follows at once.
-            let clean = scene_start(obs, &settings.clean_scene, &format!("{name} - Clean")).await?;
+            let clean = scene_start(
+                obs,
+                &settings.clean_scene,
+                &format!("{name} - Clean"),
+                folder.as_deref(),
+            )
+            .await?;
             let overlay = if settings.overlay_scene.is_empty() {
                 None
             } else {
-                match scene_start(obs, &settings.overlay_scene, &format!("{name} - Overlay")).await
+                match scene_start(
+                    obs,
+                    &settings.overlay_scene,
+                    &format!("{name} - Overlay"),
+                    folder.as_deref(),
+                )
+                .await
                 {
                     Ok(tape) => Some(tape),
                     Err(e) => {
@@ -176,7 +227,12 @@ pub async fn start(
     }
 }
 
-async fn start_own(obs: &Obs, desk: &VideoDesk, name: &str) -> Result<(), String> {
+async fn start_own(
+    obs: &Obs,
+    desk: &VideoDesk,
+    name: &str,
+    folder: Option<&str>,
+) -> Result<(), String> {
     if own_recording(obs).await? {
         return Err(
             "OBS was already recording, so this race is inside that recording. Grid left it alone."
@@ -191,6 +247,26 @@ async fn start_own(obs: &Obs, desk: &VideoDesk, name: &str) -> Result<(), String
     };
     desk.remember_obs_naming(Some(before));
     set_naming(obs, name).await?;
+    // The same for the folder, when the recording goes into Grid's.
+    if let Some(folder) = folder {
+        let before = match desk.stored().obs_folder_before {
+            Some(before) => before,
+            None => obs.call("GetRecordDirectory", json!({})).await?["recordDirectory"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        };
+        desk.remember_obs_folder(Some(before));
+        if let Err(e) = obs
+            .call("SetRecordDirectory", json!({ "recordDirectory": folder }))
+            .await
+        {
+            restore(obs, desk).await;
+            return Err(format!(
+                "OBS would not record into Grid's videos folder ({e}). Pick OBS's own folder on the Video page."
+            ));
+        }
+    }
 
     // OBS ignores a start that lands while an earlier recording is still stopping, and
     // says nothing. So wait for it to say the output is running, and ask again if not.
@@ -199,7 +275,7 @@ async fn start_own(obs: &Obs, desk: &VideoDesk, name: &str) -> Result<(), String
         if let Err(e) = obs.call("StartRecord", json!({})).await
             && !own_recording(obs).await.unwrap_or(false)
         {
-            restore_naming(obs, desk).await;
+            restore(obs, desk).await;
             return Err(e);
         }
         if own_state(&mut events, "OBS_WEBSOCKET_OUTPUT_STARTED", STARTED).await
@@ -208,7 +284,7 @@ async fn start_own(obs: &Obs, desk: &VideoDesk, name: &str) -> Result<(), String
             return Ok(());
         }
     }
-    restore_naming(obs, desk).await;
+    restore(obs, desk).await;
     Err("OBS did not start recording.".into())
 }
 
@@ -225,7 +301,7 @@ pub async fn stop(obs: &Obs, desk: &VideoDesk, tape: Tape) -> Result<Written, St
             if stopped.is_ok() {
                 own_state(&mut events, "OBS_WEBSOCKET_OUTPUT_STOPPED", STOPPED).await;
             }
-            restore_naming(obs, desk).await;
+            restore(obs, desk).await;
             let answer = stopped?;
             Ok(Written {
                 file: answer["outputPath"].as_str().unwrap_or_default().to_owned(),
@@ -382,8 +458,14 @@ async fn scene_active(obs: &Obs, filter: &str) -> bool {
         .is_ok_and(|status| status["outputActive"] == true)
 }
 
-async fn scene_start(obs: &Obs, scene: &str, name: &str) -> Result<SceneTape, String> {
-    // Where the files go: the folder the scene's filter already has, else OBS's own.
+async fn scene_start(
+    obs: &Obs,
+    scene: &str,
+    name: &str,
+    grid: Option<&str>,
+) -> Result<SceneTape, String> {
+    // Where the files go: Grid's folder when asked for, else the folder the scene's filter
+    // already has, else OBS's own.
     let own = obs
         .call("GetRecordDirectory", json!({}))
         .await?
@@ -405,6 +487,7 @@ async fn scene_start(obs: &Obs, scene: &str, name: &str) -> Result<SceneTape, St
         .and_then(|filter| filter["filterSettings"]["path"].as_str())
         .filter(|path| !path.is_empty())
         .map_or(own, str::to_owned);
+    let folder = grid.map_or(folder, str::to_owned);
     let filter = scene_filter(obs, scene, &folder).await?;
     if scene_active(obs, &filter).await {
         return Err(format!(

@@ -98,7 +98,8 @@ export const VIDEO_OFF: VideoSettings = {
   overlay_scene: '',
   render_when: 'Asked',
   browser_path: '',
-  ffmpeg_path: ''
+  ffmpeg_path: '',
+  save_in: 'Obs'
 };
 
 /** What is known about OBS: not connected, unless `over` says otherwise. */

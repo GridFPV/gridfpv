@@ -88,7 +88,7 @@ levels, and whether it is in a crossing). It is for the Tune page and is gone on
 
 | Route | What |
 |---|---|
-| `GET /video/settings`, `PUT /video/settings` | Whether races are recorded, where OBS is, what records (OBS's own recording, or scenes of their own), the tail after a stop, whether a discarded race's recording goes to the trash, and when the overlay is drawn onto a clean recording |
+| `GET /video/settings`, `PUT /video/settings` | Whether races are recorded, where OBS is, what records (OBS's own recording, or scenes of their own), the tail after a stop, whether a discarded race's recording goes to the trash, which folder the recordings go into (`save_in`: `Grid` for the `videos` folder of the data folder, given back as `videos_folder`; `Obs` for wherever OBS records), and when the overlay is drawn onto a clean recording |
 | `GET /video/status` | Whether OBS is connected (and why not), its scenes, whether it has Source Record, whether it is recording, the runs and the renders since the Director started, and whether a browser and ffmpeg were found |
 | `POST /video/render` | Draw the overlay onto one race's clean recording (`{event, race}`), or onto every race of the event that needs it (`{event}`). Answers how many were asked for; `409` for a race with no clean recording. The drawing runs in the background and `GET /video/status` follows it |
 | `POST /video/ffmpeg` | Download ffmpeg and keep it in the `tools` folder of the data folder. Answers `202` at once; `GET /video/status` says `tools.fetching`, then `tools.ffmpeg` or `tools.fetch_problem`. `409` on a computer Grid has no build for (`tools.can_fetch` is false) |

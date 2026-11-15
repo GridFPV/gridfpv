@@ -80,10 +80,29 @@ pub struct StoredVideoSettings {
     /// ffmpeg, which puts the frames on the video. Empty: `ffmpeg` on the PATH.
     #[serde(default)]
     pub ffmpeg_path: String,
+    /// Which folder the recordings go into.
+    #[serde(default)]
+    pub save_in: SaveIn,
     /// OBS's own file naming, as it was before the Director changed it for a race. Kept so
     /// it can be put back even if the Director stopped in the middle of a recording.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obs_naming_before: Option<String>,
+    /// OBS's own recording folder, as it was before the Director pointed it at Grid's for a
+    /// race. Kept so it can be put back, like the naming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obs_folder_before: Option<String>,
+}
+
+/// Which folder the recordings go into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SaveIn {
+    /// The `videos` folder of Grid's data folder. For OBS on the Director's own computer.
+    #[default]
+    Grid,
+    /// Wherever OBS itself records to. The choice when OBS is on another computer, which
+    /// cannot see Grid's folder.
+    Obs,
 }
 
 /// What records each race.
@@ -134,7 +153,9 @@ impl Default for StoredVideoSettings {
             render_when: RenderWhen::Asked,
             browser_path: String::new(),
             ffmpeg_path: String::new(),
+            save_in: SaveIn::Grid,
             obs_naming_before: None,
+            obs_folder_before: None,
         }
     }
 }
@@ -165,6 +186,12 @@ pub struct VideoSettings {
     pub browser_path: String,
     /// ffmpeg. Empty: `ffmpeg` on the PATH.
     pub ffmpeg_path: String,
+    /// Which folder the recordings go into.
+    pub save_in: SaveIn,
+    /// Grid's own videos folder, as a full path. Absent when the Director keeps no data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub videos_folder: Option<String>,
 }
 
 /// What `PUT /video/settings` takes.
@@ -191,6 +218,8 @@ pub struct VideoSettingsRequest {
     pub browser_path: String,
     #[serde(default)]
     pub ffmpeg_path: String,
+    #[serde(default)]
+    pub save_in: SaveIn,
 }
 
 /// Where a run's recording stands.
@@ -452,6 +481,10 @@ impl VideoDesk {
             render_when: stored.render_when,
             browser_path: stored.browser_path,
             ffmpeg_path: stored.ffmpeg_path,
+            save_in: stored.save_in,
+            videos_folder: self
+                .videos_dir()
+                .map(|dir| dir.to_string_lossy().into_owned()),
         }
     }
 
@@ -527,6 +560,7 @@ impl VideoDesk {
                 settings.render_when = request.render_when;
                 settings.browser_path = request.browser_path.trim().to_owned();
                 settings.ffmpeg_path = request.ffmpeg_path.trim().to_owned();
+                settings.save_in = request.save_in;
             },
             true,
         )?;
@@ -572,6 +606,21 @@ impl VideoDesk {
     /// Say which of the programs a render needs were found.
     pub fn report_tools(&self, tools: RenderTools) {
         self.write().status.tools = tools;
+    }
+
+    /// Remember OBS's own recording folder while the Director has pointed it at Grid's, or
+    /// forget it (`None`) once it is put back.
+    pub fn remember_obs_folder(&self, folder: Option<String>) {
+        if let Err(e) = self.store(|settings| settings.obs_folder_before = folder, false) {
+            eprintln!("WARNING: {e}");
+        }
+    }
+
+    /// Grid's own videos folder: `videos` in the data folder, as a full path (OBS is handed
+    /// it, and OBS has its own idea of "here").
+    pub fn videos_dir(&self) -> Option<PathBuf> {
+        let dir = self.read().data_dir.as_ref()?.join("videos");
+        Some(std::path::absolute(&dir).unwrap_or(dir))
     }
 
     /// Where a downloaded ffmpeg is kept: the `tools` folder of the data folder.
@@ -911,6 +960,7 @@ mod tests {
             render_when: RenderWhen::Asked,
             browser_path: String::new(),
             ffmpeg_path: String::new(),
+            save_in: SaveIn::Obs,
         }
     }
 
@@ -931,6 +981,9 @@ mod tests {
                 render_when: RenderWhen::Asked,
                 browser_path: String::new(),
                 ffmpeg_path: String::new(),
+                save_in: SaveIn::Grid,
+                // No data folder, so nowhere of Grid's own for videos.
+                videos_folder: None,
             }
         );
         let mut watch = desk.watch();

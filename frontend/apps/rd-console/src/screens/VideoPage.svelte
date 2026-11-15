@@ -30,7 +30,14 @@
     StatusPill,
     toast
   } from '@gridfpv/components';
-  import type { RaceId, RecordFrom, RenderWhen, VideoSettings, VideoStatus } from '@gridfpv/types';
+  import type {
+    RaceId,
+    RecordFrom,
+    RenderWhen,
+    SaveIn,
+    VideoSettings,
+    VideoStatus
+  } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import { raceName } from '../lib/marshal.js';
@@ -78,6 +85,7 @@
     cleanScene: '',
     overlayScene: '',
     renderWhen: 'Asked' as RenderWhen,
+    saveIn: 'Grid' as SaveIn,
     browserPath: '',
     ffmpegPath: ''
   });
@@ -97,6 +105,7 @@
       cleanScene: from.clean_scene,
       overlayScene: from.overlay_scene,
       renderWhen: from.render_when,
+      saveIn: from.save_in,
       browserPath: from.browser_path,
       ffmpegPath: from.ffmpeg_path
     };
@@ -137,6 +146,7 @@
         form.cleanScene !== settings.clean_scene ||
         form.overlayScene !== settings.overlay_scene ||
         form.renderWhen !== settings.render_when ||
+        form.saveIn !== settings.save_in ||
         form.browserPath.trim() !== settings.browser_path ||
         form.ffmpegPath.trim() !== settings.ffmpeg_path ||
         passwordTyped)
@@ -165,7 +175,8 @@
         overlay_scene: form.overlayScene,
         render_when: form.renderWhen,
         browser_path: form.browserPath.trim(),
-        ffmpeg_path: form.ffmpegPath.trim()
+        ffmpeg_path: form.ffmpegPath.trim(),
+        save_in: form.saveIn
       });
       if (!saved) return;
       settings = saved;
@@ -200,7 +211,8 @@
         overlay_scene: settings.overlay_scene,
         render_when: settings.render_when,
         browser_path: settings.browser_path,
-        ffmpeg_path: settings.ffmpeg_path
+        ffmpeg_path: settings.ffmpeg_path,
+        save_in: settings.save_in
       });
       if (!saved) return;
       // Only the stored copy moves: what else is typed in the form stays, still unsaved.
@@ -295,11 +307,6 @@
       {#if obs?.connected}
         <p class="facts" data-testid="obs-facts">
           <span>{obs.version ?? 'OBS'}</span>
-          {#if obs.record_folder}
-            <span data-testid="video-folder">
-              Videos are saved in <code>{obs.record_folder}</code>
-            </span>
-          {/if}
           {#if obs.recording}<Badge tone="danger" dot>Recording now</Badge>{/if}
         </p>
       {/if}
@@ -401,6 +408,26 @@
             </Banner>
           </div>
         {/if}
+        <div class="row">
+          <Field label="Where videos are saved">
+            <Select bind:value={form.saveIn} aria-label="Where videos are saved" disabled={saving}>
+              <option value="Grid">Grid's videos folder</option>
+              <option value="Obs">OBS's own recording folder</option>
+            </Select>
+          </Field>
+        </div>
+        <p class="facts" data-testid="video-folder">
+          {#if form.saveIn === 'Grid'}
+            {#if settings.videos_folder}
+              <span>Videos are saved in <code>{settings.videos_folder}</code></span>
+            {/if}
+            <span>Pick OBS's own folder if OBS runs on another computer.</span>
+          {:else if obs?.record_folder}
+            <span>Videos are saved in <code>{obs.record_folder}</code></span>
+          {:else}
+            <span>Videos are saved wherever OBS records to.</span>
+          {/if}
+        </p>
         <div class="row">
           <Field
             label="Keep recording after the stop (seconds)"

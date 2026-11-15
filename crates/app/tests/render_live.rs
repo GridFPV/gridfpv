@@ -23,7 +23,9 @@ use gridfpv_events::{
 use gridfpv_server::app::now_micros;
 use gridfpv_server::control::with_event;
 use gridfpv_server::events::{CreateEventRequest, EventId, EventRegistry};
-use gridfpv_server::video::{RecordFrom, RenderState, RenderWhen, VideoSettingsRequest, log_video};
+use gridfpv_server::video::{
+    RecordFrom, RenderState, RenderWhen, SaveIn, VideoSettingsRequest, log_video,
+};
 use gridfpv_server::view::{EventView, VideoOverlay};
 
 async fn eventually<T>(what: &str, secs: u64, mut check: impl FnMut() -> Option<T>) -> T {
@@ -86,6 +88,7 @@ async fn the_overlay_is_drawn_onto_a_clean_recording() {
             render_when: RenderWhen::Asked,
             browser_path: browser,
             ffmpeg_path: ffmpeg,
+            save_in: SaveIn::Obs,
         })
         .unwrap();
     let renderer = gridfpv_app::render::spawn(registry.clone(), base);

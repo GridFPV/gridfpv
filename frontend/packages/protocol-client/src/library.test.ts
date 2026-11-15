@@ -414,7 +414,8 @@ describe('video', () => {
       overlay_scene: '',
       render_when: 'Asked' as const,
       browser_path: '',
-      ffmpeg_path: ''
+      ffmpeg_path: '',
+      save_in: 'Obs' as const
     };
     expect(await putVideoSettings('http://d.local', request, 'tok', { fetch })).toEqual(settings);
     expect(calls.map((call) => call.url)).toEqual([

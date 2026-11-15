@@ -88,7 +88,8 @@ describe('VideoPage settings', () => {
         overlay_scene: '',
         render_when: 'Asked',
         browser_path: '',
-        ffmpeg_path: ''
+        ffmpeg_path: '',
+        save_in: 'Obs'
       },
       'tok'
     );
@@ -143,6 +144,13 @@ describe('VideoPage status', () => {
     const facts = screen.getByTestId('obs-facts');
     expect(facts).toHaveTextContent('OBS 31.0.2 on windows');
     expect(screen.getByTestId('video-folder')).toHaveTextContent('Videos are saved in C:\\Videos');
+    // Grid's own folder, once that is picked.
+    await fireEvent.change(screen.getByLabelText('Where videos are saved'), {
+      target: { value: 'Grid' }
+    });
+    expect(screen.getByTestId('video-folder')).toHaveTextContent(
+      "Pick OBS's own folder if OBS runs on another computer."
+    );
     expect(screen.getByTestId('no-runs')).toHaveTextContent(/No race has been recorded/);
   });
 
