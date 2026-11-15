@@ -142,7 +142,7 @@ describe('VideoPage status', () => {
     await waitFor(() => expect(screen.getByText('Connected')).toBeVisible());
     const facts = screen.getByTestId('obs-facts');
     expect(facts).toHaveTextContent('OBS 31.0.2 on windows');
-    expect(facts).toHaveTextContent('C:\\Videos');
+    expect(screen.getByTestId('video-folder')).toHaveTextContent('Videos are saved in C:\\Videos');
     expect(screen.getByTestId('no-runs')).toHaveTextContent(/No race has been recorded/);
   });
 

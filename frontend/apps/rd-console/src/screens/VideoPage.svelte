@@ -296,8 +296,8 @@
         <p class="facts" data-testid="obs-facts">
           <span>{obs.version ?? 'OBS'}</span>
           {#if obs.record_folder}
-            <span title="The folder OBS records into, on its own machine">
-              {obs.record_folder}
+            <span data-testid="video-folder">
+              Videos are saved in <code>{obs.record_folder}</code>
             </span>
           {/if}
           {#if obs.recording}<Badge tone="danger" dot>Recording now</Badge>{/if}
