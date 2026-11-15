@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { EventView, Pilot, SavedFormat, TimerView } from '@gridfpv/types';
 import { EventLive, toProtocolError, type LiveSession } from '../src/lib/eventLive.svelte.js';
 import { eventView, heat, SAVED_FORMATS, timerView } from './competition.js';
+import { VIDEO_IDLE, VIDEO_OFF } from './support.js';
 
 /** A promise the test settles by hand. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -38,6 +39,8 @@ function fakeSession(over: Partial<LiveSession> = {}): {
     listTimers: vi.fn(async (): Promise<TimerView[]> => []),
     listClasses: vi.fn(async () => []),
     listFormats: vi.fn(async (): Promise<SavedFormat[]> => []),
+    getVideoSettings: vi.fn(async () => VIDEO_OFF),
+    getVideoStatus: vi.fn(async () => VIDEO_IDLE),
     ...over
   };
   return { session, cursor: (n) => onCursor(n), stopped: () => stopped };

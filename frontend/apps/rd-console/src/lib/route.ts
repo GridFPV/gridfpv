@@ -10,7 +10,7 @@
  *
  * The console has two sides (see `AppNav.svelte` and {@link sideOf}). **Event** is the open
  * event's pages, the ones used all race day. **Setup** is what is kept for every event:
- * the events themselves, timers, seats, pilots, classes and formats. A switch at the top
+ * the events themselves, timers, seats, pilots, classes, formats, video and data. A switch at the top
  * moves between the two, and the row under it shows that side's pages.
  *
  *   - `#/` (or empty)   → the open event's page
@@ -28,21 +28,26 @@
  *     timer. `#/seats/‹timer›/‹seat›` → that seat's Tune page (record, then set levels).
  *   - `#/timers`        → the Timers page: add, find and remove timers
  *   - `#/pilots`, `#/classes`, `#/formats` → the lists that outlive events
+ *   - `#/video`         → the Video page: OBS, and the recording of each race
+ *   - `#/data`          → the Data page: a copy of everything, to move to another computer
  *   - `#/help`          → the help index, and `#/help/‹page›` → one help page
  *   - `#/overlay/race`  → the race overlay, a page for an OBS browser source: light text, for
  *     dark video. `#/overlay/race/light` is the same page with dark text on a light panel,
  *     for bright video. An overlay is drawn bare (no shell) on a see-through page, and
  *     follows the Director's active event by itself. `#/overlay/‹anything else›` draws
  *     nothing at all, so a mistyped source never puts the console in the video.
+ *   - `#/overlay/replay/‹event›/‹race›` → the race overlay for one finished race, as it stood
+ *     at any moment of its recording (and `…/light` for dark text). The Director opens this
+ *     page itself to draw the overlay onto a clean recording. Both ids are percent-encoded.
  *
  * The open event itself is **app-wide server state** (the Director's active event), so the
  * hash does not name *which* event. An event route with no active event reconciles to the
  * Events page rather than rendering an empty page (see {@link reconcileRoute}).
  */
-import type { AdapterId, PhaseId, RaceId, SeatRef } from '@gridfpv/types';
+import type { AdapterId, EventId, PhaseId, RaceId, SeatRef } from '@gridfpv/types';
 
 /** The pages that need no open event. */
-export type AppPage = 'events' | 'pilots' | 'classes' | 'timers' | 'formats';
+export type AppPage = 'events' | 'pilots' | 'classes' | 'timers' | 'formats' | 'video' | 'data';
 
 /** The pages of the open event that take no further argument. */
 export type EventSection = 'event' | 'phases' | 'results' | 'overlays';
@@ -67,7 +72,13 @@ export type Route =
    * does not have: that page draws nothing. `theme` is only ever present as `'light'`
    * (dark text on a light panel); absent means the default, light text on a dark panel.
    */
-  | { kind: 'overlay'; overlay?: OverlayName; theme?: 'light' };
+  | { kind: 'overlay'; overlay?: OverlayName; theme?: 'light' }
+  /**
+   * The race overlay for one finished race, moved through its recording by whoever opened
+   * it. Unlike every other route it names its event: it is opened by the Director for any
+   * event's race, not only the open one's.
+   */
+  | { kind: 'replay'; event: EventId; race: RaceId; theme?: 'light' };
 
 /** The overlay pages the console has. */
 export type OverlayName = 'race';
@@ -88,7 +99,15 @@ function decodeSegment(segment: string | undefined): string | undefined {
   }
 }
 
-const APP_PAGES: readonly AppPage[] = ['events', 'pilots', 'classes', 'timers', 'formats'];
+const APP_PAGES: readonly AppPage[] = [
+  'events',
+  'pilots',
+  'classes',
+  'timers',
+  'formats',
+  'video',
+  'data'
+];
 const EVENT_SECTIONS: readonly EventSection[] = ['event', 'phases', 'results', 'overlays'];
 
 /** The route shown when the hash is empty or unrecognised: the open event's page. */
@@ -111,6 +130,15 @@ export function parseHash(hash: string): Route {
     // that draws nothing: a browser source must never fall back to a console page. Any third
     // part other than `light` is the default contrast, so a mistyped one still draws the overlay.
     const name = segments[1]?.toLowerCase();
+    if (name === 'replay') {
+      // `overlay/replay/‹event›/‹race›`. Without both ids there is nothing to draw.
+      const event = decodeSegment(segments[2]);
+      const race = decodeSegment(segments[3]);
+      if (!event || !race) return { kind: 'overlay' };
+      return segments[4]?.toLowerCase() === 'light'
+        ? { kind: 'replay', event, race, theme: 'light' }
+        : { kind: 'replay', event, race };
+    }
     if (name === undefined || !(OVERLAYS as readonly string[]).includes(name)) {
       return { kind: 'overlay' };
     }
@@ -168,6 +196,10 @@ export function formatHash(route: Route): string {
       return route.theme === 'light'
         ? `#/overlay/${route.overlay}/light`
         : `#/overlay/${route.overlay}`;
+    case 'replay':
+      return `#/overlay/replay/${part(route.event)}/${part(route.race)}${
+        route.theme === 'light' ? '/light' : ''
+      }`;
     case 'event':
       return route.section === 'event' ? '#/event' : `#/event/${route.section}`;
     case 'run':
@@ -208,7 +240,7 @@ export function inEvent(route: Route): boolean {
  * prompt, no toasts and no sound.
  */
 export function isOverlay(route: Route): boolean {
-  return route.kind === 'overlay';
+  return route.kind === 'overlay' || route.kind === 'replay';
 }
 
 /**

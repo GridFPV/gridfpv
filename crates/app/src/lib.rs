@@ -16,7 +16,12 @@
 pub mod logging;
 pub mod discovery;
 pub mod links;
+pub mod obs;
 pub mod oft;
+pub mod render;
 pub mod rotorhazard;
+pub mod tape;
+pub mod tools;
+pub mod video;
 
 pub mod director;

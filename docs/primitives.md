@@ -582,7 +582,7 @@ A mode chooses what the UI shows. It never changes the model underneath.
 **Full mode is built first** (Ryan, 2026-11-12). The other modes come once a single pilot
 can run a home series in full mode. Full mode takes its shape from grid-rh, one page per
 job. The pages are on two sides with a switch between them (Ryan, 2026-11-13). **Setup** is
-what is kept for every event: Events, Timers, Seats, Pilots, Classes, Formats. **Event** is
+what is kept for every event: Events, Timers, Seats, Pilots, Classes, Formats, Video. **Event** is
 the open event: Details, Phases, Run, Marshal, Results, Overlays. Each side remembers its
 page, and Help is on both. What it keeps from grid-rh: lap rules set once on the
 event, seat profiles, the format list, the Run and Marshal pages, tuning on a recording,
@@ -783,6 +783,51 @@ What the design must leave room for, and does: a race already has its start on t
 clock, and every crossing has a time. A recording only needs one more fact in the log, saying
 which race it covers and what server time its first frame is. Then any moment in the race
 maps to a moment in the video. Nothing in §5 changes.
+
+**Video, step 1: built** (Ryan, 2026-11-15: "it should be built in to Grid itself, no need
+for a separate app"). grid-rh's video companion is being ported into the Director, not
+kept as a second program. The Director talks to OBS itself and has it record each race:
+started at the countdown, stopped a few seconds after the stop, named after the race,
+moved to a trash folder on a discard. The fact described above is in the log
+(`VideoRecorded`: the file, and the Director's clock at its first frame). Settings and
+status are on the Video page under Setup, and the Run page says before Start if a race
+would not be recorded. Grid is run as the native app on the OBS machine, so moving files is
+the normal case.
+
+**Video, step 2: built** (Ryan, 2026-11-15: "do redrawing and then the source record now
+together"). Two things, which need each other:
+
+- **A scene of its own.** Instead of OBS's own recording, the Director can record one
+  scene through the Source Record plugin: the clean scene, with the camera and no overlay.
+  A second scene with the live overlay on it can be recorded alongside. OBS's own recording
+  and stream are left alone.
+- **Drawing the overlay afterwards.** The overlay has a replay page, which shows a
+  finished race as it stood at any moment of its recording. The Director opens that page in
+  a browser with no window, takes a picture of it for every frame, and has ffmpeg lay the
+  pictures over the clean recording. So a lap fixed in Marshal shows in the video: fix the
+  lap, draw again.
+
+Two more facts carry this. `VideoRecorded` says whether the file is clean, where the
+overlay scene's file is, and a mark of the laps that one was filmed with. `VideoRendered`
+names a drawn video and the mark of the laps it shows. The mark is worked out from the
+race's laps, so the snapshot can say for every race whether its overlaid video still
+matches: filmed, drawn, none yet, or laps changed. Neither fact changes a result.
+
+Not built yet: the video window in Marshal, and video on the Tune page.
+
+ffmpeg is not shipped with Grid and there is no installer to fetch it. The Video page has a
+**Get ffmpeg** button: the Director downloads a ready-made build with the system's `curl`
+and `tar` and keeps it in `tools` in the data folder. This keeps the desktop app one
+portable file with its data beside it.
+
+**Moving to another computer: built** (Ryan, 2026-11-15: "an easy way to copy or export all
+our grid data so we can move it between computers"). The Data page saves one zip of
+everything that is not tied to a computer: pilots, classes, formats, seat profiles, timers,
+the open event and every event's log. The video setup stays behind (it holds the OBS
+password and paths on that machine), and so do recordings. Bringing a copy in **replaces**
+the data; it does not merge. The Director only checks and keeps the file. The swap happens
+at the next start, before any file is open, and what was there is moved to a `backups`
+folder. Nothing is deleted.
 
 **To discuss once the base is done:** whether Grid should control video itself, the way
 FPVTrackside does, instead of leaving capture to OBS. This was decided against for grid-rh.

@@ -72,6 +72,7 @@
     type SeatRow
   } from '../lib/run.js';
   import { StartCue, unlockAudio, type CuePhase } from '../lib/startTone.js';
+  import { runVideo } from '../lib/video.js';
   import DiscardDialog from './DiscardDialog.svelte';
   import RunSeatCard from './RunSeatCard.svelte';
 
@@ -194,6 +195,11 @@
   const timerTrouble = $derived(
     phase && !phase.complete && !phase.locked ? timedBy.filter((t) => t.trouble !== undefined) : []
   );
+  /**
+   * What to say about video: nothing when it is off, a warning before Start when a race
+   * would not be recorded, and the recording of the race on screen once there is one.
+   */
+  const video = $derived(runVideo(live.video, undecided?.race));
   const showRanking = $derived(!!phase && isRanked(phase.format) && savedCount > 0);
 
   // ── Best N laps in a row ───────────────────────────────────────────────────
@@ -396,6 +402,17 @@
     {#each timerTrouble as t (t.adapter)}
       <Banner tone="warn" title={t.trouble}>{t.detail}</Banner>
     {/each}
+    {#if video.kind === 'warning'}
+      <div data-testid="video-warning">
+        <Banner tone="warn" title={video.title}>{video.detail}</Banner>
+      </div>
+    {:else if video.kind === 'run' && video.run.state === 'Failed'}
+      <div data-testid="video-warning">
+        <Banner tone="warn" title="This race is not being recorded.">
+          {video.run.note ?? 'OBS did not start a recording.'}
+        </Banner>
+      </div>
+    {/if}
 
     {#if !view}
       {#if !live.loadError}<p class="muted" role="status">Loading…</p>{/if}
@@ -518,6 +535,11 @@
               <Badge tone={STATE_TONES[race.state]} dot={race.state === 'Running'}>
                 {raceStateLabel(race)}
               </Badge>
+            {/if}
+            {#if video.kind === 'run' && (video.run.state === 'Recording' || video.run.state === 'Finishing')}
+              <span data-testid="video-rec" title="OBS is recording this race">
+                <Badge tone="danger" variant="solid" dot>REC</Badge>
+              </span>
             {/if}
             <div class="controls">
               {#if !race}

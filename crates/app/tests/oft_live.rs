@@ -268,10 +268,10 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     let mut live = registry.timers().listen(&timer).unwrap();
     let levels = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Ok(gridfpv_server::timers::TimerLive::Levels(levels)) = live.recv().await {
-                if levels[0].enter == -700 {
-                    return levels;
-                }
+            if let Ok(gridfpv_server::timers::TimerLive::Levels(levels)) = live.recv().await
+                && levels[0].enter == -700
+            {
+                return levels;
             }
         }
     })

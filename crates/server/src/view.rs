@@ -168,12 +168,131 @@ pub enum RaceStateView {
     Discarded,
 }
 
+/// A race's video recording.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RaceVideoView {
+    /// The recording, as the recorder named it: a path on the machine that recorded it.
+    pub file: String,
+    /// The Director's clock at the file's first frame, in epoch microseconds. The race's
+    /// `tone_at` and `started_at` are on the same clock, so the difference is where the
+    /// start sits in the video.
+    #[ts(type = "number")]
+    pub first_frame_at: i64,
+    /// Whether `file` has no overlay in it, so one can be drawn onto it.
+    pub clean: bool,
+    /// The video with the overlay in it that is right for the laps as they stand now: the
+    /// latest render, or else the one filmed with the live overlay. Absent when there is
+    /// none, or the laps have changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub overlaid_file: Option<String>,
+    /// Where the overlay stands.
+    pub overlay: VideoOverlay,
+}
+
+/// Where a race's overlaid video stands against its laps as they are now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum VideoOverlay {
+    /// It was filmed with the live overlay in it, and the laps have not changed since.
+    Filmed,
+    /// The Director drew the overlay onto the clean recording, for the laps as they are.
+    Rendered,
+    /// There is a clean recording and no overlaid video yet. One can be rendered.
+    Missing,
+    /// The laps have changed since the overlaid video was made. A new one can be rendered.
+    NeedsRender,
+    /// The laps have changed, and there is no clean recording to draw a new overlay onto.
+    CannotRender,
+}
+
+/// Where a race's overlaid video stands, and the overlaid file that is right, if any.
+/// `key` is the mark of the race's laps as they are now.
+pub fn overlay_state(
+    video: &gridfpv_engine::state::RaceVideo,
+    key: &str,
+) -> (VideoOverlay, Option<String>) {
+    if let Some((file, rendered_key)) = &video.rendered {
+        return if rendered_key == key {
+            (VideoOverlay::Rendered, Some(file.clone()))
+        } else {
+            (VideoOverlay::NeedsRender, None)
+        };
+    }
+    // A recording that is not clean has the live overlay in it; so has `overlay_file`.
+    let filmed = if video.clean {
+        video.overlay_file.clone()
+    } else {
+        Some(video.file.clone())
+    };
+    // A recording made before marks were kept is taken to be as filmed.
+    let unchanged = video
+        .filmed_key
+        .as_deref()
+        .is_none_or(|filmed| filmed == key);
+    match (filmed, unchanged, video.clean) {
+        (Some(file), true, _) => (VideoOverlay::Filmed, Some(file)),
+        (None, _, true) => (VideoOverlay::Missing, None),
+        (_, false, true) => (VideoOverlay::NeedsRender, None),
+        _ => (VideoOverlay::CannotRender, None),
+    }
+}
+
+/// A short mark of a race's laps: every seat's hole shot and every lap that counts. Two
+/// races' laps give the same mark only when a video of one would show the other's overlay
+/// exactly. It is kept in the log, so it must never change between builds: a plain FNV-1a
+/// hash, written here.
+pub fn laps_key(laps: &[SeatLaps]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |value: i64| {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for seat in laps {
+        feed(-1);
+        feed(seat.tone_at.map_or(-2, |at| at.micros));
+        feed(seat.hole_shot.map_or(-3, |(_, at)| at.micros));
+        for lap in &seat.intervals {
+            feed(lap.ended_at.micros);
+            feed(match lap.kind {
+                LapKind::Lap => 0,
+                LapKind::Restart => 1,
+                LapKind::TimerRestarted => 2,
+            });
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// The mark of one race's laps as they stand now.
+pub fn race_laps_key(state: &EventState, race: &Race) -> String {
+    let laps: Vec<SeatLaps> = race
+        .setup
+        .lineup
+        .iter()
+        .map(|entry| {
+            let filters = state.filters_for(race, &entry.adapter);
+            state
+                .laps
+                .seat(&race.setup.race, &entry.adapter, &entry.seat, filters)
+        })
+        .collect();
+    laps_key(&laps)
+}
+
 /// One race and its laps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct RaceView {
     pub race: RaceId,
     pub heat: PhaseId,
+    /// The race's video recording, when the Director had one made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub video: Option<RaceVideoView>,
     pub state: RaceStateView,
     pub owner: StartOwner,
     /// How the race ends, from the format in force.
@@ -215,6 +334,12 @@ pub struct RaceSeatView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pilot: Option<PilotId>,
+    /// The race's start on this seat's timer's own clock, when the Director could place
+    /// it there. Lap times are on that clock, so this is what places each crossing in the
+    /// race. Absent for a timer whose clock was never measured (the bench).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start_at: Option<SourceTime>,
     /// Whether a false start is recorded against the pilot in this race.
     pub false_start: bool,
     /// The seat's place in the race so far, 1 first. Absent for an open seat.
@@ -481,6 +606,16 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
         tone_at: race.tone_at,
         started_at: race.started_at,
         stopped_at: race.stopped_at,
+        video: state.videos.get(id).map(|video| {
+            let (overlay, overlaid_file) = overlay_state(video, &laps_key(&laps));
+            RaceVideoView {
+                file: video.file.clone(),
+                first_frame_at: video.first_frame_at,
+                clean: video.clean,
+                overlaid_file,
+                overlay,
+            }
+        }),
         needs_marshal: race.needs_marshal,
         note: race.note.clone(),
         discard_reason: race.discard_reason,
@@ -494,6 +629,10 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
                 adapter: entry.adapter.clone(),
                 seat: entry.seat.clone(),
                 pilot: entry.pilot.clone(),
+                start_at: state
+                    .starts_on_timer
+                    .get(&(id.clone(), entry.adapter.clone()))
+                    .map(|(at, _)| *at),
                 false_start: entry
                     .pilot
                     .as_ref()

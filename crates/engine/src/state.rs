@@ -27,6 +27,23 @@ use crate::phase::{Inputs, PhaseResult, SeatWho, Tree};
 use crate::race::{Race, RaceCommand, RaceError, RaceState, Races};
 use crate::rulings::{LockError, Rulings};
 
+/// A race's video recording, as the log has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaceVideo {
+    /// The recording, as the recorder named it.
+    pub file: String,
+    /// The Director's clock at the file's first frame, in epoch microseconds.
+    pub first_frame_at: i64,
+    /// Whether `file` has no overlay in it, so one can be drawn onto it.
+    pub clean: bool,
+    /// A second recording made alongside, with the live overlay in it.
+    pub overlay_file: Option<String>,
+    /// The mark of the race's laps when it was filmed.
+    pub filmed_key: Option<String>,
+    /// The latest render: the finished file, and the mark of the laps it shows.
+    pub rendered: Option<(String, String)>,
+}
+
 /// Why a command was refused. Nothing was appended.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum Refusal {
@@ -110,6 +127,8 @@ pub struct EventState {
     pub queue_order: Vec<PhaseId>,
     /// The event's lap rules, as last set.
     pub lap_rules: LapRules,
+    /// Each race's video recording.
+    pub videos: BTreeMap<RaceId, RaceVideo>,
     /// Where in the log each race begins: the offset of its first fact. A race's signal is
     /// logged from there on, so this is where to start reading for it.
     pub race_log_start: BTreeMap<RaceId, u64>,
@@ -142,6 +161,38 @@ impl EventState {
             }
             Event::QueueSet { heats } => self.queue_order = heats.clone(),
             Event::LapRulesSet { rules } => self.lap_rules = *rules,
+            Event::VideoRecorded {
+                race,
+                file,
+                first_frame_at,
+                clean,
+                overlay_file,
+                laps_key,
+            } => {
+                self.videos.insert(
+                    race.clone(),
+                    RaceVideo {
+                        file: file.clone(),
+                        first_frame_at: *first_frame_at,
+                        clean: *clean,
+                        overlay_file: overlay_file.clone(),
+                        filmed_key: laps_key.clone(),
+                        rendered: None,
+                    },
+                );
+            }
+            Event::VideoRendered {
+                race,
+                file,
+                laps_key,
+            } => {
+                if let Some(video) = self.videos.get_mut(race) {
+                    video.rendered = Some((file.clone(), laps_key.clone()));
+                }
+            }
+            Event::VideoRemoved { race } => {
+                self.videos.remove(race);
+            }
             Event::StandingsSet { class, phases } => {
                 self.class_phases.insert(class.clone(), phases.clone());
             }
@@ -837,6 +888,9 @@ impl EventState {
             | Event::SessionEnded { .. }
             | Event::SeatSeen { .. }
             | Event::Pass(_)
+            | Event::VideoRecorded { .. }
+            | Event::VideoRendered { .. }
+            | Event::VideoRemoved { .. }
             | Event::ClockOffset { .. }
             | Event::SignalChunk(_)
             | Event::SignalThresholds(_)

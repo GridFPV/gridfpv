@@ -5,12 +5,17 @@ import type { PhaseId } from "./PhaseId";
 import type { RaceId } from "./RaceId";
 import type { RaceSeatView } from "./RaceSeatView";
 import type { RaceStateView } from "./RaceStateView";
+import type { RaceVideoView } from "./RaceVideoView";
 import type { StartOwner } from "./StartOwner";
 
 /**
  * One race and its laps.
  */
-export type RaceView = { race: RaceId, heat: PhaseId, state: RaceStateView, owner: StartOwner, 
+export type RaceView = { race: RaceId, heat: PhaseId, 
+/**
+ * The race's video recording, when the Director had one made.
+ */
+video?: RaceVideoView, state: RaceStateView, owner: StartOwner, 
 /**
  * How the race ends, from the format in force.
  */

@@ -875,6 +875,39 @@ pub enum Event {
         class: ClassId,
         phases: Vec<PhaseId>,
     },
+    /// The Director had a race recorded on video. `file` is the recording as the recorder
+    /// named it (a path on the machine that recorded it). `first_frame_at` is the Director's
+    /// clock, in epoch microseconds, at the first frame of the file, so any moment of the
+    /// race maps to a moment in the video. A race recorded again replaces what was noted.
+    ///
+    /// `clean` says the file has no overlay in it (it was recorded from a scene of its
+    /// own), so an overlay can be drawn onto it afterwards. `overlay_file` is a second
+    /// recording made alongside, with the live overlay in it. `laps_key` is the race's laps
+    /// as they stood when it was filmed (see `VideoRendered`), so a later change shows.
+    VideoRecorded {
+        race: RaceId,
+        file: String,
+        #[ts(type = "number")]
+        first_frame_at: i64,
+        #[serde(default)]
+        clean: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        overlay_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        laps_key: Option<String>,
+    },
+    /// The Director drew the overlay onto a race's clean recording. `file` is the finished
+    /// video. `laps_key` is a short mark of the laps it shows: when the race's laps no
+    /// longer give the same mark (a marshal changed one), the video is out of date.
+    VideoRendered {
+        race: RaceId,
+        file: String,
+        laps_key: String,
+    },
+    /// A race's recording is gone from where it was: moved to the trash after a discard.
+    VideoRemoved { race: RaceId },
     /// The event set its lap rules: the minimum lap, and how long after the start crossings
     /// are ignored. They hold for every race of the event, flown or still to fly; the last
     /// one set wins. A format may carry a minimum lap of its own, which then wins for the

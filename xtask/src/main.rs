@@ -224,10 +224,10 @@ fn binding_names(root: &Path) -> Result<Vec<String>, String> {
     let mut names: Vec<String> = Vec::new();
     for entry in entries {
         let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("ts") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                names.push(stem.to_string());
-            }
+        if path.extension().and_then(|e| e.to_str()) == Some("ts")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.push(stem.to_string());
         }
     }
     names.sort();
@@ -402,15 +402,15 @@ fn e2e(args: &[String]) -> bool {
         return false;
     }
     let installed = playwright_version();
-    if let Some(v) = &installed {
-        if !PLAYWRIGHT_IMAGE.contains(v.as_str()) {
-            eprintln!(
-                "e2e: @playwright/test is {v} but the image is pinned to {PLAYWRIGHT_IMAGE}.\n\
+    if let Some(v) = &installed
+        && !PLAYWRIGHT_IMAGE.contains(v.as_str())
+    {
+        eprintln!(
+            "e2e: @playwright/test is {v} but the image is pinned to {PLAYWRIGHT_IMAGE}.\n\
                  Playwright refuses a runner/browser mismatch — update PLAYWRIGHT_IMAGE in \
                  xtask/src/main.rs to the matching tag."
-            );
-            return false;
-        }
+        );
+        return false;
     }
     let root = workspace_root();
     let mount = format!("{}:{}", root.display(), root.display());

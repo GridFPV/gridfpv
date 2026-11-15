@@ -36,7 +36,9 @@ const ORDER = [
   'run',
   'marshal',
   'results',
-  'overlays'
+  'overlays',
+  'video',
+  'data'
 ];
 
 const slugOf = (path: string): string => path.replace(/^.*\//, '').replace(/\.md$/, '');

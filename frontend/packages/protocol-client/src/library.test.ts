@@ -383,3 +383,42 @@ describe("a timer's seat profiles", () => {
     );
   });
 });
+
+describe('video', () => {
+  it('reads the settings and the status, and changes the settings with a PUT', async () => {
+    const settings = {
+      enabled: true,
+      obs_address: '127.0.0.1:4455',
+      has_password: true,
+      tail_seconds: 3,
+      trash_discarded: true
+    };
+    const status = { obs: { connected: true, recording: false }, runs: [] };
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      calls.push({ url, init });
+      const body = url.endsWith('/video/status') ? status : settings;
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+    const { getVideoSettings, getVideoStatus, putVideoSettings } = await import('./client.js');
+    expect(await getVideoSettings('http://d.local', { fetch })).toEqual(settings);
+    expect(await getVideoStatus('http://d.local/', { fetch })).toEqual(status);
+    const request = {
+      enabled: true,
+      obs_address: '127.0.0.1:4455',
+      obs_password: 'secret',
+      tail_seconds: 3,
+      trash_discarded: true
+    };
+    expect(await putVideoSettings('http://d.local', request, 'tok', { fetch })).toEqual(settings);
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://d.local/video/settings',
+      'http://d.local/video/status',
+      'http://d.local/video/settings'
+    ]);
+    const put = calls[2].init;
+    expect(put?.method).toBe('PUT');
+    expect(JSON.parse(String(put?.body))).toEqual(request);
+    expect((put?.headers as Record<string, string>).Authorization).toBe('Bearer tok');
+  });
+});

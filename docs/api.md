@@ -1,6 +1,6 @@
 # The Director's API, as built
 
-**Status:** as built on the `primitives` branch, 2026-11-12. This page lists what the
+**Status:** as built on the `primitives` branch, 2026-11-15. This page lists what the
 Director serves today. The design behind it is [Grid primitives](primitives.md). The older
 [Protocol](protocol.html) doc still holds for auth, TLS and versioning, but its snapshot and
 stream sections describe a design that was not rebuilt (see "What changed" at the end).
@@ -84,6 +84,66 @@ changing or deleting a saved format never changes a phase that uses it. They are
 samples for one seat) and `levels` events (each seat's level, noise floor, enter and exit
 levels, and whether it is in a crossing). It is for the Tune page and is gone once sent.
 
+## Video
+
+| Route | What |
+|---|---|
+| `GET /video/settings`, `PUT /video/settings` | Whether races are recorded, where OBS is, what records (OBS's own recording, or scenes of their own), the tail after a stop, whether a discarded race's recording goes to the trash, and when the overlay is drawn onto a clean recording |
+| `GET /video/status` | Whether OBS is connected (and why not), its scenes, whether it has Source Record, whether it is recording, the runs and the renders since the Director started, and whether a browser and ffmpeg were found |
+| `POST /video/render` | Draw the overlay onto one race's clean recording (`{event, race}`), or onto every race of the event that needs it (`{event}`). Answers how many were asked for; `409` for a race with no clean recording. The drawing runs in the background and `GET /video/status` follows it |
+| `POST /video/ffmpeg` | Download ffmpeg and keep it in the `tools` folder of the data folder. Answers `202` at once; `GET /video/status` says `tools.fetching`, then `tools.ffmpeg` or `tools.fetch_problem`. `409` on a computer Grid has no build for (`tools.can_fetch` is false) |
+
+**OBS does the capturing; the Director says when.** While video is on, the Director keeps
+a connection to OBS's WebSocket server (obs-websocket 5). It starts OBS's recording when a
+race begins its countdown, stops it a few seconds after the race is stopped, and sets OBS's
+file naming to the race's name just before the start (and puts OBS's own back after the
+stop). A saved race's recording is logged into its event (`VideoRecorded`: the file, and
+the Director's clock at its first frame) and shows on the race in the snapshot as `video`.
+A discarded race's recording is moved to `trash/` beside it.
+
+**A scene of its own.** With `record_from: "Scenes"` the Director leaves OBS's own
+recording alone and records `clean_scene` (the camera, no overlay) through the Source
+Record plugin, to `‹race› - Clean`. If `overlay_scene` is set, that scene is recorded
+alongside to `‹race› - Overlay`. `VideoRecorded` then says the file is `clean`, names the
+`overlay_file`, and carries `laps_key`: a mark of the race's laps as the overlay scene
+filmed them.
+
+**Drawing the overlay afterwards.** A clean recording can have the overlay drawn onto it
+at any time, with the laps as they stand. The Director runs a browser with no window on
+the console's replay page (`#/overlay/replay/‹event›/‹race›`), steps it through the
+recording one frame at a time, and has ffmpeg lay the pictures over the clean recording.
+The result is `‹race› - Overlay (redrawn).mp4` beside it, logged as `VideoRendered` with
+the `laps_key` it shows. A race's `video.overlay` in the snapshot says where it stands:
+`Filmed` or `Rendered` (there is an overlaid video that matches the laps, named in
+`overlaid_file`), `Missing` (clean, none drawn yet), `NeedsRender` (the laps changed
+since), or `CannotRender` (the recording is not clean). With `render_when: "Always"` the
+Director draws every saved race of the active event that is `Missing` or `NeedsRender` by
+itself. The browser and ffmpeg are looked for on the Director's machine; `browser_path`
+and `ffmpeg_path` name them when they are somewhere else.
+
+**The password is write-only.** Reads are open, so the settings a client reads say only
+`has_password`. A `PUT` that leaves `obs_password` out keeps the stored one.
+
+**The Director only stops what it started.** If OBS is already recording when a race
+begins, that race gets no file of its own and its run says so.
+
+**Files are moved only when the Director can reach them.** That is the native app on the
+OBS machine. A Director elsewhere on the network still starts, stops and names recordings;
+a discarded race's file is then left in place, with a note on the run.
+
+## A copy of everything
+
+One zip of the pilots, classes, formats, seat profiles, timers, the open event and every
+event's log. The video setup, the log files and the recordings are not in it.
+
+| Request | What it does |
+| --- | --- |
+| `GET /data` | `{folder?, waiting?}`: the data folder on the Director's computer, and the copy that waits to be brought in, if one does |
+| `POST /data/export` | Make a copy. Answers `{name, file, copy}`: the file's name, where it is on the Director's computer (`exports` in the data folder), and what is in it. The five newest are kept |
+| `GET /data/export/{name}` | Download a copy that was made |
+| `POST /data/import` | Bring in a copy. The body is the zip itself. The Director checks it and keeps it; it **replaces** the data when the Director next starts, and what was there is moved to `backups` in the data folder. `400` for a file that is not a copy, `409` while a race is on |
+| `DELETE /data/import` | Forget the copy that waits |
+
 ## Events
 
 | Route | What |
@@ -116,7 +176,8 @@ levels, and whether it is in a crossing). It is for the Tune page and is gone on
   standings, and the standings from 1 to n.
 - `phases`: every phase with its format, its field, a heat's lineup, its ranking, and
   whether it is waiting, complete or locked.
-- `races`: every race with its state, its clock times, and each seat's laps.
+- `races`: every race with its state, its clock times, each seat's laps, and its video
+  recording when the Director had one made.
 - `current_race`: the race that is counting down, running, or waiting to be saved.
 - `queue`: the heats that can be raced now, in the suggested order.
 - `protests` and `proposed_disqualifications`: what is waiting on the director.

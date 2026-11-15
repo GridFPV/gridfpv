@@ -12,6 +12,7 @@ import RaceOverlay from '../src/screens/RaceOverlay.svelte';
 import type { LiveSession } from '../src/lib/eventLive.svelte.js';
 import type { Session } from '../src/lib/session.svelte.js';
 import { eventView, heat, race, raceSeat } from './competition.js';
+import { VIDEO_IDLE, VIDEO_OFF } from './support.js';
 
 // The overlay must never make a sound. Stand in for the tone module so any use of it shows.
 const tone = vi.hoisted(() => ({
@@ -79,6 +80,8 @@ function open(
     sendCommand: vi.fn(async () => ({ cursor: 1 })),
     createBracket: vi.fn(async () => ({ cursor: 1 })),
     postPass: vi.fn(async () => ({ cursor: 1 })),
+    getVideoSettings: vi.fn(async () => VIDEO_OFF),
+    getVideoStatus: vi.fn(async () => VIDEO_IDLE),
     listPilots: vi.fn(async () => PILOTS),
     listFormats: vi.fn(async () => []),
     listTimers: vi.fn(async () => []),

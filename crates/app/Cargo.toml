@@ -36,7 +36,7 @@ gridfpv-adapters.workspace = true
 gridfpv-server.workspace = true
 gridfpv-events.workspace = true
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 
 # Only compiled in under `--features embed-assets`: `rust-embed` bakes the built RD console
@@ -48,6 +48,12 @@ mime_guess = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 mdns-sd = "0.21.7"
+# The password handshake of OBS's WebSocket server (obs-websocket 5) is two SHA-256 hashes,
+# each written as base64.
+sha2 = "0.10"
+base64 = "0.22"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # The fake OFT timer in `tests/oft_link.rs` is an axum WebSocket server.

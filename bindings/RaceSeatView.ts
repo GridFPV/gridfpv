@@ -4,6 +4,7 @@ import type { CrossingView } from "./CrossingView";
 import type { LapView } from "./LapView";
 import type { PilotId } from "./PilotId";
 import type { SeatRef } from "./SeatRef";
+import type { SourceTime } from "./SourceTime";
 import type { UncountedView } from "./UncountedView";
 
 /**
@@ -14,6 +15,12 @@ export type RaceSeatView = { adapter: AdapterId, seat: SeatRef,
  * The pilot on the seat. Absent for an open seat.
  */
 pilot?: PilotId, 
+/**
+ * The race's start on this seat's timer's own clock, when the Director could place
+ * it there. Lap times are on that clock, so this is what places each crossing in the
+ * race. Absent for a timer whose clock was never measured (the bench).
+ */
+start_at?: SourceTime, 
 /**
  * Whether a false start is recorded against the pilot in this race.
  */

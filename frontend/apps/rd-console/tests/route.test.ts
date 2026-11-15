@@ -506,3 +506,40 @@ describe('overlay routes', () => {
     expect(resolveInitialRoute('#/overlay/nope', true)).toEqual(nothing);
   });
 });
+
+describe('the replay overlay route', () => {
+  it('parses an event and a race, decoding both and keeping their case', () => {
+    expect(parseHash('#/overlay/replay/evt-7Q/track-2%231')).toEqual({
+      kind: 'replay',
+      event: 'evt-7Q',
+      race: 'track-2#1'
+    });
+    expect(parseHash('#/overlay/replay/evt-7Q/track-2%231/light')).toEqual({
+      kind: 'replay',
+      event: 'evt-7Q',
+      race: 'track-2#1',
+      theme: 'light'
+    });
+  });
+
+  it('draws nothing without both ids, and never falls back to a console page', () => {
+    expect(parseHash('#/overlay/replay')).toEqual({ kind: 'overlay' });
+    expect(parseHash('#/overlay/replay/evt-7Q')).toEqual({ kind: 'overlay' });
+    expect(parseHash('#/overlay/replay/evt-7Q/%E0%A4%A')).toEqual({ kind: 'overlay' });
+  });
+
+  it('formats with each id as one encoded segment, and round-trips', () => {
+    const route = { kind: 'replay', event: 'evt/7', race: 'heat a#2' } as const;
+    expect(formatHash(route)).toBe('#/overlay/replay/evt%2F7/heat%20a%232');
+    expect(parseHash(formatHash(route))).toEqual(route);
+    const light = { ...route, theme: 'light' } as const;
+    expect(parseHash(formatHash(light))).toEqual(light);
+  });
+
+  it('is an overlay: bare, and in need of no open event', () => {
+    const route = parseHash('#/overlay/replay/evt-7Q/track-2%231');
+    expect(isOverlay(route)).toBe(true);
+    expect(reconcileRoute(route, false)).toEqual(route);
+    expect(sideOf(route)).toBeUndefined();
+  });
+});

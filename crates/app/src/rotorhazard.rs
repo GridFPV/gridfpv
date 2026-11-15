@@ -108,14 +108,13 @@ impl Link {
         if let Some(log) = registry
             .active()
             .and_then(|active| registry.log(&active.id))
+            && let Ok(log) = log.lock()
         {
-            if let Ok(log) = log.lock() {
-                for stored in log.read_all().unwrap_or_default() {
-                    if let Event::Pass(pass) = stored.event {
-                        if pass.adapter == id {
-                            adapter.already_logged(&pass.seat, pass.at);
-                        }
-                    }
+            for stored in log.read_all().unwrap_or_default() {
+                if let Event::Pass(pass) = stored.event
+                    && pass.adapter == id
+                {
+                    adapter.already_logged(&pass.seat, pass.at);
                 }
             }
         }

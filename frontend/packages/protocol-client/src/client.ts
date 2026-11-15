@@ -21,6 +21,9 @@ import type {
   CommandOutcome,
   CreateClassRequest,
   CreateEventRequest,
+  DataCopy,
+  DataExport,
+  DataInfo,
   CreatePilotRequest,
   CreateTimerRequest,
   DiscoveredTimer,
@@ -46,7 +49,11 @@ import type {
   TimerProfiles,
   TimerView,
   UpdateClassRequest,
-  UpdatePilotRequest
+  UpdatePilotRequest,
+  RenderRequest,
+  VideoSettings,
+  VideoSettingsRequest,
+  VideoStatus
 } from '@gridfpv/types';
 
 /** Minimal `fetch` surface this client needs (injectable for tests / Node). */
@@ -141,6 +148,8 @@ interface RequestOptions {
   method?: string;
   /** The value to send as a JSON body. Its **presence** is what sets `Content-Type`. */
   body?: unknown;
+  /** A file to send as it is, in place of a JSON body. */
+  file?: Blob;
   /** Bearer token, sent as `Authorization: Bearer …` only when held. */
   token?: string;
   /** Inject a `fetch` (defaults to the global). Used by tests and Node. */
@@ -173,6 +182,10 @@ async function apiRequest(
   const init: RequestInit = { headers };
   if (options.method) init.method = options.method;
   if (options.body !== undefined) init.body = JSON.stringify(options.body);
+  if (options.file !== undefined) {
+    headers['Content-Type'] = 'application/zip';
+    init.body = options.file;
+  }
   const resp = await fetchImpl(`${trimSlash(baseUrl)}${path}`, init);
   if (!resp.ok) throw await requestFailed(resp, attempted);
   return resp;
@@ -628,6 +641,141 @@ export async function applyProfile(
     { method: 'POST', token, fetch: options.fetch },
     'apply the profile'
   );
+}
+
+/** The video settings, without the password (`GET /video/settings`). An open read. */
+export async function getVideoSettings(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<VideoSettings> {
+  return apiJson<VideoSettings>(baseUrl, '/video/settings', options, 'read the video settings');
+}
+
+/**
+ * Change the video settings (`PUT /video/settings`). RD-gated. A password left out of the
+ * request keeps the stored one. An address that is not `host:port` is a **400**.
+ */
+export async function putVideoSettings(
+  baseUrl: string,
+  request: VideoSettingsRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<VideoSettings> {
+  return apiJson<VideoSettings>(
+    baseUrl,
+    '/video/settings',
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the video settings'
+  );
+}
+
+/**
+ * Ask for the overlay to be drawn onto a race's clean recording, or (with no race named)
+ * onto every race of the event that needs it (`POST /video/render`). RD-gated. Answers with
+ * how many were asked for. The drawing runs in the background: `getVideoStatus` follows it.
+ * A race with no clean recording is a **409**.
+ */
+export async function postVideoRender(
+  baseUrl: string,
+  request: RenderRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<number> {
+  return apiJson<number>(
+    baseUrl,
+    '/video/render',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'draw the overlay'
+  );
+}
+
+/**
+ * Have the Director download ffmpeg and keep it in its data folder (`POST /video/ffmpeg`),
+ * RD-gated. The download runs in the background: `getVideoStatus` says when it is there.
+ * A computer Grid has no build for is a **409**.
+ */
+export async function postVideoFfmpeg(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/video/ffmpeg',
+    { method: 'POST', token, fetch: options.fetch },
+    'get ffmpeg'
+  );
+}
+
+/** Where Grid keeps its data, and the copy that waits to be brought in (`GET /data`). */
+export async function getData(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<DataInfo> {
+  return apiJson<DataInfo>(baseUrl, '/data', options, 'read where the data is kept');
+}
+
+/**
+ * Make a copy of everything Grid keeps (`POST /data/export`), RD-gated. The copy is a zip in
+ * the data folder on the Director's computer; {@link dataExportUrl} downloads it.
+ */
+export async function postDataExport(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<DataExport> {
+  return apiJson<DataExport>(
+    baseUrl,
+    '/data/export',
+    { method: 'POST', token, fetch: options.fetch },
+    'make the copy'
+  );
+}
+
+/** The address a copy made by {@link postDataExport} downloads from. */
+export function dataExportUrl(baseUrl: string, name: string): string {
+  return `${trimSlash(baseUrl)}/data/export/${encodeURIComponent(name)}`;
+}
+
+/**
+ * Bring in a copy (`POST /data/import`), RD-gated. The body is the zip itself. The Director
+ * checks it and keeps it; it takes over when Grid is next started. A file that is not a
+ * copy is a **400**, and a race being on is a **409**.
+ */
+export async function postDataImport(
+  baseUrl: string,
+  file: Blob,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<DataCopy> {
+  return apiJson<DataCopy>(
+    baseUrl,
+    '/data/import',
+    { method: 'POST', file, token, fetch: options.fetch },
+    'bring in the copy'
+  );
+}
+
+/** Forget the copy that waits to be brought in (`DELETE /data/import`), RD-gated. */
+export async function deleteDataImport(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/data/import',
+    { method: 'DELETE', token, fetch: options.fetch },
+    'forget the copy'
+  );
+}
+
+/** The link to OBS and the runs recorded since the Director started (`GET /video/status`). */
+export async function getVideoStatus(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<VideoStatus> {
+  return apiJson<VideoStatus>(baseUrl, '/video/status', options, 'read the video status');
 }
 
 /**

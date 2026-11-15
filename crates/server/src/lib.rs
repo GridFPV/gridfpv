@@ -27,6 +27,7 @@
 
 pub mod app;
 pub mod auth;
+pub mod backup;
 pub mod classes;
 pub mod control;
 pub mod error;
@@ -34,6 +35,7 @@ pub mod events;
 pub mod library;
 pub mod pilots;
 pub mod timers;
+pub mod video;
 pub mod view;
 
 use serde::{Deserialize, Serialize};

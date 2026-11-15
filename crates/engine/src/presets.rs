@@ -172,7 +172,7 @@ fn deal(slots: Vec<Slot>, heat_size: usize) -> Vec<Vec<Slot>> {
     let mut heats: Vec<Vec<Slot>> = vec![Vec::new(); count];
     for (index, slot) in slots.into_iter().enumerate() {
         let fewest = heats.iter().map(Vec::len).min().unwrap_or(0);
-        let forwards = (index / count) % 2 == 0;
+        let forwards = (index / count).is_multiple_of(2);
         let mut open: Vec<usize> = (0..count).filter(|h| heats[*h].len() == fewest).collect();
         if !forwards {
             open.reverse();

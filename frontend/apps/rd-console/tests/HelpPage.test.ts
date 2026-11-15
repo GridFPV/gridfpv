@@ -45,7 +45,9 @@ describe('HelpPage index', () => {
       'run',
       'marshal',
       'results',
-      'overlays'
+      'overlays',
+      'video',
+      'data'
     ]);
   });
 

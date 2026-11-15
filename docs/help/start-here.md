@@ -25,6 +25,9 @@ Event, and you are on the same page as before.
 5. **Classes**: the classes an event can race. You can skip this when flying alone.
 6. **Formats**: how one race is run and how a heat is ranked. Grid comes with four. See
    [Formats](#/help/formats).
+7. **Video**: have OBS record every race. See [Video](#/help/video).
+8. **Data**: save a copy of everything, or move it to another computer. See
+   [Data](#/help/data).
 
 ## Event, on race day
 

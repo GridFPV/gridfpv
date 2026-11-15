@@ -40,11 +40,14 @@
   import PhasesPage from './screens/PhasesPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import RaceOverlay from './screens/RaceOverlay.svelte';
+  import ReplayOverlay from './screens/ReplayOverlay.svelte';
   import ResultsPage from './screens/ResultsPage.svelte';
   import RunPage from './screens/RunPage.svelte';
   import SeatsPage from './screens/SeatsPage.svelte';
   import TimersPage from './screens/TimersPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
+  import DataPage from './screens/DataPage.svelte';
+  import VideoPage from './screens/VideoPage.svelte';
   import {
     parseHash,
     formatHash,
@@ -145,6 +148,19 @@
       <RaceOverlay {session} theme={route.theme ?? 'dark'} />
     {/if}
   </div>
+{:else if route.kind === 'replay'}
+  <!-- One finished race, moved through its recording by the Director to draw the overlay
+       onto the video. Keyed, so another race starts from a fresh read. -->
+  <div class="gridfpv-root">
+    {#key `${route.event}\u0000${route.race}`}
+      <ReplayOverlay
+        {session}
+        event={route.event}
+        race={route.race}
+        theme={route.theme ?? 'dark'}
+      />
+    {/key}
+  </div>
 {:else}
   <div class="gridfpv-root gridfpv-dense">
     {@render shell()}
@@ -176,6 +192,10 @@
       <ClassesPage {session} />
     {:else if route.page === 'formats'}
       <FormatsPage {session} />
+    {:else if route.page === 'video'}
+      <VideoPage {session} {live} />
+    {:else if route.page === 'data'}
+      <DataPage {session} />
     {:else if route.page === 'timers'}
       <TimersPage {session} ontune={(timer) => navigate({ kind: 'seats', timer })} />
     {/if}

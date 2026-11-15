@@ -55,6 +55,16 @@ import {
   updateProfile,
   deleteProfile,
   applyProfile,
+  getVideoSettings,
+  putVideoSettings,
+  getVideoStatus,
+  postVideoRender,
+  postVideoFfmpeg,
+  getData,
+  postDataExport,
+  dataExportUrl,
+  postDataImport,
+  deleteDataImport,
   getEventState,
   sendCommand,
   createBracket,
@@ -93,6 +103,13 @@ import type {
   TimerProfiles,
   TimerView,
   UpdateClassRequest,
+  RenderRequest,
+  VideoSettings,
+  VideoSettingsRequest,
+  VideoStatus,
+  DataCopy,
+  DataExport,
+  DataInfo,
   UpdatePilotRequest
 } from '@gridfpv/types';
 
@@ -184,6 +201,16 @@ const realApi = {
   updateProfile,
   deleteProfile,
   applyProfile,
+  getVideoSettings,
+  putVideoSettings,
+  getVideoStatus,
+  postVideoRender,
+  postVideoFfmpeg,
+  getData,
+  postDataExport,
+  dataExportUrl,
+  postDataImport,
+  deleteDataImport,
   getEventState,
   sendCommand,
   createBracket,
@@ -459,6 +486,81 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#api.putTimerConfig(this.baseUrl, id, config, token)
     );
+  }
+
+  // ── Video ──────────────────────────────────────────────────────────────────
+
+  /** The video settings, without the password (`GET /video/settings`, open). */
+  getVideoSettings(): Promise<VideoSettings> {
+    return this.#api.getVideoSettings(this.baseUrl, { token: this.#token });
+  }
+
+  /**
+   * Change the video settings. Resolves to them as they now are, `undefined` on a cancelled
+   * token prompt, or throws with the Director's sentence.
+   */
+  putVideoSettings(request: VideoSettingsRequest): Promise<VideoSettings | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.putVideoSettings(this.baseUrl, request, token)
+    );
+  }
+
+  /**
+   * Ask for the overlay to be drawn onto a race's clean recording, or onto every race of
+   * the event that needs it (`POST /video/render`). Resolves to how many were asked for,
+   * `undefined` if the director cancelled the token prompt, or throws with the Director's
+   * sentence.
+   */
+  renderVideo(request: RenderRequest): Promise<number | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.postVideoRender(this.baseUrl, request, token)
+    );
+  }
+
+  /** Have the Director download ffmpeg (`POST /video/ffmpeg`). The status follows it. */
+  fetchFfmpeg(): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#api.postVideoFfmpeg(this.baseUrl, token);
+      return true as const;
+    });
+  }
+
+  /** The link to OBS and the runs recorded so far (`GET /video/status`, open). */
+  getVideoStatus(): Promise<VideoStatus> {
+    return this.#api.getVideoStatus(this.baseUrl, { token: this.#token });
+  }
+
+  // ── A copy of everything ───────────────────────────────────────────────────
+
+  /** Where Grid keeps its data, and the copy that waits to be brought in (`GET /data`). */
+  getData(): Promise<DataInfo> {
+    return this.#api.getData(this.baseUrl, { token: this.#token });
+  }
+
+  /** Make a copy of everything (`POST /data/export`). `undefined` on a cancelled prompt. */
+  exportData(): Promise<DataExport | undefined> {
+    return this.#privilegedWrite((token) => this.#api.postDataExport(this.baseUrl, token));
+  }
+
+  /** The address a copy that was just made downloads from. */
+  exportUrl(name: string): string {
+    return this.#api.dataExportUrl(this.baseUrl, name);
+  }
+
+  /**
+   * Hand the Director a copy to bring in (`POST /data/import`). It takes over when Grid is
+   * next started. `undefined` on a cancelled prompt; a file that is not a copy throws.
+   */
+  importData(file: Blob): Promise<DataCopy | undefined> {
+    return this.#privilegedWrite((token) => this.#api.postDataImport(this.baseUrl, file, token));
+  }
+
+  /** Forget the copy that waits (`DELETE /data/import`). */
+  cancelImport(): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#api.deleteDataImport(this.baseUrl, token);
+      return true as const;
+    });
   }
 
   // ── Saved formats and seat profiles ────────────────────────────────────────

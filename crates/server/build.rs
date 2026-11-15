@@ -44,17 +44,17 @@ fn build_version(pkg: &str) -> String {
     }
     // `git()` yields None for empty output, so Some(porcelain) == a dirty tree.
     let dirty = git(&["status", "--porcelain"]).is_some();
-    if !dirty {
-        if let Some(tag) = git(&[
+    if !dirty
+        && let Some(tag) = git(&[
             "describe",
             "--exact-match",
             "--tags",
             "--match",
             "v*",
             "HEAD",
-        ]) {
-            return tag.trim_start_matches('v').to_string();
-        }
+        ])
+    {
+        return tag.trim_start_matches('v').to_string();
     }
     let Some(hash) = git(&["rev-parse", "--short=7", "HEAD"]) else {
         // No git (a source tarball / a stripped checkout): the workspace version verbatim is

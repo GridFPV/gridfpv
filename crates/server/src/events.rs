@@ -177,7 +177,7 @@ pub struct SetActiveEventRequest {
 /// short random suffix), never user-entered, per the maintainer's rule. Keeping the id off
 /// the wire means two events can share a name without colliding and a client cannot pick its
 /// own id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct CreateEventRequest {
     /// The display name for the new event.
@@ -291,6 +291,8 @@ struct Registry {
     timers: crate::timers::TimerDirectory,
     /// The saved formats and the saved seat profiles, held here for the same reason.
     library: crate::library::Library,
+    /// The video settings and status, held here for the same reason.
+    video: crate::video::VideoDesk,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -312,6 +314,22 @@ impl EventRegistry {
     pub fn new(data_dir: Option<PathBuf>) -> Result<Self, RegistryError> {
         let tokens = TokenStore::new();
         let mut events = BTreeMap::new();
+
+        // A copy that was brought in takes over now, before anything here is opened.
+        if let Some(dir) = &data_dir {
+            match crate::backup::apply_waiting(dir, crate::app::now_micros()) {
+                Some(Ok(done)) => eprintln!(
+                    "Brought in a copy of {} event(s). What was here before is in {}",
+                    done.copy.events,
+                    done.kept_in.display()
+                ),
+                Some(Err(err)) => eprintln!(
+                    "WARNING: the copy waiting to be brought in was not used, and the data \
+                     is as it was: {err}"
+                ),
+                None => {}
+            }
+        }
 
         // The pilots persisted to `<data_dir>/pilots.json` (empty on first boot).
         let pilots = PilotDirectory::new(data_dir.clone())
@@ -347,6 +365,7 @@ impl EventRegistry {
                 classes,
                 timers: crate::timers::TimerDirectory::new(data_dir.clone()),
                 library: crate::library::Library::new(data_dir.clone()),
+                video: crate::video::VideoDesk::new(data_dir.clone()),
                 data_dir,
                 active_event,
             })),
@@ -408,6 +427,11 @@ impl EventRegistry {
         self.read().tokens.clone()
     }
 
+    /// The folder everything is kept in, or `None` when nothing is kept on disk.
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        self.read().data_dir.clone()
+    }
+
     /// An event's own log, or `None` if no such event.
     pub fn log(&self, id: &EventId) -> Option<SharedLog> {
         self.read().events.get(id).map(|e| e.log.clone())
@@ -432,6 +456,11 @@ impl EventRegistry {
         let reg = self.read();
         let live = &reg.events.get(reg.active_event.as_ref()?)?.live;
         live.race_now.lock().ok()?.clone()
+    }
+
+    /// The video settings and status.
+    pub fn video(&self) -> crate::video::VideoDesk {
+        self.read().video.clone()
     }
 
     /// The saved formats and the saved seat profiles.
@@ -511,10 +540,8 @@ impl EventRegistry {
         // Persist the freshly-built meta into the event's own SQLite `meta` table so a
         // Director restart can restore it. Only for a persistent (file-backed) event — an
         // in-memory event has nothing to persist to.
-        if persistent {
-            if let Some(dir) = reg.data_dir.clone() {
-                persist_event_meta(&dir, &meta)?;
-            }
+        if persistent && let Some(dir) = reg.data_dir.clone() {
+            persist_event_meta(&dir, &meta)?;
         }
 
         reg.events.insert(
@@ -549,10 +576,10 @@ impl EventRegistry {
             organizer: normalize_optional(&request.organizer),
             ..event.meta.clone()
         };
-        if meta.persistent {
-            if let Some(dir) = data_dir {
-                persist_event_meta(&dir, &meta)?;
-            }
+        if meta.persistent
+            && let Some(dir) = data_dir
+        {
+            persist_event_meta(&dir, &meta)?;
         }
         event.meta = meta.clone();
         Ok(meta)

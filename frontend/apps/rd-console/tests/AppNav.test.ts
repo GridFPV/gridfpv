@@ -42,6 +42,8 @@ const SETUP_ROW = [
   ['Pilots', '#/pilots'],
   ['Classes', '#/classes'],
   ['Formats', '#/formats'],
+  ['Video', '#/video'],
+  ['Data', '#/data'],
   ['Help', '#/help']
 ];
 
@@ -74,7 +76,9 @@ describe('AppNav: the two sides', () => {
     ["a seat's Tune page", { kind: 'capture', timer: 'gate-x1y2', seat: '0' }, 'Setup', 'Seats'],
     ['the Pilots page', { kind: 'page', page: 'pilots' }, 'Setup', 'Pilots'],
     ['the Classes page', { kind: 'page', page: 'classes' }, 'Setup', 'Classes'],
-    ['the Formats page', { kind: 'page', page: 'formats' }, 'Setup', 'Formats']
+    ['the Formats page', { kind: 'page', page: 'formats' }, 'Setup', 'Formats'],
+    ['the Video page', { kind: 'page', page: 'video' }, 'Setup', 'Video'],
+    ['the Data page', { kind: 'page', page: 'data' }, 'Setup', 'Data']
   ])('%s is on the %s side, under %s', (_where, route, sideName, label) => {
     render(AppNav, { route, eventName: 'Club Night' });
     expect(currentSide()).toEqual([sideName]);

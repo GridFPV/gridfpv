@@ -3,7 +3,7 @@
  * the session without a real server.
  */
 import { vi } from 'vitest';
-import type { EventMeta, EventView } from '@gridfpv/types';
+import type { EventMeta, EventView, ObsStatus, VideoSettings, VideoStatus } from '@gridfpv/types';
 import { EventLive, type LiveSession } from '../src/lib/eventLive.svelte.js';
 import { Session, type SessionApi } from '../src/lib/session.svelte.js';
 import { SAVED_FORMATS } from './competition.js';
@@ -86,6 +86,45 @@ export function makeTestSession(
  * something inert (the given snapshot, empty directories, the saved formats of
  * `competition.ts`) and every write succeeds, unless `over` says otherwise.
  */
+/** The video settings of a Director that records nothing. */
+export const VIDEO_OFF: VideoSettings = {
+  enabled: false,
+  obs_address: '127.0.0.1:4455',
+  has_password: false,
+  tail_seconds: 3,
+  trash_discarded: true,
+  record_from: 'Obs',
+  clean_scene: '',
+  overlay_scene: '',
+  render_when: 'Asked',
+  browser_path: '',
+  ffmpeg_path: ''
+};
+
+/** What is known about OBS: not connected, unless `over` says otherwise. */
+export function obsStatus(over: Partial<ObsStatus> = {}): ObsStatus {
+  return { connected: false, recording: false, scenes: [], source_record: false, ...over };
+}
+
+/** A video status: nothing recorded, nothing drawn, both programs found, unless `over` says. */
+export function videoStatus(over: Partial<VideoStatus> = {}): VideoStatus {
+  return {
+    obs: obsStatus(),
+    runs: [],
+    renders: [],
+    tools: {
+      browser: '/usr/bin/chromium',
+      ffmpeg: '/usr/bin/ffmpeg',
+      can_fetch: true,
+      fetching: false
+    },
+    ...over
+  };
+}
+
+/** The video status of a Director that has done nothing yet. */
+export const VIDEO_IDLE: VideoStatus = videoStatus();
+
 export function fakeLiveSession(view: EventView, over: Partial<LiveSession> = {}): LiveSession {
   return {
     getEventState: vi.fn(async () => view),
@@ -98,6 +137,9 @@ export function fakeLiveSession(view: EventView, over: Partial<LiveSession> = {}
     listTimers: vi.fn(async () => []),
     listClasses: vi.fn(async () => []),
     listFormats: vi.fn(async () => SAVED_FORMATS),
+    // Video is off unless a test switches it on.
+    getVideoSettings: vi.fn(async () => VIDEO_OFF),
+    getVideoStatus: vi.fn(async () => VIDEO_IDLE),
     ...over
   };
 }
@@ -119,5 +161,6 @@ export async function openLive(
   await live.reloadTimers();
   await live.reloadClasses();
   await live.reloadFormats();
+  await live.reloadVideo();
   return { session, live };
 }

@@ -30,7 +30,9 @@ import type {
   RaceId,
   RaceSignal,
   SavedFormat,
-  TimerView
+  TimerView,
+  VideoSettings,
+  VideoStatus
 } from '@gridfpv/types';
 import { buildNames, type Names } from './names.js';
 import { seatSources, type SeatSource } from './seats.js';
@@ -50,6 +52,8 @@ export type LiveSession = Pick<
   | 'listTimers'
   | 'listClasses'
   | 'listFormats'
+  | 'getVideoSettings'
+  | 'getVideoStatus'
 >;
 
 /**
@@ -80,6 +84,11 @@ export class EventLive {
   classes = $state.raw<Class[]>([]);
   /** The saved formats, for the format pickers. */
   formats = $state.raw<SavedFormat[]>([]);
+  /**
+   * Whether races are being recorded on video, and how that stands: the settings and the
+   * status, read with the timer list. `undefined` until read, or when the read fails.
+   */
+  video = $state.raw<{ settings: VideoSettings; status: VideoStatus } | undefined>(undefined);
   /** What a heat can be timed by: every timer, then the bench. */
   seatSources: SeatSource[] = $derived(seatSources(this.timers));
   /** The one resolver from ids to names for this event. */
@@ -123,8 +132,13 @@ export class EventLive {
     void this.reloadClasses();
     void this.reloadFormats();
     clearInterval(this.#timerPoll);
+    // Video has no change feed either, so it is asked for on the same beat as the timers.
+    if (this.#pollTimers) void this.reloadVideo();
     this.#timerPoll = this.#pollTimers
-      ? setInterval(() => void this.reloadTimers(), TIMER_POLL_MS)
+      ? setInterval(() => {
+          void this.reloadTimers();
+          void this.reloadVideo();
+        }, TIMER_POLL_MS)
       : undefined;
     try {
       // The feed sends the current cursor on every connect and reconnect, so a console
@@ -218,6 +232,21 @@ export class EventLive {
       if (!this.#stopped) this.classes = classes;
     } catch {
       // Class names fall back to "Unknown class".
+    }
+  }
+
+  /** Read the video settings and status again. A read that fails keeps what was known. */
+  async reloadVideo(): Promise<void> {
+    try {
+      const [settings, status] = await Promise.all([
+        this.#session.getVideoSettings(),
+        this.#session.getVideoStatus()
+      ]);
+      if (this.#stopped) return;
+      const next = { settings, status };
+      if (JSON.stringify(next) !== JSON.stringify(this.video)) this.video = next;
+    } catch {
+      // Keep what we have.
     }
   }
 

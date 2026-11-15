@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
-import type { EventMeta, EventView, Pilot } from '@gridfpv/types';
+import type { EventMeta, EventView, ObsStatus, Pilot, VideoRun } from '@gridfpv/types';
 import RunPage from '../src/screens/RunPage.svelte';
 import type { LiveSession } from '../src/lib/eventLive.svelte.js';
 import {
@@ -21,7 +21,7 @@ import {
   timerView,
   TWO_MINUTE_QUALI
 } from './competition.js';
-import { openLive } from './support.js';
+import { VIDEO_OFF, obsStatus, openLive, videoStatus } from './support.js';
 
 const EVENT: EventMeta = { id: 'evt-77', name: 'Club Night', created_at: 0, persistent: true };
 const PILOTS: Pilot[] = [
@@ -461,6 +461,68 @@ describe('RunPage: earlier races', () => {
     expect(within(earlier[1]).queryByRole('link')).toBeNull();
     expect(within(earlier[2]).queryByRole('link')).toBeNull();
     expectNoRawIds();
+  });
+});
+
+describe('RunPage: video', () => {
+  const ON = { ...VIDEO_OFF, enabled: true };
+  const video = (obs: Partial<ObsStatus>, runs: VideoRun[] = []) => ({
+    getVideoSettings: vi.fn(async () => ON),
+    getVideoStatus: vi.fn(async () => videoStatus({ obs: obsStatus(obs), runs }))
+  });
+
+  it('says nothing about video while it is switched off', async () => {
+    await open(eventView({ phases: [quali()] }));
+    expect(screen.queryByTestId('video-warning')).toBeNull();
+    expect(screen.queryByTestId('video-rec')).toBeNull();
+  });
+
+  it('warns before Start when OBS is not connected, so a run is never missed unnoticed', async () => {
+    await open(
+      eventView({ phases: [quali()] }),
+      video({
+        connected: false,
+        recording: false,
+        problem: 'Could not reach OBS at 127.0.0.1:4455.'
+      })
+    );
+    const warning = screen.getByTestId('video-warning');
+    expect(warning).toHaveTextContent('OBS is not connected. A race started now is not recorded.');
+    expect(warning).toHaveTextContent('Could not reach OBS at 127.0.0.1:4455.');
+    // It is a warning, not a lock: the race can still be flown.
+    expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
+  });
+
+  it('shows REC while OBS is recording the race on screen, and no warning', async () => {
+    const running = race(HEAT, 1, 'Running', { started_at: 0 });
+    await open(
+      eventView({ phases: [quali()], races: [running], current_race: running.race }),
+      video({ connected: true, recording: true }, [
+        { event: EVENT.id, race: running.race, name: 'Night Quali race 1', state: 'Recording' }
+      ])
+    );
+    expect(screen.getByTestId('video-rec')).toHaveTextContent('REC');
+    expect(screen.queryByTestId('video-warning')).toBeNull();
+  });
+
+  it('says so when the race on screen could not be recorded, with why', async () => {
+    const running = race(HEAT, 1, 'Running', { started_at: 0 });
+    await open(
+      eventView({ phases: [quali()], races: [running], current_race: running.race }),
+      video({ connected: true, recording: true }, [
+        {
+          event: EVENT.id,
+          race: running.race,
+          name: 'Night Quali race 1',
+          state: 'Failed',
+          note: 'OBS was already recording, so this race is inside that recording. Grid left it alone.'
+        }
+      ])
+    );
+    expect(screen.queryByTestId('video-rec')).toBeNull();
+    const warning = screen.getByTestId('video-warning');
+    expect(warning).toHaveTextContent('This race is not being recorded.');
+    expect(warning).toHaveTextContent(/OBS was already recording/);
   });
 });
 

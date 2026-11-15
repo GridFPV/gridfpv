@@ -134,11 +134,11 @@ impl Races {
                 }),
             },
             Event::RaceStopped { race } => {
-                if let Some(race) = self.by_id.get_mut(race) {
-                    if race.state == RaceState::Running {
-                        race.state = RaceState::Stopped;
-                        race.stopped_at = recorded_at;
-                    }
+                if let Some(race) = self.by_id.get_mut(race)
+                    && race.state == RaceState::Running
+                {
+                    race.state = RaceState::Stopped;
+                    race.stopped_at = recorded_at;
                 }
             }
             Event::RaceSaved {
@@ -146,12 +146,12 @@ impl Races {
                 needs_marshal,
                 note,
             } => {
-                if let Some(race) = self.by_id.get_mut(race) {
-                    if race.state == RaceState::Stopped {
-                        race.state = RaceState::Saved;
-                        race.needs_marshal = *needs_marshal;
-                        race.note = note.clone();
-                    }
+                if let Some(race) = self.by_id.get_mut(race)
+                    && race.state == RaceState::Stopped
+                {
+                    race.state = RaceState::Saved;
+                    race.needs_marshal = *needs_marshal;
+                    race.note = note.clone();
                 }
             }
             Event::MarshalFlagSet {
@@ -166,14 +166,14 @@ impl Races {
                 }
             }
             Event::RaceDiscarded { race, reason, note } => {
-                if let Some(race) = self.by_id.get_mut(race) {
-                    if race.state != RaceState::Discarded {
-                        race.state = RaceState::Discarded;
-                        race.discard_reason = *reason;
-                        race.needs_marshal = false;
-                        if note.is_some() {
-                            race.note = note.clone();
-                        }
+                if let Some(race) = self.by_id.get_mut(race)
+                    && race.state != RaceState::Discarded
+                {
+                    race.state = RaceState::Discarded;
+                    race.discard_reason = *reason;
+                    race.needs_marshal = false;
+                    if note.is_some() {
+                        race.note = note.clone();
                     }
                 }
             }
@@ -319,10 +319,10 @@ fn check_lineup(lineup: &[LineupEntry]) -> Result<(), RaceError> {
                 seat: entry.seat.0.clone(),
             });
         }
-        if let Some(pilot) = &entry.pilot {
-            if !pilots.insert(pilot) {
-                return Err(RaceError::PilotSeatedTwice(pilot.0.clone()));
-            }
+        if let Some(pilot) = &entry.pilot
+            && !pilots.insert(pilot)
+        {
+            return Err(RaceError::PilotSeatedTwice(pilot.0.clone()));
         }
     }
     Ok(())

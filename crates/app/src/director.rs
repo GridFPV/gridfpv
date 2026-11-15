@@ -170,6 +170,14 @@ where
     // Look for OFT timers on the network, for the "found on the network" list. Held until
     // the Director stops.
     let _discovery = crate::discovery::spawn(registry.clone());
+    // Have OBS record each race, while video is switched on in the settings.
+    let video = crate::video::spawn(registry.clone());
+    // Draw overlays onto clean recordings when asked. The browser it runs is on this
+    // machine, so it reaches the console here whatever address the listener is bound to.
+    let renders = crate::render::spawn(
+        registry.clone(),
+        format!("http://127.0.0.1:{}", bound.port()),
+    );
 
     let app = build_app(registry, &assets);
 
@@ -183,6 +191,8 @@ where
         .with_graceful_shutdown(shutdown)
         .await;
     timers.abort();
+    video.abort();
+    renders.abort();
     served?;
     Ok(())
 }

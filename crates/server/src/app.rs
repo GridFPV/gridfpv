@@ -146,6 +146,25 @@ pub fn router(registry: EventRegistry) -> Router {
             post(crate::library::apply_profile),
         )
         .route(
+            "/video/settings",
+            get(crate::video::get_settings).put(crate::video::put_settings),
+        )
+        // A copy of everything, to carry to another computer, and bringing one back in.
+        .route("/data", get(crate::backup::get_data))
+        .route("/data/export", post(crate::backup::post_export))
+        .route("/data/export/{name}", get(crate::backup::get_export))
+        .route(
+            "/data/import",
+            post(crate::backup::post_import)
+                .delete(crate::backup::delete_import)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::backup::MAX_IMPORT_BYTES,
+                )),
+        )
+        .route("/video/status", get(crate::video::get_status))
+        .route("/video/render", post(crate::video::post_render))
+        .route("/video/ffmpeg", post(crate::video::post_ffmpeg))
+        .route(
             "/formats",
             get(crate::library::list_formats).post(crate::library::create_format),
         )
@@ -533,7 +552,7 @@ where
 
 /// Current server wall-clock time in **microseconds** since the Unix epoch — what `GET /time`
 /// serves.
-pub(crate) fn now_micros() -> i64 {
+pub fn now_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
