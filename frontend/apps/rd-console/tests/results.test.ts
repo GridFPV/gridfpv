@@ -2,7 +2,16 @@
 import { describe, expect, it } from 'vitest';
 import type { Format, LapView, PilotId, PlacedView } from '@gridfpv/types';
 import { buildNames } from '../src/lib/names.js';
-import { defaultResult, heatsUnder, resultChoices, resultTable } from '../src/lib/results.js';
+import {
+  bestLapSource,
+  bestRunSource,
+  defaultResult,
+  heatsUnder,
+  phaseRaces,
+  raceDetail,
+  resultChoices,
+  resultTable
+} from '../src/lib/results.js';
 import { FIRST_TO_3, eventView, group, heat, race, raceSeat } from './competition.js';
 
 const S = 1_000_000;
@@ -277,5 +286,118 @@ describe('resultTable', () => {
 
   it('has no rows for a phase nobody is ranked in', () => {
     expect(resultTable(view, phase('q-2'), names).rows).toEqual([]);
+  });
+});
+
+describe('where a best came from, and one race in full', () => {
+  const lapOf = (crossing: number, seconds: number, restart = false): LapView => ({
+    crossing,
+    started_at: 0,
+    ended_at: seconds * S,
+    micros: restart ? 0 : seconds * S,
+    restart,
+    timer_restarted: false
+  });
+  const phases = [
+    group('quali', 'Qualifying'),
+    heat('t-1', 'Track 1', ['p-1a'], { parent: 'quali', format: BEST_2 }),
+    heat('t-2', 'Track 2', ['p-1a', 'p-2b'], { parent: 'quali', format: BEST_2 })
+  ];
+  const day = eventView({
+    phases,
+    races: [
+      race('t-1', 1, 'Saved', {
+        seats: [raceSeat(0, 'p-1a', { laps: [lapOf(1, 10), lapOf(2, 9), lapOf(3, 12)] })]
+      }),
+      // Faster, but discarded: it never counts.
+      race('t-1', 2, 'Discarded', {
+        seats: [raceSeat(0, 'p-1a', { laps: [lapOf(4, 5), lapOf(5, 5)] })]
+      }),
+      race('t-2', 1, 'Saved', {
+        seats: [
+          raceSeat(0, 'p-1a', {
+            finish: 2,
+            start_at: 0,
+            hole_shot: { crossing: 6, at: 1.5 * S },
+            laps: [lapOf(7, 8), lapOf(8, 0, true), lapOf(9, 9.5), lapOf(10, 8.5)],
+            best_lap_micros: 8 * S,
+            total_micros: 26 * S
+          }),
+          raceSeat(1, 'p-2b', { finish: 1, laps: [lapOf(11, 11)], false_start: true })
+        ]
+      })
+    ]
+  });
+  const names = buildNames(phases, PILOTS);
+
+  it('lists every race under a phase, numbered within its own heat', () => {
+    expect(phaseRaces(day, 'quali', names).map((entry) => [entry.name, entry.number])).toEqual([
+      ['Track 1 race 1', 1],
+      ['Track 1 race 2', 2],
+      ['Track 2 race 1', 1]
+    ]);
+    expect(phaseRaces(day, 't-2', names).map((entry) => entry.name)).toEqual(['Track 2 race 1']);
+  });
+
+  it('finds the saved race a best run and a best lap were flown in', () => {
+    const races = phaseRaces(day, 'quali', names);
+    // 9.5 + 8.5 in Track 2 beats 10 + 9 in Track 1. The restart is never run across.
+    expect(bestRunSource(races, 'p-1a', 2)).toMatchObject({
+      micros: 18 * S,
+      from: { name: 'Track 2 race 1', race: 't-2#1' }
+    });
+    expect(bestLapSource(races, 'p-1a')).toMatchObject({
+      micros: 8 * S,
+      from: { name: 'Track 2 race 1' }
+    });
+    // Within one heat, only that heat's races are looked at.
+    expect(bestRunSource(phaseRaces(day, 't-1', names), 'p-1a', 2)).toMatchObject({
+      micros: 19 * S,
+      from: { name: 'Track 1 race 1' }
+    });
+    expect(bestRunSource(races, 'p-2b', 2)).toBeUndefined();
+    expect(bestLapSource(races, 'p-3c')).toBeUndefined();
+  });
+
+  it('puts the source on the table, and names the best lap only when a race holds it', () => {
+    const ranked = {
+      ...phases[0],
+      format: BEST_2,
+      ranking: [
+        placed('p-1a', 1, { best_lap_micros: 8 * S }),
+        placed('p-2b', 2, { best_lap_micros: 10 * S })
+      ]
+    };
+    const table = resultTable(day, ranked, names);
+    expect(table.rows[0]).toMatchObject({
+      bestRunMicros: 18 * S,
+      bestRunFrom: { name: 'Track 2 race 1' },
+      bestLapFrom: { name: 'Track 2 race 1' }
+    });
+    // Bee's best lap on the table is 10 s, and no saved race has that lap.
+    expect(table.rows[1].bestRunFrom).toBeUndefined();
+    expect(table.rows[1].bestLapFrom).toBeUndefined();
+  });
+
+  it('gives one race in full: finishing order, the hole shot, every lap, the best run', () => {
+    const rows = raceDetail(day.races[2], names, 2);
+    expect(rows.map((row) => [row.place, row.name, row.laps])).toEqual([
+      [1, 'Bee', 1],
+      [2, 'Ace', 3]
+    ]);
+    expect(rows[0].falseStart).toBe(true);
+    expect(rows[1]).toMatchObject({
+      bestLapMicros: 8 * S,
+      totalMicros: 26 * S,
+      bestRun: { start: 1, length: 2, totalMicros: 18 * S }
+    });
+    expect(rows[1].lapList).toEqual([
+      { label: 'HS', micros: 1.5 * S, inBestRun: false, best: false },
+      { label: 'L1', micros: 8 * S, inBestRun: false, best: true },
+      { label: 'L2', micros: 9.5 * S, inBestRun: true, best: false },
+      { label: 'L3', micros: 8.5 * S, inBestRun: true, best: false }
+    ]);
+    // With no run to rank on, no lap is marked as part of one.
+    expect(raceDetail(day.races[2], names)[1].lapList.some((lap) => lap.inBestRun)).toBe(false);
   });
 });

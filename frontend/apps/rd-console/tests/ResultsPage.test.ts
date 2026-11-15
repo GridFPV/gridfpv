@@ -177,16 +177,22 @@ describe('ResultsPage', () => {
     expect(rowsOf(screen.getByRole('table', { name: 'Results of Qualifying' }))).toEqual([
       'Place | Pilot | Best 3 in a row | Best lap | Most laps | Notes',
       // Ace's fastest three in a row are the last three laps of heat 2, not the 36 s of heat 1.
-      '1 | Ace | 30.000 | 9.500 | 4 |',
-      '2 | Bee | 33.000 | 10.500 | 3 |',
+      // Each best run names the race it was flown in.
+      '1 | Ace | 30.000 Qualifying Heat 2 race 1 | 9.500 | 4 |',
+      '2 | Bee | 33.000 Qualifying Heat 1 race 1 | 10.500 | 3 |',
       '3 | Cat | — | — | 0 | Did not fly'
     ]);
     const state = screen.getByTestId('result-state');
     expect(state).toHaveTextContent('Provisional');
     expect(state).toHaveTextContent('Still being raced.');
     expect(state).toHaveTextContent('2 minute qualifying');
-    // A phase that holds heats lists no races of its own.
-    expect(screen.queryByRole('list', { name: /^Races of/ })).toBeNull();
+    // A phase that holds heats lists the races of every heat under it, newest first.
+    const items = within(screen.getByRole('list', { name: 'Races of Qualifying' })).getAllByRole(
+      'listitem'
+    );
+    expect(items.map((item) => within(item).getAllByRole('button')[0].textContent?.trim())).toEqual(
+      ['Qualifying Heat 2 race 1', 'Qualifying Heat 1 race 1']
+    );
   });
 
   it('shows the columns the format ranks by, and marks hand-set and disqualified places', async () => {
@@ -196,7 +202,8 @@ describe('ResultsPage', () => {
     await open(day);
     expect(rowsOf(screen.getByRole('table', { name: 'Results of Final' }))).toEqual([
       'Place | Pilot | Wins | Best lap | Most laps | Notes',
-      '1 | Bee | 1 | 10.000 | 3 | Set by hand',
+      // The best lap names its race when a saved race holds that lap.
+      '1 | Bee | 1 | 10.000 Race 2 | 3 | Set by hand',
       '2 | Ace | 0 | — | 2 | Disqualified'
     ]);
     expect(screen.getByTestId('result-state')).toHaveTextContent('Complete, not locked yet.');
@@ -243,10 +250,56 @@ describe('ResultsPage', () => {
     await fireEvent.change(picker(), { target: { value: 'q-1' } });
     expect(rowsOf(screen.getByRole('table', { name: 'Results of Qualifying Heat 1' }))).toEqual([
       'Place | Pilot | Best 3 in a row | Best lap | Most laps | Notes',
-      '1 | Bee | 33.000 | — | 3 |',
-      '2 | Ace | 36.000 | — | 3 |'
+      '1 | Bee | 33.000 Race 1 | — | 3 |',
+      '2 | Ace | 36.000 Race 1 | — | 3 |'
     ]);
     expect(screen.getByRole('list', { name: 'Races of Qualifying Heat 1' })).toBeVisible();
+  });
+
+  it('opens the race a best run came from, with every lap, and leads back to the phase', async () => {
+    await open(raceDay());
+    await fireEvent.change(picker(), { target: { value: 'quali' } });
+    await fireEvent.click(
+      screen.getByRole('button', { name: "Ace's best run: Qualifying Heat 2 race 1" })
+    );
+    // The phase's table gives way to the race.
+    expect(screen.queryByRole('table', { name: 'Results of Qualifying' })).toBeNull();
+    const section = screen.getByRole('region', { name: 'Qualifying Heat 2 race 1' });
+    expect(within(section).getByRole('heading')).toHaveTextContent('Qualifying Heat 2 race 1');
+    expect(within(section).getByRole('link', { name: 'Open in Marshal' })).toHaveAttribute(
+      'href',
+      `#/event/marshal/${encodeURIComponent('q-2#1')}`
+    );
+    expect(
+      rowsOf(within(section).getByRole('table', { name: 'Pilots of Qualifying Heat 2 race 1' }))
+    ).toEqual([
+      'Place | Pilot | Laps | Best 3 in a row | Best lap | Total | Every lap',
+      '1 | Ace | 4 | 30.000 | 10.000 | — | L1 14.000L2 10.000L3 10.000L4 10.000'
+    ]);
+    // The laps of the best run are marked.
+    const laps = within(screen.getByRole('list', { name: 'Laps of Ace' })).getAllByRole('listitem');
+    expect(laps.map((li) => li.classList.contains('in-run'))).toEqual([false, true, true, true]);
+    expectNoRawIds();
+
+    // The trail leads back up to the phase.
+    const trail = screen.getByRole('navigation', { name: 'Where this race is' });
+    await fireEvent.click(within(trail).getByRole('button', { name: 'Qualifying' }));
+    expect(screen.getByRole('table', { name: 'Results of Qualifying' })).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Qualifying Heat 2 race 1' })).toBeNull();
+  });
+
+  it('opens any race from the list, a discarded one too, and says it does not count', async () => {
+    await open(raceDay());
+    await fireEvent.change(picker(), { target: { value: 'f-1' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Open Final race 1' }));
+    const section = screen.getByRole('region', { name: 'Final race 1' });
+    expect(section).toHaveTextContent('Discarded');
+    expect(section).toHaveTextContent('It does not count toward the results.');
+    expect(section).toHaveTextContent('“Gate fell over”');
+    // Picking another phase closes the race.
+    await fireEvent.change(picker(), { target: { value: 'q-1' } });
+    expect(screen.queryByRole('region', { name: 'Final race 1' })).toBeNull();
+    expect(screen.getByRole('table', { name: 'Results of Qualifying Heat 1' })).toBeVisible();
   });
 
   it('says a locked phase is official', async () => {

@@ -346,7 +346,8 @@ export function overlayRows(race: RaceView, names: Names, runLength?: number): O
     .map(({ row }) => row);
 }
 
-function holeShot(seat: RaceView['seats'][number]): number | undefined {
+/** A seat's hole shot: from the start to the crossing that began lap 1, in microseconds. */
+export function holeShot(seat: RaceView['seats'][number]): number | undefined {
   if (seat.hole_shot === undefined || seat.start_at === undefined) return undefined;
   const micros = seat.hole_shot.at - seat.start_at;
   return micros >= 0 ? micros : undefined;

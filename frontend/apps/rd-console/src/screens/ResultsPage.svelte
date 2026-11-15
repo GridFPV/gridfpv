@@ -4,18 +4,28 @@
    *
    * - **Class standings**: each class from 1 to n, and the phase that placed each pilot.
    * - **Phase results**: one phase's ranking at a time, with the numbers behind each place.
-   *   It opens on the phase raced last. A heat also lists its races, each with a link to
-   *   Marshal.
+   *   It opens on the phase raced last. A best time names the race it was flown in.
+   * - **The phase's races**: every race under the phase, with who finished where.
+   * - **One race**: opened from the list, or from a best time. Each pilot with every lap.
+   *
+   * The three are steps down: a phase, its races, one race. The trail above a race leads
+   * back up.
    *
    * Every order shown is the Director's. A result is provisional until its phase is locked
    * (on the Phases page), and the page says which it is.
    */
   import { Badge, Banner, Card, Select, formatMicros } from '@gridfpv/components';
-  import type { PhaseId } from '@gridfpv/types';
+  import type { PhaseId, RaceId } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { racesOfHeat } from '../lib/phases.js';
-  import { defaultResult, resultChoices, resultTable } from '../lib/results.js';
+  import { consecutiveLaps } from '../lib/overlay.js';
+  import {
+    defaultResult,
+    phaseRaces,
+    raceDetail,
+    resultChoices,
+    resultTable
+  } from '../lib/results.js';
   import { formatHash } from '../lib/route.js';
   import { standingRows } from '../lib/rulings.js';
   import { finishOrder, raceStateLabel } from '../lib/run.js';
@@ -37,11 +47,24 @@
   const phase = $derived(view?.phases.find((p) => p.def.id === shownId));
   const table = $derived(view && phase ? resultTable(view, phase, names) : undefined);
   const heat = $derived(choices.find((choice) => choice.id === shownId)?.heat ?? false);
-  const races = $derived(
-    view && phase && heat
-      ? racesOfHeat(view, phase.def.id).map((race, index) => ({ race, number: index + 1 }))
-      : []
+  /** Every race under the phase, oldest first. */
+  const races = $derived(view && phase ? phaseRaces(view, phase.def.id, names) : []);
+  /** What a race is called here: inside its own heat the number says it all. */
+  const raceLabel = (entry: { name: string; number: number }): string =>
+    heat ? `Race ${entry.number}` : entry.name;
+
+  /** The race opened in full, if one is. */
+  let openedId = $state<RaceId | undefined>(undefined);
+  const opened = $derived(races.find((entry) => entry.race === openedId));
+  /** The opened race is ranked the way its own heat is. */
+  const openedRunLength = $derived(
+    opened ? consecutiveLaps(view?.phases.find((p) => p.def.id === opened.heat)?.format) : undefined
   );
+  const detail = $derived(opened ? raceDetail(opened.view, names, openedRunLength) : []);
+  function pickPhase(id: PhaseId): void {
+    picked = id;
+    openedId = undefined;
+  }
 </script>
 
 <Page
@@ -105,7 +128,7 @@
             <Select
               aria-label="Phase"
               value={shownId}
-              onchange={(e: Event) => (picked = (e.currentTarget as HTMLSelectElement).value)}
+              onchange={(e: Event) => pickPhase((e.currentTarget as HTMLSelectElement).value)}
             >
               {#each choices as choice (choice.id)}
                 <option value={choice.id}>{choice.label}</option>
@@ -122,72 +145,198 @@
             {#if phase.format}<span class="faint">{phase.format.name}</span>{/if}
           </span>
         </div>
-        <div class="scroll">
-          <table aria-label="Results of {phase.def.label}">
-            <thead>
-              <tr>
-                <th scope="col" class="num">Place</th>
-                <th scope="col">Pilot</th>
-                {#if table.runLength !== undefined}
-                  <th scope="col" class="num">Best {table.runLength} in a row</th>
-                {/if}
-                {#if table.showWins}<th scope="col" class="num">Wins</th>{/if}
-                {#if table.showPoints}<th scope="col" class="num">Points</th>{/if}
-                <th scope="col" class="num">Best lap</th>
-                <th scope="col" class="num">Most laps</th>
-                <th scope="col"><span class="sr-only">Notes</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each table.rows as row (row.placed.pilot)}
-                <tr>
-                  <td class="num place">{row.position}</td>
-                  <th scope="row">{row.callsign}</th>
-                  {#if table.runLength !== undefined}
-                    <td class="num strong">{formatMicros(row.bestRunMicros)}</td>
-                  {/if}
-                  {#if table.showWins}<td class="num">{row.placed.wins}</td>{/if}
-                  {#if table.showPoints}<td class="num">{row.placed.points}</td>{/if}
-                  <td class="num">{formatMicros(row.placed.best_lap_micros)}</td>
-                  <td class="num">{row.placed.laps}</td>
-                  <td class="flags">
-                    {#if row.placed.position_set}<Badge tone="violet">Set by hand</Badge>{/if}
-                    {#if row.placed.disqualified}<Badge tone="danger">Disqualified</Badge>{/if}
-                    {#if !row.placed.flew}<Badge tone="neutral">Did not fly</Badge>{/if}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-
-        {#if races.length > 0}
-          <h3 class="sub">Races of {phase.def.label}</h3>
-          <ol class="races" aria-label="Races of {phase.def.label}">
-            {#each [...races].reverse() as { race, number } (race.race)}
-              <li class:discarded={race.state === 'Discarded'}>
-                <span class="race-name">Race {number}</span>
-                <Badge tone={race.state === 'Saved' ? 'success' : 'neutral'}>
-                  {raceStateLabel(race)}
-                </Badge>
-                <span class="finish">
-                  {#each finishOrder(race) as seat (`${seat.adapter}/${seat.seat}`)}
-                    {@const laps = seat.laps.filter((lap) => !lap.restart).length}
-                    <span>
-                      {seat.finish}. {seat.pilot === undefined
-                        ? names.who('Open')
-                        : names.pilot(seat.pilot)}
-                      <span class="faint">({laps} {laps === 1 ? 'lap' : 'laps'})</span>
-                    </span>
+        {#if opened}
+          <nav class="trail" aria-label="Where this race is">
+            <button type="button" class="link" onclick={() => (openedId = undefined)}>
+              {phase.def.label}
+            </button>
+            <span aria-hidden="true">›</span>
+            <span aria-current="page">{raceLabel(opened)}</span>
+          </nav>
+          <section class="race" aria-label={opened.name}>
+            <div class="race-head">
+              <h3 class="race-title">{opened.name}</h3>
+              <Badge tone={opened.view.state === 'Saved' ? 'success' : 'neutral'}>
+                {raceStateLabel(opened.view)}
+              </Badge>
+              {#if opened.view.state !== 'Saved'}
+                <span class="faint">It does not count toward the results.</span>
+              {/if}
+              <a class="open" href={formatHash({ kind: 'marshal', race: opened.race })}
+                >Open in Marshal</a
+              >
+            </div>
+            {#if opened.view.note}<p class="muted">“{opened.view.note}”</p>{/if}
+            {#if opened.view.video}
+              <p class="muted">
+                Video: <code>{opened.view.video.overlaid_file ?? opened.view.video.file}</code>
+              </p>
+            {/if}
+            <div class="scroll">
+              <table aria-label="Pilots of {opened.name}">
+                <thead>
+                  <tr>
+                    <th scope="col" class="num">Place</th>
+                    <th scope="col">Pilot</th>
+                    <th scope="col" class="num">Laps</th>
+                    {#if openedRunLength !== undefined}
+                      <th scope="col" class="num">Best {openedRunLength} in a row</th>
+                    {/if}
+                    <th scope="col" class="num">Best lap</th>
+                    <th scope="col" class="num">Total</th>
+                    <th scope="col">Every lap</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each detail as row (row.key)}
+                    <tr>
+                      <td class="num place">{row.place ?? '–'}</td>
+                      <th scope="row">
+                        {row.name}
+                        {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
+                      </th>
+                      <td class="num">{row.laps}</td>
+                      {#if openedRunLength !== undefined}
+                        <td class="num strong">{formatMicros(row.bestRun?.totalMicros)}</td>
+                      {/if}
+                      <td class="num">{formatMicros(row.bestLapMicros)}</td>
+                      <td class="num">{formatMicros(row.totalMicros)}</td>
+                      <td>
+                        {#if row.lapList.length === 0}
+                          <span class="faint">No laps</span>
+                        {:else}
+                          <ol class="laps" aria-label="Laps of {row.name}">
+                            {#each row.lapList as lap (lap.label)}
+                              <li
+                                class:in-run={lap.inBestRun}
+                                class:best={lap.best}
+                                title={lap.inBestRun
+                                  ? 'Part of the best run'
+                                  : lap.best
+                                    ? 'Best lap'
+                                    : undefined}
+                              >
+                                <span class="lap-n">{lap.label}</span>
+                                {formatMicros(lap.micros)}
+                              </li>
+                            {/each}
+                          </ol>
+                        {/if}
+                      </td>
+                    </tr>
                   {/each}
-                </span>
-                {#if race.note}<span class="faint">“{race.note}”</span>{/if}
-                <a class="open" href={formatHash({ kind: 'marshal', race: race.race })}
-                  >Open in Marshal</a
-                >
-              </li>
-            {/each}
-          </ol>
+                </tbody>
+              </table>
+            </div>
+            {#if openedRunLength !== undefined}
+              <p class="muted key">
+                <span class="swatch in-run"></span> the best {openedRunLength} in a row
+                <span class="swatch best"></span> the best lap
+              </p>
+            {/if}
+          </section>
+        {:else}
+          <div class="scroll">
+            <table aria-label="Results of {phase.def.label}">
+              <thead>
+                <tr>
+                  <th scope="col" class="num">Place</th>
+                  <th scope="col">Pilot</th>
+                  {#if table.runLength !== undefined}
+                    <th scope="col" class="num">Best {table.runLength} in a row</th>
+                  {/if}
+                  {#if table.showWins}<th scope="col" class="num">Wins</th>{/if}
+                  {#if table.showPoints}<th scope="col" class="num">Points</th>{/if}
+                  <th scope="col" class="num">Best lap</th>
+                  <th scope="col" class="num">Most laps</th>
+                  <th scope="col"><span class="sr-only">Notes</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each table.rows as row (row.placed.pilot)}
+                  <tr>
+                    <td class="num place">{row.position}</td>
+                    <th scope="row">{row.callsign}</th>
+                    {#if table.runLength !== undefined}
+                      <td class="num strong">
+                        {formatMicros(row.bestRunMicros)}
+                        {#if row.bestRunFrom}
+                          {@const from = row.bestRunFrom}
+                          <button
+                            type="button"
+                            class="link from"
+                            aria-label="{row.callsign}'s best run: {from.name}"
+                            onclick={() => (openedId = from.race)}
+                          >
+                            {raceLabel(from)}
+                          </button>
+                        {/if}
+                      </td>
+                    {/if}
+                    {#if table.showWins}<td class="num">{row.placed.wins}</td>{/if}
+                    {#if table.showPoints}<td class="num">{row.placed.points}</td>{/if}
+                    <td class="num">
+                      {formatMicros(row.placed.best_lap_micros)}
+                      {#if row.bestLapFrom}
+                        {@const from = row.bestLapFrom}
+                        <button
+                          type="button"
+                          class="link from"
+                          aria-label="{row.callsign}'s best lap: {from.name}"
+                          onclick={() => (openedId = from.race)}
+                        >
+                          {raceLabel(from)}
+                        </button>
+                      {/if}
+                    </td>
+                    <td class="num">{row.placed.laps}</td>
+                    <td class="flags">
+                      {#if row.placed.position_set}<Badge tone="violet">Set by hand</Badge>{/if}
+                      {#if row.placed.disqualified}<Badge tone="danger">Disqualified</Badge>{/if}
+                      {#if !row.placed.flew}<Badge tone="neutral">Did not fly</Badge>{/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+
+          {#if races.length > 0}
+            <h3 class="sub">Races of {phase.def.label}</h3>
+            <ol class="races" aria-label="Races of {phase.def.label}">
+              {#each [...races].reverse() as entry (entry.race)}
+                {@const race = entry.view}
+                <li class:discarded={race.state === 'Discarded'}>
+                  <button
+                    type="button"
+                    class="link race-name"
+                    aria-label="Open {entry.name}"
+                    onclick={() => (openedId = entry.race)}
+                  >
+                    {raceLabel(entry)}
+                  </button>
+                  <Badge tone={race.state === 'Saved' ? 'success' : 'neutral'}>
+                    {raceStateLabel(race)}
+                  </Badge>
+                  <span class="finish">
+                    {#each finishOrder(race) as seat (`${seat.adapter}/${seat.seat}`)}
+                      {@const laps = seat.laps.filter((lap) => !lap.restart).length}
+                      <span>
+                        {seat.finish}. {seat.pilot === undefined
+                          ? names.who('Open')
+                          : names.pilot(seat.pilot)}
+                        <span class="faint">({laps} {laps === 1 ? 'lap' : 'laps'})</span>
+                      </span>
+                    {/each}
+                  </span>
+                  {#if race.note}<span class="faint">“{race.note}”</span>{/if}
+                  <a class="open" href={formatHash({ kind: 'marshal', race: race.race })}
+                    >Open in Marshal</a
+                  >
+                </li>
+              {/each}
+            </ol>
+          {/if}
         {/if}
       {/if}
     </Card>
@@ -311,6 +460,98 @@
   }
   .open {
     margin-left: auto;
+  }
+  /* A button that reads as a link: it moves around this page, it does not leave it. */
+  .link {
+    appearance: none;
+    border: 0;
+    padding: 0;
+    background: none;
+    font: inherit;
+    color: var(--gf-accent);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .link:focus-visible {
+    outline: 2px solid var(--gf-accent);
+    outline-offset: 2px;
+  }
+  /* Under a best time: the race it was flown in. */
+  .from {
+    display: block;
+    margin-left: auto;
+    font-family: var(--gf-font-family);
+    font-size: var(--gf-font-size-xs);
+    font-weight: var(--gf-font-weight-regular, 400);
+    white-space: nowrap;
+  }
+  .trail {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gf-space-2);
+    margin-bottom: var(--gf-space-3);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .race-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+    margin-bottom: var(--gf-space-2);
+  }
+  .race-title {
+    margin: 0;
+    font-size: var(--gf-font-size-lg);
+  }
+  .laps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-1);
+  }
+  .laps li {
+    padding: 1px var(--gf-space-2);
+    border-radius: var(--gf-radius-sm);
+    border: 1px solid var(--gf-border-subtle);
+    font-family: var(--gf-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--gf-font-size-sm);
+    white-space: nowrap;
+  }
+  .lap-n {
+    color: var(--gf-text-muted);
+    margin-right: var(--gf-space-1);
+  }
+  .laps li.in-run,
+  .swatch.in-run {
+    background: var(--gf-elevated);
+    border-color: var(--gf-accent);
+  }
+  .laps li.best {
+    font-weight: var(--gf-font-weight-bold);
+  }
+  .key {
+    margin-top: var(--gf-space-3);
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+  }
+  .swatch {
+    display: inline-block;
+    width: 0.9em;
+    height: 0.9em;
+    border-radius: 3px;
+    border: 1px solid var(--gf-border-subtle);
+  }
+  .swatch.best {
+    border-width: 2px;
+    border-color: var(--gf-text);
+    margin-left: var(--gf-space-3);
   }
   .sr-only {
     position: absolute;
