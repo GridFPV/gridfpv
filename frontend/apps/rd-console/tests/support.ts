@@ -165,3 +165,10 @@ export async function openLive(
   await live.reloadVideo();
   return { session, live };
 }
+
+/** The overlay's look as a fresh Director gives it: top left, full size, no logos. */
+export const OVERLAY_LOOK: import('@gridfpv/types').OverlayLook = {
+  placement: { corner: 'TopLeft', x: 24, y: 24, scale: 100, opacity: 90 },
+  logo_left: false,
+  logo_right: false
+};

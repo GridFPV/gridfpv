@@ -5,9 +5,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/svelte';
 import { waitFor } from '@testing-library/dom';
-import type { EventView, LapView, Pilot } from '@gridfpv/types';
+import type { EventMeta, EventView, LapView, Pilot } from '@gridfpv/types';
 import ReplayOverlay from '../src/screens/ReplayOverlay.svelte';
 import { eventView, heat, race, raceSeat } from './competition.js';
+import { OVERLAY_LOOK } from './support.js';
 
 const S = 1_000_000;
 const START = 1_000 * S;
@@ -63,7 +64,10 @@ function open(over: { view?: EventView; race?: string; fail?: string } = {}) {
     }),
     listPilots: vi.fn(async () => PILOTS),
     listTimers: vi.fn(async () => []),
-    listClasses: vi.fn(async () => [])
+    listClasses: vi.fn(async () => []),
+    listEvents: vi.fn(async () => [{ id: EVENT, name: 'RaceGOW 6' } as EventMeta]),
+    getOverlayLook: vi.fn(async () => OVERLAY_LOOK),
+    overlayLogoUrl: (side: 'left' | 'right') => `http://d.local/overlay/logo/${side}`
   };
   render(ReplayOverlay, { session, event: EVENT, race: over.race ?? RACE });
   return session;
@@ -82,9 +86,12 @@ describe('ReplayOverlay', () => {
     expect(await handle()!.ready()).toBe('');
     expect(session.getEventState).toHaveBeenCalledWith(EVENT);
     // The first frame is 5 s before the start: the countdown.
-    expect(screen.getByTestId('overlay-state')).toHaveTextContent('Starting');
-    expect(screen.getByTestId('overlay-heat')).toHaveTextContent('Track 2');
-    expect(screen.getByRole('timer')).toHaveTextContent('0:05.000');
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('STAGING');
+    // The title is the run's name, as its recording is named.
+    expect(screen.getByTestId('overlay-heat')).toHaveTextContent('RaceGOW 6 Track 2 race 1');
+    expect(screen.getByRole('timer')).toHaveTextContent('0:05.0');
+    // The look was read once, with the race.
+    expect(session.getOverlayLook).toHaveBeenCalledTimes(1);
   });
 
   it('shows the race as it stood at each moment of the recording', async () => {
@@ -93,22 +100,27 @@ describe('ReplayOverlay', () => {
     await handle()!.ready();
     // 4 s into the file: a second to go.
     await handle()!.seek(4000);
-    expect(screen.getByRole('timer')).toHaveTextContent('0:01.000');
+    expect(screen.getByRole('timer')).toHaveTextContent('0:01.0');
     // 17 s into the file is 12 s into the race: one lap flown.
     await handle()!.seek(17_000);
-    expect(screen.getByTestId('overlay-state')).toHaveTextContent('Live');
-    expect(screen.getByRole('timer')).toHaveTextContent('0:12.000');
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('LIVE');
+    expect(screen.getByRole('timer')).toHaveTextContent('0:12.0');
     expect(stat('laps')).toBe('1');
-    expect(stat('last')).toBe('10.000');
+    // Lap 1 starts at the hole shot, a second after the tone: it is listed first, as HS.
+    expect(
+      Array.from(document.querySelectorAll('.lap')).map((li) =>
+        li.textContent?.replace(/\s+/g, ' ').trim()
+      )
+    ).toEqual(['HS 0:01.000', 'L1 0:10.000']);
     expect(screen.getByTestId('overlay-solo')).toHaveAccessibleName('Ace');
     // 31 s into the file: the race stopped 25 s in, and the clock stands there.
     await handle()!.seek(31_000);
-    expect(screen.getByTestId('overlay-state')).toHaveTextContent('Finished');
-    expect(screen.getByRole('timer')).toHaveTextContent('0:25.000');
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('FINISHED');
+    expect(screen.getByRole('timer')).toHaveTextContent('0:25.0');
     expect(stat('laps')).toBe('2');
     // And back: any moment can be asked for in any order.
     await handle()!.seek(0);
-    expect(screen.getByTestId('overlay-state')).toHaveTextContent('Starting');
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('STAGING');
     expect(stat('laps')).toBe('0');
   });
 
@@ -116,8 +128,11 @@ describe('ReplayOverlay', () => {
     open();
     await waitFor(() => expect(handle()).toBeDefined());
     await handle()!.ready();
+    // The clock shows tenths, so two frames inside one tenth are the same picture, and the
+    // next tenth is a new one.
     const a = await handle()!.seek(17_000);
-    const b = await handle()!.seek(17_033);
+    expect(await handle()!.seek(17_033)).toBe(a);
+    const b = await handle()!.seek(17_100);
     expect(b).not.toBe(a);
     // After the stop nothing moves: the same key, so no new picture is needed.
     const c = await handle()!.seek(31_000);

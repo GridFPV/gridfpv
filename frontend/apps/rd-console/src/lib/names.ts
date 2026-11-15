@@ -45,6 +45,8 @@ export interface Names {
   seat(adapter: AdapterId, seat: SeatRef, position?: number): string;
   /** What times a seat: the timer's name, "Bench", or "Unknown timer". */
   timer(adapter: AdapterId): string;
+  /** The pilot's own colour (`#RRGGBB`), when they have one. For a dot beside the name. */
+  pilotColor(id: PilotId): string | undefined;
 }
 
 /** "1st", "2nd", "3rd", "4th", "11th", "22nd". */
@@ -99,5 +101,7 @@ export function buildNames(
   const seat = (adapter: AdapterId, ref: SeatRef, position?: number): string =>
     seatLabel(timers, adapter, ref, position);
   const timer = (adapter: AdapterId): string => timerName(timers, adapter);
-  return { phase, pilot, klass, who, seat, timer };
+  const colors = new Map(pilots.map((p) => [p.id, p.color]));
+  const pilotColor = (id: PilotId): string | undefined => colors.get(id);
+  return { phase, pilot, klass, who, seat, timer, pilotColor };
 }

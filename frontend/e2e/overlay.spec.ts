@@ -72,7 +72,9 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
     const region = overlay.getByRole('region', { name: 'Race overlay' });
     await expect(region).toBeVisible({ timeout: 15_000 });
     await expect(overlay.getByTestId('overlay-idle')).toHaveText(EVENT, { timeout: 15_000 });
-    await expect(overlay.getByRole('timer')).toHaveCount(0);
+    // Waiting for a race: the clock stands at zero.
+    await expect(overlay.getByRole('timer')).toHaveText('0:00.0');
+    await expect(overlay.getByTestId('overlay-state')).toHaveText('READY');
 
     // Bare and see-through: no shell around it, and nothing painted behind it.
     await expect(overlay.getByRole('navigation')).toHaveCount(0);
@@ -104,9 +106,11 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
 
     // ── Start. The overlay names the heat and counts down, with both pilots listed. ──────
     await page.getByRole('button', { name: 'Start', exact: true }).click();
-    await expect(overlay.getByTestId('overlay-heat')).toHaveText(HEAT, { timeout: 15_000 });
-    await expect(overlay.getByTestId('overlay-state')).toHaveText('Starting');
-    await expect(overlay.getByRole('timer')).toHaveAttribute('data-mode', 'remaining');
+    await expect(overlay.getByTestId('overlay-heat')).toHaveText(`${EVENT} ${HEAT} race 1`, {
+      timeout: 15_000
+    });
+    await expect(overlay.getByTestId('overlay-state')).toHaveText('STAGING');
+    await expect(overlay.getByRole('timer')).toHaveAttribute('data-phase', 'staging');
     const ace = overlayRow(overlay, ACE);
     const bee = overlayRow(overlay, BEE);
     await expect(ace).toBeVisible();
@@ -121,8 +125,8 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
     // ── Racing: the clock counts up and laps follow the crossings ────────────────────────
     const stop = page.getByRole('button', { name: 'Stop', exact: true });
     await expect(stop).toBeVisible({ timeout: 20_000 });
-    await expect(overlay.getByTestId('overlay-state')).toHaveText('Live', { timeout: 15_000 });
-    await expect(overlay.getByRole('timer')).toHaveAttribute('data-mode', 'elapsed');
+    await expect(overlay.getByTestId('overlay-state')).toHaveText('LIVE', { timeout: 15_000 });
+    await expect(overlay.getByRole('timer')).toHaveAttribute('data-phase', 'racing');
 
     const aceCrossing = page.getByRole('button', { name: 'Crossing for Seat 1' });
     const beeCrossing = page.getByRole('button', { name: 'Crossing for Seat 2' });
@@ -138,8 +142,8 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
     }
     await expect(stat(ace, 'place')).toHaveText('1');
     await expect(stat(bee, 'place')).toHaveText('2');
-    await expect(stat(ace, 'last')).toHaveText(/^\d+\.\d{3}$/);
-    await expect(stat(ace, 'best')).toHaveText(/^\d+\.\d{3}$/);
+    await expect(stat(ace, 'last')).toHaveText(/^\d:\d\d\.\d{3}$/);
+    await expect(stat(ace, 'best')).toHaveText(/^\d:\d\d\.\d{3}$/);
 
     // A picture of it mid-race, over a stand-in for dark video.
     mkdirSync(ARTIFACTS, { recursive: true });
@@ -174,10 +178,15 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
 
     // ── Stop and save: the overlay shows the stopped race, then the saved result ─────────
     await stop.click();
-    await expect(overlay.getByTestId('overlay-state')).toHaveText('Finished', { timeout: 15_000 });
+    await expect(overlay.getByTestId('overlay-state')).toHaveText('FINISHED', { timeout: 15_000 });
     await page.getByRole('button', { name: 'Save', exact: true }).click();
-    await expect(overlay.getByTestId('overlay-state')).toHaveText('Result', { timeout: 15_000 });
-    await expect(overlay.getByTestId('overlay-heat')).toHaveText(HEAT);
+    await expect(overlay.getByRole('region', { name: 'Race overlay' })).toHaveAttribute(
+      'data-state',
+      'Saved',
+      { timeout: 15_000 }
+    );
+    await expect(overlay.getByTestId('overlay-state')).toHaveText('FINISHED');
+    await expect(overlay.getByTestId('overlay-heat')).toHaveText(`${EVENT} ${HEAT} race 1`);
     await expect(stat(ace, 'laps')).toHaveText('3');
     const resultText = await overlay.locator('body').innerText();
     for (const handle of raw) expect(resultText).not.toContain(handle);

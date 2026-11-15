@@ -647,8 +647,11 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      rulings on heats and phases), the Run page (start, countdown and tone, stop, save or
      discard), and the Marshal page (a to-do list, lap rulings, the race's signal trace,
      protests). A heat is timed by a timer, or by the bench, where crossings are a button.
-   - The race overlay (`#/overlay/race`, a page for an OBS browser source) is ported from the
-     `racegow` branch, with an Overlays card on the event page.
+   - The race overlay (`#/overlay/race`, a page for an OBS browser source) is the panel
+     grid-rh's race overlay drew, on Grid's data: the same sizes, the run's name as the
+     title, the hole shot, pilot colours, and two logos. Where it sits (corner, offsets,
+     size, background) is one look for the whole Director, set on the Overlays page and
+     used live, in the replay and in every redrawn video.
 6. Timers. **The OFT adapter is built:**
    - `adapters::oft`: a Timer's messages translated to Grid's events, and the clock fit.
      Pure, tested with messages from the spec.

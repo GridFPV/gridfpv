@@ -13,7 +13,11 @@ import {
   consecutiveLaps,
   inRun,
   lastResult,
+  formatClockMs,
+  formatLapMicros,
+  overlayClock,
   overlayRows,
+  overlayTitle,
   overlayStateWord,
   overlaySubject,
   overlayUrl
@@ -124,10 +128,82 @@ describe('which race the overlay shows', () => {
   });
 
   it('has one word for each state', () => {
-    expect(overlayStateWord(race('q1', 1, 'Staging'))).toBe('Starting');
-    expect(overlayStateWord(race('q1', 1, 'Running'))).toBe('Live');
-    expect(overlayStateWord(race('q1', 1, 'Stopped'))).toBe('Finished');
-    expect(overlayStateWord(race('q1', 1, 'Saved'))).toBe('Result');
+    expect(overlayStateWord(undefined)).toBe('READY');
+    expect(overlayStateWord(race('q1', 1, 'Staging'))).toBe('STAGING');
+    expect(overlayStateWord(race('q1', 1, 'Running'))).toBe('LIVE');
+    expect(overlayStateWord(race('q1', 1, 'Running'), 'overtime')).toBe('TIME UP');
+    expect(overlayStateWord(race('q1', 1, 'Stopped'))).toBe('FINISHED');
+    expect(overlayStateWord(race('q1', 1, 'Saved'))).toBe('FINISHED');
+    expect(overlayStateWord(race('q1', 1, 'Discarded'))).toBe('DISCARDED');
+  });
+});
+
+describe('the clock', () => {
+  const timed = { Timed: { micros: 120 * S, grace_micros: 10 * S } };
+
+  it('reads to the tenth, cut and not rounded', () => {
+    expect(formatClockMs(0)).toBe('0:00.0');
+    expect(formatClockMs(83_499)).toBe('1:23.4');
+    expect(formatClockMs(-1_250)).toBe('-0:01.2');
+  });
+
+  it('writes a lap as minutes, seconds and thousandths, and a dash for none', () => {
+    expect(formatLapMicros(4.535 * S)).toBe('0:04.535');
+    expect(formatLapMicros(71.5 * S)).toBe('1:11.500');
+    expect(formatLapMicros(undefined)).toBe('—');
+  });
+
+  it('with no race it stands at zero', () => {
+    expect(overlayClock(undefined, 50 * S)).toEqual({ phase: 'idle', text: '0:00.0', elapsed: '' });
+  });
+
+  it('counts down to the tone while staging', () => {
+    const staging = race('q1', 1, 'Staging', { tone_at: 50 * S });
+    expect(overlayClock(staging, 47.5 * S)).toEqual({
+      phase: 'staging',
+      text: '0:02.5',
+      elapsed: ''
+    });
+  });
+
+  it('counts up for a race with no time limit', () => {
+    const running = race('q1', 1, 'Running', { started_at: 50 * S });
+    expect(overlayClock(running, 62.34 * S)).toEqual({
+      phase: 'racing',
+      text: '0:12.3',
+      elapsed: ''
+    });
+  });
+
+  it('counts a timed race down, with the time since the start beside it', () => {
+    const running = race('q1', 1, 'Running', { started_at: 50 * S, end: timed });
+    expect(overlayClock(running, 80 * S)).toEqual({
+      phase: 'racing',
+      text: '1:30.0',
+      elapsed: '0:30.0'
+    });
+    // Past the time it goes below zero and reads as time up, but never as "-0:00.0".
+    expect(overlayClock(running, 170.05 * S)).toMatchObject({ phase: 'overtime', text: '0:00.0' });
+    expect(overlayClock(running, 173 * S)).toMatchObject({ phase: 'overtime', text: '-0:03.0' });
+  });
+
+  it('a stopped race is frozen where it stopped', () => {
+    const stopped = race('q1', 1, 'Stopped', { started_at: 50 * S, stopped_at: 111.5 * S });
+    expect(overlayClock(stopped, 500 * S)).toEqual({ phase: 'done', text: '1:01.5', elapsed: '' });
+    const over = race('q1', 1, 'Saved', { started_at: 50 * S, stopped_at: 175 * S, end: timed });
+    expect(overlayClock(over, 500 * S)).toMatchObject({ phase: 'overtime', text: '-0:05.0' });
+  });
+});
+
+describe('the title', () => {
+  it("is the run's name: the event, the heat, and which race of the heat", () => {
+    const phases = [heat('q1', 'Track 2', ['p-1a'])];
+    const first = race('q1', 1, 'Saved');
+    const second = race('q1', 2, 'Running');
+    const view = eventView({ phases, races: [first, second] });
+    const names = buildNames(phases, []);
+    expect(overlayTitle(view, names, second, 'RaceGOW 6')).toBe('RaceGOW 6 Track 2 race 2');
+    expect(overlayTitle(view, names, first)).toBe('Track 2 race 1');
   });
 });
 
@@ -234,7 +310,7 @@ describe('overlayRows', () => {
     timerView('gate-x1y2', 'Gate', 4)
   ]);
 
-  it('gives one row per seat in lineup order with the numbers so far', () => {
+  it('gives one row per seat, the placed ones first in finishing order', () => {
     const running = race('q', 1, 'Running', {
       seats: [
         raceSeat(0, 'p-2b', { finish: 2, laps: [lap(1, 11)], best_lap_micros: 11 * S }),
@@ -246,18 +322,35 @@ describe('overlayRows', () => {
       ]
     });
     const rows = overlayRows(running, names);
-    expect(rows.map((row) => row.name)).toEqual(['Bee', 'Ace']);
-    expect(rows[1]).toMatchObject({
+    expect(rows.map((row) => row.name)).toEqual(['Ace', 'Bee']);
+    expect(rows[0]).toMatchObject({
       place: 1,
       laps: 2,
       lapMicros: [9.5 * S, 8.25 * S],
       lastLapMicros: 8.25 * S,
       bestLapMicros: 8.25 * S
     });
-    expect(rows[0]).toMatchObject({ place: 2, laps: 1, lastLapMicros: 11 * S });
+    expect(rows[1]).toMatchObject({ place: 2, laps: 1, lastLapMicros: 11 * S });
     // No run is worked out unless the heat is ranked on one.
-    expect(rows[1].bestRun).toBeUndefined();
+    expect(rows[0].bestRun).toBeUndefined();
     expect(new Set(rows.map((row) => row.key)).size).toBe(2);
+  });
+
+  it("carries the pilot's colour and the hole shot, when there is one", () => {
+    const coloured = buildNames(
+      [heat('q', 'Qualifying', ['p-1a', 'p-2b'])],
+      [{ id: 'p-1a', callsign: 'Ace', vtx_types: [], color: '#ff8800' }, pilots[1]]
+    );
+    const running = race('q', 1, 'Running', {
+      seats: [
+        raceSeat(0, 'p-1a', { start_at: 10 * S, hole_shot: { crossing: 1, at: 11.25 * S } }),
+        raceSeat(1, 'p-2b', { start_at: 10 * S })
+      ]
+    });
+    const rows = overlayRows(running, coloured);
+    expect(rows[0]).toMatchObject({ color: '#ff8800', holeShotMicros: 1.25 * S });
+    expect(rows[1].color).toBeUndefined();
+    expect(rows[1].holeShotMicros).toBeUndefined();
   });
 
   it('a staging race has every seat with nothing flown', () => {

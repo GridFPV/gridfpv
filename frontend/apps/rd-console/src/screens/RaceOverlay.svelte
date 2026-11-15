@@ -15,9 +15,10 @@
    * on a dark panel, `'light'` is dark text on a light panel.
    */
   import { untrack } from 'svelte';
-  import type { EventMeta } from '@gridfpv/types';
+  import type { EventMeta, OverlayLook } from '@gridfpv/types';
   import { EventLive, type LiveSession } from '../lib/eventLive.svelte.js';
   import { overlaySubject } from '../lib/overlay.js';
+  import { logoUrls } from '../lib/overlayPlacement.js';
   import type { OverlayTheme } from '../lib/route.js';
   import type { Session } from '../lib/session.svelte.js';
   import RacePanel from './RacePanel.svelte';
@@ -31,7 +32,7 @@
     activePollMs = ACTIVE_POLL_MS
   }: {
     /** The reads the page makes. Narrow, so a test can hand in a stand-in. */
-    session: LiveSession & Pick<Session, 'readActiveEvent'>;
+    session: LiveSession & Pick<Session, 'readActiveEvent' | 'getOverlayLook' | 'overlayLogoUrl'>;
     theme?: OverlayTheme;
     activePollMs?: number;
   } = $props();
@@ -41,6 +42,9 @@
   // one being raced. The Director is asked on a slow interval; a read that fails keeps what
   // is showing.
   let event = $state.raw<EventMeta | undefined>(undefined);
+  /** Where the panel sits and which logos it has. Read with the active event, so a change
+   * made on the Overlays page shows here within a few seconds. */
+  let look = $state.raw<OverlayLook | undefined>(undefined);
   $effect(() => {
     let stopped = false;
     const check = async () => {
@@ -50,6 +54,13 @@
         if (active?.id !== event?.id || active?.name !== event?.name) event = active ?? undefined;
       } catch {
         // The Director did not answer. Keep showing what we have.
+      }
+      try {
+        const read = await session.getOverlayLook();
+        if (stopped) return;
+        if (JSON.stringify(read) !== JSON.stringify(look)) look = read;
+      } catch {
+        // The same: keep the look we have.
       }
     };
     void untrack(check);
@@ -112,4 +123,13 @@
   const names = $derived(live?.names);
 </script>
 
-<RacePanel {theme} {race} {names} view={live?.view} {now} eventName={event?.name} />
+<RacePanel
+  {theme}
+  {race}
+  {names}
+  view={live?.view}
+  {now}
+  eventName={event?.name}
+  placement={look?.placement}
+  logos={logoUrls(look, (side) => session.overlayLogoUrl(side))}
+/>

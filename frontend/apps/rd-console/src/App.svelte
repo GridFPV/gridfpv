@@ -232,7 +232,7 @@
     {:else if route.kind === 'event' && route.section === 'results'}
       <ResultsPage {live} />
     {:else if route.kind === 'event' && route.section === 'overlays'}
-      <OverlaysPage />
+      <OverlaysPage {session} />
     {:else}
       <EventPage {session} event={session.currentEvent} {live} />
     {/if}

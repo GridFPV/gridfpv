@@ -54,13 +54,14 @@ const EXPORTS_KEPT: usize = 5;
 const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
 /// The plain files that go into a copy, when they exist.
-pub const KEPT_FILES: [&str; 7] = [
+pub const KEPT_FILES: [&str; 8] = [
     crate::pilots::PILOTS_FILE,
     crate::classes::CLASSES_FILE,
     crate::classes::HIDDEN_CLASSES_FILE,
     crate::library::FORMATS_FILE,
     crate::library::PROFILES_FILE,
     crate::timers::TIMERS_FILE,
+    crate::overlay::OVERLAY_FILE,
     ACTIVE_EVENT_FILE,
 ];
 

@@ -65,6 +65,11 @@ import {
   dataExportUrl,
   postDataImport,
   deleteDataImport,
+  getOverlayLook,
+  putOverlayLook,
+  overlayLogoUrl,
+  putOverlayLogo,
+  deleteOverlayLogo,
   getEventState,
   sendCommand,
   createBracket,
@@ -110,6 +115,8 @@ import type {
   DataCopy,
   DataExport,
   DataInfo,
+  OverlayLook,
+  OverlayPlacement,
   UpdatePilotRequest
 } from '@gridfpv/types';
 
@@ -211,6 +218,11 @@ const realApi = {
   dataExportUrl,
   postDataImport,
   deleteDataImport,
+  getOverlayLook,
+  putOverlayLook,
+  overlayLogoUrl,
+  putOverlayLogo,
+  deleteOverlayLogo,
   getEventState,
   sendCommand,
   createBracket,
@@ -561,6 +573,37 @@ export class Session {
       await this.#api.deleteDataImport(this.baseUrl, token);
       return true as const;
     });
+  }
+
+  // ── The race overlay's look ────────────────────────────────────────────────
+
+  /** Where the race overlay sits and which logos it has (`GET /overlay/look`, open). */
+  getOverlayLook(): Promise<OverlayLook> {
+    return this.#api.getOverlayLook(this.baseUrl, { token: this.#token });
+  }
+
+  /** Move or resize the race overlay. `undefined` on a cancelled prompt. */
+  putOverlayLook(placement: OverlayPlacement): Promise<OverlayLook | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.putOverlayLook(this.baseUrl, placement, token)
+    );
+  }
+
+  /** Where one of the overlay's logos is served from. */
+  overlayLogoUrl(side: 'left' | 'right'): string {
+    return this.#api.overlayLogoUrl(this.baseUrl, side);
+  }
+
+  /** Keep a picture as one of the overlay's logos. `undefined` on a cancelled prompt. */
+  putOverlayLogo(side: 'left' | 'right', file: Blob): Promise<OverlayLook | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.putOverlayLogo(this.baseUrl, side, file, token)
+    );
+  }
+
+  /** Take one of the overlay's logos away. `undefined` on a cancelled prompt. */
+  deleteOverlayLogo(side: 'left' | 'right'): Promise<OverlayLook | undefined> {
+    return this.#privilegedWrite((token) => this.#api.deleteOverlayLogo(this.baseUrl, side, token));
   }
 
   // ── Saved formats and seat profiles ────────────────────────────────────────

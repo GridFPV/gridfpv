@@ -8,10 +8,41 @@
    * preview is the same page in a frame, drawn at 1920x1080 and scaled down, over a dark or
    * light backdrop that stands in for the video. It is opened on demand, because it is a
    * second live page.
+   *
+   * Under that is where the race overlay sits: the corner, how far in from it, the size and
+   * how solid the background is, and the two logos of its title line. There is one such
+   * look for the whole Director. Each change is saved as it is made, and the live page, the
+   * replay and every redrawn video follow it.
    */
-  import { Button, toast } from '@gridfpv/components';
+  import { Button, Input, toast } from '@gridfpv/components';
+  import type { OverlayLook, OverlayPlacement } from '@gridfpv/types';
   import { OVERLAY_CATALOG, overlayUrl } from '../lib/overlay.js';
+  import {
+    CORNERS,
+    CORNER_LABELS,
+    OPACITY_MAX,
+    OPACITY_MIN,
+    SCALE_MAX,
+    SCALE_MIN,
+    logoUrls,
+    placementProblem
+  } from '../lib/overlayPlacement.js';
   import type { OverlayName, OverlayTheme } from '../lib/route.js';
+  import type { Session } from '../lib/session.svelte.js';
+
+  let {
+    session
+  }: {
+    /** The reads and writes the card makes. Narrow, so a test can hand in a stand-in. */
+    session: Pick<
+      Session,
+      | 'getOverlayLook'
+      | 'putOverlayLook'
+      | 'overlayLogoUrl'
+      | 'putOverlayLogo'
+      | 'deleteOverlayLogo'
+    >;
+  } = $props();
 
   /** The size the preview's page is drawn at before it is scaled to fit. */
   const SOURCE_WIDTH = 1920;
@@ -26,6 +57,65 @@
   let previewing = $state<Record<OverlayName, boolean>>({ race: false });
   /** The preview box's width on screen, which sets the scale. */
   let previewWidth = $state(0);
+
+  // ── Where the race overlay sits, and its logos ─────────────────────────────
+  const say = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  let look = $state.raw<OverlayLook | undefined>(undefined);
+  let lookError = $state<string | undefined>(undefined);
+  let placing = $state(false);
+  /** Counts the saves, so the preview and the logo pictures are fetched again after one. */
+  let saves = $state(0);
+  $effect(() => {
+    session.getOverlayLook().then(
+      (read) => (look = read),
+      (e) => (lookError = say(e))
+    );
+  });
+
+  async function change(run: () => Promise<OverlayLook | undefined>): Promise<void> {
+    if (placing) return;
+    placing = true;
+    lookError = undefined;
+    try {
+      const saved = await run();
+      if (saved) {
+        look = saved;
+        saves += 1;
+      }
+    } catch (e) {
+      lookError = say(e);
+    } finally {
+      placing = false;
+    }
+  }
+
+  function place(fields: Partial<OverlayPlacement>): void {
+    if (!look) return;
+    const next = { ...look.placement, ...fields };
+    const problem = placementProblem(next);
+    if (problem) {
+      lookError = problem;
+      return;
+    }
+    void change(() => session.putOverlayLook(next));
+  }
+  const num = (e: Event) => Number((e.currentTarget as HTMLInputElement).value);
+
+  const SIDES = [
+    { side: 'left', label: 'Left logo' },
+    { side: 'right', label: 'Right logo' }
+  ] as const;
+  let pickers = $state<Record<'left' | 'right', HTMLInputElement | undefined>>({
+    left: undefined,
+    right: undefined
+  });
+  function chooseLogo(side: 'left' | 'right', e: Event): void {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (file) void change(() => session.putOverlayLogo(side, file));
+  }
+  const logos = $derived(logoUrls(look, (side) => session.overlayLogoUrl(side), saves));
 
   async function copy(url: string): Promise<void> {
     try {
@@ -83,17 +173,167 @@
           aria-label="{info.title} overlay preview"
           bind:clientWidth={previewWidth}
         >
-          <!-- The real overlay route, as OBS loads it. Nothing in it can be clicked. -->
-          <iframe
-            class="preview-frame"
-            title="{info.title} overlay preview"
-            src={url}
-            tabindex="-1"
-            width={SOURCE_WIDTH}
-            height={SOURCE_HEIGHT}
-            style:transform="scale({previewWidth / SOURCE_WIDTH})"
-          ></iframe>
+          <!-- The real overlay route, as OBS loads it. Nothing in it can be clicked. It is
+               loaded again after each change to the look, so the change shows at once. -->
+          {#key saves}
+            <iframe
+              class="preview-frame"
+              title="{info.title} overlay preview"
+              src={url}
+              tabindex="-1"
+              width={SOURCE_WIDTH}
+              height={SOURCE_HEIGHT}
+              style:transform="scale({previewWidth / SOURCE_WIDTH})"
+            ></iframe>
+          {/key}
         </div>
+      {/if}
+      {#if info.name === 'race' && look}
+        {@const placement = look.placement}
+        <fieldset class="placement" aria-label="Placement">
+          <legend>Placement: the same live, in the replay and in every redrawn video</legend>
+          <div class="theme-pick" role="radiogroup" aria-label="Corner">
+            {#each CORNERS as corner (corner)}
+              <button
+                type="button"
+                class="theme-opt"
+                role="radio"
+                aria-checked={placement.corner === corner}
+                disabled={placing}
+                onclick={() => place({ corner })}
+              >
+                {CORNER_LABELS[corner]}
+              </button>
+            {/each}
+          </div>
+          <div class="placerow">
+            <label class="field">
+              <span>In from the side (px)</span>
+              <Input
+                type="number"
+                min="0"
+                max="4000"
+                value={String(placement.x)}
+                aria-label="In from the side"
+                disabled={placing}
+                onchange={(e: Event) => place({ x: num(e) })}
+              />
+            </label>
+            <label class="field">
+              <span>In from the top or bottom (px)</span>
+              <Input
+                type="number"
+                min="0"
+                max="4000"
+                value={String(placement.y)}
+                aria-label="In from the top or bottom"
+                disabled={placing}
+                onchange={(e: Event) => place({ y: num(e) })}
+              />
+            </label>
+          </div>
+          <div class="placerow">
+            <label class="field">
+              <span>Size (%)</span>
+              <Input
+                type="number"
+                min={String(SCALE_MIN)}
+                max={String(SCALE_MAX)}
+                step="5"
+                value={String(placement.scale)}
+                aria-label="Size"
+                disabled={placing}
+                onchange={(e: Event) => place({ scale: num(e) })}
+              />
+            </label>
+            <input
+              class="slider"
+              type="range"
+              min={SCALE_MIN}
+              max={SCALE_MAX}
+              step="5"
+              value={placement.scale}
+              aria-label="Size slider"
+              disabled={placing}
+              onchange={(e) => place({ scale: num(e) })}
+            />
+          </div>
+          <div class="placerow">
+            <label class="field">
+              <span>Background (%)</span>
+              <Input
+                type="number"
+                min={String(OPACITY_MIN)}
+                max={String(OPACITY_MAX)}
+                step="5"
+                value={String(placement.opacity)}
+                aria-label="Background"
+                disabled={placing}
+                onchange={(e: Event) => place({ opacity: num(e) })}
+              />
+            </label>
+            <input
+              class="slider"
+              type="range"
+              min={OPACITY_MIN}
+              max={OPACITY_MAX}
+              step="5"
+              value={placement.opacity}
+              aria-label="Background slider"
+              disabled={placing}
+              onchange={(e) => place({ opacity: num(e) })}
+            />
+          </div>
+        </fieldset>
+        <fieldset class="placement" aria-label="Logos">
+          <legend>Logos: one for each end of the title line</legend>
+          <div class="placerow">
+            {#each SIDES as { side, label } (side)}
+              <div class="logo-slot">
+                <span class="logo-name">{label}</span>
+                {#if logos[side]}
+                  <img class="logo-thumb" src={logos[side]} alt="{label} now" />
+                {:else}
+                  <span class="muted" data-testid="no-logo-{side}">
+                    {side === 'left' ? 'None. The GridFPV name shows.' : 'None.'}
+                  </span>
+                {/if}
+                <input
+                  bind:this={pickers[side]}
+                  class="picker"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                  aria-label="{label} picture"
+                  onchange={(e) => chooseLogo(side, e)}
+                />
+                <div class="row-actions">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={placing}
+                    onclick={() => pickers[side]?.click()}
+                  >
+                    Choose a picture
+                  </Button>
+                  {#if logos[side]}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={placing}
+                      aria-label="Remove the {label.toLowerCase()}"
+                      onclick={() => change(() => session.deleteOverlayLogo(side))}
+                    >
+                      Remove
+                    </Button>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        </fieldset>
+      {/if}
+      {#if info.name === 'race' && lookError}
+        <p class="problem" role="alert">{lookError}</p>
       {/if}
     </section>
   {/each}
@@ -178,6 +418,66 @@
   }
   .preview[data-backdrop='light'] {
     background: linear-gradient(135deg, #dfe9f2 0%, #f6f1e4 60%, #c9dcea 100%);
+  }
+  .placement {
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    padding: var(--gf-space-2) var(--gf-space-3) var(--gf-space-3);
+    margin: 0;
+    display: grid;
+    gap: var(--gf-space-3);
+  }
+  .placement legend {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+    padding: 0 var(--gf-space-1);
+  }
+  .placerow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-3);
+    align-items: end;
+  }
+  .placerow .field {
+    display: grid;
+    gap: var(--gf-space-1);
+    min-width: 9rem;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .slider {
+    flex: 1;
+    min-width: 10rem;
+    accent-color: var(--gf-accent);
+  }
+  .logo-slot {
+    display: grid;
+    gap: var(--gf-space-2);
+    min-width: 14rem;
+    align-content: start;
+  }
+  .logo-name {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  /* On a mid grey, so a dark mark and a light one both show. */
+  .logo-thumb {
+    height: 44px;
+    width: auto;
+    max-width: 14rem;
+    object-fit: contain;
+    justify-self: start;
+    padding: var(--gf-space-1);
+    border-radius: var(--gf-radius-sm);
+    background: #4f4f4f;
+  }
+  .picker {
+    display: none;
+  }
+  .problem {
+    margin: 0;
+    color: var(--gf-danger);
+    font-size: var(--gf-font-size-sm);
   }
   .preview-frame {
     position: absolute;

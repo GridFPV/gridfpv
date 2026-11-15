@@ -5,7 +5,10 @@
    */
   import { Card } from '@gridfpv/components';
   import Page from '../Page.svelte';
+  import type { Session } from '../lib/session.svelte.js';
   import EventOverlays from './EventOverlays.svelte';
+
+  let { session }: { session: Session } = $props();
 </script>
 
 <Page
@@ -14,6 +17,6 @@
   lede="Pages that go on top of your video in OBS. They follow the open event and only read."
 >
   <Card elevation="sm">
-    <EventOverlays />
+    <EventOverlays {session} />
   </Card>
 </Page>

@@ -24,6 +24,8 @@ import type {
   DataCopy,
   DataExport,
   DataInfo,
+  OverlayLook,
+  OverlayPlacement,
   CreatePilotRequest,
   CreateTimerRequest,
   DiscoveredTimer,
@@ -767,6 +769,65 @@ export async function deleteDataImport(
     '/data/import',
     { method: 'DELETE', token, fetch: options.fetch },
     'forget the copy'
+  );
+}
+
+/** How the race overlay looks: where it sits and which logos it has (`GET /overlay/look`). */
+export async function getOverlayLook(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<OverlayLook> {
+  return apiJson<OverlayLook>(baseUrl, '/overlay/look', options, "read the overlay's look");
+}
+
+/** Move or resize the race overlay (`PUT /overlay/look`), RD-gated. */
+export async function putOverlayLook(
+  baseUrl: string,
+  placement: OverlayPlacement,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<OverlayLook> {
+  return apiJson<OverlayLook>(
+    baseUrl,
+    '/overlay/look',
+    { method: 'PUT', body: placement, token, fetch: options.fetch },
+    'move the overlay'
+  );
+}
+
+/** Where one of the overlay's two logos is served from (`GET /overlay/logo/{side}`). */
+export function overlayLogoUrl(baseUrl: string, side: 'left' | 'right'): string {
+  return `${trimSlash(baseUrl)}/overlay/logo/${side}`;
+}
+
+/** Keep a picture as one of the overlay's logos (`PUT /overlay/logo/{side}`), RD-gated. */
+export async function putOverlayLogo(
+  baseUrl: string,
+  side: 'left' | 'right',
+  file: Blob,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<OverlayLook> {
+  return apiJson<OverlayLook>(
+    baseUrl,
+    `/overlay/logo/${side}`,
+    { method: 'PUT', file, token, fetch: options.fetch },
+    'keep the logo'
+  );
+}
+
+/** Take one of the overlay's logos away (`DELETE /overlay/logo/{side}`), RD-gated. */
+export async function deleteOverlayLogo(
+  baseUrl: string,
+  side: 'left' | 'right',
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<OverlayLook> {
+  return apiJson<OverlayLook>(
+    baseUrl,
+    `/overlay/logo/${side}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'take the logo away'
   );
 }
 

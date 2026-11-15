@@ -11,6 +11,7 @@
  */
 import type { EventView, Format, LapView, PhaseId, PilotId, RaceView } from '@gridfpv/types';
 import type { Names } from './names.js';
+import { raceNumber } from './marshal.js';
 import { currentRace } from './phases.js';
 import { formatHash, type OverlayName, type OverlayTheme } from './route.js';
 import { raceSeatRows } from './run.js';
@@ -98,20 +99,114 @@ export function overlaySubject(
   return now - since < RESULT_LINGER_MICROS ? { race: result, current: false } : undefined;
 }
 
-/** The race's state in one word, as the overlay shows it. */
-export function overlayStateWord(race: RaceView): string {
-  switch (race.state) {
-    case 'Staging':
-      return 'Starting';
-    case 'Running':
-      return 'Live';
-    case 'Stopped':
-      return 'Finished';
-    case 'Saved':
-      return 'Result';
-    case 'Discarded':
-      return 'Discarded';
+// ── The clock ────────────────────────────────────────────────────────────────
+
+/** What the clock is doing, which sets its colour. */
+export type OverlayClockPhase = 'idle' | 'staging' | 'racing' | 'overtime' | 'done';
+
+/** The overlay's clock at one moment. */
+export interface OverlayClock {
+  phase: OverlayClockPhase;
+  /** What the big clock shows, to the tenth: `1:23.4`. */
+  text: string;
+  /**
+   * The time since the start, shown small under a countdown so a clip always carries a
+   * running clock. Empty when the big clock already counts up, and before the start.
+   */
+  elapsed: string;
+}
+
+/** A clock time to the tenth of a second: `1:23.4`. The tenth is cut, not rounded. */
+export function formatClockMs(ms: number): string {
+  const sign = ms < 0 ? '-' : '';
+  const t = Math.abs(ms);
+  const m = Math.floor(t / 60000);
+  const s = Math.floor((t % 60000) / 1000);
+  const d = Math.floor((t % 1000) / 100);
+  return `${sign}${m}:${String(s).padStart(2, '0')}.${d}`;
+}
+
+/** A lap or run time: `0:04.535`. A dash for none. */
+export function formatLapMicros(micros: number | undefined): string {
+  if (micros === undefined) return '—';
+  const t = Math.max(0, Math.round(micros / 1000));
+  const m = Math.floor(t / 60000);
+  const s = Math.floor((t % 60000) / 1000);
+  return `${m}:${String(s).padStart(2, '0')}.${String(t % 1000).padStart(3, '0')}`;
+}
+
+/** How long a timed race lasts, in milliseconds; `undefined` for a race with no time limit. */
+function timedMs(race: RaceView): number | undefined {
+  const end = race.end;
+  return end !== undefined && typeof end === 'object' && 'Timed' in end
+    ? end.Timed.micros / 1000
+    : undefined;
+}
+
+/**
+ * The clock for a race at `now` (Director clock, microseconds).
+ *
+ * - Counting down to the start: the time to the tone.
+ * - A timed race: the time left. Past it the clock goes below zero and reads as time up.
+ * - Any other race: the time since the start.
+ * - Stopped: frozen where it was.
+ * - No race: `0:00.0`.
+ */
+export function overlayClock(race: RaceView | undefined, now: number): OverlayClock {
+  const idle: OverlayClock = { phase: 'idle', text: '0:00.0', elapsed: '' };
+  if (!race) return idle;
+  if (race.state === 'Staging') {
+    const left = race.tone_at === undefined ? 0 : Math.max(0, (race.tone_at - now) / 1000);
+    return { phase: 'staging', text: formatClockMs(left), elapsed: '' };
   }
+  const started = race.started_at;
+  if (started === undefined) return idle;
+  const running = race.state === 'Running';
+  const at = running ? now : (race.stopped_at ?? started);
+  const t = Math.max(0, (at - started) / 1000);
+  const duration = timedMs(race);
+  if (duration === undefined) {
+    return { phase: running ? 'racing' : 'done', text: formatClockMs(t), elapsed: '' };
+  }
+  const left = duration - t;
+  const over = t > duration;
+  return {
+    phase: over ? 'overtime' : running ? 'racing' : 'done',
+    // Never "-0:00.0": the tenth that reads zero is zero.
+    text: formatClockMs(left > -100 && left < 0 ? 0 : left),
+    elapsed: formatClockMs(t)
+  };
+}
+
+/** The word in the corner: what the race is doing right now. */
+export function overlayStateWord(race: RaceView | undefined, clock?: OverlayClockPhase): string {
+  switch (race?.state) {
+    case undefined:
+      return 'READY';
+    case 'Staging':
+      return 'STAGING';
+    case 'Running':
+      return clock === 'overtime' ? 'TIME UP' : 'LIVE';
+    case 'Stopped':
+    case 'Saved':
+      return 'FINISHED';
+    case 'Discarded':
+      return 'DISCARDED';
+  }
+}
+
+/**
+ * The panel's title line: the run's name, the same one its recording gets. "RaceGOW 6
+ * Track 2 race 7" is the event, the heat, and which race of the heat it is.
+ */
+export function overlayTitle(
+  view: EventView,
+  names: Names,
+  race: RaceView,
+  eventName?: string
+): string {
+  const run = `${names.phase(race.heat)} race ${raceNumber(view, race)}`;
+  return eventName ? `${eventName} ${run}` : run;
 }
 
 // ── Best N laps in a row ─────────────────────────────────────────────────────
@@ -210,24 +305,51 @@ export interface OverlayRow {
   bestLapMicros?: number;
   /** The fastest run of N laps in a row, when the heat is ranked on one. */
   bestRun?: LapRun;
+  /** The pilot's own colour (`#RRGGBB`), for a dot beside the name. */
+  color?: string;
+  /**
+   * The hole shot: from the start to the first crossing, in microseconds. Set only when
+   * lap 1 starts at that crossing and the pilot has made it. Shown as `HS` before lap 1.
+   */
+  holeShotMicros?: number;
 }
 
 /**
- * The overlay's rows for a race: one per seat, in lineup order. `runLength` is the N of a
+ * The overlay's rows for a race: one per seat. The seats with a place come first, in
+ * finishing order; the rest follow in lineup order. `runLength` is the N of a
  * heat ranked on best N consecutive (see {@link consecutiveLaps}); leave it out otherwise.
  */
 export function overlayRows(race: RaceView, names: Names, runLength?: number): OverlayRow[] {
-  return raceSeatRows(race, names).map((row, index) => ({
-    key: `${row.adapter}\u0000${row.seat}`,
-    name: row.pilot === undefined ? row.seatName : row.who,
-    pilot: row.pilot,
-    place: row.place,
-    laps: row.laps.length,
-    lapMicros: row.laps.map((lap) => lap.micros),
-    lastLapMicros: row.lastLapMicros,
-    bestLapMicros: row.bestLapMicros,
-    bestRun: runLength === undefined ? undefined : bestLapRun(race.seats[index].laps, runLength)
-  }));
+  const rows = raceSeatRows(race, names).map(
+    (row, index): OverlayRow => ({
+      key: `${row.adapter}\u0000${row.seat}`,
+      name: row.pilot === undefined ? row.seatName : row.who,
+      pilot: row.pilot,
+      place: row.place,
+      laps: row.laps.length,
+      lapMicros: row.laps.map((lap) => lap.micros),
+      lastLapMicros: row.lastLapMicros,
+      bestLapMicros: row.bestLapMicros,
+      bestRun: runLength === undefined ? undefined : bestLapRun(race.seats[index].laps, runLength),
+      color: row.pilot === undefined ? undefined : names.pilotColor(row.pilot),
+      holeShotMicros: holeShot(race.seats[index])
+    })
+  );
+  // A stable sort: seats with no place yet keep their lineup order, after the placed ones.
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort(
+      (a, b) =>
+        (a.row.place ?? Number.POSITIVE_INFINITY) - (b.row.place ?? Number.POSITIVE_INFINITY) ||
+        a.index - b.index
+    )
+    .map(({ row }) => row);
+}
+
+function holeShot(seat: RaceView['seats'][number]): number | undefined {
+  if (seat.hole_shot === undefined || seat.start_at === undefined) return undefined;
+  const micros = seat.hole_shot.at - seat.start_at;
+  return micros >= 0 ? micros : undefined;
 }
 
 /** Whether lap `index` (among counted laps, from 0) is part of `run`. */

@@ -50,7 +50,6 @@
     RUN_STATE_LABELS,
     RUN_STATE_TONES,
     canDraw,
-    fileName,
     isDrawing,
     needsDrawing,
     renderOf,
@@ -576,9 +575,7 @@
                     </span>
                   {/if}
                 </div>
-                <code class="file" title={entry.video.overlaid_file ?? entry.video.file}>
-                  {fileName(entry.video.overlaid_file ?? entry.video.file)}
-                </code>
+                <code class="file">{entry.video.overlaid_file ?? entry.video.file}</code>
                 {#if job?.state === 'Failed' && job.note}<p class="note">{job.note}</p>{/if}
               </li>
             {/each}
@@ -610,7 +607,7 @@
                 {/if}
               </div>
               {#if run.file}
-                <code class="file" title={run.file}>{fileName(run.file)}</code>
+                <code class="file">{run.file}</code>
               {/if}
               {#if run.note}<p class="note">{run.note}</p>{/if}
             </li>

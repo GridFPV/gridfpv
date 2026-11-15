@@ -5,7 +5,27 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
+import type { OverlayLook, OverlayPlacement } from '@gridfpv/types';
 import EventOverlays from '../src/screens/EventOverlays.svelte';
+import { OVERLAY_LOOK } from './support.js';
+
+/** The card with a Director behind it that keeps the look it is given. */
+function open(start: OverlayLook = OVERLAY_LOOK) {
+  let look = start;
+  const session = {
+    getOverlayLook: vi.fn(async () => look),
+    putOverlayLook: vi.fn(async (placement: OverlayPlacement) => (look = { ...look, placement })),
+    overlayLogoUrl: (side: 'left' | 'right') => `http://d.local/overlay/logo/${side}`,
+    putOverlayLogo: vi.fn(
+      async (side: 'left' | 'right', _file: Blob) => (look = { ...look, [`logo_${side}`]: true })
+    ),
+    deleteOverlayLogo: vi.fn(
+      async (side: 'left' | 'right') => (look = { ...look, [`logo_${side}`]: false })
+    )
+  };
+  render(EventOverlays, { session });
+  return session;
+}
 
 const BASE = `${location.origin}${location.pathname}`;
 
@@ -13,7 +33,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe('EventOverlays', () => {
   it('lists the race overlay with what it shows and its URL', () => {
-    render(EventOverlays);
+    open();
     const card = screen.getByRole('region', { name: 'Race overlay' });
     expect(card).toHaveTextContent('The heat being raced');
     expect(screen.getByLabelText('Race overlay URL')).toHaveTextContent(`${BASE}#/overlay/race`);
@@ -25,7 +45,7 @@ describe('EventOverlays', () => {
   it('the contrast choice changes the URL, the link and what is copied', async () => {
     const writeText = vi.fn(async () => {});
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
-    render(EventOverlays);
+    open();
     const dark = screen.getByRole('radio', { name: 'Light text, for dark video' });
     const light = screen.getByRole('radio', { name: 'Dark text, for bright video' });
     expect(dark).toHaveAttribute('aria-checked', 'true');
@@ -46,16 +66,7 @@ describe('EventOverlays', () => {
   });
 
   it('the preview is the same route in a frame, opened on demand', async () => {
-    // The preview measures its box to set the scale; jsdom has nothing to measure with.
-    vi.stubGlobal(
-      'ResizeObserver',
-      class {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      }
-    );
-    render(EventOverlays);
+    open();
     expect(screen.queryByTitle('Race overlay preview')).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Show preview' }));
     const frame = screen.getByTitle('Race overlay preview');
@@ -65,5 +76,71 @@ describe('EventOverlays', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: 'Hide preview' }));
     expect(screen.queryByTitle('Race overlay preview')).toBeNull();
+  });
+
+  it('moves the overlay: each change is saved as it is made', async () => {
+    const session = open();
+    const placement = await screen.findByRole('group', { name: 'Placement' });
+    expect(screen.getByRole('radio', { name: 'Top left' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByLabelText('Size')).toHaveValue(100);
+    expect(screen.getByLabelText('Background')).toHaveValue(90);
+
+    await fireEvent.click(screen.getByRole('radio', { name: 'Bottom right' }));
+    await waitFor(() =>
+      expect(screen.getByRole('radio', { name: 'Bottom right' })).toHaveAttribute(
+        'aria-checked',
+        'true'
+      )
+    );
+    expect(session.putOverlayLook).toHaveBeenLastCalledWith({
+      corner: 'BottomRight',
+      x: 24,
+      y: 24,
+      scale: 100,
+      opacity: 90
+    });
+
+    const side = screen.getByLabelText('In from the side');
+    await fireEvent.change(side, { target: { value: '60' } });
+    await waitFor(() => expect(session.putOverlayLook).toHaveBeenCalledTimes(2));
+    expect(session.putOverlayLook).toHaveBeenLastCalledWith(
+      expect.objectContaining({ corner: 'BottomRight', x: 60 })
+    );
+    await waitFor(() => expect(screen.getByLabelText('Size slider')).toBeEnabled());
+    await fireEvent.change(screen.getByLabelText('Size slider'), { target: { value: '150' } });
+    await waitFor(() => expect(screen.getByLabelText('Size')).toHaveValue(150));
+    await fireEvent.change(screen.getByLabelText('Background slider'), { target: { value: '0' } });
+    await waitFor(() =>
+      expect(session.putOverlayLook).toHaveBeenLastCalledWith(
+        expect.objectContaining({ scale: 150, opacity: 0 })
+      )
+    );
+    expect(placement).toBeVisible();
+  });
+
+  it('refuses a size out of range in words, and saves nothing', async () => {
+    const session = open();
+    await screen.findByRole('group', { name: 'Placement' });
+    await fireEvent.change(screen.getByLabelText('Size'), { target: { value: '10' } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('The size is 25 to 300 percent.');
+    expect(session.putOverlayLook).not.toHaveBeenCalled();
+  });
+
+  it('keeps a logo for each end of the title line, and takes one away', async () => {
+    const session = open();
+    await screen.findByRole('group', { name: 'Logos' });
+    expect(screen.getByTestId('no-logo-left')).toHaveTextContent('The GridFPV name shows.');
+    const file = new File(['png'], 'racegow.png', { type: 'image/png' });
+    await fireEvent.change(screen.getByLabelText('Left logo picture'), {
+      target: { files: [file] }
+    });
+    await waitFor(() => expect(session.putOverlayLogo).toHaveBeenCalledWith('left', file));
+    const shown = await screen.findByRole('img', { name: 'Left logo now' });
+    expect(shown.getAttribute('src')).toMatch(/^http:\/\/d\.local\/overlay\/logo\/left\?v=\d+$/);
+    expect(screen.getByTestId('no-logo-right')).toBeVisible();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove the left logo' }));
+    await waitFor(() => expect(session.deleteOverlayLogo).toHaveBeenCalledWith('left'));
+    expect(await screen.findByTestId('no-logo-left')).toBeVisible();
   });
 });

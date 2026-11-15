@@ -122,15 +122,21 @@ test('the replay overlay shows a finished race as it stood at each moment', asyn
 
     // Before the start: the countdown, and nothing flown.
     await seek(2000);
-    await expect(word).toHaveText('Starting');
-    await expect(replay.getByRole('timer')).toHaveText('0:03.000');
-    await expect(replay.getByTestId('overlay-heat')).toHaveText(HEAT_LABEL);
+    await expect(word).toHaveText('STAGING');
+    await expect(replay.getByRole('timer')).toHaveText('0:03.0');
+    // The title is the run's name, as the recording is named.
+    await expect(replay.getByTestId('overlay-heat')).toHaveText(`${EVENT} ${HEAT_LABEL} race 1`);
+    // The panel sits in the top left corner at its natural size: a small part of the frame.
+    const box = await replay.getByTestId('overlay-panel').boundingBox();
+    expect(box!.x).toBe(24);
+    expect(box!.y).toBe(24);
+    expect(box!.width).toBeLessThanOrEqual(546);
     await expect(replay.getByTestId('overlay-solo')).toHaveAccessibleName(ACE);
     await expect(laps).toHaveText('0');
 
     // Just before the first lap ends, and just after.
     await seek(at(first) - 50);
-    await expect(word).toHaveText('Live');
+    await expect(word).toHaveText('LIVE');
     await expect(laps).toHaveText('0');
     await seek(at(first) + 50);
     await expect(laps).toHaveText('1');
@@ -140,7 +146,7 @@ test('the replay overlay shows a finished race as it stood at each moment', asyn
     await expect(laps).toHaveText('2');
     // After the stop: finished, and still. The same key means no new picture is needed.
     const stopped = await seek(at(flown.stopped_at!) + 500);
-    await expect(word).toHaveText('Finished');
+    await expect(word).toHaveText('FINISHED');
     await expect(laps).toHaveText('2');
     expect(await seek(at(flown.stopped_at!) + 900)).toBe(stopped);
     // And back again, to exactly the same picture.

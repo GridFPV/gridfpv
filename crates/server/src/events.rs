@@ -293,6 +293,8 @@ struct Registry {
     library: crate::library::Library,
     /// The video settings and status, held here for the same reason.
     video: crate::video::VideoDesk,
+    /// How the race overlay looks, held here for the same reason.
+    overlay: crate::overlay::OverlayDesk,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -366,6 +368,7 @@ impl EventRegistry {
                 timers: crate::timers::TimerDirectory::new(data_dir.clone()),
                 library: crate::library::Library::new(data_dir.clone()),
                 video: crate::video::VideoDesk::new(data_dir.clone()),
+                overlay: crate::overlay::OverlayDesk::new(data_dir.clone()),
                 data_dir,
                 active_event,
             })),
@@ -456,6 +459,11 @@ impl EventRegistry {
         let reg = self.read();
         let live = &reg.events.get(reg.active_event.as_ref()?)?.live;
         live.race_now.lock().ok()?.clone()
+    }
+
+    /// How the race overlay looks.
+    pub fn overlay(&self) -> crate::overlay::OverlayDesk {
+        self.read().overlay.clone()
     }
 
     /// The video settings and status.

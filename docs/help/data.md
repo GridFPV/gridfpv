@@ -15,6 +15,7 @@ The Data page is under **Setup**.
 
 These are not in a copy:
 
+- the overlay's logos. Where the overlay sits is in the copy, the pictures are not.
 - the video setup. Each computer has its own OBS address and password.
 - the recordings. They are big. They are in the `videos` folder inside Grid's data folder
   (or in OBS's folder, if you chose that). Copy them yourself.

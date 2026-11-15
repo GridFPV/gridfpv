@@ -161,6 +161,20 @@ pub fn router(registry: EventRegistry) -> Router {
                     crate::backup::MAX_IMPORT_BYTES,
                 )),
         )
+        // How the race overlay looks: where it sits, and its two logos.
+        .route(
+            "/overlay/look",
+            get(crate::overlay::get_look).put(crate::overlay::put_look),
+        )
+        .route(
+            "/overlay/logo/{side}",
+            get(crate::overlay::get_logo)
+                .put(crate::overlay::put_logo)
+                .delete(crate::overlay::delete_logo)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::overlay::MAX_LOGO_BYTES + 1024,
+                )),
+        )
         .route("/video/status", get(crate::video::get_status))
         .route("/video/render", post(crate::video::post_render))
         .route("/video/ffmpeg", post(crate::video::post_ffmpeg))

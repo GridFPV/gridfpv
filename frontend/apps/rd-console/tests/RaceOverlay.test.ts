@@ -7,12 +7,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import { waitFor } from '@testing-library/dom';
-import type { EventMeta, EventView, Format, LapView, Pilot } from '@gridfpv/types';
+import type { EventMeta, EventView, Format, LapView, OverlayLook, Pilot } from '@gridfpv/types';
 import RaceOverlay from '../src/screens/RaceOverlay.svelte';
 import type { LiveSession } from '../src/lib/eventLive.svelte.js';
 import type { Session } from '../src/lib/session.svelte.js';
 import { eventView, heat, race, raceSeat } from './competition.js';
-import { VIDEO_IDLE, VIDEO_OFF } from './support.js';
+import { OVERLAY_LOOK, VIDEO_IDLE, VIDEO_OFF } from './support.js';
 
 // The overlay must never make a sound. Stand in for the tone module so any use of it shows.
 const tone = vi.hoisted(() => ({
@@ -56,7 +56,8 @@ const lap = (crossing: number, seconds: number): LapView => ({
 /** The Director's clock right now, as a snapshot carries it. */
 const directorNow = (): number => Date.now() * 1000;
 
-type OverlaySession = LiveSession & Pick<Session, 'readActiveEvent'>;
+type OverlaySession = LiveSession &
+  Pick<Session, 'readActiveEvent' | 'getOverlayLook' | 'overlayLogoUrl'>;
 
 /**
  * Open the overlay. `views` maps an event id to the snapshot it answers with; the returned
@@ -64,7 +65,7 @@ type OverlaySession = LiveSession & Pick<Session, 'readActiveEvent'>;
  */
 function open(
   views: Record<string, EventView>,
-  opts: { active?: EventMeta | null; theme?: 'dark' | 'light' } = {}
+  opts: { active?: EventMeta | null; theme?: 'dark' | 'light'; look?: OverlayLook } = {}
 ) {
   const feeds = new Map<string, (cursor: number) => void>();
   let active: EventMeta | null = opts.active === undefined ? EVENT : opts.active;
@@ -72,6 +73,8 @@ function open(
   vi.stubGlobal('AudioContext', audio);
   const session: OverlaySession = {
     readActiveEvent: vi.fn(async () => active),
+    getOverlayLook: vi.fn(async () => opts.look ?? OVERLAY_LOOK),
+    overlayLogoUrl: (side: 'left' | 'right') => `http://d.local/overlay/logo/${side}`,
     getEventState: vi.fn(async (id: string) => views[id] ?? eventView()),
     subscribeChanges: vi.fn((id: string, heard: (cursor: number) => void) => {
       feeds.set(id, heard);
@@ -101,6 +104,12 @@ function open(
     },
     listening: () => [...feeds.keys()]
   };
+}
+
+/** The clock, once a race is on the panel. The panel is there before that, waiting. */
+async function raceClock(): Promise<HTMLElement> {
+  await screen.findByTestId('overlay-heat');
+  return screen.getByRole('timer');
 }
 
 const quali = (over = {}) => heat(HEAT, 'Qualifying Heat 1', ['p-1a', 'p-2b'], over);
@@ -135,11 +144,14 @@ describe('RaceOverlay', () => {
         current_race: staging.race
       })
     });
-    expect(await screen.findByTestId('overlay-heat')).toHaveTextContent('Qualifying Heat 1');
-    expect(screen.getByTestId('overlay-state')).toHaveTextContent('Starting');
+    // The title is the run's name: the event, the heat, and which race of the heat.
+    expect(await screen.findByTestId('overlay-heat')).toHaveTextContent(
+      'Club Night Qualifying Heat 1 race 1'
+    );
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('STAGING');
     const clock = screen.getByRole('timer');
-    expect(clock).toHaveAttribute('data-mode', 'remaining');
-    expect(clock.getAttribute('aria-label')).toMatch(/^Starts in: 0:0[0-5]\.\d{3}$/);
+    expect(clock).toHaveAttribute('data-phase', 'staging');
+    expect(clock.textContent).toMatch(/^0:0[0-5]\.\d$/);
     // It is really counting: the reading moves.
     const first = clock.textContent;
     await waitFor(() => expect(clock.textContent).not.toBe(first));
@@ -175,14 +187,17 @@ describe('RaceOverlay', () => {
     };
     const { show } = open({ [EVENT.id]: running([lap(3, 9.5)], 5) });
     await waitFor(() => expect(row('Ace')).toBeVisible());
-    expect(screen.getByTestId('overlay-state')).toHaveTextContent('Live');
-    expect(screen.getByRole('timer')).toHaveAttribute('data-mode', 'elapsed');
-    expect(screen.getByRole('timer').getAttribute('aria-label')).toMatch(/^Race time: 0:3\d\./);
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('LIVE');
+    expect(screen.getByRole('timer')).toHaveAttribute('data-phase', 'racing');
+    expect(screen.getByRole('timer').textContent).toMatch(/^0:3\d\.\d$/);
+    // A race with no time limit counts up, so there is no second clock under it.
+    expect(screen.queryByTestId('overlay-elapsed')).toBeNull();
     expect(stat(row('Ace'), 'place')).toHaveTextContent('1');
     expect(stat(row('Ace'), 'laps')).toHaveTextContent('1');
-    expect(stat(row('Ace'), 'last')).toHaveTextContent('9.500');
+    expect(stat(row('Ace'), 'last')).toHaveTextContent('0:09.500');
     expect(stat(row('Bee'), 'laps')).toHaveTextContent('0');
-    // Rows are in lineup order.
+    // Ace has a place and Bee has none yet, so Ace is first and Bee takes the next number.
+    expect(stat(row('Bee'), 'place')).toHaveTextContent('2');
     const rows = within(screen.getByRole('table', { name: 'Pilots in this heat' })).getAllByRole(
       'row'
     );
@@ -190,8 +205,8 @@ describe('RaceOverlay', () => {
 
     show(EVENT.id, running([lap(3, 9.5), lap(5, 8.25)], 6));
     await waitFor(() => expect(stat(row('Ace'), 'laps')).toHaveTextContent('2'));
-    expect(stat(row('Ace'), 'last')).toHaveTextContent('8.250');
-    expect(stat(row('Ace'), 'best')).toHaveTextContent('8.250');
+    expect(stat(row('Ace'), 'last')).toHaveTextContent('0:08.250');
+    expect(stat(row('Ace'), 'best')).toHaveTextContent('0:08.250');
     expectNoRawIds();
   });
 
@@ -205,9 +220,27 @@ describe('RaceOverlay', () => {
     open({
       [EVENT.id]: eventView({ now, phases: [quali()], races: [timed], current_race: timed.race })
     });
-    const clock = await screen.findByRole('timer');
-    expect(clock).toHaveAttribute('data-mode', 'remaining');
-    expect(clock.getAttribute('aria-label')).toMatch(/^Time left: 1:(39|40)\./);
+    const clock = await raceClock();
+    expect(clock.textContent).toMatch(/^1:(39|40)\.\d$/);
+    // Under the countdown, small: the time since the start.
+    expect(screen.getByTestId('overlay-elapsed').textContent).toMatch(/^0:(19|20)\.\d$/);
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('LIVE');
+  });
+
+  it('a timed race past its time reads as time up, in the red', async () => {
+    const now = directorNow();
+    const over = race(HEAT, 1, 'Running', {
+      started_at: now - 125 * S,
+      end: { Timed: { micros: 120 * S, grace_micros: 10 * S } },
+      seats: [raceSeat(0, 'p-1a'), raceSeat(1, 'p-2b')]
+    });
+    open({
+      [EVENT.id]: eventView({ now, phases: [quali()], races: [over], current_race: over.race })
+    });
+    const clock = await raceClock();
+    expect(clock).toHaveAttribute('data-phase', 'overtime');
+    expect(clock.textContent).toMatch(/^-0:0[45]\.\d$/);
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('TIME UP');
   });
 
   it('a stopped race stands still on its length', async () => {
@@ -225,9 +258,10 @@ describe('RaceOverlay', () => {
         current_race: stopped.race
       })
     });
-    const clock = await screen.findByRole('timer');
-    expect(clock).toHaveAttribute('aria-label', 'Race time: 1:01.500');
-    expect(screen.getByTestId('overlay-state')).toHaveTextContent('Finished');
+    const clock = await raceClock();
+    expect(clock).toHaveTextContent('1:01.5');
+    expect(clock).toHaveAttribute('data-phase', 'done');
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('FINISHED');
   });
 
   it('a heat ranked on best 3 consecutive shows the best 3-lap run in place of the best lap', async () => {
@@ -282,26 +316,28 @@ describe('RaceOverlay', () => {
     });
     const solo = await screen.findByTestId('overlay-solo');
     expect(screen.queryByRole('table')).toBeNull();
-    expect(screen.getByTestId('overlay-heat')).toHaveTextContent('Ace Time Trial');
-    expect(within(solo).getByText('Ace')).toBeVisible();
-    expect(stat(solo, 'laps')).toHaveTextContent('8');
-    expect(stat(solo, 'last')).toHaveTextContent('11.500');
-    // 9 + 8 + 9.5 this race; 24 flat in the saved race before it.
-    expect(stat(solo, 'best-run')).toHaveTextContent('26.500');
-    expect(stat(solo, 'heat-best-run')).toHaveTextContent('24.000');
-    // The last six laps, numbered as flown, with the best run marked.
-    const listed = within(within(solo).getByRole('list', { name: 'Last laps' })).getAllByRole(
+    expect(screen.getByTestId('overlay-heat')).toHaveTextContent(
+      'Club Night Ace Time Trial race 2'
+    );
+    expect(solo).toHaveTextContent('Ace');
+    const panel = screen.getByTestId('overlay-panel');
+    expect(stat(panel, 'laps')).toHaveTextContent('8');
+    // 9 + 8 + 9.5: the best three in a row of this race.
+    expect(panel).toHaveTextContent('Best 3 this race');
+    expect(stat(panel, 'best-run')).toHaveTextContent('0:26.500');
+    // The last six laps, numbered as flown, with the best run lit.
+    const listed = within(screen.getByRole('list', { name: 'Recent laps' })).getAllByRole(
       'listitem'
     );
     expect(listed.map((li) => li.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-      'Lap 3 10.000',
-      'Lap 4 9.000',
-      'Lap 5 8.000',
-      'Lap 6 9.500',
-      'Lap 7 10.500',
-      'Lap 8 11.500'
+      'L3 0:10.000',
+      'L4 0:09.000',
+      'L5 0:08.000',
+      'L6 0:09.500',
+      'L7 0:10.500',
+      'L8 0:11.500'
     ]);
-    expect(listed.map((li) => li.classList.contains('in-run'))).toEqual([
+    expect(listed.map((li) => li.classList.contains('lit'))).toEqual([
       false,
       true,
       true,
@@ -345,14 +381,21 @@ describe('RaceOverlay', () => {
         current_race: stopped.race
       })
     });
-    expect(await screen.findByTestId('overlay-state')).toHaveTextContent('Finished');
+    await raceClock();
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('FINISHED');
     const saved = race(HEAT, 1, 'Saved', { ...times, seats });
     show(EVENT.id, eventView({ cursor: 6, now, phases: [quali()], races: [saved] }));
-    await waitFor(() => expect(screen.getByTestId('overlay-state')).toHaveTextContent('Result'));
+    await waitFor(() =>
+      expect(screen.getByRole('region', { name: 'Race overlay' })).toHaveAttribute(
+        'data-state',
+        'Saved'
+      )
+    );
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('FINISHED');
     expect(row('Ace')).toBeVisible();
   });
 
-  it('goes quiet with no race on: the brand and the event name, nothing else', async () => {
+  it('waits with no race on: the event name, a clock at zero and READY', async () => {
     const now = directorNow();
     // Saved long ago, and this overlay never saw it happen.
     const old = race(HEAT, 1, 'Saved', {
@@ -362,17 +405,53 @@ describe('RaceOverlay', () => {
     });
     open({ [EVENT.id]: eventView({ now, phases: [quali()], races: [old] }) });
     expect(await screen.findByTestId('overlay-idle')).toHaveTextContent('Club Night');
-    expect(screen.queryByRole('timer')).toBeNull();
+    expect(screen.getByRole('timer')).toHaveTextContent('0:00.0');
     expect(screen.queryByRole('table')).toBeNull();
-    expect(screen.queryByTestId('overlay-state')).toBeNull();
+    expect(screen.getByTestId('overlay-state')).toHaveTextContent('READY');
     expectNoRawIds();
   });
 
-  it('with no active event it shows the brand alone and reads no event', async () => {
+  it('with no active event it says it is waiting, and reads no event', async () => {
     const { session } = open({}, { active: null });
     await waitFor(() => expect(session.readActiveEvent).toHaveBeenCalled());
-    expect(screen.getByRole('region', { name: 'Race overlay' })).toHaveTextContent(/^GridFPV$/);
+    expect(screen.getByTestId('overlay-idle')).toHaveTextContent('waiting for a race…');
     expect(session.getEventState).not.toHaveBeenCalled();
+  });
+
+  it('sits where the look says, with its logos, and follows a change to the look', async () => {
+    const now = directorNow();
+    const running = race(HEAT, 1, 'Running', {
+      started_at: now - 5 * S,
+      seats: [raceSeat(0, 'p-1a'), raceSeat(1, 'p-2b')]
+    });
+    open(
+      {
+        [EVENT.id]: eventView({
+          now,
+          phases: [quali()],
+          races: [running],
+          current_race: running.race
+        })
+      },
+      {
+        look: {
+          placement: { corner: 'BottomRight', x: 40, y: 10, scale: 150, opacity: 30 },
+          logo_left: true,
+          logo_right: false
+        }
+      }
+    );
+    const panel = screen.getByTestId('overlay-panel');
+    await waitFor(() => expect(panel).toHaveAttribute('data-corner', 'BottomRight'));
+    expect(panel.getAttribute('style')).toContain('right: 40px');
+    expect(panel.getAttribute('style')).toContain('scale(1.5)');
+    expect(panel.getAttribute('style')).toContain('--panel-alpha: 0.3');
+    // The left logo takes the place of the GridFPV name; there is no right one.
+    const logos = panel.querySelectorAll('img');
+    expect(Array.from(logos).map((img) => img.getAttribute('src'))).toEqual([
+      'http://d.local/overlay/logo/left'
+    ]);
+    expect(panel).not.toHaveTextContent('GridFPV');
   });
 
   it('follows the Director to another event, and stops listening to the first', async () => {

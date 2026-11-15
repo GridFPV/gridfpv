@@ -33,6 +33,7 @@ pub mod control;
 pub mod error;
 pub mod events;
 pub mod library;
+pub mod overlay;
 pub mod pilots;
 pub mod timers;
 pub mod video;
