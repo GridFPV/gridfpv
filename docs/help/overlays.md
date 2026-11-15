@@ -60,8 +60,9 @@ of the URL, so copy the URL again after you change it.
 
 ## Preview
 
-**Show preview** shows the overlay in a small frame on a plain backdrop. It is a second live
-page, so it is opened only when you ask.
+**Show preview** shows the overlay in a small frame on a plain backdrop. The race in it is
+made up: one pilot a few laps in, with the clock running. That way you can see where the
+laps go while you set the corner and the size. The overlay in OBS shows your real race.
 
 ## Copy does not work
 

@@ -252,7 +252,7 @@ test('the Overlays page lists the overlay with its URL and a live preview', asyn
     await expect(url).toHaveText(`${origin}/#/overlay/race/light`);
     await expect(card.getByRole('button', { name: 'Copy URL' })).toBeVisible();
 
-    // The preview is the real overlay page in a frame, following the same event.
+    // The preview is the overlay's panel in a frame, with a made-up race under way.
     await card.getByRole('button', { name: 'Show preview' }).click();
     const frame = page.frameLocator('iframe[title="Race overlay preview"]');
     await expect(frame.getByRole('region', { name: 'Race overlay' })).toHaveAttribute(
@@ -260,7 +260,11 @@ test('the Overlays page lists the overlay with its URL and a live preview', asyn
       'light',
       { timeout: 15_000 }
     );
-    await expect(frame.getByTestId('overlay-idle')).toHaveText(name, { timeout: 15_000 });
+    await expect(frame.getByTestId('overlay-state')).toHaveText('LIVE', { timeout: 15_000 });
+    await expect(frame.locator('[data-stat="laps"]')).toHaveText('5');
+    await expect(
+      frame.getByRole('list', { name: 'Recent laps' }).getByRole('listitem')
+    ).toHaveCount(6);
     // Scaled to fit the card, not drawn at 1920 wide.
     const box = await page.locator('iframe[title="Race overlay preview"]').boundingBox();
     const cardBox = await card.boundingBox();

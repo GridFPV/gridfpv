@@ -43,7 +43,8 @@
     now,
     eventName,
     placement = DEFAULT_PLACEMENT,
-    logos = {}
+    logos = {},
+    sample
   }: {
     theme?: OverlayTheme;
     /** The race to draw. None: the panel waits. */
@@ -58,6 +59,11 @@
     placement?: OverlayPlacement;
     /** Where each logo is served from, for the sides that have one. */
     logos?: { left?: string; right?: string };
+    /**
+     * For a made-up race, which has no event behind it to read these from: the title line,
+     * and the N of "best N laps in a row".
+     */
+    sample?: { title: string; runLength?: number };
   } = $props();
 
   const clock = $derived(overlayClock(race, now));
@@ -65,12 +71,16 @@
     race ? view?.phases.find((candidate) => candidate.def.id === race.heat) : undefined
   );
   /** The N of a heat ranked on best N consecutive, else `undefined`. */
-  const runLength = $derived(consecutiveLaps(phase?.format));
+  const runLength = $derived(sample ? sample.runLength : consecutiveLaps(phase?.format));
   const rows = $derived(race && names ? overlayRows(race, names, runLength) : []);
   /** A heat with one seat gets the long form. */
   const solo = $derived(rows.length === 1 ? rows[0] : undefined);
   const title = $derived(
-    race && names && view ? overlayTitle(view, names, race, eventName) : undefined
+    sample
+      ? sample.title
+      : race && names && view
+        ? overlayTitle(view, names, race, eventName)
+        : undefined
   );
 
   /** The pilot's laps in order, the hole shot first as "HS"; `lap` counts from 0 (-1 for HS). */

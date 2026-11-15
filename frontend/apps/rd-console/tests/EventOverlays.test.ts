@@ -65,12 +65,19 @@ describe('EventOverlays', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${BASE}#/overlay/race/light`));
   });
 
-  it('the preview is the same route in a frame, opened on demand', async () => {
+  it('the preview is the overlay with a made-up race, in a frame, opened on demand', async () => {
     open();
     expect(screen.queryByTitle('Race overlay preview')).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Show preview' }));
     const frame = screen.getByTitle('Race overlay preview');
-    expect(frame).toHaveAttribute('src', `${BASE}#/overlay/race`);
+    // The sample page, never the URL that goes into OBS.
+    expect(frame).toHaveAttribute('src', `${BASE}#/overlay/race/sample`);
+    expect(screen.getByLabelText('Race overlay URL')).toHaveTextContent(`${BASE}#/overlay/race`);
+    await fireEvent.click(screen.getByRole('radio', { name: 'Dark text, for bright video' }));
+    expect(screen.getByTitle('Race overlay preview')).toHaveAttribute(
+      'src',
+      `${BASE}#/overlay/race/light/sample`
+    );
     expect(frame).toHaveAttribute('width', '1920');
     expect(frame).toHaveAttribute('height', '1080');
 

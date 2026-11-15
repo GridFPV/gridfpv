@@ -167,19 +167,21 @@
         </Button>
       </div>
       {#if previewing[info.name]}
+        <p class="muted">The preview shows a made-up race, so you can see where the laps go.</p>
         <div
           class="preview"
           data-backdrop={themes[info.name]}
           aria-label="{info.title} overlay preview"
           bind:clientWidth={previewWidth}
         >
-          <!-- The real overlay route, as OBS loads it. Nothing in it can be clicked. It is
-               loaded again after each change to the look, so the change shows at once. -->
+          <!-- The overlay with a made-up race under way, so there is something to place and
+               size. Nothing in it can be clicked. It is loaded again after each change to
+               the look, so the change shows at once. -->
           {#key saves}
             <iframe
               class="preview-frame"
               title="{info.title} overlay preview"
-              src={url}
+              src={overlayUrl(location, info.name, themes[info.name], true)}
               tabindex="-1"
               width={SOURCE_WIDTH}
               height={SOURCE_HEIGHT}

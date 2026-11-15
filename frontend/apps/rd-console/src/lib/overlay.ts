@@ -38,16 +38,21 @@ export const OVERLAY_CATALOG: readonly OverlayInfo[] = [
 /**
  * The URL to paste into OBS for an overlay, built from where the console itself is served.
  * `theme` picks the contrast: `'dark'` (the default) is light text on a dark panel, for dark
- * video; `'light'` is dark text on a light panel, for bright video.
+ * video; `'light'` is dark text on a light panel, for bright video. `sample` gives the page
+ * that shows a made-up race under way, for a preview: never the one to paste into OBS.
  */
 export function overlayUrl(
   loc: { origin: string; pathname: string },
   overlay: OverlayName,
-  theme: OverlayTheme = 'dark'
+  theme: OverlayTheme = 'dark',
+  sample = false
 ): string {
-  const hash = formatHash(
-    theme === 'light' ? { kind: 'overlay', overlay, theme } : { kind: 'overlay', overlay }
-  );
+  const hash = formatHash({
+    kind: 'overlay',
+    overlay,
+    ...(theme === 'light' ? { theme } : {}),
+    ...(sample ? { sample: true as const } : {})
+  });
   return `${loc.origin}${loc.pathname}${hash}`;
 }
 

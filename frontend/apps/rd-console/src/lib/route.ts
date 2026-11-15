@@ -34,7 +34,9 @@
  *   - `#/overlay/race`  → the race overlay, a page for an OBS browser source: light text, for
  *     dark video. `#/overlay/race/light` is the same page with dark text on a light panel,
  *     for bright video. An overlay is drawn bare (no shell) on a see-through page, and
- *     follows the Director's active event by itself. `#/overlay/‹anything else›` draws
+ *     follows the Director's active event by itself. `#/overlay/race/sample` (and
+ *     `…/light/sample`) is the same panel showing a made-up race under way, for the
+ *     preview on the Overlays page. `#/overlay/‹anything else›` draws
  *     nothing at all, so a mistyped source never puts the console in the video.
  *   - `#/overlay/replay/‹event›/‹race›` → the race overlay for one finished race, as it stood
  *     at any moment of its recording (and `…/light` for dark text). The Director opens this
@@ -72,7 +74,7 @@ export type Route =
    * does not have: that page draws nothing. `theme` is only ever present as `'light'`
    * (dark text on a light panel); absent means the default, light text on a dark panel.
    */
-  | { kind: 'overlay'; overlay?: OverlayName; theme?: 'light' }
+  | { kind: 'overlay'; overlay?: OverlayName; theme?: 'light'; sample?: true }
   /**
    * The race overlay for one finished race, moved through its recording by whoever opened
    * it. Unlike every other route it names its event: it is opened by the Director for any
@@ -143,9 +145,14 @@ export function parseHash(hash: string): Route {
       return { kind: 'overlay' };
     }
     const overlay = name as OverlayName;
-    return segments[2]?.toLowerCase() === 'light'
-      ? { kind: 'overlay', overlay, theme: 'light' }
-      : { kind: 'overlay', overlay };
+    // What follows the name: `light` for the contrast, `sample` for the made-up race.
+    const rest = segments.slice(2).map((segment) => segment.toLowerCase());
+    return {
+      kind: 'overlay',
+      overlay,
+      ...(rest[0] === 'light' ? { theme: 'light' as const } : {}),
+      ...(rest.includes('sample') ? { sample: true as const } : {})
+    };
   }
   if (head === 'event') {
     const section = segments[1]?.toLowerCase();
@@ -193,9 +200,9 @@ export function formatHash(route: Route): string {
   switch (route.kind) {
     case 'overlay':
       if (route.overlay === undefined) return '#/overlay';
-      return route.theme === 'light'
-        ? `#/overlay/${route.overlay}/light`
-        : `#/overlay/${route.overlay}`;
+      return `#/overlay/${route.overlay}${route.theme === 'light' ? '/light' : ''}${
+        route.sample ? '/sample' : ''
+      }`;
     case 'replay':
       return `#/overlay/replay/${part(route.event)}/${part(route.race)}${
         route.theme === 'light' ? '/light' : ''

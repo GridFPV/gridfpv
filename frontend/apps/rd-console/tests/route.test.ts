@@ -122,7 +122,9 @@ describe('round-trip (format → parse)', () => {
     { kind: 'help', slug: 'start-here' },
     { kind: 'overlay' },
     { kind: 'overlay', overlay: 'race' },
-    { kind: 'overlay', overlay: 'race', theme: 'light' }
+    { kind: 'overlay', overlay: 'race', theme: 'light' },
+    { kind: 'overlay', overlay: 'race', sample: true },
+    { kind: 'overlay', overlay: 'race', theme: 'light', sample: true }
   ];
   for (const route of routes) {
     it(`round-trips ${JSON.stringify(route)}`, () => {
@@ -472,6 +474,10 @@ describe('overlay routes', () => {
   it('formats and round-trips', () => {
     expect(formatHash(race)).toBe('#/overlay/race');
     expect(formatHash(light)).toBe('#/overlay/race/light');
+    // The made-up race for the preview, in either contrast.
+    expect(parseHash('#/overlay/race/sample')).toEqual({ ...race, sample: true });
+    expect(parseHash('#/overlay/race/light/sample')).toEqual({ ...light, sample: true });
+    expect(formatHash({ ...light, sample: true })).toBe('#/overlay/race/light/sample');
     expect(formatHash(nothing)).toBe('#/overlay');
     for (const route of [race, light, nothing]) {
       expect(parseHash(formatHash(route))).toEqual(route);

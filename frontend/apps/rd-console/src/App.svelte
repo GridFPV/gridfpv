@@ -40,6 +40,7 @@
   import PhasesPage from './screens/PhasesPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import RaceOverlay from './screens/RaceOverlay.svelte';
+  import SampleOverlay from './screens/SampleOverlay.svelte';
   import ReplayOverlay from './screens/ReplayOverlay.svelte';
   import ResultsPage from './screens/ResultsPage.svelte';
   import RunPage from './screens/RunPage.svelte';
@@ -144,7 +145,9 @@
   <!-- An OBS browser source: bare, on a see-through page. A name the console does not have
        draws nothing at all. Not dense: an overlay sets its own sizes for a 1920x1080 frame. -->
   <div class="gridfpv-root">
-    {#if route.overlay === 'race'}
+    {#if route.overlay === 'race' && route.sample}
+      <SampleOverlay {session} theme={route.theme ?? 'dark'} />
+    {:else if route.overlay === 'race'}
       <RaceOverlay {session} theme={route.theme ?? 'dark'} />
     {/if}
   </div>
