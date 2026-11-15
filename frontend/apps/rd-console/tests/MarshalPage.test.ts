@@ -814,8 +814,14 @@ describe('MarshalPage trace', () => {
     `http://d.local/${event}/${encodeURIComponent(race)}/${which}`;
   const openFilmed = async (video?: Partial<NonNullable<RaceView['video']>>) => {
     const { view, signal } = filmed(video);
-    await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) }, undefined, { videoUrl });
-    return { view, signal };
+    const { session } = await open(
+      view,
+      RACE,
+      { getRaceSignal: vi.fn(async () => signal) },
+      undefined,
+      { videoUrl }
+    );
+    return { view, signal, session };
   };
   /** The player, with a clock jsdom lets a test read and set. */
   function player(): HTMLVideoElement {
@@ -909,6 +915,96 @@ describe('MarshalPage trace', () => {
     await fireEvent.click(within(ace).getByRole('button', { name: /^Lap 1$/ }));
     expect(video.currentTime).toBeLessThan(15.5);
     expect(video.currentTime).toBeGreaterThan(5);
+  });
+
+  it('"add a lap" is always where the video is, and typing a time moves the video', async () => {
+    layOut();
+    const { session } = await openFilmed();
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    await within(ace).findByRole('img');
+    const video = player();
+    await fireEvent.loadedMetadata(video);
+    const box = within(ace).getByRole('textbox', { name: 'Seconds into the race, for Ace' });
+    // Opened on the start: the box says so.
+    await waitFor(() => expect(box).toHaveValue('0.000'));
+
+    // The video plays on to 12.25 s into the race (17.25 s into the file): the box follows.
+    video.currentTime = 17.25;
+    await fireEvent.timeUpdate(video);
+    await waitFor(() => expect(box).toHaveValue('12.250'));
+    await fireEvent.click(within(ace).getByRole('button', { name: 'Add a lap here' }));
+    await waitFor(() =>
+      expect(sent(session)).toEqual([
+        {
+          Record: {
+            LapInserted: { race: RACE, adapter: GATE, seat: '0', at: START + 12.25 * S }
+          }
+        }
+      ])
+    );
+    // The box stays on the video's moment after the lap is added.
+    expect(box).toHaveValue('12.250');
+
+    // Typing a time moves the video there, and the typing is not overwritten.
+    await fireEvent.focus(box);
+    await fireEvent.input(box, { target: { value: '20.5' } });
+    expect(video.currentTime).toBeCloseTo(25.5, 5);
+    expect(box).toHaveValue('20.5');
+
+    // Before the start there is no lap to add.
+    await fireEvent.blur(box);
+    video.currentTime = 2;
+    await fireEvent.timeUpdate(video);
+    await waitFor(() => expect(box).toHaveValue(''));
+    expect(within(ace).getByRole('button', { name: 'Add lap' })).toBeDisabled();
+  });
+
+  it('the space bar plays and pauses from anywhere on the page, but not while typing', async () => {
+    layOut();
+    await openFilmed();
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    await within(ace).findByRole('img');
+    const video = player();
+    let paused = true;
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+    video.play = vi.fn(async () => {
+      paused = false;
+    });
+    video.pause = vi.fn(() => {
+      paused = true;
+    });
+    const press = async (target: Element) => {
+      const down = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+      target.dispatchEvent(down);
+      await Promise.resolve();
+      return down.defaultPrevented;
+    };
+
+    // From the page itself: it plays, and the page does not scroll.
+    expect(await press(document.body)).toBe(true);
+    expect(video.play).toHaveBeenCalledTimes(1);
+    // From a button under the focus: it pauses, and the button is not pressed.
+    const lap = within(ace).getByRole('button', { name: /^Lap 1$/ });
+    expect(await press(lap)).toBe(true);
+    expect(video.pause).toHaveBeenCalledTimes(1);
+    const up = new KeyboardEvent('keyup', { key: ' ', bubbles: true, cancelable: true });
+    lap.dispatchEvent(up);
+    expect(up.defaultPrevented).toBe(true);
+    // In a text box a space is a space: nothing is stolen, and the video is left alone.
+    const note = screen.getByPlaceholderText('What is protested (optional)');
+    expect(await press(note)).toBe(false);
+    expect(video.play).toHaveBeenCalledTimes(1);
+    expect(video.pause).toHaveBeenCalledTimes(1);
+    // Other keys, and the space bar with Ctrl held, are not touched.
+    const other = new KeyboardEvent('keydown', {
+      key: ' ',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true
+    });
+    document.body.dispatchEvent(other);
+    expect(other.defaultPrevented).toBe(false);
+    expect(video.play).toHaveBeenCalledTimes(1);
   });
 
   it('the video can be hidden, and the choice is kept', async () => {

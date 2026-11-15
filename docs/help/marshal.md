@@ -39,6 +39,10 @@ the recording started and when the race started.
   same.
 - **◀ Frame** and **Frame ▶** step one frame. **0.25×** and **0.5×** play slowly.
 - **To the start** goes to the start tone.
+- The **space bar** plays and pauses from anywhere on the page. In a text box it types a
+  space as usual.
+- **Add a lap** is always at the moment the video is on. Play, step or click to the pass,
+  then press **Add a lap here**. If you type a time in the box, the video goes there.
 - **Hide video** puts it away. Grid remembers your choice.
 
 A race with no recording has no Video card. If the file was moved or cannot be played, the

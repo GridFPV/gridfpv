@@ -12,6 +12,10 @@
    *
    * The player's own controls are kept (play, the bar, full screen). Under them are the
    * things a marshal needs and a plain player lacks: slow speeds, and a step of one frame.
+   *
+   * The space bar plays and pauses from anywhere on the page, so a marshal's hands can stay
+   * on the keyboard while their eyes are on the laps. It is left alone only where a space is
+   * a letter being typed: a text box.
    */
   import { Badge, Button } from '@gridfpv/components';
   import type { RaceView } from '@gridfpv/types';
@@ -107,9 +111,42 @@
     read();
   }
 
+  // ── The space bar plays and pauses, wherever the marshal is on the page ────
+  /** Whether a key pressed here is text being typed, which the space bar must not steal. */
+  function isTyping(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable || target instanceof HTMLTextAreaElement) return true;
+    if (target instanceof HTMLInputElement) {
+      // A box that takes text. A tick box or a slider does not.
+      return !['button', 'checkbox', 'radio', 'range', 'submit', 'reset', 'file'].includes(
+        target.type
+      );
+    }
+    return false;
+  }
+  function toggle(): void {
+    if (!player || unplayable) return;
+    if (player.paused) void player.play()?.catch(() => {});
+    else player.pause();
+  }
+  function onkeydown(event: KeyboardEvent): void {
+    if (event.key !== ' ' || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (isTyping(event.target)) return;
+    // Not the page scrolling, not the button under the focus, and not the player's own
+    // handling of the key (which would undo this one).
+    event.preventDefault();
+    if (!event.repeat) toggle();
+  }
+  /** A focused button is pressed by the space bar coming back up: that is stopped too. */
+  function onkeyup(event: KeyboardEvent): void {
+    if (event.key === ' ' && !isTyping(event.target)) event.preventDefault();
+  }
+
   // The marker goes when the player does.
   $effect(() => () => (playhead = undefined));
 </script>
+
+<svelte:window {onkeydown} {onkeyup} />
 
 {#if choice}
   <section class="video" aria-label="Video of the race">
@@ -199,6 +236,7 @@
           This race has no start to line the video up with.
         {/if}
       </span>
+      <span class="muted">Space plays and pauses.</span>
     </div>
   </section>
 {/if}

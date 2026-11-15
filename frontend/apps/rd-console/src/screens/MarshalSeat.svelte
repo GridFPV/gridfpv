@@ -98,6 +98,31 @@
   const seekTo = $derived(
     aligned !== undefined && onseek ? (at: number) => onseek(at - aligned) : undefined
   );
+  // With the video open, "add a lap" is always where the video is: play it, step it or
+  // click the trace, and the time in the box follows. So what the marshal sees on the
+  // screen is the moment a lap would be added at. Typing in the box works the other way
+  // round: the video goes to the time typed. While the box is being typed in, it is left
+  // alone.
+  let typing = $state(false);
+  $effect(() => {
+    if (!editable || typing || cursor === undefined || aligned === undefined) return;
+    if (cursor < aligned) {
+      // Before the start there is no lap to add.
+      pickedAt = undefined;
+      addText = '';
+      return;
+    }
+    pickedAt = cursor;
+    addText = ((cursor - aligned) / 1_000_000).toFixed(3);
+    addError = undefined;
+  });
+  function typed() {
+    pickedAt = undefined;
+    if (!base || !seekTo) return;
+    const at = parseOffset(addText, base.at);
+    if (at !== undefined) seekTo(at);
+  }
+
   /** Pick a lap in the list, and show its crossing in the video. */
   function pickRow(crossing: LogRef) {
     pick(crossing);
@@ -134,7 +159,8 @@
     const done = await act({
       Record: { LapInserted: { ...ref, adapter: seat.adapter, seat: seat.seat, at: addAt } }
     });
-    if (done) {
+    // With the video open the box stays on the video's moment. Without it, it is cleared.
+    if (done && cursor === undefined) {
       addText = '';
       pickedAt = undefined;
     }
@@ -381,7 +407,9 @@
             placeholder="e.g. 12.5"
             autocomplete="off"
             aria-label="Seconds {base.words}, for {who}"
-            oninput={() => (pickedAt = undefined)}
+            oninput={typed}
+            onfocus={() => (typing = true)}
+            onblur={() => (typing = false)}
             disabled={busy}
           />
         </span>
