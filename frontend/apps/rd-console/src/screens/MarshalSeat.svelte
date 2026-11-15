@@ -365,6 +365,9 @@
           {pickedAt === undefined ? 'Add lap' : 'Add a lap here'}
         </Button>
         {#if hasTrace}<span class="muted">Or click an empty spot on the trace.</span>{/if}
+        <span class="muted" data-testid="add-hint">
+          Missed the hole shot? Add it here. A crossing before the first one becomes the hole shot.
+        </span>
         {#if addError}<span class="error" role="alert">{addError}</span>{/if}
       </form>
     {:else}

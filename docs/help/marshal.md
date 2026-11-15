@@ -32,6 +32,8 @@ shot, and each lap.
   and the laps either side stay as they were. A "fastest laps in a row" run never crosses a
   restart.
 - **Add a lap** puts in a pass the gate missed. Type the seconds into the race.
+  If the gate missed the **hole shot**, add it the same way. A pass you add before the
+  first one becomes the hole shot, and the old first pass becomes the end of lap 1.
 - **Crossings that do not count** lists passes that were left out, each with the reason.
   One that was too soon after the pass before it, or too soon after the start, has
   **Count it**. Press it if the lap was real. After that no lap rule leaves it out.

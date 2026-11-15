@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gridfpv_events::{
-    AdapterId, Event, FirstLap, LogRef, RaceId, RemovalReason, SeatRef, SourceTime,
+    AdapterId, Event, FirstLap, LogRef, RaceId, RemovalReason, SeatRef, SessionId, SourceTime,
 };
 
 /// The lap filters a race runs under. They come from the race rules of the format in force.
@@ -184,6 +184,9 @@ struct Crossing {
     by_hand: bool,
     /// Which run of the timer's clock `at` is on.
     clock_run: u32,
+    /// A person put this crossing in. Its time was picked on the race's own clock, however
+    /// long after the race that was: see [`RaceLaps::seat`].
+    inserted: bool,
 }
 
 /// Every lap-gate crossing that belongs to a race, with the rulings made about them.
@@ -196,6 +199,9 @@ pub struct RaceLaps {
     crossings: BTreeMap<LogRef, Crossing>,
     /// How many times each timer has started its clock, as far as the log says.
     clock_runs: BTreeMap<AdapterId, u32>,
+    /// The session each timer last said it started. A timer says the same one again when
+    /// the Director is the one that started up, and its clock has not begun again.
+    sessions: BTreeMap<AdapterId, SessionId>,
 }
 
 impl RaceLaps {
@@ -233,6 +239,7 @@ impl RaceLaps {
                             restart: false,
                             by_hand: false,
                             clock_run: self.clock_run(&pass.adapter),
+                            inserted: false,
                         },
                     );
                 }
@@ -254,13 +261,19 @@ impl RaceLaps {
                         restart: false,
                         by_hand: true,
                         clock_run: self.clock_run(adapter),
+                        inserted: true,
                     },
                 );
             }
             // A timer says so each time it starts up. Its clock begins again, so times
             // from before and after cannot be compared.
-            Event::SessionStarted { adapter, .. } => {
-                *self.clock_runs.entry(adapter.clone()).or_default() += 1;
+            Event::SessionStarted { adapter, session } => {
+                // The same session said again is the same clock: the Director started up
+                // and met a timer that had been running all along.
+                if self.sessions.get(adapter) != Some(session) {
+                    self.sessions.insert(adapter.clone(), session.clone());
+                    *self.clock_runs.entry(adapter.clone()).or_default() += 1;
+                }
             }
             Event::LapRemoved {
                 race,
@@ -344,9 +357,26 @@ impl RaceLaps {
             .iter()
             .filter(|(_, c)| &c.race == race && &c.adapter == adapter && &c.seat == seat)
             .collect();
+        // A lap put in by hand was timed on the race's clock: the marshal picked a moment of
+        // the race. The timer may have started again since, and that says nothing about the
+        // lap. So it is read on the clock run of the race's start, or, where the start was
+        // never placed on this timer, of the seat's first crossing from the timer itself.
+        let race_run = if filters.start_at.is_some() {
+            Some(filters.start_clock_run)
+        } else {
+            crossings
+                .iter()
+                .filter(|(_, c)| !c.inserted)
+                .map(|(_, c)| c.clock_run)
+                .min()
+        };
+        let run_of = |c: &Crossing| match (c.inserted, race_run) {
+            (true, Some(run)) => run,
+            _ => c.clock_run,
+        };
         // Clock runs in order first: after a restart the timer's clock is back near zero,
         // and those crossings still came later.
-        crossings.sort_by_key(|(offset, c)| (c.clock_run, c.at.micros, **offset));
+        crossings.sort_by_key(|(offset, c)| (run_of(c), c.at.micros, **offset));
 
         let mut out = SeatLaps::default();
         // The last crossing that counted: where the next lap starts, and which run of the
@@ -357,6 +387,7 @@ impl RaceLaps {
             previous = Some((None, tone, filters.start_clock_run));
         }
         for (offset, crossing) in crossings {
+            let clock_run = run_of(crossing);
             if let Some(reason) = crossing.removed {
                 out.uncounted.push(UncountedCrossing {
                     crossing: *offset,
@@ -370,7 +401,7 @@ impl RaceLaps {
             let ruled = crossing.restart || crossing.by_hand;
             // The start only means something on the clock run it was placed on.
             if !ruled
-                && crossing.clock_run == filters.start_clock_run
+                && clock_run == filters.start_clock_run
                 && filters.start_at.is_some_and(|start| {
                     crossing.at.micros
                         < start.micros + filters.ignore_before_micros.unwrap_or(0).max(0)
@@ -385,10 +416,10 @@ impl RaceLaps {
             }
             let Some((start, started_at, run)) = previous else {
                 out.hole_shot = Some((*offset, crossing.at));
-                previous = Some((Some(*offset), crossing.at, crossing.clock_run));
+                previous = Some((Some(*offset), crossing.at, clock_run));
                 continue;
             };
-            if run != crossing.clock_run {
+            if run != clock_run {
                 // The timer restarted in between: the two times are on different clocks.
                 out.intervals.push(Lap {
                     start,
@@ -397,7 +428,7 @@ impl RaceLaps {
                     ended_at: crossing.at,
                     kind: LapKind::TimerRestarted,
                 });
-                previous = Some((Some(*offset), crossing.at, crossing.clock_run));
+                previous = Some((Some(*offset), crossing.at, clock_run));
                 continue;
             }
             let too_short = filters
@@ -422,7 +453,7 @@ impl RaceLaps {
                     LapKind::Lap
                 },
             });
-            previous = Some((Some(*offset), crossing.at, crossing.clock_run));
+            previous = Some((Some(*offset), crossing.at, clock_run));
         }
         out
     }
@@ -973,6 +1004,87 @@ mod tests {
         assert_eq!(laps.best_consecutive_micros(3), None);
         // And there is no one clock to give a total on.
         assert_eq!(laps.total_micros(), None);
+    }
+
+    #[test]
+    fn the_director_starting_again_is_not_the_timer_starting_again() {
+        let session = |name: &str| Event::SessionStarted {
+            adapter: AdapterId("oft".into()),
+            session: SessionId(name.into()),
+        };
+        // The Director is stopped and started mid-race (an update, say). The timer never
+        // went away: it names the same session, and its clock ran on.
+        let events = vec![
+            session("boot-1"),
+            pass(52 * S),
+            pass(62 * S),
+            session("boot-1"),
+            pass(71 * S),
+        ];
+        let filters = LapFilters {
+            start_at: Some(SourceTime::from_micros(50 * S)),
+            start_clock_run: 1,
+            ..LapFilters::default()
+        };
+        let laps = read(&events, filters);
+        assert!(
+            laps.intervals.iter().all(Lap::is_lap),
+            "{:?}",
+            laps.intervals
+        );
+        assert_eq!(times(&laps), vec![10 * S, 9 * S]);
+        assert_eq!(laps.total_micros(), Some(19 * S));
+    }
+
+    #[test]
+    fn a_lap_added_by_hand_after_the_timer_restarted_is_still_on_the_race_s_clock() {
+        let session = |name: &str| Event::SessionStarted {
+            adapter: AdapterId("oft".into()),
+            session: SessionId(name.into()),
+        };
+        // The timer missed the hole shot: the first crossing it reported ended lap 1. Later
+        // the timer was restarted, and only then did the marshal add the missed crossing,
+        // 2 s into the race.
+        let events = vec![
+            session("boot-1"),
+            pass(62 * S),
+            pass(71 * S),
+            session("boot-2"),
+            Event::LapInserted {
+                race: race(),
+                adapter: AdapterId("oft".into()),
+                seat: SeatRef("seat-0".into()),
+                at: SourceTime::from_micros(52 * S),
+            },
+        ];
+        let filters = LapFilters {
+            start_at: Some(SourceTime::from_micros(50 * S)),
+            start_clock_run: 1,
+            ..LapFilters::default()
+        };
+        let laps = read(&events, filters);
+        // It is the hole shot, and the two laps after it are laps: nothing is "timer
+        // restarted".
+        assert_eq!(
+            laps.hole_shot.map(|(_, at)| at),
+            Some(SourceTime::from_micros(52 * S))
+        );
+        assert!(
+            laps.intervals.iter().all(Lap::is_lap),
+            "{:?}",
+            laps.intervals
+        );
+        assert_eq!(times(&laps), vec![10 * S, 9 * S]);
+
+        // The same where the start was never placed on this timer's clock: the added lap
+        // goes with the crossings the timer itself reported.
+        let laps = read(&events, LapFilters::default());
+        assert!(
+            laps.intervals.iter().all(Lap::is_lap),
+            "{:?}",
+            laps.intervals
+        );
+        assert_eq!(times(&laps), vec![10 * S, 9 * S]);
     }
 
     #[test]
