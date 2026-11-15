@@ -40,7 +40,9 @@
     signalState,
     editable,
     busy,
-    act
+    act,
+    playhead = undefined,
+    onseek = undefined
   }: {
     race: RaceView;
     seat: RaceSeatView;
@@ -56,6 +58,10 @@
     busy: boolean;
     /** Send one ruling. Resolves `true` when the Director took it. */
     act: (command: Command) => Promise<boolean>;
+    /** Where the race's video is, in microseconds into the race. Left out with no video open. */
+    playhead?: number | undefined;
+    /** Move the race's video to a moment of the race, in microseconds from its start. */
+    onseek?: ((raceMicros: number) => void) | undefined;
   } = $props();
 
   const who = $derived(seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot));
@@ -81,6 +87,22 @@
 
   function pick(crossing: LogRef) {
     selected = selected === crossing ? undefined : crossing;
+  }
+
+  // The video and this seat's times only line up when the times are counted from the race's
+  // start. Counted from the seat's first crossing, there is nothing to line them up with.
+  const aligned = $derived(base?.words === 'into the race' ? base.at : undefined);
+  const cursor = $derived(
+    aligned !== undefined && playhead !== undefined ? aligned + playhead : undefined
+  );
+  const seekTo = $derived(
+    aligned !== undefined && onseek ? (at: number) => onseek(at - aligned) : undefined
+  );
+  /** Pick a lap in the list, and show its crossing in the video. */
+  function pickRow(crossing: LogRef) {
+    pick(crossing);
+    const mark = marks.find((entry) => entry.crossing === crossing);
+    if (mark) seekTo?.(mark.at);
   }
 
   function pickOnTrace(at: number) {
@@ -181,6 +203,8 @@
       label="Signal for {who} on {seatName} over the whole race, with the start, each crossing and the enter and exit levels. The lap list below says the same in words."
       onselect={pick}
       onpick={editable ? pickOnTrace : undefined}
+      {cursor}
+      onseek={seekTo}
     />
   {:else if signalState === 'loading'}
     <p class="muted" role="status">Reading the signal…</p>
@@ -217,7 +241,7 @@
                 class="pick"
                 aria-pressed={selected === row.crossing}
                 title="Show on the trace"
-                onclick={() => pick(row.crossing)}
+                onclick={() => pickRow(row.crossing)}
               >
                 {#if row.kind === 'holeshot'}Hole shot{:else if row.kind === 'restart'}Restart{:else if row.kind === 'timerRestart'}Timer
                   restarted{:else}Lap
@@ -304,7 +328,7 @@
               class="pick"
               aria-pressed={selected === crossing.crossing}
               title="Show on the trace"
-              onclick={() => pick(crossing.crossing)}
+              onclick={() => pickRow(crossing.crossing)}
             >
               {base ? `${formatOffset(crossing.at, base.at)} s` : 'Crossing'}
             </button>

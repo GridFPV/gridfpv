@@ -57,6 +57,7 @@ export {
   getOverlayLook,
   putOverlayLook,
   overlayLogoUrl,
+  raceVideoUrl,
   putOverlayLogo,
   deleteOverlayLogo,
   getEventState,

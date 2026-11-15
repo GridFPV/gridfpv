@@ -90,7 +90,8 @@ async function open(
   view: EventView,
   raceId?: string,
   over: Partial<LiveSession> = {},
-  timers = [timerView('gate-x1y2', 'Gate', 2)]
+  timers = [timerView('gate-x1y2', 'Gate', 2)],
+  props: { videoUrl?: (event: string, race: string, which: string) => string } = {}
 ) {
   const { session, live } = await openLive(
     view,
@@ -102,7 +103,7 @@ async function open(
     EVENT.id
   );
   const nav = { onopen: vi.fn(), onrun: vi.fn() };
-  render(MarshalPage, { live, race: raceId, ...nav });
+  render(MarshalPage, { live, race: raceId, ...nav, ...props });
   return { session, live, nav };
 }
 
@@ -789,6 +790,152 @@ describe('MarshalPage trace', () => {
     expect(lap2).toHaveAttribute('aria-pressed', 'false');
     await fireEvent.click(lap1);
     expect(lap1).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  // ── The race's video, lined up with the trace ──────────────────────────────
+  /** The race started 100 s on the Director's clock, and its video 5 s before that. */
+  function filmed(video: Partial<NonNullable<RaceView['video']>> = {}) {
+    const { view, signal } = onGate();
+    view.races[0] = {
+      ...view.races[0],
+      started_at: 100 * S,
+      video: {
+        file: 'C:\\Videos\\Night race 1 - Clean.mp4',
+        first_frame_at: 95 * S,
+        clean: true,
+        old_overlaid_file: 'C:\\Videos\\Night race 1 - Overlay.mp4',
+        overlay: 'NeedsRender',
+        ...video
+      }
+    };
+    return { view, signal };
+  }
+  const videoUrl = (event: string, race: string, which: string) =>
+    `http://d.local/${event}/${encodeURIComponent(race)}/${which}`;
+  const openFilmed = async (video?: Partial<NonNullable<RaceView['video']>>) => {
+    const { view, signal } = filmed(video);
+    await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) }, undefined, { videoUrl });
+    return { view, signal };
+  };
+  /** The player, with a clock jsdom lets a test read and set. */
+  function player(): HTMLVideoElement {
+    const video = document.querySelector('video')!;
+    if (!Object.getOwnPropertyDescriptor(video, 'currentTime')) {
+      let at = 0;
+      Object.defineProperty(video, 'currentTime', {
+        configurable: true,
+        get: () => at,
+        set: (value: number) => (at = value)
+      });
+      video.pause = () => {};
+    }
+    return video;
+  }
+
+  it('offers no video for a race that has none, or a console that cannot reach the files', async () => {
+    const { view, signal } = onGate();
+    await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) }, undefined, { videoUrl });
+    expect(screen.queryByRole('region', { name: 'Video of the race' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /video/i })).toBeNull();
+  });
+
+  it('plays the overlay video first, even when its laps are out of date, and says so', async () => {
+    globalThis.localStorage?.removeItem('gridfpv.marshal.video');
+    await openFilmed();
+    const region = screen.getByRole('region', { name: 'Video of the race' });
+    const video = player();
+    expect(video).toHaveAttribute(
+      'src',
+      `http://d.local/${EVENT.id}/${encodeURIComponent(RACE)}/overlay`
+    );
+    expect(within(region).getByTestId('video-out-of-date')).toHaveTextContent('Laps changed since');
+    expect(region).toHaveTextContent('Its clock is still right.');
+    // The clean recording can be picked instead.
+    await fireEvent.click(within(region).getByRole('radio', { name: 'Clean, no overlay' }));
+    expect(document.querySelector('video')).toHaveAttribute(
+      'src',
+      `http://d.local/${EVENT.id}/${encodeURIComponent(RACE)}/recording`
+    );
+    expect(within(region).queryByTestId('video-out-of-date')).toBeNull();
+    expectNoRawIds();
+  });
+
+  it('opens on the start of the race, and the line on the trace follows the video', async () => {
+    layOut();
+    await openFilmed();
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    await within(ace).findByRole('img');
+    const video = player();
+    // Loaded: it goes to the start, which sits 5 s into the file.
+    await fireEvent.loadedMetadata(video);
+    expect(video.currentTime).toBe(5);
+    await waitFor(() =>
+      expect(screen.getByTestId('video-moment')).toHaveTextContent('0.000 s into the race')
+    );
+    const line = await within(ace).findByTestId('trace-cursor');
+    const leftAtStart = Number.parseFloat(line.style.left);
+    // 15.5 s into the file is 10.5 s into the race: the line has moved right.
+    video.currentTime = 15.5;
+    await fireEvent.timeUpdate(video);
+    await waitFor(() =>
+      expect(screen.getByTestId('video-moment')).toHaveTextContent('10.500 s into the race')
+    );
+    expect(Number.parseFloat(within(ace).getByTestId('trace-cursor').style.left)).toBeGreaterThan(
+      leftAtStart
+    );
+  });
+
+  it('a click on the trace, or on a lap, moves the video to that moment', async () => {
+    layOut();
+    const { view, signal } = await openFilmed();
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const video = player();
+    await fireEvent.loadedMetadata(video);
+    const marks = traceMarks(view.races[0].seats[0], START);
+    const whole = wholeWindow(new RaceTrace(signal.seats[0].chunks), marks)!;
+
+    // An empty spot: exactly the time clicked, 5 s later in the file than in the race.
+    const at = timeAtX(whole, 1000, 480);
+    await clickAt(canvas, 480);
+    expect(video.currentTime).toBeCloseTo((at - START) / S + 5, 5);
+
+    // A crossing: the crossing itself. Lap 2 ended 10.5 s into the race.
+    const x = ((START + 10.5 * S - whole.from) / (whole.to - whole.from)) * 1000;
+    await clickAt(canvas, x + 2);
+    expect(video.currentTime).toBeCloseTo(15.5, 5);
+
+    // And picking a lap in the list does the same. Lap 1 ended before lap 2.
+    await fireEvent.click(within(ace).getByRole('button', { name: /^Lap 1$/ }));
+    expect(video.currentTime).toBeLessThan(15.5);
+    expect(video.currentTime).toBeGreaterThan(5);
+  });
+
+  it('the video can be hidden, and the choice is kept', async () => {
+    globalThis.localStorage?.removeItem('gridfpv.marshal.video');
+    layOut();
+    await openFilmed();
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    await within(ace).findByRole('img');
+    await fireEvent.loadedMetadata(player());
+    await within(ace).findByTestId('trace-cursor');
+    await fireEvent.click(screen.getByRole('button', { name: 'Hide video' }));
+    expect(document.querySelector('video')).toBeNull();
+    // With no video open there is no line on the trace.
+    await waitFor(() => expect(within(ace).queryByTestId('trace-cursor')).toBeNull());
+    expect(globalThis.localStorage?.getItem('gridfpv.marshal.video')).toBe('off');
+    await fireEvent.click(screen.getByRole('button', { name: 'Show video' }));
+    expect(document.querySelector('video')).not.toBeNull();
+    globalThis.localStorage?.removeItem('gridfpv.marshal.video');
+  });
+
+  it('says so in words when the video cannot be played, with where the file is', async () => {
+    globalThis.localStorage?.removeItem('gridfpv.marshal.video');
+    await openFilmed();
+    await fireEvent.error(player());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('This video cannot be played here.');
+    expect(alert).toHaveTextContent('Night race 1 - Overlay.mp4');
   });
 
   it('a click on an empty spot offers "Add a lap here" at that exact time', async () => {

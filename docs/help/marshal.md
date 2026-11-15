@@ -24,6 +24,29 @@ shot, and each lap.
 - Click a lap's name in the table to find it on the trace.
 - Click an empty spot on the trace to add a lap there.
 
+## The video
+
+If the race was recorded, a **Video** card shows above the seats. It plays the race's
+video, lined up with the race clock. There is nothing to line up by hand: Grid knows when
+the recording started and when the race started.
+
+- It plays the video **with the overlay** when there is one. The clock drawn on it is the
+  thing to read a pass against. If laps have changed since it was made, it says **Laps
+  changed since**. The laps on it are old, but its clock is still right.
+- **Clean, no overlay** plays the plain recording.
+- The line on each signal trace is where the video is. It moves as the video plays.
+- **Click a trace** to jump the video to that moment. Clicking a lap in the table does the
+  same.
+- **◀ Frame** and **Frame ▶** step one frame. **0.25×** and **0.5×** play slowly.
+- **To the start** goes to the start tone.
+- **Hide video** puts it away. Grid remembers your choice.
+
+A race with no recording has no Video card. If the file was moved or cannot be played, the
+card says so and names the file. MP4 always plays.
+
+A seat on a timer whose clock was never measured cannot be lined up, so its trace shows no
+line.
+
 ## Fixing laps
 
 - **Remove** takes a pass out. Its time joins the next lap. Say laps A, B and C were flown

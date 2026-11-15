@@ -38,6 +38,8 @@ pub struct RaceVideo {
     pub clean: bool,
     /// A second recording made alongside, with the live overlay in it.
     pub overlay_file: Option<String>,
+    /// The Director's clock at the first frame of `overlay_file`, where it was kept.
+    pub overlay_first_frame_at: Option<i64>,
     /// The mark of the race's laps when it was filmed.
     pub filmed_key: Option<String>,
     /// The latest render: the finished file, and the mark of the laps it shows.
@@ -167,6 +169,7 @@ impl EventState {
                 first_frame_at,
                 clean,
                 overlay_file,
+                overlay_first_frame_at,
                 laps_key,
             } => {
                 self.videos.insert(
@@ -176,6 +179,7 @@ impl EventState {
                         first_frame_at: *first_frame_at,
                         clean: *clean,
                         overlay_file: overlay_file.clone(),
+                        overlay_first_frame_at: *overlay_first_frame_at,
                         filmed_key: laps_key.clone(),
                         rendered: None,
                     },

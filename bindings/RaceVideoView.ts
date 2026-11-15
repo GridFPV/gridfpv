@@ -26,6 +26,19 @@ clean: boolean,
  */
 overlaid_file?: string, 
 /**
+ * A video with an overlay in it whose laps are out of date: the latest render, or else
+ * the one filmed live. Set only when `overlaid_file` is absent and such a video
+ * exists. Its clock is still right, which is what a marshal watches it for.
+ */
+old_overlaid_file?: string, 
+/**
+ * The Director's clock at the first frame of the video with the overlay in it
+ * (`overlaid_file`, or else `old_overlaid_file`), in epoch microseconds. It is not
+ * always `first_frame_at`: a scene filmed alongside starts a moment later. Absent when
+ * there is no such video.
+ */
+overlaid_first_frame_at?: number, 
+/**
  * Where the overlay stands.
  */
 overlay: VideoOverlay, };

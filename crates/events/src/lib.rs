@@ -884,6 +884,9 @@ pub enum Event {
     /// own), so an overlay can be drawn onto it afterwards. `overlay_file` is a second
     /// recording made alongside, with the live overlay in it. `laps_key` is the race's laps
     /// as they stood when it was filmed (see `VideoRendered`), so a later change shows.
+    /// `overlay_first_frame_at` is the Director's clock at the first frame of
+    /// `overlay_file`: the two recordings do not start at the same instant. Absent in a
+    /// log from before it was kept, where `first_frame_at` stands in for it.
     VideoRecorded {
         race: RaceId,
         file: String,
@@ -894,6 +897,9 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         overlay_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        overlay_first_frame_at: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         laps_key: Option<String>,

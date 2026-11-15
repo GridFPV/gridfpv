@@ -795,6 +795,22 @@ export async function putOverlayLook(
   );
 }
 
+/**
+ * Where one of a race's videos plays from (`GET /events/{event}/races/{race}/video/{which}`).
+ * `recording` is the recording itself; `overlay` is a video with the overlay in it, whether
+ * or not its laps are still right. The Director answers byte ranges, so a player can seek.
+ */
+export function raceVideoUrl(
+  baseUrl: string,
+  event: string,
+  race: string,
+  which: 'recording' | 'overlay'
+): string {
+  return `${trimSlash(baseUrl)}/events/${encodeURIComponent(event)}/races/${encodeURIComponent(
+    race
+  )}/video/${which}`;
+}
+
 /** Where one of the overlay's two logos is served from (`GET /overlay/logo/{side}`). */
 export function overlayLogoUrl(baseUrl: string, side: 'left' | 'right'): string {
   return `${trimSlash(baseUrl)}/overlay/logo/${side}`;
