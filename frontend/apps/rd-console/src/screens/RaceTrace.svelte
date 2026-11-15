@@ -15,6 +15,10 @@
    * Clicking a crossing picks it (the caller highlights the same lap in its list). Clicking an
    * empty spot hands the caller the exact time there, to offer "Add a lap here".
    *
+   * With the race's video open, `cursor` is where the video is, drawn as a line that moves as
+   * it plays. Any click also tells the caller the time clicked (`onseek`), which moves the
+   * video there.
+   *
    * The plot is a picture of what the caller's lap list already says in words, so the list is
    * its text alternative; the wrapper carries a label that says what the picture shows.
    */
@@ -44,7 +48,9 @@
     pending = undefined,
     label,
     onselect,
-    onpick = undefined
+    onpick = undefined,
+    cursor = undefined,
+    onseek = undefined
   }: {
     /** The seat's logged signal. */
     signal: SeatSignal;
@@ -62,6 +68,10 @@
     onselect: (crossing: LogRef) => void;
     /** An empty spot was clicked. Left out when laps cannot be added. */
     onpick?: ((at: SourceTime) => void) | undefined;
+    /** Where the race's video is, on the timer's clock. Left out with no video open. */
+    cursor?: SourceTime | undefined;
+    /** The plot was clicked at this time: move the video there. */
+    onseek?: ((at: SourceTime) => void) | undefined;
   } = $props();
 
   const trace = $derived(new RaceTrace(signal.chunks));
@@ -132,7 +142,17 @@
     );
     if (hit?.crossing !== undefined) onselect(hit.crossing);
     else onpick?.(at);
+    // A click on a crossing goes to the crossing itself, not to the pixel beside it.
+    onseek?.(hit?.crossing !== undefined ? hit.at : at);
   }
+
+  /** Where the video's line sits across the plot, as a share of its width. Off the plot: none. */
+  const cursorShare = $derived.by(() => {
+    if (cursor === undefined) return undefined;
+    const span = shown.to - shown.from;
+    if (span <= 0 || cursor < shown.from || cursor > shown.to) return undefined;
+    return (cursor - shown.from) / span;
+  });
 
   // The wheel must be able to stop the page from scrolling, so it is not a passive listener.
   $effect(() => {
@@ -321,7 +341,17 @@
 <div class="trace">
   <!-- The picture is named on a wrapper: a canvas cannot itself carry the image role. The lap
        list beside it does everything a click here does, for a keyboard or a screen reader. -->
-  <div role="img" aria-label={label}>
+  <div class="plot" role="img" aria-label={label}>
+    {#if cursorShare !== undefined}
+      <!-- A line of its own over the picture: it moves every frame of the video, and the
+           picture under it does not have to be drawn again. -->
+      <span
+        class="cursor"
+        data-testid="trace-cursor"
+        style:left="{cursorShare * 100}%"
+        aria-hidden="true"
+      ></span>
+    {/if}
     <canvas
       bind:this={canvas}
       aria-hidden="true"
@@ -384,6 +414,20 @@
   }
   canvas.can-add {
     cursor: crosshair;
+  }
+  .plot {
+    position: relative;
+  }
+  /* Where the video is. Clicks pass through it to the picture. */
+  .cursor {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--gf-accent);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
   }
   .tools {
     display: flex;

@@ -23,7 +23,14 @@
    * A race is always named by its heat and its number in that heat. Its id is only in the URL.
    */
   import { Badge, Banner, Button, Card, Input, Select, formatMicros } from '@gridfpv/components';
-  import type { Command, PhaseId, ProtocolError, RaceId, RaceSignal } from '@gridfpv/types';
+  import type {
+    Command,
+    EventId,
+    PhaseId,
+    ProtocolError,
+    RaceId,
+    RaceSignal
+  } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import ErrorBanner from '../lib/ErrorBanner.svelte';
   import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
@@ -41,13 +48,16 @@
   import { bestRunInHeat, consecutiveLaps } from '../lib/overlay.js';
   import { defaultHeat, groupOfHeat, heatGroups } from '../lib/phases.js';
   import { raceStateLabel } from '../lib/run.js';
+  import type { WhichVideo } from '../lib/marshalVideo.js';
   import MarshalSeat from './MarshalSeat.svelte';
+  import MarshalVideo from './MarshalVideo.svelte';
 
   let {
     live,
     race: named = undefined,
     onopen,
-    onrun
+    onrun,
+    videoUrl = undefined
   }: {
     live: EventLive;
     /**
@@ -59,7 +69,34 @@
     onopen: (race: RaceId) => void;
     /** Open a heat's Run view. */
     onrun: (heat: PhaseId) => void;
+    /**
+     * Where one of a race's videos plays from. Left out, the page has no video: a console
+     * that cannot reach the Director's files simply does not offer it.
+     */
+    videoUrl?: ((event: EventId, race: RaceId, which: WhichVideo) => string) | undefined;
   } = $props();
+
+  // ── The race's video, lined up with its clock ──────────────────────────────
+  /** The marshal's choice to watch the video. Kept, so it holds from race to race. */
+  let showVideo = $state(readShowVideo());
+  function readShowVideo(): boolean {
+    try {
+      return globalThis.localStorage?.getItem('gridfpv.marshal.video') !== 'off';
+    } catch {
+      return true;
+    }
+  }
+  function setShowVideo(on: boolean): void {
+    showVideo = on;
+    try {
+      globalThis.localStorage?.setItem('gridfpv.marshal.video', on ? 'on' : 'off');
+    } catch {
+      // The choice lasts for this visit only.
+    }
+  }
+  /** Where the video is, in microseconds into the race. */
+  let playhead = $state<number | undefined>(undefined);
+  let videoPlayer = $state<{ seek: (raceMicros: number) => void }>();
 
   const names = $derived(live.names);
   const view = $derived(live.view);
@@ -339,6 +376,39 @@
               </p>
             </Card>
 
+            {#if race.video && videoUrl}
+              {@const url = videoUrl}
+              <Card elevation="sm">
+                <div class="video-head">
+                  <h3 class="video-title">Video</h3>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-expanded={showVideo}
+                    onclick={() => setShowVideo(!showVideo)}
+                  >
+                    {showVideo ? 'Hide video' : 'Show video'}
+                  </Button>
+                  {#if showVideo}
+                    <span class="muted video-hint">
+                      The line on each signal trace is where the video is. Click a trace, or a lap,
+                      to jump there.
+                    </span>
+                  {/if}
+                </div>
+                {#if showVideo}
+                  {#key race.race}
+                    <MarshalVideo
+                      bind:this={videoPlayer}
+                      bind:playhead
+                      {race}
+                      urlOf={(which) => url(live.eventId, race.race, which)}
+                    />
+                  {/key}
+                {/if}
+              </Card>
+            {/if}
+
             <ul class="seats" aria-label="Seats">
               {#each race.seats as seat, index (`${seat.adapter}/${seat.seat}`)}
                 <MarshalSeat
@@ -351,6 +421,10 @@
                   {editable}
                   {busy}
                   {act}
+                  playhead={showVideo && race.video && videoUrl ? playhead : undefined}
+                  onseek={showVideo && race.video && videoUrl
+                    ? (raceMicros) => videoPlayer?.seek(raceMicros)
+                    : undefined}
                 />
               {/each}
             </ul>
@@ -659,5 +733,19 @@
     .columns {
       grid-template-columns: 1fr;
     }
+  }
+  .video-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+    margin-bottom: var(--gf-space-2);
+  }
+  .video-title {
+    margin: 0;
+    font-size: var(--gf-font-size-md);
+  }
+  .video-hint {
+    margin: 0;
   }
 </style>

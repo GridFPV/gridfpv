@@ -43,6 +43,8 @@ const VENDOR: &str = "source-record";
 const FILTER_KIND: &str = "source_record_filter";
 
 /// A recording in progress: what has to be stopped.
+// One of these exists at a time, so the size of the bigger variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tape {
     /// OBS's own recording.
@@ -63,6 +65,28 @@ pub struct SceneTape {
     folder: String,
     /// The file's name, without its extension.
     name: String,
+    /// The Director's clock when the scene's recording was seen to be running: the file's
+    /// first frame, in epoch microseconds.
+    started_at: i64,
+}
+
+impl Tape {
+    /// The Director's clock at the first frame of the recording itself, where the tape
+    /// knows it. `None` for OBS's own recording: the caller notes that one.
+    pub fn first_frame_at(&self) -> Option<i64> {
+        match self {
+            Tape::Own => None,
+            Tape::Scenes { clean, .. } => Some(clean.started_at),
+        }
+    }
+
+    /// The same for the overlay scene's recording, when one is being made.
+    pub fn overlay_first_frame_at(&self) -> Option<i64> {
+        match self {
+            Tape::Own => None,
+            Tape::Scenes { overlay, .. } => overlay.as_ref().map(|tape| tape.started_at),
+        }
+    }
 }
 
 /// What a finished recording left behind.
@@ -591,6 +615,7 @@ async fn scene_start(
         filter,
         folder,
         name: name.to_owned(),
+        started_at: gridfpv_server::app::now_micros(),
     })
 }
 

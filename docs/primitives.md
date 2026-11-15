@@ -816,7 +816,9 @@ names a drawn video and the mark of the laps it shows. The mark is worked out fr
 race's laps, so the snapshot can say for every race whether its overlaid video still
 matches: filmed, drawn, none yet, or laps changed. Neither fact changes a result.
 
-Not built yet: the video window in Marshal, and video on the Tune page.
+The Marshal page plays a race's video lined up with its clock: a line on each signal trace
+shows where the video is, and a click on a trace moves the video there. Not built yet:
+video on the Tune page.
 
 ffmpeg is not shipped with Grid and there is no installer to fetch it. The Video page has a
 **Get ffmpeg** button: the Director downloads a ready-made build with the system's `curl`

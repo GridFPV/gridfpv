@@ -68,6 +68,7 @@ import {
   getOverlayLook,
   putOverlayLook,
   overlayLogoUrl,
+  raceVideoUrl,
   putOverlayLogo,
   deleteOverlayLogo,
   getEventState,
@@ -221,6 +222,7 @@ const realApi = {
   getOverlayLook,
   putOverlayLook,
   overlayLogoUrl,
+  raceVideoUrl,
   putOverlayLogo,
   deleteOverlayLogo,
   getEventState,
@@ -587,6 +589,11 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#api.putOverlayLook(this.baseUrl, placement, token)
     );
+  }
+
+  /** Where one of a race's videos plays from, for the Marshal page's player. */
+  raceVideoUrl(event: EventMeta['id'], race: string, which: 'recording' | 'overlay'): string {
+    return this.#api.raceVideoUrl(this.baseUrl, event, race, which);
   }
 
   /** Where one of the overlay's logos is served from. */

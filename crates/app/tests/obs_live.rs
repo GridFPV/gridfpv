@@ -486,11 +486,22 @@ async fn two_scenes_are_recorded_to_their_own_files_by_a_real_obs() {
             Event::VideoRecorded {
                 race: of,
                 file,
+                first_frame_at,
                 clean,
                 overlay_file,
+                overlay_first_frame_at,
                 laps_key,
-                ..
-            } if of == race => Some((file, clean, overlay_file, laps_key)),
+            } if of == race => {
+                // The overlay scene's recording began a moment after the clean one's, and
+                // each keeps its own first frame, so each lines up with the race clock.
+                let late =
+                    overlay_first_frame_at.expect("the overlay's own first frame") - first_frame_at;
+                assert!(
+                    (0..2_000_000).contains(&late),
+                    "the overlay began {late} µs after"
+                );
+                Some((file, clean, overlay_file, laps_key))
+            }
             _ => None,
         })
         .expect("the recording is logged");

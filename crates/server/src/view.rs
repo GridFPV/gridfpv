@@ -187,8 +187,42 @@ pub struct RaceVideoView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub overlaid_file: Option<String>,
+    /// A video with an overlay in it whose laps are out of date: the latest render, or else
+    /// the one filmed live. Set only when `overlaid_file` is absent and such a video
+    /// exists. Its clock is still right, which is what a marshal watches it for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub old_overlaid_file: Option<String>,
+    /// The Director's clock at the first frame of the video with the overlay in it
+    /// (`overlaid_file`, or else `old_overlaid_file`), in epoch microseconds. It is not
+    /// always `first_frame_at`: a scene filmed alongside starts a moment later. Absent when
+    /// there is no such video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub overlaid_first_frame_at: Option<i64>,
     /// Where the overlay stands.
     pub overlay: VideoOverlay,
+}
+
+/// A race's video with an overlay in it, whether or not its laps are still right: the
+/// latest render, else the one filmed with the live overlay. `None` when there is neither.
+pub fn any_overlaid_file(video: &gridfpv_engine::state::RaceVideo) -> Option<String> {
+    overlaid(video).map(|(file, _)| file)
+}
+
+/// That video, and the Director's clock at its first frame. A render is drawn onto the
+/// recording, so it begins where the recording does. A scene filmed alongside begins a
+/// moment later, at its own first frame where that was kept.
+fn overlaid(video: &gridfpv_engine::state::RaceVideo) -> Option<(String, i64)> {
+    if let Some((file, _)) = &video.rendered {
+        return Some((file.clone(), video.first_frame_at));
+    }
+    if video.clean {
+        let first = video.overlay_first_frame_at.unwrap_or(video.first_frame_at);
+        video.overlay_file.clone().map(|file| (file, first))
+    } else {
+        Some((video.file.clone(), video.first_frame_at))
+    }
 }
 
 /// Where a race's overlaid video stands against its laps as they are now.
@@ -608,11 +642,17 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
         stopped_at: race.stopped_at,
         video: state.videos.get(id).map(|video| {
             let (overlay, overlaid_file) = overlay_state(video, &laps_key(&laps));
+            let old_overlaid_file = match overlaid_file {
+                Some(_) => None,
+                None => any_overlaid_file(video),
+            };
             RaceVideoView {
                 file: video.file.clone(),
                 first_frame_at: video.first_frame_at,
                 clean: video.clean,
                 overlaid_file,
+                old_overlaid_file,
+                overlaid_first_frame_at: overlaid(video).map(|(_, first)| first),
                 overlay,
             }
         }),

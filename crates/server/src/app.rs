@@ -175,6 +175,11 @@ pub fn router(registry: EventRegistry) -> Router {
                     crate::overlay::MAX_LOGO_BYTES + 1024,
                 )),
         )
+        // A race's recording, played on the Marshal page.
+        .route(
+            "/events/{event_id}/races/{race_id}/video/{which}",
+            get(crate::video::get_race_video),
+        )
         .route("/video/status", get(crate::video::get_status))
         .route("/video/render", post(crate::video::post_render))
         .route("/video/ffmpeg", post(crate::video::post_ffmpeg))

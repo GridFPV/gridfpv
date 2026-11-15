@@ -57,6 +57,8 @@ struct Active {
     name: String,
     /// The Director's clock when OBS said the recording had started: the file's first frame.
     first_frame_at: i64,
+    /// The same for the overlay scene's recording, when one is made alongside.
+    overlay_first_frame_at: Option<i64>,
     /// The race's start on the Director's clock, as last seen.
     starts_at: Option<i64>,
     phase: Phase,
@@ -408,17 +410,21 @@ impl Recorder {
         }
         let settings = desk.stored();
         let started = tape::start(&self.obs, &desk, &settings, &file_name_for(&race.name)).await;
-        // The clock at this moment is where the file begins.
-        let first_frame_at = now_micros();
+        // The clock at this moment is where OBS's own recording begins.
+        let returned_at = now_micros();
         let tape = match started {
             Ok(tape) => tape,
             Err(e) => return self.failed(&race, e),
         };
+        // A scene's recording noted its own first frame as it began. With two scenes the
+        // second begins a moment after the first, so each keeps its own.
+        let first_frame_at = tape.first_frame_at().unwrap_or(returned_at);
         let active = Active {
             event: race.event.clone(),
             race: race.race.clone(),
             name: race.name.clone(),
             first_frame_at,
+            overlay_first_frame_at: tape.overlay_first_frame_at(),
             starts_at: race.starts_at,
             phase: Phase::Recording,
         };
@@ -481,6 +487,7 @@ impl Recorder {
                 first_frame_at: active.first_frame_at,
                 clean: written.clean,
                 overlay_file: written.overlay_file.clone(),
+                overlay_first_frame_at: active.overlay_first_frame_at,
                 laps_key: mine.map(|race| race.laps_key.clone()),
             },
         );
@@ -642,6 +649,7 @@ mod tests {
             race: RaceId("heat#1".into()),
             name: "Night Heat race 1".into(),
             first_frame_at: 5 * S,
+            overlay_first_frame_at: None,
             starts_at: Some(10 * S),
             phase,
         }
