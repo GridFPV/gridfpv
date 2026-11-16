@@ -792,6 +792,108 @@ describe('MarshalPage trace', () => {
     expect(lap1).toHaveAttribute('aria-pressed', 'false');
   });
 
+  // ── Moving a crossing ──────────────────────────────────────────────────────
+  /** Where a moment of the race sits across the 1000 px canvas, and back. */
+  function scale(view: EventView, signal: RaceSignal) {
+    const marks = traceMarks(view.races[0].seats[0], START);
+    const whole = wholeWindow(new RaceTrace(signal.seats[0].chunks), marks)!;
+    return {
+      x: (seconds: number) => ((START + seconds * S - whole.from) / (whole.to - whole.from)) * 1000,
+      at: (x: number) => Math.round(whole.from + (x / 1000) * (whole.to - whole.from))
+    };
+  }
+
+  it('dragging a crossing previews the move, and nothing is sent until "Move it"', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x, at } = scale(view, signal);
+    // Lap 2 ended 10.5 s into the race. Drag it to about 12 s.
+    const to = x(12);
+    await fireEvent.mouseDown(canvas, { clientX: x(10.5) + 1, button: 0 });
+    await fireEvent.mouseMove(canvas, { clientX: to });
+    await fireEvent.mouseUp(canvas, { clientX: to, button: 0 });
+
+    const bar = within(ace).getByRole('group', { name: 'Move lap 2 of Ace' });
+    expect(bar).toHaveTextContent('Move lap 2 from 10.500 s to');
+    expect(within(bar).getByTestId('move-laps')).toHaveTextContent(
+      /lap 2 becomes .+, lap 3 becomes .+\./
+    );
+    expect(within(ace).getByTestId('trace-moving')).toHaveTextContent('2');
+    expect(within(ace).getByRole('button', { name: /^Lap 2$/ })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    expect(session.sendCommand).not.toHaveBeenCalled();
+
+    await fireEvent.click(within(bar).getByRole('button', { name: 'Move it' }));
+    await waitFor(() =>
+      expect(sent(session)).toEqual([
+        { Record: { LapAdjusted: { race: RACE, crossing: 12, at: at(to) } } }
+      ])
+    );
+    await waitFor(() => expect(within(ace).queryByTestId('trace-moving')).toBeNull());
+  });
+
+  it('a move can be cancelled, and a drag on an empty spot still slides the trace', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x } = scale(view, signal);
+    await fireEvent.mouseDown(canvas, { clientX: x(10.5), button: 0 });
+    await fireEvent.mouseMove(canvas, { clientX: x(13) });
+    await fireEvent.mouseUp(canvas, { clientX: x(13), button: 0 });
+    const bar = within(ace).getByRole('group', { name: 'Move lap 2 of Ace' });
+    await fireEvent.click(within(bar).getByRole('button', { name: 'Cancel' }));
+    expect(within(ace).queryByRole('group', { name: 'Move lap 2 of Ace' })).toBeNull();
+    // Away from any crossing, a drag moves nothing.
+    await fireEvent.mouseDown(canvas, { clientX: x(14), button: 0 });
+    await fireEvent.mouseMove(canvas, { clientX: x(16) });
+    await fireEvent.mouseUp(canvas, { clientX: x(16), button: 0 });
+    expect(within(ace).queryByRole('group', { name: /^Move .* of Ace$/ })).toBeNull();
+    expect(session.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('a finger drags a crossing the same way', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x } = scale(view, signal);
+    await fireEvent.touchStart(canvas, { touches: [{ clientX: x(10.5) }] });
+    await fireEvent.touchMove(canvas, { touches: [{ clientX: x(12) }] });
+    await fireEvent.touchEnd(canvas, { changedTouches: [{ clientX: x(12) }] });
+    expect(within(ace).getByRole('group', { name: 'Move lap 2 of Ace' })).toBeInTheDocument();
+  });
+
+  it('"Move here" moves the picked lap to the spot picked on the trace', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x, at } = scale(view, signal);
+    await fireEvent.click(within(ace).getByRole('button', { name: /^Lap 2$/ }));
+    // Nowhere to move it to yet.
+    expect(within(ace).queryByRole('button', { name: 'Move lap 2 of Ace here' })).toBeNull();
+    await clickAt(canvas, x(12));
+    await fireEvent.click(
+      await within(ace).findByRole('button', { name: 'Move lap 2 of Ace here' })
+    );
+    const bar = within(ace).getByRole('group', { name: 'Move lap 2 of Ace' });
+    await fireEvent.click(within(bar).getByRole('button', { name: 'Move it' }));
+    await waitFor(() =>
+      expect(sent(session)).toEqual([
+        { Record: { LapAdjusted: { race: RACE, crossing: 12, at: at(x(12)) } } }
+      ])
+    );
+  });
+
   // ── The race's video, lined up with the trace ──────────────────────────────
   /** The race started 100 s on the Director's clock, and its video 5 s before that. */
   function filmed(video: Partial<NonNullable<RaceView['video']>> = {}) {

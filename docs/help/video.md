@@ -157,8 +157,3 @@ recording in OBS to have each race recorded by itself.
 Grid can start, stop and name recordings on an OBS anywhere on the network. It can only
 move a file to the trash when it runs on the same computer as OBS. If it does not, a
 discarded race's file stays where it is and the run says why.
-
-## Not yet
-
-- Watching a race's video in Marshal.
-- Video on the Tune page.

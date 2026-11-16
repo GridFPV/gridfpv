@@ -19,6 +19,12 @@
    * it plays. Any click also tells the caller the time clicked (`onseek`), which moves the
    * video there.
    *
+   * A crossing can be dragged to a new time when the caller takes moves (`onmove`). The drag
+   * is a preview only: the caller is told the time, draws nothing in the log, and hands the
+   * preview back as `moving` to be drawn until the marshal confirms or cancels.
+   *
+   * A finger works like the mouse: a drag slides the plot or a crossing, a tap is a click.
+   *
    * The plot is a picture of what the caller's lap list already says in words, so the list is
    * its text alternative; the wrapper carries a label that says what the picture shows.
    */
@@ -50,7 +56,9 @@
     onselect,
     onpick = undefined,
     cursor = undefined,
-    onseek = undefined
+    onseek = undefined,
+    moving = undefined,
+    onmove = undefined
   }: {
     /** The seat's logged signal. */
     signal: SeatSignal;
@@ -72,6 +80,10 @@
     cursor?: SourceTime | undefined;
     /** The plot was clicked at this time: move the video there. */
     onseek?: ((at: SourceTime) => void) | undefined;
+    /** A crossing the marshal is moving, and where to. Drawn as a dashed line until it is settled. */
+    moving?: { crossing: LogRef; at: SourceTime } | undefined;
+    /** A crossing was dragged to this time. Left out when crossings cannot be moved. */
+    onmove?: ((crossing: LogRef, at: SourceTime) => void) | undefined;
   } = $props();
 
   const trace = $derived(new RaceTrace(signal.chunks));
@@ -103,56 +115,98 @@
     chosen = panWindow(shown, bounds, (shown.to - shown.from) * share);
   }
 
-  // ── Pointer: drag to pan, click to pick ────────────────────────────────────
-  let dragFrom: { x: number; window: TimeWindow; moved: boolean } | undefined;
+  // ── Pointer: drag to pan or to move a crossing, click to pick ──────────────
+  let dragFrom: { x: number; window: TimeWindow; moved: boolean; mark?: TraceMark } | undefined;
 
   function widthOf(element: HTMLElement): number {
     return element.getBoundingClientRect().width;
   }
-  function xIn(element: HTMLElement, event: MouseEvent): number {
-    return event.clientX - element.getBoundingClientRect().left;
+  function xIn(element: HTMLElement, clientX: number): number {
+    return clientX - element.getBoundingClientRect().left;
   }
+  /** The crossing within reach of a spot on the plot, if there is one. */
+  function markAt(element: HTMLElement, clientX: number, among: readonly TraceMark[]) {
+    const width = widthOf(element);
+    if (width <= 0) return undefined;
+    const at = timeAtX(shown, width, xIn(element, clientX));
+    const reach = (REACH_PX / width) * (shown.to - shown.from);
+    return { at, hit: nearestMark(among, at, reach) };
+  }
+  const crossings = $derived(marks.filter((mark) => mark.crossing !== undefined));
+  /** A crossing that does not count has no lap to re-time, so it is not dragged. */
+  const movable = $derived(crossings.filter((mark) => mark.kind !== 'uncounted'));
 
-  function onmousedown(event: MouseEvent) {
-    if (event.button !== 0) return;
-    dragFrom = { x: event.clientX, window: shown, moved: false };
+  function down(clientX: number) {
+    const mark = onmove && canvas ? markAt(canvas, clientX, movable)?.hit : undefined;
+    dragFrom = { x: clientX, window: shown, moved: false, mark };
   }
-  function onmousemove(event: MouseEvent) {
+  function move(clientX: number) {
     if (!dragFrom || !canvas) return;
-    const dx = event.clientX - dragFrom.x;
+    const dx = clientX - dragFrom.x;
     if (Math.abs(dx) < 4 && !dragFrom.moved) return;
     dragFrom.moved = true;
     const width = widthOf(canvas);
     if (width <= 0) return;
+    if (dragFrom.mark?.crossing !== undefined) {
+      const at = Math.round(timeAtX(shown, width, xIn(canvas, clientX)));
+      onmove?.(dragFrom.mark.crossing, Math.min(bounds.to, Math.max(bounds.from, at)));
+      return;
+    }
     const span = dragFrom.window.to - dragFrom.window.from;
     chosen = panWindow(dragFrom.window, bounds, (-dx / width) * span);
   }
-  function onmouseup(event: MouseEvent) {
+  function up(clientX: number) {
     const drag = dragFrom;
     dragFrom = undefined;
     if (!drag || drag.moved || !canvas) return;
-    const width = widthOf(canvas);
-    if (width <= 0) return;
-    const at = timeAtX(shown, width, xIn(canvas, event));
-    const reach = (REACH_PX / width) * (shown.to - shown.from);
-    const hit = nearestMark(
-      marks.filter((mark) => mark.crossing !== undefined),
-      at,
-      reach
-    );
+    const found = markAt(canvas, clientX, crossings);
+    if (!found) return;
+    const { at, hit } = found;
     if (hit?.crossing !== undefined) onselect(hit.crossing);
     else onpick?.(at);
     // A click on a crossing goes to the crossing itself, not to the pixel beside it.
     onseek?.(hit?.crossing !== undefined ? hit.at : at);
   }
 
-  /** Where the video's line sits across the plot, as a share of its width. Off the plot: none. */
-  const cursorShare = $derived.by(() => {
-    if (cursor === undefined) return undefined;
+  function onmousedown(event: MouseEvent) {
+    if (event.button === 0) down(event.clientX);
+  }
+  function onmousemove(event: MouseEvent) {
+    move(event.clientX);
+  }
+  function onmouseup(event: MouseEvent) {
+    up(event.clientX);
+  }
+  // One finger does what the mouse does. Two fingers are left to the browser.
+  function ontouchstart(event: TouchEvent) {
+    if (event.touches.length === 1) down(event.touches[0].clientX);
+    else dragFrom = undefined;
+  }
+  function ontouchmove(event: TouchEvent) {
+    if (event.touches.length === 1) move(event.touches[0].clientX);
+  }
+  function ontouchend(event: TouchEvent) {
+    const touch = event.changedTouches[0];
+    if (!touch || !dragFrom) return;
+    // Stops the browser from sending the same tap again as a mouse click.
+    event.preventDefault();
+    up(touch.clientX);
+  }
+
+  /** Where a time sits across the plot, as a share of its width. Off the plot: none. */
+  function shareOf(time: number | undefined): number | undefined {
+    if (time === undefined) return undefined;
     const span = shown.to - shown.from;
-    if (span <= 0 || cursor < shown.from || cursor > shown.to) return undefined;
-    return (cursor - shown.from) / span;
-  });
+    if (span <= 0 || time < shown.from || time > shown.to) return undefined;
+    return (time - shown.from) / span;
+  }
+  const movingShare = $derived(shareOf(moving?.at));
+  const movingText = $derived(
+    moving ? marks.find((mark) => mark.crossing === moving.crossing)?.text : undefined
+  );
+
+  /** Where the video's line sits across the plot, as a share of its width. Off the plot: none. */
+  const cursorShare = $derived(shareOf(cursor));
 
   // The wheel must be able to stop the page from scrolling, so it is not a passive listener.
   $effect(() => {
@@ -161,7 +215,7 @@
     const onwheel = (event: WheelEvent) => {
       event.preventDefault();
       const width = widthOf(element);
-      const anchor = width > 0 ? timeAtX(shown, width, xIn(element, event)) : undefined;
+      const anchor = width > 0 ? timeAtX(shown, width, xIn(element, event.clientX)) : undefined;
       zoom(event.deltaY > 0 ? 1.25 : 0.8, anchor);
     };
     element.addEventListener('wheel', onwheel, { passive: false });
@@ -352,6 +406,14 @@
         aria-hidden="true"
       ></span>
     {/if}
+    {#if movingShare !== undefined}
+      <span
+        class="moving"
+        data-testid="trace-moving"
+        style:left="{movingShare * 100}%"
+        aria-hidden="true"><b>{movingText ?? ''}</b></span
+      >
+    {/if}
     <canvas
       bind:this={canvas}
       aria-hidden="true"
@@ -359,6 +421,10 @@
       {onmousedown}
       {onmousemove}
       {onmouseup}
+      {ontouchstart}
+      {ontouchmove}
+      {ontouchend}
+      ontouchcancel={() => (dragFrom = undefined)}
       onmouseleave={() => (dragFrom = undefined)}
     ></canvas>
   </div>
@@ -411,6 +477,8 @@
     border-radius: var(--gf-radius-sm);
     background: var(--gf-surface-sunken);
     cursor: grab;
+    /* A finger sliding sideways moves the plot; up and down still scrolls the page. */
+    touch-action: pan-y;
   }
   canvas.can-add {
     cursor: crosshair;
@@ -428,6 +496,26 @@
     background: var(--gf-accent);
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
     pointer-events: none;
+  }
+  /* Where a crossing would go. Dashed, and it carries the crossing's own label. */
+  .moving {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    border-left: 2px dashed var(--gf-accent);
+    margin-left: -1px;
+    pointer-events: none;
+  }
+  .moving b {
+    position: absolute;
+    top: 2px;
+    left: 4px;
+    padding: 0 4px;
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-accent);
+    color: var(--gf-on-accent, #fff);
+    font-size: var(--gf-font-size-xs);
   }
   .tools {
     display: flex;
