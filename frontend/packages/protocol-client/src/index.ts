@@ -68,6 +68,7 @@ export {
   listPublicPilots,
   listPublicClasses,
   listPublicTimers,
+  listPublicChannels,
   subscribePublicChanges,
   signInDirector,
   signOutDirector,

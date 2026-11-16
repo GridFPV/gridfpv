@@ -66,6 +66,7 @@ own shapes with the director's things taken out, so the same page code draws bot
 | `GET /public/event/pilots` | The pilots the snapshot names: `id`, `callsign` and `color` only |
 | `GET /public/event/classes` | The classes in the event: name only |
 | `GET /public/event/timers` | The timers its heats are flown on: name and seats only. No address |
+| `GET /public/event/channels` | `[{adapter, seat, freq_mhz}]`: the video channel of each switched-on seat on those timers. A bench seat has none. The Director asks a timer at most once in 15 seconds, however many are asking, and keeps the last answer when a timer does not reply |
 
 With no event open, all but the first answer `404` with "No event is open." There is no way
 to ask for another event by id. A field added to one of those shapes later does not compile

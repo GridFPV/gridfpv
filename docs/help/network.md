@@ -30,6 +30,19 @@ They can look. On a phone, Grid shows three things:
 - **Up next:** the heats coming up and who is in each.
 - **Results:** the ranking of each phase.
 
+A pilot who has signed in (see **Pilot sign-in** on the
+[Details](#/help/event) help page) also gets a **Me** tab:
+
+- their own heats, in the order they will fly, and how many heats away each is;
+- the seat for each, and the channel when the heat is on a timer;
+- their own races, lap by lap, with the best lap marked.
+
+A box at the top tells the pilot when they are two heats away or closer, when they are
+next, and when they are flying. The phone buzzes each time they get closer. This only
+works while the page is open on the phone: Grid cannot wake a phone that is asleep.
+
+Each seat's channel is shown to everyone in **Up next**.
+
 The page updates by itself. Nobody needs to reload it. If the director opens another event,
 the phones follow.
 

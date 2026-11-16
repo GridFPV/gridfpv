@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use std::convert::Infallible;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -373,7 +373,34 @@ struct Inner {
     live: BTreeMap<AdapterId, broadcast::Sender<TimerLive>>,
     /// Timers found on the network, by the full name they advertise under.
     discovered: BTreeMap<String, DiscoveredTimer>,
+    /// Each timer's seat channels, as last read from it. See [`seat_channels`].
+    channels: BTreeMap<AdapterId, KnownChannels>,
     data_dir: Option<PathBuf>,
+}
+
+/// A timer's seat channels as last read, and when the Director last looked.
+#[derive(Debug, Clone)]
+struct KnownChannels {
+    /// The switched-on seats and their frequencies, from the last read that worked.
+    seats: Vec<(SeatRef, u32)>,
+    /// When the Director last asked the timer, whether or not it answered.
+    asked_at: Instant,
+    /// Whether someone is asking right now, so two askers do not both go to the timer.
+    asking: bool,
+}
+
+/// How long a timer's seat channels are taken as read before the Director asks it again.
+/// However many phones are watching, a timer is asked at most once in this long.
+pub const CHANNELS_MAX_AGE: Duration = Duration::from_secs(15);
+
+/// The video channel of one seat: which frequency a pilot on that seat flies on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SeatChannel {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+    /// In MHz, such as 5658.
+    pub freq_mhz: u32,
 }
 
 /// The shared timer directory. Cloning shares the one directory.
@@ -412,6 +439,7 @@ impl TimerDirectory {
                 status: BTreeMap::new(),
                 live: BTreeMap::new(),
                 discovered: BTreeMap::new(),
+                channels: BTreeMap::new(),
                 data_dir,
             })),
             generation: watch::Sender::new(0),
@@ -501,11 +529,103 @@ impl TimerDirectory {
             return Err(e);
         }
         inner.status.remove(id);
+        inner.channels.remove(id);
         // Dropping the sender ends every live feed of this timer.
         inner.live.remove(id);
         drop(inner);
         self.generation.send_modify(|g| *g += 1);
         Ok(())
+    }
+
+    /// Remember a timer's seat channels from settings that were just read from it or
+    /// written to it. Seats that are switched off have no channel to fly on.
+    pub fn note_channels(&self, id: &AdapterId, config: &TimerConfig, now: Instant) {
+        let mut inner = self.write();
+        if !inner.timers.contains_key(id) {
+            return;
+        }
+        inner.channels.insert(
+            id.clone(),
+            KnownChannels {
+                seats: config
+                    .seats
+                    .iter()
+                    .filter(|seat| seat.enabled)
+                    .map(|seat| (seat.seat.clone(), seat.freq_mhz))
+                    .collect(),
+                asked_at: now,
+                asking: false,
+            },
+        );
+    }
+
+    /// A timer's seat channels as last read. Empty when it has never answered.
+    pub fn known_channels(&self, id: &AdapterId) -> Vec<SeatChannel> {
+        self.read()
+            .channels
+            .get(id)
+            .map(|known| {
+                known
+                    .seats
+                    .iter()
+                    .map(|(seat, freq_mhz)| SeatChannel {
+                        adapter: id.clone(),
+                        seat: seat.clone(),
+                        freq_mhz: *freq_mhz,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the caller should ask the timer for its channels now: nobody else is
+    /// asking, and it has not been asked within [`CHANNELS_MAX_AGE`]. A `true` answer marks
+    /// the timer as being asked; the caller must end with [`note_channels`](Self::note_channels)
+    /// or [`channels_not_read`](Self::channels_not_read).
+    pub fn should_ask_channels(&self, id: &AdapterId, now: Instant) -> bool {
+        let mut inner = self.write();
+        if !inner.timers.contains_key(id) {
+            return false;
+        }
+        match inner.channels.get_mut(id) {
+            Some(known) if known.asking => false,
+            Some(known) if now.duration_since(known.asked_at) < CHANNELS_MAX_AGE => false,
+            Some(known) => {
+                known.asking = true;
+                true
+            }
+            None => {
+                inner.channels.insert(
+                    id.clone(),
+                    KnownChannels {
+                        seats: Vec::new(),
+                        asked_at: now,
+                        asking: true,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    /// The timer did not answer. What was known before is kept, and the timer is not asked
+    /// again until [`CHANNELS_MAX_AGE`] has passed: a timer that is switched off must not be
+    /// asked on every request.
+    pub fn channels_not_read(&self, id: &AdapterId, now: Instant) {
+        if let Some(known) = self.write().channels.get_mut(id) {
+            known.asked_at = now;
+            known.asking = false;
+        }
+    }
+
+    /// Make a timer's channels count as old, so the next asker goes to the timer. For tests.
+    pub fn age_channels(&self, id: &AdapterId) {
+        if let Some(known) = self.write().channels.get_mut(id) {
+            known.asked_at = known
+                .asked_at
+                .checked_sub(CHANNELS_MAX_AGE * 2)
+                .unwrap_or(known.asked_at);
+        }
     }
 
     /// Change a timer's status. Called by whatever holds its connection. A timer that has
@@ -813,7 +933,31 @@ pub async fn get_timer_config(
     if timer.kind != TimerKind::Oft {
         return Err(TimerError::NotBuilt.into());
     }
-    Ok(Json(read_config(&timer).await?.into()))
+    let config: TimerConfig = read_config(&timer).await?.into();
+    registry
+        .timers()
+        .note_channels(&timer_id, &config, Instant::now());
+    Ok(Json(config))
+}
+
+/// A timer's seat channels: which frequency each switched-on seat is on.
+///
+/// The answer comes from what the Director last read from the timer. The timer itself is
+/// asked at most once in [`CHANNELS_MAX_AGE`], whoever is asking and however often, so a
+/// field full of phones costs the timer nothing. A timer that does not answer keeps the
+/// channels it last gave. Only an OFT timer says its channels.
+pub async fn seat_channels(registry: &EventRegistry, timer_id: &AdapterId) -> Vec<SeatChannel> {
+    let directory = registry.timers();
+    let Some(timer) = directory.get(timer_id) else {
+        return Vec::new();
+    };
+    if timer.kind == TimerKind::Oft && directory.should_ask_channels(timer_id, Instant::now()) {
+        match read_config(&timer).await {
+            Ok(config) => directory.note_channels(timer_id, &config.into(), Instant::now()),
+            Err(_) => directory.channels_not_read(timer_id, Instant::now()),
+        }
+    }
+    directory.known_channels(timer_id)
 }
 
 /// `PUT /timers/{timer_id}/config` — change the timer's settings, RD-gated. Answers with
@@ -861,7 +1005,11 @@ pub async fn apply_config(
     if status.keeps_settings {
         keep_config(&timer).await?;
     }
-    Ok(written.into())
+    let written: TimerConfig = written.into();
+    registry
+        .timers()
+        .note_channels(timer_id, &written, Instant::now());
+    Ok(written)
 }
 
 /// `GET /timers/{timer_id}/live` — server-sent events for tuning. Open read.
@@ -910,6 +1058,170 @@ mod tests {
             address: address.into(),
             own_id: None,
         }
+    }
+
+    /// Settings with seats on these frequencies; `None` is a seat that is switched off.
+    fn settings(seats: &[Option<u32>]) -> TimerConfig {
+        TimerConfig {
+            seats: seats
+                .iter()
+                .enumerate()
+                .map(|(index, freq)| TimerSeatConfig {
+                    seat: SeatRef(index.to_string()),
+                    freq_mhz: freq.unwrap_or(5800),
+                    enabled: freq.is_some(),
+                    threshold: None,
+                })
+                .collect(),
+            threshold: TimerThreshold::Auto {
+                snr_enter: 10,
+                hysteresis: 3,
+            },
+            lap_cooldown_ms: Some(2000),
+            exit_hold_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_timers_seat_channels_are_remembered_and_only_for_seats_that_are_on() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        assert!(
+            directory.known_channels(&gate).is_empty(),
+            "nothing is known at first"
+        );
+        directory.note_channels(
+            &gate,
+            &settings(&[Some(5658), None, Some(5732)]),
+            Instant::now(),
+        );
+        assert_eq!(
+            directory.known_channels(&gate),
+            [
+                SeatChannel {
+                    adapter: gate.clone(),
+                    seat: SeatRef("0".into()),
+                    freq_mhz: 5658
+                },
+                SeatChannel {
+                    adapter: gate.clone(),
+                    seat: SeatRef("2".into()),
+                    freq_mhz: 5732
+                }
+            ]
+        );
+        // Newer settings replace the old ones whole.
+        directory.note_channels(&gate, &settings(&[Some(5800)]), Instant::now());
+        assert_eq!(directory.known_channels(&gate).len(), 1);
+        assert_eq!(directory.known_channels(&gate)[0].freq_mhz, 5800);
+    }
+
+    #[test]
+    fn a_timer_is_asked_for_its_channels_once_and_then_not_again_for_a_while() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let start = Instant::now();
+        assert!(
+            directory.should_ask_channels(&gate, start),
+            "never asked: ask"
+        );
+        // While that asker is at it, nobody else goes to the timer.
+        for _ in 0..50 {
+            assert!(!directory.should_ask_channels(&gate, start));
+        }
+        directory.note_channels(&gate, &settings(&[Some(5658)]), start);
+        // Fresh: not asked again, right up to the limit.
+        assert!(!directory.should_ask_channels(&gate, start));
+        let nearly = start + CHANNELS_MAX_AGE - Duration::from_millis(1);
+        assert!(!directory.should_ask_channels(&gate, nearly));
+        // Old: one asker goes, and only one.
+        let later = start + CHANNELS_MAX_AGE;
+        assert!(directory.should_ask_channels(&gate, later));
+        assert!(!directory.should_ask_channels(&gate, later));
+    }
+
+    #[test]
+    fn a_timer_that_does_not_answer_keeps_its_last_channels_and_is_left_alone_for_a_while() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let start = Instant::now();
+        directory.note_channels(&gate, &settings(&[Some(5658)]), start);
+        let later = start + CHANNELS_MAX_AGE;
+        assert!(directory.should_ask_channels(&gate, later));
+        directory.channels_not_read(&gate, later);
+        assert_eq!(
+            directory.known_channels(&gate)[0].freq_mhz,
+            5658,
+            "the old answer stands"
+        );
+        assert!(
+            !directory.should_ask_channels(&gate, later),
+            "not asked again at once"
+        );
+        assert!(directory.should_ask_channels(&gate, later + CHANNELS_MAX_AGE));
+        // A timer that has never answered: nothing known, and the same patience.
+        let dead = directory
+            .create(&request("Dead", "10.0.0.6:7270"))
+            .unwrap()
+            .id;
+        assert!(directory.should_ask_channels(&dead, start));
+        directory.channels_not_read(&dead, start);
+        assert!(directory.known_channels(&dead).is_empty());
+        assert!(!directory.should_ask_channels(&dead, start));
+    }
+
+    #[test]
+    fn channels_are_per_timer_and_go_when_the_timer_does() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let other = directory
+            .create(&request("Other", "10.0.0.6:7270"))
+            .unwrap()
+            .id;
+        let now = Instant::now();
+        directory.note_channels(&gate, &settings(&[Some(5658)]), now);
+        assert!(directory.known_channels(&other).is_empty());
+        assert!(
+            directory.should_ask_channels(&other, now),
+            "the other timer is its own"
+        );
+        directory.delete(&gate).unwrap();
+        assert!(directory.known_channels(&gate).is_empty());
+        // A timer that is not in the directory is never asked and never remembered.
+        assert!(!directory.should_ask_channels(&gate, now));
+        directory.note_channels(&gate, &settings(&[Some(5658)]), now);
+        assert!(directory.known_channels(&gate).is_empty());
+        let unknown = AdapterId("no-such-timer".into());
+        assert!(!directory.should_ask_channels(&unknown, now));
+        assert!(directory.known_channels(&unknown).is_empty());
+        directory.channels_not_read(&unknown, now);
+        directory.age_channels(&unknown);
+    }
+
+    #[test]
+    fn channels_made_old_are_asked_for_again() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let now = Instant::now();
+        directory.note_channels(&gate, &settings(&[Some(5658)]), now);
+        assert!(!directory.should_ask_channels(&gate, now));
+        directory.age_channels(&gate);
+        assert!(directory.should_ask_channels(&gate, now));
     }
 
     #[test]

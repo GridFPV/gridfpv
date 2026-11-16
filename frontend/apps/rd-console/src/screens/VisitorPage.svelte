@@ -19,7 +19,7 @@
    */
   import { untrack } from 'svelte';
   import { Button, Card, Input } from '@gridfpv/components';
-  import type { PublicEventName, PublicHello, PublicPilot } from '@gridfpv/types';
+  import type { PublicEventName, PublicHello, PublicPilot, SeatChannel } from '@gridfpv/types';
   import { codeInHash, codeProblem, tidyCode } from '../lib/pilotAccess.js';
   import { EventLive } from '../lib/eventLive.svelte.js';
   import type { Session } from '../lib/session.svelte.js';
@@ -28,6 +28,8 @@
 
   /** How often to ask which event is open, in milliseconds. */
   const EVENT_POLL_MS = 5000;
+  /** How often to ask which channel each seat is on. They change rarely. */
+  const CHANNEL_POLL_MS = 20_000;
 
   let {
     session,
@@ -151,6 +153,31 @@
     void sendCode(scanned);
   });
 
+  // Which channel each seat is on. Asked for while an event is open, and again when
+  // another one is. A failure keeps what was known: channels are a help, not the race.
+  let channels = $state.raw<SeatChannel[]>([]);
+  $effect(() => {
+    if (openId === undefined) {
+      channels = [];
+      return;
+    }
+    let stopped = false;
+    const ask = async () => {
+      try {
+        const found = await source.getChannels();
+        if (!stopped) channels = found;
+      } catch {
+        // Keep the last answer.
+      }
+    };
+    void ask();
+    const timer = setInterval(ask, CHANNEL_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  });
+
   let asking = $state(false);
   let token = $state('');
   let busy = $state(false);
@@ -184,7 +211,7 @@
   {#if eventName}
     <p class="event" data-testid="visitor-event">{eventName}</p>
     {#if live}
-      <SpectatorView {live} />
+      <SpectatorView {live} {pilot} {channels} />
     {/if}
   {:else}
     <Card elevation="sm">

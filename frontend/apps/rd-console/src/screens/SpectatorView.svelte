@@ -5,21 +5,36 @@
    * Three things, one at a time on a phone: the race that is **on now** (or how the last
    * one ended), the heats **coming up** with who is in them, and the **results**.
    *
+   * A pilot who is signed in gets a fourth, **Me**: their own heats with the seat and
+   * channel for each, and their races lap by lap. Above everything, an alert tells them
+   * when they are a couple of heats away, next, or flying now. It can only reach a phone
+   * that has this page open.
+   *
    * It reads the same live store the console's pages do, fed from the Director's public
    * routes, and draws with the console's own helpers. It has no button that changes
    * anything: a spectator can only look.
    */
   import { Badge, Tabs, formatMicros } from '@gridfpv/components';
-  import type { PhaseId } from '@gridfpv/types';
+  import type { PhaseId, PublicPilot, SeatChannel } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import { ordinal } from '../lib/names.js';
   import { consecutiveLaps, overlayClock, overlayRows } from '../lib/overlay.js';
   import { defaultResult, resultChoices, resultTable } from '../lib/results.js';
+  import { myHeats, myRaces, nearnessWords, pilotAlert, seatChannel } from '../lib/pilotView.js';
   import { missingNames, nowShowing, raceWord, upcomingHeats } from '../lib/spectator.js';
 
   let {
-    live
+    live,
+    pilot = undefined,
+    channels = [],
+    buzz = (pattern) => navigator.vibrate?.(pattern)
   }: {
+    /** The pilot this phone is signed in as. Left out for a spectator. */
+    pilot?: PublicPilot | undefined;
+    /** Which video channel each seat is on, as far as the timers have said. */
+    channels?: readonly SeatChannel[];
+    /** Make the phone buzz. A test passes its own. */
+    buzz?: (pattern: number[]) => void;
     live: Pick<
       EventLive,
       | 'view'
@@ -39,7 +54,7 @@
   const time = (micros: number | null | undefined): string =>
     micros === undefined || micros === null ? '—' : formatMicros(micros);
 
-  type Tab = 'now' | 'next' | 'results';
+  type Tab = 'me' | 'now' | 'next' | 'results';
   let tab = $state<Tab>('now');
 
   const view = $derived(live.view);
@@ -86,7 +101,34 @@
   const resultPhase = $derived(view?.phases.find((phase) => phase.def.id === resultId));
   const table = $derived(view && resultPhase ? resultTable(view, resultPhase, names) : undefined);
 
+  // ── The pilot's own ────────────────────────────────────────────────────────
+  const mine = $derived(pilot ? myHeats(view, names, pilot.id, channels) : []);
+  const flown = $derived(pilot ? myRaces(view, names, pilot.id) : []);
+  const alert = $derived(pilotAlert(mine));
+  // Buzz once each time the alert is about something new: closer, or another heat.
+  let buzzed = $state<string | undefined>(undefined);
+  $effect(() => {
+    const key = alert?.key;
+    if (key === buzzed) return;
+    buzzed = key;
+    if (!alert) return;
+    try {
+      buzz(alert.nearness === 'soon' ? [200] : [300, 150, 300]);
+    } catch {
+      // A phone that cannot buzz, or will not until it is touched, still shows the alert.
+    }
+  });
+  // A pilot who signs in lands on their own tab. One who signs out leaves it.
+  let wasPilot = $state(false);
+  $effect(() => {
+    const isPilot = pilot !== undefined;
+    if (isPilot && !wasPilot) tab = 'me';
+    if (!isPilot && tab === 'me') tab = 'now';
+    wasPilot = isPilot;
+  });
+
   const tabs = $derived([
+    ...(pilot ? [{ id: 'me', label: 'Me', badge: mine.length > 0 ? mine.length : undefined }] : []),
     { id: 'now', label: showing?.live ? 'On now' : 'Last race' },
     { id: 'next', label: 'Up next', badge: upcoming.length > 0 ? upcoming.length : undefined },
     { id: 'results', label: 'Results' }
@@ -107,7 +149,73 @@
       </p>
     {/if}
 
+    {#if alert}
+      <div class="alert" data-nearness={alert.nearness} role="status" data-testid="pilot-alert">
+        <strong>{alert.title}</strong>
+        <span>{alert.detail}</span>
+      </div>
+    {/if}
+
     <Tabs items={tabs} bind:value={tab} ariaLabel="What to show" />
+
+    {#if tab === 'me' && pilot}
+      <section aria-label="Me">
+        <h2 class="part">My heats</h2>
+        {#if mine.length === 0}
+          <p class="empty" data-testid="no-heats">You are not in a heat that is coming up.</p>
+        {:else}
+          <ol class="mine" aria-label="My heats">
+            {#each mine as entry (entry.id)}
+              <li data-nearness={entry.nearness}>
+                <span class="when">{nearnessWords(entry)}</span>
+                <span class="what">
+                  <strong>{entry.name}</strong>
+                  <span class="where">
+                    {entry.seatName}{#if entry.channel}{' · '}<span data-testid="my-channel"
+                        >{entry.channel}</span
+                      >{/if}
+                  </span>
+                </span>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+
+        <h2 class="part">My races</h2>
+        {#if flown.length === 0}
+          <p class="empty" data-testid="no-races">You have not flown a race that counts yet.</p>
+        {:else}
+          <ul class="flown" aria-label="My races">
+            {#each flown as entry (entry.key)}
+              <li>
+                <div class="flown-head">
+                  <strong>{entry.name}</strong>
+                  {#if entry.place !== undefined}<Badge tone="accent">{ordinal(entry.place)}</Badge
+                    >{/if}
+                  {#if entry.falseStart}<Badge tone="danger">False start</Badge>{/if}
+                </div>
+                {#if entry.laps.length === 0}
+                  <p class="empty">No laps.</p>
+                {:else}
+                  <ol class="laps" aria-label="Laps of {entry.name}">
+                    {#each entry.laps as micros, index (index)}
+                      <li class:best={index === entry.bestLapIndex}>
+                        <span class="lap-no">{index + 1}</span>
+                        <span class="num">{time(micros)}</span>
+                      </li>
+                    {/each}
+                  </ol>
+                  <p class="totals">
+                    Best <span class="num">{time(entry.bestLapMicros)}</span> · Total
+                    <span class="num">{time(entry.totalMicros)}</span>
+                  </p>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
 
     {#if tab === 'now'}
       <section aria-label={showing?.live ? 'On now' : 'Last race'}>
@@ -137,7 +245,7 @@
             </thead>
             <tbody>
               {#each rows as row (row.key)}
-                <tr>
+                <tr class:me={pilot !== undefined && row.pilot === pilot.id}>
                   <td class="place">{row.place === undefined ? '' : ordinal(row.place)}</td>
                   <th scope="row">
                     {#if row.color}
@@ -167,9 +275,13 @@
                 <h3>{entry.name}</h3>
                 <ul>
                   {#each entry.seats as seat (`${seat.adapter}\u0000${seat.seat}`)}
-                    <li>
+                    <li class:me={pilot !== undefined && seat.pilot === pilot.id}>
                       <span class="seat">{seat.seatName}</span>
                       <span class="who">{seat.who}</span>
+                      {#if seatChannel(channels, seat.adapter, seat.seat)}
+                        <span class="channel">{seatChannel(channels, seat.adapter, seat.seat)}</span
+                        >
+                      {/if}
                     </li>
                   {/each}
                 </ul>
@@ -178,7 +290,7 @@
           </ol>
         {/if}
       </section>
-    {:else}
+    {:else if tab === 'results'}
       <section aria-label="Results">
         {#if choices.length === 0 || !table}
           <p class="empty" data-testid="no-results">No results yet.</p>
@@ -209,7 +321,10 @@
             </thead>
             <tbody>
               {#each table.rows as row (row.placed.pilot)}
-                <tr class:out={row.placed.disqualified}>
+                <tr
+                  class:out={row.placed.disqualified}
+                  class:me={pilot !== undefined && row.placed.pilot === pilot.id}
+                >
                   <td class="place">{ordinal(row.position)}</td>
                   <th scope="row">
                     {row.callsign}
@@ -242,6 +357,14 @@
     display: grid;
     gap: var(--gf-space-3);
     min-width: 0;
+  }
+  /* Four tabs have to fit across a phone: keep each on one line and give up some padding. */
+  .spectator :global(.gf-tab) {
+    white-space: nowrap;
+    padding-inline: var(--gf-space-2);
+  }
+  .spectator :global(.gf-tabs) {
+    overflow-x: auto;
   }
   .notice,
   .empty {
@@ -358,6 +481,123 @@
     border-radius: var(--gf-radius-sm);
     font: inherit;
     margin-bottom: var(--gf-space-2);
+  }
+  /* The pilot's own row, wherever it is. */
+  tr.me th,
+  li.me .who {
+    color: var(--gf-accent);
+  }
+  .channel {
+    margin-left: auto;
+    color: var(--gf-text-muted);
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-xs);
+    white-space: nowrap;
+  }
+  .alert {
+    display: grid;
+    gap: 2px;
+    padding: var(--gf-space-3);
+    border-radius: var(--gf-radius-md);
+    border: 2px solid var(--gf-accent);
+    background: var(--gf-accent-soft, var(--gf-surface));
+  }
+  .alert strong {
+    font-size: var(--gf-font-size-lg);
+  }
+  .alert span {
+    font-size: var(--gf-font-size-sm);
+    overflow-wrap: anywhere;
+  }
+  .alert[data-nearness='soon'] {
+    border-color: var(--gf-warn);
+  }
+  .alert[data-nearness='now'],
+  .alert[data-nearness='next'] {
+    border-color: var(--gf-success);
+  }
+  .part {
+    margin: var(--gf-space-3) 0 var(--gf-space-2);
+    font-size: var(--gf-font-size-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--gf-tracking-caps);
+    color: var(--gf-text-muted);
+  }
+  .part:first-child {
+    margin-top: 0;
+  }
+  .mine,
+  .flown {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--gf-space-2);
+  }
+  .mine li {
+    display: flex;
+    gap: var(--gf-space-3);
+    align-items: baseline;
+    padding: var(--gf-space-2);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+  }
+  .mine li[data-nearness='now'],
+  .mine li[data-nearness='next'] {
+    border-color: var(--gf-success);
+  }
+  .when {
+    min-width: 6.5rem;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .what {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .where {
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .flown > li {
+    padding: var(--gf-space-2);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+  }
+  .flown-head {
+    display: flex;
+    gap: var(--gf-space-2);
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: var(--gf-space-1);
+    overflow-wrap: anywhere;
+  }
+  .laps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-1) var(--gf-space-3);
+    font-size: var(--gf-font-size-sm);
+  }
+  .laps li {
+    display: flex;
+    gap: var(--gf-space-1);
+  }
+  .laps li.best .num {
+    color: var(--gf-success);
+    font-weight: var(--gf-font-weight-bold);
+  }
+  .lap-no {
+    color: var(--gf-text-muted);
+  }
+  .totals {
+    margin: var(--gf-space-1) 0 0;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
   }
   .visually-hidden {
     position: absolute;
