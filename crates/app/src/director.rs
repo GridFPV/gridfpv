@@ -29,7 +29,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use gridfpv_server::app::{router, smart_fallback};
 use gridfpv_server::events::EventRegistry;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 #[cfg(not(feature = "embed-assets"))]
 use tower_http::services::ServeDir;
 
@@ -179,7 +179,15 @@ where
         format!("http://127.0.0.1:{}", bound.port()),
     );
 
-    let app = build_app(registry, &assets);
+    let app = build_app(registry.clone(), &assets);
+
+    // Other devices (docs/primitives.md §11). A Director that was started on the network
+    // already is reachable as it is. One on this computer only gets a second listener,
+    // which the director switches on and off in the console.
+    let network = registry.network();
+    network.set_main(bound);
+    let others = (bound.ip().to_canonical().is_loopback())
+        .then(|| crate::network::spawn(registry.clone(), app.clone()));
 
     on_ready(&DirectorReady {
         bound,
@@ -187,9 +195,16 @@ where
         log_file,
     });
 
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await;
+    // The gate must know who is calling, so every connection carries its peer's address.
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await;
+    if let Some(others) = others {
+        others.abort();
+    }
     timers.abort();
     video.abort();
     renders.abort();
@@ -239,14 +254,17 @@ pub fn default_assets_dir() -> PathBuf {
 /// becomes a single portable file. The default build (feature off) serves from `assets` on
 /// disk exactly as before, keeping the hosted dev loop's rebuild-dist-only workflow intact.
 pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
-    router(registry)
+    let api = router(registry.clone())
         // Where the diagnostics log is (#380). Mounted HERE rather than in the API
         // router because the log file is an *app*-level concern (`crate::logging` owns it)
         // and `gridfpv-server` knows nothing about it.
-        .route("/diagnostics", get(diagnostics))
-        // Anything the API router does not handle falls through to `smart_fallback`:
-        // a mistyped API path → a typed `ProtocolError` 404, any other path → the SPA.
-        .fallback_service(smart_fallback(spa_service(assets)))
+        .route("/diagnostics", get(diagnostics));
+    // Anything the API router does not handle falls through to `smart_fallback`:
+    // a mistyped API path → a typed `ProtocolError` 404, any other path → the SPA.
+    let files = smart_fallback(spa_service(assets));
+    // The gate goes around both (docs/primitives.md §11): a caller on this computer is the
+    // director, and a caller from anywhere else is a visitor who may read the public pages.
+    gridfpv_server::access::guard(api, files, &registry)
         // SPA cache policy. Vite content-hashes every asset, so `assets/*` may be cached forever —
         // a changed file gets a new name. `index.html` must NOT be: it is the one file that names
         // those hashes, and it keeps its URL across every build.
@@ -256,8 +274,34 @@ pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
         // bundle, so a rebuilt console looked unchanged and even a hard reload was unreliable —
         // hours were lost to "is the new version up?" during a live bench session.
         .layer(axum::middleware::from_fn(spa_cache_headers))
-        // Permissive CORS so the cross-origin Tauri RD app can reach the API.
-        .layer(CorsLayer::permissive())
+        // A page on another origin may call the API only when it is on this computer: the
+        // dev server, or the desktop app's own window. Any other website gets no CORS
+        // answer, so a browser will not let it read anything here.
+        .layer(cors())
+}
+
+/// Which other origins a browser lets call the API: pages on this computer only.
+fn cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            origin.to_str().is_ok_and(local_origin)
+        }))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
+}
+
+/// Whether an `Origin` is a page on this computer: `http(s)://localhost` or a loopback
+/// address, on any port, or the desktop app's own window.
+pub fn local_origin(origin: &str) -> bool {
+    match origin.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("tauri") => true,
+        Some((scheme, host))
+            if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") =>
+        {
+            !host.contains('/') && gridfpv_server::access::is_loopback_host(host)
+        }
+        _ => false,
+    }
 }
 
 /// `GET /diagnostics` — **where the log file is** (#380).

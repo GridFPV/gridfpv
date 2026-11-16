@@ -436,3 +436,106 @@ describe("request failures carry the Director's words (#433)", () => {
     expect((err as { code?: string }).code).toBe('Unauthorized');
   });
 });
+
+describe('other devices on the network (docs/primitives.md §11)', () => {
+  const answer = (status: number, body: unknown): Response =>
+    ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async (): Promise<unknown> => body,
+      text: async (): Promise<string> => JSON.stringify(body)
+    }) as unknown as Response;
+  const recorder = (status: number, body: unknown) => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return answer(status, body);
+    };
+    return { seen, fetch };
+  };
+  const view = { enabled: true, port: 8081, state: 'On', addresses: ['http://192.168.1.20:8081/'] };
+
+  it('getNetwork GETs /network', async () => {
+    const { seen, fetch } = recorder(200, view);
+    const { getNetwork } = await import('./client.js');
+    expect(await getNetwork('http://d.local:8080/', { fetch })).toEqual(view);
+    expect(seen[0].url).toBe('http://d.local:8080/network');
+    expect(seen[0].init?.method ?? 'GET').toBe('GET');
+  });
+
+  it('putNetwork PUTs the request with the token, and leaves the port out when it is not given', async () => {
+    const { seen, fetch } = recorder(200, view);
+    const { putNetwork } = await import('./client.js');
+    await putNetwork('http://d.local:8080', { enabled: true }, 'rd-tok', { fetch });
+    await putNetwork('http://d.local:8080', { enabled: false, port: 9000 }, undefined, { fetch });
+    expect(seen[0].url).toBe('http://d.local:8080/network');
+    expect(seen[0].init?.method).toBe('PUT');
+    expect((seen[0].init?.headers as Record<string, string>).Authorization).toBe('Bearer rd-tok');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({ enabled: true });
+    expect((seen[1].init?.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(JSON.parse(seen[1].init?.body as string)).toEqual({ enabled: false, port: 9000 });
+  });
+
+  it("putNetwork rejects with the Director's own words", async () => {
+    const { fetch } = recorder(400, {
+      code: 'BadRequest',
+      message: 'Pick a port from 1024 to 65535.'
+    });
+    const { putNetwork } = await import('./client.js');
+    await expect(
+      putNetwork('http://d.local:8080', { enabled: true, port: 80 }, undefined, { fetch })
+    ).rejects.toThrow('Pick a port from 1024 to 65535.');
+  });
+
+  it('getPublicHello GETs /public/hello, with a token only when one is held', async () => {
+    const hello = { version: '0.5.1', caller: 'Visitor', director_sign_in: true };
+    const { seen, fetch } = recorder(200, hello);
+    const { getPublicHello } = await import('./client.js');
+    expect(await getPublicHello('http://d.local:8080', { fetch })).toEqual(hello);
+    await getPublicHello('http://d.local:8080', { fetch, token: 'rd-tok' });
+    expect(seen[0].url).toBe('http://d.local:8080/public/hello');
+    expect((seen[0].init?.headers as Record<string, string> | undefined)?.Authorization).toBe(
+      undefined
+    );
+    expect((seen[1].init?.headers as Record<string, string>).Authorization).toBe('Bearer rd-tok');
+  });
+
+  it('signInDirector POSTs the token as a bearer header and sends no body', async () => {
+    const { seen, fetch } = recorder(204, undefined);
+    const { signInDirector } = await import('./client.js');
+    await signInDirector('http://d.local:8080', 'rd-tok', { fetch });
+    expect(seen[0].url).toBe('http://d.local:8080/public/session');
+    expect(seen[0].init?.method).toBe('POST');
+    expect((seen[0].init?.headers as Record<string, string>).Authorization).toBe('Bearer rd-tok');
+    expect(seen[0].init?.body).toBeUndefined();
+  });
+
+  it("signInDirector rejects with the Director's words for a wrong token and for too many tries", async () => {
+    const { signInDirector } = await import('./client.js');
+    const wrong = recorder(401, {
+      code: 'Unauthorized',
+      message: "That is not the director's access token."
+    });
+    await expect(
+      signInDirector('http://d.local:8080', 'nope', { fetch: wrong.fetch })
+    ).rejects.toThrow("That is not the director's access token.");
+    const shut = recorder(429, {
+      code: 'TooManyRequests',
+      message: 'Too many wrong access tokens from this device. Wait a minute and try again.'
+    });
+    await expect(
+      signInDirector('http://d.local:8080', 'nope', { fetch: shut.fetch })
+    ).rejects.toThrow('Wait a minute and try again.');
+  });
+
+  it('signOutDirector DELETEs /public/session with no token', async () => {
+    const { seen, fetch } = recorder(204, undefined);
+    const { signOutDirector } = await import('./client.js');
+    await signOutDirector('http://d.local:8080', { fetch });
+    expect(seen[0].url).toBe('http://d.local:8080/public/session');
+    expect(seen[0].init?.method).toBe('DELETE');
+    expect((seen[0].init?.headers as Record<string, string> | undefined)?.Authorization).toBe(
+      undefined
+    );
+  });
+});

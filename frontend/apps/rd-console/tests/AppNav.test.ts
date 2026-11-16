@@ -43,6 +43,7 @@ const SETUP_ROW = [
   ['Classes', '#/classes'],
   ['Formats', '#/formats'],
   ['Video', '#/video'],
+  ['Network', '#/network'],
   ['Data', '#/data'],
   ['Help', '#/help']
 ];
@@ -78,6 +79,7 @@ describe('AppNav: the two sides', () => {
     ['the Classes page', { kind: 'page', page: 'classes' }, 'Setup', 'Classes'],
     ['the Formats page', { kind: 'page', page: 'formats' }, 'Setup', 'Formats'],
     ['the Video page', { kind: 'page', page: 'video' }, 'Setup', 'Video'],
+    ['the Network page', { kind: 'page', page: 'network' }, 'Setup', 'Network'],
     ['the Data page', { kind: 'page', page: 'data' }, 'Setup', 'Data']
   ])('%s is on the %s side, under %s', (_where, route, sideName, label) => {
     render(AppNav, { route, eventName: 'Club Night' });

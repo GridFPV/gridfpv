@@ -96,6 +96,10 @@ impl Role {
 pub struct Session {
     /// The authority this session grants.
     pub role: Role,
+    /// Whether this is a director's sign-in from a browser on another device
+    /// (`POST /public/session`), not the access token itself. It can be ended on its own,
+    /// and it cannot be used to make another sign-in.
+    pub browser: bool,
 }
 
 /// The in-memory token → [`Session`] store (protocol.html §5, §9.4) — the auth authority.
@@ -147,8 +151,43 @@ impl TokenStore {
         self.sessions
             .write()
             .expect("token store lock poisoned")
-            .insert(token.to_string(), Session { role: Role::Rd });
+            .insert(
+                token.to_string(),
+                Session {
+                    role: Role::Rd,
+                    browser: false,
+                },
+            );
         true
+    }
+
+    /// Sign a director in from a browser on another device: a fresh, control-authorized
+    /// session of its own. The browser keeps this, never the access token.
+    pub fn issue_browser_session(&self) -> String {
+        let token = random_token();
+        self.sessions
+            .write()
+            .expect("token store lock poisoned")
+            .insert(
+                token.clone(),
+                Session {
+                    role: Role::Rd,
+                    browser: true,
+                },
+            );
+        token
+    }
+
+    /// End a browser sign-in. Returns whether there was one. The access token itself is
+    /// never removed this way, whatever is passed in.
+    pub fn end_browser_session(&self, token: &str) -> bool {
+        let mut sessions = self.sessions.write().expect("token store lock poisoned");
+        if sessions.get(token).is_some_and(|session| session.browser) {
+            sessions.remove(token);
+            true
+        } else {
+            false
+        }
     }
 
     /// Register a session for `role` under a fresh opaque token and return the token.
@@ -157,7 +196,13 @@ impl TokenStore {
         self.sessions
             .write()
             .expect("token store lock poisoned")
-            .insert(token.clone(), Session { role });
+            .insert(
+                token.clone(),
+                Session {
+                    role,
+                    browser: false,
+                },
+            );
         token
     }
 
@@ -201,7 +246,7 @@ impl TokenStore {
             .read()
             .expect("token store lock poisoned")
             .values()
-            .any(|s| s.role.can_control())
+            .any(|s| s.role.can_control() && !s.browser)
     }
 
     /// Authenticate a control caller (issue #72, Slice 1b — full-trust by default).
@@ -223,7 +268,10 @@ impl TokenStore {
         // when the Director was previously run gated) must NOT break an open Director;
         // there is nothing to validate it against, so it is simply ignored.
         if !self.has_control_credential() {
-            return Ok(Session { role: Role::Rd });
+            return Ok(Session {
+                role: Role::Rd,
+                browser: false,
+            });
         }
         // Gated: a credential IS configured, so a valid control token is required.
         match token {
@@ -340,8 +388,9 @@ impl FromRequestParts<EventRegistry> for ControlAuth {
         parts: &mut Parts,
         registry: &EventRegistry,
     ) -> Result<Self, Self::Rejection> {
-        // The token store is Director-wide, so one RD token authorizes every write.
-        let token = bearer_token(parts);
+        // The token store is Director-wide, so one RD token authorizes every write. A
+        // director signed in from a browser on another device sends a cookie instead.
+        let token = crate::access::presented_token(&parts.headers);
         registry.tokens().authenticate_control(token.as_deref())?;
         Ok(ControlAuth { _private: () })
     }
@@ -455,6 +504,48 @@ mod tests {
             store.authenticate_read(Some("nope")).unwrap_err().code,
             ErrorCode::Unauthorized
         );
+    }
+
+    #[test]
+    fn a_browser_sign_in_controls_and_ends_on_its_own() {
+        let store = TokenStore::new();
+        let token = store.issue_rd_token();
+        let browser = store.issue_browser_session();
+        assert_ne!(browser, token);
+        assert!(store.authenticate_control(Some(&browser)).is_ok());
+        assert!(store.session(&browser).unwrap().browser);
+        assert!(!store.session(&token).unwrap().browser);
+        // Ending it stops it at once and leaves the access token alone.
+        assert!(store.end_browser_session(&browser));
+        assert!(store.authenticate_control(Some(&browser)).is_err());
+        assert!(store.authenticate_control(Some(&token)).is_ok());
+        assert!(
+            !store.end_browser_session(&browser),
+            "a second time is nothing"
+        );
+    }
+
+    #[test]
+    fn the_access_token_cannot_be_ended_as_if_it_were_a_browser_sign_in() {
+        let store = TokenStore::new();
+        let token = store.issue_rd_token();
+        let join = store.issue_join_token();
+        assert!(!store.end_browser_session(&token));
+        assert!(!store.end_browser_session(&join));
+        assert!(!store.end_browser_session("unknown"));
+        assert!(!store.end_browser_session(""));
+        assert!(store.authenticate_control(Some(&token)).is_ok());
+    }
+
+    #[test]
+    fn a_browser_sign_in_alone_does_not_gate_control() {
+        // It can only exist beside an access token, but the rule is stated on its own: what
+        // gates control is an access token, not a sign-in made with one.
+        let store = TokenStore::new();
+        let token = store.issue_rd_token();
+        let _browser = store.issue_browser_session();
+        assert!(store.revoke(&token));
+        assert!(!store.has_control_credential());
     }
 
     #[test]

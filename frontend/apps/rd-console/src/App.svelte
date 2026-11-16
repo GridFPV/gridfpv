@@ -47,7 +47,10 @@
   import SeatsPage from './screens/SeatsPage.svelte';
   import TimersPage from './screens/TimersPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
+  import type { PublicHello } from '@gridfpv/types';
   import DataPage from './screens/DataPage.svelte';
+  import NetworkPage from './screens/NetworkPage.svelte';
+  import VisitorPage from './screens/VisitorPage.svelte';
   import VideoPage from './screens/VideoPage.svelte';
   import {
     parseHash,
@@ -99,12 +102,28 @@
   // state; after this the hash is the source of truth.
   // An overlay skips this: it follows the active event by itself and needs no route resolved.
   // (It runs on the first route that is not an overlay, should the hash ever be edited to one.)
+  //
+  // Before any of that, ask the Director who it takes this browser for. On the Grid computer
+  // that is the director, and so is another device that has signed in with the access token.
+  // Any other device is a visitor: the console is not for them, and the Director would
+  // refuse everything it asks, so they get the visitor's page and nothing else is read.
+  // A Director too old to answer, or one that cannot be reached, is treated as before.
   let resumed = false;
+  let hello = $state.raw<PublicHello | undefined>(undefined);
+  let greeted = $state(false);
+  const visitor = $derived(hello?.caller === 'Visitor');
   const bare = $derived(isOverlay(route));
   $effect(() => {
     if (resumed || bare) return;
     resumed = true;
     void (async () => {
+      try {
+        hello = await session.hello();
+      } catch {
+        hello = undefined;
+      }
+      greeted = true;
+      if (hello?.caller === 'Visitor') return;
       await session.resolveActiveEvent();
       navigate(resolveInitialRoute(location.hash, !!session.currentEvent));
     })();
@@ -114,7 +133,7 @@
   // between them does not read everything again. It lives for as long as an event is open,
   // on whatever page: the nav shows how many races need a marshal from anywhere.
   let live = $state.raw<EventLive | undefined>(undefined);
-  const liveEventId = $derived(bare ? undefined : session.currentEvent?.id);
+  const liveEventId = $derived(bare || visitor ? undefined : session.currentEvent?.id);
   const toMarshal = $derived(live?.view ? marshalCount(live.view) : 0);
   $effect(() => {
     const id = liveEventId;
@@ -164,6 +183,19 @@
       />
     {/key}
   </div>
+{:else if !greeted}
+  <!-- Until the Director has said who this browser is, show neither the console nor the
+       visitor's page: a visitor must never see the console flash by. -->
+  <div class="gridfpv-root">
+    <div class="resume-loading" role="status">
+      <span class="resume-spinner" aria-hidden="true"></span>
+      <span>Connecting…</span>
+    </div>
+  </div>
+{:else if visitor && hello}
+  <div class="gridfpv-root">
+    <VisitorPage {session} {hello} />
+  </div>
 {:else}
   <div class="gridfpv-root gridfpv-dense">
     {@render shell()}
@@ -197,6 +229,8 @@
       <FormatsPage {session} />
     {:else if route.page === 'video'}
       <VideoPage {session} {live} />
+    {:else if route.page === 'network'}
+      <NetworkPage {session} />
     {:else if route.page === 'data'}
       <DataPage {session} />
     {:else if route.page === 'timers'}

@@ -72,7 +72,15 @@ async fn the_overlay_is_drawn_onto_a_clean_recording() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let app = gridfpv_app::director::build_app(registry.clone(), &assets);
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // The gate needs each caller's address, as the real Director gives it.
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
 
     registry
         .video()

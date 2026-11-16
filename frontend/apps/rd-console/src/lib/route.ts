@@ -29,6 +29,7 @@
  *   - `#/timers`        → the Timers page: add, find and remove timers
  *   - `#/pilots`, `#/classes`, `#/formats` → the lists that outlive events
  *   - `#/video`         → the Video page: OBS, and the recording of each race
+ *   - `#/network`       → the Network page: whether other devices can open Grid
  *   - `#/data`          → the Data page: a copy of everything, to move to another computer
  *   - `#/help`          → the help index, and `#/help/‹page›` → one help page
  *   - `#/overlay/race`  → the race overlay, a page for an OBS browser source: light text, for
@@ -49,7 +50,15 @@
 import type { AdapterId, EventId, PhaseId, RaceId, SeatRef } from '@gridfpv/types';
 
 /** The pages that need no open event. */
-export type AppPage = 'events' | 'pilots' | 'classes' | 'timers' | 'formats' | 'video' | 'data';
+export type AppPage =
+  | 'events'
+  | 'pilots'
+  | 'classes'
+  | 'timers'
+  | 'formats'
+  | 'video'
+  | 'network'
+  | 'data';
 
 /** The pages of the open event that take no further argument. */
 export type EventSection = 'event' | 'phases' | 'results' | 'overlays';
@@ -108,6 +117,7 @@ const APP_PAGES: readonly AppPage[] = [
   'timers',
   'formats',
   'video',
+  'network',
   'data'
 ];
 const EVENT_SECTIONS: readonly EventSection[] = ['event', 'phases', 'results', 'overlays'];

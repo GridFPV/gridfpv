@@ -148,6 +148,7 @@ test('the switch moves between Setup and the event, and each side remembers its 
     'Classes',
     'Formats',
     'Video',
+    'Network',
     'Data',
     'Help'
   ]);

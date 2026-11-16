@@ -37,6 +37,9 @@ tokio = { version = "1", features = ["sync", "time"] }
 tower-http = { version = "0.6", features = ["fs"] }
 futures-util = { version = "0.3", default-features = false }
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+# This computer's network addresses, to tell the director what to open on a phone. Already
+# in the tree through the timer discovery.
+if-addrs = "0.15"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
