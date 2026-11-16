@@ -50,7 +50,8 @@
     names,
     live,
     onrun,
-    onaddheat
+    onaddheat,
+    onsignup = undefined
   }: {
     view: EventView;
     names: Names;
@@ -60,6 +61,8 @@
     onrun: (heat: PhaseView['def']['id']) => void;
     /** Add a heat under a phase. Left out, the rows offer no "+ Heat". */
     onaddheat?: (under: PhaseId) => void;
+    /** Set up pilot sign-up for a phase that holds heats. */
+    onsignup?: ((phase: PhaseId) => void) | undefined;
   } = $props();
 
   /** Whether a phase can be removed: nothing beneath it, nothing raced, not locked. */
@@ -172,6 +175,15 @@
               variant="secondary"
               aria-label="Add a heat under {phase.def.label}"
               onclick={() => onaddheat(phase.def.id)}>+ Heat</Button
+            >
+          {/if}
+          {#if !heat && onsignup && !phase.locked && !phase.signup}
+            <Button
+              size="sm"
+              variant="ghost"
+              title="Let pilots put themselves into heats of this phase"
+              aria-label="Set up pilot sign-up for {phase.def.label}"
+              onclick={() => onsignup(phase.def.id)}>Sign-up</Button
             >
           {/if}
           {#if removable(phase)}

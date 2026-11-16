@@ -15,6 +15,7 @@ import {
   race,
   raceSeat
 } from './competition.js';
+import { SIGNUP_PILOTS, signupEvent, signupSheet } from './signupFixtures.js';
 import { openLive } from './support.js';
 
 beforeEach(() => {
@@ -621,5 +622,73 @@ describe('SpectatorView: a signed-in pilot', () => {
       expect(screen.queryAllByRole('button')).toEqual([]);
       expect(screen.queryAllByRole('textbox')).toEqual([]);
     }
+  });
+});
+
+describe('SpectatorView: the Sign up tab', () => {
+  it('is there only when a phase has sign-up, between Up next and Results', async () => {
+    await open(running());
+    expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
+    cleanup();
+    const { live } = await openLive(signupEvent(), {
+      listPilots: vi.fn(async () => SIGNUP_PILOTS)
+    });
+    render(SpectatorView, { live });
+    expect(screen.getAllByRole('tab').map((el) => el.textContent?.trim())).toEqual([
+      'Last race',
+      'Up next',
+      'Sign up',
+      'Results'
+    ]);
+  });
+
+  it('shows the sheet and nothing else when it is picked', async () => {
+    const { live } = await openLive(signupEvent(), {
+      listPilots: vi.fn(async () => SIGNUP_PILOTS)
+    });
+    render(SpectatorView, { live });
+    await fireEvent.click(tab('Sign up'));
+    expect(screen.getAllByRole('region').map((el) => el.getAttribute('aria-label'))).toEqual([
+      'Sign up',
+      'Sign-up for Qualifying'
+    ]);
+    // Looking only: nothing to press.
+    expect(screen.queryAllByRole('button')).toEqual([]);
+  });
+
+  it('goes back to the race when sign-up is turned off under it', async () => {
+    const view = signupEvent();
+    const { live } = await openLive(view, { listPilots: vi.fn(async () => SIGNUP_PILOTS) });
+    render(SpectatorView, { live });
+    await fireEvent.click(tab('Sign up'));
+    live.view = {
+      ...view,
+      cursor: 2,
+      phases: view.phases.map((phase) => ({ ...phase, signup: undefined }))
+    };
+    await waitFor(() => expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull());
+    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('region', { name: 'Last race' })).toBeVisible();
+  });
+
+  it('gives a signed-in pilot the buttons, and passes on what they press', async () => {
+    const { live } = await openLive(signupEvent(signupSheet()), {
+      listPilots: vi.fn(async () => SIGNUP_PILOTS)
+    });
+    const signup = {
+      take: vi.fn(async () => {}),
+      next: vi.fn(async () => {}),
+      leave: vi.fn(async () => {})
+    };
+    render(SpectatorView, {
+      live,
+      pilot: { id: 'p-bee', callsign: 'Bee' },
+      channels: [],
+      buzz: vi.fn(),
+      signup
+    });
+    await fireEvent.click(tab('Sign up'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 1 in Qualifying Heat 2' }));
+    expect(signup.take).toHaveBeenCalledOnce();
   });
 });

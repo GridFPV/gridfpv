@@ -94,6 +94,37 @@ leaves the event. Wrong codes are counted by address, apart from wrong tokens, w
 same limit. The codes and sign-ins are kept in `pilot-access.json` in the data folder, not
 in any event's log and not in a copy made on the Data page.
 
+**Sign-up** (`docs/primitives.md` §11.5). The rules are in the engine
+(`crates/engine/src/signup.rs`). A spot is a seat in a heat's lineup, so sign-up writes
+plain heats; four facts carry what a lineup cannot (`SignupSet`, `SignupRunsSet`,
+`SignupCharged`, `SignupHeatClosed`), and they can only come from a sign-up command.
+
+The **director** sends `POST /events/{id}/commands` with `{"Signup": …}`:
+
+| Command | Does |
+|---|---|
+| `Set { phase, rules? }` | Turn sign-up on, change its rules, or (no `rules`) turn it off. `rules` is `{seats, open_heats, held_limit?, run_limit?, rest_heats, open}` |
+| `Take { heat, seat, pilot, by }` | Put a pilot on a seat. `by` is `Director` or `Pilot` |
+| `TakeNext { phase, seat, pilot, by }` | The first free spot on that seat |
+| `Leave { heat, pilot, by }` | Give a spot up |
+| `Drop { heat, pilot, counted }` | Take a pilot out. `counted` uses up one of their runs |
+| `Pull { pilot, from, to }` | Move a pilot forward to an earlier heat, on the same seat |
+| `SetRuns { phase, pilot, extra }` | One pilot's own allowance, added to the limit |
+| `CloseHeat { heat, closed }` | Close a heat to pilots, or open it again |
+
+A **pilot** uses three routes of their own. The pilot is the one the request is signed in
+as, never one named in the body, and it always acts as `Pilot`, so every limit applies:
+
+| Route | Body |
+|---|---|
+| `POST /public/pilot/signup/take` | `{heat, seat}` |
+| `POST /public/pilot/signup/next` | `{phase, seat}` |
+| `POST /public/pilot/signup/leave` | `{heat}` |
+
+With no sign-in they answer `401`. A change the rules do not allow answers `409` with the
+reason in words. The snapshot carries the sheet on the phase: `signup: {rules, heats:
+[{heat, number, seats, state, full}], pilots: [{pilot, used, held, extra, allowed?}]}`.
+
 Ten wrong tokens from one address inside a minute shut that address out (`429`) until the
 minute has passed, whatever it sends. The public reads still answer it.
 

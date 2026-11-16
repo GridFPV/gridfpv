@@ -187,3 +187,86 @@ describe('with an event open', () => {
     expect(((await res.json()) as ProtocolError).code).toBe('Unauthorized');
   });
 });
+
+describe('pilot sign-up over the wire (docs/primitives.md §11.5)', () => {
+  it('a Signup command turns it on, and both snapshots carry the same sheet', async () => {
+    const group = {
+      Record: {
+        PhaseDefined: {
+          def: {
+            id: 'quali',
+            label: 'Qualifying',
+            kind: { Group: { combine: 'Stack' } },
+            format: {
+              name: 'One race each',
+              race: { end: 'Open', staging_micros: 0, first_lap: 'HoleShot' },
+              completion: { SavedRaces: 1 }
+            }
+          }
+        }
+      }
+    };
+    await direct('POST', `/events/${event}/commands`, group);
+    const rules = {
+      seats: [
+        { adapter: 'bench', seat: 'seat-1' },
+        { adapter: 'bench', seat: 'seat-2' }
+      ],
+      open_heats: 2,
+      run_limit: 3,
+      rest_heats: 0,
+      open: true
+    };
+    await direct('POST', `/events/${event}/commands`, {
+      Signup: { Set: { phase: 'quali', rules } }
+    });
+    const ours = await direct<EventView>('GET', `/events/${event}/state`);
+    const phase = ours.phases.find((entry) => entry.def.id === 'quali');
+    const signup = phase?.signup;
+    expect(signup?.rules).toEqual(rules);
+    expect(Object.keys(signup ?? {}).sort()).toEqual(['heats', 'pilots', 'rules']);
+    expect(signup?.heats).toEqual([
+      { heat: 'quali/heat-1', number: 1, seats: [null, null], state: 'Open', full: false },
+      { heat: 'quali/heat-2', number: 2, seats: [null, null], state: 'Open', full: false }
+    ]);
+    for (const pilot of signup?.pilots ?? []) {
+      expect(Object.keys(pilot).sort()).toEqual(['allowed', 'extra', 'held', 'pilot', 'used']);
+    }
+    const theirs = (await (await visit('/public/event/state')).json()) as EventView;
+    expect(theirs.phases.find((entry) => entry.def.id === 'quali')?.signup).toEqual(signup);
+  });
+
+  it("the pilot's routes need a sign-in, and say so", async () => {
+    for (const [route, body] of [
+      ['take', { heat: 'quali/heat-1', seat: { adapter: 'bench', seat: 'seat-1' } }],
+      ['next', { phase: 'quali', seat: { adapter: 'bench', seat: 'seat-1' } }],
+      ['leave', { heat: 'quali/heat-1' }]
+    ] as const) {
+      const res = await fetch(`${director.baseUrl}/public/pilot/signup/${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      expect(res.status, route).toBe(401);
+      expect(await res.json()).toEqual({
+        code: 'Unauthorized',
+        message: 'Sign in with your code first.'
+      });
+    }
+  });
+
+  it('a refused sign-up command is a typed 409 with the reason', async () => {
+    const res = await fetch(`${director.baseUrl}/events/${event}/commands`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        Signup: { Set: { phase: 'quali', rules: { seats: [], open_heats: 1 } } }
+      })
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      code: 'Refused',
+      message: 'a sign-up phase needs at least one seat'
+    });
+  });
+});

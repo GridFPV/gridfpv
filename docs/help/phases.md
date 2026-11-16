@@ -50,3 +50,60 @@ Locked.
 
 A seat that reads "Winner of Heat 3" is waiting for that heat. It fills in by itself when
 the heat is done.
+
+## Pilot sign-up
+
+For practice and qualifying you can let pilots put themselves into heats, from their
+phones. Pilots need to be [signed in](#/help/event) and phones need to
+[reach Grid](#/help/network).
+
+### Turning it on
+
+Press **Sign-up** on a phase that holds heats. Pick:
+
+- **Timed by** and the **seats** every heat has. A seat is the same channel in every heat.
+- **Heats open at once.** Grid keeps this many heats with room in them. Start with 3.
+- **Runs for each pilot.** Leave it empty for no limit.
+- **Spots held at once.** How many heats a pilot can be waiting in. Leave it empty for no
+  limit.
+- **Heats to sit out between two.** 0 lets a pilot fly back to back.
+
+Press **Turn sign-up on**. The first heats appear, empty. Sign-up starts **closed**: press
+**Open sign-up** on the sheet when you want pilots to start.
+
+### The sheet
+
+Each row is a heat and each column is a seat.
+
+- Heats are numbered as they appear, and fly in that order.
+- A new heat appears when one fills up. It also appears when you start a heat or close one,
+  because those no longer have room for pilots.
+- A heat that is not full can still be flown. If a heat is thin, **pull** a pilot forward
+  into it: the **↑** button beside a pilot moves them to an earlier heat on the same seat,
+  so their channel does not change. Ask the pilot first. Grid only tells them.
+- **+ Add** puts a pilot on a free seat. Your limits are for pilots. They do not stop you.
+- **Drop** takes a pilot out. Grid asks if it counts as a run. Pick **Does not count** for
+  a pilot who never got to fly.
+- **Close to pilots** stops pilots joining or leaving one heat from a phone. Use it when
+  you call the heat to the line. You can still add or drop. Starting the race closes the
+  heat anyway.
+- Once a heat is on or flown, nobody can change who is in it.
+
+### Runs
+
+A run is used when a race is **saved** with the pilot in it. A race you throw out uses
+none.
+
+- **One more run for everyone** raises the limit by one.
+- **+** and **−** beside a pilot give or take a run for that pilot only. Use **+** to give
+  a run back to a pilot who was in a saved race but did not get to fly.
+
+### What pilots see
+
+On their phone, a **Sign up** tab. They press **Take** on a free seat, **Leave** on their
+own, or **Next free** for the first open spot on a seat. A seat they cannot take says why:
+no runs left, the heat is closed, sign-up is closed.
+
+### Turning it off
+
+**Rules**, then **Turn sign-up off**. The heats and who is in them stay.

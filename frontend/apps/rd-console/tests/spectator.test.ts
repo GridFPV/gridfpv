@@ -283,6 +283,37 @@ describe("the visitor's source", () => {
     expect(asked).toEqual([]);
   });
 
+  it("a pilot's own sign-up goes to the pilot routes, and never names the pilot", async () => {
+    const asked: { url: string; method: string; body?: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        asked.push({
+          url: String(input),
+          method: init?.method ?? 'GET',
+          body: init?.body as string | undefined
+        });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ cursor: 9 }),
+          text: async () => '{"cursor":9}'
+        } as Response;
+      })
+    );
+    const source = publicSource('http://grid.local:8081');
+    const seat = { adapter: 'gate', seat: '0' };
+    await source.takeSpot('quali/heat-1', seat);
+    await source.takeNextSpot('quali', seat);
+    await source.leaveSpot('quali/heat-1');
+    expect(asked.map((call) => [call.method, call.url, JSON.parse(call.body ?? 'null')])).toEqual([
+      ['POST', 'http://grid.local:8081/public/pilot/signup/take', { heat: 'quali/heat-1', seat }],
+      ['POST', 'http://grid.local:8081/public/pilot/signup/next', { phase: 'quali', seat }],
+      ['POST', 'http://grid.local:8081/public/pilot/signup/leave', { heat: 'quali/heat-1' }]
+    ]);
+    for (const call of asked) expect(call.body).not.toContain('pilot');
+  });
+
   it('refuses every write and every director-only read without sending anything', async () => {
     const asked = answering({});
     const source = publicSource('http://grid.local:8081');

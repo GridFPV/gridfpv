@@ -18,11 +18,14 @@
   import type { PhaseId } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
+  import { signupPhases } from '../lib/signup.js';
   import AddBracketDialog from './AddBracketDialog.svelte';
   import AddHeatDialog from './AddHeatDialog.svelte';
   import AddPhaseDialog from './AddPhaseDialog.svelte';
   import PhaseList from './PhaseList.svelte';
   import RunQueue from './RunQueue.svelte';
+  import SignupRulesDialog from './SignupRulesDialog.svelte';
+  import SignupSheet from './SignupSheet.svelte';
 
   let {
     live,
@@ -38,6 +41,12 @@
     undefined
   );
   const close = () => (adding = undefined);
+
+  // ── Pilot sign-up (docs/primitives.md §11.5) ───────────────────────────────
+  const sheets = $derived(signupPhases(live.view));
+  /** The phase whose sign-up rules are being set. */
+  let rulesFor = $state<PhaseId | undefined>(undefined);
+  const rulesPhase = $derived(live.view?.phases.find((phase) => phase.def.id === rulesFor));
 </script>
 
 <Page
@@ -72,6 +81,14 @@
         <RunQueue view={live.view} names={live.names} {live} {onrun} />
       </Card>
     {/if}
+    {#each sheets as sheet (sheet.id)}
+      <SignupSheet
+        phase={sheet}
+        names={live.names}
+        send={(command) => live.send(command)}
+        onrules={() => (rulesFor = sheet.id)}
+      />
+    {/each}
     <Card title="All phases" elevation="sm">
       <PhaseList
         view={live.view}
@@ -79,10 +96,22 @@
         {live}
         {onrun}
         onaddheat={(under) => (adding = { what: 'heat', under })}
+        onsignup={(phase) => (rulesFor = phase)}
       />
     </Card>
   {/if}
 </Page>
+
+{#if rulesPhase}
+  <SignupRulesDialog
+    phase={rulesPhase.def.id}
+    phaseName={rulesPhase.def.label}
+    rules={rulesPhase.signup?.rules}
+    sources={live.seatSources}
+    send={(command) => live.send(command)}
+    onclose={() => (rulesFor = undefined)}
+  />
+{/if}
 
 {#if adding?.what === 'phase'}
   <AddPhaseDialog {live} under={adding.under} onclose={close} />

@@ -10,11 +10,14 @@
 import {
   getPublicEvent,
   getPublicEventState,
+  leaveSpot,
   listPublicChannels,
   listPublicClasses,
   listPublicPilots,
   listPublicTimers,
-  subscribePublicChanges
+  subscribePublicChanges,
+  takeNextSpot,
+  takeSpot
 } from '@gridfpv/protocol-client';
 import type {
   Class,
@@ -25,6 +28,7 @@ import type {
   PublicEvent,
   RaceView,
   SeatChannel,
+  SignupSeat,
   TimerView
 } from '@gridfpv/types';
 import type { LiveSession } from './eventLive.svelte.js';
@@ -39,6 +43,13 @@ export interface PublicSource extends LiveSession {
   getEvent(): Promise<PublicEvent>;
   /** Which video channel each seat is on. */
   getChannels(): Promise<SeatChannel[]>;
+  /**
+   * What a signed-in pilot does for themselves (§11.5). Who the pilot is comes from their
+   * sign-in. Each rejects with the Director's reason when the rules do not allow it.
+   */
+  takeSpot(heat: PhaseId, seat: SignupSeat): Promise<unknown>;
+  takeNextSpot(phase: PhaseId, seat: SignupSeat): Promise<unknown>;
+  leaveSpot(heat: PhaseId): Promise<unknown>;
 }
 
 const NOT_FOR_VISITORS = 'Only the director can do this.';
@@ -53,6 +64,9 @@ export function publicSource(baseUrl: string): PublicSource {
   return {
     getEvent: () => getPublicEvent(baseUrl),
     getChannels: () => listPublicChannels(baseUrl),
+    takeSpot: (heat, seat) => takeSpot(baseUrl, heat, seat),
+    takeNextSpot: (phase, seat) => takeNextSpot(baseUrl, phase, seat),
+    leaveSpot: (heat) => leaveSpot(baseUrl, heat),
     getEventState: () => getPublicEventState(baseUrl),
     subscribeChanges: (_id, onCursor) => subscribePublicChanges(baseUrl, onCursor),
     listPilots: () => listPublicPilots(baseUrl),

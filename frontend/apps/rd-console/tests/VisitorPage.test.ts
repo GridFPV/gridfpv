@@ -2,11 +2,12 @@
  * The page someone on another device sees, and the director's sign-in on it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import type { PublicEvent, PublicHello } from '@gridfpv/types';
 import type { PublicSource } from '../src/lib/spectator.js';
 import VisitorPage from '../src/screens/VisitorPage.svelte';
 import { eventView, heat, race, raceSeat } from './competition.js';
+import { signupEvent, signupSheet, SIGNUP_PILOTS, GATE } from './signupFixtures.js';
 import { fakeLiveSession } from './support.js';
 
 beforeEach(() => {
@@ -55,7 +56,10 @@ function open(hello: PublicHello = HELLO, event: PublicEvent = hello.event ? NIG
       subscribeChanges: vi.fn(() => stop)
     }),
     getEvent: vi.fn(async () => event),
-    getChannels: vi.fn(async () => [{ adapter: 'bench', seat: 'seat-1', freq_mhz: 5658 }])
+    getChannels: vi.fn(async () => [{ adapter: 'bench', seat: 'seat-1', freq_mhz: 5658 }]),
+    takeSpot: vi.fn(async () => {}),
+    takeNextSpot: vi.fn(async () => {}),
+    leaveSpot: vi.fn(async () => {})
   };
   render(VisitorPage, { session, source, hello, reload });
   return {
@@ -384,6 +388,14 @@ describe('VisitorPage: a pilot signs in', () => {
     finish({ id: 'p-ace', callsign: 'Ace' });
   });
 
+  it('does not tell a signed-in pilot they can only look', () => {
+    open();
+    expect(screen.getByText(/You can look\./)).toBeVisible();
+    cleanup();
+    open({ ...HELLO, pilot: { id: 'p-bee', callsign: 'Bee' } });
+    expect(screen.queryByText(/You can look\./)).toBeNull();
+  });
+
   it('is already signed in when the Director says so at load', () => {
     open({ ...HELLO, pilot: { id: 'p-bee', callsign: 'Bee' } });
     expect(screen.getByTestId('pilot-signed-in')).toHaveTextContent('Signed in as Bee');
@@ -421,7 +433,10 @@ describe('VisitorPage: a pilot signs in', () => {
       source: {
         ...fakeLiveSession(racing()),
         getEvent: vi.fn(async () => NIGHT),
-        getChannels: vi.fn(async () => [])
+        getChannels: vi.fn(async () => []),
+        takeSpot: vi.fn(async () => {}),
+        takeNextSpot: vi.fn(async () => {}),
+        leaveSpot: vi.fn(async () => {})
       },
       hello: HELLO,
       reload: vi.fn()
@@ -503,5 +518,90 @@ describe('VisitorPage: what a signed-in pilot gets', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await waitFor(() => expect(screen.queryByTestId('pilot-alert')).toBeNull());
     expect(screen.queryByRole('tab', { name: /^Me/ })).toBeNull();
+  });
+});
+
+describe('VisitorPage: signing up for a heat', () => {
+  /** The open event has a sign-up phase. Ace holds seat 1 of heat 1. */
+  function openSheet(hello: PublicHello = HELLO) {
+    const session = {
+      signInDirector: vi.fn(async (_token: string) => {}),
+      signInPilot: vi.fn(async (_code: string) => ({ id: 'p-bee', callsign: 'Bee' })),
+      signOutPilot: vi.fn(async () => {})
+    };
+    const view = signupEvent(signupSheet());
+    const source: PublicSource = {
+      ...fakeLiveSession(view, {
+        listPilots: vi.fn(async () => SIGNUP_PILOTS),
+        listTimers: vi.fn(async () => [GATE])
+      }),
+      getEvent: vi.fn(async () => NIGHT),
+      getChannels: vi.fn(async () => []),
+      takeSpot: vi.fn(async () => {}),
+      takeNextSpot: vi.fn(async () => {}),
+      leaveSpot: vi.fn(async () => {})
+    };
+    render(VisitorPage, { session, source, hello, reload: vi.fn() });
+    return { source };
+  }
+  const signUpTab = () => screen.findByRole('tab', { name: 'Sign up' });
+
+  it('has no Sign up tab when the event has nothing to sign up for', async () => {
+    open();
+    await screen.findByTestId('race-heat');
+    expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
+  });
+
+  it('shows the sheet to someone who is only looking, with nothing to press on it', async () => {
+    openSheet();
+    await fireEvent.click(await signUpTab());
+    const sheet = screen.getByRole('region', { name: 'Sign-up for Qualifying' });
+    expect(within(sheet).getByRole('listitem', { name: 'Qualifying Heat 1' })).toHaveTextContent(
+      'Ace'
+    );
+    expect(within(sheet).queryAllByRole('button')).toEqual([]);
+  });
+
+  it('a signed-in pilot takes a seat, and the page reads the event again', async () => {
+    const { source } = openSheet({ ...HELLO, pilot: { id: 'p-bee', callsign: 'Bee' } });
+    await fireEvent.click(await signUpTab());
+    const reads = vi.mocked(source.getEventState).mock.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    await waitFor(() =>
+      expect(source.takeSpot).toHaveBeenCalledWith('quali/heat-1', { adapter: 'gate', seat: '1' })
+    );
+    await waitFor(() =>
+      expect(vi.mocked(source.getEventState).mock.calls.length).toBeGreaterThan(reads)
+    );
+  });
+
+  it('a signed-in pilot leaves their seat and takes the next free one', async () => {
+    const { source } = openSheet({ ...HELLO, pilot: { id: 'p-ace', callsign: 'Ace' } });
+    await fireEvent.click(await signUpTab());
+    await fireEvent.click(screen.getByRole('button', { name: 'Leave Qualifying Heat 1' }));
+    await waitFor(() => expect(source.leaveSpot).toHaveBeenCalledWith('quali/heat-1'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Next free spot on Seat 3' }));
+    await waitFor(() =>
+      expect(source.takeNextSpot).toHaveBeenCalledWith('quali', { adapter: 'gate', seat: '2' })
+    );
+  });
+
+  it("shows the Director's reason when it refuses, and does not read the event for nothing", async () => {
+    const { source } = openSheet({ ...HELLO, pilot: { id: 'p-bee', callsign: 'Bee' } });
+    vi.mocked(source.takeSpot).mockRejectedValueOnce(
+      new Error('that seat in Qualifying Heat 1 is already taken')
+    );
+    await fireEvent.click(await signUpTab());
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    expect(await screen.findByTestId('signup-error')).toHaveTextContent('already taken');
+  });
+
+  it('signing out leaves the sheet up with nothing to press', async () => {
+    openSheet({ ...HELLO, pilot: { id: 'p-bee', callsign: 'Bee' } });
+    await fireEvent.click(await signUpTab());
+    expect(screen.getAllByRole('button', { name: /^Take/ }).length).toBeGreaterThan(0);
+    await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull());
+    expect(screen.getByRole('region', { name: 'Sign-up for Qualifying' })).toBeVisible();
   });
 });
