@@ -42,7 +42,11 @@ function racing() {
 }
 
 function open(hello: PublicHello = HELLO, event: PublicEvent = hello.event ? NIGHT : {}) {
-  const session = { signInDirector: vi.fn(async (_token: string) => {}) };
+  const session = {
+    signInDirector: vi.fn(async (_token: string) => {}),
+    signInPilot: vi.fn(async (_code: string) => ({ id: 'p-ace', callsign: 'Ace' })),
+    signOutPilot: vi.fn(async () => {})
+  };
   const reload = vi.fn();
   const stop = vi.fn();
   const source: PublicSource = {
@@ -286,5 +290,169 @@ describe('VisitorPage: following the open event', () => {
     for (const tabEl of screen.getAllByRole('tab')) await fireEvent.click(tabEl);
     expect(source.sendCommand).not.toHaveBeenCalled();
     expect(source.postPass).not.toHaveBeenCalled();
+  });
+});
+
+describe('VisitorPage: a pilot signs in', () => {
+  const askAsPilot = () => fireEvent.click(screen.getByRole('button', { name: 'I am a pilot' }));
+  const codeBox = () => screen.getByLabelText('Your code') as HTMLInputElement;
+  const form = () => screen.getByRole('form', { name: 'Pilot sign-in' });
+
+  afterEach(() => {
+    history.replaceState(null, '', '/');
+  });
+
+  it('keeps the code box away until it is asked for', async () => {
+    open();
+    expect(screen.queryByLabelText('Your code')).toBeNull();
+    await askAsPilot();
+    expect(codeBox()).toHaveAttribute('autocomplete', 'off');
+    expect(codeBox()).toHaveAttribute('autocapitalize', 'characters');
+  });
+
+  it('signs in with a typed code, tidied, and then knows the pilot by name', async () => {
+    const { session } = open();
+    await askAsPilot();
+    await fireEvent.input(codeBox(), { target: { value: ' abc-234 ' } });
+    await fireEvent.submit(form());
+    await waitFor(() => expect(session.signInPilot).toHaveBeenCalledWith('ABC234'));
+    expect(await screen.findByTestId('pilot-signed-in')).toHaveTextContent('Signed in as Ace');
+    expect(screen.queryByLabelText('Your code')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'I am a pilot' })).toBeNull();
+  });
+
+  it('catches a slip before it is sent, so it does not count as a wrong try', async () => {
+    const { session } = open();
+    await askAsPilot();
+    for (const [typed, words] of [
+      ['', 'Type your code.'],
+      ['ABC23', 'A code has 6 letters and numbers.'],
+      ['ABC2345', 'A code has only 6 letters and numbers.'],
+      ['ABC23O', 'never 0, O, 1 or I']
+    ] as const) {
+      await fireEvent.input(codeBox(), { target: { value: typed } });
+      await fireEvent.submit(form());
+      expect(screen.getByRole('alert')).toHaveTextContent(words);
+    }
+    expect(session.signInPilot).not.toHaveBeenCalled();
+  });
+
+  it('does not nag about the code while it is still being typed for the first time', async () => {
+    open();
+    await askAsPilot();
+    await fireEvent.input(codeBox(), { target: { value: 'AB' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("shows the Director's words for a wrong code and lets the pilot try again", async () => {
+    const { session } = open();
+    session.signInPilot.mockRejectedValueOnce(
+      new Error('That code is not right. Check it with the director.')
+    );
+    await askAsPilot();
+    await fireEvent.input(codeBox(), { target: { value: 'AAA222' } });
+    await fireEvent.submit(form());
+    expect(await screen.findByRole('alert')).toHaveTextContent('That code is not right.');
+    expect(screen.queryByTestId('pilot-signed-in')).toBeNull();
+    await fireEvent.input(codeBox(), { target: { value: 'ABC234' } });
+    await fireEvent.submit(form());
+    expect(await screen.findByTestId('pilot-signed-in')).toBeVisible();
+  });
+
+  it('says so when the device has guessed too often', async () => {
+    const { session } = open();
+    session.signInPilot.mockRejectedValueOnce(
+      new Error('Too many wrong codes from this device. Wait a minute and try again.')
+    );
+    await askAsPilot();
+    await fireEvent.input(codeBox(), { target: { value: 'AAA222' } });
+    await fireEvent.submit(form());
+    expect(await screen.findByRole('alert')).toHaveTextContent('Wait a minute and try again.');
+  });
+
+  it('sends a code once however fast it is pressed', async () => {
+    const { session } = open();
+    let finish: (pilot: { id: string; callsign: string }) => void = () => {};
+    session.signInPilot.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    await askAsPilot();
+    await fireEvent.input(codeBox(), { target: { value: 'ABC234' } });
+    await fireEvent.submit(form());
+    await fireEvent.submit(form());
+    await fireEvent.submit(form());
+    expect(session.signInPilot).toHaveBeenCalledOnce();
+    finish({ id: 'p-ace', callsign: 'Ace' });
+  });
+
+  it('is already signed in when the Director says so at load', () => {
+    open({ ...HELLO, pilot: { id: 'p-bee', callsign: 'Bee' } });
+    expect(screen.getByTestId('pilot-signed-in')).toHaveTextContent('Signed in as Bee');
+    expect(screen.queryByRole('button', { name: 'I am a pilot' })).toBeNull();
+  });
+
+  it('signs out, and offers to sign in again', async () => {
+    const { session } = open({ ...HELLO, pilot: { id: 'p-bee', callsign: 'Bee' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(session.signOutPilot).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByTestId('pilot-signed-in')).toBeNull());
+    expect(screen.getByRole('button', { name: 'I am a pilot' })).toBeVisible();
+  });
+
+  it('a code in the address signs in by itself and is taken out of the address', async () => {
+    history.replaceState(null, '', '/#/join/abc234');
+    const { session } = open();
+    await waitFor(() => expect(session.signInPilot).toHaveBeenCalledWith('ABC234'));
+    expect(await screen.findByTestId('pilot-signed-in')).toHaveTextContent('Signed in as Ace');
+    expect(location.hash).toBe('');
+    expect(location.href).not.toContain('ABC234');
+    expect(location.href.toLowerCase()).not.toContain('abc234');
+  });
+
+  it('a wrong code in the address shows why and opens the box to type the right one', async () => {
+    history.replaceState(null, '', '/#/join/AAA222');
+    const { session } = open();
+    session.signInPilot.mockRejectedValueOnce(
+      new Error('That code is not right. Check it with the director.')
+    );
+    cleanup();
+    history.replaceState(null, '', '/#/join/AAA222');
+    render(VisitorPage, {
+      session,
+      source: { ...fakeLiveSession(racing()), getEvent: vi.fn(async () => NIGHT) },
+      hello: HELLO,
+      reload: vi.fn()
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent('That code is not right.');
+    expect(codeBox()).toBeVisible();
+    expect(location.hash).toBe('');
+  });
+
+  it('an address that is not a sign-in link is left alone and signs nobody in', async () => {
+    for (const hash of ['#/join/ABC23', '#/join/', '#/events', '#/join/ABC234/x']) {
+      history.replaceState(null, '', `/${hash}`);
+      const { session } = open();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(session.signInPilot, hash).not.toHaveBeenCalled();
+      expect(location.hash).toBe(hash);
+      cleanup();
+    }
+  });
+
+  it('offers no pilot sign-in when no event is open', () => {
+    const { event: _none, ...noEvent } = HELLO;
+    open(noEvent, {});
+    expect(screen.queryByRole('button', { name: 'I am a pilot' })).toBeNull();
+  });
+
+  it('cancel puts the box away and forgets what went wrong', async () => {
+    const { session } = open();
+    session.signInPilot.mockRejectedValueOnce(new Error('That code is not right.'));
+    await askAsPilot();
+    await fireEvent.input(codeBox(), { target: { value: 'AAA222' } });
+    await fireEvent.submit(form());
+    await screen.findByRole('alert');
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByLabelText('Your code')).toBeNull();
+    await askAsPilot();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

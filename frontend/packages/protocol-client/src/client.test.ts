@@ -647,3 +647,98 @@ describe('the open event, for a visitor (docs/primitives.md §11.2)', () => {
     }
   });
 });
+
+describe("a pilot's sign-in (docs/primitives.md §11.3)", () => {
+  const recorder = (status: number, body: unknown) => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async (): Promise<unknown> => body,
+        text: async (): Promise<string> => JSON.stringify(body)
+      } as unknown as Response;
+    };
+    return { seen, fetch };
+  };
+  const auth = (init?: RequestInit) =>
+    (init?.headers as Record<string, string> | undefined)?.Authorization;
+
+  it("getPilotAccess GETs the event's codes, escaping the event id", async () => {
+    const view = { pilots: [{ pilot: 'p-ace', code: 'ABC234', signed_in: false }] };
+    const { seen, fetch } = recorder(200, view);
+    const { getPilotAccess } = await import('./client.js');
+    expect(await getPilotAccess('http://d.local:8080/', 'night race/1', { fetch })).toEqual(view);
+    expect(seen[0].url).toBe('http://d.local:8080/events/night%20race%2F1/access');
+    expect(seen[0].init?.method ?? 'GET').toBe('GET');
+  });
+
+  it('resetPilotCode POSTs with the token and escapes both ids', async () => {
+    const next = { pilot: 'p ace', code: 'NEW456', signed_in: false };
+    const { seen, fetch } = recorder(200, next);
+    const { resetPilotCode } = await import('./client.js');
+    expect(
+      await resetPilotCode('http://d.local:8080', 'evt/1', 'p ace', 'rd-tok', { fetch })
+    ).toEqual(next);
+    expect(seen[0].url).toBe('http://d.local:8080/events/evt%2F1/access/p%20ace/reset');
+    expect(seen[0].init?.method).toBe('POST');
+    expect(auth(seen[0].init)).toBe('Bearer rd-tok');
+    expect(seen[0].init?.body).toBeUndefined();
+  });
+
+  it("endPilotSession DELETEs the pilot's sign-in", async () => {
+    const { seen, fetch } = recorder(204, undefined);
+    const { endPilotSession } = await import('./client.js');
+    await endPilotSession('http://d.local:8080', 'evt-1', 'p-ace', undefined, { fetch });
+    expect(seen[0].url).toBe('http://d.local:8080/events/evt-1/access/p-ace/session');
+    expect(seen[0].init?.method).toBe('DELETE');
+    expect(auth(seen[0].init)).toBeUndefined();
+  });
+
+  it('pilotQrUrl is the picture address, with both ids escaped', async () => {
+    const { pilotQrUrl } = await import('./client.js');
+    expect(pilotQrUrl('http://d.local:8080/', 'evt/1', 'p ace')).toBe(
+      'http://d.local:8080/events/evt%2F1/access/p%20ace/qr'
+    );
+  });
+
+  it('signInPilot POSTs the code as JSON, with no token, and gives back the pilot', async () => {
+    const { seen, fetch } = recorder(200, { id: 'p-ace', callsign: 'Ace' });
+    const { signInPilot } = await import('./client.js');
+    expect(await signInPilot('http://d.local:8081', 'ABC234', { fetch })).toEqual({
+      id: 'p-ace',
+      callsign: 'Ace'
+    });
+    expect(seen[0].url).toBe('http://d.local:8081/public/pilot/session');
+    expect(seen[0].init?.method).toBe('POST');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({ code: 'ABC234' });
+    expect(auth(seen[0].init)).toBeUndefined();
+  });
+
+  it("signInPilot rejects with the Director's words", async () => {
+    const { signInPilot } = await import('./client.js');
+    for (const [status, code, message] of [
+      [401, 'Unauthorized', 'That code is not right. Check it with the director.'],
+      [
+        429,
+        'TooManyRequests',
+        'Too many wrong codes from this device. Wait a minute and try again.'
+      ],
+      [404, 'UnknownScope', 'No event is open.']
+    ] as const) {
+      const { fetch } = recorder(status, { code, message });
+      await expect(signInPilot('http://d.local:8081', 'AAA222', { fetch })).rejects.toThrow(
+        message
+      );
+    }
+  });
+
+  it('signOutPilot DELETEs /public/pilot/session', async () => {
+    const { seen, fetch } = recorder(204, undefined);
+    const { signOutPilot } = await import('./client.js');
+    await signOutPilot('http://d.local:8081', { fetch });
+    expect(seen[0].url).toBe('http://d.local:8081/public/pilot/session');
+    expect(seen[0].init?.method).toBe('DELETE');
+  });
+});

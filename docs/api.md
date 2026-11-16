@@ -71,6 +71,28 @@ With no event open, all but the first answer `404` with "No event is open." Ther
 to ask for another event by id. A field added to one of those shapes later does not compile
 until someone decides, in `spectate.rs`, whether a visitor may see it.
 
+A **pilot** signs in with a short code that is theirs for one event
+(`crates/server/src/pilot_access.rs`). It says who they are and opens nothing else: a
+signed-in pilot is still a visitor to every route outside `/public`.
+
+| Route | Who | What it does |
+|---|---|---|
+| `GET /events/{id}/access` | Director | `{pilots: [{pilot, code, signed_in}], address?}`: every pilot in the event with their code. A code is made the first time this is read. `address` is where a phone opens Grid, when it can. Sent with `Cache-Control: no-store` |
+| `POST /events/{id}/access/{pilot}/reset` | Director | A new code for one pilot. The old one stops working and their device is signed out |
+| `DELETE /events/{id}/access/{pilot}/session` | Director | Sign a pilot's device out. Their code still works. `204` |
+| `GET /events/{id}/access/{pilot}/qr` | Director | The code as a QR picture (SVG). It holds `address` + `#/join/CODE`. `409` while other devices cannot reach Grid |
+| `POST /public/pilot/session` | Anyone | `{code}`. A right code for the open event answers `{id, callsign}` and sets the cookie `gridfpv_pilot` (`HttpOnly`, `SameSite=Strict`). A wrong one answers `401`. With no event open, `404` |
+| `DELETE /public/pilot/session` | Anyone | Sign out. `204` |
+
+`GET /public/hello` gains `pilot?: {id, callsign}` for a browser that is signed in.
+
+A code is six characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`. As typed, case, spaces
+and dashes do not matter. One device at a time: a second sign-in with the same code
+replaces the first. A sign-in is for the event it was made in, and ends when the pilot
+leaves the event. Wrong codes are counted by address, apart from wrong tokens, with the
+same limit. The codes and sign-ins are kept in `pilot-access.json` in the data folder, not
+in any event's log and not in a copy made on the Data page.
+
 Ten wrong tokens from one address inside a minute shut that address out (`429`) until the
 minute has passed, whatever it sends. The public reads still answer it.
 

@@ -10,11 +10,17 @@
    * The page asks every few seconds which event is open. When the director opens another
    * one, or closes it, the page follows.
    *
+   * A **pilot** signs in here with the code the director gives them, or by scanning its
+   * QR code, which opens this page with the code in the address. Signed in, the page knows
+   * them by name.
+   *
    * A director who is using another device signs in here with the access token. The
    * Director sets a cookie, the page loads again, and this time it is the console.
    */
+  import { untrack } from 'svelte';
   import { Button, Card, Input } from '@gridfpv/components';
-  import type { PublicEventName, PublicHello } from '@gridfpv/types';
+  import type { PublicEventName, PublicHello, PublicPilot } from '@gridfpv/types';
+  import { codeInHash, codeProblem, tidyCode } from '../lib/pilotAccess.js';
   import { EventLive } from '../lib/eventLive.svelte.js';
   import type { Session } from '../lib/session.svelte.js';
   import type { PublicSource } from '../lib/spectator.js';
@@ -29,7 +35,7 @@
     hello,
     reload = () => location.reload()
   }: {
-    session: Pick<Session, 'signInDirector'>;
+    session: Pick<Session, 'signInDirector' | 'signInPilot' | 'signOutPilot'>;
     /** Where the open event is read from: the Director's public routes. */
     source: PublicSource;
     hello: PublicHello;
@@ -87,6 +93,64 @@
     return () => store.stop();
   });
 
+  // ── The pilot ──────────────────────────────────────────────────────────────
+  /** Who this browser is signed in as. Starts from what the Director said at load. */
+  let pilot = $state<PublicPilot | undefined>(untrack(() => hello.pilot));
+  let pilotAsking = $state(false);
+  let code = $state('');
+  let pilotBusy = $state(false);
+  let pilotError = $state<string | undefined>(undefined);
+  /** Shown only once the pilot has tried to send a code that cannot be one. */
+  let codeTried = $state(false);
+  const codeTrouble = $derived(codeTried ? codeProblem(code) : undefined);
+
+  async function sendCode(typed: string) {
+    if (pilotBusy) return;
+    pilotBusy = true;
+    pilotError = undefined;
+    try {
+      pilot = await session.signInPilot(tidyCode(typed));
+      code = '';
+      codeTried = false;
+      pilotAsking = false;
+    } catch (err) {
+      pilotError = err instanceof Error ? err.message : String(err);
+      pilotAsking = true;
+    } finally {
+      pilotBusy = false;
+    }
+  }
+
+  function signInPilot(e: Event) {
+    e.preventDefault();
+    codeTried = true;
+    if (codeProblem(code) !== undefined) return;
+    void sendCode(code);
+  }
+
+  async function signOutPilot() {
+    if (pilotBusy) return;
+    pilotBusy = true;
+    try {
+      await session.signOutPilot();
+      pilot = undefined;
+    } catch (err) {
+      pilotError = err instanceof Error ? err.message : String(err);
+    } finally {
+      pilotBusy = false;
+    }
+  }
+
+  // A pilot who scanned their QR code arrives with the code in the address. Sign them in
+  // with it, and take it out of the address so it is not left in the phone's history or
+  // sent on if they share the page.
+  $effect(() => {
+    const scanned = codeInHash(location.hash);
+    if (scanned === undefined) return;
+    history.replaceState(null, '', location.pathname + location.search);
+    void sendCode(scanned);
+  });
+
   let asking = $state(false);
   let token = $state('');
   let busy = $state(false);
@@ -127,6 +191,49 @@
       <p class="event" data-testid="visitor-event">No event is open</p>
       <p>You are connected. When the director opens an event, it will show here.</p>
     </Card>
+  {/if}
+  {#if pilot}
+    <p class="who" data-testid="pilot-signed-in">
+      Signed in as <strong>{pilot.callsign}</strong>
+      <Button size="sm" variant="ghost" disabled={pilotBusy} onclick={signOutPilot}>Sign out</Button
+      >
+    </p>
+  {:else if pilotAsking}
+    <Card title="Pilot sign-in" elevation="sm">
+      <form onsubmit={signInPilot} aria-label="Pilot sign-in">
+        <label for="pilot-code">Your code</label>
+        <Input
+          id="pilot-code"
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+          placeholder="ABC 234"
+          bind:value={code}
+          disabled={pilotBusy}
+        />
+        {#if codeTrouble}
+          <p class="error" role="alert">{codeTrouble}</p>
+        {:else if pilotError}
+          <p class="error" role="alert">{pilotError}</p>
+        {/if}
+        <p class="muted">The director has your code. It works on one phone at a time.</p>
+        <div class="row">
+          <Button variant="primary" type="submit" disabled={pilotBusy}>Sign in</Button>
+          <Button
+            variant="ghost"
+            onclick={() => ((pilotAsking = false), (pilotError = undefined), (codeTried = false))}
+          >
+            Cancel
+          </Button>
+        </div>
+      </form>
+    </Card>
+  {:else if eventName}
+    <p class="director">
+      <Button variant="secondary" size="sm" onclick={() => (pilotAsking = true)}>
+        I am a pilot
+      </Button>
+    </p>
   {/if}
   <p class="muted">You can look. The director runs the race from the Grid computer.</p>
 
@@ -200,6 +307,14 @@
   }
   .director {
     text-align: center;
+    margin: 0;
+  }
+  .who {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    margin: 0;
   }
   form {
     display: grid;

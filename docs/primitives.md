@@ -942,8 +942,13 @@ Until now only the director used Grid. This section adds the other people at a r
   ended; the heats coming up with who is in them; and the results. It updates by itself and
   follows the director to another event. It reads the console's own snapshot through
   `/public/event…`, with the director's things taken out (video paths, notes, protests, a
-  pilot's real name and outside ids, a timer's address). Not yet: alerts, and anything
-  only a pilot sees (§11.3).
+  pilot's real name and outside ids, a timer's address).
+- **Step 3, a pilot signs in** (§11.3). Each pilot in an event has a six-character code.
+  The director opens the **Pilot sign-in** card on the event's Details page and shows a
+  pilot theirs, as letters or as a QR code. The pilot types it on their phone, or scans
+  it, and the page then knows them by name. One device at a time; one event; the director
+  can give a new code or sign a phone out. A signed-in pilot can still only look: what a
+  pilot sees and does (§11.2, §11.5) comes next.
 
 ### 11.1 Two parts, and the rule between them
 

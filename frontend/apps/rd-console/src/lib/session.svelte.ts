@@ -68,6 +68,12 @@ import {
   getNetwork,
   putNetwork,
   getPublicHello,
+  getPilotAccess,
+  resetPilotCode,
+  endPilotSession,
+  pilotQrUrl,
+  signInPilot,
+  signOutPilot,
   signInDirector,
   signOutDirector,
   getOverlayLook,
@@ -102,7 +108,10 @@ import type {
   EventView,
   NetworkRequest,
   NetworkView,
+  PilotAccessView,
+  PilotCodeView,
   PublicHello,
+  PublicPilot,
   Format,
   PassRequest,
   Pilot,
@@ -230,6 +239,12 @@ const realApi = {
   getNetwork,
   putNetwork,
   getPublicHello,
+  getPilotAccess,
+  resetPilotCode,
+  endPilotSession,
+  pilotQrUrl,
+  signInPilot,
+  signOutPilot,
   signInDirector,
   signOutDirector,
   getOverlayLook,
@@ -595,6 +610,41 @@ export class Session {
   /** Who the Director takes this browser for, and which event is open. Open to anyone. */
   hello(): Promise<PublicHello> {
     return this.#api.getPublicHello(this.baseUrl, { token: this.#token });
+  }
+
+  /** Every pilot in an event with their sign-in code. For the director. */
+  getPilotAccess(event: EventMeta['id']): Promise<PilotAccessView> {
+    return this.#api.getPilotAccess(this.baseUrl, event, { token: this.#token });
+  }
+
+  /** Give a pilot a new sign-in code. `undefined` on a cancelled prompt. */
+  resetPilotCode(event: EventMeta['id'], pilot: PilotId): Promise<PilotCodeView | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.resetPilotCode(this.baseUrl, event, pilot, token)
+    );
+  }
+
+  /** Sign a pilot's device out. `true` when done, `undefined` on a cancelled prompt. */
+  endPilotSession(event: EventMeta['id'], pilot: PilotId): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#api.endPilotSession(this.baseUrl, event, pilot, token);
+      return true as const;
+    });
+  }
+
+  /** Where a pilot's QR code picture is served from. */
+  pilotQrUrl(event: EventMeta['id'], pilot: PilotId): string {
+    return this.#api.pilotQrUrl(this.baseUrl, event, pilot);
+  }
+
+  /** Sign this browser in as a pilot, with their code. Rejects with the Director's words. */
+  signInPilot(code: string): Promise<PublicPilot> {
+    return this.#api.signInPilot(this.baseUrl, code);
+  }
+
+  /** Sign this browser out as a pilot. */
+  signOutPilot(): Promise<void> {
+    return this.#api.signOutPilot(this.baseUrl);
   }
 
   /** Whether other devices can reach the Director, and on what address. */

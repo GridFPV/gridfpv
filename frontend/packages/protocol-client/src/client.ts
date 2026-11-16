@@ -28,8 +28,11 @@ import type {
   OverlayPlacement,
   NetworkRequest,
   NetworkView,
+  PilotAccessView,
+  PilotCodeView,
   PublicEvent,
   PublicHello,
+  PublicPilot,
   CreatePilotRequest,
   CreateTimerRequest,
   DiscoveredTimer,
@@ -808,6 +811,90 @@ export async function getPublicHello(
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<PublicHello> {
   return apiJson<PublicHello>(baseUrl, '/public/hello', options, 'reach Grid');
+}
+
+/**
+ * Every pilot in an event with their sign-in code (`GET /events/{id}/access`). For the
+ * director: a visitor is refused.
+ */
+export async function getPilotAccess(
+  baseUrl: string,
+  event: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<PilotAccessView> {
+  return apiJson<PilotAccessView>(
+    baseUrl,
+    eventPath(event, '/access'),
+    options,
+    "read the pilots' sign-in codes"
+  );
+}
+
+/** Give a pilot a new sign-in code; the old one stops working. RD-gated. */
+export async function resetPilotCode(
+  baseUrl: string,
+  event: EventId,
+  pilot: PilotId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PilotCodeView> {
+  return apiJson<PilotCodeView>(
+    baseUrl,
+    eventPath(event, `/access/${encodeURIComponent(pilot)}/reset`),
+    { method: 'POST', token, fetch: options.fetch },
+    'give the pilot a new code'
+  );
+}
+
+/** Sign a pilot's device out; their code still works. RD-gated. */
+export async function endPilotSession(
+  baseUrl: string,
+  event: EventId,
+  pilot: PilotId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    eventPath(event, `/access/${encodeURIComponent(pilot)}/session`),
+    { method: 'DELETE', token, fetch: options.fetch },
+    "sign the pilot's device out"
+  );
+}
+
+/** Where a pilot's QR code picture is served from, for an `<img>`. */
+export function pilotQrUrl(baseUrl: string, event: EventId, pilot: PilotId): string {
+  return `${trimSlash(baseUrl)}${eventPath(event, `/access/${encodeURIComponent(pilot)}/qr`)}`;
+}
+
+/**
+ * Sign in as a pilot with their code (`POST /public/pilot/session`). The Director sets a
+ * cookie the browser then sends by itself, and answers who the pilot is.
+ */
+export async function signInPilot(
+  baseUrl: string,
+  code: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PublicPilot> {
+  return apiJson<PublicPilot>(
+    baseUrl,
+    '/public/pilot/session',
+    { method: 'POST', body: { code }, fetch: options.fetch },
+    'sign in'
+  );
+}
+
+/** Sign out as a pilot (`DELETE /public/pilot/session`). */
+export async function signOutPilot(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/pilot/session',
+    { method: 'DELETE', fetch: options.fetch },
+    'sign out'
+  );
 }
 
 /** Which event is open, for a visitor (`GET /public/event`). Empty when none is. */

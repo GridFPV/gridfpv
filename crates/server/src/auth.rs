@@ -315,7 +315,7 @@ impl TokenStore {
 /// for the join-token. Random + opaque means the token carries no authority itself; the
 /// [`TokenStore`] is the sole authority (so revocation is instant). Real signed tokens are
 /// deferred (see the module docs).
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
     url_safe_base64(&bytes)

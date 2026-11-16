@@ -284,7 +284,10 @@ fn open_to_visitors(method: &Method, path: &str) -> bool {
         | "/public/event/pilots"
         | "/public/event/classes"
         | "/public/event/timers" => read,
-        "/public/session" => read || *method == Method::POST || *method == Method::DELETE,
+        // Signing in and out, as the director or as a pilot. Each checks what it is shown.
+        "/public/session" | "/public/pilot/session" => {
+            read || *method == Method::POST || *method == Method::DELETE
+        }
         _ => false,
     }
 }

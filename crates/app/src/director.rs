@@ -347,10 +347,18 @@ async fn spa_cache_headers(req: axum::extract::Request, next: axum::middleware::
         // costs nothing, but it can never serve a stale shell without asking.
         "no-cache"
     };
-    resp.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static(value),
-    );
+    // An answer that says it must not be kept at all (a pilot's sign-in code) stays that way.
+    let keep_out = resp
+        .headers()
+        .get(axum::http::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("no-store"));
+    if !keep_out {
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static(value),
+        );
+    }
     resp
 }
 
