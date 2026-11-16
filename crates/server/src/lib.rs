@@ -39,6 +39,7 @@ pub mod overlay;
 pub mod pilot_access;
 pub mod pilots;
 pub mod public;
+pub mod signup;
 pub mod spectate;
 pub mod timers;
 pub mod video;

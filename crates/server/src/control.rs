@@ -207,7 +207,7 @@ impl Session<'_> {
         self.append(self.now, event)
     }
 
-    fn outcome(&self) -> CommandOutcome {
+    pub(crate) fn outcome(&self) -> CommandOutcome {
         CommandOutcome {
             cursor: self.state.applied,
         }

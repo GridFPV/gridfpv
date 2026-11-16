@@ -284,6 +284,10 @@ pub const PUBLIC_PREFIX: &str = "/public";
 pub const SESSION_PATH: &str = "/public/session";
 /// Signing in and out as a pilot, with the pilot's own code (see `pilot_access`).
 pub const PILOT_SESSION_PATH: &str = "/public/pilot/session";
+/// What a pilot does for themselves, such as signing up for a heat. A visitor may send
+/// these, because a pilot is a visitor to the gate. Each route checks for itself who the
+/// pilot is, from their sign-in, and does nothing without one.
+pub const PILOT_PREFIX: &str = "/public/pilot/";
 
 /// Whether a visitor with no token may make this request of the **API**.
 pub fn is_public_api(method: &Method, raw_path: &str) -> bool {
@@ -292,7 +296,7 @@ pub fn is_public_api(method: &Method, raw_path: &str) -> bool {
     }
     let path = decoded(raw_path);
     let read = method == Method::GET || method == Method::HEAD;
-    if path == SESSION_PATH || path == PILOT_SESSION_PATH {
+    if path == SESSION_PATH || path == PILOT_SESSION_PATH || path.starts_with(PILOT_PREFIX) {
         return read || method == Method::POST || method == Method::DELETE;
     }
     if !read {
@@ -790,6 +794,21 @@ mod tests {
         assert!(is_public_api(&Method::DELETE, SESSION_PATH));
         assert!(!is_public_api(&Method::PUT, SESSION_PATH));
         assert!(!is_public_api(&Method::PATCH, SESSION_PATH));
+        // What a pilot does for themselves is theirs to send; the route checks who they are.
+        assert!(is_public_api(&Method::POST, "/public/pilot/signup/take"));
+        assert!(is_public_api(&Method::POST, "/public/pilot/session"));
+        assert!(is_public_api(&Method::DELETE, "/public/pilot/session"));
+        assert!(!is_public_api(&Method::PUT, "/public/pilot/signup/take"));
+        assert!(!is_public_api(&Method::PATCH, "/public/pilot/signup/take"));
+        // Only under that prefix, written plainly.
+        assert!(!is_public_api(&Method::POST, "/public/pilot"));
+        assert!(!is_public_api(&Method::POST, "/public/pilots/x"));
+        assert!(!is_public_api(&Method::POST, "/public/pilot/../../events"));
+        assert!(!is_public_api(
+            &Method::POST,
+            "/public/pilot/..%2f..%2fevents"
+        ));
+        assert!(!is_public_api(&Method::POST, "/public/event/state"));
         assert!(!is_public_api(&Method::POST, "/public/session/"));
         assert!(!is_public_api(&Method::POST, "/public/session/x"));
     }

@@ -178,6 +178,13 @@ pub fn router(registry: EventRegistry) -> Router {
             "/public/pilot/session",
             post(crate::pilot_access::post_session).delete(crate::pilot_access::delete_session),
         )
+        // A pilot signing themselves up for a heat (docs/primitives.md §11.5).
+        .route("/public/pilot/signup/take", post(crate::signup::post_take))
+        .route("/public/pilot/signup/next", post(crate::signup::post_next))
+        .route(
+            "/public/pilot/signup/leave",
+            post(crate::signup::post_leave),
+        )
         // The open event, as a visitor may see it.
         .route("/public/event", get(crate::spectate::get_event))
         .route("/public/event/state", get(crate::spectate::get_state))
