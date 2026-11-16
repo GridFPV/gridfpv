@@ -91,6 +91,39 @@ pub enum Refusal {
     NotLocked(PhaseId),
     #[error("only a timer or the Director can log that")]
     NotACommand,
+    // --- pilot sign-up (docs/primitives.md §11.5) ---
+    #[error("{0:?} is not set up for pilots to sign up")]
+    NoSignup(PhaseId),
+    #[error("pilots sign up for a phase that holds heats, and {0:?} is a heat")]
+    NotAGroup(PhaseId),
+    #[error("{0}")]
+    BadSignupRules(&'static str),
+    #[error("sign-up for {0:?} is not open")]
+    SignupClosed(PhaseId),
+    #[error("{0:?} is closed to changes from a phone. Ask the director")]
+    HeatClosedToPilots(PhaseId),
+    #[error("{0:?} has started or been flown, so who is in it cannot change")]
+    HeatAlreadyRaced(PhaseId),
+    #[error("that seat is not one of the seats of {0:?}")]
+    NotASignupSeat(PhaseId),
+    #[error("that seat in {0:?} is already taken")]
+    SeatTaken(PhaseId),
+    #[error("{pilot:?} is already in {heat:?}")]
+    AlreadyInHeat { heat: PhaseId, pilot: PilotId },
+    #[error("{pilot:?} is not in {heat:?}")]
+    PilotNotInHeat { heat: PhaseId, pilot: PilotId },
+    #[error("{pilot:?} already holds {limit} spots, which is the most at once")]
+    HoldingTooMany { pilot: PilotId, limit: u32 },
+    #[error("{pilot:?} has no runs left. The limit is {allowed}")]
+    NoRunsLeft { pilot: PilotId, allowed: u32 },
+    #[error("{pilot:?} has a heat too close to that one. Heats to sit out in between: {rest}")]
+    NeedsRest { pilot: PilotId, rest: u32 },
+    #[error("there is no free spot on that seat in {0:?} right now. One opens when a heat fills")]
+    NoFreeSpot(PhaseId),
+    #[error("a pilot can only be pulled forward, into an earlier heat")]
+    PullNotForward,
+    #[error("those two heats are not in the same sign-up phase")]
+    NotSameSignup,
 }
 
 /// One pilot's place in a class.
@@ -134,6 +167,8 @@ pub struct EventState {
     /// Where in the log each race begins: the offset of its first fact. A race's signal is
     /// logged from there on, so this is where to start reading for it.
     pub race_log_start: BTreeMap<RaceId, u64>,
+    /// What pilot sign-up keeps beside the heats' lineups (see [`crate::signup`]).
+    pub signups: crate::signup::Signups,
     /// How many log entries have been applied: the offset the next one will have.
     pub applied: u64,
 }
@@ -154,6 +189,7 @@ impl EventState {
         self.races.apply(recorded_at, event);
         self.laps.apply(offset, event);
         self.rulings.apply(event);
+        self.signups.apply(event);
         match event {
             Event::RosterSet { class, pilots } => {
                 self.rosters.insert(class.clone(), pilots.clone());
@@ -646,6 +682,7 @@ impl EventState {
                 self.check_fact(&fact)?;
                 Ok(vec![*fact])
             }
+            Command::Signup(command) => self.signup(command),
         }
     }
 
@@ -694,14 +731,18 @@ impl EventState {
             lineup,
             owner: StartOwner::Grid,
         };
-        Ok(self.races.check(if staging > 0 {
+        let starting = setup.heat.clone();
+        let mut facts = self.races.check(if staging > 0 {
             RaceCommand::Stage {
                 setup,
                 tone_at: now + staging,
             }
         } else {
             RaceCommand::Start { setup }
-        })?)
+        })?;
+        // A sign-up heat that starts is no longer open to pilots, so the next one may open.
+        facts.extend(self.signup_after_start(&starting));
+        Ok(facts)
     }
 
     /// Whether a setup fact or ruling may be recorded as it stands.
@@ -903,7 +944,12 @@ impl EventState {
             | Event::RaceStarted { .. }
             | Event::RaceStopped { .. }
             | Event::RaceSaved { .. }
-            | Event::RaceDiscarded { .. } => Err(Refusal::NotACommand),
+            | Event::RaceDiscarded { .. }
+            // Sign-up facts come from sign-up commands, which check the rules first.
+            | Event::SignupSet { .. }
+            | Event::SignupRunsSet { .. }
+            | Event::SignupCharged { .. }
+            | Event::SignupHeatClosed { .. } => Err(Refusal::NotACommand),
         }
     }
 }

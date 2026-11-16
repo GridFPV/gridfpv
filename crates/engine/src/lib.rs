@@ -28,4 +28,5 @@ pub mod phase;
 pub mod presets;
 pub mod race;
 pub mod rulings;
+pub mod signup;
 pub mod state;
