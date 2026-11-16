@@ -19,14 +19,21 @@
 //! closing and opening Grid at the field does not sign everyone out. They are not part of
 //! a copy made on the Data page, and they never go into an event's log.
 //!
+//! **The kiosk** (§11.4) is a shared tablet. A pilot proves who they are there with the
+//! same code, but it must not sign their phone out, and it must not leave them signed in
+//! for the next person. So a code typed at a kiosk gives a **kiosk pass**: a random token
+//! the page keeps in memory and sends in the [`KIOSK_HEADER`] header. It is never written
+//! down, it stops working [`KIOSK_IDLE`] after it was last used, and a new code or the
+//! director's "sign out" ends it.
+//!
 //! Wrong codes are counted by address like wrong access tokens: after
 //! [`crate::access::MAX_FAILURES`] in a minute, that device has to wait.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{ConnectInfo, Extension, Path, State};
@@ -58,6 +65,21 @@ pub const PILOT_COOKIE: &str = "gridfpv_pilot";
 /// ends when the director says so, or the pilot leaves the event.
 const COOKIE_SECONDS: u32 = 2 * 24 * 60 * 60;
 
+/// The header a kiosk sends its pass in.
+pub const KIOSK_HEADER: &str = "x-gridfpv-kiosk";
+/// How long a kiosk pass lasts after it was last used. The page signs the pilot out
+/// sooner by itself; this is the backstop for a tablet that was closed or lost its page.
+pub const KIOSK_IDLE: Duration = Duration::from_secs(120);
+/// The most kiosk passes kept at once. The oldest goes when one more is made.
+const KIOSK_MAX: usize = 64;
+
+/// A pilot at a kiosk.
+struct KioskPass {
+    event: EventId,
+    pilot: PilotId,
+    used: Instant,
+}
+
 /// One pilot's code, and the device signed in with it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
@@ -76,6 +98,8 @@ struct Stored {
 struct Inner {
     file: Option<PathBuf>,
     stored: Stored,
+    /// Kiosk passes, by token. Kept in memory only.
+    kiosk: HashMap<String, KioskPass>,
 }
 
 /// One pilot's code, as the director's console shows it.
@@ -125,7 +149,11 @@ pub struct PilotAccess {
 
 /// A code as typed: capitals, with spaces and dashes taken out. `None` when what is left
 /// is not a code at all (the wrong length, or a character no code has).
+///
+/// A whole sign-in link is taken too (`…#/join/CODE`), which is what a handheld scanner
+/// types when it reads a pilot's QR code.
 pub fn normalize(typed: &str) -> Option<String> {
+    let typed = typed.rsplit_once("/join/").map_or(typed, |(_, code)| code);
     let code: String = typed
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
@@ -165,7 +193,11 @@ impl PilotAccess {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         Self {
-            inner: Arc::new(RwLock::new(Inner { file, stored })),
+            inner: Arc::new(RwLock::new(Inner {
+                file,
+                stored,
+                kiosk: HashMap::new(),
+            })),
         }
     }
 
@@ -251,6 +283,9 @@ impl PilotAccess {
                 session: None,
             },
         );
+        inner
+            .kiosk
+            .retain(|_, pass| !(pass.event == *event && pass.pilot == *pilot));
         Self::save(&inner);
         Some(PilotCodeView {
             pilot: pilot.clone(),
@@ -262,6 +297,11 @@ impl PilotAccess {
     /// Sign a pilot's device out. Their code still works. Whether there was a sign-in.
     pub fn sign_out(&self, event: &EventId, pilot: &PilotId) -> bool {
         let mut inner = self.write();
+        // A kiosk they are standing at is signed out too, though it does not count as a
+        // device: it never shows as "signed in".
+        inner
+            .kiosk
+            .retain(|_, pass| !(pass.event == *event && pass.pilot == *pilot));
         let ended = inner
             .stored
             .events
@@ -284,9 +324,23 @@ impl PilotAccess {
         pilots: &BTreeSet<PilotId>,
         typed: &str,
     ) -> Option<(PilotId, String)> {
-        let code = normalize(typed)?;
         let mut inner = self.write();
-        let entries = inner.stored.events.get_mut(event)?;
+        let pilot = Self::pilot_of(&inner, event, pilots, typed)?;
+        let session = crate::auth::random_token();
+        inner.stored.events.get_mut(event)?.get_mut(&pilot)?.session = Some(session.clone());
+        Self::save(&inner);
+        Some((pilot, session))
+    }
+
+    /// The pilot a code belongs to, in `event`, if they are in it right now.
+    fn pilot_of(
+        inner: &Inner,
+        event: &EventId,
+        pilots: &BTreeSet<PilotId>,
+        typed: &str,
+    ) -> Option<PilotId> {
+        let code = normalize(typed)?;
+        let entries = inner.stored.events.get(event)?;
         // Look at every entry, so the time taken does not depend on which one matched.
         let mut found = None;
         for (pilot, entry) in entries.iter() {
@@ -294,11 +348,73 @@ impl PilotAccess {
                 found = Some(pilot.clone());
             }
         }
-        let pilot = found?;
-        let session = crate::auth::random_token();
-        entries.get_mut(&pilot)?.session = Some(session.clone());
-        Self::save(&inner);
-        Some((pilot, session))
+        found
+    }
+
+    /// Prove who a pilot is at a kiosk, with their code. Gives the pilot and a pass.
+    /// Unlike [`Self::sign_in`] it leaves the pilot's own device signed in, and nothing is
+    /// written down.
+    pub fn kiosk_in(
+        &self,
+        event: &EventId,
+        pilots: &BTreeSet<PilotId>,
+        typed: &str,
+        now: Instant,
+    ) -> Option<(PilotId, String)> {
+        let mut inner = self.write();
+        let pilot = Self::pilot_of(&inner, event, pilots, typed)?;
+        inner
+            .kiosk
+            .retain(|_, pass| now.saturating_duration_since(pass.used) < KIOSK_IDLE);
+        while inner.kiosk.len() >= KIOSK_MAX {
+            let Some(oldest) = inner
+                .kiosk
+                .iter()
+                .min_by_key(|(_, pass)| pass.used)
+                .map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            inner.kiosk.remove(&oldest);
+        }
+        let token = crate::auth::random_token();
+        inner.kiosk.insert(
+            token.clone(),
+            KioskPass {
+                event: event.clone(),
+                pilot: pilot.clone(),
+                used: now,
+            },
+        );
+        Some((pilot, token))
+    }
+
+    /// Who a kiosk pass belongs to, in `event`. Using a pass keeps it going. `None` for an
+    /// unknown or ended pass, one that has sat unused too long, one for another event, or
+    /// a pilot who has left the event.
+    pub fn kiosk_who(
+        &self,
+        event: &EventId,
+        pilots: &BTreeSet<PilotId>,
+        token: &str,
+        now: Instant,
+    ) -> Option<PilotId> {
+        let mut inner = self.write();
+        let pass = inner.kiosk.get_mut(token)?;
+        if now.saturating_duration_since(pass.used) >= KIOSK_IDLE {
+            inner.kiosk.remove(token);
+            return None;
+        }
+        if pass.event != *event || !pilots.contains(&pass.pilot) {
+            return None;
+        }
+        pass.used = now;
+        Some(pass.pilot.clone())
+    }
+
+    /// End a kiosk pass. Whether there was one.
+    pub fn kiosk_end(&self, token: &str) -> bool {
+        self.write().kiosk.remove(token).is_some()
     }
 
     /// Who a sign-in belongs to, in `event`. `None` for an unknown or ended sign-in, one
@@ -356,6 +472,7 @@ impl PilotAccess {
     /// Drop everything kept for an event that is gone.
     pub fn forget(&self, event: &EventId) {
         let mut inner = self.write();
+        inner.kiosk.retain(|_, pass| pass.event != *event);
         if inner.stored.events.remove(event).is_some() {
             Self::save(&inner);
         }
@@ -398,11 +515,23 @@ fn pilots_in(
 
 /// The pilot a request is signed in as, for the event that is open. This is the one way
 /// any route learns who a pilot is.
+///
+/// A request from a kiosk carries a pass in [`KIOSK_HEADER`], and then the pass alone
+/// decides: a tablet whose pass has run out must not fall back to whoever once signed in
+/// on it the ordinary way.
 pub fn signed_in_pilot(registry: &EventRegistry, headers: &HeaderMap) -> Option<PublicPilot> {
-    let session = pilot_cookie(headers)?;
     let event = registry.active()?.id;
-    let pilots = pilots_in(registry, &event).ok()?;
-    let id = registry.pilot_access().who(&event, &pilots, &session)?;
+    let id = if let Some(pass) = headers.get(KIOSK_HEADER) {
+        let pass = pass.to_str().ok()?;
+        let pilots = pilots_in(registry, &event).ok()?;
+        registry
+            .pilot_access()
+            .kiosk_who(&event, &pilots, pass, Instant::now())?
+    } else {
+        let session = pilot_cookie(headers)?;
+        let pilots = pilots_in(registry, &event).ok()?;
+        registry.pilot_access().who(&event, &pilots, &session)?
+    };
     let callsign = registry
         .pilots()
         .list()
@@ -560,6 +689,23 @@ pub async fn post_session(
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(body): Json<PilotSignInRequest>,
 ) -> Result<Response, ProtocolError> {
+    let (pilot, session) = with_code(&registry, peer, |access, event, pilots| {
+        access.sign_in(event, pilots, &body.code)
+    })?;
+    Ok((
+        [(SET_COOKIE, cookie(&session, COOKIE_SECONDS))],
+        Json(pilot),
+    )
+        .into_response())
+}
+
+/// Check a code for the open event, counting wrong ones by address. `check` gives the
+/// pilot and whatever token the right code earns.
+fn with_code(
+    registry: &EventRegistry,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    check: impl FnOnce(&PilotAccess, &EventId, &BTreeSet<PilotId>) -> Option<(PilotId, String)>,
+) -> Result<(PublicPilot, String), ProtocolError> {
     let ip = guesser(peer.map(|Extension(peer)| peer));
     let guesses = registry.pilot_guesses();
     let now = Instant::now();
@@ -569,22 +715,19 @@ pub async fn post_session(
             "Too many wrong codes from this device. Wait a minute and try again.",
         ));
     }
-    let wrong = || {
-        ProtocolError::new(
-            ErrorCode::Unauthorized,
-            "That code is not right. Check it with the director.",
-        )
-    };
     let Some(event) = registry.active().map(|event| event.id) else {
         return Err(ProtocolError::new(
             ErrorCode::UnknownScope,
             "No event is open.",
         ));
     };
-    let pilots = pilots_in(&registry, &event)?;
-    let Some((id, session)) = registry.pilot_access().sign_in(&event, &pilots, &body.code) else {
+    let pilots = pilots_in(registry, &event)?;
+    let Some((id, token)) = check(&registry.pilot_access(), &event, &pilots) else {
         guesses.failed(ip, now);
-        return Err(wrong());
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "That code is not right. Check it with the director.",
+        ));
     };
     guesses.cleared(ip);
     let callsign = registry
@@ -594,11 +737,49 @@ pub async fn post_session(
         .find(|pilot| pilot.id == id)
         .map(|pilot| pilot.callsign)
         .unwrap_or_default();
+    Ok((PublicPilot { id, callsign }, token))
+}
+
+/// What a kiosk is told when a pilot's code is right.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct KioskPassView {
+    pub pilot: PublicPilot,
+    /// What the kiosk sends in the `x-gridfpv-kiosk` header to act as this pilot.
+    pub pass: String,
+    /// How many seconds the pass lasts after it was last used.
+    pub idle_seconds: u32,
+}
+
+/// `POST /public/pilot/kiosk` — prove who a pilot is at a kiosk, with their code.
+///
+/// A right code answers the pilot and a pass. It sets no cookie and leaves the pilot's own
+/// phone signed in. Wrong codes are counted and answered as on [`post_session`].
+pub async fn post_kiosk(
+    State(registry): State<EventRegistry>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(body): Json<PilotSignInRequest>,
+) -> Result<Response, ProtocolError> {
+    let (pilot, pass) = with_code(&registry, peer, |access, event, pilots| {
+        access.kiosk_in(event, pilots, &body.code, Instant::now())
+    })?;
     Ok((
-        [(SET_COOKIE, cookie(&session, COOKIE_SECONDS))],
-        Json(PublicPilot { id, callsign }),
+        [(CACHE_CONTROL, "no-store")],
+        Json(KioskPassView {
+            pilot,
+            pass,
+            idle_seconds: KIOSK_IDLE.as_secs() as u32,
+        }),
     )
         .into_response())
+}
+
+/// `DELETE /public/pilot/kiosk` — the pilot is done at the kiosk. Always `204`.
+pub async fn delete_kiosk(State(registry): State<EventRegistry>, headers: HeaderMap) -> Response {
+    if let Some(pass) = headers.get(KIOSK_HEADER).and_then(|v| v.to_str().ok()) {
+        registry.pilot_access().kiosk_end(pass);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `DELETE /public/pilot/session` — sign out. Always `204`, signed in or not.
@@ -634,6 +815,216 @@ mod tests {
             .find(|entry| entry.pilot == pilot(id))
             .unwrap()
             .code
+    }
+
+    // ── The kiosk ────────────────────────────────────────────────────────────
+
+    /// An event with Ace and Bee in it, their codes made.
+    fn kiosk_rig() -> (PilotAccess, BTreeSet<PilotId>, String, String) {
+        let access = PilotAccess::new(None);
+        let pilots = field(&["ace", "bee"]);
+        let ace = code_of(&access, "fri", &pilots, "ace");
+        let bee = code_of(&access, "fri", &pilots, "bee");
+        (access, pilots, ace, bee)
+    }
+
+    #[test]
+    fn a_scanned_link_is_read_as_its_code() {
+        assert_eq!(
+            normalize("http://192.168.1.5:8081/#/join/abc-234").as_deref(),
+            Some("ABC234")
+        );
+        assert_eq!(normalize("#/join/ABC234").as_deref(), Some("ABC234"));
+        // The last one counts, and what follows it must be a code and nothing more.
+        assert_eq!(
+            normalize("http://x/join/ZZZZZZ/#/join/ABC234").as_deref(),
+            Some("ABC234")
+        );
+        assert_eq!(normalize("http://x/#/join/"), None);
+        assert_eq!(normalize("http://x/#/join/ABC234/more"), None);
+        assert_eq!(normalize("http://x/#/join/ABC234?x=1"), None);
+        assert_eq!(normalize("http://x/#/other/ABC234"), None);
+    }
+
+    #[test]
+    fn a_kiosk_pass_is_its_pilots_and_using_it_keeps_it_going() {
+        let (access, pilots, ace, bee) = kiosk_rig();
+        let start = Instant::now();
+        let (who, pass) = access
+            .kiosk_in(&event("fri"), &pilots, &ace, start)
+            .unwrap();
+        assert_eq!(who, pilot("ace"));
+        let (_, other) = access
+            .kiosk_in(&event("fri"), &pilots, &bee, start)
+            .unwrap();
+        assert_ne!(pass, other);
+        // Used every 100 seconds, it lasts well past the 120 it would sit unused.
+        let mut now = start;
+        for _ in 0..10 {
+            now += Duration::from_secs(100);
+            assert_eq!(
+                access.kiosk_who(&event("fri"), &pilots, &pass, now),
+                Some(pilot("ace"))
+            );
+        }
+        // Bee's was never used, and is gone.
+        assert_eq!(access.kiosk_who(&event("fri"), &pilots, &other, now), None);
+    }
+
+    #[test]
+    fn a_kiosk_pass_stops_exactly_when_it_has_sat_unused_too_long() {
+        let (access, pilots, ace, _) = kiosk_rig();
+        let start = Instant::now();
+        let (_, pass) = access
+            .kiosk_in(&event("fri"), &pilots, &ace, start)
+            .unwrap();
+        let just_before = start + KIOSK_IDLE - Duration::from_millis(1);
+        assert!(
+            access
+                .kiosk_who(&event("fri"), &pilots, &pass, just_before)
+                .is_some()
+        );
+        // That use moved the clock on.
+        let at = just_before + KIOSK_IDLE;
+        assert_eq!(access.kiosk_who(&event("fri"), &pilots, &pass, at), None);
+        // Once it has stopped it stays stopped, even asked "earlier".
+        assert_eq!(
+            access.kiosk_who(&event("fri"), &pilots, &pass, just_before),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clock_that_goes_backwards_does_not_break_a_kiosk_pass() {
+        let (access, pilots, ace, _) = kiosk_rig();
+        let later = Instant::now() + Duration::from_secs(1000);
+        let (_, pass) = access
+            .kiosk_in(&event("fri"), &pilots, &ace, later)
+            .unwrap();
+        let earlier = later - Duration::from_secs(900);
+        assert!(
+            access
+                .kiosk_who(&event("fri"), &pilots, &pass, earlier)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_kiosk_pass_does_not_touch_the_pilots_own_sign_in_or_the_file() {
+        let dir =
+            std::env::temp_dir().join(format!("gridfpv-kiosk-{}", crate::auth::random_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let access = PilotAccess::new(Some(dir.clone()));
+        let pilots = field(&["ace"]);
+        let code = code_of(&access, "fri", &pilots, "ace");
+        let (_, session) = access.sign_in(&event("fri"), &pilots, &code).unwrap();
+        let before = std::fs::read_to_string(dir.join(ACCESS_FILE)).unwrap();
+        let now = Instant::now();
+        let (_, pass) = access.kiosk_in(&event("fri"), &pilots, &code, now).unwrap();
+        assert_eq!(
+            access.who(&event("fri"), &pilots, &session),
+            Some(pilot("ace"))
+        );
+        assert!(access.codes(&event("fri"), &pilots)[0].signed_in);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(ACCESS_FILE)).unwrap(),
+            before
+        );
+        assert!(!before.contains(&pass));
+        // A pass is not a sign-in, and a sign-in is not a pass.
+        assert_eq!(access.who(&event("fri"), &pilots, &pass), None);
+        assert_eq!(
+            access.kiosk_who(&event("fri"), &pilots, &session, now),
+            None
+        );
+        // Opened again, the sign-in is there and the pass is not.
+        let reopened = PilotAccess::new(Some(dir.clone()));
+        assert!(reopened.who(&event("fri"), &pilots, &session).is_some());
+        assert_eq!(reopened.kiosk_who(&event("fri"), &pilots, &pass, now), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_kiosk_pass_ends_with_done_a_new_code_a_sign_out_or_the_event() {
+        let (access, pilots, ace, bee) = kiosk_rig();
+        let now = Instant::now();
+        let fri = event("fri");
+        let pass = |code: &str| access.kiosk_in(&fri, &pilots, code, now).unwrap().1;
+        let works = |pass: &str| access.kiosk_who(&fri, &pilots, pass, now).is_some();
+
+        let done = pass(&ace);
+        assert!(access.kiosk_end(&done));
+        assert!(!access.kiosk_end(&done));
+        assert!(!works(&done));
+
+        let (a, b) = (pass(&ace), pass(&bee));
+        access.reset(&fri, &pilot("ace")).unwrap();
+        assert!(!works(&a));
+        assert!(works(&b));
+        // The old code is no good at the kiosk either.
+        assert!(access.kiosk_in(&fri, &pilots, &ace, now).is_none());
+
+        // The director's sign-out ends it, though no device was signed in.
+        assert!(!access.sign_out(&fri, &pilot("bee")));
+        assert!(!works(&b));
+
+        let b = pass(&bee);
+        access.forget(&fri);
+        assert!(!works(&b));
+    }
+
+    #[test]
+    fn a_kiosk_pass_is_for_its_event_and_a_pilot_still_in_it() {
+        let (access, pilots, ace, _) = kiosk_rig();
+        let now = Instant::now();
+        let (_, pass) = access.kiosk_in(&event("fri"), &pilots, &ace, now).unwrap();
+        assert_eq!(access.kiosk_who(&event("sat"), &pilots, &pass, now), None);
+        assert_eq!(
+            access.kiosk_who(&event("fri"), &field(&["bee"]), &pass, now),
+            None
+        );
+        // Neither of those ended it: back in the event, it works.
+        assert!(
+            access
+                .kiosk_who(&event("fri"), &pilots, &pass, now)
+                .is_some()
+        );
+        // A code does nothing in another event, or for a pilot who has left.
+        assert!(access.kiosk_in(&event("sat"), &pilots, &ace, now).is_none());
+        assert!(
+            access
+                .kiosk_in(&event("fri"), &field(&["bee"]), &ace, now)
+                .is_none()
+        );
+        assert!(access.kiosk_in(&event("fri"), &pilots, "", now).is_none());
+    }
+
+    #[test]
+    fn only_so_many_kiosk_passes_are_kept_and_the_oldest_goes_first() {
+        let (access, pilots, ace, _) = kiosk_rig();
+        let start = Instant::now();
+        let fri = event("fri");
+        let mut passes = Vec::new();
+        for n in 0..(KIOSK_MAX as u64 + 3) {
+            let at = start + Duration::from_millis(n);
+            passes.push(access.kiosk_in(&fri, &pilots, &ace, at).unwrap().1);
+        }
+        let now = start + Duration::from_secs(1);
+        let alive: Vec<bool> = passes
+            .iter()
+            .map(|pass| access.kiosk_who(&fri, &pilots, pass, now).is_some())
+            .collect();
+        assert_eq!(alive.iter().filter(|on| **on).count(), KIOSK_MAX);
+        assert_eq!(alive[..3], [false, false, false]);
+        // Passes that have run out make room without pushing a live one out.
+        let much_later = now + KIOSK_IDLE * 2;
+        let fresh = access.kiosk_in(&fri, &pilots, &ace, much_later).unwrap().1;
+        assert!(
+            access
+                .kiosk_who(&fri, &pilots, &fresh, much_later)
+                .is_some()
+        );
+        assert_eq!(access.read().kiosk.len(), 1);
     }
 
     #[test]

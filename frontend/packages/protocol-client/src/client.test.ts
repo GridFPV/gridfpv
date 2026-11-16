@@ -824,3 +824,104 @@ describe("a pilot's own sign-up (docs/primitives.md §11.5)", () => {
     ).rejects.toThrow('Sign in with your code first.');
   });
 });
+
+describe('the kiosk (docs/primitives.md §11.4)', () => {
+  const recorder = (status: number, body: unknown) => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async (): Promise<unknown> => body,
+        text: async (): Promise<string> => JSON.stringify(body)
+      } as unknown as Response;
+    };
+    return { seen, fetch };
+  };
+  const header = (init?: RequestInit) =>
+    (init?.headers as Record<string, string> | undefined)?.['X-GridFPV-Kiosk'];
+  const seat = { adapter: 'gate-x1', seat: '0' };
+
+  it('kioskIn POSTs the code and answers the pilot and the pass', async () => {
+    const client = await import('./client.js');
+    const pass = { pilot: { id: 'p-1', callsign: 'Ace' }, pass: 'pass-1', idle_seconds: 120 };
+    const { seen, fetch } = recorder(200, pass);
+    expect(await client.kioskIn('http://d.local:8081/', 'ABC234', { fetch })).toEqual(pass);
+    expect(seen[0].url).toBe('http://d.local:8081/public/pilot/kiosk');
+    expect(seen[0].init?.method).toBe('POST');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({ code: 'ABC234' });
+    expect(header(seen[0].init)).toBeUndefined();
+  });
+
+  it('kioskIn rejects with the reason and the status when the code is wrong or held up', async () => {
+    const client = await import('./client.js');
+    for (const [status, code, message] of [
+      [401, 'Unauthorized', 'That code is not right. Check it with the director.'],
+      [
+        429,
+        'TooManyRequests',
+        'Too many wrong codes from this device. Wait a minute and try again.'
+      ]
+    ] as const) {
+      const { fetch } = recorder(status, { code, message });
+      await expect(
+        client.kioskIn('http://d.local:8081', 'ZZZZZZ', { fetch })
+      ).rejects.toMatchObject({
+        message,
+        status
+      });
+    }
+  });
+
+  it('kioskDone DELETEs with the pass in its header and reads no body', async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder(204, undefined);
+    await expect(
+      client.kioskDone('http://d.local:8081', 'pass-1', { fetch })
+    ).resolves.toBeUndefined();
+    expect(seen[0].url).toBe('http://d.local:8081/public/pilot/kiosk');
+    expect(seen[0].init?.method).toBe('DELETE');
+    expect(header(seen[0].init)).toBe('pass-1');
+    expect(seen[0].init?.body).toBeUndefined();
+  });
+
+  it('the sign-up calls carry a pass only when given one, and never in the body', async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder(200, { cursor: 3 });
+    await client.takeSpot('http://d.local:8081', 'quali/heat-1', seat, { fetch, kiosk: 'pass-1' });
+    await client.takeNextSpot('http://d.local:8081', 'quali', seat, { fetch, kiosk: 'pass-1' });
+    await client.leaveSpot('http://d.local:8081', 'quali/heat-1', { fetch, kiosk: 'pass-1' });
+    await client.takeSpot('http://d.local:8081', 'quali/heat-1', seat, { fetch });
+    await client.leaveSpot('http://d.local:8081', 'quali/heat-1', { fetch, kiosk: '' });
+    expect(seen.map((call) => header(call.init))).toEqual([
+      'pass-1',
+      'pass-1',
+      'pass-1',
+      undefined,
+      undefined
+    ]);
+    for (const call of seen) {
+      expect(call.url).not.toContain('pass-1');
+      expect(call.init?.body as string).not.toContain('pass-1');
+    }
+  });
+
+  it('a refused request at a kiosk carries its status, so the page can tell a lost pass from a rule', async () => {
+    const client = await import('./client.js');
+    const lost = recorder(401, { code: 'Unauthorized', message: 'Sign in with your code first.' });
+    await expect(
+      client.takeSpot('http://d.local:8081', 'quali/heat-1', seat, {
+        fetch: lost.fetch,
+        kiosk: 'old'
+      })
+    ).rejects.toMatchObject({ status: 401 });
+    const rule = recorder(409, { code: 'Refused', message: 'no runs left' });
+    await expect(
+      client.takeSpot('http://d.local:8081', 'quali/heat-1', seat, {
+        fetch: rule.fetch,
+        kiosk: 'p'
+      })
+    ).rejects.toMatchObject({ status: 409, message: 'no runs left' });
+  });
+});

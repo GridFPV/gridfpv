@@ -691,4 +691,30 @@ describe('SpectatorView: the Sign up tab', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 1 in Qualifying Heat 2' }));
     expect(signup.take).toHaveBeenCalledOnce();
   });
+
+  it('lands a pilot on the sheet when told to, and on their own tab when there is no sheet', async () => {
+    const { live } = await openLive(signupEvent(signupSheet()), {
+      listPilots: vi.fn(async () => SIGNUP_PILOTS)
+    });
+    render(SpectatorView, {
+      live,
+      pilot: { id: 'p-bee', callsign: 'Bee' },
+      channels: [],
+      buzz: vi.fn(),
+      landOn: 'signup'
+    });
+    await waitFor(() => expect(tab('Sign up')).toHaveAttribute('aria-selected', 'true'));
+    cleanup();
+    const plain = await openLive(running());
+    render(SpectatorView, {
+      live: plain.live,
+      pilot: { id: 'p-ace', callsign: 'Ace' },
+      channels: [],
+      buzz: vi.fn(),
+      landOn: 'signup'
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: /^Me/ })).toHaveAttribute('aria-selected', 'true')
+    );
+  });
 });

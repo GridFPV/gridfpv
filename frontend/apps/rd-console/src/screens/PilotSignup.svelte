@@ -40,8 +40,11 @@
     names,
     pilot = undefined,
     channels = [],
-    actions = undefined
+    actions = undefined,
+    how = 'Sign in as a pilot to take a seat.'
   }: {
+    /** What someone who is not signed in is told to do. A kiosk says it its own way. */
+    how?: string;
     /** The phases with sign-up, each with its sheet. */
     phases: readonly SignupPhase[];
     names: Names;
@@ -93,7 +96,7 @@
       {#if me}
         <p class="runs" data-testid="my-runs">{runsWords(runsOf(signup, me))}</p>
       {:else if !pilot}
-        <p class="muted">Sign in as a pilot to take a seat.</p>
+        <p class="muted">{how}</p>
       {/if}
 
       {#if me && actions}

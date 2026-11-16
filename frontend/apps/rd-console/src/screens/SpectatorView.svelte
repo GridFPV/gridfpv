@@ -30,8 +30,17 @@
     pilot = undefined,
     channels = [],
     buzz = (pattern) => navigator.vibrate?.(pattern),
-    signup = undefined
+    signup = undefined,
+    landOn = 'me',
+    signupHow = undefined
   }: {
+    /** What the sign-up sheet tells someone who is not signed in. */
+    signupHow?: string | undefined;
+    /**
+     * The tab a pilot lands on when they sign in. At a kiosk that is the sign-up sheet,
+     * when there is one: it is what they walked up for.
+     */
+    landOn?: 'me' | 'signup';
     /** What a signed-in pilot can ask for on the sign-up sheet. Left out: looking only. */
     signup?: SignupActions | undefined;
     /** The pilot this phone is signed in as. Left out for a spectator. */
@@ -123,16 +132,16 @@
       // A phone that cannot buzz, or will not until it is touched, still shows the alert.
     }
   });
+  const sheets = $derived(signupPhases(view));
+
   // A pilot who signs in lands on their own tab. One who signs out leaves it.
   let wasPilot = $state(false);
   $effect(() => {
     const isPilot = pilot !== undefined;
-    if (isPilot && !wasPilot) tab = 'me';
+    if (isPilot && !wasPilot) tab = landOn === 'signup' && sheets.length > 0 ? 'signup' : 'me';
     if (!isPilot && tab === 'me') tab = 'now';
     wasPilot = isPilot;
   });
-
-  const sheets = $derived(signupPhases(view));
 
   const tabs = $derived([
     ...(pilot ? [{ id: 'me', label: 'Me', badge: mine.length > 0 ? mine.length : undefined }] : []),
@@ -305,7 +314,7 @@
       </section>
     {:else if tab === 'signup'}
       <section aria-label="Sign up">
-        <PilotSignup phases={sheets} {names} {pilot} {channels} actions={signup} />
+        <PilotSignup phases={sheets} {names} {pilot} {channels} actions={signup} how={signupHow} />
       </section>
     {:else if tab === 'results'}
       <section aria-label="Results">

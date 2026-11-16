@@ -10,6 +10,8 @@
 import {
   getPublicEvent,
   getPublicEventState,
+  kioskDone,
+  kioskIn,
   leaveSpot,
   listPublicChannels,
   listPublicClasses,
@@ -26,6 +28,7 @@ import type {
   PhaseView,
   Pilot,
   PublicEvent,
+  KioskPassView,
   RaceView,
   SeatChannel,
   SignupSeat,
@@ -46,10 +49,17 @@ export interface PublicSource extends LiveSession {
   /**
    * What a signed-in pilot does for themselves (§11.5). Who the pilot is comes from their
    * sign-in. Each rejects with the Director's reason when the rules do not allow it.
+   *
+   * `kiosk` is the pass of a pilot who proved who they are at a shared tablet (§11.4).
+   * With it the request is theirs, whoever the tablet's browser is signed in as.
    */
-  takeSpot(heat: PhaseId, seat: SignupSeat): Promise<unknown>;
-  takeNextSpot(phase: PhaseId, seat: SignupSeat): Promise<unknown>;
-  leaveSpot(heat: PhaseId): Promise<unknown>;
+  takeSpot(heat: PhaseId, seat: SignupSeat, kiosk?: string): Promise<unknown>;
+  takeNextSpot(phase: PhaseId, seat: SignupSeat, kiosk?: string): Promise<unknown>;
+  leaveSpot(heat: PhaseId, kiosk?: string): Promise<unknown>;
+  /** Prove who a pilot is at a kiosk, with their code. Rejects when the code is wrong. */
+  kioskIn(code: string): Promise<KioskPassView>;
+  /** The pilot is done at the kiosk. */
+  kioskDone(pass: string): Promise<void>;
 }
 
 const NOT_FOR_VISITORS = 'Only the director can do this.';
@@ -64,9 +74,11 @@ export function publicSource(baseUrl: string): PublicSource {
   return {
     getEvent: () => getPublicEvent(baseUrl),
     getChannels: () => listPublicChannels(baseUrl),
-    takeSpot: (heat, seat) => takeSpot(baseUrl, heat, seat),
-    takeNextSpot: (phase, seat) => takeNextSpot(baseUrl, phase, seat),
-    leaveSpot: (heat) => leaveSpot(baseUrl, heat),
+    takeSpot: (heat, seat, kiosk) => takeSpot(baseUrl, heat, seat, { kiosk }),
+    takeNextSpot: (phase, seat, kiosk) => takeNextSpot(baseUrl, phase, seat, { kiosk }),
+    leaveSpot: (heat, kiosk) => leaveSpot(baseUrl, heat, { kiosk }),
+    kioskIn: (code) => kioskIn(baseUrl, code),
+    kioskDone: (pass) => kioskDone(baseUrl, pass),
     getEventState: () => getPublicEventState(baseUrl),
     subscribeChanges: (_id, onCursor) => subscribePublicChanges(baseUrl, onCursor),
     listPilots: () => listPublicPilots(baseUrl),
