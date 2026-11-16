@@ -23,7 +23,18 @@ again.
 
 ## What other devices can do
 
-They can look. They see which event is open.
+They can look. On a phone, Grid shows three things:
+
+- **On now:** the race that is running, with a clock and each pilot's laps as they fly
+  them. With no race on, it shows how the last one ended.
+- **Up next:** the heats coming up and who is in each.
+- **Results:** the ranking of each phase.
+
+The page updates by itself. Nobody needs to reload it. If the director opens another event,
+the phones follow.
+
+Some things are never shown to other devices: your notes on a race, protests, the video
+files, a pilot's real name, and where your timers are on the network.
 
 They cannot start or stop a race, change a lap, or change any setting. Only the Grid
 computer can do those things. This is always true. No setting changes it.

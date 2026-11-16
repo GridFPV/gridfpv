@@ -277,6 +277,13 @@ fn open_to_visitors(method: &Method, path: &str) -> bool {
     let read = *method == Method::GET || *method == Method::HEAD;
     match path {
         "/health" | "/about" | "/time" | "/public/hello" => read,
+        // The open event, as a visitor may see it (`spectator.rs` checks what is in them).
+        "/public/event"
+        | "/public/event/state"
+        | "/public/event/changes"
+        | "/public/event/pilots"
+        | "/public/event/classes"
+        | "/public/event/timers" => read,
         "/public/session" => read || *method == Method::POST || *method == Method::DELETE,
         _ => false,
     }

@@ -1,13 +1,20 @@
 /**
  * The page someone on another device sees, and the director's sign-in on it.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import type { PublicHello } from '@gridfpv/types';
+import type { PublicEvent, PublicHello } from '@gridfpv/types';
+import type { PublicSource } from '../src/lib/spectator.js';
 import VisitorPage from '../src/screens/VisitorPage.svelte';
+import { eventView, heat, race, raceSeat } from './competition.js';
+import { fakeLiveSession } from './support.js';
 
+beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+});
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -18,11 +25,42 @@ const HELLO: PublicHello = {
   director_sign_in: true
 };
 
-function open(hello: PublicHello = HELLO) {
+const NIGHT: PublicEvent = { event: { id: 'evt-night', name: 'Friday Night Whoops' } };
+
+/** A running race in the open event, for the pages that show it. */
+function racing() {
+  const on = race('h1', 1, 'Running', {
+    started_at: 100_000_000,
+    seats: [raceSeat(0, 'p-ace', { finish: 1 })]
+  });
+  return eventView({
+    now: 105_000_000,
+    phases: [heat('h1', 'Qualifying Heat 1', ['p-ace'])],
+    races: [on],
+    current_race: on.race
+  });
+}
+
+function open(hello: PublicHello = HELLO, event: PublicEvent = hello.event ? NIGHT : {}) {
   const session = { signInDirector: vi.fn(async (_token: string) => {}) };
   const reload = vi.fn();
-  render(VisitorPage, { session, hello, reload });
-  return { session, reload };
+  const stop = vi.fn();
+  const source: PublicSource = {
+    ...fakeLiveSession(racing(), {
+      listPilots: vi.fn(async () => [{ id: 'p-ace', callsign: 'Ace', vtx_types: [] }]),
+      subscribeChanges: vi.fn(() => stop)
+    }),
+    getEvent: vi.fn(async () => event)
+  };
+  render(VisitorPage, { session, source, hello, reload });
+  return {
+    session,
+    reload,
+    source,
+    stop,
+    /** What the Director says is open from now on. */
+    becomes: (next: PublicEvent) => vi.mocked(source.getEvent).mockResolvedValue(next)
+  };
 }
 
 const askToSignIn = () =>
@@ -143,5 +181,110 @@ describe('VisitorPage', () => {
     expect(screen.queryByLabelText('Access token')).toBeNull();
     await askToSignIn();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('VisitorPage: following the open event', () => {
+  it('shows the open event to watch, read from the public routes', async () => {
+    const { source } = open();
+    expect(await screen.findByTestId('race-heat')).toHaveTextContent('Qualifying Heat 1');
+    expect(source.getEventState).toHaveBeenCalledWith('evt-night');
+    expect(source.subscribeChanges).toHaveBeenCalledOnce();
+    expect(await screen.findByRole('rowheader', { name: /Ace/ })).toBeVisible();
+  });
+
+  it('names the event at once from the first answer, before the event has been read', () => {
+    open();
+    expect(screen.getByTestId('visitor-event')).toHaveTextContent('Friday Night Whoops');
+  });
+
+  it('follows the director to another event, and starts reading it afresh', async () => {
+    const { source, stop, becomes } = open();
+    await screen.findByTestId('race-heat');
+    becomes({ event: { id: 'evt-sunday', name: 'Sunday Finals' } });
+    await vi.advanceTimersByTimeAsync(5100);
+    await waitFor(() =>
+      expect(screen.getByTestId('visitor-event')).toHaveTextContent('Sunday Finals')
+    );
+    // The old event's feed is closed and the new one is opened.
+    expect(stop).toHaveBeenCalledOnce();
+    await waitFor(() => expect(source.getEventState).toHaveBeenCalledWith('evt-sunday'));
+    expect(source.subscribeChanges).toHaveBeenCalledTimes(2);
+  });
+
+  it('takes a new name for the same event without reading it all again', async () => {
+    const { source, stop, becomes } = open();
+    await screen.findByTestId('race-heat');
+    becomes({ event: { id: 'evt-night', name: 'Friday Night Whoops, round 2' } });
+    await vi.advanceTimersByTimeAsync(5100);
+    await waitFor(() =>
+      expect(screen.getByTestId('visitor-event')).toHaveTextContent('Friday Night Whoops, round 2')
+    );
+    expect(stop).not.toHaveBeenCalled();
+    expect(source.subscribeChanges).toHaveBeenCalledOnce();
+  });
+
+  it('says no event is open when the director closes it, and stops listening', async () => {
+    const { stop, becomes } = open();
+    await screen.findByTestId('race-heat');
+    becomes({});
+    await vi.advanceTimersByTimeAsync(5100);
+    await waitFor(() =>
+      expect(screen.getByTestId('visitor-event')).toHaveTextContent('No event is open')
+    );
+    expect(screen.queryByTestId('race-heat')).toBeNull();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('picks up an event that is opened later', async () => {
+    const { event: _none, ...noEvent } = HELLO;
+    const { becomes } = open(noEvent, {});
+    expect(screen.getByTestId('visitor-event')).toHaveTextContent('No event is open');
+    becomes(NIGHT);
+    await vi.advanceTimersByTimeAsync(5100);
+    expect(await screen.findByTestId('race-heat')).toHaveTextContent('Qualifying Heat 1');
+  });
+
+  it('keeps what is on the page while Grid cannot be reached, and keeps asking', async () => {
+    const { source } = open();
+    await screen.findByTestId('race-heat');
+    vi.mocked(source.getEvent).mockRejectedValue(new Error('Failed to fetch'));
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(screen.getByTestId('visitor-event')).toHaveTextContent('Friday Night Whoops');
+    expect(screen.getByTestId('race-heat')).toBeVisible();
+    expect(vi.mocked(source.getEvent).mock.calls.length).toBeGreaterThanOrEqual(4);
+    // And it says that what is on the page is not live.
+    expect(screen.getByTestId('visitor-offline')).toHaveTextContent(
+      'Not connected to Grid right now. Trying again.'
+    );
+    // When Grid answers again, the notice goes.
+    vi.mocked(source.getEvent).mockResolvedValue(NIGHT);
+    await vi.advanceTimersByTimeAsync(5100);
+    await waitFor(() => expect(screen.queryByTestId('visitor-offline')).toBeNull());
+  });
+
+  it('does not say it is offline while Grid is answering', async () => {
+    open();
+    await screen.findByTestId('race-heat');
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(screen.queryByTestId('visitor-offline')).toBeNull();
+  });
+
+  it('stops asking and listening when the page is left', async () => {
+    const { source, stop } = open();
+    await screen.findByTestId('race-heat');
+    cleanup();
+    expect(stop).toHaveBeenCalledOnce();
+    const asked = vi.mocked(source.getEvent).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(vi.mocked(source.getEvent).mock.calls.length).toBe(asked);
+  });
+
+  it('sends no command, whatever the visitor does on the page', async () => {
+    const { source } = open();
+    await screen.findByTestId('race-heat');
+    for (const tabEl of screen.getAllByRole('tab')) await fireEvent.click(tabEl);
+    expect(source.sendCommand).not.toHaveBeenCalled();
+    expect(source.postPass).not.toHaveBeenCalled();
   });
 });

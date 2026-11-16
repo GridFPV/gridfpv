@@ -936,8 +936,14 @@ Until now only the director used Grid. This section adds the other people at a r
   the Network page (off by default) starts a second listener for other devices. A device
   that is not the Grid computer is a **visitor**: it can read the public pages and nothing
   else. A director on another device signs in with the access token. The rules and the
-  routes are in `docs/api.md` ("Who may do what"). A visitor sees a page that names the
-  open event; the spectator and pilot pages (§11.2) are built on it next.
+  routes are in `docs/api.md` ("Who may do what").
+- **Step 2, the spectator's page** (§11.2). A visitor's browser shows the open event: the
+  race that is on with a running clock and each lap as it is flown, or how the last race
+  ended; the heats coming up with who is in them; and the results. It updates by itself and
+  follows the director to another event. It reads the console's own snapshot through
+  `/public/event…`, with the director's things taken out (video paths, notes, protests, a
+  pilot's real name and outside ids, a timer's address). Not yet: alerts, and anything
+  only a pilot sees (§11.3).
 
 ### 11.1 Two parts, and the rule between them
 

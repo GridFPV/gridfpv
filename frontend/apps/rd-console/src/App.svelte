@@ -29,6 +29,7 @@
   import { Session } from './lib/session.svelte.js';
   import { EventLive } from './lib/eventLive.svelte.js';
   import { marshalCount } from './lib/marshal.js';
+  import { publicSource } from './lib/spectator.js';
   import CapturePage from './screens/CapturePage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
   import EventPage from './screens/EventPage.svelte';
@@ -194,7 +195,7 @@
   </div>
 {:else if visitor && hello}
   <div class="gridfpv-root">
-    <VisitorPage {session} {hello} />
+    <VisitorPage {session} {hello} source={publicSource(session.baseUrl)} />
   </div>
 {:else}
   <div class="gridfpv-root gridfpv-dense">

@@ -1,0 +1,186 @@
+/**
+ * What a spectator sees (docs/primitives.md §11.2): the race that is on, the heats coming
+ * up with who is in them, and results. Pure helpers over the same snapshot the console
+ * reads, so the spectator's page and the console can never tell two stories.
+ *
+ * The data comes from the Director's `/public` routes, which hand out the console's own
+ * shapes with the director's things taken out. {@link publicSource} is the thin object
+ * that makes the shared live store ({@link EventLive}) read from there.
+ */
+import {
+  getPublicEvent,
+  getPublicEventState,
+  listPublicClasses,
+  listPublicPilots,
+  listPublicTimers,
+  subscribePublicChanges
+} from '@gridfpv/protocol-client';
+import type {
+  Class,
+  EventView,
+  PhaseId,
+  PhaseView,
+  Pilot,
+  PublicEvent,
+  RaceView,
+  TimerView
+} from '@gridfpv/types';
+import type { LiveSession } from './eventLive.svelte.js';
+import type { Names } from './names.js';
+import { lastResult } from './overlay.js';
+import { currentRace, isHeat } from './phases.js';
+import { lineupSeatRows, type SeatRow } from './run.js';
+import { BENCH_ADAPTER } from './seats.js';
+
+/** What the spectator's page reads from: which event is open, and the live store's reads. */
+export interface PublicSource extends LiveSession {
+  getEvent(): Promise<PublicEvent>;
+}
+
+const NOT_FOR_VISITORS = 'Only the director can do this.';
+const refuse = (): Promise<never> => Promise.reject(new Error(NOT_FOR_VISITORS));
+
+/**
+ * The reads of the open event, for a visitor. The event's id is never sent: a visitor is
+ * only ever shown the one event that is open. Every write is refused here, before it
+ * could be sent (the Director would refuse it too).
+ */
+export function publicSource(baseUrl: string): PublicSource {
+  return {
+    getEvent: () => getPublicEvent(baseUrl),
+    getEventState: () => getPublicEventState(baseUrl),
+    subscribeChanges: (_id, onCursor) => subscribePublicChanges(baseUrl, onCursor),
+    listPilots: () => listPublicPilots(baseUrl),
+    listClasses: () => listPublicClasses(baseUrl),
+    listTimers: () => listPublicTimers(baseUrl),
+    // A visitor has no use for the saved formats: each phase carries the one in force.
+    listFormats: async () => [],
+    sendCommand: refuse,
+    createBracket: refuse,
+    postPass: refuse,
+    getRaceSignal: refuse,
+    getVideoSettings: refuse,
+    getVideoStatus: refuse
+  };
+}
+
+/** The race the page shows on top. */
+export interface NowShowing {
+  race: RaceView;
+  /** True while it is counting down, running, or stopped and not yet saved. */
+  live: boolean;
+}
+
+/**
+ * The race to show: the one that is on, or else the last one that was saved. Unlike the
+ * video overlay, a result stays up until the next race starts: someone who looks at their
+ * phone five minutes after a heat still wants to see how it ended.
+ */
+export function nowShowing(view: EventView | undefined): NowShowing | undefined {
+  if (!view) return undefined;
+  const current = currentRace(view);
+  if (current) return { race: current, live: true };
+  const result = lastResult(view);
+  return result ? { race: result, live: false } : undefined;
+}
+
+/** A heat that is coming up. */
+export interface UpcomingHeat {
+  id: PhaseId;
+  /** "Qualifying Heat 3". */
+  name: string;
+  /** Who is in it, in seat order. */
+  seats: SeatRow[];
+}
+
+/**
+ * The heats coming up, in the order the director has them: the run queue, without the
+ * heat that is on right now. A heat still waiting on another one to fill its seats is in
+ * the list too, after the ones that are ready, so pilots can see where they will come in.
+ */
+export function upcomingHeats(view: EventView | undefined, names: Names): UpcomingHeat[] {
+  if (!view) return [];
+  const byId = new Map(view.phases.map((phase) => [phase.def.id, phase]));
+  const onNow = currentRace(view)?.heat;
+  const ready = view.queue
+    .map((id) => byId.get(id))
+    .filter((phase): phase is PhaseView => phase !== undefined);
+  const queued = new Set(view.queue);
+  const waiting = view.phases.filter(
+    (phase) =>
+      isHeat(phase.def) &&
+      !queued.has(phase.def.id) &&
+      phase.waiting &&
+      !phase.complete &&
+      !phase.locked
+  );
+  return [...ready, ...waiting]
+    .filter((phase) => phase.def.id !== onNow)
+    .map((phase) => ({
+      id: phase.def.id,
+      name: names.phase(phase.def.id),
+      seats: lineupSeatRows(phase, names)
+    }));
+}
+
+/**
+ * Whether the snapshot names a pilot, class or timer the page has no name for yet. The
+ * names a visitor is given are only those the event uses, so when the director adds a
+ * pilot to the event the page has to ask again.
+ */
+export function missingNames(
+  view: EventView | undefined,
+  pilots: readonly Pilot[],
+  classes: readonly Class[],
+  timers: readonly TimerView[]
+): { pilots: boolean; classes: boolean; timers: boolean } {
+  if (!view) return { pilots: false, classes: false, timers: false };
+  const knownPilots = new Set(pilots.map((pilot) => pilot.id));
+  const knownClasses = new Set(classes.map((klass) => klass.id));
+  const knownTimers = new Set(timers.map((timer) => timer.timer.id));
+  let pilotMissing = false;
+  let timerMissing = false;
+  const seePilot = (id: string | undefined) => {
+    if (id !== undefined && !knownPilots.has(id)) pilotMissing = true;
+  };
+  const seeTimer = (id: string) => {
+    // The bench is not a timer: it has no entry in the list and needs none.
+    if (id !== BENCH_ADAPTER && !knownTimers.has(id)) timerMissing = true;
+  };
+  for (const roster of view.rosters) roster.pilots.forEach(seePilot);
+  for (const phase of view.phases) {
+    phase.field.forEach(seePilot);
+    phase.ranking.forEach((placed) => seePilot(placed.pilot));
+    for (const seat of phase.lineup) {
+      seeTimer(seat.adapter);
+      if (typeof seat.who === 'object' && 'Pilot' in seat.who) seePilot(seat.who.Pilot);
+    }
+  }
+  for (const race of view.races) {
+    for (const seat of race.seats) {
+      seeTimer(seat.adapter);
+      seePilot(seat.pilot);
+    }
+  }
+  return {
+    pilots: pilotMissing,
+    classes: view.rosters.some((roster) => !knownClasses.has(roster.class)),
+    timers: timerMissing
+  };
+}
+
+/** The word under a race's name: what it is doing. Sentence case, for a page, not a video. */
+export function raceWord(race: RaceView): string {
+  switch (race.state) {
+    case 'Staging':
+      return 'Starting';
+    case 'Running':
+      return 'Racing';
+    case 'Stopped':
+      return 'Finished';
+    case 'Saved':
+      return 'Result';
+    case 'Discarded':
+      return 'Thrown out';
+  }
+}
