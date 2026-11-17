@@ -355,6 +355,46 @@ describe('classes at the event', () => {
     expect(screen.getByText(/No class is in this event yet\./)).toBeVisible();
   });
 
+  it('with nothing counting yet, lists who is in the class and shows no table of blanks', async () => {
+    await open(
+      eventView({
+        phases,
+        rosters: [
+          roster({
+            counted_phases: [],
+            standings: [
+              { pilot: 'p-1a', position: 1 },
+              { pilot: 'p-2b', position: 2 }
+            ]
+          })
+        ]
+      })
+    );
+    const open_ = screen.getByRole('listitem', { name: 'Open' });
+    expect(within(open_).getByTestId('counted')).toHaveTextContent(
+      'No phase counts toward the standings yet.'
+    );
+    expect(within(open_).queryByRole('table')).toBeNull();
+    expect(document.body.textContent).not.toContain('Not placed yet');
+    // The roster, in roster order, by callsign.
+    expect(
+      within(within(open_).getByRole('list', { name: 'Pilots in Open' }))
+        .getAllByRole('listitem')
+        .map((item) => item.textContent)
+    ).toEqual(['Ace', 'Bee']);
+    expect(document.body.textContent).not.toContain('p-1a');
+  });
+
+  it('a class with nobody in it and nothing counting shows neither a list nor a table', async () => {
+    await open(
+      eventView({ phases, rosters: [roster({ pilots: [], counted_phases: [], standings: [] })] })
+    );
+    const open_ = screen.getByRole('listitem', { name: 'Open' });
+    expect(open_).toHaveTextContent('0 pilots');
+    expect(within(open_).queryByRole('list')).toBeNull();
+    expect(within(open_).queryByRole('table')).toBeNull();
+  });
+
   it('shows each class by name with its standings and what placed each pilot', async () => {
     await open(eventView({ phases, rosters: [roster()] }));
     const open_ = screen.getByRole('listitem', { name: 'Open' });

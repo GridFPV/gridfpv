@@ -352,4 +352,43 @@ describe('class standings', () => {
     expect(screen.getByRole('link', { name: 'Details page' })).toHaveAttribute('href', '#/event');
     expect(screen.queryByRole('table', { name: 'Standings of Open' })).toBeNull();
   });
+
+  it('with nothing counting, shows no table of blanks even when the Director sends the roster in order', async () => {
+    // The Director lists every pilot of the class with a position and no phase. That is the
+    // roster again, not a result, and it used to push the real results off the screen.
+    await open(
+      raceDay({
+        rosters: [
+          {
+            class: 'cls-open',
+            pilots: ['p-1a', 'p-2b', 'p-3c'],
+            counted_phases: [],
+            standings: [
+              { pilot: 'p-1a', position: 1 },
+              { pilot: 'p-2b', position: 2 },
+              { pilot: 'p-3c', position: 3 }
+            ]
+          }
+        ]
+      })
+    );
+    expect(screen.getByRole('heading', { name: 'Open standings' })).toBeVisible();
+    expect(screen.queryByRole('table', { name: 'Standings of Open' })).toBeNull();
+    expect(document.body.textContent).not.toContain('Not placed yet');
+  });
+
+  it('comes after the phase results, which are what the page is opened for', async () => {
+    await open(
+      raceDay({
+        rosters: [
+          { class: 'cls-open', pilots: ['p-1a'], counted_phases: [], standings: [] },
+          { class: 'cls-spec', pilots: ['p-2b'], counted_phases: [], standings: [] }
+        ]
+      })
+    );
+    const titles = [...document.querySelectorAll('.gf-card-title')].map((t) => t.textContent);
+    expect(titles[0]).toBe('Phase results');
+    expect(titles.slice(1)).toHaveLength(2);
+    expect(titles.slice(1).every((title) => title?.endsWith(' standings'))).toBe(true);
+  });
 });
