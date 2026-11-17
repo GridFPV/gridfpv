@@ -3,9 +3,12 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import type { SignupView } from '@gridfpv/types';
+import type { SignupRules, SignupView } from '@gridfpv/types';
+import { buildNames } from '../src/lib/names.js';
 import PilotSignup from '../src/screens/PilotSignup.svelte';
+import { timerView } from './competition.js';
 import {
+  SIGNUP_PILOTS,
   SIGNUP_RULES,
   signupEvent,
   signupHeat,
@@ -392,5 +395,92 @@ describe('PilotSignup: the grid for a kiosk', () => {
     );
     await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 1 in Qualifying Heat 2' }));
     expect(await screen.findByTestId('signup-error')).toHaveTextContent('already taken');
+  });
+});
+
+describe('PilotSignup: a sheet whose seats are each on a timer of their own', () => {
+  /** Three one-seat gates. Before the fix every seat was "Seat 1" and the sheet crashed. */
+  function openGates(layout: 'list' | 'grid') {
+    const rules: SignupRules = {
+      ...SIGNUP_RULES,
+      seats: ['g1', 'g2', 'g3'].map((adapter) => ({ adapter, seat: '0' }))
+    };
+    const sheet = signupSheet({ rules });
+    const view = signupEvent(sheet);
+    view.phases = view.phases.map((phase) =>
+      phase.def.id.startsWith('quali/')
+        ? {
+            ...phase,
+            lineup: rules.seats.map((seat) => ({ ...seat, who: 'Nobody' as const }))
+          }
+        : phase
+    );
+    const timers = ['g1', 'g2', 'g3'].map((id, n) => timerView(id, `Gate ${n + 1}`, 1));
+    const names = buildNames(
+      view.phases,
+      SIGNUP_PILOTS,
+      timers,
+      [],
+      [
+        { adapter: 'g1', seat: '0', freq_mhz: 5658 },
+        { adapter: 'g2', seat: '0', freq_mhz: 5695 }
+      ]
+    );
+    const actions = {
+      take: vi.fn(async (_heat: string, _seat: { adapter: string; seat: string }) => {}),
+      next: vi.fn(async (_phase: string, _seat: { adapter: string; seat: string }) => {}),
+      leave: vi.fn(async (_heat: string) => {})
+    };
+    render(PilotSignup, { phases: [signupPhase(sheet)], names, pilot: BEE, actions, layout });
+    return actions;
+  }
+
+  it('draws the list, with each seat named by its gate and its channel', async () => {
+    const actions = openGates('list');
+    const seats = within(screen.getByRole('listitem', { name: 'Qualifying Heat 2' }))
+      .getAllByRole('listitem')
+      .map((item) => item.textContent?.replace(/\s+/g, ' ').trim());
+    expect(seats).toEqual([
+      'Gate 1 R1 · 5658 MHz Free Take',
+      'Gate 2 R2 · 5695 MHz Free Take',
+      'Gate 3 Free Take'
+    ]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Gate 2 in Qualifying Heat 2' }));
+    expect(actions.take).toHaveBeenCalledWith('quali/heat-2', { adapter: 'g2', seat: '0' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Next free spot on Gate 3' }));
+    expect(actions.next).toHaveBeenCalledWith('quali', { adapter: 'g3', seat: '0' });
+  });
+
+  it('draws the grid, one column to a gate', () => {
+    openGates('grid');
+    expect(
+      within(screen.getByRole('table', { name: 'Heats of Qualifying' }))
+        .getAllByRole('columnheader')
+        .map((cell) => cell.textContent?.replace(/\s+/g, ' ').trim())
+    ).toEqual([
+      'Heat',
+      'Gate 1 R1 · 5658 MHz Next free',
+      'Gate 2 R2 · 5695 MHz Next free',
+      'Gate 3 Next free'
+    ]);
+  });
+
+  it('seats that do share a name still draw: a name is never what tells two seats apart', () => {
+    const rules: SignupRules = {
+      ...SIGNUP_RULES,
+      seats: ['x1', 'x2'].map((adapter) => ({ adapter, seat: '0' }))
+    };
+    const sheet = signupSheet({
+      rules,
+      heats: [signupHeat(1, [null, null])],
+      pilots: [signupRuns('p-bee')]
+    });
+    // No timer directory at all: both seats can only be named by position.
+    const names = buildNames([], SIGNUP_PILOTS);
+    for (const layout of ['list', 'grid'] as const) {
+      render(PilotSignup, { phases: [signupPhase(sheet)], names, pilot: BEE, layout });
+      expect(screen.getByRole('region', { name: 'Sign-up for Qualifying' })).toBeVisible();
+      cleanup();
+    }
   });
 });

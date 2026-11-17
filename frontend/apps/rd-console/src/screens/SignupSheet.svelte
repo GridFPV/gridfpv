@@ -143,7 +143,7 @@
       <thead>
         <tr>
           <th scope="col">Heat</th>
-          {#each seats as seat (seat.name)}
+          {#each seats as seat (`${seat.seat.adapter}\u0000${seat.seat.seat}`)}
             <th scope="col">
               {seat.name}
               {#if seat.channel}<span class="channel">{seat.channel}</span>{/if}

@@ -102,7 +102,7 @@
       {#if me && actions && layout === 'list'}
         <div class="next" role="group" aria-label="Next free spot in {phase.name}">
           <span class="muted">Next free:</span>
-          {#each seats as seat, index (seat.name)}
+          {#each seats as seat, index (`${seat.seat.adapter}\u0000${seat.seat.seat}`)}
             <Button
               size="sm"
               variant="secondary"
@@ -123,7 +123,7 @@
           <thead>
             <tr>
               <th scope="col">Heat</th>
-              {#each seats as seat, index (seat.name)}
+              {#each seats as seat, index (`${seat.seat.adapter}\u0000${seat.seat.seat}`)}
                 <th scope="col">
                   <span class="seat-name">{seat.name}</span>
                   {#if seat.channel}<span class="channel">{seat.channel}</span>{/if}
