@@ -269,4 +269,31 @@ describe('seats of a heat that is on more than one timer', () => {
     const names = buildNames([gone], [], timers);
     expect(names.seat('removed', '0', 1)).toBe('Seat 2');
   });
+
+  it('a sign-up phase says which timers share its heats, even for a seat nobody is on yet', () => {
+    const phase = {
+      ...group('practice', 'Practice'),
+      signup: {
+        rules: {
+          seats: [
+            { adapter: 'g1', seat: '0' },
+            { adapter: 'g2', seat: '0' }
+          ],
+          open_heats: 1,
+          rest_heats: 0,
+          open: true
+        },
+        heats: [],
+        pilots: []
+      }
+    };
+    // The heat has one pilot, on gate 2. Its lineup alone names one timer.
+    const lonely = {
+      ...heat('practice/heat-1', 'Practice Heat 1', []),
+      lineup: [{ adapter: 'g2', seat: '0', who: 'Nobody' as const }]
+    };
+    const names = buildNames([phase, lonely], [], timers);
+    expect(names.seat('g2', '0', 0)).toBe('Gate 2');
+    expect(names.seat('g1', '0', 0)).toBe('Gate 1');
+  });
 });

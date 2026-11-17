@@ -115,8 +115,12 @@ export function buildNames(
   // seats named by the timer instead, which is also what the director sees on the gate.
   const shared = new Set<AdapterId>();
   for (const entry of phases) {
-    const used = new Set(entry.lineup.map((seat) => seat.adapter));
-    if (used.size > 1) for (const adapter of used) shared.add(adapter);
+    // A lineup lists only the seats that are filled. A sign-up phase's rules list every
+    // seat its heats have, so a gate with nobody on it yet is still known to be shared.
+    for (const seats of [entry.lineup, entry.signup?.rules.seats ?? []]) {
+      const used = new Set(seats.map((seat) => seat.adapter));
+      if (used.size > 1) for (const adapter of used) shared.add(adapter);
+    }
   }
   const seatPlain = (adapter: AdapterId, ref: SeatRef, position?: number): string => {
     const plain = seatLabel(timers, adapter, ref, position);
