@@ -7,6 +7,7 @@ import {
   defaultRace,
   formatOffset,
   lapRows,
+  movePreview,
   lockedBy,
   marshalCount,
   otherRaces,
@@ -344,6 +345,35 @@ describe('lap rows', () => {
       ['uncounted', '×', 14]
     ]);
     expect(traceMarks(seat)[0].kind).toBe('holeshot');
+  });
+});
+
+describe('moving a crossing', () => {
+  const seat: RaceSeatView = raceSeat(0, 'p-1a', {
+    hole_shot: { crossing: 10, at: 1 * S },
+    laps: [lap(11, 1 * S, 4 * S), lap(12, 4 * S, 6 * S, true), lap(13, 6 * S, 8 * S)]
+  });
+
+  it('shows the lap the crossing ends and the lap after it', () => {
+    expect(movePreview(seat, 11, 3.5 * S)).toEqual({
+      name: 'lap 1',
+      from: 4 * S,
+      // The row after lap 1 is a restart, which has no time to show.
+      laps: [{ name: 'lap 1', micros: 2.5 * S }]
+    });
+    // The hole shot ends no lap, so only the first lap changes.
+    expect(movePreview(seat, 10, 1.5 * S)).toEqual({
+      name: 'the hole shot',
+      from: 1 * S,
+      laps: [{ name: 'lap 1', micros: 2.5 * S }]
+    });
+    // The last lap has no lap after it.
+    expect(movePreview(seat, 13, 9 * S)?.laps).toEqual([{ name: 'lap 2', micros: 3 * S }]);
+  });
+
+  it('gives no times when the move passes another crossing, and nothing for a stranger', () => {
+    expect(movePreview(seat, 11, 7 * S)).toEqual({ name: 'lap 1', from: 4 * S, laps: [] });
+    expect(movePreview(seat, 99, 2 * S)).toBeUndefined();
   });
 });
 

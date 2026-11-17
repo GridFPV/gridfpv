@@ -754,8 +754,6 @@ seat, the higher seed keeps it. A director's override of the result is not built
   result on screen.
 - The trace of a race in which the timer restarted is drawn on two clocks at once. The lap
   list is right; the picture is not.
-- Marshal cannot move a lap's time yet, though the Director can. The trace does not pan by
-  touch drag.
 - A class cannot be removed from an event in the console. A timer can be removed while a
   heat still uses it.
 - Every unlocked phase row has a Lock button, which is a lot on a big bracket.
@@ -773,7 +771,8 @@ feature that CI does not enable, so CI on GitHub stays green.
 laps), and seasons. Season rules such as "best N of M events" need measures that §5.5 does
 not have yet; they are added when seasons are built.
 
-**Planned, not built: video in marshaling** (Ryan, 2026-11-10). When reviewing laps today,
+**Video in marshaling: built** (asked for by Ryan on 2026-11-10, released in v0.5.1; the
+plan is kept here as written). When reviewing laps today,
 Ryan opens the OBS recording made through grid-rh's video page and reads the lap times off
 the overlay. Grid should do this natively:
 
@@ -817,8 +816,7 @@ race's laps, so the snapshot can say for every race whether its overlaid video s
 matches: filmed, drawn, none yet, or laps changed. Neither fact changes a result.
 
 The Marshal page plays a race's video lined up with its clock: a line on each signal trace
-shows where the video is, and a click on a trace moves the video there. Not built yet:
-video on the Tune page.
+shows where the video is, and a click on a trace moves the video there.
 
 ffmpeg is not shipped with Grid and there is no installer to fetch it. The Video page has a
 **Get ffmpeg** button: the Director downloads a ready-made build with the system's `curl`

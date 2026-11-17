@@ -23,6 +23,7 @@ shot, and each lap.
 - **+** and **−** zoom. The arrows move left and right. **Whole race** fits it all.
 - Click a lap's name in the table to find it on the trace.
 - Click an empty spot on the trace to add a lap there.
+- Drag a lap's mark to move it. A finger works too: slide the trace, or drag a mark.
 
 ## The video
 
@@ -61,6 +62,9 @@ line.
 - **Add a lap** puts in a pass the gate missed. Type the seconds into the race.
   If the gate missed the **hole shot**, add it the same way. A pass you add before the
   first one becomes the hole shot, and the old first pass becomes the end of lap 1.
+- **Move** a pass that was read at the wrong moment. Drag its mark along the trace, or
+  click the lap, go to the right moment in the video, and press **Move here**. Grid shows
+  the new lap times first. Nothing changes until you press **Move it**.
 - **Crossings that do not count** lists passes that were left out, each with the reason.
   One that was too soon after the pass before it, or too soon after the start, has
   **Count it**. Press it if the lap was real. After that no lap rule leaves it out.
