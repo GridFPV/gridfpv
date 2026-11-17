@@ -253,11 +253,12 @@ test('the director turns sign-up on, two pilots sign up on their phones, and eve
     await expect(ace.getByRole('list', { name: 'My heats' })).toContainText('Seat 2');
     await expect(ace.getByTestId('pilot-alert')).toContainText('You are next');
 
-    // ── A phone that is signed out can only look ─────────────────────────────────────────
+    // ── A phone that is signed out has no sign-up ─────────────────────────────────────────
     await bee.getByRole('button', { name: 'Sign out' }).click();
-    await bee.getByRole('tab', { name: 'Sign up' }).click();
-    await expect(bee.getByRole('region', { name: 'Sign-up for Qualifying' })).toBeVisible();
-    await expect(bee.getByRole('region', { name: 'Sign up' }).getByRole('button')).toHaveCount(0);
+    // Sign-up is for pilots: the tab and the sheet go, and the page is back on the race.
+    await expect(bee.getByRole('tab', { name: 'Sign up' })).toHaveCount(0);
+    await expect(bee.getByRole('region', { name: 'Sign-up for Qualifying' })).toHaveCount(0);
+    await expect(bee.getByRole('button', { name: 'Pilot', exact: true })).toBeVisible();
     const refused = await bee.request.post(`${address}public/pilot/signup/take`, {
       data: { heat: 'quali/heat-3', seat: { adapter: 'bench', seat: 'seat-1' } }
     });

@@ -26,6 +26,15 @@
 //! down, it stops working [`KIOSK_IDLE`] after it was last used, and a new code or the
 //! director's "sign out" ends it.
 //!
+//! **Only the director makes a device a kiosk.** A kiosk is a tablet the director sets up
+//! at the race director's stand; pilots are never given a way to make one. The director
+//! makes a **kiosk code** on the console's Network page and types it on the tablet. A code
+//! works **once**: it is used up by the tablet that takes it, and the director makes
+//! another for the next tablet. The tablet is given the [`KIOSK_COOKIE`] cookie, and is
+//! then on the director's list of kiosks until the director removes it. Without that a
+//! device cannot use a pilot's code the kiosk way, so a pilot cannot get round "one
+//! device" by opening the kiosk page on a second phone. Being a kiosk opens nothing else.
+//!
 //! Wrong codes are counted by address like wrong access tokens: after
 //! [`crate::access::MAX_FAILURES`] in a minute, that device has to wait.
 
@@ -73,6 +82,26 @@ pub const KIOSK_IDLE: Duration = Duration::from_secs(120);
 /// The most kiosk passes kept at once. The oldest goes when one more is made.
 const KIOSK_MAX: usize = 64;
 
+/// The cookie that marks a device as a kiosk. It holds a token only that tablet has.
+pub const KIOSK_COOKIE: &str = "gridfpv_kiosk";
+/// How long a tablet stays a kiosk: thirty days, or until the director removes it.
+const KIOSK_COOKIE_SECONDS: u32 = 30 * 24 * 60 * 60;
+/// The most kiosk codes that can be waiting to be used at once.
+pub const KIOSK_CODES_MAX: usize = 12;
+/// The most kiosks at once. The oldest makes room for one more.
+pub const KIOSK_DEVICES_MAX: usize = 24;
+
+/// A tablet the director has set up as a kiosk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct KioskDevice {
+    /// Its number on the director's list: "Kiosk 2".
+    number: u32,
+    /// What its cookie holds.
+    token: String,
+    /// When it was set up, in seconds since 1970.
+    set_up_at: u64,
+}
+
 /// A pilot at a kiosk.
 struct KioskPass {
     event: EventId,
@@ -93,6 +122,15 @@ struct Entry {
 struct Stored {
     #[serde(default)]
     events: BTreeMap<EventId, BTreeMap<PilotId, Entry>>,
+    /// Kiosk codes the director has made that no tablet has used yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    kiosk_codes: Vec<String>,
+    /// The tablets set up as kiosks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    kiosks: Vec<KioskDevice>,
+    /// The number the last kiosk got. Numbers are not used twice.
+    #[serde(default)]
+    last_kiosk: u32,
 }
 
 struct Inner {
@@ -160,6 +198,29 @@ pub fn normalize(typed: &str) -> Option<String> {
         .map(|c| c.to_ascii_uppercase())
         .collect();
     (code.len() == CODE_LENGTH && code.bytes().all(|b| CODE_ALPHABET.contains(&b))).then_some(code)
+}
+
+/// How many letters and digits a kiosk code has. Longer than a pilot's code: it is typed
+/// once, by the director.
+pub const KIOSK_KEY_LENGTH: usize = 8;
+
+/// A kiosk key as typed: capitals, with spaces and dashes taken out.
+pub fn normalize_key(typed: &str) -> String {
+    typed
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// A fresh kiosk key, in the letters and digits codes are written in.
+fn random_key() -> String {
+    let mut bytes = [0u8; KIOSK_KEY_LENGTH];
+    getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable");
+    bytes
+        .iter()
+        .map(|byte| CODE_ALPHABET[usize::from(byte % 32)] as char)
+        .collect()
 }
 
 /// A fresh code, drawn from the system's source of randomness.
@@ -351,6 +412,124 @@ impl PilotAccess {
         found
     }
 
+    /// The kiosk codes waiting to be used and the kiosks set up, for the director.
+    pub fn kiosk_view(&self) -> KioskView {
+        let inner = self.read();
+        KioskView {
+            codes: inner.stored.kiosk_codes.clone(),
+            kiosks: inner
+                .stored
+                .kiosks
+                .iter()
+                .map(|device| KioskDeviceView {
+                    number: device.number,
+                    set_up_at: device.set_up_at,
+                })
+                .collect(),
+        }
+    }
+
+    /// Make one more kiosk code. `None` when [`KIOSK_CODES_MAX`] are already waiting.
+    pub fn kiosk_new_code(&self) -> Option<String> {
+        let mut inner = self.write();
+        if inner.stored.kiosk_codes.len() >= KIOSK_CODES_MAX {
+            return None;
+        }
+        let code = loop {
+            let code = random_key();
+            if !inner.stored.kiosk_codes.contains(&code) {
+                break code;
+            }
+        };
+        inner.stored.kiosk_codes.push(code.clone());
+        Self::save(&inner);
+        Some(code)
+    }
+
+    /// Throw away a kiosk code that has not been used. Whether there was one.
+    pub fn kiosk_cancel_code(&self, typed: &str) -> bool {
+        let code = normalize_key(typed);
+        let mut inner = self.write();
+        let before = inner.stored.kiosk_codes.len();
+        inner.stored.kiosk_codes.retain(|kept| *kept != code);
+        let found = inner.stored.kiosk_codes.len() != before;
+        if found {
+            Self::save(&inner);
+        }
+        found
+    }
+
+    /// Use a kiosk code up, making the device that typed it a kiosk. Gives the token for
+    /// its cookie. `None` for a code that is wrong or already used. `now` is seconds since
+    /// 1970.
+    pub fn kiosk_set_up(&self, typed: &str, now: u64) -> Option<String> {
+        let code = normalize_key(typed);
+        if code.is_empty() {
+            return None;
+        }
+        let mut inner = self.write();
+        // Look at every code, so the time taken does not say which one matched.
+        let mut found = None;
+        for (index, kept) in inner.stored.kiosk_codes.iter().enumerate() {
+            if same(kept, &code) {
+                found = Some(index);
+            }
+        }
+        let index = found?;
+        inner.stored.kiosk_codes.remove(index);
+        while inner.stored.kiosks.len() >= KIOSK_DEVICES_MAX {
+            inner.stored.kiosks.remove(0);
+        }
+        inner.stored.last_kiosk += 1;
+        let token = crate::auth::random_token();
+        let number = inner.stored.last_kiosk;
+        inner.stored.kiosks.push(KioskDevice {
+            number,
+            token: token.clone(),
+            set_up_at: now,
+        });
+        Self::save(&inner);
+        Some(token)
+    }
+
+    /// Remove a kiosk from the list. Its tablet stops being one. Whether it was there.
+    pub fn kiosk_remove(&self, number: u32) -> bool {
+        let mut inner = self.write();
+        let before = inner.stored.kiosks.len();
+        inner.stored.kiosks.retain(|device| device.number != number);
+        let found = inner.stored.kiosks.len() != before;
+        if found {
+            Self::save(&inner);
+        }
+        found
+    }
+
+    /// Stop the kiosk whose cookie holds `token`. Whether there was one.
+    pub fn kiosk_forget(&self, token: &str) -> bool {
+        let mut inner = self.write();
+        let before = inner.stored.kiosks.len();
+        inner
+            .stored
+            .kiosks
+            .retain(|device| !same(&device.token, token));
+        let found = inner.stored.kiosks.len() != before;
+        if found {
+            Self::save(&inner);
+        }
+        found
+    }
+
+    /// Whether `token` is the cookie of a kiosk on the director's list.
+    pub fn is_kiosk(&self, token: &str) -> bool {
+        !token.is_empty()
+            && self
+                .read()
+                .stored
+                .kiosks
+                .iter()
+                .fold(false, |found, device| found | same(&device.token, token))
+    }
+
     /// Prove who a pilot is at a kiosk, with their code. Gives the pilot and a pass.
     /// Unlike [`Self::sign_in`] it leaves the pilot's own device signed in, and nothing is
     /// written down.
@@ -481,13 +660,23 @@ impl PilotAccess {
 
 /// The pilot sign-in a request carries, if it has one.
 pub fn pilot_cookie(headers: &HeaderMap) -> Option<String> {
+    cookie_named(headers, PILOT_COOKIE)
+}
+
+/// Whether a request comes from a device the director set up as a kiosk.
+pub fn is_kiosk_device(registry: &EventRegistry, headers: &HeaderMap) -> bool {
+    cookie_named(headers, KIOSK_COOKIE)
+        .is_some_and(|token| registry.pilot_access().is_kiosk(&token))
+}
+
+fn cookie_named(headers: &HeaderMap, wanted: &str) -> Option<String> {
     headers
         .get_all(COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
         .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, value)| *name == PILOT_COOKIE && !value.is_empty())
+        .find(|(name, value)| *name == wanted && !value.is_empty())
         .map(|(_, value)| value.to_string())
 }
 
@@ -522,6 +711,10 @@ fn pilots_in(
 pub fn signed_in_pilot(registry: &EventRegistry, headers: &HeaderMap) -> Option<PublicPilot> {
     let event = registry.active()?.id;
     let id = if let Some(pass) = headers.get(KIOSK_HEADER) {
+        // A pass is only any use on a device that is still a kiosk.
+        if !is_kiosk_device(registry, headers) {
+            return None;
+        }
         let pass = pass.to_str().ok()?;
         let pilots = pilots_in(registry, &event).ok()?;
         registry
@@ -758,8 +951,12 @@ pub struct KioskPassView {
 pub async fn post_kiosk(
     State(registry): State<EventRegistry>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     Json(body): Json<PilotSignInRequest>,
 ) -> Result<Response, ProtocolError> {
+    if !is_kiosk_device(&registry, &headers) {
+        return Err(not_a_kiosk());
+    }
     let (pilot, pass) = with_code(&registry, peer, |access, event, pilots| {
         access.kiosk_in(event, pilots, &body.code, Instant::now())
     })?;
@@ -772,6 +969,146 @@ pub async fn post_kiosk(
         }),
     )
         .into_response())
+}
+
+fn not_a_kiosk() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::Forbidden,
+        "This device is not set up as a kiosk. The director sets a kiosk up.",
+    )
+}
+
+/// One kiosk on the director's list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct KioskDeviceView {
+    /// "Kiosk 2".
+    pub number: u32,
+    /// When it was set up, in seconds since 1970.
+    #[ts(type = "number")]
+    pub set_up_at: u64,
+}
+
+/// `GET /kiosk`: what the director sees about kiosks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct KioskView {
+    /// Codes that no tablet has used yet. Each sets up one kiosk, once.
+    pub codes: Vec<String>,
+    /// The tablets set up as kiosks, oldest first.
+    pub kiosks: Vec<KioskDeviceView>,
+}
+
+/// `POST /public/pilot/kiosk/device`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct KioskDeviceRequest {
+    /// A kiosk code the director made.
+    pub code: String,
+}
+
+fn kiosk_answer(registry: &EventRegistry) -> Response {
+    (
+        // The codes are secrets: a browser must not keep this answer.
+        [(CACHE_CONTROL, "no-store")],
+        Json(registry.pilot_access().kiosk_view()),
+    )
+        .into_response()
+}
+
+/// `GET /kiosk` — the kiosk codes and the kiosks, for the director only.
+pub async fn get_kiosks(State(registry): State<EventRegistry>) -> Response {
+    kiosk_answer(&registry)
+}
+
+/// `POST /kiosk/codes` — make one more kiosk code, for the director only.
+pub async fn post_kiosk_code(
+    State(registry): State<EventRegistry>,
+) -> Result<Response, ProtocolError> {
+    if registry.pilot_access().kiosk_new_code().is_none() {
+        return Err(ProtocolError::new(
+            ErrorCode::Refused,
+            "There are already a lot of kiosk codes waiting. Use one or cancel one first.",
+        ));
+    }
+    Ok(kiosk_answer(&registry))
+}
+
+/// `DELETE /kiosk/codes/{code}` — cancel a kiosk code that has not been used.
+pub async fn delete_kiosk_code(
+    State(registry): State<EventRegistry>,
+    Path(code): Path<String>,
+) -> Response {
+    registry.pilot_access().kiosk_cancel_code(&code);
+    kiosk_answer(&registry)
+}
+
+/// `DELETE /kiosk/devices/{number}` — remove a kiosk. Its tablet stops being one.
+pub async fn delete_kiosk_number(
+    State(registry): State<EventRegistry>,
+    Path(number): Path<u32>,
+) -> Response {
+    registry.pilot_access().kiosk_remove(number);
+    kiosk_answer(&registry)
+}
+
+/// `POST /public/pilot/kiosk/device` — make this device a kiosk, with a kiosk code the
+/// director typed on it. A right code is used up, sets a cookie and answers `204`. A wrong
+/// or used one answers `401`, and wrong codes are counted like wrong pilot codes.
+pub async fn post_kiosk_device(
+    State(registry): State<EventRegistry>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Json(body): Json<KioskDeviceRequest>,
+) -> Result<Response, ProtocolError> {
+    let ip = guesser(peer.map(|Extension(peer)| peer));
+    let guesses = registry.pilot_guesses();
+    let now = Instant::now();
+    if guesses.blocked(ip, now) {
+        return Err(ProtocolError::new(
+            ErrorCode::TooManyRequests,
+            "Too many wrong tries from this device. Wait a minute and try again.",
+        ));
+    }
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let Some(token) = registry.pilot_access().kiosk_set_up(&body.code, wall) else {
+        guesses.failed(ip, now);
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthorized,
+            "That kiosk code is not right, or it has been used. Make a new one on the Network page.",
+        ));
+    };
+    guesses.cleared(ip);
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(
+            SET_COOKIE,
+            format!(
+                "{KIOSK_COOKIE}={token}; Path=/; Max-Age={KIOSK_COOKIE_SECONDS}; HttpOnly; SameSite=Strict"
+            ),
+        )],
+    )
+        .into_response())
+}
+
+/// `DELETE /public/pilot/kiosk/device` — this device stops being a kiosk, and comes off the
+/// director's list. Always `204`.
+pub async fn delete_kiosk_device(
+    State(registry): State<EventRegistry>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(token) = cookie_named(&headers, KIOSK_COOKIE) {
+        registry.pilot_access().kiosk_forget(&token);
+    }
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            SET_COOKIE,
+            format!("{KIOSK_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"),
+        )],
+    )
+        .into_response()
 }
 
 /// `DELETE /public/pilot/kiosk` — the pilot is done at the kiosk. Always `204`.
@@ -826,6 +1163,124 @@ mod tests {
         let ace = code_of(&access, "fri", &pilots, "ace");
         let bee = code_of(&access, "fri", &pilots, "bee");
         (access, pilots, ace, bee)
+    }
+
+    #[test]
+    fn a_kiosk_code_is_used_up_by_the_first_device_that_types_it() {
+        let access = PilotAccess::new(None);
+        assert!(access.kiosk_view().codes.is_empty());
+        let code = access.kiosk_new_code().unwrap();
+        assert_eq!(code.len(), KIOSK_KEY_LENGTH);
+        assert!(code.bytes().all(|b| CODE_ALPHABET.contains(&b)));
+        // Typed loosely, it still works.
+        let loose = format!(" {}-{} ", code[..4].to_lowercase(), &code[4..]);
+        let token = access.kiosk_set_up(&loose, 1000).unwrap();
+        assert!(access.is_kiosk(&token));
+        assert!(access.kiosk_set_up(&code, 1001).is_none());
+        let view = access.kiosk_view();
+        assert!(view.codes.is_empty());
+        assert_eq!(
+            view.kiosks,
+            [KioskDeviceView {
+                number: 1,
+                set_up_at: 1000
+            }]
+        );
+        // The code is not the cookie, and nothing but the token makes a kiosk.
+        for not in ["", code.as_str(), "x", &token[1..], &format!("{token}x")] {
+            assert!(!access.is_kiosk(not), "{not:?}");
+        }
+        assert!(access.kiosk_set_up("", 1002).is_none());
+        assert!(access.kiosk_set_up("   ", 1002).is_none());
+    }
+
+    #[test]
+    fn kiosk_numbers_are_never_used_twice_and_removing_one_stops_only_it() {
+        let access = PilotAccess::new(None);
+        let mut tokens = Vec::new();
+        for n in 0..3 {
+            let code = access.kiosk_new_code().unwrap();
+            tokens.push(access.kiosk_set_up(&code, n).unwrap());
+        }
+        assert!(access.kiosk_remove(2));
+        assert!(!access.kiosk_remove(2));
+        assert!(!access.kiosk_remove(99));
+        assert_eq!(
+            [
+                access.is_kiosk(&tokens[0]),
+                access.is_kiosk(&tokens[1]),
+                access.is_kiosk(&tokens[2])
+            ],
+            [true, false, true]
+        );
+        // The tablet itself can stop being one.
+        assert!(access.kiosk_forget(&tokens[0]));
+        assert!(!access.kiosk_forget(&tokens[0]));
+        assert!(!access.kiosk_forget(""));
+        let code = access.kiosk_new_code().unwrap();
+        access.kiosk_set_up(&code, 9).unwrap();
+        let numbers: Vec<u32> = access
+            .kiosk_view()
+            .kiosks
+            .iter()
+            .map(|k| k.number)
+            .collect();
+        assert_eq!(numbers, [3, 4]);
+    }
+
+    #[test]
+    fn only_so_many_codes_wait_and_only_so_many_kiosks_are_kept() {
+        let access = PilotAccess::new(None);
+        let mut codes = std::collections::BTreeSet::new();
+        for _ in 0..KIOSK_CODES_MAX {
+            assert!(
+                codes.insert(access.kiosk_new_code().unwrap()),
+                "a code came up twice"
+            );
+        }
+        assert!(access.kiosk_new_code().is_none());
+        assert!(access.kiosk_cancel_code(&codes.first().unwrap().to_lowercase()));
+        assert!(!access.kiosk_cancel_code("NOPE"));
+        assert!(access.kiosk_new_code().is_some());
+        // One more kiosk than the list holds: the oldest makes room.
+        let mut first = None;
+        for n in 0..=KIOSK_DEVICES_MAX {
+            let code = match access.kiosk_new_code() {
+                Some(code) => code,
+                None => access.kiosk_view().codes[0].clone(),
+            };
+            let token = access.kiosk_set_up(&code, n as u64).unwrap();
+            first.get_or_insert(token);
+        }
+        let view = access.kiosk_view();
+        assert_eq!(view.kiosks.len(), KIOSK_DEVICES_MAX);
+        assert_eq!(view.kiosks[0].number, 2);
+        assert!(!access.is_kiosk(&first.unwrap()));
+    }
+
+    #[test]
+    fn an_old_file_with_no_kiosks_still_loads_and_kiosks_are_saved() {
+        let dir =
+            std::env::temp_dir().join(format!("gridfpv-kiosk-{}", crate::auth::random_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // What an earlier build wrote: codes only, and a key this build does not know.
+        std::fs::write(
+            dir.join(ACCESS_FILE),
+            r#"{"events":{"fri":{"ace":{"code":"ABC234"}}},"kiosk_key":"OLDOLDOL"}"#,
+        )
+        .unwrap();
+        let access = PilotAccess::new(Some(dir.clone()));
+        assert_eq!(code_of(&access, "fri", &field(&["ace"]), "ace"), "ABC234");
+        assert!(access.kiosk_view().codes.is_empty());
+        assert!(!access.is_kiosk("OLDOLDOL"));
+        let used = access.kiosk_new_code().unwrap();
+        let waiting = access.kiosk_new_code().unwrap();
+        let token = access.kiosk_set_up(&used, 5).unwrap();
+        let reopened = PilotAccess::new(Some(dir.clone()));
+        assert_eq!(reopened.kiosk_view().codes, [waiting]);
+        assert!(reopened.is_kiosk(&token));
+        assert_eq!(code_of(&reopened, "fri", &field(&["ace"]), "ace"), "ABC234");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

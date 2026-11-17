@@ -242,3 +242,106 @@ describe('PilotSignup: a signed-in pilot', () => {
     expect(screen.getByRole('region', { name: 'Sign-up for Practice' })).toBeVisible();
   });
 });
+
+describe('PilotSignup: the grid for a kiosk', () => {
+  function openGrid(sheet: SignupView = signupSheet(), who: typeof BEE | null = BEE) {
+    const actions = {
+      take: vi.fn(async (_heat: string, _seat: { adapter: string; seat: string }) => {}),
+      next: vi.fn(async (_phase: string, _seat: { adapter: string; seat: string }) => {}),
+      leave: vi.fn(async (_heat: string) => {})
+    };
+    render(PilotSignup, {
+      phases: [signupPhase(sheet)],
+      names: signupNames(signupEvent(sheet)),
+      pilot: who ?? undefined,
+      channels: [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }],
+      actions: who ? actions : undefined,
+      layout: 'grid'
+    });
+    return actions;
+  }
+  const row = (n: number) => screen.getByRole('row', { name: `Qualifying Heat ${n}` });
+  const cells = (n: number) => within(row(n)).getAllByRole('cell');
+
+  it('is a table: a row for each heat and a column for each seat, with the channel', () => {
+    openGrid();
+    const table = screen.getByRole('table', { name: 'Heats of Qualifying' });
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map((cell) => cell.textContent?.replace(/\s+/g, ' ').trim());
+    expect(headers).toEqual([
+      'Heat',
+      'Seat 1 R1 · 5658 MHz Next free',
+      'Seat 2 Next free',
+      'Seat 3 Next free'
+    ]);
+    expect(within(table).getAllByRole('row')).toHaveLength(4);
+    expect(cells(1)[0]).toHaveTextContent('Ace');
+    // The phone's list is not drawn as well.
+    expect(screen.queryByRole('listitem', { name: 'Qualifying Heat 1' })).toBeNull();
+    expect(screen.queryByRole('group', { name: /Next free spot/ })).toBeNull();
+    expect(document.body.textContent).not.toContain('quali/heat');
+  });
+
+  it('takes a free seat, leaves their own, and takes the next free from a column', async () => {
+    const actions = openGrid(signupSheet(), ACE);
+    await fireEvent.click(
+      within(cells(2)[1]).getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 2' })
+    );
+    expect(actions.take).toHaveBeenCalledWith('quali/heat-2', { adapter: 'gate', seat: '1' });
+    expect(cells(1)[0]).toHaveClass('mine');
+    await fireEvent.click(
+      within(cells(1)[0]).getByRole('button', { name: 'Leave Qualifying Heat 1' })
+    );
+    expect(actions.leave).toHaveBeenCalledWith('quali/heat-1');
+    await fireEvent.click(screen.getByRole('button', { name: 'Next free spot on Seat 3' }));
+    expect(actions.next).toHaveBeenCalledWith('quali', { adapter: 'gate', seat: '2' });
+  });
+
+  it("has no button on another pilot's seat, and says why a free seat cannot be taken", () => {
+    openGrid(
+      signupSheet({
+        rules: { ...SIGNUP_RULES, run_limit: 1 },
+        pilots: [signupRuns('p-bee', { used: 1, allowed: 1 })]
+      })
+    );
+    expect(within(cells(1)[0]).queryByRole('button')).toBeNull();
+    expect(cells(2)[0]).toHaveTextContent('Free');
+    expect(cells(2)[0]).toHaveTextContent('No runs left');
+    expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull();
+    for (const button of screen.getAllByRole('button', { name: /^Next free spot/ })) {
+      expect(button).toBeDisabled();
+    }
+  });
+
+  it('marks the state of each heat, and offers nothing in one that is on or flown', () => {
+    openGrid(
+      signupSheet({
+        heats: [
+          signupHeat(1, ['p-bee', null, null], 'Flown'),
+          signupHeat(2, ['p-bee', null, null], 'Racing'),
+          signupHeat(3, [null, null, null], 'Closed')
+        ]
+      })
+    );
+    expect(row(1)).toHaveTextContent('Flown');
+    expect(row(2)).toHaveTextContent('On now');
+    expect(row(3)).toHaveTextContent('Closed');
+    for (const n of [1, 2, 3]) expect(within(row(n)).queryAllByRole('button')).toEqual([]);
+  });
+
+  it('with nobody signed in it shows who is where and nothing to press', () => {
+    openGrid(signupSheet(), null);
+    expect(cells(1)[0]).toHaveTextContent('Ace');
+    expect(screen.queryAllByRole('button')).toEqual([]);
+  });
+
+  it("shows the Director's reason when it refuses", async () => {
+    const actions = openGrid();
+    actions.take.mockRejectedValueOnce(
+      new Error('that seat in Qualifying Heat 2 is already taken')
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 1 in Qualifying Heat 2' }));
+    expect(await screen.findByTestId('signup-error')).toHaveTextContent('already taken');
+  });
+});

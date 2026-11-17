@@ -12,6 +12,7 @@ import {
   getPublicEventState,
   kioskDone,
   kioskIn,
+  kioskSetUp,
   leaveSpot,
   listPublicChannels,
   listPublicClasses,
@@ -60,6 +61,8 @@ export interface PublicSource extends LiveSession {
   kioskIn(code: string): Promise<KioskPassView>;
   /** The pilot is done at the kiosk. */
   kioskDone(pass: string): Promise<void>;
+  /** Make this device a kiosk, with a kiosk code the director made. It is used up. */
+  kioskSetUp(code: string): Promise<void>;
 }
 
 const NOT_FOR_VISITORS = 'Only the director can do this.';
@@ -79,6 +82,7 @@ export function publicSource(baseUrl: string): PublicSource {
     leaveSpot: (heat, kiosk) => leaveSpot(baseUrl, heat, { kiosk }),
     kioskIn: (code) => kioskIn(baseUrl, code),
     kioskDone: (pass) => kioskDone(baseUrl, pass),
+    kioskSetUp: (code) => kioskSetUp(baseUrl, code),
     getEventState: () => getPublicEventState(baseUrl),
     subscribeChanges: (_id, onCursor) => subscribePublicChanges(baseUrl, onCursor),
     listPilots: () => listPublicPilots(baseUrl),

@@ -1063,7 +1063,12 @@ describe('Session', () => {
 
 describe('other devices on the network', () => {
   const VIEW = { enabled: true, port: 8081, state: 'Starting' as const, addresses: [] };
-  const HELLO = { version: '0.5.1', caller: 'Local' as const, director_sign_in: false };
+  const HELLO = {
+    version: '0.5.1',
+    caller: 'Local' as const,
+    director_sign_in: false,
+    kiosk: false
+  };
 
   it('hello and getNetwork are plain reads that never prompt', async () => {
     const getPublicHello = vi.fn(async () => HELLO);

@@ -11,6 +11,7 @@ import type {
   Class,
   EventView,
   KioskPassView,
+  KioskView,
   Pilot,
   ProtocolError,
   PublicEvent,
@@ -274,14 +275,76 @@ describe('pilot sign-up over the wire (docs/primitives.md §11.5)', () => {
 });
 
 describe('the kiosk over the wire (docs/primitives.md §11.4)', () => {
-  const kiosk = (code: unknown) =>
+  /** A tablet's cookie, once the director's kiosk code has been typed on it. */
+  let tablet = '';
+  const kiosk = (code: unknown, cookie = tablet) =>
     fetch(`${director.baseUrl}/public/pilot/kiosk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+      body: JSON.stringify({ code })
+    });
+  const setUp = (code: unknown) =>
+    fetch(`${director.baseUrl}/public/pilot/kiosk/device`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code })
     });
 
-  it('a wrong code is a typed 401, and nothing but the reason comes back', async () => {
+  it("the director's kiosk list is codes and kiosks, and a new code is added to it", async () => {
+    const before = await direct<KioskView>('GET', '/kiosk');
+    expect(Object.keys(before).sort()).toEqual(['codes', 'kiosks']);
+    const after = await direct<KioskView>('POST', '/kiosk/codes');
+    expect(after.codes).toHaveLength(before.codes.length + 1);
+    expect(after.codes.at(-1)).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/);
+    const res = await fetch(`${director.baseUrl}/kiosk`, { headers: auth() });
+    expect(res.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('a kiosk code sets a device up once: 204 and a cookie, then a typed 401', async () => {
+    const code = (await direct<KioskView>('POST', '/kiosk/codes')).codes.at(-1)!;
+    const wrong = await setUp('ZZZZZZZZ');
+    expect(wrong.status).toBe(401);
+    expect(wrong.headers.get('set-cookie')).toBeNull();
+    expect(await wrong.json()).toEqual({
+      code: 'Unauthorized',
+      message:
+        'That kiosk code is not right, or it has been used. Make a new one on the Network page.'
+    });
+    const res = await setUp(code);
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe('');
+    const set = res.headers.get('set-cookie') ?? '';
+    expect(set).toMatch(
+      /^gridfpv_kiosk=[^;]+; Path=\/; Max-Age=2592000; HttpOnly; SameSite=Strict$/
+    );
+    tablet = set.split(';')[0];
+    expect(tablet).not.toContain(code);
+    // Used up.
+    expect((await setUp(code)).status).toBe(401);
+    const view = await direct<KioskView>('GET', '/kiosk');
+    expect(view.codes).not.toContain(code);
+    const mine = view.kiosks.at(-1)!;
+    expect(Object.keys(mine).sort()).toEqual(['number', 'set_up_at']);
+    expect(typeof mine.number).toBe('number');
+    expect(mine.set_up_at).toBeGreaterThan(1_700_000_000);
+  });
+
+  it('a device that is not a kiosk is refused with a typed 403, whatever the code', async () => {
+    const access = await direct<{ pilots: { pilot: string; code: string }[] }>(
+      'GET',
+      `/events/${event}/access`
+    );
+    for (const code of [access.pilots[0].code, 'ZZZZZZ']) {
+      const res = await kiosk(code, '');
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({
+        code: 'Forbidden',
+        message: 'This device is not set up as a kiosk. The director sets a kiosk up.'
+      });
+    }
+  });
+
+  it('on a kiosk a wrong pilot code is a typed 401', async () => {
     const res = await kiosk('ZZZZZZ');
     expect(res.status).toBe(401);
     expect(res.headers.get('set-cookie')).toBeNull();
@@ -291,7 +354,7 @@ describe('the kiosk over the wire (docs/primitives.md §11.4)', () => {
     });
   });
 
-  it('a right code answers the pilot, a pass and how long it lasts, and sets no cookie', async () => {
+  it('on a kiosk a right code answers the pilot, a pass and how long it lasts', async () => {
     const access = await direct<{ pilots: { pilot: string; code: string }[] }>(
       'GET',
       `/events/${event}/access`
@@ -309,21 +372,37 @@ describe('the kiosk over the wire (docs/primitives.md §11.4)', () => {
     expect(body.idle_seconds).toBe(120);
     expect(typeof body.pass).toBe('string');
 
-    // With the pass in its header the Director knows the pilot; without it, nobody.
+    // The Director says who the tablet is acting for only with the pass and the cookie.
     const hello = async (headers: Record<string, string>) =>
-      ((await (await fetch(`${director.baseUrl}/public/hello`, { headers })).json()) as PublicHello)
-        .pilot;
-    expect(await hello({ 'X-GridFPV-Kiosk': body.pass })).toEqual(body.pilot);
-    expect(await hello({})).toBeUndefined();
-    expect(await hello({ 'X-GridFPV-Kiosk': `${body.pass}x` })).toBeUndefined();
+      (await (await fetch(`${director.baseUrl}/public/hello`, { headers })).json()) as PublicHello;
+    const both = await hello({ 'X-GridFPV-Kiosk': body.pass, Cookie: tablet });
+    expect(both.pilot).toEqual(body.pilot);
+    expect(both.kiosk).toBe(true);
+    expect((await hello({ Cookie: tablet })).pilot).toBeUndefined();
+    expect((await hello({ Cookie: tablet })).kiosk).toBe(true);
+    const passOnly = await hello({ 'X-GridFPV-Kiosk': body.pass });
+    expect(passOnly.pilot).toBeUndefined();
+    expect(passOnly.kiosk).toBe(false);
+    expect(
+      (await hello({ 'X-GridFPV-Kiosk': `${body.pass}x`, Cookie: tablet })).pilot
+    ).toBeUndefined();
 
     // Done ends it: 204, no body, and the pass is no use after.
     const done = await fetch(`${director.baseUrl}/public/pilot/kiosk`, {
       method: 'DELETE',
-      headers: { 'X-GridFPV-Kiosk': body.pass }
+      headers: { 'X-GridFPV-Kiosk': body.pass, Cookie: tablet }
     });
     expect(done.status).toBe(204);
     expect(await done.text()).toBe('');
-    expect(await hello({ 'X-GridFPV-Kiosk': body.pass })).toBeUndefined();
+    expect((await hello({ 'X-GridFPV-Kiosk': body.pass, Cookie: tablet })).pilot).toBeUndefined();
+  });
+
+  it('removing the kiosk stops the tablet, and the list says so', async () => {
+    const view = await direct<KioskView>('GET', '/kiosk');
+    const number = view.kiosks.at(-1)!.number;
+    const after = await direct<KioskView>('DELETE', `/kiosk/devices/${number}`);
+    expect(after.kiosks.map((entry) => entry.number)).not.toContain(number);
+    const res = await kiosk('ZZZZZZ');
+    expect(res.status).toBe(403);
   });
 });

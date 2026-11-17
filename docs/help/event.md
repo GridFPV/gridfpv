@@ -57,8 +57,8 @@ a screen left open shows none.
 To sign a pilot in:
 
 - Press **QR code** beside their name and let them scan it with the phone's camera. Or
-- Read them their code. On the phone they open Grid's address, press **I am a pilot**, and
-  type it. Capitals and spaces do not matter.
+- Read them their code. On the phone they open Grid's address, press **Pilot** in the top
+  corner, and type it. Capitals and spaces do not matter.
 
 Phones must be able to reach Grid first. Turn that on, on the
 [Network](#/help/network) page.

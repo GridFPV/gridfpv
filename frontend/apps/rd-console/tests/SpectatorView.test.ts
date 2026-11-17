@@ -244,7 +244,7 @@ describe('SpectatorView: results', () => {
   it('opens on the phase raced last and lists it in ranked order', async () => {
     await open(withResults());
     await fireEvent.click(tab('Results'));
-    const pickerEl = screen.getByRole('combobox', { name: 'Results for' }) as HTMLSelectElement;
+    const pickerEl = screen.getByRole('combobox', { name: 'Phase' }) as HTMLSelectElement;
     expect(pickerEl.selectedOptions[0].textContent).toBe('Qualifying');
     const table = screen.getByRole('table', { name: 'Results' });
     expect(
@@ -258,19 +258,192 @@ describe('SpectatorView: results', () => {
     expect(bee).toHaveTextContent('4.250');
   });
 
-  it('switches to another phase, and marks a disqualified pilot', async () => {
-    await open(withResults());
+  it('picks the phase first, then its overall table or one of its heats', async () => {
+    const view = withResults();
+    view.races = [
+      race('h1', 1, 'Saved', {
+        seats: [raceSeat(0, 'p-ace', { finish: 1 }), raceSeat(1, 'p-bee', { finish: 2 })]
+      })
+    ];
+    await open(view);
     await fireEvent.click(tab('Results'));
-    const pickerEl = screen.getByRole('combobox', { name: 'Results for' });
-    expect(
-      within(pickerEl)
+    const phase = screen.getByRole('combobox', { name: 'Phase' });
+    const show = screen.getByRole('combobox', { name: 'Show' }) as HTMLSelectElement;
+    const options = (el: HTMLElement) =>
+      within(el)
         .getAllByRole('option')
-        .map((o) => o.textContent)
-    ).toEqual(['Qualifying', 'Qualifying › Heat 1']);
-    await fireEvent.change(pickerEl, { target: { value: 'h1' } });
-    const table = screen.getByRole('table', { name: 'Results' });
+        .map((o) => o.textContent);
+    // A heat inside a phase is reached through the phase, not listed beside it.
+    expect(options(phase)).toEqual(['Qualifying']);
+    expect(options(show)).toEqual(['Overall', 'Heat 1']);
+    expect(show.selectedOptions[0].textContent).toBe('Overall');
+    expect(screen.getByRole('table', { name: 'Results' })).toBeVisible();
+    await fireEvent.change(show, { target: { value: 'h1' } });
+    // The overall table gives way to the heat's race.
+    expect(screen.queryByRole('table', { name: 'Results' })).toBeNull();
+    const table = screen.getByRole('table', { name: 'Heat 1 race 1' });
+    expect(screen.getByTestId('result-race')).toHaveTextContent('Heat 1');
+    // Someone disqualified from the heat is marked in its race.
     expect(within(table).getByRole('row', { name: /Bee/ })).toHaveTextContent('Disqualified');
-    expect(within(table).queryByRole('columnheader', { name: 'Best 3' })).toBeNull();
+    expect(within(table).getByRole('row', { name: /Ace/ })).not.toHaveTextContent('Disqualified');
+    // Back to overall.
+    await fireEvent.change(show, { target: { value: '' } });
+    expect(screen.getByRole('table', { name: 'Results' })).toBeVisible();
+  });
+
+  /** Two phases. Mains has a final raced twice and a heat still to fly. */
+  function twoPhases(): EventView {
+    const finalRace = (number: number, aceLaps: number[], beeLaps: number[]) =>
+      race('final', number, 'Saved', {
+        seats: [
+          raceSeat(0, 'p-ace', {
+            finish: number === 1 ? 1 : 2,
+            laps: aceLaps.map((seconds, i) => lap(i + 1, seconds)),
+            best_lap_micros: Math.min(...aceLaps) * S,
+            total_micros: aceLaps.reduce((a, b) => a + b, 0) * S
+          }),
+          raceSeat(1, 'p-bee', {
+            finish: number === 1 ? 2 : 1,
+            laps: beeLaps.map((seconds, i) => lap(i + 10, seconds)),
+            best_lap_micros: Math.min(...beeLaps) * S,
+            total_micros: beeLaps.reduce((a, b) => a + b, 0) * S
+          })
+        ]
+      });
+    return eventView({
+      phases: [
+        group('quali', 'Qualifying', undefined, {
+          format: TWO_MINUTE_QUALI,
+          ranking: [placed('p-cat', 1, { laps: 4 })]
+        }),
+        heat('q1', 'Qualifying Heat 1', ['p-cat'], {
+          parent: 'quali',
+          ranking: [placed('p-cat', 1, { laps: 4 })]
+        }),
+        group('mains', 'Mains', undefined, {
+          format: TWO_MINUTE_QUALI,
+          ranking: [placed('p-ace', 1, { wins: 1 }), placed('p-bee', 2, { wins: 1 })]
+        }),
+        heat('final', 'A-Main', ['p-ace', 'p-bee'], {
+          parent: 'mains',
+          format: TWO_MINUTE_QUALI,
+          ranking: [
+            placed('p-ace', 1, { wins: 1, laps: 5 }),
+            placed('p-bee', 2, { wins: 1, laps: 4 })
+          ]
+        }),
+        heat('b-main', 'B-Main', ['p-cat'], { parent: 'mains' })
+      ],
+      races: [
+        race('q1', 1, 'Saved', { seats: [raceSeat(0, 'p-cat', { finish: 1, laps: [lap(1, 9)] })] }),
+        finalRace(1, [5, 4.5, 4.75], [6, 5.5]),
+        race('final', 2, 'Discarded'),
+        finalRace(3, [5.25, 5.5], [4, 4.1])
+      ]
+    });
+  }
+
+  it('offers only the heats of the phase picked that have a saved race', async () => {
+    await open(twoPhases());
+    await fireEvent.click(tab('Results'));
+    const phase = screen.getByRole('combobox', { name: 'Phase' }) as HTMLSelectElement;
+    const show = () => screen.getByRole('combobox', { name: 'Show' }) as HTMLSelectElement;
+    const shown = () =>
+      within(show())
+        .getAllByRole('option')
+        .map((o) => o.textContent);
+    // It opens on the phase raced last.
+    expect(phase.selectedOptions[0].textContent).toBe('Mains');
+    // B-Main has not been flown: it is not offered.
+    expect(shown()).toEqual(['Overall', 'A-Main']);
+    await fireEvent.change(phase, { target: { value: 'quali' } });
+    expect(shown()).toEqual(['Overall', 'Qualifying Heat 1']);
+  });
+
+  it('picking another phase goes back to its overall table', async () => {
+    await open(twoPhases());
+    await fireEvent.click(tab('Results'));
+    const show = () => screen.getByRole('combobox', { name: 'Show' }) as HTMLSelectElement;
+    await fireEvent.change(show(), { target: { value: 'final' } });
+    expect(screen.queryByRole('table', { name: 'Results' })).toBeNull();
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Phase' }), {
+      target: { value: 'quali' }
+    });
+    expect(show().selectedOptions[0].textContent).toBe('Overall');
+    expect(screen.getByRole('table', { name: 'Results' })).toHaveTextContent('Cat');
+  });
+
+  it('a heat raced more than once shows its own result, then each race that counts', async () => {
+    await open(twoPhases());
+    await fireEvent.click(tab('Results'));
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Show' }), {
+      target: { value: 'final' }
+    });
+    const heatTable = screen.getByRole('table', { name: 'Result of A-Main' });
+    expect(
+      within(heatTable)
+        .getAllByRole('rowheader')
+        .map((cell) => cell.textContent?.trim())
+    ).toEqual(['Ace', 'Bee']);
+    // The race that was thrown out is not a result, and the numbers are the ones every page uses.
+    expect(screen.getAllByTestId('result-race').map((el) => el.textContent?.trim())).toEqual([
+      'Race 1',
+      'Race 3'
+    ]);
+    const third = screen.getByRole('table', { name: 'A-Main race 3' });
+    expect(
+      within(third)
+        .getAllByRole('rowheader')
+        .map((cell) => cell.textContent?.trim())
+    ).toEqual(['Bee', 'Ace']);
+    expect(
+      within(within(third).getByRole('row', { name: /Bee/ }))
+        .getAllByRole('cell')
+        .map((cell) => cell.textContent?.trim())
+      // Two laps is too few for a best three in a row: a dash, not a made-up time.
+    ).toEqual(['1st', '2', '—', '4.000', '8.100']);
+  });
+
+  it("a heat raced once shows just its race, under the heat's name", async () => {
+    await open(twoPhases());
+    await fireEvent.click(tab('Results'));
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Phase' }), {
+      target: { value: 'quali' }
+    });
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Show' }), {
+      target: { value: 'q1' }
+    });
+    expect(screen.queryByRole('table', { name: 'Result of Qualifying Heat 1' })).toBeNull();
+    expect(screen.getAllByTestId('result-race').map((el) => el.textContent?.trim())).toEqual([
+      'Qualifying Heat 1'
+    ]);
+  });
+
+  it("opens a race's lap times large, with every pilot's laps and the best one marked", async () => {
+    await open(twoPhases());
+    await fireEvent.click(tab('Results'));
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Show' }), {
+      target: { value: 'final' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Lap times of A-Main race 1' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading')).toHaveTextContent('Lap times: A-Main race 1');
+    const ace = within(dialog).getByRole('region', { name: 'Laps of Ace' });
+    expect(
+      within(ace)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent?.replace(/\s+/g, ' ').trim())
+    ).toEqual(['1 5.000', '2 4.500', '3 4.750']);
+    expect(ace.querySelectorAll('li.best')).toHaveLength(1);
+    expect(ace.querySelector('li.best')).toHaveTextContent('4.500');
+    expect(ace).toHaveTextContent('1st');
+    expect(ace).toHaveTextContent('Total 14.250');
+    expect(within(dialog).getByRole('region', { name: 'Laps of Bee' })).toHaveTextContent('2nd');
+    // Nothing in it changes anything: the one button closes it.
+    expect(within(dialog).getAllByRole('button')).toHaveLength(1);
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.body.textContent).not.toContain('final#');
   });
 
   it('says so when there are no results', async () => {
@@ -550,6 +723,16 @@ describe('SpectatorView: a signed-in pilot', () => {
     await openAs(view, ACE);
     const races = within(screen.getByRole('list', { name: 'My races' }));
     const names = races.getAllByText(/· race \d/).map((el) => el.textContent);
+    // Each race opens to its lap times, large, with the pilot's own column marked.
+    await fireEvent.click(races.getByRole('button', { name: 'Lap times of Heat 1 · race 1' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading')).toHaveTextContent('Lap times: Heat 1 race 1');
+    expect(within(dialog).getByRole('region', { name: 'Laps of Ace' })).toHaveClass('me');
+    for (const other of within(dialog).getAllByRole('region')) {
+      if (other.getAttribute('aria-label') !== 'Laps of Ace') expect(other).not.toHaveClass('me');
+    }
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(names).toEqual(['Heat 3 · race 1', 'Heat 1 · race 1']);
     const laps = within(screen.getByRole('list', { name: 'Laps of Heat 1 · race 1' }))
       .getAllByRole('listitem')
@@ -626,40 +809,52 @@ describe('SpectatorView: a signed-in pilot', () => {
 });
 
 describe('SpectatorView: the Sign up tab', () => {
-  it('is there only when a phase has sign-up, between Up next and Results', async () => {
+  const BEE = { id: 'p-bee', callsign: 'Bee' };
+  async function openSheet(who: typeof BEE | undefined, over: Record<string, unknown> = {}) {
+    const view = signupEvent(signupSheet());
+    const { live } = await openLive(view, { listPilots: vi.fn(async () => SIGNUP_PILOTS) });
+    const props = { live, pilot: who, channels: [], buzz: vi.fn(), ...over };
+    const rendered = render(SpectatorView, props);
+    return { live, view, rendered, props };
+  }
+  const tabNames = () => screen.getAllByRole('tab').map((el) => el.textContent?.trim());
+
+  it('someone who is only looking never gets it, sign-up or not', async () => {
     await open(running());
     expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
     cleanup();
-    const { live } = await openLive(signupEvent(), {
-      listPilots: vi.fn(async () => SIGNUP_PILOTS)
-    });
-    render(SpectatorView, { live });
-    expect(screen.getAllByRole('tab').map((el) => el.textContent?.trim())).toEqual([
-      'Last race',
-      'Up next',
-      'Sign up',
-      'Results'
-    ]);
+    await openSheet(undefined);
+    expect(tabNames()).toEqual(['Last race', 'Up next', 'Results']);
+    expect(screen.queryByRole('region', { name: 'Sign-up for Qualifying' })).toBeNull();
+  });
+
+  it('a pilot gets it when a phase has sign-up, between Up next and Results', async () => {
+    await openSheet(BEE);
+    expect(tabNames()).toEqual(['Me', 'Last race', 'Up next', 'Sign up', 'Results']);
+    cleanup();
+    // A pilot at an event with no sign-up does not.
+    const { live } = await openLive(running(), { listPilots: vi.fn(async () => PILOTS) });
+    render(SpectatorView, { live, pilot: BEE, channels: [], buzz: vi.fn() });
+    expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
   });
 
   it('shows the sheet and nothing else when it is picked', async () => {
-    const { live } = await openLive(signupEvent(), {
-      listPilots: vi.fn(async () => SIGNUP_PILOTS)
-    });
-    render(SpectatorView, { live });
+    await openSheet(BEE);
     await fireEvent.click(tab('Sign up'));
     expect(screen.getAllByRole('region').map((el) => el.getAttribute('aria-label'))).toEqual([
       'Sign up',
       'Sign-up for Qualifying'
     ]);
-    // Looking only: nothing to press.
+  });
+
+  it('with nothing to act through, a pilot sees the sheet and can press nothing', async () => {
+    await openSheet(BEE);
+    await fireEvent.click(tab('Sign up'));
     expect(screen.queryAllByRole('button')).toEqual([]);
   });
 
   it('goes back to the race when sign-up is turned off under it', async () => {
-    const view = signupEvent();
-    const { live } = await openLive(view, { listPilots: vi.fn(async () => SIGNUP_PILOTS) });
-    render(SpectatorView, { live });
+    const { live, view } = await openSheet(BEE);
     await fireEvent.click(tab('Sign up'));
     live.view = {
       ...view,
@@ -671,50 +866,24 @@ describe('SpectatorView: the Sign up tab', () => {
     expect(screen.getByRole('region', { name: 'Last race' })).toBeVisible();
   });
 
+  it('goes back to the race when the pilot signs out while on it', async () => {
+    const { rendered, props } = await openSheet(BEE);
+    await fireEvent.click(tab('Sign up'));
+    await rendered.rerender({ ...props, pilot: undefined });
+    await waitFor(() => expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull());
+    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('region', { name: 'Sign-up for Qualifying' })).toBeNull();
+  });
+
   it('gives a signed-in pilot the buttons, and passes on what they press', async () => {
-    const { live } = await openLive(signupEvent(signupSheet()), {
-      listPilots: vi.fn(async () => SIGNUP_PILOTS)
-    });
     const signup = {
       take: vi.fn(async () => {}),
       next: vi.fn(async () => {}),
       leave: vi.fn(async () => {})
     };
-    render(SpectatorView, {
-      live,
-      pilot: { id: 'p-bee', callsign: 'Bee' },
-      channels: [],
-      buzz: vi.fn(),
-      signup
-    });
+    await openSheet(BEE, { signup });
     await fireEvent.click(tab('Sign up'));
     await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 1 in Qualifying Heat 2' }));
     expect(signup.take).toHaveBeenCalledOnce();
-  });
-
-  it('lands a pilot on the sheet when told to, and on their own tab when there is no sheet', async () => {
-    const { live } = await openLive(signupEvent(signupSheet()), {
-      listPilots: vi.fn(async () => SIGNUP_PILOTS)
-    });
-    render(SpectatorView, {
-      live,
-      pilot: { id: 'p-bee', callsign: 'Bee' },
-      channels: [],
-      buzz: vi.fn(),
-      landOn: 'signup'
-    });
-    await waitFor(() => expect(tab('Sign up')).toHaveAttribute('aria-selected', 'true'));
-    cleanup();
-    const plain = await openLive(running());
-    render(SpectatorView, {
-      live: plain.live,
-      pilot: { id: 'p-ace', callsign: 'Ace' },
-      channels: [],
-      buzz: vi.fn(),
-      landOn: 'signup'
-    });
-    await waitFor(() =>
-      expect(screen.getByRole('tab', { name: /^Me/ })).toHaveAttribute('aria-selected', 'true')
-    );
   });
 });

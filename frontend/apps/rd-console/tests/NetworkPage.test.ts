@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import type { NetworkRequest, NetworkView, PublicHello } from '@gridfpv/types';
+import type { KioskView, NetworkRequest, NetworkView, PublicHello } from '@gridfpv/types';
 import NetworkPage from '../src/screens/NetworkPage.svelte';
 
 beforeEach(() => {
@@ -27,11 +27,17 @@ const HELLO: PublicHello = {
   version: '0.5.1',
   caller: 'Local',
   event: 'Friday Night Whoops',
-  director_sign_in: false
+  director_sign_in: false,
+  kiosk: false
 };
 
-function open(first: NetworkView, hello: PublicHello = HELLO) {
+function open(
+  first: NetworkView,
+  hello: PublicHello = HELLO,
+  firstKiosks: KioskView = { codes: [], kiosks: [] }
+) {
   let now = first;
+  let kiosks = firstKiosks;
   const session = {
     getNetwork: vi.fn(async () => now),
     putNetwork: vi.fn(async (request: NetworkRequest): Promise<NetworkView | undefined> => {
@@ -44,7 +50,20 @@ function open(first: NetworkView, hello: PublicHello = HELLO) {
       return now;
     }),
     hello: vi.fn(async () => hello),
-    signOutDirector: vi.fn(async () => {})
+    signOutDirector: vi.fn(async () => {}),
+    getKiosks: vi.fn(async (): Promise<KioskView> => kiosks),
+    newKioskCode: vi.fn(async (): Promise<KioskView | undefined> => {
+      kiosks = { ...kiosks, codes: [...kiosks.codes, `NEWC${2345 + kiosks.codes.length}`] };
+      return kiosks;
+    }),
+    cancelKioskCode: vi.fn(async (code: string): Promise<KioskView | undefined> => {
+      kiosks = { ...kiosks, codes: kiosks.codes.filter((kept) => kept !== code) };
+      return kiosks;
+    }),
+    removeKiosk: vi.fn(async (number: number): Promise<KioskView | undefined> => {
+      kiosks = { ...kiosks, kiosks: kiosks.kiosks.filter((kept) => kept.number !== number) };
+      return kiosks;
+    })
   };
   render(NetworkPage, { session });
   return {
@@ -285,7 +304,7 @@ describe('NetworkPage', () => {
     await waitFor(() => expect(reload).toHaveBeenCalledOnce());
   });
 
-  it('gives the address for a shared tablet only when other devices can reach Grid', async () => {
+  it('gives the kiosk address only when other devices can reach Grid', async () => {
     open({ ...ON, addresses: ['http://192.168.1.20:8081/', 'http://10.42.0.1:8081/'] });
     const link = await screen.findByTestId('kiosk-link');
     expect(link).toHaveTextContent('http://192.168.1.20:8081/#/kiosk');
@@ -294,10 +313,117 @@ describe('NetworkPage', () => {
     open(OFF);
     await screen.findByTestId('network-state');
     expect(screen.queryByTestId('kiosk-link')).toBeNull();
+    expect(screen.getByText(/Let other devices open Grid first\./)).toBeVisible();
     cleanup();
     // On, but this computer has no address to give.
     open({ ...ON, addresses: [] });
     await screen.findByTestId('network-state');
     expect(screen.queryByTestId('kiosk-link')).toBeNull();
+  });
+});
+
+describe('NetworkPage: kiosks', () => {
+  const codes = () => screen.queryAllByTestId('kiosk-code').map((el) => el.textContent?.trim());
+  const TWO: KioskView = {
+    codes: ['ABCD2345', 'WXYZ6789'],
+    kiosks: [
+      { number: 1, set_up_at: 1_794_800_000 },
+      { number: 3, set_up_at: 1_794_803_600 }
+    ]
+  };
+
+  it('starts with no codes and no kiosks, and says what a kiosk is', async () => {
+    open(ON);
+    await screen.findByTestId('kiosk-link');
+    expect(screen.getByText(/Only a tablet you set up here can be one\./)).toBeVisible();
+    expect(codes()).toEqual([]);
+    expect(screen.queryByRole('list', { name: 'Kiosks set up' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Kiosk codes waiting to be used' })).toBeNull();
+  });
+
+  it('makes a code each time it is asked, and shows each in two halves', async () => {
+    const { session } = open(ON);
+    const make = await screen.findByRole('button', { name: 'New kiosk code' });
+    await fireEvent.click(make);
+    await waitFor(() => expect(codes()).toEqual(['NEWC 2345']));
+    await fireEvent.click(make);
+    await waitFor(() => expect(codes()).toEqual(['NEWC 2345', 'NEWC 2346']));
+    expect(session.newKioskCode).toHaveBeenCalledTimes(2);
+  });
+
+  it('lists the codes waiting and the kiosks set up', async () => {
+    open(ON, HELLO, TWO);
+    await waitFor(() => expect(codes()).toEqual(['ABCD 2345', 'WXYZ 6789']));
+    const set = within(screen.getByRole('list', { name: 'Kiosks set up' })).getAllByRole(
+      'listitem'
+    );
+    expect(set.map((item) => item.textContent?.replace(/\s+/g, ' ').trim().slice(0, 7))).toEqual([
+      'Kiosk 1',
+      'Kiosk 3'
+    ]);
+    expect(set[0]).toHaveTextContent(/set up .+\d/);
+  });
+
+  it('cancels a code that has not been used', async () => {
+    const { session } = open(ON, HELLO, TWO);
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Cancel kiosk code ABCD 2345' })
+    );
+    await waitFor(() => expect(codes()).toEqual(['WXYZ 6789']));
+    expect(session.cancelKioskCode).toHaveBeenCalledWith('ABCD2345');
+  });
+
+  it('removes a kiosk', async () => {
+    const { session } = open(ON, HELLO, TWO);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Remove kiosk 3' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Remove kiosk 3' })).toBeNull()
+    );
+    expect(session.removeKiosk).toHaveBeenCalledWith(3);
+    expect(screen.getByRole('button', { name: 'Remove kiosk 1' })).toBeVisible();
+  });
+
+  it('a code a tablet has used moves to the kiosks by itself', async () => {
+    const { session } = open(ON, HELLO, { codes: ['ABCD2345'], kiosks: [] });
+    await waitFor(() => expect(codes()).toEqual(['ABCD 2345']));
+    session.getKiosks.mockResolvedValue({
+      codes: [],
+      kiosks: [{ number: 1, set_up_at: 1_794_800_000 }]
+    });
+    await vi.advanceTimersByTimeAsync(6_000);
+    await waitFor(() => expect(codes()).toEqual([]));
+    expect(screen.getByRole('button', { name: 'Remove kiosk 1' })).toBeVisible();
+  });
+
+  it("shows the Director's reason when a change is refused, and keeps the list", async () => {
+    const { session } = open(ON, HELLO, TWO);
+    session.newKioskCode.mockRejectedValueOnce(
+      new Error('There are already a lot of kiosk codes waiting. Use one or cancel one first.')
+    );
+    await fireEvent.click(await screen.findByRole('button', { name: 'New kiosk code' }));
+    expect(await screen.findByText(/already a lot of kiosk codes waiting/)).toBeVisible();
+    expect(codes()).toEqual(['ABCD 2345', 'WXYZ 6789']);
+  });
+
+  it('a prompt that was cancelled changes nothing', async () => {
+    const { session } = open(ON, HELLO, TWO);
+    session.removeKiosk.mockResolvedValueOnce(undefined);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Remove kiosk 1' }));
+    await waitFor(() => expect(session.removeKiosk).toHaveBeenCalledOnce());
+    expect(screen.getByRole('button', { name: 'Remove kiosk 1' })).toBeVisible();
+  });
+
+  it('keeps the list when it cannot be read again', async () => {
+    const { session } = open(ON, HELLO, TWO);
+    await waitFor(() => expect(codes()).toHaveLength(2));
+    session.getKiosks.mockRejectedValue(new Error('offline'));
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(codes()).toEqual(['ABCD 2345', 'WXYZ 6789']);
+  });
+
+  it('can make a code while other devices are shut out, for setting up ahead', async () => {
+    const { session } = open(OFF);
+    await fireEvent.click(await screen.findByRole('button', { name: 'New kiosk code' }));
+    await waitFor(() => expect(session.newKioskCode).toHaveBeenCalledOnce());
   });
 });

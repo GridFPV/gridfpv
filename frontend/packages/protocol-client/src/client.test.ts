@@ -925,3 +925,91 @@ describe('the kiosk (docs/primitives.md §11.4)', () => {
     ).rejects.toMatchObject({ status: 409, message: 'no runs left' });
   });
 });
+
+describe('setting kiosks up (docs/primitives.md §11.4)', () => {
+  const recorder = (status: number, body: unknown) => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async (): Promise<unknown> => body,
+        text: async (): Promise<string> => JSON.stringify(body)
+      } as unknown as Response;
+    };
+    return { seen, fetch };
+  };
+  const auth = (init?: RequestInit) =>
+    (init?.headers as Record<string, string> | undefined)?.Authorization;
+  const VIEW = { codes: ['ABCD2345'], kiosks: [{ number: 2, set_up_at: 1794800000 }] };
+
+  it("the director's four calls go to their routes, with the token when one is held", async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder(200, VIEW);
+    expect(await client.getKiosks('http://d.local:8080/', { token: 't', fetch })).toEqual(VIEW);
+    expect(await client.newKioskCode('http://d.local:8080', 't', { fetch })).toEqual(VIEW);
+    expect(await client.cancelKioskCode('http://d.local:8080', 'ABCD2345', 't', { fetch })).toEqual(
+      VIEW
+    );
+    expect(await client.removeKiosk('http://d.local:8080', 2, 't', { fetch })).toEqual(VIEW);
+    expect(seen.map((call) => [call.init?.method ?? 'GET', call.url])).toEqual([
+      ['GET', 'http://d.local:8080/kiosk'],
+      ['POST', 'http://d.local:8080/kiosk/codes'],
+      ['DELETE', 'http://d.local:8080/kiosk/codes/ABCD2345'],
+      ['DELETE', 'http://d.local:8080/kiosk/devices/2']
+    ]);
+    for (const call of seen) expect(auth(call.init)).toBe('Bearer t');
+    // With no token held, none is sent.
+    const open = recorder(200, VIEW);
+    await client.newKioskCode('http://d.local:8080', undefined, { fetch: open.fetch });
+    expect(auth(open.seen[0].init)).toBeUndefined();
+  });
+
+  it('a code with odd characters in it cannot change the route', async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder(200, VIEW);
+    await client.cancelKioskCode('http://d.local:8080', '../devices/1?x=#', undefined, { fetch });
+    expect(seen[0].url).toBe('http://d.local:8080/kiosk/codes/..%2Fdevices%2F1%3Fx%3D%23');
+  });
+
+  it('kioskSetUp POSTs the code with no token and reads no body', async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder(204, undefined);
+    await expect(
+      client.kioskSetUp('http://d.local:8081/', 'ABCD2345', { fetch })
+    ).resolves.toBeUndefined();
+    expect(seen[0].url).toBe('http://d.local:8081/public/pilot/kiosk/device');
+    expect(seen[0].init?.method).toBe('POST');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({ code: 'ABCD2345' });
+    expect(auth(seen[0].init)).toBeUndefined();
+  });
+
+  it("each rejects with the Director's reason and the status", async () => {
+    const client = await import('./client.js');
+    const used = recorder(401, {
+      code: 'Unauthorized',
+      message: 'That kiosk code is not right, or it has been used.'
+    });
+    await expect(
+      client.kioskSetUp('http://d.local:8081', 'ZZZZZZZZ', { fetch: used.fetch })
+    ).rejects.toMatchObject({
+      status: 401,
+      message: 'That kiosk code is not right, or it has been used.'
+    });
+    const full = recorder(409, {
+      code: 'Refused',
+      message: 'There are already a lot of kiosk codes waiting.'
+    });
+    await expect(
+      client.newKioskCode('http://d.local:8080', undefined, { fetch: full.fetch })
+    ).rejects.toMatchObject({ status: 409 });
+    const notKiosk = recorder(403, {
+      code: 'Forbidden',
+      message: 'This device is not set up as a kiosk.'
+    });
+    await expect(
+      client.kioskIn('http://d.local:8081', 'ABC234', { fetch: notKiosk.fetch })
+    ).rejects.toMatchObject({ status: 403 });
+  });
+});

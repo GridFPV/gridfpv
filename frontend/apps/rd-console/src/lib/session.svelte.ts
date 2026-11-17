@@ -67,6 +67,10 @@ import {
   deleteDataImport,
   getNetwork,
   putNetwork,
+  getKiosks,
+  newKioskCode,
+  cancelKioskCode,
+  removeKiosk,
   getPublicHello,
   getPilotAccess,
   resetPilotCode,
@@ -103,21 +107,28 @@ import type {
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
+  DataCopy,
+  DataExport,
+  DataInfo,
   DiscoveredTimer,
   EventMeta,
   EventView,
+  Format,
+  KioskView,
   NetworkRequest,
   NetworkView,
-  PilotAccessView,
-  PilotCodeView,
-  PublicHello,
-  PublicPilot,
-  Format,
+  OverlayLook,
+  OverlayPlacement,
   PassRequest,
   Pilot,
+  PilotAccessView,
+  PilotCodeView,
   PilotId,
+  PublicHello,
+  PublicPilot,
   RaceId,
   RaceSignal,
+  RenderRequest,
   SavedFormat,
   SeatProfile,
   SeatProfileRequest,
@@ -126,16 +137,10 @@ import type {
   TimerProfiles,
   TimerView,
   UpdateClassRequest,
-  RenderRequest,
+  UpdatePilotRequest,
   VideoSettings,
   VideoSettingsRequest,
-  VideoStatus,
-  DataCopy,
-  DataExport,
-  DataInfo,
-  OverlayLook,
-  OverlayPlacement,
-  UpdatePilotRequest
+  VideoStatus
 } from '@gridfpv/types';
 
 const TOKEN_STORAGE_KEY = 'gridfpv.rd.token';
@@ -238,6 +243,10 @@ const realApi = {
   deleteDataImport,
   getNetwork,
   putNetwork,
+  getKiosks,
+  newKioskCode,
+  cancelKioskCode,
+  removeKiosk,
   getPublicHello,
   getPilotAccess,
   resetPilotCode,
@@ -655,6 +664,26 @@ export class Session {
   /** Let other devices in, shut them out, or change the port. `undefined` on a cancelled prompt. */
   putNetwork(request: NetworkRequest): Promise<NetworkView | undefined> {
     return this.#privilegedWrite((token) => this.#api.putNetwork(this.baseUrl, request, token));
+  }
+
+  /** The kiosk codes waiting to be used, and the kiosks set up. */
+  getKiosks(): Promise<KioskView> {
+    return this.#api.getKiosks(this.baseUrl, { token: this.#token });
+  }
+
+  /** Make one more kiosk code. `undefined` on a cancelled prompt. */
+  newKioskCode(): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.newKioskCode(this.baseUrl, token));
+  }
+
+  /** Cancel a kiosk code that has not been used. */
+  cancelKioskCode(code: string): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.cancelKioskCode(this.baseUrl, code, token));
+  }
+
+  /** Remove a kiosk: its tablet stops being one. */
+  removeKiosk(number: number): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.removeKiosk(this.baseUrl, number, token));
   }
 
   /** Sign in as the director from another device. Rejects with the Director's words. */

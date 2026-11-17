@@ -41,10 +41,13 @@
     pilot = undefined,
     channels = [],
     actions = undefined,
-    how = 'Sign in as a pilot to take a seat.'
+    layout = 'list'
   }: {
-    /** What someone who is not signed in is told to do. A kiosk says it its own way. */
-    how?: string;
+    /**
+     * `list` is for a phone held upright: one heat under another. `grid` is for a tablet
+     * on its side at a kiosk: heats down, seats across, with large buttons.
+     */
+    layout?: 'list' | 'grid';
     /** The phases with sign-up, each with its sheet. */
     phases: readonly SignupPhase[];
     names: Names;
@@ -75,7 +78,7 @@
   const heatName = (heat: SignupHeatView) => names.phase(heat.heat);
 </script>
 
-<div class="signup">
+<div class="signup" data-layout={layout}>
   {#if error}
     <p class="error" role="alert" data-testid="signup-error">{error}</p>
   {/if}
@@ -96,10 +99,10 @@
       {#if me}
         <p class="runs" data-testid="my-runs">{runsWords(runsOf(signup, me))}</p>
       {:else if !pilot}
-        <p class="muted">{how}</p>
+        <p class="muted">Sign in as a pilot to take a seat.</p>
       {/if}
 
-      {#if me && actions}
+      {#if me && actions && layout === 'list'}
         <div class="next" role="group" aria-label="Next free spot in {phase.name}">
           <span class="muted">Next free:</span>
           {#each seats as seat, index (seat.name)}
@@ -116,67 +119,198 @@
         </div>
       {/if}
 
-      <ol class="heats">
-        {#each signup.heats as heat (heat.heat)}
-          <li aria-label={heatName(heat)} data-state={heat.state}>
-            <div class="heat-head">
-              <strong>Heat {heat.number}</strong>
-              {#if heatStateWords(heat)}
-                <Badge tone={heat.state === 'Racing' ? 'success' : 'neutral'}>
-                  {heatStateWords(heat)}
-                </Badge>
-              {/if}
-            </div>
-            <ul>
-              {#each heat.seats as on, index (index)}
-                {@const seat = seats[index]}
-                {@const action = me ? seatAction(signup, heat, index, me) : undefined}
-                <li class:mine={me !== undefined && on === me}>
-                  <span class="seat">
-                    {seat.name}
-                    {#if seat.channel}<span class="channel">{seat.channel}</span>{/if}
-                  </span>
-                  <span class="who">
-                    {#if on !== null && on !== undefined}
-                      {names.pilot(on)}
-                    {:else}
-                      <span class="free">Free</span>
-                    {/if}
-                  </span>
-                  <span class="do">
+      {#if layout === 'grid'}
+        <table aria-label="Heats of {phase.name}">
+          <thead>
+            <tr>
+              <th scope="col">Heat</th>
+              {#each seats as seat, index (seat.name)}
+                <th scope="col">
+                  <span class="seat-name">{seat.name}</span>
+                  {#if seat.channel}<span class="channel">{seat.channel}</span>{/if}
+                  {#if me && actions}
+                    <Button
+                      variant="secondary"
+                      disabled={busy || !hasNextFree(signup, index, me)}
+                      aria-label="Next free spot on {seat.name}"
+                      onclick={() => act(() => actions.next(phase.id, seat.seat))}>Next free</Button
+                    >
+                  {/if}
+                </th>
+              {/each}
+            </tr>
+          </thead>
+          <tbody>
+            {#each signup.heats as heat (heat.heat)}
+              <tr aria-label={heatName(heat)} data-state={heat.state}>
+                <th scope="row">
+                  <span class="heat-no">{heat.number}</span>
+                  {#if heatStateWords(heat)}
+                    <Badge tone={heat.state === 'Racing' ? 'success' : 'neutral'}>
+                      {heatStateWords(heat)}
+                    </Badge>
+                  {/if}
+                </th>
+                {#each heat.seats as on, index (index)}
+                  {@const seat = seats[index]}
+                  {@const action = me ? seatAction(signup, heat, index, me) : undefined}
+                  <td class:mine={me !== undefined && on === me}>
                     {#if action?.kind === 'take' && actions}
                       <Button
-                        size="sm"
                         variant="primary"
                         disabled={busy}
                         aria-label="Take {seat.name} in {heatName(heat)}"
                         onclick={() => act(() => actions.take(heat.heat, seat.seat))}>Take</Button
                       >
-                    {:else if action?.kind === 'leave' && actions}
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={busy}
-                        aria-label="Leave {heatName(heat)}"
-                        onclick={() => act(() => actions.leave(heat.heat))}>Leave</Button
-                      >
-                    {:else if action?.kind === 'mine'}
-                      <span class="muted">You</span>
-                    {:else if action?.kind === 'blocked'}
-                      <span class="muted why">{action.why}</span>
+                    {:else if on !== null && on !== undefined}
+                      <span class="who">{names.pilot(on)}</span>
+                      {#if action?.kind === 'leave' && actions}
+                        <Button
+                          variant="secondary"
+                          disabled={busy}
+                          aria-label="Leave {heatName(heat)}"
+                          onclick={() => act(() => actions.leave(heat.heat))}>Leave</Button
+                        >
+                      {/if}
+                    {:else}
+                      <span class="free">Free</span>
+                      {#if action?.kind === 'blocked'}
+                        <span class="muted why">{action.why}</span>
+                      {/if}
                     {/if}
-                  </span>
-                </li>
-              {/each}
-            </ul>
-          </li>
-        {/each}
-      </ol>
+                  </td>
+                {/each}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {:else}
+        <ol class="heats">
+          {#each signup.heats as heat (heat.heat)}
+            <li aria-label={heatName(heat)} data-state={heat.state}>
+              <div class="heat-head">
+                <strong>Heat {heat.number}</strong>
+                {#if heatStateWords(heat)}
+                  <Badge tone={heat.state === 'Racing' ? 'success' : 'neutral'}>
+                    {heatStateWords(heat)}
+                  </Badge>
+                {/if}
+              </div>
+              <ul>
+                {#each heat.seats as on, index (index)}
+                  {@const seat = seats[index]}
+                  {@const action = me ? seatAction(signup, heat, index, me) : undefined}
+                  <li class:mine={me !== undefined && on === me}>
+                    <span class="seat">
+                      {seat.name}
+                      {#if seat.channel}<span class="channel">{seat.channel}</span>{/if}
+                    </span>
+                    <span class="who">
+                      {#if on !== null && on !== undefined}
+                        {names.pilot(on)}
+                      {:else}
+                        <span class="free">Free</span>
+                      {/if}
+                    </span>
+                    <span class="do">
+                      {#if action?.kind === 'take' && actions}
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          disabled={busy}
+                          aria-label="Take {seat.name} in {heatName(heat)}"
+                          onclick={() => act(() => actions.take(heat.heat, seat.seat))}>Take</Button
+                        >
+                      {:else if action?.kind === 'leave' && actions}
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy}
+                          aria-label="Leave {heatName(heat)}"
+                          onclick={() => act(() => actions.leave(heat.heat))}>Leave</Button
+                        >
+                      {:else if action?.kind === 'mine'}
+                        <span class="muted">You</span>
+                      {:else if action?.kind === 'blocked'}
+                        <span class="muted why">{action.why}</span>
+                      {/if}
+                    </span>
+                  </li>
+                {/each}
+              </ul>
+            </li>
+          {/each}
+        </ol>
+      {/if}
     </section>
   {/each}
 </div>
 
 <style>
+  /* The kiosk grid: read standing up, pressed with a thumb. */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    margin-top: var(--gf-space-3);
+  }
+  th,
+  td {
+    border: 1px solid var(--gf-border-subtle);
+    padding: var(--gf-space-2) var(--gf-space-3);
+    text-align: center;
+    vertical-align: middle;
+    height: 4.25rem;
+  }
+  thead th {
+    height: auto;
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  thead th :global(button) {
+    display: block;
+    margin: var(--gf-space-1) auto 0;
+  }
+  thead th:first-child,
+  tbody th {
+    width: 7rem;
+  }
+  .seat-name {
+    display: block;
+  }
+  .heat-no {
+    font-size: var(--gf-font-size-xl);
+    font-weight: var(--gf-font-weight-bold);
+    margin-right: var(--gf-space-1);
+  }
+  td :global(button) {
+    min-width: 6rem;
+    min-height: 2.75rem;
+    font-size: var(--gf-font-size-lg);
+  }
+  td .who {
+    display: block;
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  td.mine {
+    outline: 2px solid var(--gf-accent);
+    outline-offset: -2px;
+  }
+  td.mine .who {
+    color: var(--gf-accent);
+  }
+  td .why {
+    display: block;
+  }
+  tr[data-state='Flown'] {
+    opacity: 0.55;
+  }
+  [data-layout='grid'] h2 {
+    font-size: var(--gf-font-size-xl);
+  }
+  [data-layout='grid'] .runs {
+    font-size: var(--gf-font-size-lg);
+  }
   .signup {
     display: grid;
     gap: var(--gf-space-4);

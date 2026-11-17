@@ -111,6 +111,55 @@ export function phaseRaces(view: EventView, phase: PhaseId, names: Names): Phase
   return found;
 }
 
+/**
+ * The phases to pick results by, for a page that asks for the phase first and then for a
+ * race in it. A heat inside a phase that has its own results is left out: it is reached
+ * through that phase.
+ */
+export function resultPhases(view: EventView): ResultChoice[] {
+  const choices = resultChoices(view);
+  const ranked = new Set(choices.map((choice) => choice.id));
+  const parentOf = new Map(view.phases.map((phase) => [phase.def.id, phase.def.parent]));
+  return choices.filter((choice) => {
+    if (!choice.heat) return true;
+    const parent = parentOf.get(choice.id);
+    return parent === undefined || !ranked.has(parent);
+  });
+}
+
+/** One heat to pick under a phase: its name and its saved races, oldest first. */
+export interface HeatChoice {
+  id: PhaseId;
+  /** "Qualifying Heat 2". */
+  label: string;
+  races: PhaseRace[];
+}
+
+/**
+ * The heats at or beneath a phase that have a saved race, in the order they were first
+ * raced. A race that was thrown out, or is still going, is not a result.
+ */
+export function heatChoices(view: EventView, phase: PhaseId, names: Names): HeatChoice[] {
+  const found = new Map<PhaseId, HeatChoice>();
+  for (const race of phaseRaces(view, phase, names)) {
+    if (race.view.state !== 'Saved') continue;
+    let heat = found.get(race.heat);
+    if (!heat) {
+      heat = { id: race.heat, label: names.phase(race.heat), races: [] };
+      found.set(race.heat, heat);
+    }
+    heat.races.push(race);
+  }
+  return [...found.values()];
+}
+
+/** One race by its id, named and numbered the way every page does. */
+export function findRace(view: EventView, race: RaceId, names: Names): PhaseRace | undefined {
+  const found = view.races.find((entry) => entry.race === race);
+  if (!found) return undefined;
+  return phaseRaces(view, found.heat, names).find((entry) => entry.race === race);
+}
+
 /** A number in a results table, and the race it was flown in. */
 export interface Sourced {
   micros: number;
