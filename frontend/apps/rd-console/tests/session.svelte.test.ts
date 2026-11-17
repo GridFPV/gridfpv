@@ -1060,3 +1060,100 @@ describe('Session', () => {
     });
   });
 });
+
+describe('other devices on the network', () => {
+  const VIEW = { enabled: true, port: 8081, state: 'Starting' as const, addresses: [] };
+  const HELLO = { version: '0.5.1', caller: 'Local' as const, director_sign_in: false };
+
+  it('hello and getNetwork are plain reads that never prompt', async () => {
+    const getPublicHello = vi.fn(async () => HELLO);
+    const getNetwork = vi.fn(async () => VIEW);
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({ autoRestore: false, api: { getPublicHello, getNetwork } });
+    session.setTokenProvider(tokenProvider);
+    expect(await session.hello()).toEqual(HELLO);
+    expect(await session.getNetwork()).toEqual(VIEW);
+    expect(tokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('a read that fails is passed on as it is, with no prompt', async () => {
+    const getNetwork = vi.fn(async () => {
+      throw refusal(401, "It needs the director's access token.");
+    });
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({ autoRestore: false, api: { getNetwork } });
+    session.setTokenProvider(tokenProvider);
+    await expect(session.getNetwork()).rejects.toThrow(/access token/);
+    expect(tokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('putNetwork goes through with no token on an open Director', async () => {
+    const putNetwork = vi.fn(async () => VIEW);
+    const session = new Session({ autoRestore: false, api: { putNetwork } });
+    expect(await session.putNetwork({ enabled: true })).toEqual(VIEW);
+    expect(putNetwork).toHaveBeenCalledOnce();
+    expect(putNetwork.mock.calls[0].slice(1, 3)).toEqual([{ enabled: true }, undefined]);
+  });
+
+  it('putNetwork asks for the token when refused, and sends the change again with it', async () => {
+    let calls = 0;
+    const putNetwork = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
+      return VIEW;
+    });
+    const session = new Session({ autoRestore: false, api: { putNetwork } });
+    session.setTokenProvider(async () => 'lazy-tok');
+    expect(await session.putNetwork({ enabled: true, port: 9000 })).toEqual(VIEW);
+    expect(putNetwork).toHaveBeenCalledTimes(2);
+    expect(putNetwork.mock.calls[1].slice(1, 3)).toEqual([
+      { enabled: true, port: 9000 },
+      'lazy-tok'
+    ]);
+  });
+
+  it('putNetwork gives undefined when the token prompt is cancelled, and sends nothing more', async () => {
+    const putNetwork = vi.fn(async () => {
+      throw refusal(401, 'Control on this Director needs a token.');
+    });
+    const session = new Session({ autoRestore: false, api: { putNetwork } });
+    session.setTokenProvider(async () => undefined);
+    expect(await session.putNetwork({ enabled: true })).toBeUndefined();
+    expect(putNetwork).toHaveBeenCalledOnce();
+  });
+
+  it("putNetwork passes on the Director's refusal of a bad port, with no prompt", async () => {
+    const putNetwork = vi.fn(async () => {
+      throw refusal(400, 'Pick a port from 1024 to 65535.');
+    });
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({ autoRestore: false, api: { putNetwork } });
+    session.setTokenProvider(tokenProvider);
+    await expect(session.putNetwork({ enabled: true, port: 80 })).rejects.toThrow(/1024 to 65535/);
+    expect(tokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('signing in sends the typed token and never keeps it; a refusal is passed on', async () => {
+    const signInDirector = vi.fn(async (_baseUrl: string, _token: string) => {});
+    const getPublicHello = vi.fn(async (_baseUrl: string, _options?: { token?: string }) => HELLO);
+    const session = new Session({ autoRestore: false, api: { signInDirector, getPublicHello } });
+    await session.signInDirector('the-token');
+    expect(signInDirector.mock.calls[0][1]).toBe('the-token');
+    // The session holds no token afterwards: the cookie carries the sign-in.
+    expect(session.hasToken).toBe(false);
+    await session.hello();
+    expect(getPublicHello.mock.calls[0][1]).toEqual({ token: undefined });
+
+    signInDirector.mockRejectedValueOnce(refusal(401, "That is not the director's access token."));
+    await expect(session.signInDirector('nope')).rejects.toThrow(/not the director/);
+    signInDirector.mockRejectedValueOnce(refusal(429, 'Wait a minute and try again.'));
+    await expect(session.signInDirector('nope')).rejects.toThrow(/Wait a minute/);
+  });
+
+  it('signing out is one call', async () => {
+    const signOutDirector = vi.fn(async () => {});
+    const session = new Session({ autoRestore: false, api: { signOutDirector } });
+    await session.signOutDirector();
+    expect(signOutDirector).toHaveBeenCalledOnce();
+  });
+});

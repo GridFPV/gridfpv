@@ -26,6 +26,9 @@ import type {
   DataInfo,
   OverlayLook,
   OverlayPlacement,
+  NetworkRequest,
+  NetworkView,
+  PublicHello,
   CreatePilotRequest,
   CreateTimerRequest,
   DiscoveredTimer,
@@ -769,6 +772,70 @@ export async function deleteDataImport(
     '/data/import',
     { method: 'DELETE', token, fetch: options.fetch },
     'forget the copy'
+  );
+}
+
+/** Whether other devices can reach the Director, and on what address (`GET /network`). */
+export async function getNetwork(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(baseUrl, '/network', options, 'read the network setting');
+}
+
+/** Let other devices in, shut them out, or change the port (`PUT /network`), RD-gated. */
+export async function putNetwork(
+  baseUrl: string,
+  request: NetworkRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(
+    baseUrl,
+    '/network',
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the network setting'
+  );
+}
+
+/**
+ * Who the Director takes this browser for, and which event is open (`GET /public/hello`).
+ * Open to everyone: it is the first thing a page asks.
+ */
+export async function getPublicHello(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<PublicHello> {
+  return apiJson<PublicHello>(baseUrl, '/public/hello', options, 'reach Grid');
+}
+
+/**
+ * Sign in as the director from another device (`POST /public/session`). The Director sets
+ * a cookie the browser then sends by itself; the page never keeps the token.
+ */
+export async function signInDirector(
+  baseUrl: string,
+  token: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/session',
+    { method: 'POST', token, fetch: options.fetch },
+    'sign in'
+  );
+}
+
+/** Sign out again (`DELETE /public/session`). */
+export async function signOutDirector(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/session',
+    { method: 'DELETE', fetch: options.fetch },
+    'sign out'
   );
 }
 

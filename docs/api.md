@@ -13,7 +13,9 @@ Every route answers JSON. Every failure is one shape, a `ProtocolError`:
 
 | Code | HTTP | Means |
 |---|---|---|
-| `Unauthorized` | 401 | A write without the director's token, once a token is set |
+| `Unauthorized` | 401 | A write without the director's token, once a token is set. Or anything but the public reads, from another device with no token |
+| `Forbidden` | 403 | A change asked for by a page on another website |
+| `TooManyRequests` | 429 | Too many wrong access tokens from one device. It can try again after a minute |
 | `UnknownScope` | 404 | No such event, pilot, class, timer, race or route |
 | `BadRequest` | 400 | The request is malformed or can never work |
 | `Refused` | 409 | Understood, but not allowed right now. Nothing changed |
@@ -25,11 +27,57 @@ A console shows it as it is.
 All wire types are generated from Rust into `bindings/`. A client imports them and never
 writes one by hand.
 
-## Reads are open, writes need the token
+## Who may do what
 
-Any client on the network can read. Every write needs the director's token as
-`Authorization: Bearer …`, once a token is set. With no token set (the desktop app on one
-laptop), writes are open too.
+The Director sorts every caller into one of three (`crates/server/src/access.rs`).
+
+| Caller | Who it is | What it may do |
+|---|---|---|
+| **Local** | A request from the Grid computer itself | Everything. Reads need no token. Writes need the director's token only if one is set |
+| **Director** | A request from another device that shows the director's token | Everything, the same as local |
+| **Visitor** | Any other request from another device | Read the console's files, `/health`, `/about`, `/time` and everything under `/public`. Nothing else |
+
+A caller is **local** only when all three hold: the connection comes from a loopback
+address; the request was not passed on by a proxy (no `Forwarded`, `X-Forwarded-*`,
+`X-Real-IP` or `Via` header); and the `Host` it asked for is `localhost` or a loopback
+address. If any of that cannot be told, the caller is a visitor.
+
+The director's token is the value of `GRIDFPV_RD_TOKEN` when the Director was started. It is
+sent as `Authorization: Bearer <token>`. With no token set, the Grid computer writes freely
+and **no other device can sign in at all**.
+
+A browser on another device signs in once and then carries a cookie:
+
+| Route | What it does |
+|---|---|
+| `GET /public/hello` | `{version, caller, event?, director_sign_in}`. `caller` is `Local`, `Director` or `Visitor`. `event` is the open event's name. `director_sign_in` says whether a token is set |
+| `POST /public/session` | Sign in. Send the token as a `Bearer` header. Answers `204` and sets the cookie `gridfpv_director` (`HttpOnly`, `SameSite=Strict`, half a day). The cookie holds a sign-in of its own, never the token. A wrong token answers `401` |
+| `DELETE /public/session` | Sign out. The sign-in stops working at once. Always `204` |
+
+Ten wrong tokens from one address inside a minute shut that address out (`429`) until the
+minute has passed, whatever it sends. The public reads still answer it.
+
+A request that changes something and carries an `Origin` from another site is refused
+(`403`), whoever the caller is. A page on the Grid computer (`localhost`, a loopback
+address, the desktop app's window) and the Director's own pages are allowed. The same rule
+decides which origins get a CORS answer.
+
+## Other devices on the network
+
+The desktop app listens on its own computer only. A second listener lets other devices in.
+It is off until the director switches it on, and it serves the same app with the same rules.
+
+| Route | What it does |
+|---|---|
+| `GET /network` | `{enabled, port, state, addresses, problem?}`. `state` is `Off`, `Starting`, `On`, `Failed` or `Always`. `addresses` are the URLs to open on another device. `problem` says in words why the listener is not up |
+| `PUT /network` | `{enabled, port?}`. The port must be 1024 to 65535 and not the Director's own. Answers the same shape as the `GET` |
+
+`Always` means the Director itself was started on the network (`GRIDFPV_ADDR`). Then there
+is no second listener and the switch does nothing.
+
+Switching off closes the listener and every connection it had open. A port that is taken
+gives `Failed` with the reason, and the Director tries again every few seconds. The setting
+is kept in `network.json` in the data folder. It is not part of a copy made on the Data page.
 
 ## The Director
 

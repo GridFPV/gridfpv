@@ -36,12 +36,27 @@ async fn get(assets: &Path, uri: &str) -> (StatusCode, String) {
     let registry = registry_with_event();
     let app = build_app(registry, assets);
     let response = app
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            local(Request::builder().uri(uri))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A request as the Grid computer itself makes it: from a loopback address, asking for a
+/// loopback address. Anything else is a visitor to the gate (see `network_access.rs`).
+fn local(request: axum::http::request::Builder) -> axum::http::request::Builder {
+    request
+        .header("Host", "127.0.0.1:8080")
+        .extension(axum::extract::ConnectInfo(SocketAddr::from((
+            Ipv4Addr::LOCALHOST,
+            50000,
+        ))))
 }
 
 /// A registry holding one **created** event. There is no built-in event, so the test makes
@@ -134,31 +149,41 @@ async fn static_assets_are_served_alongside_index() {
 }
 
 #[tokio::test]
-async fn cors_preflight_is_permissive() {
+async fn cors_answers_a_page_on_this_computer_and_no_other_site() {
     let dir = temp_dir("cors");
     std::fs::write(dir.join("index.html"), "<title>shell</title>").unwrap();
 
-    let app = build_app(registry_with_event(), &dir);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("OPTIONS")
-                .uri("/events")
-                .header("Origin", "http://tauri.localhost")
-                .header("Access-Control-Request-Method", "GET")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // A permissive CORS layer answers the preflight with an allow-origin header so the
-    // cross-origin Tauri RD app may call the API.
+    let preflight = |origin: &'static str| {
+        let app = build_app(registry_with_event(), &dir);
+        async move {
+            app.oneshot(
+                local(Request::builder().method("OPTIONS").uri("/events"))
+                    .header("Origin", origin)
+                    .header("Access-Control-Request-Method", "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // The dev server and the desktop app's window are pages on this computer.
+    for origin in ["http://localhost:5173", "tauri://localhost"] {
+        assert!(
+            preflight(origin)
+                .await
+                .headers()
+                .contains_key("access-control-allow-origin"),
+            "{origin} may call the API"
+        );
+    }
+    // Any other website gets no answer a browser would accept.
     assert!(
-        response
+        !preflight("http://evil.example")
+            .await
             .headers()
             .contains_key("access-control-allow-origin"),
-        "permissive CORS echoes an allow-origin header"
+        "another website may not"
     );
 
     std::fs::remove_dir_all(&dir).ok();

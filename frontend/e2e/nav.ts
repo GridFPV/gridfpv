@@ -10,7 +10,17 @@
 import { expect, type Locator, type Page } from '@playwright/test';
 
 /** The pages kept for every event. Every other page belongs to the open event. */
-const SETUP_PAGES = ['Events', 'Timers', 'Seats', 'Pilots', 'Classes', 'Formats', 'Video', 'Data'];
+const SETUP_PAGES = [
+  'Events',
+  'Timers',
+  'Seats',
+  'Pilots',
+  'Classes',
+  'Formats',
+  'Video',
+  'Network',
+  'Data'
+];
 
 /** The row of pages of the side that is showing. */
 export function pagesNav(page: Page): Locator {

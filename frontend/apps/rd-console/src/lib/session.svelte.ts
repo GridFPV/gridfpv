@@ -65,6 +65,11 @@ import {
   dataExportUrl,
   postDataImport,
   deleteDataImport,
+  getNetwork,
+  putNetwork,
+  getPublicHello,
+  signInDirector,
+  signOutDirector,
   getOverlayLook,
   putOverlayLook,
   overlayLogoUrl,
@@ -95,6 +100,9 @@ import type {
   DiscoveredTimer,
   EventMeta,
   EventView,
+  NetworkRequest,
+  NetworkView,
+  PublicHello,
   Format,
   PassRequest,
   Pilot,
@@ -219,6 +227,11 @@ const realApi = {
   dataExportUrl,
   postDataImport,
   deleteDataImport,
+  getNetwork,
+  putNetwork,
+  getPublicHello,
+  signInDirector,
+  signOutDirector,
   getOverlayLook,
   putOverlayLook,
   overlayLogoUrl,
@@ -578,6 +591,31 @@ export class Session {
   }
 
   // ── The race overlay's look ────────────────────────────────────────────────
+
+  /** Who the Director takes this browser for, and which event is open. Open to anyone. */
+  hello(): Promise<PublicHello> {
+    return this.#api.getPublicHello(this.baseUrl, { token: this.#token });
+  }
+
+  /** Whether other devices can reach the Director, and on what address. */
+  getNetwork(): Promise<NetworkView> {
+    return this.#api.getNetwork(this.baseUrl, { token: this.#token });
+  }
+
+  /** Let other devices in, shut them out, or change the port. `undefined` on a cancelled prompt. */
+  putNetwork(request: NetworkRequest): Promise<NetworkView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.putNetwork(this.baseUrl, request, token));
+  }
+
+  /** Sign in as the director from another device. Rejects with the Director's words. */
+  signInDirector(token: string): Promise<void> {
+    return this.#api.signInDirector(this.baseUrl, token);
+  }
+
+  /** Sign this browser out as the director. */
+  signOutDirector(): Promise<void> {
+    return this.#api.signOutDirector(this.baseUrl);
+  }
 
   /** Where the race overlay sits and which logos it has (`GET /overlay/look`, open). */
   getOverlayLook(): Promise<OverlayLook> {

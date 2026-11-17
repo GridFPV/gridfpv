@@ -9,7 +9,7 @@
    * The switch reads just "Setup" and "Event"; the rest is in its tooltips. The open event's
    * name is at the top right, and leads to the Events page.
    * - **Setup** is what is kept for every event: Events (open, add or delete one), Timers,
-   *   Seats, Pilots, Classes, Formats, Video, Data.
+   *   Seats, Pilots, Classes, Formats, Video, Network, Data.
    *
    * The side follows the page that is showing, so a link or the back button lands on the
    * right one. Each side remembers the page it was last on: switching to Setup and back
@@ -60,6 +60,7 @@
     { key: 'classes', label: 'Classes', to: { kind: 'page', page: 'classes' } },
     { key: 'formats', label: 'Formats', to: { kind: 'page', page: 'formats' } },
     { key: 'video', label: 'Video', to: { kind: 'page', page: 'video' } },
+    { key: 'network', label: 'Network', to: { kind: 'page', page: 'network' } },
     { key: 'data', label: 'Data', to: { kind: 'page', page: 'data' } }
   ];
   const HELP: Entry = { key: 'help', label: 'Help', to: { kind: 'help' } };
@@ -115,7 +116,7 @@
       href={setupHref}
       class:active={side === 'setup'}
       aria-current={side === 'setup' ? 'true' : undefined}
-      title="What is kept for every event: events, timers, seats, pilots, classes, formats, video, data"
+      title="What is kept for every event: events, timers, seats, pilots, classes, formats, video, network, data"
     >
       <span class="side-name">Setup</span>
     </a>

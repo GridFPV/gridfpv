@@ -16,6 +16,7 @@
 pub mod logging;
 pub mod discovery;
 pub mod links;
+pub mod network;
 pub mod obs;
 pub mod oft;
 pub mod render;

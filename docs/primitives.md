@@ -927,6 +927,16 @@ GitHub issues are #14 (the page), #432 (who may do what) and #16 (the remote ser
 
 Until now only the director used Grid. This section adds the other people at a race.
 
+**Built so far** (2026-11-16):
+
+- **Step 1, letting other devices in safely.** The desktop app answered only its own
+  computer, and anything that could reach the Director could run the race. Now a switch on
+  the Network page (off by default) starts a second listener for other devices. A device
+  that is not the Grid computer is a **visitor**: it can read the public pages and nothing
+  else. A director on another device signs in with the access token. The rules and the
+  routes are in `docs/api.md` ("Who may do what"). A visitor sees a page that names the
+  open event; the spectator and pilot pages (§11.2) are built on it next.
+
 ### 11.1 Two parts, and the rule between them
 
 - **Local:** people at the race use their own phones, on the field's network, served by

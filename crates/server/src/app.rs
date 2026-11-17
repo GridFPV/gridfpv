@@ -150,6 +150,17 @@ pub fn router(registry: EventRegistry) -> Router {
             get(crate::video::get_settings).put(crate::video::put_settings),
         )
         // A copy of everything, to carry to another computer, and bringing one back in.
+        // Whether other devices can reach the Director (docs/primitives.md §11).
+        .route(
+            "/network",
+            get(crate::network::get_network).put(crate::network::put_network),
+        )
+        // What a visitor on the network may ask for.
+        .route("/public/hello", get(crate::public::get_hello))
+        .route(
+            "/public/session",
+            post(crate::public::post_session).delete(crate::public::delete_session),
+        )
         .route("/data", get(crate::backup::get_data))
         .route("/data/export", post(crate::backup::post_export))
         .route("/data/export/{name}", get(crate::backup::get_export))
@@ -483,7 +494,7 @@ fn class_error_to_protocol(error: ClassError) -> ProtocolError {
 /// A path matches when it equals a prefix exactly or continues with `/` (so `/eventsxyz` is
 /// *not* an API path, but `/events`, `/events/`, and `/events/zzz` all are).
 pub fn is_api_path(path: &str) -> bool {
-    const API_PREFIXES: [&str; 9] = [
+    const API_PREFIXES: [&str; 15] = [
         "/health",
         "/about",
         "/time",
@@ -492,6 +503,12 @@ pub fn is_api_path(path: &str) -> bool {
         "/pilots",
         "/classes",
         "/timers",
+        "/formats",
+        "/data",
+        "/video",
+        "/overlay",
+        "/network",
+        "/public",
         "/diagnostics",
     ];
     API_PREFIXES.iter().any(|prefix| {
@@ -587,6 +604,8 @@ impl IntoResponse for ProtocolError {
             ErrorCode::UnknownScope => StatusCode::NOT_FOUND,
             ErrorCode::StaleCursor => StatusCode::GONE,
             ErrorCode::VersionMismatch => StatusCode::UPGRADE_REQUIRED,
+            ErrorCode::Forbidden => StatusCode::FORBIDDEN,
+            ErrorCode::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
             ErrorCode::Refused => StatusCode::CONFLICT,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
