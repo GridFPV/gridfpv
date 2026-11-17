@@ -802,17 +802,21 @@ async fn wrong_tokens_from_one_device_shut_it_out_for_a_while() {
         .await,
         StatusCode::TOO_MANY_REQUESTS
     );
-    // Signing in is refused too.
+    // Signing in is refused too, and it says it is a wait: a director with the right
+    // token must never be told it is the wrong one.
+    let sign_in = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .bearer(TOKEN),
+    )
+    .await;
+    assert_eq!(sign_in.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
-        status(
-            &rig.app,
-            call(Method::POST, "/public/session")
-                .visitor()
-                .bearer(TOKEN)
-        )
-        .await,
-        StatusCode::UNAUTHORIZED
+        sign_in.json()["message"],
+        "Too many wrong access tokens from this device. Wait a minute and try again."
     );
+    assert!(sign_in.set_cookie().is_none());
     // The public pages still answer it, as a visitor.
     let hello = send(&rig.app, get("/public/hello").visitor().bearer(TOKEN)).await;
     assert_eq!(hello.status, StatusCode::OK);
@@ -831,6 +835,84 @@ async fn wrong_tokens_from_one_device_shut_it_out_for_a_while() {
     assert_eq!(status(&rig.app, other).await, StatusCode::OK);
     assert_eq!(status(&rig.app, get("/events")).await, StatusCode::OK);
     assert_eq!(event_names(&rig).await, [EVENT]);
+}
+
+#[tokio::test]
+async fn a_tab_left_open_with_an_old_token_or_an_ended_sign_in_never_locks_its_device_out() {
+    // What locked Ryan's laptop out on 2026-11-17: console tabs from before a restart
+    // kept asking, each with the token or the sign-in it had. That is not guessing.
+    let rig = rig(true);
+    for _ in 0..200 {
+        // The same old token, over and over.
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events").visitor().bearer("last-weeks-token")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A sign-in cookie from before the Director was restarted.
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events").visitor().cookie("ended-at-the-restart")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Both at once.
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events")
+                    .visitor()
+                    .cookie("ended-at-the-restart")
+                    .bearer("last-weeks-token")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // The director can still sign in from that device, first time.
+    let signed = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .cookie("ended-at-the-restart")
+            .bearer(TOKEN),
+    )
+    .await;
+    assert_eq!(signed.status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn different_wrong_tokens_are_still_counted_each_time_and_one_repeated_is_one() {
+    let rig = rig(true);
+    // Nine different guesses, each sent five times: nine guesses.
+    for n in 0..MAX_FAILURES - 1 {
+        for _ in 0..5 {
+            status(&rig.app, get("/events").visitor().bearer(&format!("g{n}"))).await;
+        }
+    }
+    assert_eq!(
+        status(&rig.app, get("/public/hello").visitor()).await,
+        StatusCode::OK
+    );
+    // The tenth different one shuts the device out.
+    assert_eq!(
+        status(&rig.app, get("/events").visitor().bearer("one-more")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status(&rig.app, get("/events").visitor().bearer(TOKEN)).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // An ended cookie cannot be used to get round the wait, and does not add to it.
+    assert_eq!(
+        status(&rig.app, get("/events").visitor().cookie("anything")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
 }
 
 #[tokio::test]
@@ -855,7 +937,10 @@ async fn the_count_is_per_device_whatever_port_it_calls_from() {
         let from = format!("192.168.1.77:{}", 40000 + n);
         status(
             &rig.app,
-            get("/events").visitor().from(&from).bearer("guess"),
+            get("/events")
+                .visitor()
+                .from(&from)
+                .bearer(&format!("guess-{n}")),
         )
         .await;
     }

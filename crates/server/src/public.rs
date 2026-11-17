@@ -133,7 +133,16 @@ pub async fn post_session(
     // For a visitor the gate has already checked the token, and counted a wrong one. Its
     // answer is the one that stands: an address that has guessed too often is refused even
     // when it finally sends the right token.
-    let allowed = match access.map(|Extension(access)| access) {
+    let access = access.map(|Extension(access)| access);
+    // Say that it is a wait, and not that the token is wrong: a director with the right
+    // token must not be told it is the wrong one.
+    if access.is_some_and(|access| access.blocked) {
+        return Err(ProtocolError::new(
+            ErrorCode::TooManyRequests,
+            "Too many wrong access tokens from this device. Wait a minute and try again.",
+        ));
+    }
+    let allowed = match access {
         Some(access) if access.origin == Origin::Network => access.director && known,
         _ => known,
     };
@@ -164,7 +173,13 @@ mod tests {
     #[test]
     fn a_caller_is_named_from_what_the_gate_found() {
         assert_eq!(caller(None), Caller::Local);
-        let access = |origin, director| Some(Access { origin, director });
+        let access = |origin, director| {
+            Some(Access {
+                origin,
+                director,
+                blocked: false,
+            })
+        };
         assert_eq!(caller(access(Origin::Local, false)), Caller::Local);
         // A token shown from the Grid computer changes nothing: it is local either way.
         assert_eq!(caller(access(Origin::Local, true)), Caller::Local);
