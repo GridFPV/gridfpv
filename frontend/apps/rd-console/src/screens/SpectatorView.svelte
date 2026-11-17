@@ -72,7 +72,7 @@
 
   const view = $derived(live.view);
   const names = $derived(live.names);
-  const upcoming = $derived(upcomingHeats(view, names));
+  const coming = $derived(upcomingHeats(view, names));
 
   // The names a visitor is given are only the ones the event uses. When the snapshot
   // mentions someone new, ask for the names again.
@@ -92,15 +92,14 @@
     const timer = setInterval(() => (now = live.nowMicros()), onNow === undefined ? 1000 : 200);
     return () => clearInterval(timer);
   });
-  /** When this page saw the race that was on go away: it was saved, or thrown out. */
-  let decidedAt = $state<number | undefined>(undefined);
-  let wasOn: RaceId | undefined;
-  $effect(() => {
-    const id = onNow;
-    if (wasOn !== undefined && id === undefined) decidedAt = live.nowMicros();
-    wasOn = id;
-  });
-  const current = $derived(currentRaceView(view, names, now, decidedAt));
+  const current = $derived(currentRaceView(view, names));
+  /**
+   * The heats after the current one. The heat on the timer is on the Current race tab
+   * while it waits to fly, so it is not listed again here.
+   */
+  const upcoming = $derived(
+    current?.kind === 'next' ? coming.filter((heat) => heat.id !== current.heat.id) : coming
+  );
   /** The race on the tab, when it is showing one and not the heat that is up next. */
   const shown = $derived(current && current.kind !== 'next' ? current.race : undefined);
   const heat = $derived(
@@ -370,7 +369,7 @@
         {:else}
           <ol class="heats">
             {#each upcoming as entry (entry.id)}
-              <li aria-label={entry.name}>
+              <li class="card" aria-label={entry.name}>
                 <h3>{entry.name}</h3>
                 <ul>
                   {#each entry.seats as seat (`${seat.adapter}\u0000${seat.seat}`)}
@@ -654,12 +653,20 @@
     font-weight: var(--gf-font-weight-regular, 400);
     font-size: var(--gf-font-size-xs);
   }
+  /* One heat to a card, one card to a row, on a phone and on a wide screen alike. */
   .heats {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--gf-space-3);
+  }
+  .heats > .card {
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-md);
+    padding: var(--gf-space-3);
+    background: var(--gf-surface);
   }
   .heats h3 {
     margin: 0 0 var(--gf-space-1);

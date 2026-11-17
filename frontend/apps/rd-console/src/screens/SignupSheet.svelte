@@ -10,7 +10,7 @@
    * Every change is one command. The sheet shown afterwards is the Director's.
    */
   import { Badge, Banner, Button, Card, Dialog } from '@gridfpv/components';
-  import type { Command, PilotId, SignupHeatView } from '@gridfpv/types';
+  import type { Command, PhaseId, PilotId, SignupHeatView } from '@gridfpv/types';
   import type { Names } from '../lib/names.js';
   import {
     heatStateWords,
@@ -23,11 +23,14 @@
   let {
     phase,
     names,
+    onTimer = undefined,
     send,
     onrules
   }: {
     phase: SignupPhase;
     names: Names;
+    /** The heat on the timer. It is closed to pilots for that reason, not by a button. */
+    onTimer?: PhaseId | undefined;
     /** Send one command. Rejects with the Director's reason when it is refused. */
     send: (command: Command) => Promise<unknown>;
     /** Open the rules dialog. */
@@ -140,7 +143,7 @@
       <thead>
         <tr>
           <th scope="col">Heat</th>
-          {#each seats as seat (seat.name)}
+          {#each seats as seat (`${seat.seat.adapter}\u0000${seat.seat.seat}`)}
             <th scope="col">
               {seat.name}
               {#if seat.channel}<span class="channel">{seat.channel}</span>{/if}
@@ -154,7 +157,9 @@
           <tr data-state={heat.state}>
             <th scope="row">
               {heat.number}
-              {#if heatStateWords(heat)}
+              {#if heat.heat === onTimer && heat.state === 'Closed'}
+                <Badge tone="accent">On the timer</Badge>
+              {:else if heatStateWords(heat)}
                 <Badge tone={heat.state === 'Racing' ? 'success' : 'neutral'}>
                   {heatStateWords(heat)}
                 </Badge>
@@ -210,7 +215,7 @@
                   aria-label="Close {heatName(heat)} to pilots"
                   onclick={() => closeHeat(heat, true)}>Close to pilots</Button
                 >
-              {:else if editable && heat.state === 'Closed'}
+              {:else if editable && heat.state === 'Closed' && heat.heat !== onTimer}
                 <Button
                   size="sm"
                   variant="ghost"

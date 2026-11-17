@@ -327,6 +327,11 @@ event's log. The video setup, the log files and the recordings are not in it.
 - `races`: every race with its state, its clock times, each seat's laps, and its video
   recording when the Director had one made.
 - `current_race`: the race that is counting down, running, or waiting to be saved.
+- `on_timer`: the heat the director is running now, whether its race has started or not.
+  It is the heat of `current_race` when there is one; otherwise the heat last put on the
+  timer or last started. Absent until a heat has been put there. Set with the command
+  `{"PutOnTimer": {"heat": …}}`, which is refused (`409`) while a race of another heat is
+  waiting to be saved or thrown out. A sign-up heat on the timer is closed to pilots.
 - `queue`: the heats that can be raced now, in the suggested order.
 - `protests` and `proposed_disqualifications`: what is waiting on the director.
 - `cursor`: how long the event's log was when this was worked out.

@@ -144,6 +144,7 @@ pub fn for_visitors(view: EventView) -> EventView {
         phases,
         races,
         current_race,
+        on_timer,
         queue,
         protests: _,
         proposed_disqualifications: _,
@@ -156,6 +157,7 @@ pub fn for_visitors(view: EventView) -> EventView {
         phases,
         races: races.into_iter().map(race_for_visitors).collect(),
         current_race,
+        on_timer,
         queue,
         // Who protested what, and who is close to a disqualification, is not public.
         protests: Vec::new(),

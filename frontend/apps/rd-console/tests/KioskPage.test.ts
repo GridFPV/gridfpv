@@ -425,3 +425,113 @@ describe('KioskPage: a pilot signing up', () => {
     expect(screen.getByTestId('visitor-event')).toHaveTextContent('No event is open');
   });
 });
+
+describe('KioskPage: one sheet at a time', () => {
+  /** An event with two sign-up phases. Bee is in both, Cat only in Qualifying. */
+  function openTwo() {
+    const first = signupSheet();
+    const view = signupEvent(first);
+    const sport: SignupView = {
+      ...signupSheet(),
+      heats: [
+        { heat: 'sport/heat-1', number: 1, seats: [null, null, null], state: 'Open', full: false }
+      ],
+      pilots: [{ pilot: 'p-bee', used: 0, held: 0, extra: 0 }]
+    };
+    view.phases = [
+      ...view.phases,
+      {
+        ...view.phases[0],
+        def: { ...view.phases[0].def, id: 'sport', label: 'Sport' },
+        signup: sport
+      },
+      {
+        ...view.phases[1],
+        def: { ...view.phases[1].def, id: 'sport/heat-1', label: 'Sport Heat 1', parent: 'sport' },
+        lineup: []
+      }
+    ];
+    const source = {
+      kioskSetUp: vi.fn(async (_code: string) => {}),
+      kioskIn: vi.fn(async (_code: string) => BEE),
+      kioskDone: vi.fn(async (_pass: string) => {}),
+      takeSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+      takeNextSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+      leaveSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined)
+    };
+    const live = { view, names: signupNames(view), reload: vi.fn(async () => {}) };
+    render(KioskPage, { source, isKiosk: true, eventName: 'Friday Night Whoops', live });
+    return { source };
+  }
+  const picker = () => screen.getByRole('combobox', { name: 'Sign up for' }) as HTMLSelectElement;
+  const tables = () => screen.getAllByRole('table').map((el) => el.getAttribute('aria-label'));
+
+  it('with one sheet there is no picker', async () => {
+    open();
+    await beeSignsIn();
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(tables()).toEqual(['Heats of Qualifying']);
+  });
+
+  it('with several, shows the first and a picker for the rest', async () => {
+    openTwo();
+    await beeSignsIn();
+    expect([...picker().options].map((o) => o.textContent)).toEqual(['Qualifying', 'Sport']);
+    expect(picker().selectedOptions[0].textContent).toBe('Qualifying');
+    expect(tables()).toEqual(['Heats of Qualifying']);
+    await fireEvent.change(picker(), { target: { value: 'sport' } });
+    expect(tables()).toEqual(['Heats of Sport']);
+    expect(document.body.textContent).not.toContain('sport/heat');
+  });
+
+  it('acts on the sheet that is showing', async () => {
+    const { source } = openTwo();
+    await beeSignsIn();
+    await fireEvent.change(picker(), { target: { value: 'sport' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 1 in Sport Heat 1' }));
+    await waitFor(() =>
+      expect(source.takeSpot).toHaveBeenCalledWith(
+        'sport/heat-1',
+        { adapter: 'gate', seat: '0' },
+        'pass-bee-1'
+      )
+    );
+  });
+
+  it('lists only the sheets the pilot is in, and no picker when that leaves one', async () => {
+    const { source } = openTwo();
+    source.kioskIn.mockResolvedValueOnce({
+      pilot: { id: 'p-cat', callsign: 'Cat' },
+      pass: 'pass-cat',
+      idle_seconds: 120
+    });
+    await typeCode('ABC234');
+    await screen.findByTestId('kiosk-pilot');
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(tables()).toEqual(['Heats of Qualifying']);
+    expect(document.body.textContent).not.toContain('You are not in this phase');
+  });
+
+  it('a pilot who is in none is told there is nothing to sign up for', async () => {
+    const { source } = openTwo();
+    source.kioskIn.mockResolvedValueOnce({
+      pilot: { id: 'p-stranger', callsign: 'Stranger' },
+      pass: 'pass-s',
+      idle_seconds: 120
+    });
+    await typeCode('ABC234');
+    await screen.findByTestId('kiosk-pilot');
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.getByText('There is nothing to sign up for right now.')).toBeVisible();
+  });
+
+  it('the next pilot starts on the first sheet, not where the last one left off', async () => {
+    openTwo();
+    await beeSignsIn();
+    await fireEvent.change(picker(), { target: { value: 'sport' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await beeSignsIn();
+    expect(picker().selectedOptions[0].textContent).toBe('Qualifying');
+    expect(tables()).toEqual(['Heats of Qualifying']);
+  });
+});

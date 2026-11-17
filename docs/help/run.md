@@ -8,9 +8,18 @@ Two boxes pick the heat. The first picks the **phase**. The second picks a **hea
 phase. A heat's name shows where it stands: how many races it has, or that it is complete,
 waiting or locked.
 
-With no heat picked by you, the page shows the heat with a race in progress, or the first
-heat of **Up next**. The boxes are locked while a race is counting down, running, or
-waiting to be saved.
+The heat on the timer is **the current race** for everyone: this page, any other console,
+the spectators' and pilots' phones, and sign-up. Grid remembers it, so it is still there
+after a reload or a restart.
+
+- Picking a heat here, or pressing **Run** on a heat on the Phases page, puts it on the
+  timer.
+- Starting a race puts its heat on the timer too.
+- After a race is saved the heat stays on the timer, showing its result, until you put
+  another one on. When the heat is complete, a **Next** button names the heat to go to.
+- Before you have put anything on the timer, the page shows the first heat of **Up next**.
+
+The boxes are locked while a race is counting down, running, or waiting to be saved.
 
 Under the boxes are the heat's format and the timer that times it.
 

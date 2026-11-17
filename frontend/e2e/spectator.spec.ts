@@ -152,13 +152,29 @@ test('a spectator watches a race from start to result without touching the page'
     await expect(lineup.locator('tbody tr')).toHaveCount(2);
     await expect(lineup).toContainText('Ace');
     const upNext = page.getByRole('tab', { name: /Up next/ });
-    await expect(upNext).toContainText('2');
+    // Heat 1 is the current race, so only heat 2 is "up next".
+    await expect(upNext).toContainText('1');
     await upNext.click();
     const coming = page.getByRole('region', { name: 'Up next' });
-    await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 1' })).toContainText('Ace');
-    await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 1' })).toContainText('Bee');
+    await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 1' })).toHaveCount(0);
     await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 2' })).toContainText('Bee');
     await page.getByRole('tab', { name: 'Current race' }).click();
+
+    // ── The director puts heat 2 on the timer: the phone shows that heat, by itself ──────
+    await command({ PutOnTimer: { heat: 'heat-2' } });
+    await expect(page.getByTestId('race-heat')).toHaveText('Qualifying Heat 2', {
+      timeout: 10_000
+    });
+    await expect(page.getByTestId('race-word')).toHaveText('Up next');
+    await upNext.click();
+    await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 1' })).toContainText('Ace');
+    await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 2' })).toHaveCount(0);
+    await page.getByRole('tab', { name: 'Current race' }).click();
+    // And back to heat 1, which is the one about to be flown.
+    await command({ PutOnTimer: { heat: 'heat-1' } });
+    await expect(page.getByTestId('race-heat')).toHaveText('Qualifying Heat 1', {
+      timeout: 10_000
+    });
 
     // ── The director starts heat 1: the phone shows it by itself ─────────────────────────
     await command({ StartRace: { heat: 'heat-1' } });

@@ -100,17 +100,11 @@ export function publicSource(baseUrl: string): PublicSource {
 }
 
 /**
- * How long a result stays on the Current race tab once the race is saved, before the tab
- * moves on to the heat that is up next: two minutes. The Results tab has it for good.
- */
-export const RESULT_STAYS_MICROS = 120_000_000;
-
-/**
  * What the Current race tab shows. One thing at a time, always with a clock:
  *
  * - `race`: a race that is counting down, running, or stopped and not yet saved.
- * - `result`: the race that was just saved, for {@link RESULT_STAYS_MICROS}.
- * - `next`: the heat that is up next, with who is in it.
+ * - `result`: how the heat on the timer was last flown.
+ * - `next`: the heat on the timer, not flown yet, with who is in it.
  */
 export type CurrentRace =
   | { kind: 'race'; race: RaceView }
@@ -118,31 +112,36 @@ export type CurrentRace =
   | { kind: 'next'; heat: UpcomingHeat };
 
 /**
- * What to show as the current race at `now` (Director clock, microseconds).
+ * What to show as the current race: **the heat the director has on the timer**
+ * (`on_timer`). While its race is on, that race. Once it has been flown and saved, its
+ * result, which stays until the director puts another heat on the timer. Before it has
+ * been flown, who is in it.
  *
- * The Director does not know which heat the director has on the Run page, so "current" is
- * worked out from what has happened: a race that is on wins; then the result just saved,
- * for a while; then the first heat in the run order. With nothing coming up, the last
- * result stays. `decidedAt` is when this page saw the race end, which is the best it has
- * for when it was saved; a page opened later goes by when the race stopped.
+ * An event where the director has not put anything on the timer yet shows the heat they
+ * would run first, and with nothing lined up, the last result.
  */
 export function currentRaceView(
   view: EventView | undefined,
-  names: Names,
-  now: number,
-  decidedAt?: number
+  names: Names
 ): CurrentRace | undefined {
   if (!view) return undefined;
   const on = currentRace(view);
   if (on) return { kind: 'race', race: on };
-  const result = lastResult(view);
-  const next = upcomingHeats(view, names)[0];
-  if (result) {
-    const since = Math.max(result.stopped_at ?? Number.NEGATIVE_INFINITY, decidedAt ?? 0);
-    const fresh = Number.isFinite(since) && since > 0 && now - since < RESULT_STAYS_MICROS;
-    if (fresh || !next) return { kind: 'result', race: result };
+  const heat = view.phases.find((phase) => phase.def.id === view.on_timer && isHeat(phase.def));
+  if (heat) {
+    const saved = view.races
+      .filter((race) => race.heat === heat.def.id && race.state === 'Saved')
+      .at(-1);
+    if (saved) return { kind: 'result', race: saved };
+    return {
+      kind: 'next',
+      heat: { id: heat.def.id, name: names.phase(heat.def.id), seats: lineupSeatRows(heat, names) }
+    };
   }
-  return next ? { kind: 'next', heat: next } : undefined;
+  const next = upcomingHeats(view, names)[0];
+  if (next) return { kind: 'next', heat: next };
+  const result = lastResult(view);
+  return result ? { kind: 'result', race: result } : undefined;
 }
 
 /** A heat that is coming up. */
@@ -158,6 +157,8 @@ export interface UpcomingHeat {
  * The heats coming up, in the order the director has them: the run queue, without the
  * heat that is on right now. A heat still waiting on another one to fill its seats is in
  * the list too, after the ones that are ready, so pilots can see where they will come in.
+ * The heat on the timer comes first when it is still to be flown: it is the next to fly,
+ * whatever the order says.
  */
 export function upcomingHeats(view: EventView | undefined, names: Names): UpcomingHeat[] {
   if (!view) return [];
@@ -175,13 +176,15 @@ export function upcomingHeats(view: EventView | undefined, names: Names): Upcomi
       !phase.complete &&
       !phase.locked
   );
-  return [...ready, ...waiting]
-    .filter((phase) => phase.def.id !== onNow)
-    .map((phase) => ({
-      id: phase.def.id,
-      name: names.phase(phase.def.id),
-      seats: lineupSeatRows(phase, names)
-    }));
+  const coming = [...ready, ...waiting].filter((phase) => phase.def.id !== onNow);
+  // The heat on the timer flies before anything else, wherever it is in the run order.
+  const first = coming.findIndex((phase) => phase.def.id === view.on_timer);
+  if (first > 0) coming.unshift(...coming.splice(first, 1));
+  return coming.map((phase) => ({
+    id: phase.def.id,
+    name: names.phase(phase.def.id),
+    seats: lineupSeatRows(phase, names)
+  }));
 }
 
 /**

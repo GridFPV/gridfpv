@@ -802,17 +802,21 @@ async fn wrong_tokens_from_one_device_shut_it_out_for_a_while() {
         .await,
         StatusCode::TOO_MANY_REQUESTS
     );
-    // Signing in is refused too.
+    // Signing in is refused too, and it says it is a wait: a director with the right
+    // token must never be told it is the wrong one.
+    let sign_in = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .bearer(TOKEN),
+    )
+    .await;
+    assert_eq!(sign_in.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
-        status(
-            &rig.app,
-            call(Method::POST, "/public/session")
-                .visitor()
-                .bearer(TOKEN)
-        )
-        .await,
-        StatusCode::UNAUTHORIZED
+        sign_in.json()["message"],
+        "Too many wrong access tokens from this device. Wait a minute and try again."
     );
+    assert!(sign_in.set_cookie().is_none());
     // The public pages still answer it, as a visitor.
     let hello = send(&rig.app, get("/public/hello").visitor().bearer(TOKEN)).await;
     assert_eq!(hello.status, StatusCode::OK);
@@ -831,6 +835,84 @@ async fn wrong_tokens_from_one_device_shut_it_out_for_a_while() {
     assert_eq!(status(&rig.app, other).await, StatusCode::OK);
     assert_eq!(status(&rig.app, get("/events")).await, StatusCode::OK);
     assert_eq!(event_names(&rig).await, [EVENT]);
+}
+
+#[tokio::test]
+async fn a_tab_left_open_with_an_old_token_or_an_ended_sign_in_never_locks_its_device_out() {
+    // What locked Ryan's laptop out on 2026-11-17: console tabs from before a restart
+    // kept asking, each with the token or the sign-in it had. That is not guessing.
+    let rig = rig(true);
+    for _ in 0..200 {
+        // The same old token, over and over.
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events").visitor().bearer("last-weeks-token")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A sign-in cookie from before the Director was restarted.
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events").visitor().cookie("ended-at-the-restart")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Both at once.
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events")
+                    .visitor()
+                    .cookie("ended-at-the-restart")
+                    .bearer("last-weeks-token")
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // The director can still sign in from that device, first time.
+    let signed = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .cookie("ended-at-the-restart")
+            .bearer(TOKEN),
+    )
+    .await;
+    assert_eq!(signed.status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn different_wrong_tokens_are_still_counted_each_time_and_one_repeated_is_one() {
+    let rig = rig(true);
+    // Nine different guesses, each sent five times: nine guesses.
+    for n in 0..MAX_FAILURES - 1 {
+        for _ in 0..5 {
+            status(&rig.app, get("/events").visitor().bearer(&format!("g{n}"))).await;
+        }
+    }
+    assert_eq!(
+        status(&rig.app, get("/public/hello").visitor()).await,
+        StatusCode::OK
+    );
+    // The tenth different one shuts the device out.
+    assert_eq!(
+        status(&rig.app, get("/events").visitor().bearer("one-more")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status(&rig.app, get("/events").visitor().bearer(TOKEN)).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // An ended cookie cannot be used to get round the wait, and does not add to it.
+    assert_eq!(
+        status(&rig.app, get("/events").visitor().cookie("anything")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
 }
 
 #[tokio::test]
@@ -855,7 +937,10 @@ async fn the_count_is_per_device_whatever_port_it_calls_from() {
         let from = format!("192.168.1.77:{}", 40000 + n);
         status(
             &rig.app,
-            get("/events").visitor().from(&from).bearer("guess"),
+            get("/events")
+                .visitor()
+                .from(&from)
+                .bearer(&format!("guess-{n}")),
         )
         .await;
     }
@@ -876,6 +961,93 @@ async fn the_count_is_per_device_whatever_port_it_calls_from() {
 }
 
 // ── Signing in from a browser on another device ─────────────────────────────
+
+#[tokio::test]
+async fn an_old_token_the_browser_still_sends_does_not_undo_a_good_sign_in() {
+    // What happened to Ryan on 2026-11-17: the tab had an old token kept from an earlier
+    // run and sent it with every request, beside a good sign-in cookie.
+    let rig = rig(true);
+    let signed = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .bearer(TOKEN),
+    )
+    .await;
+    let session = signed.session();
+    let stale = "the-token-from-last-week";
+    // A read, the change feed and a write all work with the cookie and the old token.
+    assert_eq!(
+        status(
+            &rig.app,
+            get("/events").visitor().cookie(&session).bearer(stale)
+        )
+        .await,
+        StatusCode::OK
+    );
+    let made = send(
+        &rig.app,
+        post("/events", json!({"name": "With an old token too"}))
+            .visitor()
+            .cookie(&session)
+            .bearer(stale)
+            .header("origin", &format!("http://{LAN_HOST}")),
+    )
+    .await;
+    assert!(made.status.is_success(), "{}: {}", made.status, made.body);
+    let hello = send(
+        &rig.app,
+        get("/public/hello")
+            .visitor()
+            .cookie(&session)
+            .bearer(stale),
+    )
+    .await;
+    assert_eq!(hello.json()["caller"], "Director");
+    // And it never counts as a wrong guess: twenty of them do not lock the device out.
+    for _ in 0..20 {
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events").visitor().cookie(&session).bearer(stale)
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+    // The other way round too: a good token beside a cookie that has ended.
+    assert_eq!(
+        status(
+            &rig.app,
+            get("/events")
+                .visitor()
+                .cookie("ended-long-ago")
+                .bearer(TOKEN)
+        )
+        .await,
+        StatusCode::OK
+    );
+    // Two wrong ones are still refused, and still counted once per request.
+    assert_eq!(
+        status(
+            &rig.app,
+            get("/events").visitor().cookie("nope").bearer(stale)
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    // Signing in again with the right token while the old one is in the header is the
+    // header's business: the header is what the sign-in reads.
+    let again = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .cookie(&session)
+            .bearer(stale),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+}
 
 #[tokio::test]
 async fn a_director_signs_in_from_another_device_and_the_cookie_does_the_rest() {

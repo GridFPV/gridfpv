@@ -80,6 +80,9 @@ pub struct Access {
     /// Whether the caller showed the director's token. Always `false` for a local caller,
     /// who needs none.
     pub director: bool,
+    /// Whether this address has sent too many wrong tokens and must wait. A sign-in from
+    /// it is refused even with the right token, and should say why.
+    pub blocked: bool,
 }
 
 impl Access {
@@ -105,6 +108,10 @@ const MAX_TRACKED: usize = 1024;
 #[derive(Clone, Default)]
 pub struct Guesses {
     seen: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
+    /// The wrong tokens each address has already been counted for in this window, so one
+    /// wrong token sent over and over is one guess. A console tab left open across a
+    /// restart sends its old token with every request it makes; that is not guessing.
+    tried: Arc<Mutex<HashMap<IpAddr, Vec<String>>>>,
 }
 
 impl Guesses {
@@ -141,9 +148,43 @@ impl Guesses {
         entry.0 += 1;
     }
 
+    /// Count a wrong token from `ip`, once for each different token in the window.
+    /// Guessing means trying different tokens; the same wrong one again is not a new guess.
+    pub fn failed_token(&self, ip: IpAddr, now: Instant, token: &str) {
+        {
+            let mut tried = self.tried.lock().expect("guesses lock poisoned");
+            // A new window forgets what was tried in the last one.
+            let fresh = self
+                .seen
+                .lock()
+                .expect("guesses lock poisoned")
+                .get(&ip)
+                .is_none_or(|(_, since)| now.duration_since(*since) >= FAILURE_WINDOW);
+            if fresh {
+                tried.remove(&ip);
+            }
+            if tried.len() >= MAX_TRACKED && !tried.contains_key(&ip) {
+                tried.clear();
+            }
+            let known = tried.entry(ip).or_default();
+            if known.iter().any(|kept| kept == token) {
+                return;
+            }
+            // Never more than the tries that lock an address out anyway.
+            if known.len() < MAX_FAILURES as usize {
+                known.push(token.to_string());
+            }
+        }
+        self.failed(ip, now);
+    }
+
     /// A right token clears the count.
     pub fn cleared(&self, ip: IpAddr) {
         self.seen.lock().expect("guesses lock poisoned").remove(&ip);
+        self.tried
+            .lock()
+            .expect("guesses lock poisoned")
+            .remove(&ip);
     }
 }
 
@@ -329,6 +370,36 @@ pub fn presented_token(headers: &HeaderMap) -> Option<String> {
     cookie_token(headers)
 }
 
+/// The token in the `Bearer` header, if the request has one: the token somebody typed.
+pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, token)| scheme.eq_ignore_ascii_case("Bearer") && !token.trim().is_empty())
+        .map(|(_, token)| token.trim().to_string())
+}
+
+/// Every token a request carries: the `Bearer` header's, then the session cookie's. A
+/// caller is the director if **either** is good. A browser that is signed in by cookie may
+/// still send an old token it once had typed in, and that old token must not undo the
+/// sign-in.
+pub fn presented_tokens(headers: &HeaderMap) -> Vec<String> {
+    let bearer = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, token)| scheme.eq_ignore_ascii_case("Bearer") && !token.trim().is_empty())
+        .map(|(_, token)| token.trim().to_string());
+    let mut tokens: Vec<String> = bearer.into_iter().collect();
+    if let Some(cookie) = cookie_token(headers)
+        && !tokens.contains(&cookie)
+    {
+        tokens.push(cookie);
+    }
+    tokens
+}
+
 /// The session cookie's value, if the request has one.
 pub fn cookie_token(headers: &HeaderMap) -> Option<String> {
     headers
@@ -432,6 +503,7 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
         request.extensions_mut().insert(Access {
             origin,
             director: false,
+            blocked: false,
         });
         return next.run(request).await;
     }
@@ -444,26 +516,32 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
         Part::Api => is_public_api(&method, request.uri().path()),
         Part::Files => may_read_files(&method, request.uri().path()),
     };
-    let token = presented_token(request.headers());
+    let tokens = presented_tokens(request.headers());
 
+    // Only a token in the `Bearer` header can be a guess. A sign-in cookie that has ended
+    // (the Director was restarted, or half a day passed) is not one: nobody typed it.
+    let typed = bearer_token(request.headers());
     let mut director = false;
-    if let Some(token) = &token {
+    let mut blocked = false;
+    if !tokens.is_empty() {
         if guesses.blocked(ip, now) {
+            blocked = true;
             if !public {
                 return refuse(
                     ErrorCode::TooManyRequests,
                     "Too many wrong access tokens from this device. Wait a minute and try again.",
                 );
             }
-        } else if registry
-            .tokens()
-            .session(token)
-            .is_some_and(|session| session.role.can_control())
-        {
+        } else if tokens.iter().any(|token| {
+            registry
+                .tokens()
+                .session(token)
+                .is_some_and(|session| session.role.can_control())
+        }) {
             guesses.cleared(ip);
             director = true;
-        } else {
-            guesses.failed(ip, now);
+        } else if let Some(typed) = &typed {
+            guesses.failed_token(ip, now, typed);
         }
     }
 
@@ -473,7 +551,11 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
             "Only the director can do this from another device. It needs the director's access token.",
         );
     }
-    request.extensions_mut().insert(Access { origin, director });
+    request.extensions_mut().insert(Access {
+        origin,
+        director,
+        blocked,
+    });
     next.run(request).await
 }
 
@@ -497,6 +579,62 @@ mod tests {
     }
     fn uri(text: &str) -> Uri {
         text.parse().unwrap()
+    }
+
+    #[test]
+    fn the_same_wrong_token_again_is_not_a_new_guess() {
+        let guesses = Guesses::default();
+        let ip: IpAddr = "192.168.1.9".parse().unwrap();
+        let start = Instant::now();
+        for _ in 0..1000 {
+            guesses.failed_token(ip, start, "stale");
+        }
+        assert!(!guesses.blocked(ip, start));
+        // Different ones add up, with the stale one counted once among them.
+        for n in 0..MAX_FAILURES - 2 {
+            guesses.failed_token(ip, start, &format!("guess-{n}"));
+        }
+        assert!(!guesses.blocked(ip, start));
+        guesses.failed_token(ip, start, "the-tenth");
+        assert!(guesses.blocked(ip, start));
+        // Past the limit, more guesses do not grow what is remembered.
+        for n in 0..10_000 {
+            guesses.failed_token(ip, start, &format!("flood-{n}"));
+        }
+        assert!(guesses.tried.lock().unwrap()[&ip].len() <= MAX_FAILURES as usize);
+        // A new window starts the count, and what was tried, again.
+        let later = start + FAILURE_WINDOW;
+        assert!(!guesses.blocked(ip, later));
+        guesses.failed_token(ip, later, "stale");
+        assert!(!guesses.blocked(ip, later));
+        assert_eq!(guesses.tried.lock().unwrap()[&ip], ["stale"]);
+        // A right token forgets both.
+        guesses.cleared(ip);
+        assert!(guesses.tried.lock().unwrap().get(&ip).is_none());
+    }
+
+    #[test]
+    fn the_typed_token_is_the_header_and_never_the_cookie() {
+        assert_eq!(
+            bearer_token(&headers(&[
+                ("authorization", "Bearer typed"),
+                ("cookie", "gridfpv_director=cookie")
+            ]))
+            .as_deref(),
+            Some("typed")
+        );
+        assert_eq!(
+            bearer_token(&headers(&[("cookie", "gridfpv_director=cookie")])),
+            None
+        );
+        assert_eq!(
+            bearer_token(&headers(&[("authorization", "Basic abc")])),
+            None
+        );
+        assert_eq!(
+            bearer_token(&headers(&[("authorization", "Bearer   ")])),
+            None
+        );
     }
 
     #[test]
@@ -902,6 +1040,27 @@ mod tests {
         ] {
             assert_eq!(presented_token(&none), None, "{none:?}");
         }
+        // Both are offered when both are there, the header first, and once when they match.
+        assert_eq!(
+            presented_tokens(&headers(&[
+                ("authorization", "Bearer header"),
+                ("cookie", "gridfpv_director=cookie")
+            ])),
+            ["header", "cookie"]
+        );
+        assert_eq!(
+            presented_tokens(&headers(&[
+                ("authorization", "Bearer same"),
+                ("cookie", "gridfpv_director=same")
+            ])),
+            ["same"]
+        );
+        assert_eq!(
+            presented_tokens(&headers(&[("cookie", "gridfpv_director=cookie")])),
+            ["cookie"]
+        );
+        assert!(presented_tokens(&headers(&[("authorization", "Basic abc")])).is_empty());
+        assert!(presented_tokens(&headers(&[])).is_empty());
         // A bad header falls back to the cookie.
         assert_eq!(
             presented_token(&headers(&[
@@ -1030,7 +1189,14 @@ mod tests {
 
     #[test]
     fn full_access_is_local_or_a_visitor_with_the_token() {
-        let access = |origin, director| Access { origin, director }.full();
+        let access = |origin, director| {
+            Access {
+                origin,
+                director,
+                blocked: false,
+            }
+            .full()
+        };
         assert!(access(Origin::Local, false));
         assert!(access(Origin::Network, true));
         assert!(!access(Origin::Network, false));

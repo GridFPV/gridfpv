@@ -13,4 +13,4 @@ import type { SignupCommand } from "./SignupCommand";
  * stands for are appended to the log; if not, it is refused with the reason and nothing is
  * appended.
  */
-export type Command = { "StartRace": { heat: PhaseId, } } | { "StopRace": { race: RaceId, } } | { "SaveRace": { race: RaceId, needs_marshal: boolean, note?: string, } } | { "DiscardRace": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "FileProtest": { race: RaceId, by?: PilotId, note?: string, } } | { "Record": Event } | { "Signup": SignupCommand };
+export type Command = { "StartRace": { heat: PhaseId, } } | { "StopRace": { race: RaceId, } } | { "SaveRace": { race: RaceId, needs_marshal: boolean, note?: string, } } | { "DiscardRace": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "FileProtest": { race: RaceId, by?: PilotId, note?: string, } } | { "Record": Event } | { "Signup": SignupCommand } | { "PutOnTimer": { heat: PhaseId, } };

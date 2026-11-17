@@ -104,6 +104,8 @@ pub enum Refusal {
     HeatClosedToPilots(PhaseId),
     #[error("{0:?} has started or been flown, so who is in it cannot change")]
     HeatAlreadyRaced(PhaseId),
+    #[error("{0:?} has a race that is not saved or thrown out yet. Decide it first")]
+    RaceStillOn(PhaseId),
     #[error("that seat is not one of the seats of {0:?}")]
     NotASignupSeat(PhaseId),
     #[error("that seat in {0:?} is already taken")]
@@ -169,6 +171,10 @@ pub struct EventState {
     pub race_log_start: BTreeMap<RaceId, u64>,
     /// What pilot sign-up keeps beside the heats' lineups (see [`crate::signup`]).
     pub signups: crate::signup::Signups,
+    /// The heat the director last put on the timer, or last started. Read it through
+    /// [`EventState::on_timer`], which also knows about a race that is on and a heat that
+    /// has since been removed.
+    pub put_on_timer: Option<PhaseId>,
     /// How many log entries have been applied: the offset the next one will have.
     pub applied: u64,
 }
@@ -251,12 +257,18 @@ impl EventState {
                 // clock that no longer exists. It must not place a start until measured.
                 self.clock_offsets.remove(adapter);
             }
+            Event::HeatOnTimer { heat } => {
+                self.put_on_timer = Some(heat.clone());
+            }
             Event::RaceStarting { setup, .. } => {
+                // A heat whose race starts is on the timer, whatever was there before.
+                self.put_on_timer = Some(setup.heat.clone());
                 self.race_log_start
                     .entry(setup.race.clone())
                     .or_insert(offset);
             }
             Event::RaceStarted { setup } => {
+                self.put_on_timer = Some(setup.heat.clone());
                 self.race_log_start
                     .entry(setup.race.clone())
                     .or_insert(offset);
@@ -683,7 +695,35 @@ impl EventState {
                 Ok(vec![*fact])
             }
             Command::Signup(command) => self.signup(command),
+            Command::PutOnTimer { heat } => {
+                self.heat(&heat)?;
+                if let Some(on) = self.races.undecided()
+                    && on.setup.heat != heat
+                {
+                    return Err(Refusal::RaceStillOn(on.setup.heat.clone()));
+                }
+                if self.on_timer().as_ref() == Some(&heat) {
+                    return Ok(Vec::new());
+                }
+                let mut facts = vec![Event::HeatOnTimer { heat: heat.clone() }];
+                // A sign-up heat on the timer is closed to pilots, so the next may open.
+                facts.extend(self.signup_after_on_timer(&heat));
+                Ok(facts)
+            }
         }
+    }
+
+    /// The heat that is **on the timer**: the one being run now. A race that is counting
+    /// down, running or stopped decides it. Otherwise it is the heat the director last put
+    /// there or last started, as long as it is still a heat of the event. `None` before
+    /// the director has put anything on the timer.
+    pub fn on_timer(&self) -> Option<PhaseId> {
+        if let Some(on) = self.races.undecided() {
+            return Some(on.setup.heat.clone());
+        }
+        self.put_on_timer
+            .clone()
+            .filter(|heat| self.heat(heat).is_ok())
     }
 
     fn start(&self, heat: PhaseId, now: i64) -> Result<Vec<Event>, Refusal> {
@@ -949,7 +989,9 @@ impl EventState {
             | Event::SignupSet { .. }
             | Event::SignupRunsSet { .. }
             | Event::SignupCharged { .. }
-            | Event::SignupHeatClosed { .. } => Err(Refusal::NotACommand),
+            | Event::SignupHeatClosed { .. }
+            // Putting a heat on the timer is a command of its own, which checks the race.
+            | Event::HeatOnTimer { .. } => Err(Refusal::NotACommand),
         }
     }
 }

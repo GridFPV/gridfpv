@@ -965,11 +965,12 @@ Until now only the director used Grid. This section adds the other people at a r
 
   Where the build differs from the text below, and why:
 
-  - **"On the timer."** §11.5 says a heat locks to pilots when the director puts it on the
-    timer. The Director does not know which heat the Run page is showing: that is the
-    console's own state. So a heat locks to pilots when its race is **started**, and the
-    director has a **Close to pilots** button for the time before that. The director can
-    add a pilot up to the start either way.
+  - **"On the timer."** As §11.5 says, a heat locks to pilots when the director puts it on
+    the timer, and the director can add a pilot up to the start. (The first build could
+    not do this, because the heat on the timer was kept only in the console's address
+    bar. Since step 8 the Director keeps it.) Taking a heat off the timer without flying
+    it opens it to pilots again. The **Close to pilots** button is still there, for
+    closing a heat that is not on the timer.
   - **A drop after the race.** A pilot in a saved race has used a run. To give it back,
     the director gives that pilot one more run, since a flown heat cannot be changed.
   - **Not built:** opening and closing sign-up on a set time.
@@ -1004,11 +1005,10 @@ Until now only the director used Grid. This section adds the other people at a r
   - **Results** are picked phase first, then **Overall** or one heat. A heat shows each
     of its races, and a race opens to its lap times in a large format. So does a race on
     the pilot's own tab.
-  - **One race tab, always called Current race** (Ryan, 2026-11-17). It shows one thing,
-    always with a clock: a race that is on; the result just saved, for two minutes; else
-    the heat that is up next with who is in it. With nothing coming up the last result
-    stays. The Director does not know which heat is on the Run page, so "current" is
-    worked out from what has happened.
+  - **One race tab, always called Current race** (Ryan, 2026-11-17). It shows **the heat
+    on the timer**, always with a clock: who is in it before it is flown, its race while
+    that is on, and its result once it is saved. The result stays until the director puts
+    another heat on the timer.
   - **A seat is named with its channel wherever it is named**: "Seat 2 · R2". The channel
     is what a pilot needs. It comes from the timer, so a bench seat has none. The console
     and the visitor's page read it the same way, into the one name resolver.
@@ -1019,6 +1019,22 @@ Until now only the director used Grid. This section adds the other people at a r
     name while it waits. Kiosks stay on the same listener as phones (agreed).
   - **The director's sign-in** from another device is at `#/director`. Nothing on the
     visitor's page links to it. The director is expected at the Grid computer.
+- **Step 8, the heat on the timer is the Director's** (Ryan, 2026-11-17: "I have to set
+  the heat that is on the timer. That is always the heat I am referring to when I say the
+  active race. You absolutely should know about it").
+  - **On the timer** is one heat: the one the director is running now, whether its race
+    has started or not. The director puts a heat there from the Run page or with **Run**
+    on a heat. Starting a race puts its heat there too. It stays after the race is saved,
+    until another heat is put on.
+  - It is a fact in the event's log (`HeatOnTimer`), so every console, the spectators'
+    page, the pilots' alerts and sign-up all read the same heat, and it is kept when Grid
+    is closed and opened.
+  - While a race is waiting to be saved or thrown out, no other heat can go on the timer.
+  - **"The current race" means the heat on the timer, everywhere.**
+  - Before the director has put anything on the timer, the Run page shows the heat that
+    would be run first and tells the Director so.
+  - The kiosk shows one sign-up sheet at a time, with a picker when a pilot is in more
+    than one, and only the sheets that pilot is in.
 
 ### 11.1 Two parts, and the rule between them
 

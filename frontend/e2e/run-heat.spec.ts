@@ -97,10 +97,24 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
 
     // ── Open the Run view ────────────────────────────────────────────────────────────────
     await phase.getByRole('button', { name: `Run ${HEAT}` }).click();
-    await expect(page).toHaveURL(/#\/event\/run\//);
+    // The address does not carry the heat: which heat is on the timer is the Director's.
+    await expect(page).toHaveURL(/#\/event\/run$/);
     await expect(page.getByRole('heading', { name: 'Run', level: 1 })).toBeVisible();
     // The heat is on the timer, with its format and what times it said in words.
     await expect(heatOnTimer(page)).toHaveText(HEAT);
+    // The console told the Director, so every other screen agrees on the current heat.
+    await expect
+      .poll(async () => {
+        const told = (await (await page.request.get(`/events/${eventId}/state`)).json()) as {
+          on_timer?: string;
+          phases: { def: { id: string; label: string } }[];
+        };
+        return told.phases.find((entry) => entry.def.id === told.on_timer)?.def.label;
+      })
+      .toBe(HEAT);
+    // A reload keeps it: it does not live in the address or in this browser.
+    await page.reload();
+    await expect(heatOnTimer(page)).toHaveText(HEAT, { timeout: 15_000 });
     await expect(openEvent(page)).toContainText(EVENT);
     await expect(page.getByTestId('run-rules')).toContainText('First to 3 laps');
     await expect(page.getByTestId('timed-by')).toHaveText('Timed by Bench');

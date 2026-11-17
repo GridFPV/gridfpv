@@ -84,9 +84,11 @@ Each row is a heat and each column is a seat.
 - **+ Add** puts a pilot on a free seat. Your limits are for pilots. They do not stop you.
 - **Drop** takes a pilot out. Grid asks if it counts as a run. Pick **Does not count** for
   a pilot who never got to fly.
-- **Close to pilots** stops pilots joining or leaving one heat from a phone. Use it when
-  you call the heat to the line. You can still add or drop. Starting the race closes the
-  heat anyway.
+- **The heat on the timer is closed to pilots.** When you put a heat on the timer (on the
+  Run page, or with **Run**), pilots can no longer join or leave it from a phone. The
+  sheet marks it **On the timer**. You can still add or drop, up to the start. If you
+  put another heat on the timer without flying it, it opens to pilots again.
+- **Close to pilots** does the same for a heat that is not on the timer.
 - Once a heat is on or flown, nobody can change who is in it.
 
 ### Runs

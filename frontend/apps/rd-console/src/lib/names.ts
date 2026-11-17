@@ -22,7 +22,7 @@ import type {
   TimerView
 } from '@gridfpv/types';
 import { channelLabel, formatMhz, frequencyLabel } from './channels.js';
-import { seatLabel, timerName } from './seats.js';
+import { seatLabel, timerName, isBench } from './seats.js';
 
 /** Shown for a pilot who is no longer in the pilot directory. */
 export const UNKNOWN_PILOT = 'Unknown pilot';
@@ -110,8 +110,25 @@ export function buildNames(
   const frequency = new Map(
     channels.map((entry) => [`${entry.adapter}\u0000${entry.seat}`, entry.freq_mhz])
   );
-  const seatPlain = (adapter: AdapterId, ref: SeatRef, position?: number): string =>
-    seatLabel(timers, adapter, ref, position);
+  // A heat can have seats on more than one timer: four one-seat gates, say. "Seat 1" would
+  // then name every one of them. A timer that shares a lineup with another timer has its
+  // seats named by the timer instead, which is also what the director sees on the gate.
+  const shared = new Set<AdapterId>();
+  for (const entry of phases) {
+    // A lineup lists only the seats that are filled. A sign-up phase's rules list every
+    // seat its heats have, so a gate with nobody on it yet is still known to be shared.
+    for (const seats of [entry.lineup, entry.signup?.rules.seats ?? []]) {
+      const used = new Set(seats.map((seat) => seat.adapter));
+      if (used.size > 1) for (const adapter of used) shared.add(adapter);
+    }
+  }
+  const seatPlain = (adapter: AdapterId, ref: SeatRef, position?: number): string => {
+    const plain = seatLabel(timers, adapter, ref, position);
+    const known = timers.find((candidate) => candidate.timer.id === adapter);
+    if (!shared.has(adapter) || isBench(adapter) || !known) return plain;
+    // A timer with one seat is that seat: its name says it all.
+    return known.status.seats.length > 1 ? `${known.timer.name} ${plain}` : known.timer.name;
+  };
   const seat = (adapter: AdapterId, ref: SeatRef, position?: number): string => {
     const mhz = frequency.get(`${adapter}\u0000${ref}`);
     const plain = seatPlain(adapter, ref, position);

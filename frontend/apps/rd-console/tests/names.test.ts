@@ -191,3 +191,109 @@ describe("a seat's channel in its name", () => {
     expect(two.seat('b', '0', 0)).toBe('Seat 1 · R2');
   });
 });
+
+describe('seats of a heat that is on more than one timer', () => {
+  const one = (id: string, name: string) => timerView(id, name, 1);
+  const timers = [one('g1', 'Gate 1'), one('g2', 'Gate 2'), timerView('big', 'Big', 4)];
+  const mixed = {
+    ...heat('h1', 'Heat 1', []),
+    lineup: [
+      { adapter: 'g1', seat: '0', who: 'Nobody' as const },
+      { adapter: 'g2', seat: '0', who: 'Nobody' as const }
+    ]
+  };
+
+  it('are named by their timer, so no two seats share a name', () => {
+    const names = buildNames(
+      [mixed],
+      [],
+      timers,
+      [],
+      [
+        { adapter: 'g1', seat: '0', freq_mhz: 5658 },
+        { adapter: 'g2', seat: '0', freq_mhz: 5695 }
+      ]
+    );
+    expect(names.seatPlain('g1', '0', 0)).toBe('Gate 1');
+    expect(names.seatPlain('g2', '0', 1)).toBe('Gate 2');
+    // The channel still goes on the end.
+    expect(names.seat('g1', '0', 0)).toBe('Gate 1 · R1');
+    expect(names.seat('g2', '0', 1)).toBe('Gate 2 · R2');
+  });
+
+  it('a timer with several seats keeps the seat number after its name', () => {
+    const both = {
+      ...heat('h2', 'Heat 2', []),
+      lineup: [
+        { adapter: 'g1', seat: '0', who: 'Nobody' as const },
+        { adapter: 'big', seat: '2', who: 'Nobody' as const }
+      ]
+    };
+    const names = buildNames([both], [], timers);
+    expect(names.seatPlain('big', '2', 1)).toBe('Big Seat 3');
+    expect(names.seatPlain('g1', '0', 0)).toBe('Gate 1');
+  });
+
+  it('a heat on one timer is named as before, and so is the bench', () => {
+    const plain = {
+      ...heat('h3', 'Heat 3', []),
+      lineup: [
+        { adapter: 'big', seat: '0', who: 'Nobody' as const },
+        { adapter: 'big', seat: '1', who: 'Nobody' as const }
+      ]
+    };
+    const names = buildNames([plain], [], timers);
+    expect(names.seat('big', '0', 0)).toBe('Seat 1');
+    expect(names.seat('big', '1', 1)).toBe('Seat 2');
+    // The bench beside a timer in one heat is still the bench's seat.
+    const withBench = {
+      ...heat('h4', 'Heat 4', []),
+      lineup: [
+        { adapter: BENCH_ADAPTER, seat: 'seat-2', who: 'Nobody' as const },
+        { adapter: 'g1', seat: '0', who: 'Nobody' as const }
+      ]
+    };
+    const more = buildNames([withBench], [], timers);
+    expect(more.seat(BENCH_ADAPTER, 'seat-2', 0)).toBe('Seat 2');
+    expect(more.seat('g1', '0', 1)).toBe('Gate 1');
+  });
+
+  it('a timer that has been removed falls back to the place in the lineup', () => {
+    const gone = {
+      ...heat('h5', 'Heat 5', []),
+      lineup: [
+        { adapter: 'g1', seat: '0', who: 'Nobody' as const },
+        { adapter: 'removed', seat: '0', who: 'Nobody' as const }
+      ]
+    };
+    const names = buildNames([gone], [], timers);
+    expect(names.seat('removed', '0', 1)).toBe('Seat 2');
+  });
+
+  it('a sign-up phase says which timers share its heats, even for a seat nobody is on yet', () => {
+    const phase = {
+      ...group('practice', 'Practice'),
+      signup: {
+        rules: {
+          seats: [
+            { adapter: 'g1', seat: '0' },
+            { adapter: 'g2', seat: '0' }
+          ],
+          open_heats: 1,
+          rest_heats: 0,
+          open: true
+        },
+        heats: [],
+        pilots: []
+      }
+    };
+    // The heat has one pilot, on gate 2. Its lineup alone names one timer.
+    const lonely = {
+      ...heat('practice/heat-1', 'Practice Heat 1', []),
+      lineup: [{ adapter: 'g2', seat: '0', who: 'Nobody' as const }]
+    };
+    const names = buildNames([phase, lonely], [], timers);
+    expect(names.seat('g2', '0', 0)).toBe('Gate 2');
+    expect(names.seat('g1', '0', 0)).toBe('Gate 1');
+  });
+});

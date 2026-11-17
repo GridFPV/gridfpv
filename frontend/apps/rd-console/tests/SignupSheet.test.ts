@@ -283,4 +283,53 @@ describe('SignupSheet', () => {
     expect(send).toHaveBeenCalledOnce();
     finish();
   });
+
+  it('says which heat is on the timer, and offers no "Open to pilots" for it', () => {
+    const sheet = signupSheet({
+      heats: [
+        signupHeat(1, ['p-ace', null, null], 'Closed'),
+        signupHeat(2, [null, null, null], 'Closed'),
+        signupHeat(3, [null, null, null])
+      ]
+    });
+    render(SignupSheet, {
+      phase: signupPhase(sheet),
+      names: signupNames(signupEvent(sheet)),
+      onTimer: 'quali/heat-1',
+      send: vi.fn(async () => true),
+      onrules: vi.fn()
+    });
+    expect(heatRow(1)).toHaveTextContent('On the timer');
+    expect(heatRow(1)).not.toHaveTextContent('Closed');
+    // It is closed because it is on the timer: there is nothing to open by hand.
+    expect(within(heatRow(1)).queryByRole('button', { name: /to pilots/ })).toBeNull();
+    // The director can still add and drop in it, up to the start.
+    expect(
+      within(heatRow(1)).getByRole('button', { name: 'Drop Ace from Qualifying Heat 1' })
+    ).toBeEnabled();
+    expect(
+      within(heatRow(1)).getByRole('button', { name: 'Add a pilot to Seat 2 of Qualifying Heat 1' })
+    ).toBeEnabled();
+    // A heat the director closed by hand still says Closed and can be opened.
+    expect(heatRow(2)).toHaveTextContent('Closed');
+    expect(
+      within(heatRow(2)).getByRole('button', { name: 'Open Qualifying Heat 2 to pilots' })
+    ).toBeEnabled();
+    expect(heatRow(3)).not.toHaveTextContent('On the timer');
+  });
+
+  it('a heat on the timer that is racing or flown says that, not "On the timer"', () => {
+    for (const state of ['Racing', 'Flown'] as const) {
+      const sheet = signupSheet({ heats: [signupHeat(1, ['p-ace', null, null], state)] });
+      render(SignupSheet, {
+        phase: signupPhase(sheet),
+        names: signupNames(signupEvent(sheet)),
+        onTimer: 'quali/heat-1',
+        send: vi.fn(async () => true),
+        onrules: vi.fn()
+      });
+      expect(heatRow(1)).not.toHaveTextContent('On the timer');
+      cleanup();
+    }
+  });
 });
