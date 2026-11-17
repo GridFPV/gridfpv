@@ -246,12 +246,14 @@ describe("the visitor's source", () => {
     await source.listPilots();
     await source.listClasses();
     await source.listTimers();
+    await source.getChannels();
     expect(asked.map((call) => call.url)).toEqual([
       'http://grid.local:8081/public/event',
       'http://grid.local:8081/public/event/state',
       'http://grid.local:8081/public/event/pilots',
       'http://grid.local:8081/public/event/classes',
-      'http://grid.local:8081/public/event/timers'
+      'http://grid.local:8081/public/event/timers',
+      'http://grid.local:8081/public/event/channels'
     ]);
     for (const call of asked) {
       expect(call.method).toBe('GET');

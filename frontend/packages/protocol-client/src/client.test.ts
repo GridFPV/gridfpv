@@ -742,3 +742,25 @@ describe("a pilot's sign-in (docs/primitives.md §11.3)", () => {
     expect(seen[0].init?.method).toBe('DELETE');
   });
 });
+
+describe('seat channels, for a visitor', () => {
+  it('listPublicChannels GETs /public/event/channels with no token', async () => {
+    const channels = [{ adapter: 'gate-x1', seat: '0', freq_mhz: 5658 }];
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => channels
+      } as unknown as Response;
+    };
+    const { listPublicChannels } = await import('./client.js');
+    expect(await listPublicChannels('http://d.local:8081/', { fetch })).toEqual(channels);
+    expect(seen[0].url).toBe('http://d.local:8081/public/event/channels');
+    expect(seen[0].init?.method ?? 'GET').toBe('GET');
+    expect(
+      (seen[0].init?.headers as Record<string, string> | undefined)?.Authorization
+    ).toBeUndefined();
+  });
+});

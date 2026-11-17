@@ -54,7 +54,8 @@ function open(hello: PublicHello = HELLO, event: PublicEvent = hello.event ? NIG
       listPilots: vi.fn(async () => [{ id: 'p-ace', callsign: 'Ace', vtx_types: [] }]),
       subscribeChanges: vi.fn(() => stop)
     }),
-    getEvent: vi.fn(async () => event)
+    getEvent: vi.fn(async () => event),
+    getChannels: vi.fn(async () => [{ adapter: 'bench', seat: 'seat-1', freq_mhz: 5658 }])
   };
   render(VisitorPage, { session, source, hello, reload });
   return {
@@ -417,7 +418,11 @@ describe('VisitorPage: a pilot signs in', () => {
     history.replaceState(null, '', '/#/join/AAA222');
     render(VisitorPage, {
       session,
-      source: { ...fakeLiveSession(racing()), getEvent: vi.fn(async () => NIGHT) },
+      source: {
+        ...fakeLiveSession(racing()),
+        getEvent: vi.fn(async () => NIGHT),
+        getChannels: vi.fn(async () => [])
+      },
       hello: HELLO,
       reload: vi.fn()
     });
@@ -454,5 +459,49 @@ describe('VisitorPage: a pilot signs in', () => {
     expect(screen.queryByLabelText('Your code')).toBeNull();
     await askAsPilot();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('VisitorPage: what a signed-in pilot gets', () => {
+  it('a spectator sees no Me tab; a pilot who signs in gets one, with their heat and channel', async () => {
+    const { source } = open();
+    await screen.findByTestId('race-heat');
+    expect(screen.queryByRole('tab', { name: /^Me/ })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'I am a pilot' }));
+    await fireEvent.input(screen.getByLabelText('Your code'), { target: { value: 'ABC234' } });
+    await fireEvent.submit(screen.getByRole('form', { name: 'Pilot sign-in' }));
+    const me = await screen.findByRole('tab', { name: /^Me/ });
+    await waitFor(() => expect(me).toHaveAttribute('aria-selected', 'true'));
+    // Ace is in the race that is on: the page says so, with the seat's channel.
+    const alert = await screen.findByTestId('pilot-alert');
+    expect(alert).toHaveTextContent('You are flying now');
+    await waitFor(() => expect(alert).toHaveTextContent('R1 · 5658 MHz'));
+    expect(source.getChannels).toHaveBeenCalled();
+  });
+
+  it('asks for the channels again now and then, and keeps the last answer when that fails', async () => {
+    const { source } = open({ ...HELLO, pilot: { id: 'p-ace', callsign: 'Ace' } });
+    const alert = await screen.findByTestId('pilot-alert');
+    await waitFor(() => expect(alert).toHaveTextContent('R1 · 5658 MHz'));
+    const asked = vi.mocked(source.getChannels).mock.calls.length;
+    vi.mocked(source.getChannels).mockRejectedValue(new Error('Failed to fetch'));
+    await vi.advanceTimersByTimeAsync(21_000);
+    expect(vi.mocked(source.getChannels).mock.calls.length).toBeGreaterThan(asked);
+    expect(screen.getByTestId('pilot-alert')).toHaveTextContent('R1 · 5658 MHz');
+  });
+
+  it('asks for no channels while no event is open', async () => {
+    const { event: _none, ...noEvent } = HELLO;
+    const { source } = open(noEvent, {});
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(source.getChannels).not.toHaveBeenCalled();
+  });
+
+  it('signing out takes the Me tab and the alert away', async () => {
+    open({ ...HELLO, pilot: { id: 'p-ace', callsign: 'Ace' } });
+    await screen.findByTestId('pilot-alert');
+    await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(screen.queryByTestId('pilot-alert')).toBeNull());
+    expect(screen.queryByRole('tab', { name: /^Me/ })).toBeNull();
   });
 });

@@ -154,6 +154,7 @@ export type * from '@bindings/PilotAccessView';
 export type * from '@bindings/PilotCodeView';
 export type * from '@bindings/PilotSignInRequest';
 export type * from '@bindings/PublicPilot';
+export type * from '@bindings/SeatChannel';
 export type * from '@bindings/VideoRun';
 export type * from '@bindings/VideoRunState';
 export type * from '@bindings/VideoSettings';

@@ -10,6 +10,7 @@
 import {
   getPublicEvent,
   getPublicEventState,
+  listPublicChannels,
   listPublicClasses,
   listPublicPilots,
   listPublicTimers,
@@ -23,6 +24,7 @@ import type {
   Pilot,
   PublicEvent,
   RaceView,
+  SeatChannel,
   TimerView
 } from '@gridfpv/types';
 import type { LiveSession } from './eventLive.svelte.js';
@@ -35,6 +37,8 @@ import { BENCH_ADAPTER } from './seats.js';
 /** What the spectator's page reads from: which event is open, and the live store's reads. */
 export interface PublicSource extends LiveSession {
   getEvent(): Promise<PublicEvent>;
+  /** Which video channel each seat is on. */
+  getChannels(): Promise<SeatChannel[]>;
 }
 
 const NOT_FOR_VISITORS = 'Only the director can do this.';
@@ -48,6 +52,7 @@ const refuse = (): Promise<never> => Promise.reject(new Error(NOT_FOR_VISITORS))
 export function publicSource(baseUrl: string): PublicSource {
   return {
     getEvent: () => getPublicEvent(baseUrl),
+    getChannels: () => listPublicChannels(baseUrl),
     getEventState: () => getPublicEventState(baseUrl),
     subscribeChanges: (_id, onCursor) => subscribePublicChanges(baseUrl, onCursor),
     listPilots: () => listPublicPilots(baseUrl),

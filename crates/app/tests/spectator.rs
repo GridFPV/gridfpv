@@ -420,6 +420,7 @@ async fn everything_a_visitor_reads(rig: &Rig) -> String {
         "/public/event/pilots",
         "/public/event/classes",
         "/public/event/timers",
+        "/public/event/channels",
         "/health",
         "/about",
         "/time",
@@ -754,4 +755,256 @@ async fn a_visitor_cannot_change_anything_through_the_public_routes() {
         }
     }
     assert_eq!(director_state(&rig, &day.event).await["cursor"], before);
+}
+
+// ── Seat channels ───────────────────────────────────────────────────────────
+
+/// A stand-in for an OFT timer's settings route. It counts how often it is asked.
+struct FakeTimer {
+    address: String,
+    asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeTimer {
+    fn asked(&self) -> usize {
+        self.asked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Seats 0 and 2 are on, on 5658 and 5732 MHz. Seat 1 is switched off.
+async fn fake_timer() -> FakeTimer {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    let app = Router::new().route(
+        "/oft/v1/config",
+        axum::routing::get(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Slow enough that requests arriving together overlap.
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                axum::Json(json!({
+                    "seats": [
+                        {"seat": 0, "freq_mhz": 5658, "enabled": true},
+                        {"seat": 1, "freq_mhz": 5695, "enabled": false},
+                        {"seat": 2, "freq_mhz": 5732, "enabled": true}
+                    ],
+                    "threshold": {"mode": "auto", "snr_enter": 10, "hysteresis": 3},
+                    "min_lap_ms": 2000
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    FakeTimer {
+        address,
+        asked,
+        task,
+    }
+}
+
+/// An open event with one heat on a timer at `address`, and a spare timer no heat uses.
+async fn event_on_timer(rig: &Rig, address: &str, spare: &str) -> String {
+    let ace = id_of(&direct(rig, Method::POST, "/pilots", json!({"callsign": "Ace"})).await);
+    let gate = id_of(
+        &direct(
+            rig,
+            Method::POST,
+            "/timers",
+            json!({"name": "Gate", "kind": "Oft", "address": address}),
+        )
+        .await,
+    );
+    direct(
+        rig,
+        Method::POST,
+        "/timers",
+        json!({"name": "Spare", "kind": "Oft", "address": spare}),
+    )
+    .await;
+    let event = id_of(
+        &direct(
+            rig,
+            Method::POST,
+            "/events",
+            json!({"name": "Channel Night"}),
+        )
+        .await,
+    );
+    direct(rig, Method::PUT, "/active-event", json!({"id": event})).await;
+    direct(
+        rig,
+        Method::POST,
+        &format!("/events/{event}/commands"),
+        json!({"Record": {"PhaseDefined": {"def": {
+            "id": "heat-1",
+            "label": "Heat 1",
+            "kind": {"Heat": {"lineup": [
+                {"adapter": gate, "seat": "0", "source": {"Pilot": ace}},
+                {"adapter": "bench", "seat": "seat-1", "source": "Open"}
+            ]}},
+            "format": {
+                "name": "Open",
+                "race": {"end": "Open", "staging_micros": 0, "first_lap": "HoleShot"},
+                "completion": "DirectorDecides"
+            }
+        }}}}),
+    )
+    .await;
+    gate
+}
+
+#[tokio::test]
+async fn a_visitor_is_told_the_channel_of_each_seat_that_is_on() {
+    let rig = rig();
+    let timer = fake_timer().await;
+    let spare = fake_timer().await;
+    let gate = event_on_timer(&rig, &timer.address, &spare.address).await;
+    let channels = visit_json(&rig, "/public/event/channels").await;
+    assert_eq!(
+        channels,
+        json!([
+            {"adapter": gate, "seat": "0", "freq_mhz": 5658},
+            {"adapter": gate, "seat": "2", "freq_mhz": 5732}
+        ])
+    );
+    // The timer no heat is flown on was not asked, and is not in the answer.
+    assert_eq!(spare.asked(), 0);
+    timer.task.abort();
+    spare.task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_field_full_of_phones_asks_the_timer_once() {
+    let rig = rig();
+    let timer = fake_timer().await;
+    let spare = fake_timer().await;
+    event_on_timer(&rig, &timer.address, &spare.address).await;
+    // Forty phones ask at the same moment: forty tasks, started together, each its own
+    // request. The fake timer takes 60 ms to answer, so they all overlap.
+    let mut asking = tokio::task::JoinSet::new();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(40));
+    for phone in 0..40 {
+        let app = rig.app.clone();
+        let barrier = barrier.clone();
+        asking.spawn(async move {
+            let mut request = Request::builder()
+                .uri("/public/event/channels")
+                .header(header::HOST, "192.168.1.5:8081")
+                .body(Body::empty())
+                .unwrap();
+            let peer: SocketAddr = format!("192.168.1.{}:50000", 100 + phone).parse().unwrap();
+            request.extensions_mut().insert(ConnectInfo(peer));
+            barrier.wait().await;
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        });
+    }
+    let mut answers = 0;
+    let mut with_channels = 0;
+    while let Some(done) = asking.join_next().await {
+        let (status, channels) = done.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        answers += 1;
+        // A phone that asked while the one request was still out gets what was known at
+        // that moment, which may be nothing yet. It is never made to wait or sent an error.
+        if channels.as_array().unwrap().len() == 2 {
+            with_channels += 1;
+        }
+    }
+    assert_eq!(answers, 40);
+    assert!(
+        with_channels >= 1,
+        "at least the phone that asked the timer has the channels"
+    );
+    assert_eq!(
+        timer.asked(),
+        1,
+        "one request to the timer for forty phones"
+    );
+    for _ in 0..25 {
+        let channels = visit_json(&rig, "/public/event/channels").await;
+        assert_eq!(channels.as_array().unwrap().len(), 2);
+    }
+    assert_eq!(timer.asked(), 1, "and none for the next twenty-five");
+    // When what is known is old, it is asked once more.
+    let gate = gridfpv_events::AdapterId(
+        visit_json(&rig, "/public/event/channels").await[0]["adapter"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    );
+    rig.registry.timers().age_channels(&gate);
+    visit_json(&rig, "/public/event/channels").await;
+    visit_json(&rig, "/public/event/channels").await;
+    assert_eq!(timer.asked(), 2);
+    timer.task.abort();
+    spare.task.abort();
+}
+
+#[tokio::test]
+async fn a_timer_that_stops_answering_keeps_the_channels_it_last_gave() {
+    let rig = rig();
+    let timer = fake_timer().await;
+    let spare = fake_timer().await;
+    let gate = event_on_timer(&rig, &timer.address, &spare.address).await;
+    let before = visit_json(&rig, "/public/event/channels").await;
+    assert_eq!(before.as_array().unwrap().len(), 2);
+    // The timer is switched off.
+    timer.task.abort();
+    let _ = timer.task.await;
+    rig.registry
+        .timers()
+        .age_channels(&gridfpv_events::AdapterId(gate));
+    let (status, text) = visit(&rig, "/public/event/channels").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a dead timer is not an error for a spectator"
+    );
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), before);
+    spare.task.abort();
+}
+
+#[tokio::test]
+async fn a_timer_that_never_answered_gives_no_channels_and_no_error() {
+    let rig = rig();
+    // Nothing listens here.
+    let dead = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().to_string()
+    };
+    event_on_timer(&rig, &dead, &dead).await;
+    for _ in 0..3 {
+        assert_eq!(visit_json(&rig, "/public/event/channels").await, json!([]));
+    }
+    // And the address of the timer is in none of it.
+    assert!(
+        !visit(&rig, "/public/event/channels")
+            .await
+            .1
+            .contains(&dead)
+    );
+    assert!(!visit(&rig, "/public/event/timers").await.1.contains(&dead));
+}
+
+#[tokio::test]
+async fn an_event_on_the_bench_has_no_channels_and_no_event_has_none_to_ask_for() {
+    let rig = rig();
+    let (status, text) = visit(&rig, "/public/event/channels").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(text.contains("No event is open."));
+    race_day(&rig).await;
+    // Heat 2 of that day is on the "Gate" timer at an address nothing answers at.
+    assert_eq!(visit_json(&rig, "/public/event/channels").await, json!([]));
+    assert!(marks_in(&visit(&rig, "/public/event/channels").await.1).is_empty());
 }

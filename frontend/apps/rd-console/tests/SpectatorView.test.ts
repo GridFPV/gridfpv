@@ -366,3 +366,260 @@ describe('SpectatorView: the connection, and looking only', () => {
     expect(session.listTimers).toHaveBeenCalledOnce();
   });
 });
+
+describe('SpectatorView: a signed-in pilot', () => {
+  const ACE = { id: 'p-ace', callsign: 'Ace' };
+  const CAT = { id: 'p-cat', callsign: 'Cat' };
+  const CHANNELS = [{ adapter: 'bench', seat: 'seat-1', freq_mhz: 5658 }];
+
+  async function openAs(
+    view: EventView,
+    who: { id: string; callsign: string } | undefined,
+    channels = CHANNELS
+  ) {
+    const { live } = await openLive(view, { listPilots: vi.fn(async () => PILOTS) });
+    const buzz = vi.fn();
+    const rendered = render(SpectatorView, { live, pilot: who, channels, buzz });
+    return { live, buzz, rendered };
+  }
+
+  /** Three heats queued, none on. Ace is in the first and the third. */
+  function queued(): EventView {
+    return eventView({
+      phases: [
+        heat('h1', 'Heat 1', ['p-ace', 'p-bee']),
+        heat('h2', 'Heat 2', ['p-bee', 'p-cat']),
+        heat('h3', 'Heat 3', ['p-ace'])
+      ],
+      queue: ['h1', 'h2', 'h3']
+    });
+  }
+
+  it('a spectator has no Me tab and no alert', async () => {
+    await openAs(queued(), undefined);
+    expect(screen.queryByRole('tab', { name: /^Me/ })).toBeNull();
+    expect(screen.queryByTestId('pilot-alert')).toBeNull();
+  });
+
+  it('a pilot lands on Me, with their heats in order and how far off each is', async () => {
+    await openAs(queued(), ACE);
+    expect(tab(/^Me/)).toHaveAttribute('aria-selected', 'true');
+    expect(tab(/^Me/)).toHaveTextContent('2');
+    const mine = within(screen.getByRole('list', { name: 'My heats' })).getAllByRole('listitem');
+    expect(mine.map((item) => item.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'Next Heat 1 Seat 1 · R1 · 5658 MHz',
+      '2 heats away Heat 3 Seat 1 · R1 · 5658 MHz'
+    ]);
+  });
+
+  it('shows one tab at a time: Me has no race table and no results under it', async () => {
+    const view = running();
+    view.phases[0] = { ...view.phases[0], ranking: [placed('p-ace', 1, { laps: 1 })] };
+    await openAs(view, ACE);
+    expect(tab(/^Me/)).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('region', { name: 'Me' })).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Results' })).toBeNull();
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.queryByRole('combobox')).toBeNull();
+    // And each other tab shows only itself.
+    for (const [name, region] of [
+      ['On now', 'On now'],
+      [/Up next/, 'Up next'],
+      ['Results', 'Results']
+    ] as const) {
+      await fireEvent.click(tab(name));
+      expect(screen.getAllByRole('region').map((el) => el.getAttribute('aria-label'))).toEqual([
+        region
+      ]);
+    }
+  });
+
+  it('shows no channel for a seat the timer has not spoken for', async () => {
+    await openAs(queued(), ACE, []);
+    expect(screen.queryByTestId('my-channel')).toBeNull();
+    expect(screen.getByRole('list', { name: 'My heats' })).toHaveTextContent('Seat 1');
+  });
+
+  it('tells a pilot they are next, on every tab, and buzzes once', async () => {
+    const { buzz } = await openAs(queued(), ACE);
+    const alert = screen.getByTestId('pilot-alert');
+    expect(alert).toHaveTextContent('You are next');
+    expect(alert).toHaveTextContent('Heat 1 · Seat 1 · R1 · 5658 MHz');
+    expect(alert).toHaveAttribute('data-nearness', 'next');
+    for (const name of ['Last race', /Up next/, 'Results']) {
+      await fireEvent.click(tab(name));
+      expect(screen.getByTestId('pilot-alert')).toHaveTextContent('You are next');
+    }
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(buzz).toHaveBeenCalledOnce();
+  });
+
+  it('tells a pilot how many heats away they are, and nothing when that is far off', async () => {
+    await openAs(queued(), CAT);
+    expect(screen.getByTestId('pilot-alert')).toHaveTextContent('You are 1 heat away');
+    expect(screen.getByTestId('pilot-alert')).toHaveAttribute('data-nearness', 'soon');
+    cleanup();
+    const far = queued();
+    far.phases.push(heat('h4', 'Heat 4', ['p-bee']), heat('h5', 'Heat 5', ['p-cat']));
+    far.phases[1] = heat('h2', 'Heat 2', ['p-bee']);
+    far.queue = ['h1', 'h2', 'h3', 'h4', 'h5'];
+    const { buzz } = await openAs(far, CAT);
+    expect(screen.queryByTestId('pilot-alert')).toBeNull();
+    expect(buzz).not.toHaveBeenCalled();
+    // The heat is still listed for them.
+    expect(screen.getByRole('list', { name: 'My heats' })).toHaveTextContent('4 heats away');
+  });
+
+  it('buzzes again when the pilot gets closer, and says they are flying when their race is on', async () => {
+    const view = queued();
+    const { live, buzz } = await openAs(view, CAT);
+    expect(buzz).toHaveBeenCalledTimes(1);
+    // Heat 1 is flown and saved: Heat 2, with Cat in it, is next.
+    live.view = {
+      ...view,
+      cursor: 2,
+      queue: ['h2', 'h3'],
+      races: [race('h1', 1, 'Saved')]
+    };
+    await waitFor(() =>
+      expect(screen.getByTestId('pilot-alert')).toHaveTextContent('You are next')
+    );
+    expect(buzz).toHaveBeenCalledTimes(2);
+    // Heat 2 starts.
+    const on = race('h2', 1, 'Running', {
+      started_at: 100 * S,
+      seats: [raceSeat(0, 'p-bee'), raceSeat(1, 'p-cat')]
+    });
+    live.view = {
+      ...live.view,
+      cursor: 3,
+      races: [race('h1', 1, 'Saved'), on],
+      current_race: on.race
+    };
+    await waitFor(() =>
+      expect(screen.getByTestId('pilot-alert')).toHaveTextContent('You are flying now')
+    );
+    expect(screen.getByTestId('pilot-alert')).toHaveAttribute('data-nearness', 'now');
+    expect(buzz).toHaveBeenCalledTimes(3);
+    // The same snapshot again buzzes nobody.
+    live.view = { ...live.view, cursor: 4 };
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(buzz).toHaveBeenCalledTimes(3);
+  });
+
+  it('a phone that cannot buzz still shows the alert', async () => {
+    const { live } = await openLive(queued(), { listPilots: vi.fn(async () => PILOTS) });
+    render(SpectatorView, {
+      live,
+      pilot: ACE,
+      channels: [],
+      buzz: () => {
+        throw new Error('NotAllowedError');
+      }
+    });
+    expect(screen.getByTestId('pilot-alert')).toHaveTextContent('You are next');
+  });
+
+  it('says so when the pilot is in no heat that is coming up', async () => {
+    await openAs(queued(), { id: 'p-new', callsign: 'New' });
+    expect(screen.getByTestId('no-heats')).toHaveTextContent(
+      'You are not in a heat that is coming up.'
+    );
+    expect(screen.getByTestId('no-races')).toBeVisible();
+    expect(tab(/^Me/).textContent?.trim()).toBe('Me');
+  });
+
+  it("lists the pilot's races lap by lap, newest first, with the best lap marked", async () => {
+    const view = queued();
+    view.races = [
+      race('h1', 1, 'Saved', {
+        seats: [
+          raceSeat(0, 'p-ace', {
+            finish: 2,
+            laps: [lap(1, 7), lap(2, 6.5), lap(3, 6.9)],
+            best_lap_micros: 6.5 * S,
+            total_micros: 20.4 * S
+          })
+        ]
+      }),
+      race('h3', 1, 'Saved', {
+        seats: [raceSeat(0, 'p-ace', { finish: 1, false_start: true, laps: [] })]
+      })
+    ];
+    await openAs(view, ACE);
+    const races = within(screen.getByRole('list', { name: 'My races' }));
+    const names = races.getAllByText(/· race \d/).map((el) => el.textContent);
+    expect(names).toEqual(['Heat 3 · race 1', 'Heat 1 · race 1']);
+    const laps = within(screen.getByRole('list', { name: 'Laps of Heat 1 · race 1' }))
+      .getAllByRole('listitem')
+      .map((item) => item.textContent?.replace(/\s+/g, ' ').trim());
+    expect(laps).toEqual(['1 7.000', '2 6.500', '3 6.900']);
+    const best = screen
+      .getByRole('list', { name: 'Laps of Heat 1 · race 1' })
+      .querySelectorAll('li.best');
+    expect(best).toHaveLength(1);
+    expect(best[0]).toHaveTextContent('6.500');
+    const first = screen.getByText('Heat 1 · race 1').closest('li')!;
+    expect(first).toHaveTextContent('2nd');
+    expect(first).toHaveTextContent('Best 6.500');
+    expect(first).toHaveTextContent('Total 20.400');
+    const second = screen.getByText('Heat 3 · race 1').closest('li')!;
+    expect(second).toHaveTextContent('False start');
+    expect(second).toHaveTextContent('No laps.');
+  });
+
+  it("marks the pilot's own row in the race, in what is coming up, and in the results", async () => {
+    const view = running();
+    view.phases[0] = {
+      ...view.phases[0],
+      ranking: [placed('p-bee', 1, { laps: 2 }), placed('p-ace', 2, { laps: 1 })]
+    };
+    view.phases.push(heat('h3', 'Qualifying Heat 3', ['p-bee', 'p-ace']));
+    view.queue = ['h1', 'h2', 'h3'];
+    await openAs(view, ACE);
+    await fireEvent.click(tab('On now'));
+    const table = screen.getByRole('table', { name: 'Pilots in this race' });
+    expect(within(table).getByRole('row', { name: /Ace/ })).toHaveClass('me');
+    expect(within(table).getByRole('row', { name: /Bee/ })).not.toHaveClass('me');
+    await fireEvent.click(tab(/Up next/));
+    const heat3 = within(screen.getByRole('region', { name: 'Up next' })).getByRole('listitem', {
+      name: 'Qualifying Heat 3'
+    });
+    expect(within(heat3).getByText('Ace').closest('li')).toHaveClass('me');
+    expect(within(heat3).getByText('Bee').closest('li')).not.toHaveClass('me');
+    await fireEvent.click(tab('Results'));
+    const results = screen.getByRole('table', { name: 'Results' });
+    expect(within(results).getByRole('row', { name: /Ace/ })).toHaveClass('me');
+  });
+
+  it("shows each seat's channel in what is coming up, to everyone", async () => {
+    await openAs(queued(), undefined);
+    await fireEvent.click(tab(/Up next/));
+    const heat1 = within(screen.getByRole('region', { name: 'Up next' })).getByRole('listitem', {
+      name: 'Heat 1'
+    });
+    expect(within(heat1).getByText('Ace').closest('li')).toHaveTextContent('R1 · 5658 MHz');
+    // Seat 2 has no channel known: nothing is made up for it.
+    expect(within(heat1).getByText('Bee').closest('li')).not.toHaveTextContent('MHz');
+  });
+
+  it('moves to Me when a pilot signs in, and off it when they sign out', async () => {
+    const { rendered } = await openAs(queued(), undefined);
+    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    await rendered.rerender({ pilot: ACE });
+    await waitFor(() => expect(tab(/^Me/)).toHaveAttribute('aria-selected', 'true'));
+    await rendered.rerender({ pilot: undefined });
+    await waitFor(() => expect(screen.queryByRole('tab', { name: /^Me/ })).toBeNull());
+    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByTestId('pilot-alert')).toBeNull();
+  });
+
+  it('still has nothing on it that changes anything', async () => {
+    await openAs(queued(), ACE);
+    for (const name of [/^Me/, 'Last race', /Up next/, 'Results']) {
+      await fireEvent.click(tab(name));
+      expect(screen.queryAllByRole('button')).toEqual([]);
+      expect(screen.queryAllByRole('textbox')).toEqual([]);
+    }
+  });
+});

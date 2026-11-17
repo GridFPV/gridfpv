@@ -10,6 +10,8 @@
 //! - `GET /public/event/changes` — tells a page when to read the snapshot again.
 //! - `GET /public/event/pilots`, `/classes`, `/timers` — the names the snapshot refers to,
 //!   and only those.
+//! - `GET /public/event/channels` — which video channel each seat is on, so a pilot knows
+//!   what to fly on.
 //!
 //! The shapes are the console's own (`EventView`, `Pilot`, `Class`, `TimerView`), so one
 //! page and one set of helpers draws both. What differs is what is left in them.
@@ -40,7 +42,7 @@ use crate::classes::Class;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::{EventId, EventRegistry};
 use crate::pilots::Pilot;
-use crate::timers::{Timer, TimerStatus, TimerView};
+use crate::timers::{SeatChannel, Timer, TimerStatus, TimerView};
 use crate::view::{EventView, PhaseView, RaceSeatView, RaceView, SeatWhoView};
 
 /// `GET /public/event`.
@@ -385,4 +387,18 @@ pub async fn get_timers(
             .map(timer_for_visitors)
             .collect(),
     ))
+}
+
+/// `GET /public/event/channels` — the video channel of every seat on the timers the open
+/// event is flown on. A bench seat has none. The Director asks a timer for its channels at
+/// most once in a while, however many are watching (see [`crate::timers::seat_channels`]).
+pub async fn get_channels(
+    State(registry): State<EventRegistry>,
+) -> Result<Json<Vec<SeatChannel>>, ProtocolError> {
+    let wanted = mentioned(&open_view(&registry)?).timers;
+    let mut channels = Vec::new();
+    for timer in wanted {
+        channels.extend(crate::timers::seat_channels(&registry, &timer).await);
+    }
+    Ok(Json(channels))
 }

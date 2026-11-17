@@ -60,7 +60,7 @@ describe('with no event open', () => {
   });
 
   it('every other read is a typed 404 that says so', async () => {
-    for (const path of ['state', 'changes', 'pilots', 'classes', 'timers']) {
+    for (const path of ['state', 'changes', 'pilots', 'classes', 'timers', 'channels']) {
       const res = await visit(`/public/event/${path}`);
       expect(res.status, path).toBe(404);
       expect(await res.json()).toEqual({ code: 'UnknownScope', message: 'No event is open.' });
@@ -162,6 +162,12 @@ describe('with an event open', () => {
   it('GET /public/event/timers is empty for an event flown on the bench', async () => {
     const timers = (await (await visit('/public/event/timers')).json()) as TimerView[];
     expect(timers).toEqual([]);
+  });
+
+  it('GET /public/event/channels is an empty list for an event flown on the bench', async () => {
+    const res = await visit('/public/event/channels');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
   });
 
   it('GET /public/event/changes is a server-sent feed of the log cursor', async () => {

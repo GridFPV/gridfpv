@@ -33,6 +33,7 @@ import type {
   PublicEvent,
   PublicHello,
   PublicPilot,
+  SeatChannel,
   CreatePilotRequest,
   CreateTimerRequest,
   DiscoveredTimer,
@@ -938,6 +939,17 @@ export async function listPublicTimers(
   options: { fetch?: FetchLike } = {}
 ): Promise<TimerView[]> {
   return apiJson<TimerView[]>(baseUrl, '/public/event/timers', options, 'read the timers');
+}
+
+/**
+ * The video channel of each seat the open event is flown on (`GET /public/event/channels`).
+ * A bench seat has none. The Director asks each timer at most once in a while.
+ */
+export async function listPublicChannels(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<SeatChannel[]> {
+  return apiJson<SeatChannel[]>(baseUrl, '/public/event/channels', options, 'read the channels');
 }
 
 /**

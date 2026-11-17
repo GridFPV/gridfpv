@@ -945,8 +945,15 @@ Until now only the director used Grid. This section adds the other people at a r
   The director opens the **Pilot sign-in** card on the event's Details page and shows a
   pilot theirs, as letters or as a QR code. The pilot types it on their phone, or scans
   it, and the page then knows them by name. One device at a time; one event; the director
-  can give a new code or sign a phone out. A signed-in pilot can still only look: what a
-  pilot sees and does (§11.2, §11.5) comes next.
+  can give a new code or sign a phone out.
+- **Step 4, what a pilot sees** (§11.2). A signed-in pilot gets a **Me** tab: their heats
+  in the order they will fly, how many heats away each is, the seat and, for a seat on a
+  timer, its channel; and their own races lap by lap with the best lap marked. An alert
+  sits above every tab when they are two heats away or closer, next, or flying now, and
+  the phone buzzes each time it gets closer. It only reaches a phone with the page open.
+  Everyone, pilot or not, sees each seat's channel in the heats coming up. A pilot's row
+  is marked in the race, the heats and the results. A pilot still cannot change anything:
+  sign-up (§11.5) comes next.
 
 ### 11.1 Two parts, and the rule between them
 

@@ -185,6 +185,7 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/public/event/pilots", get(crate::spectate::get_pilots))
         .route("/public/event/classes", get(crate::spectate::get_classes))
         .route("/public/event/timers", get(crate::spectate::get_timers))
+        .route("/public/event/channels", get(crate::spectate::get_channels))
         .route(
             "/public/session",
             post(crate::public::post_session).delete(crate::public::delete_session),
