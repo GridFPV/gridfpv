@@ -66,6 +66,7 @@ export type * from '@bindings/GateIndex';
 export type * from '@bindings/HeatSeat';
 export type * from '@bindings/Hello';
 export type * from '@bindings/JoinTokenResponse';
+export type * from '@bindings/KioskPassView';
 export type * from '@bindings/LapView';
 export type * from '@bindings/LineupEntry';
 export type * from '@bindings/LogRef';

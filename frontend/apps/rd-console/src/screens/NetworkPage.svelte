@@ -15,6 +15,7 @@
   import { Badge, Banner, Button, Card, Input, toast } from '@gridfpv/components';
   import type { NetworkRequest, NetworkView, PublicHello } from '@gridfpv/types';
   import Page from '../Page.svelte';
+  import { kioskLink } from '../lib/kiosk.js';
   import { portProblem, reachable, refreshEvery, stateLabel, stateTone } from '../lib/network.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -197,6 +198,28 @@
         </p>
       {/if}
 
+      {#if reachable(view) && view.addresses.length > 0}
+        <h3>For a shared tablet at the field</h3>
+        <p class="kiosk">
+          <a
+            href={kioskLink(view.addresses[0])}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="kiosk-link">{kioskLink(view.addresses[0])}</a
+          >
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label="Copy the kiosk address"
+            onclick={() => copy(kioskLink(view!.addresses[0]))}>Copy</Button
+          >
+        </p>
+        <p class="muted">
+          This opens Grid as a kiosk. A pilot types their code there to sign up, and is signed out
+          again when they walk away.
+        </p>
+      {/if}
+
       {#if !always}
         <form class="port" onsubmit={savePort} aria-label="Port for other devices">
           <label for="network-port">Port</label>
@@ -286,6 +309,18 @@
   /* The first address is the one to use. The rest are there in case. */
   .addresses li:first-child a {
     font-size: var(--gf-font-size-lg);
+  }
+  .kiosk {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    margin-bottom: var(--gf-space-2);
+  }
+  .kiosk a {
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-sm);
+    overflow-wrap: anywhere;
   }
   .port {
     display: flex;

@@ -21,48 +21,49 @@ import type {
   CommandOutcome,
   CreateClassRequest,
   CreateEventRequest,
+  CreatePilotRequest,
+  CreateTimerRequest,
   DataCopy,
   DataExport,
   DataInfo,
-  OverlayLook,
-  OverlayPlacement,
-  NetworkRequest,
-  NetworkView,
-  PilotAccessView,
-  PilotCodeView,
-  PublicEvent,
-  PublicHello,
-  PublicPilot,
-  SeatChannel,
-  SignupSeat,
-  CreatePilotRequest,
-  CreateTimerRequest,
   DiscoveredTimer,
   EventId,
   EventMeta,
   EventView,
   Format,
+  KioskPassView,
   MainsRequest,
+  NetworkRequest,
+  NetworkView,
+  OverlayLook,
+  OverlayPlacement,
   PassRequest,
-  Pilot,
   PhaseId,
+  Pilot,
+  PilotAccessView,
+  PilotCodeView,
   PilotId,
   ProtocolError,
+  PublicEvent,
+  PublicHello,
+  PublicPilot,
   RaceId,
   RaceSignal,
+  RenderRequest,
   SavedFormat,
+  SeatChannel,
   SeatLevels,
   SeatProfile,
   SeatProfileRequest,
   SetClassHiddenRequest,
   SignalChunk,
+  SignupSeat,
   Timer,
   TimerConfig,
   TimerProfiles,
   TimerView,
   UpdateClassRequest,
   UpdatePilotRequest,
-  RenderRequest,
   VideoSettings,
   VideoSettingsRequest,
   VideoStatus
@@ -166,7 +167,12 @@ interface RequestOptions {
   token?: string;
   /** Inject a `fetch` (defaults to the global). Used by tests and Node. */
   fetch?: FetchLike;
+  /** A kiosk pass: the pilot who proved who they are at a shared tablet (§11.4). */
+  kiosk?: string;
 }
+
+/** The header a kiosk pass is sent in. */
+export const KIOSK_HEADER = 'X-GridFPV-Kiosk';
 
 /**
  * **The one request path.** Every endpoint below routes through here: it resolves the injected
@@ -191,6 +197,7 @@ async function apiRequest(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  if (options.kiosk) headers[KIOSK_HEADER] = options.kiosk;
   const init: RequestInit = { headers };
   if (options.method) init.method = options.method;
   if (options.body !== undefined) init.body = JSON.stringify(options.body);
@@ -901,6 +908,39 @@ export async function signOutPilot(
 }
 
 /**
+ * Prove who a pilot is at a kiosk, with their code (`POST /public/pilot/kiosk`). Unlike
+ * {@link signInPilot} it sets no cookie and leaves the pilot's own phone signed in. The
+ * pass it answers is what the kiosk hands to the calls below, and it stops working by
+ * itself a little while after it was last used.
+ */
+export async function kioskIn(
+  baseUrl: string,
+  code: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskPassView> {
+  return apiJson<KioskPassView>(
+    baseUrl,
+    '/public/pilot/kiosk',
+    { method: 'POST', body: { code }, fetch: options.fetch },
+    'check the code'
+  );
+}
+
+/** The pilot is done at the kiosk (`DELETE /public/pilot/kiosk`). */
+export async function kioskDone(
+  baseUrl: string,
+  pass: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/pilot/kiosk',
+    { method: 'DELETE', kiosk: pass, fetch: options.fetch },
+    'sign out'
+  );
+}
+
+/**
  * The signed-in pilot takes a seat in a heat (`POST /public/pilot/signup/take`). Who the
  * pilot is comes from their sign-in, never from here. Rejects with the Director's reason
  * when the rules do not allow it.
@@ -909,12 +949,12 @@ export async function takeSpot(
   baseUrl: string,
   heat: PhaseId,
   seat: SignupSeat,
-  options: { fetch?: FetchLike } = {}
+  options: { fetch?: FetchLike; kiosk?: string } = {}
 ): Promise<CommandOutcome> {
   return apiJson<CommandOutcome>(
     baseUrl,
     '/public/pilot/signup/take',
-    { method: 'POST', body: { heat, seat }, fetch: options.fetch },
+    { method: 'POST', body: { heat, seat }, fetch: options.fetch, kiosk: options.kiosk },
     'take the spot'
   );
 }
@@ -924,12 +964,12 @@ export async function takeNextSpot(
   baseUrl: string,
   phase: PhaseId,
   seat: SignupSeat,
-  options: { fetch?: FetchLike } = {}
+  options: { fetch?: FetchLike; kiosk?: string } = {}
 ): Promise<CommandOutcome> {
   return apiJson<CommandOutcome>(
     baseUrl,
     '/public/pilot/signup/next',
-    { method: 'POST', body: { phase, seat }, fetch: options.fetch },
+    { method: 'POST', body: { phase, seat }, fetch: options.fetch, kiosk: options.kiosk },
     'take the next free spot'
   );
 }
@@ -938,12 +978,12 @@ export async function takeNextSpot(
 export async function leaveSpot(
   baseUrl: string,
   heat: PhaseId,
-  options: { fetch?: FetchLike } = {}
+  options: { fetch?: FetchLike; kiosk?: string } = {}
 ): Promise<CommandOutcome> {
   return apiJson<CommandOutcome>(
     baseUrl,
     '/public/pilot/signup/leave',
-    { method: 'POST', body: { heat }, fetch: options.fetch },
+    { method: 'POST', body: { heat }, fetch: options.fetch, kiosk: options.kiosk },
     'leave the heat'
   );
 }

@@ -314,6 +314,53 @@ describe("the visitor's source", () => {
     for (const call of asked) expect(call.body).not.toContain('pilot');
   });
 
+  it('at a kiosk, the pass rides in its header and the code goes to the kiosk route', async () => {
+    const asked: { url: string; method: string; body?: string; kiosk?: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        asked.push({
+          url: String(input),
+          method: init?.method ?? 'GET',
+          body: init?.body as string | undefined,
+          kiosk: (init?.headers as Record<string, string>)['X-GridFPV-Kiosk']
+        });
+        const body = { pilot: { id: 'p-1', callsign: 'Ace' }, pass: 'pass-1', idle_seconds: 120 };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => body,
+          text: async () => JSON.stringify(body)
+        } as Response;
+      })
+    );
+    const source = publicSource('http://grid.local:8081');
+    const seat = { adapter: 'gate', seat: '0' };
+    expect((await source.kioskIn('ABC234')).pass).toBe('pass-1');
+    await source.takeSpot('quali/heat-1', seat, 'pass-1');
+    await source.takeNextSpot('quali', seat, 'pass-1');
+    await source.leaveSpot('quali/heat-1', 'pass-1');
+    await source.kioskDone('pass-1');
+    // A pilot on their own phone sends no pass at all.
+    await source.takeSpot('quali/heat-1', seat);
+    expect(
+      asked.map((call) => [call.method, call.url.replace('http://grid.local:8081', ''), call.kiosk])
+    ).toEqual([
+      ['POST', '/public/pilot/kiosk', undefined],
+      ['POST', '/public/pilot/signup/take', 'pass-1'],
+      ['POST', '/public/pilot/signup/next', 'pass-1'],
+      ['POST', '/public/pilot/signup/leave', 'pass-1'],
+      ['DELETE', '/public/pilot/kiosk', 'pass-1'],
+      ['POST', '/public/pilot/signup/take', undefined]
+    ]);
+    expect(JSON.parse(asked[0].body ?? 'null')).toEqual({ code: 'ABC234' });
+    // The pass is never in an address or a body.
+    for (const call of asked) {
+      expect(call.url).not.toContain('pass-1');
+      expect(call.body ?? '').not.toContain('pass-1');
+    }
+  });
+
   it('refuses every write and every director-only read without sending anything', async () => {
     const asked = answering({});
     const source = publicSource('http://grid.local:8081');

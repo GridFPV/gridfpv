@@ -284,4 +284,20 @@ describe('NetworkPage', () => {
     await waitFor(() => expect(session.signOutDirector).toHaveBeenCalledOnce());
     await waitFor(() => expect(reload).toHaveBeenCalledOnce());
   });
+
+  it('gives the address for a shared tablet only when other devices can reach Grid', async () => {
+    open({ ...ON, addresses: ['http://192.168.1.20:8081/', 'http://10.42.0.1:8081/'] });
+    const link = await screen.findByTestId('kiosk-link');
+    expect(link).toHaveTextContent('http://192.168.1.20:8081/#/kiosk');
+    expect(link).toHaveAttribute('href', 'http://192.168.1.20:8081/#/kiosk');
+    cleanup();
+    open(OFF);
+    await screen.findByTestId('network-state');
+    expect(screen.queryByTestId('kiosk-link')).toBeNull();
+    cleanup();
+    // On, but this computer has no address to give.
+    open({ ...ON, addresses: [] });
+    await screen.findByTestId('network-state');
+    expect(screen.queryByTestId('kiosk-link')).toBeNull();
+  });
 });

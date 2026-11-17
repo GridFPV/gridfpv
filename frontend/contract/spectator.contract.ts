@@ -10,9 +10,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type {
   Class,
   EventView,
+  KioskPassView,
   Pilot,
   ProtocolError,
   PublicEvent,
+  PublicHello,
   TimerView
 } from '@gridfpv/types';
 
@@ -268,5 +270,60 @@ describe('pilot sign-up over the wire (docs/primitives.md §11.5)', () => {
       code: 'Refused',
       message: 'a sign-up phase needs at least one seat'
     });
+  });
+});
+
+describe('the kiosk over the wire (docs/primitives.md §11.4)', () => {
+  const kiosk = (code: unknown) =>
+    fetch(`${director.baseUrl}/public/pilot/kiosk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
+    });
+
+  it('a wrong code is a typed 401, and nothing but the reason comes back', async () => {
+    const res = await kiosk('ZZZZZZ');
+    expect(res.status).toBe(401);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(await res.json()).toEqual({
+      code: 'Unauthorized',
+      message: 'That code is not right. Check it with the director.'
+    });
+  });
+
+  it('a right code answers the pilot, a pass and how long it lasts, and sets no cookie', async () => {
+    const access = await direct<{ pilots: { pilot: string; code: string }[] }>(
+      'GET',
+      `/events/${event}/access`
+    );
+    const entry = access.pilots[0];
+    expect(entry, 'the event has a pilot with a code').toBeDefined();
+    const res = await kiosk(entry.code);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const body = (await res.json()) as KioskPassView;
+    expect(Object.keys(body).sort()).toEqual(['idle_seconds', 'pass', 'pilot']);
+    expect(Object.keys(body.pilot).sort()).toEqual(['callsign', 'id']);
+    expect(body.pilot.id).toBe(entry.pilot);
+    expect(body.idle_seconds).toBe(120);
+    expect(typeof body.pass).toBe('string');
+
+    // With the pass in its header the Director knows the pilot; without it, nobody.
+    const hello = async (headers: Record<string, string>) =>
+      ((await (await fetch(`${director.baseUrl}/public/hello`, { headers })).json()) as PublicHello)
+        .pilot;
+    expect(await hello({ 'X-GridFPV-Kiosk': body.pass })).toEqual(body.pilot);
+    expect(await hello({})).toBeUndefined();
+    expect(await hello({ 'X-GridFPV-Kiosk': `${body.pass}x` })).toBeUndefined();
+
+    // Done ends it: 204, no body, and the pass is no use after.
+    const done = await fetch(`${director.baseUrl}/public/pilot/kiosk`, {
+      method: 'DELETE',
+      headers: { 'X-GridFPV-Kiosk': body.pass }
+    });
+    expect(done.status).toBe(204);
+    expect(await done.text()).toBe('');
+    expect(await hello({ 'X-GridFPV-Kiosk': body.pass })).toBeUndefined();
   });
 });

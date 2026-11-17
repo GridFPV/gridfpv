@@ -112,6 +112,15 @@ The **director** sends `POST /events/{id}/commands` with `{"Signup": …}`:
 | `SetRuns { phase, pilot, extra }` | One pilot's own allowance, added to the limit |
 | `CloseHeat { heat, closed }` | Close a heat to pilots, or open it again |
 
+**The kiosk** (§11.4) is a shared tablet. `POST /public/pilot/kiosk` with `{code}` checks a
+pilot's code like a sign-in (same `401`, same count of wrong codes, same `429`) but sets no
+cookie and leaves the pilot's own device signed in. It answers `{pilot, pass,
+idle_seconds}`. The kiosk sends the pass in the `X-GridFPV-Kiosk` header on the pilot's
+routes below. When that header is there it alone decides who the pilot is: a pass that is
+wrong or has run out answers `401`, whatever cookie the tablet holds. A pass is kept in
+memory only and stops `idle_seconds` after it was last used. `DELETE /public/pilot/kiosk`
+with the header ends it (`204` always).
+
 A **pilot** uses three routes of their own. The pilot is the one the request is signed in
 as, never one named in the body, and it always acts as `Pilot`, so every limit applies:
 

@@ -15,6 +15,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  location.hash = '';
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -24,6 +25,13 @@ const HELLO: PublicHello = {
   caller: 'Visitor',
   event: 'Friday Night Whoops',
   director_sign_in: true
+};
+
+/** What Grid answers when Bee types their code at a kiosk. */
+const KIOSK_BEE = {
+  pilot: { id: 'p-bee', callsign: 'Bee' },
+  pass: 'pass-bee-1',
+  idle_seconds: 120
 };
 
 const NIGHT: PublicEvent = { event: { id: 'evt-night', name: 'Friday Night Whoops' } };
@@ -59,7 +67,9 @@ function open(hello: PublicHello = HELLO, event: PublicEvent = hello.event ? NIG
     getChannels: vi.fn(async () => [{ adapter: 'bench', seat: 'seat-1', freq_mhz: 5658 }]),
     takeSpot: vi.fn(async () => {}),
     takeNextSpot: vi.fn(async () => {}),
-    leaveSpot: vi.fn(async () => {})
+    leaveSpot: vi.fn(async () => {}),
+    kioskIn: vi.fn(async () => KIOSK_BEE),
+    kioskDone: vi.fn(async () => {})
   };
   render(VisitorPage, { session, source, hello, reload });
   return {
@@ -436,7 +446,9 @@ describe('VisitorPage: a pilot signs in', () => {
         getChannels: vi.fn(async () => []),
         takeSpot: vi.fn(async () => {}),
         takeNextSpot: vi.fn(async () => {}),
-        leaveSpot: vi.fn(async () => {})
+        leaveSpot: vi.fn(async () => {}),
+        kioskIn: vi.fn(async () => KIOSK_BEE),
+        kioskDone: vi.fn(async () => {})
       },
       hello: HELLO,
       reload: vi.fn()
@@ -539,7 +551,9 @@ describe('VisitorPage: signing up for a heat', () => {
       getChannels: vi.fn(async () => []),
       takeSpot: vi.fn(async () => {}),
       takeNextSpot: vi.fn(async () => {}),
-      leaveSpot: vi.fn(async () => {})
+      leaveSpot: vi.fn(async () => {}),
+      kioskIn: vi.fn(async () => KIOSK_BEE),
+      kioskDone: vi.fn(async () => {})
     };
     render(VisitorPage, { session, source, hello, reload: vi.fn() });
     return { source };
@@ -603,5 +617,314 @@ describe('VisitorPage: signing up for a heat', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await waitFor(() => expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull());
     expect(screen.getByRole('region', { name: 'Sign-up for Qualifying' })).toBeVisible();
+  });
+});
+
+describe('VisitorPage as a kiosk (#/kiosk)', () => {
+  /** The kiosk, at an event with a sign-up phase. Ace holds seat 1 of heat 1. */
+  function openKiosk(hello: PublicHello = HELLO, sheet = signupSheet()) {
+    location.hash = '#/kiosk';
+    const session = {
+      signInDirector: vi.fn(async (_token: string) => {}),
+      signInPilot: vi.fn(async (_code: string) => ({ id: 'p-bee', callsign: 'Bee' })),
+      signOutPilot: vi.fn(async () => {})
+    };
+    const source: PublicSource = {
+      ...fakeLiveSession(signupEvent(sheet), {
+        listPilots: vi.fn(async () => SIGNUP_PILOTS),
+        listTimers: vi.fn(async () => [GATE])
+      }),
+      getEvent: vi.fn(async () => NIGHT),
+      getChannels: vi.fn(async () => []),
+      takeSpot: vi.fn(async () => {}),
+      takeNextSpot: vi.fn(async () => {}),
+      leaveSpot: vi.fn(async () => {}),
+      kioskIn: vi.fn(async (_code: string) => KIOSK_BEE),
+      kioskDone: vi.fn(async (_pass: string) => {})
+    };
+    render(VisitorPage, { session, source, hello, reload: vi.fn() });
+    return { source, session };
+  }
+  const codeBox = () => screen.getByLabelText('Pilots: type your code to sign up');
+  const bar = () => screen.getByRole('region', { name: 'Kiosk sign-in' });
+  async function typeCode(typed: string) {
+    await fireEvent.input(codeBox(), { target: { value: typed } });
+    await fireEvent.submit(screen.getByRole('form', { name: 'Kiosk code' }));
+  }
+  async function beeSignsIn() {
+    await typeCode('ABC 234');
+    await screen.findByTestId('kiosk-pilot');
+  }
+
+  it('asks for a code and offers none of the ordinary sign-ins', async () => {
+    openKiosk();
+    await screen.findByRole('tab', { name: 'Sign up' });
+    expect(codeBox()).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'I am a pilot' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'I am the director' })).toBeNull();
+    expect(screen.queryByText(/You can look\./)).toBeNull();
+    expect(screen.queryByTestId('pilot-signed-in')).toBeNull();
+    // Looking only, until a code is typed.
+    await fireEvent.click(screen.getByRole('tab', { name: 'Sign up' }));
+    expect(screen.getByText('Type your code above to take a seat.')).toBeVisible();
+    expect(screen.queryByText('Sign in as a pilot to take a seat.')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull();
+  });
+
+  it('a right code greets the pilot, lands them on the sheet, and clears the box', async () => {
+    const { source, session } = openKiosk();
+    await screen.findByRole('tab', { name: 'Sign up' });
+    await typeCode('abc-234');
+    expect(await screen.findByTestId('kiosk-pilot')).toHaveTextContent('Hi Bee');
+    expect(source.kioskIn).toHaveBeenCalledWith('ABC234');
+    // It is not the ordinary sign-in: that would sign Bee's own phone out.
+    expect(session.signInPilot).not.toHaveBeenCalled();
+    expect(screen.getByRole('tab', { name: 'Sign up' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getAllByRole('button', { name: /^Take/ }).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText('Pilots: type your code to sign up')).toBeNull();
+  });
+
+  it('takes the code out of a whole link, as a handheld scanner types it', async () => {
+    const { source } = openKiosk();
+    await typeCode('http://192.168.1.20:8081/#/join/abc234');
+    await screen.findByTestId('kiosk-pilot');
+    expect(source.kioskIn).toHaveBeenCalledWith('ABC234');
+  });
+
+  it('catches a slip before it counts as a wrong try', async () => {
+    const { source } = openKiosk();
+    for (const [typed, words] of [
+      ['', 'Type your code.'],
+      ['ABC', 'A code has 6 letters and numbers.'],
+      ['ABC2345', 'A code has only 6 letters and numbers.'],
+      ['ABC10O', 'A code has capital letters and numbers, and never 0, O, 1 or I.'],
+      ['http://x/#/join/', 'Type your code.']
+    ] as const) {
+      await typeCode(typed);
+      expect(within(bar()).getByRole('alert'), typed).toHaveTextContent(words);
+    }
+    expect(source.kioskIn).not.toHaveBeenCalled();
+  });
+
+  it("shows the Director's reason for a wrong code, and does not leave the code on the screen", async () => {
+    const { source } = openKiosk();
+    vi.mocked(source.kioskIn).mockRejectedValueOnce(
+      new Error('That code is not right. Check it with the director.')
+    );
+    await typeCode('ZZZ ZZZ');
+    expect(await within(bar()).findByRole('alert')).toHaveTextContent('That code is not right.');
+    expect((codeBox() as HTMLInputElement).value).toBe('');
+    expect(screen.queryByTestId('kiosk-pilot')).toBeNull();
+    // The next try works and the old reason is gone.
+    await beeSignsIn();
+    expect(within(bar()).queryByRole('alert')).toBeNull();
+  });
+
+  it("acts with the pilot's pass, and reads the event again", async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    const reads = vi.mocked(source.getEventState).mock.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    await waitFor(() =>
+      expect(source.takeSpot).toHaveBeenCalledWith(
+        'quali/heat-1',
+        { adapter: 'gate', seat: '1' },
+        'pass-bee-1'
+      )
+    );
+    await waitFor(() =>
+      expect(vi.mocked(source.getEventState).mock.calls.length).toBeGreaterThan(reads)
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Next free spot on Seat 3' }));
+    await waitFor(() =>
+      expect(source.takeNextSpot).toHaveBeenCalledWith(
+        'quali',
+        { adapter: 'gate', seat: '2' },
+        'pass-bee-1'
+      )
+    );
+  });
+
+  it('leaving a heat goes with the pass too', async () => {
+    const { source } = openKiosk();
+    vi.mocked(source.kioskIn).mockResolvedValueOnce({
+      pilot: { id: 'p-ace', callsign: 'Ace' },
+      pass: 'pass-ace',
+      idle_seconds: 120
+    });
+    await typeCode('ABC234');
+    await screen.findByTestId('kiosk-pilot');
+    await fireEvent.click(screen.getByRole('button', { name: 'Leave Qualifying Heat 1' }));
+    await waitFor(() => expect(source.leaveSpot).toHaveBeenCalledWith('quali/heat-1', 'pass-ace'));
+  });
+
+  it('Done signs the pilot out, tells Grid, and asks for the next code', async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(screen.queryByTestId('kiosk-pilot')).toBeNull();
+    expect(source.kioskDone).toHaveBeenCalledWith('pass-bee-1');
+    expect(codeBox()).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull();
+    // Nothing is said: the pilot asked for it.
+    expect(screen.queryByTestId('kiosk-note')).toBeNull();
+  });
+
+  it('Done still signs the pilot out when Grid cannot be told', async () => {
+    const { source } = openKiosk();
+    vi.mocked(source.kioskDone).mockRejectedValue(new Error('offline'));
+    await beeSignsIn();
+    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(screen.queryByTestId('kiosk-pilot')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull();
+  });
+
+  it('signs the pilot out when nobody touches the screen, counting down first', async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    expect(screen.queryByTestId('kiosk-warning')).toBeNull();
+    await vi.advanceTimersByTimeAsync(29_000);
+    expect(screen.queryByTestId('kiosk-warning')).toBeNull();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(screen.getByTestId('kiosk-warning')).toHaveTextContent(
+      /^Signing out in 1[45] s\. Touch the screen to stay\.$/
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(screen.queryByTestId('kiosk-pilot')).toBeNull();
+    expect(screen.getByTestId('kiosk-note')).toHaveTextContent(
+      'You were signed out. Nobody touched the screen.'
+    );
+    expect(source.kioskDone).toHaveBeenCalledWith('pass-bee-1');
+    expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull();
+  });
+
+  it('a touch or a key keeps the pilot signed in', async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    for (const event of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(screen.getByTestId('kiosk-warning')).toBeVisible();
+      window.dispatchEvent(new Event(event));
+      await vi.advanceTimersByTimeAsync(600);
+      expect(screen.queryByTestId('kiosk-warning'), event).toBeNull();
+    }
+    expect(screen.getByTestId('kiosk-pilot')).toBeVisible();
+    expect(source.kioskDone).not.toHaveBeenCalled();
+  });
+
+  it('the next pilot gets a full count, not what the last one left', async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    await vi.advanceTimersByTimeAsync(44_000);
+    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    vi.mocked(source.kioskIn).mockResolvedValueOnce({
+      pilot: { id: 'p-cat', callsign: 'Cat' },
+      pass: 'pass-cat',
+      idle_seconds: 120
+    });
+    await typeCode('DEF 567');
+    expect(await screen.findByTestId('kiosk-pilot')).toHaveTextContent('Hi Cat');
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(screen.getByTestId('kiosk-pilot')).toHaveTextContent('Hi Cat');
+    expect(screen.queryByTestId('kiosk-warning')).toBeNull();
+    // And Cat acts with Cat's pass.
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    await waitFor(() =>
+      expect(source.takeSpot).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'pass-cat')
+    );
+  });
+
+  it('signs the pilot out when Grid no longer knows the pass', async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    vi.mocked(source.takeSpot).mockRejectedValueOnce(
+      Object.assign(new Error('Sign in with your code first.'), { status: 401 })
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    expect(await screen.findByTestId('kiosk-note')).toHaveTextContent(
+      'You were signed out. Type your code again.'
+    );
+    expect(screen.queryByTestId('kiosk-pilot')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull();
+  });
+
+  it("shows the Director's reason when the rules refuse, and keeps the pilot signed in", async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    vi.mocked(source.takeSpot).mockRejectedValueOnce(
+      Object.assign(new Error('that seat in Qualifying Heat 1 is already taken'), { status: 409 })
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    expect(await screen.findByTestId('signup-error')).toHaveTextContent('already taken');
+    expect(screen.getByTestId('kiosk-pilot')).toHaveTextContent('Hi Bee');
+  });
+
+  it('goes by who typed a code, never by who the tablet is signed in as', async () => {
+    // Someone once signed in on this tablet the ordinary way.
+    const { source } = openKiosk({ ...HELLO, pilot: { id: 'p-ace', callsign: 'Ace' } });
+    await fireEvent.click(await screen.findByRole('tab', { name: 'Sign up' }));
+    expect(screen.queryByRole('tab', { name: /^Me/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^(Take|Leave)/ })).toBeNull();
+    expect(document.body.textContent).not.toContain('Signed in as');
+    await beeSignsIn();
+    // Ace's own seat is not Bee's to leave.
+    expect(screen.queryByRole('button', { name: /^Leave/ })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    await waitFor(() => expect(source.takeSpot).toHaveBeenCalled());
+    expect(vi.mocked(source.takeSpot).mock.calls[0][2]).toBe('pass-bee-1');
+  });
+
+  it('with no sign-up at the event, a pilot lands on their own tab', async () => {
+    location.hash = '#/kiosk';
+    const { source } = open();
+    vi.mocked(source.kioskIn).mockResolvedValueOnce({
+      pilot: { id: 'p-ace', callsign: 'Ace' },
+      pass: 'pass-ace',
+      idle_seconds: 120
+    });
+    await screen.findByTestId('race-heat');
+    await typeCode('ABC234');
+    await screen.findByTestId('kiosk-pilot');
+    expect(screen.getByRole('tab', { name: /^Me/ })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('signs the pilot out when the event closes', async () => {
+    const { source } = openKiosk();
+    await beeSignsIn();
+    vi.mocked(source.getEvent).mockResolvedValue({});
+    await vi.advanceTimersByTimeAsync(5_100);
+    await waitFor(() => expect(screen.getByText('No event is open')).toBeVisible());
+    expect(source.kioskDone).toHaveBeenCalledWith('pass-bee-1');
+    expect(screen.queryByRole('region', { name: 'Kiosk sign-in' })).toBeNull();
+  });
+
+  it('one press is one request, however fast the code is sent', async () => {
+    const { source } = openKiosk();
+    let finish: (value: typeof KIOSK_BEE) => void = () => {};
+    vi.mocked(source.kioskIn).mockImplementationOnce(
+      () => new Promise((resolve) => (finish = resolve))
+    );
+    await fireEvent.input(codeBox(), { target: { value: 'ABC234' } });
+    const form = screen.getByRole('form', { name: 'Kiosk code' });
+    await fireEvent.submit(form);
+    await fireEvent.submit(form);
+    expect(source.kioskIn).toHaveBeenCalledOnce();
+    finish(KIOSK_BEE);
+    await screen.findByTestId('kiosk-pilot');
+  });
+
+  it('a sign-in link opened on a kiosk does not sign the tablet in', async () => {
+    location.hash = '#/kiosk';
+    const { session } = open();
+    await screen.findByTestId('race-heat');
+    expect(session.signInPilot).not.toHaveBeenCalled();
+    expect(location.hash).toBe('#/kiosk');
+  });
+
+  it('the ordinary page is not a kiosk', async () => {
+    open();
+    await screen.findByTestId('race-heat');
+    expect(screen.queryByRole('region', { name: 'Kiosk sign-in' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'I am a pilot' })).toBeVisible();
   });
 });

@@ -93,3 +93,22 @@ With no access token set, nobody can run Grid from another device.
 
 If Grid was started on the network already (with `GRIDFPV_ADDR`), the page says it is
 always on and has no switch.
+
+## A shared tablet (kiosk)
+
+Some pilots have no phone with them, or a flat battery. Put a tablet on a table and open
+the **shared tablet** address from the Network page on it. It ends in `#/kiosk`.
+
+- Everyone can look at the race and the sign-up sheet on it.
+- To sign up, a pilot types their **code** and presses **Go**. The codes are on the
+  event's Details page.
+- When they are finished they press **Done**.
+- If they walk away, the tablet signs them out by itself after 45 seconds. It counts down
+  first. Touching the screen stops the count.
+- Using the tablet does **not** sign a pilot out of their own phone.
+
+**Scanning instead of typing.** A handheld barcode scanner that plugs into the tablet can
+read a pilot's QR code, from their phone or from paper. It types the code for them. The
+tablet's own camera cannot be used for this.
+
+If you give a pilot a new code, or sign them out, they are signed out of the tablet too.
