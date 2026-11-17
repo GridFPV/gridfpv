@@ -329,6 +329,42 @@ describe('the kiosk over the wire (docs/primitives.md §11.4)', () => {
     expect(mine.set_up_at).toBeGreaterThan(1_700_000_000);
   });
 
+  it('naming a kiosk answers the list with the name, and the tablet is told it', async () => {
+    const number = (await direct<KioskView>('GET', '/kiosk')).kiosks.at(-1)!.number;
+    const hello = async () =>
+      (await (
+        await fetch(`${director.baseUrl}/public/hello`, { headers: { Cookie: tablet } })
+      ).json()) as PublicHello;
+    expect((await hello()).kiosk_name).toBe(`Kiosk ${number}`);
+    const named = await direct<KioskView>('PUT', `/kiosk/devices/${number}`, {
+      name: '  By the gate '
+    });
+    const mine = named.kiosks.find((entry) => entry.number === number)!;
+    expect(Object.keys(mine).sort()).toEqual(['name', 'number', 'set_up_at']);
+    expect(mine.name).toBe('By the gate');
+    expect((await hello()).kiosk_name).toBe('By the gate');
+    // An empty name takes it away, and the field with it.
+    const bare = await direct<KioskView>('PUT', `/kiosk/devices/${number}`, { name: '' });
+    expect(Object.keys(bare.kiosks.find((entry) => entry.number === number)!).sort()).toEqual([
+      'number',
+      'set_up_at'
+    ]);
+    // A kiosk that is not there is a typed 404.
+    const gone = await fetch(`${director.baseUrl}/kiosk/devices/9999`, {
+      method: 'PUT',
+      headers: auth(),
+      body: JSON.stringify({ name: 'x' })
+    });
+    expect(gone.status).toBe(404);
+    expect(await gone.json()).toEqual({
+      code: 'UnknownScope',
+      message: 'That kiosk is not on the list any more.'
+    });
+    // A device that is not a kiosk is told no name at all.
+    const plain = (await (await fetch(`${director.baseUrl}/public/hello`)).json()) as PublicHello;
+    expect('kiosk_name' in plain).toBe(false);
+  });
+
   it('a device that is not a kiosk is refused with a typed 403, whatever the code', async () => {
     const access = await direct<{ pilots: { pilot: string; code: string }[] }>(
       'GET',

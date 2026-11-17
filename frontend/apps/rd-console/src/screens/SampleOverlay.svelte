@@ -80,6 +80,8 @@
     klass: () => 'Class',
     who: () => 'Your pilot',
     seat: () => 'Seat 1',
+    seatPlain: () => 'Seat 1',
+    channel: () => undefined,
     timer: () => 'Timer',
     pilotColor: () => undefined
   };

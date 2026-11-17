@@ -140,7 +140,17 @@ test('a spectator watches a race from start to result without touching the page'
     });
 
     // ── Before any race ──────────────────────────────────────────────────────────────────
-    await expect(page.getByTestId('no-race')).toHaveText('No race yet.');
+    // The one race tab shows the heat that is up next, with a clock waiting at zero.
+    await expect(page.getByRole('tab', { name: 'Current race' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+    await expect(page.getByTestId('race-word')).toHaveText('Up next');
+    await expect(page.getByTestId('race-heat')).toHaveText('Qualifying Heat 1');
+    await expect(page.getByTestId('race-clock')).toHaveText('0:00.0');
+    const lineup = page.getByRole('table', { name: 'Pilots in this race' });
+    await expect(lineup.locator('tbody tr')).toHaveCount(2);
+    await expect(lineup).toContainText('Ace');
     const upNext = page.getByRole('tab', { name: /Up next/ });
     await expect(upNext).toContainText('2');
     await upNext.click();
@@ -148,13 +158,14 @@ test('a spectator watches a race from start to result without touching the page'
     await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 1' })).toContainText('Ace');
     await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 1' })).toContainText('Bee');
     await expect(coming.getByRole('listitem', { name: 'Qualifying Heat 2' })).toContainText('Bee');
-    await page.getByRole('tab', { name: 'Last race' }).click();
+    await page.getByRole('tab', { name: 'Current race' }).click();
 
     // ── The director starts heat 1: the phone shows it by itself ─────────────────────────
     await command({ StartRace: { heat: 'heat-1' } });
-    await expect(page.getByRole('tab', { name: 'On now' })).toBeVisible({ timeout: 10_000 });
+    // The same tab, with the same name, now shows the race.
+    await expect(page.getByTestId('race-word')).toHaveText('Starting', { timeout: 10_000 });
     await expect(page.getByTestId('race-heat')).toHaveText('Qualifying Heat 1');
-    await expect(page.getByTestId('race-word')).toHaveText('Starting');
+    await expect(page.getByRole('tab', { name: 'Current race' })).toBeVisible();
     await expect(page.getByTestId('race-clock')).toBeVisible();
     await expect(page.getByTestId('race-word')).toHaveText('Racing', { timeout: 15_000 });
     // The clock moves.
@@ -195,9 +206,11 @@ test('a spectator watches a race from start to result without touching the page'
     if (state.races[0].state === 'Running') await command({ StopRace: { race: 'heat-1#1' } });
     await expect(page.getByTestId('race-word')).toHaveText('Finished', { timeout: 15_000 });
     await command({ SaveRace: { race: 'heat-1#1', note: 'a note only the director sees' } });
-    await expect(page.getByRole('tab', { name: 'Last race' })).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId('race-word')).toHaveText('Result');
-    await expect(page.getByTestId('race-clock')).toHaveCount(0);
+    await expect(page.getByTestId('race-word')).toHaveText('Result', { timeout: 10_000 });
+    // The clock stays, stopped on the race's own time.
+    const stopped = await page.getByTestId('race-clock').textContent();
+    await page.waitForTimeout(1200);
+    await expect(page.getByTestId('race-clock')).toHaveText(stopped ?? '');
     await expect(page.getByText('a note only the director sees')).toHaveCount(0);
 
     // ── Results ──────────────────────────────────────────────────────────────────────────
@@ -234,7 +247,7 @@ test('a spectator watches a race from start to result without touching the page'
     await expect(page.getByTestId('visitor-event')).toHaveText('Sunday Finals', {
       timeout: 15_000
     });
-    await page.getByRole('tab', { name: 'Last race' }).click();
+    await page.getByRole('tab', { name: 'Current race' }).click();
     await expect(page.getByTestId('no-race')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText('Qualifying Heat 1')).toHaveCount(0);
 

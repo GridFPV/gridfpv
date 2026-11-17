@@ -26,4 +26,8 @@ pilot?: PublicPilot,
 /**
  * Whether the director has set this device up as a kiosk.
  */
-kiosk: boolean, };
+kiosk: boolean, 
+/**
+ * What the director calls this kiosk: its name, or "Kiosk 2". Absent off a kiosk.
+ */
+kiosk_name?: string, };

@@ -114,12 +114,16 @@ not use can be cancelled.
 The tablet stays a kiosk, even if it is switched off and on. It is listed under **Kiosks
 set up**. Press **Remove** to stop a tablet being a kiosk.
 
+With more than one, press **Name it** and say where each one is ("By the gate"). The
+tablet shows its name in the corner while it waits for a pilot.
+
 ### Using it
 
 - With nobody at it, the kiosk shows a box for a code and nothing else.
 - A pilot types their **own code** and presses **Go**. The codes are on the event's Details
   page.
-- They get the sign-up sheet, large: heats down, seats across.
+- They get the sign-up sheet, large: heats down, seats across. It lists the heats that
+  are still open. A full heat is listed too, in case someone drops out.
 - When they are finished they press **Done**.
 - If they walk away, the tablet signs them out by itself after 45 seconds. It counts down
   first. Touching the screen stops the count.

@@ -11,4 +11,8 @@ number: number,
 /**
  * When it was set up, in seconds since 1970.
  */
-set_up_at: number, };
+set_up_at: number, 
+/**
+ * What the director calls it. Absent until it is given a name.
+ */
+name?: string, };

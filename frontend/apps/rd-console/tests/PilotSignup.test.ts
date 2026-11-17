@@ -37,9 +37,8 @@ function open(
   };
   render(PilotSignup, {
     phases: [signupPhase(sheet)],
-    names: signupNames(signupEvent(sheet)),
+    names: signupNames(signupEvent(sheet), [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }]),
     pilot,
-    channels: [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }],
     actions: withActions ? actions : undefined
   });
   return actions;
@@ -71,7 +70,7 @@ describe('PilotSignup: what everyone sees', () => {
     expect(screen.getByText('Sign in as a pilot to take a seat.')).toBeVisible();
   });
 
-  it('says whether sign-up is open, and what state each heat is in', () => {
+  it('lists only the heats still open, full ones included, and says whether sign-up is open', () => {
     open(
       signupSheet({
         rules: { ...SIGNUP_RULES, open: false },
@@ -86,14 +85,35 @@ describe('PilotSignup: what everyone sees', () => {
       null,
       false
     );
-    expect(screen.getByRole('region', { name: 'Sign-up for Qualifying' })).toHaveTextContent(
-      'Closed'
-    );
-    expect(heatItem(1)).toHaveTextContent('Flown');
-    expect(heatItem(2)).toHaveTextContent('On now');
-    expect(heatItem(3)).toHaveTextContent('Closed');
+    const section = screen.getByRole('region', { name: 'Sign-up for Qualifying' });
+    expect(section).toHaveTextContent('Closed');
+    // A heat that is flown, on or closed is not on the sheet a pilot sees.
+    expect(
+      within(section)
+        .getAllByRole('listitem')
+        .map((item) => item.getAttribute('aria-label'))
+        .filter(Boolean)
+    ).toEqual(['Qualifying Heat 4', 'Qualifying Heat 5']);
+    // They keep their own numbers.
+    expect(heatItem(4)).toHaveTextContent('Heat 4');
+    // A full heat stays, marked: someone may drop out of it.
     expect(heatItem(4)).toHaveTextContent('Full');
     expect(within(heatItem(5)).queryByText(/Full|Closed|Flown|On now/)).toBeNull();
+  });
+
+  it('says so when no heat is open', () => {
+    open(
+      signupSheet({
+        heats: [
+          signupHeat(1, ['p-ace', null, null], 'Flown'),
+          signupHeat(2, [null, null, null], 'Closed')
+        ]
+      }),
+      null,
+      false
+    );
+    expect(screen.getByTestId('no-open-heats')).toHaveTextContent('No heats are open right now.');
+    expect(screen.queryByRole('listitem')).toBeNull();
   });
 
   it('says so when there is nothing to sign up for', () => {
@@ -163,13 +183,31 @@ describe('PilotSignup: a signed-in pilot', () => {
     expect(screen.getByRole('button', { name: 'Leave Qualifying Heat 1' })).toBeEnabled();
   });
 
-  it('in a heat that is closed or on, their own seat says "You" with nothing to press', () => {
+  it("a heat that is closed, on or flown is off the sheet, the pilot's own included", () => {
     for (const state of ['Closed', 'Racing', 'Flown'] as const) {
-      open(signupSheet({ heats: [signupHeat(1, ['p-ace', null, null], state)] }), ACE);
-      expect(seatRow(1, 0)).toHaveTextContent('You');
-      expect(within(heatItem(1)).queryAllByRole('button')).toEqual([]);
+      open(
+        signupSheet({
+          heats: [signupHeat(1, ['p-ace', null, null], state), signupHeat(2, [null, null, null])]
+        }),
+        ACE
+      );
+      expect(screen.queryByRole('listitem', { name: 'Qualifying Heat 1' }), state).toBeNull();
+      expect(screen.queryByRole('button', { name: /Qualifying Heat 1/ }), state).toBeNull();
+      expect(heatItem(2)).toBeVisible();
       cleanup();
     }
+  });
+
+  it('a full heat still lets the pilot in it leave, and tells the others it is full', () => {
+    const full = signupSheet({
+      heats: [signupHeat(1, ['p-ace', 'p-cat', 'p-bee']), signupHeat(2, [null, null, null])]
+    });
+    open(full, ACE);
+    expect(screen.getByRole('button', { name: 'Leave Qualifying Heat 1' })).toBeEnabled();
+    cleanup();
+    open(full, { id: 'p-dan', callsign: 'Dan' });
+    expect(within(heatItem(1)).queryAllByRole('button')).toEqual([]);
+    expect(heatItem(1)).toHaveTextContent('Full');
   });
 
   it('a pilot who is not in the phase is told so', () => {
@@ -252,9 +290,8 @@ describe('PilotSignup: the grid for a kiosk', () => {
     };
     render(PilotSignup, {
       phases: [signupPhase(sheet)],
-      names: signupNames(signupEvent(sheet)),
+      names: signupNames(signupEvent(sheet), [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }]),
       pilot: who ?? undefined,
-      channels: [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }],
       actions: who ? actions : undefined,
       layout: 'grid'
     });
@@ -314,20 +351,32 @@ describe('PilotSignup: the grid for a kiosk', () => {
     }
   });
 
-  it('marks the state of each heat, and offers nothing in one that is on or flown', () => {
+  it('lists only the heats still open, full ones included', () => {
     openGrid(
       signupSheet({
         heats: [
           signupHeat(1, ['p-bee', null, null], 'Flown'),
           signupHeat(2, ['p-bee', null, null], 'Racing'),
-          signupHeat(3, [null, null, null], 'Closed')
+          signupHeat(3, [null, null, null], 'Closed'),
+          signupHeat(4, ['p-ace', 'p-cat', 'p-bee']),
+          signupHeat(5, [null, null, null])
         ]
       })
     );
-    expect(row(1)).toHaveTextContent('Flown');
-    expect(row(2)).toHaveTextContent('On now');
-    expect(row(3)).toHaveTextContent('Closed');
-    for (const n of [1, 2, 3]) expect(within(row(n)).queryAllByRole('button')).toEqual([]);
+    const rows = within(screen.getByRole('table', { name: 'Heats of Qualifying' }))
+      .getAllByRole('row')
+      .slice(1)
+      .map((entry) => entry.getAttribute('aria-label'));
+    expect(rows).toEqual(['Qualifying Heat 4', 'Qualifying Heat 5']);
+    expect(row(4)).toHaveTextContent('Full');
+    // Bee can still leave the full heat.
+    expect(within(row(4)).getByRole('button', { name: 'Leave Qualifying Heat 4' })).toBeEnabled();
+  });
+
+  it('says so when no heat is open, in place of an empty table', () => {
+    openGrid(signupSheet({ heats: [signupHeat(1, ['p-bee', null, null], 'Flown')] }));
+    expect(screen.getByTestId('no-open-heats')).toBeVisible();
+    expect(screen.queryByRole('table')).toBeNull();
   });
 
   it('with nobody signed in it shows who is where and nothing to press', () => {

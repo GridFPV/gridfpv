@@ -205,8 +205,9 @@ test('the director turns sign-up on, two pilots sign up on their phones, and eve
     await expect(ace.getByRole('button', { name: 'Leave Qualifying Heat 1' })).toHaveCount(0, {
       timeout: 10_000
     });
-    await expect(phoneHeat(ace, 1)).toContainText('Closed');
-    await expect(phoneHeat(ace, 1)).toContainText('You');
+    // A closed heat is off the pilot's sheet: only heats they can still change are on it.
+    await expect(phoneHeat(ace, 1)).toHaveCount(0);
+    await expect(phoneHeat(ace, 2)).toBeVisible();
     // Asking the Director anyway gets its reason, and changes nothing.
     const sneak = await ace.request.post(`${address}public/pilot/signup/leave`, {
       data: { heat: 'quali/heat-1' }
@@ -226,12 +227,16 @@ test('the director turns sign-up on, two pilots sign up on their phones, and eve
 
     // ── Heat 1 is flown: it is a run for Ace and Bee, and nobody can change it ───────────
     await command({ StartRace: { heat: 'quali/heat-1' } });
-    await expect(phoneHeat(ace, 1)).toContainText('On now', { timeout: 10_000 });
-    await expect(sheetRow(1)).toContainText('On now');
+    await expect(sheetRow(1)).toContainText('On now', { timeout: 10_000 });
+    await expect(phoneHeat(ace, 1)).toHaveCount(0);
     await command({ StopRace: { race: 'quali/heat-1#1' } });
     await command({ SaveRace: { race: 'quali/heat-1#1' } });
-    await expect(phoneHeat(ace, 1)).toContainText('Flown', { timeout: 10_000 });
-    await expect(ace.getByTestId('my-runs')).toHaveText('1 flown · 0 held · 1 left of 2');
+    await expect(ace.getByTestId('my-runs')).toHaveText('1 flown · 0 held · 1 left of 2', {
+      timeout: 10_000
+    });
+    // The flown heat stays off the pilot's sheet, and on the director's.
+    await expect(phoneHeat(ace, 1)).toHaveCount(0);
+    await expect(sheetRow(1)).toContainText('Flown');
     await expect(sheetRow(1).getByRole('button')).toHaveCount(0);
     await expect(runRow('Ace').getByRole('cell').nth(0)).toHaveText('1');
 

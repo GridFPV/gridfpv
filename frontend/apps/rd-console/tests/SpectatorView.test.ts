@@ -78,7 +78,7 @@ const tab = (name: string | RegExp) => screen.getByRole('tab', { name });
 describe('SpectatorView: the race on now', () => {
   it('names the heat, says it is racing, and runs a clock', async () => {
     await open(running());
-    expect(tab('On now')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByTestId('race-heat')).toHaveTextContent('Qualifying Heat 1');
     expect(screen.getByTestId('race-word')).toHaveTextContent('Racing');
     expect(screen.getByRole('timer')).toHaveTextContent(/^0:1\d\.\d$/);
@@ -135,22 +135,104 @@ describe('SpectatorView: the race on now', () => {
     view.races[0] = { ...view.races[0], state: 'Stopped', stopped_at: 111 * S };
     await open(view);
     expect(screen.getByTestId('race-word')).toHaveTextContent('Finished');
-    expect(tab('On now')).toBeVisible();
+    expect(tab('Current race')).toBeVisible();
   });
 
-  it('with no race on, shows how the last one ended, with no clock', async () => {
+  it('with the race just saved, shows how it ended, with the clock stopped on its time', async () => {
     const view = running();
     view.races[0] = { ...view.races[0], state: 'Saved', stopped_at: 111 * S };
     view.current_race = undefined;
     await open(view);
-    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('race-heat')).toHaveTextContent('Qualifying Heat 1');
     expect(screen.getByTestId('race-word')).toHaveTextContent('Result');
-    expect(screen.queryByRole('timer')).toBeNull();
-    expect(screen.getByRole('table', { name: 'Pilots in this race' })).toBeVisible();
+    // The clock is always there. For a result it is the race's own time, and it does not run.
+    const shown = screen.getByRole('timer').textContent;
+    expect(shown).toBe('0:11.0');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(screen.getByRole('timer')).toHaveTextContent('0:11.0');
+    expect(
+      within(screen.getByRole('table', { name: 'Pilots in this race' }))
+        .getAllByRole('rowheader')
+        .map((cell) => cell.textContent?.trim())
+    ).toEqual(['Bee', 'Ace']);
   });
 
-  it('says so when nothing has been raced', async () => {
-    await open(eventView({ phases: [heat('h1', 'Heat 1', ['p-ace'])], queue: ['h1'] }));
+  it('two minutes after a result, moves on to the heat that is up next', async () => {
+    const view = running();
+    view.races[0] = { ...view.races[0], state: 'Saved', stopped_at: 111 * S };
+    view.current_race = undefined;
+    view.queue = ['h2'];
+    await open(view);
+    expect(screen.getByTestId('race-word')).toHaveTextContent('Result');
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(screen.getByTestId('race-word')).toHaveTextContent('Up next');
+    expect(screen.getByTestId('race-heat')).toHaveTextContent('Qualifying Heat 2');
+  });
+
+  it('with nothing raced yet, shows the heat that is up next: seats, pilots and a clock at zero', async () => {
+    await open(
+      eventView({
+        phases: [heat('h1', 'Heat 1', ['p-ace', 'p-bee']), heat('h2', 'Heat 2', ['p-cat'])],
+        queue: ['h1', 'h2']
+      })
+    );
+    expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('race-heat')).toHaveTextContent('Heat 1');
+    expect(screen.getByTestId('race-word')).toHaveTextContent('Up next');
+    expect(screen.getByRole('timer')).toHaveTextContent('0:00.0');
+    const table = screen.getByRole('table', { name: 'Pilots in this race' });
+    expect(
+      within(table)
+        .getAllByRole('row')
+        .slice(1)
+        .map((row) => [...row.children].map((cell) => cell.textContent?.trim()))
+    ).toEqual([
+      ['Seat 1', 'Ace'],
+      ['Seat 2', 'Bee']
+    ]);
+    // The clock does not start by itself.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(screen.getByRole('timer')).toHaveTextContent('0:00.0');
+  });
+
+  it('follows the day by itself: up next, the race, its result, then the next heat', async () => {
+    const start = eventView({
+      now: 100 * S,
+      phases: [heat('h1', 'Heat 1', ['p-ace']), heat('h2', 'Heat 2', ['p-bee'])],
+      queue: ['h1', 'h2']
+    });
+    const { live } = await open(start);
+    const word = () => screen.getByTestId('race-word').textContent?.trim();
+    const name = () => screen.getByTestId('race-heat').textContent?.trim();
+    expect([name(), word()]).toEqual(['Heat 1', 'Up next']);
+    const on = race('h1', 1, 'Running', {
+      started_at: 100 * S,
+      seats: [raceSeat(0, 'p-ace', { finish: 1, laps: [lap(1, 5)] })]
+    });
+    live.view = { ...start, cursor: 2, races: [on], current_race: on.race, queue: ['h1', 'h2'] };
+    await waitFor(() => expect([name(), word()]).toEqual(['Heat 1', 'Racing']));
+    const saved = { ...on, state: 'Saved' as const, stopped_at: live.nowMicros() };
+    live.view = { ...start, cursor: 3, races: [saved], current_race: undefined, queue: ['h2'] };
+    await waitFor(() => expect([name(), word()]).toEqual(['Heat 1', 'Result']));
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect([name(), word()]).toEqual(['Heat 2', 'Up next']);
+  });
+
+  it('the tab is always called Current race, whatever it shows', async () => {
+    for (const view of [
+      running(),
+      eventView({ phases: [heat('h1', 'Heat 1', ['p-ace'])], queue: ['h1'] }),
+      eventView()
+    ]) {
+      await open(view);
+      expect(screen.getAllByRole('tab')[0]).toHaveTextContent(/^Current race$/);
+      cleanup();
+    }
+  });
+
+  it('says so when nothing has been raced and nothing is lined up', async () => {
+    await open(eventView({ phases: [heat('h1', 'Heat 1', ['p-ace'])] }));
     expect(screen.getByTestId('no-race')).toHaveTextContent('No race yet.');
     expect(screen.queryByRole('table')).toBeNull();
   });
@@ -465,7 +547,7 @@ describe('SpectatorView: results', () => {
 describe('SpectatorView: the connection, and looking only', () => {
   it('has nothing on it that changes anything', async () => {
     await open(running());
-    for (const name of ['On now', /Up next/, 'Results']) {
+    for (const name of ['Current race', /Up next/, 'Results']) {
       await fireEvent.click(tab(name));
       // No button but the three tabs; no link; no text box.
       expect(screen.queryAllByRole('button')).toEqual([]);
@@ -476,7 +558,7 @@ describe('SpectatorView: the connection, and looking only', () => {
 
   it('never sends a command', async () => {
     const { session } = await open(running());
-    for (const name of ['On now', /Up next/, 'Results']) await fireEvent.click(tab(name));
+    for (const name of ['Current race', /Up next/, 'Results']) await fireEvent.click(tab(name));
     await vi.advanceTimersByTimeAsync(3000);
     expect(session.sendCommand).not.toHaveBeenCalled();
     expect(session.postPass).not.toHaveBeenCalled();
@@ -551,9 +633,14 @@ describe('SpectatorView: a signed-in pilot', () => {
     who: { id: string; callsign: string } | undefined,
     channels = CHANNELS
   ) {
-    const { live } = await openLive(view, { listPilots: vi.fn(async () => PILOTS) });
+    const { live } = await openLive(view, {
+      listPilots: vi.fn(async () => PILOTS),
+      listChannels: vi.fn(async () => channels)
+    });
+    // The channels come with the event, like every other name on the page.
+    await live.reloadChannels();
     const buzz = vi.fn();
-    const rendered = render(SpectatorView, { live, pilot: who, channels, buzz });
+    const rendered = render(SpectatorView, { live, pilot: who, buzz });
     return { live, buzz, rendered };
   }
 
@@ -597,7 +684,7 @@ describe('SpectatorView: a signed-in pilot', () => {
     expect(screen.queryByRole('combobox')).toBeNull();
     // And each other tab shows only itself.
     for (const [name, region] of [
-      ['On now', 'On now'],
+      ['Current race', 'Current race'],
       [/Up next/, 'Up next'],
       ['Results', 'Results']
     ] as const) {
@@ -620,7 +707,7 @@ describe('SpectatorView: a signed-in pilot', () => {
     expect(alert).toHaveTextContent('You are next');
     expect(alert).toHaveTextContent('Heat 1 · Seat 1 · R1 · 5658 MHz');
     expect(alert).toHaveAttribute('data-nearness', 'next');
-    for (const name of ['Last race', /Up next/, 'Results']) {
+    for (const name of ['Current race', /Up next/, 'Results']) {
       await fireEvent.click(tab(name));
       expect(screen.getByTestId('pilot-alert')).toHaveTextContent('You are next');
     }
@@ -686,7 +773,6 @@ describe('SpectatorView: a signed-in pilot', () => {
     render(SpectatorView, {
       live,
       pilot: ACE,
-      channels: [],
       buzz: () => {
         throw new Error('NotAllowedError');
       }
@@ -761,7 +847,7 @@ describe('SpectatorView: a signed-in pilot', () => {
     view.phases.push(heat('h3', 'Qualifying Heat 3', ['p-bee', 'p-ace']));
     view.queue = ['h1', 'h2', 'h3'];
     await openAs(view, ACE);
-    await fireEvent.click(tab('On now'));
+    await fireEvent.click(tab('Current race'));
     const table = screen.getByRole('table', { name: 'Pilots in this race' });
     expect(within(table).getByRole('row', { name: /Ace/ })).toHaveClass('me');
     expect(within(table).getByRole('row', { name: /Bee/ })).not.toHaveClass('me');
@@ -782,25 +868,28 @@ describe('SpectatorView: a signed-in pilot', () => {
     const heat1 = within(screen.getByRole('region', { name: 'Up next' })).getByRole('listitem', {
       name: 'Heat 1'
     });
-    expect(within(heat1).getByText('Ace').closest('li')).toHaveTextContent('R1 · 5658 MHz');
+    // The channel is part of the seat's name, wherever the seat is named.
+    expect(within(heat1).getByText('Ace').closest('li')).toHaveTextContent('Seat 1 · R1');
     // Seat 2 has no channel known: nothing is made up for it.
-    expect(within(heat1).getByText('Bee').closest('li')).not.toHaveTextContent('MHz');
+    const bee = within(heat1).getByText('Bee').closest('li');
+    expect(bee).toHaveTextContent('Seat 2');
+    expect(bee).not.toHaveTextContent('·');
   });
 
   it('moves to Me when a pilot signs in, and off it when they sign out', async () => {
     const { rendered } = await openAs(queued(), undefined);
-    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
     await rendered.rerender({ pilot: ACE });
     await waitFor(() => expect(tab(/^Me/)).toHaveAttribute('aria-selected', 'true'));
     await rendered.rerender({ pilot: undefined });
     await waitFor(() => expect(screen.queryByRole('tab', { name: /^Me/ })).toBeNull());
-    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
     expect(screen.queryByTestId('pilot-alert')).toBeNull();
   });
 
   it('still has nothing on it that changes anything', async () => {
     await openAs(queued(), ACE);
-    for (const name of [/^Me/, 'Last race', /Up next/, 'Results']) {
+    for (const name of [/^Me/, 'Current race', /Up next/, 'Results']) {
       await fireEvent.click(tab(name));
       expect(screen.queryAllByRole('button')).toEqual([]);
       expect(screen.queryAllByRole('textbox')).toEqual([]);
@@ -813,7 +902,7 @@ describe('SpectatorView: the Sign up tab', () => {
   async function openSheet(who: typeof BEE | undefined, over: Record<string, unknown> = {}) {
     const view = signupEvent(signupSheet());
     const { live } = await openLive(view, { listPilots: vi.fn(async () => SIGNUP_PILOTS) });
-    const props = { live, pilot: who, channels: [], buzz: vi.fn(), ...over };
+    const props = { live, pilot: who, buzz: vi.fn(), ...over };
     const rendered = render(SpectatorView, props);
     return { live, view, rendered, props };
   }
@@ -824,17 +913,17 @@ describe('SpectatorView: the Sign up tab', () => {
     expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
     cleanup();
     await openSheet(undefined);
-    expect(tabNames()).toEqual(['Last race', 'Up next', 'Results']);
+    expect(tabNames()).toEqual(['Current race', 'Up next', 'Results']);
     expect(screen.queryByRole('region', { name: 'Sign-up for Qualifying' })).toBeNull();
   });
 
   it('a pilot gets it when a phase has sign-up, between Up next and Results', async () => {
     await openSheet(BEE);
-    expect(tabNames()).toEqual(['Me', 'Last race', 'Up next', 'Sign up', 'Results']);
+    expect(tabNames()).toEqual(['Me', 'Current race', 'Up next', 'Sign up', 'Results']);
     cleanup();
     // A pilot at an event with no sign-up does not.
     const { live } = await openLive(running(), { listPilots: vi.fn(async () => PILOTS) });
-    render(SpectatorView, { live, pilot: BEE, channels: [], buzz: vi.fn() });
+    render(SpectatorView, { live, pilot: BEE, buzz: vi.fn() });
     expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
   });
 
@@ -862,8 +951,8 @@ describe('SpectatorView: the Sign up tab', () => {
       phases: view.phases.map((phase) => ({ ...phase, signup: undefined }))
     };
     await waitFor(() => expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull());
-    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByRole('region', { name: 'Last race' })).toBeVisible();
+    expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('region', { name: 'Current race' })).toBeVisible();
   });
 
   it('goes back to the race when the pilot signs out while on it', async () => {
@@ -871,7 +960,7 @@ describe('SpectatorView: the Sign up tab', () => {
     await fireEvent.click(tab('Sign up'));
     await rendered.rerender({ ...props, pilot: undefined });
     await waitFor(() => expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull());
-    expect(tab('Last race')).toHaveAttribute('aria-selected', 'true');
+    expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
     expect(screen.queryByRole('region', { name: 'Sign-up for Qualifying' })).toBeNull();
   });
 

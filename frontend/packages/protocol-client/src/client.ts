@@ -945,6 +945,25 @@ export async function cancelKioskCode(
   );
 }
 
+/**
+ * Name a kiosk, so two tablets can be told apart (`PUT /kiosk/devices/{number}`). An
+ * empty name takes the name away.
+ */
+export async function renameKiosk(
+  baseUrl: string,
+  number: number,
+  name: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    `/kiosk/devices/${number}`,
+    { method: 'PUT', body: { name }, token, fetch: options.fetch },
+    'name the kiosk'
+  );
+}
+
 /** Remove a kiosk, so its tablet stops being one (`DELETE /kiosk/devices/{number}`). */
 export async function removeKiosk(
   baseUrl: string,

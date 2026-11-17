@@ -14,7 +14,7 @@
    * Nobody stays signed in on a kiosk, and it never signs a pilot's own phone out.
    */
   import { Button, Input } from '@gridfpv/components';
-  import type { PublicPilot, SeatChannel } from '@gridfpv/types';
+  import type { PublicPilot } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import { kioskCodeProblem, kioskLeft, kioskWarning, typedCode } from '../lib/kiosk.js';
   import { codeProblem, tidyCode } from '../lib/pilotAccess.js';
@@ -27,7 +27,7 @@
     isKiosk,
     eventName,
     live,
-    channels = [],
+    kioskName = undefined,
     offline = false
   }: {
     source: Pick<
@@ -40,7 +40,8 @@
     eventName: string | undefined;
     /** The open event, live. Left out when none is open. */
     live: Pick<EventLive, 'view' | 'names' | 'reload'> | undefined;
-    channels?: readonly SeatChannel[];
+    /** What the director calls this kiosk, when the Director has said. */
+    kioskName?: string | undefined;
     /** Whether Grid cannot be reached right now. */
     offline?: boolean;
   } = $props();
@@ -185,6 +186,9 @@
   <header class="top">
     <h1>Grid<span class="accent">FPV</span></h1>
     {#if eventName}<p class="event" data-testid="visitor-event">{eventName}</p>{/if}
+    {#if ready && kioskName && !here}
+      <p class="kiosk-name" data-testid="kiosk-name">{kioskName}</p>
+    {/if}
     {#if here}
       <p class="who" data-testid="kiosk-pilot">
         <span>Hi <strong>{here.pilot.callsign}</strong></span>
@@ -268,7 +272,6 @@
         phases={sheets}
         names={live.names}
         pilot={here.pilot}
-        {channels}
         layout="grid"
         actions={{
           take: (heat, seat) => act((pass) => source.takeSpot(heat, seat, pass)),
@@ -308,6 +311,12 @@
     margin: 0;
     font-size: var(--gf-font-size-lg);
     color: var(--gf-text-muted);
+    overflow-wrap: anywhere;
+  }
+  .kiosk-name {
+    margin: 0 0 0 auto;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
     overflow-wrap: anywhere;
   }
   .who {

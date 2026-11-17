@@ -993,8 +993,8 @@ Until now only the director used Grid. This section adds the other people at a r
   minutes after it was last used, or when the director gives the pilot a new code or
   signs them out.
 
-  - **Not built: a listener of its own for kiosks.** Kiosks come in on the same listener
-    as phones. What keeps a phone from being a kiosk is the kiosk code, not the port.
+  - Kiosks come in on the same listener as phones. What keeps a phone from being a kiosk
+    is the kiosk code, not the port (agreed with Ryan, 2026-11-17).
   - **Not built: the tablet's camera reading a QR code.** A browser only gives a page the
     camera over HTTPS or on the computer itself, and Grid at the field is plain HTTP on
     the local network. A cheap handheld scanner that types what it reads works today.
@@ -1006,6 +1006,19 @@ Until now only the director used Grid. This section adds the other people at a r
   - **Results** are picked phase first, then **Overall** or one heat. A heat shows each
     of its races, and a race opens to its lap times in a large format. So does a race on
     the pilot's own tab.
+  - **One race tab, always called Current race** (Ryan, 2026-11-17). It shows one thing,
+    always with a clock: a race that is on; the result just saved, for two minutes; else
+    the heat that is up next with who is in it. With nothing coming up the last result
+    stays. The Director does not know which heat is on the Run page, so "current" is
+    worked out from what has happened.
+  - **A seat is named with its channel wherever it is named**: "Seat 2 · R2". The channel
+    is what a pilot needs. It comes from the timer, so a bench seat has none. The console
+    and the visitor's page read it the same way, into the one name resolver.
+  - **The sign-up sheet a pilot sees lists only heats still open.** A heat that is closed,
+    on or flown is off it. A full open heat stays, since someone may drop out. The
+    director's sheet shows every heat.
+  - **Kiosks can be named** on the Network page ("By the gate"), and a kiosk shows its
+    name while it waits. Kiosks stay on the same listener as phones (agreed).
   - **The director's sign-in** from another device is at `#/director`. Nothing on the
     visitor's page links to it. The director is expected at the Grid computer.
 

@@ -12,7 +12,6 @@ import type {
   PhaseId,
   PhaseView,
   PilotId,
-  SeatChannel,
   SignupHeatView,
   SignupPilotView,
   SignupRules,
@@ -20,7 +19,6 @@ import type {
   SignupView
 } from '@gridfpv/types';
 import type { Names } from './names.js';
-import { seatChannel } from './pilotView.js';
 import type { SeatSource } from './seats.js';
 
 /** A phase pilots sign up for, with its sheet. */
@@ -59,16 +57,22 @@ export interface SeatHeading {
   channel?: string;
 }
 
+/**
+ * The heats a pilot is shown: the ones still open to pilots. A heat that is closed, on or
+ * flown cannot be joined or left from a phone, so it only gets in the way. A **full** open
+ * heat stays, because a seat in it may come free.
+ */
+export function openHeats(signup: SignupView): SignupHeatView[] {
+  return signup.heats.filter((heat) => heat.state === 'Open');
+}
+
 /** The seats of a sign-up phase, named. */
-export function seatHeadings(
-  rules: SignupRules,
-  names: Names,
-  channels: readonly SeatChannel[] = []
-): SeatHeading[] {
+export function seatHeadings(rules: SignupRules, names: Names): SeatHeading[] {
   return rules.seats.map((seat, index) => ({
     seat,
-    name: names.seat(seat.adapter, seat.seat, index),
-    channel: seatChannel(channels, seat.adapter, seat.seat)
+    // The channel is shown in full under it, so the seat is named without one.
+    name: names.seatPlain(seat.adapter, seat.seat, index),
+    channel: names.channel(seat.adapter, seat.seat)
   }));
 }
 

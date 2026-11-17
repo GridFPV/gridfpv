@@ -18,6 +18,7 @@ import {
   runsOf,
   runsWords,
   seatAction,
+  openHeats,
   seatHeadings,
   seatOf,
   signupPhases
@@ -86,8 +87,14 @@ describe('which phases have sign-up', () => {
 
 describe('the seats, named', () => {
   it('gives each its name and, when the timer has said it, its channel', () => {
-    const names = buildNames([], [], [timerView('gate', 'Gate', 3)]);
-    const headings = seatHeadings(RULES, names, [{ adapter: 'gate', seat: '1', freq_mhz: 5658 }]);
+    const names = buildNames(
+      [],
+      [],
+      [timerView('gate', 'Gate', 3)],
+      [],
+      [{ adapter: 'gate', seat: '1', freq_mhz: 5658 }]
+    );
+    const headings = seatHeadings(RULES, names);
     expect(headings.map((s) => [s.name, s.channel])).toEqual([
       ['Seat 1', undefined],
       ['Seat 2', 'R1 · 5658 MHz'],
@@ -345,5 +352,51 @@ describe('the rules form', () => {
     expect(
       rulesProblem({ ...good, openHeats: '20', heldLimit: ' ', runLimit: '' })
     ).toBeUndefined();
+  });
+});
+
+describe('openHeats', () => {
+  const sheet = (states: [number, SignupHeatView['state'], boolean][]): SignupView => ({
+    rules: RULES,
+    heats: states.map(([number, state, full]) => ({
+      heat: `quali/heat-${number}`,
+      number,
+      seats: full ? ['p-a', 'p-b', 'p-c'] : [null, null, null],
+      state,
+      full
+    })),
+    pilots: []
+  });
+
+  it('keeps the heats that are open, full or not, and drops closed, on and flown ones', () => {
+    const found = openHeats(
+      sheet([
+        [1, 'Flown', true],
+        [2, 'Racing', true],
+        [3, 'Closed', false],
+        [4, 'Open', true],
+        [5, 'Open', false]
+      ])
+    );
+    expect(found.map((heat) => heat.number)).toEqual([4, 5]);
+  });
+
+  it('is empty when nothing is open, and keeps the order of the sheet', () => {
+    expect(
+      openHeats(
+        sheet([
+          [1, 'Flown', true],
+          [2, 'Closed', true]
+        ])
+      )
+    ).toEqual([]);
+    expect(
+      openHeats(
+        sheet([
+          [7, 'Open', false],
+          [3, 'Open', true]
+        ])
+      ).map((heat) => heat.number)
+    ).toEqual([7, 3]);
   });
 });

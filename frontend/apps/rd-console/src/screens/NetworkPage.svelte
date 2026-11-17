@@ -12,7 +12,7 @@
    * A Director that was started on the network already (`GRIDFPV_ADDR`) is always on. The
    * switch is hidden then, because it would do nothing.
    */
-  import { Badge, Banner, Button, Card, Input, toast } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Dialog, Input, toast } from '@gridfpv/components';
   import type { KioskView, NetworkRequest, NetworkView, PublicHello } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import { kioskLink, setUpWords, spellKioskCode } from '../lib/kiosk.js';
@@ -32,6 +32,7 @@
       | 'newKioskCode'
       | 'cancelKioskCode'
       | 'removeKiosk'
+      | 'renameKiosk'
     >;
   } = $props();
 
@@ -70,6 +71,19 @@
   let kiosks = $state<KioskView | undefined>(undefined);
   let kioskBusy = $state(false);
   let kioskError = $state<string | undefined>(undefined);
+
+  /** The kiosk being named, and the name as typed. */
+  let naming = $state<{ number: number; name: string } | undefined>(undefined);
+
+  async function saveName(e: Event) {
+    e.preventDefault();
+    const target = naming;
+    if (!target) return;
+    const before = kiosks;
+    await kioskChange(() => session.renameKiosk(target.number, target.name.trim()));
+    // Close it once the change is in. On a refusal it stays open, with the reason above.
+    if (kiosks !== before && kioskError === undefined) naming = undefined;
+  }
 
   async function kioskChange(what: () => Promise<KioskView | undefined>) {
     if (kioskBusy) return;
@@ -312,8 +326,20 @@
         <ul class="kiosk-list" aria-label="Kiosks set up">
           {#each kiosks.kiosks as kiosk (kiosk.number)}
             <li>
-              <span>Kiosk {kiosk.number}</span>
+              <span>
+                Kiosk {kiosk.number}{#if kiosk.name}{': '}<strong data-testid="kiosk-name"
+                    >{kiosk.name}</strong
+                  >{/if}
+              </span>
               <span class="muted">set up {setUpWords(kiosk.set_up_at)}</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={kioskBusy}
+                aria-label="Name kiosk {kiosk.number}"
+                onclick={() => (naming = { number: kiosk.number, name: kiosk.name ?? '' })}
+                >{kiosk.name ? 'Rename' : 'Name it'}</Button
+              >
               <Button
                 size="sm"
                 variant="ghost"
@@ -346,6 +372,32 @@
     </Card>
   {/if}
 </Page>
+
+{#if naming}
+  {@const target = naming}
+  <Dialog open={true} title="Name kiosk {target.number}" onclose={() => (naming = undefined)}>
+    <form id="kiosk-name" onsubmit={saveName} aria-label="Kiosk name">
+      <label for="kiosk-name-box">Name</label>
+      <Input
+        id="kiosk-name-box"
+        autocomplete="off"
+        maxlength={40}
+        placeholder="By the gate"
+        bind:value={target.name}
+        disabled={kioskBusy}
+      />
+      <p class="muted">
+        Say where it is, so you know which tablet is which. The tablet shows its name while it waits
+        for a pilot. Leave it empty for no name.
+      </p>
+      {#if kioskError}<Banner tone="danger">{kioskError}</Banner>{/if}
+    </form>
+    {#snippet footer()}
+      <Button variant="ghost" onclick={() => (naming = undefined)}>Cancel</Button>
+      <Button variant="primary" type="submit" form="kiosk-name" disabled={kioskBusy}>Save</Button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <style>
   p {

@@ -187,7 +187,8 @@ pub fn router(registry: EventRegistry) -> Router {
         )
         .route(
             "/kiosk/devices/{number}",
-            delete(crate::pilot_access::delete_kiosk_number),
+            put(crate::pilot_access::put_kiosk_name)
+                .delete(crate::pilot_access::delete_kiosk_number),
         )
         .route(
             "/public/pilot/kiosk/device",

@@ -966,6 +966,28 @@ describe('setting kiosks up (docs/primitives.md §11.4)', () => {
     expect(auth(open.seen[0].init)).toBeUndefined();
   });
 
+  it('renameKiosk PUTs the name to the kiosk, and an empty name is still sent', async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder(200, VIEW);
+    expect(
+      await client.renameKiosk('http://d.local:8080/', 2, 'By the gate', 't', { fetch })
+    ).toEqual(VIEW);
+    await client.renameKiosk('http://d.local:8080', 2, '', undefined, { fetch });
+    expect(seen.map((call) => [call.init?.method, call.url, call.init?.body])).toEqual([
+      ['PUT', 'http://d.local:8080/kiosk/devices/2', '{"name":"By the gate"}'],
+      ['PUT', 'http://d.local:8080/kiosk/devices/2', '{"name":""}']
+    ]);
+    expect(auth(seen[0].init)).toBe('Bearer t');
+    expect(auth(seen[1].init)).toBeUndefined();
+    const gone = recorder(404, {
+      code: 'UnknownScope',
+      message: 'That kiosk is not on the list any more.'
+    });
+    await expect(
+      client.renameKiosk('http://d.local:8080', 9, 'x', undefined, { fetch: gone.fetch })
+    ).rejects.toMatchObject({ status: 404, message: 'That kiosk is not on the list any more.' });
+  });
+
   it('a code with odd characters in it cannot change the route', async () => {
     const client = await import('./client.js');
     const { seen, fetch } = recorder(200, VIEW);

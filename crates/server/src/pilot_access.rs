@@ -100,7 +100,13 @@ struct KioskDevice {
     token: String,
     /// When it was set up, in seconds since 1970.
     set_up_at: u64,
+    /// What the director calls it ("By the gate"), so two tablets can be told apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
+
+/// The longest name a kiosk can have, in characters.
+pub const KIOSK_NAME_MAX: usize = 40;
 
 /// A pilot at a kiosk.
 struct KioskPass {
@@ -424,6 +430,7 @@ impl PilotAccess {
                 .map(|device| KioskDeviceView {
                     number: device.number,
                     set_up_at: device.set_up_at,
+                    name: device.name.clone(),
                 })
                 .collect(),
         }
@@ -487,9 +494,55 @@ impl PilotAccess {
             number,
             token: token.clone(),
             set_up_at: now,
+            name: None,
         });
         Self::save(&inner);
         Some(token)
+    }
+
+    /// Name a kiosk, or take its name away with an empty one. The name is trimmed, and cut
+    /// to [`KIOSK_NAME_MAX`] characters. Whether the kiosk was there.
+    pub fn kiosk_rename(&self, number: u32, name: &str) -> bool {
+        let name: String = name
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(KIOSK_NAME_MAX)
+            .collect();
+        let mut inner = self.write();
+        let Some(device) = inner
+            .stored
+            .kiosks
+            .iter_mut()
+            .find(|device| device.number == number)
+        else {
+            return false;
+        };
+        device.name = (!name.trim().is_empty()).then(|| name.trim().to_string());
+        Self::save(&inner);
+        true
+    }
+
+    /// What the kiosk whose cookie holds `token` is called: its name, or "Kiosk 2".
+    pub fn kiosk_label(&self, token: &str) -> Option<String> {
+        if token.is_empty() {
+            return None;
+        }
+        self.read()
+            .stored
+            .kiosks
+            .iter()
+            .find(|device| same(&device.token, token))
+            .map(|device| {
+                device
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Kiosk {}", device.number))
+            })
     }
 
     /// Remove a kiosk from the list. Its tablet stops being one. Whether it was there.
@@ -661,6 +714,12 @@ impl PilotAccess {
 /// The pilot sign-in a request carries, if it has one.
 pub fn pilot_cookie(headers: &HeaderMap) -> Option<String> {
     cookie_named(headers, PILOT_COOKIE)
+}
+
+/// What the kiosk a request comes from is called. `None` for a device that is not one.
+pub fn kiosk_label(registry: &EventRegistry, headers: &HeaderMap) -> Option<String> {
+    cookie_named(headers, KIOSK_COOKIE)
+        .and_then(|token| registry.pilot_access().kiosk_label(&token))
 }
 
 /// Whether a request comes from a device the director set up as a kiosk.
@@ -987,6 +1046,18 @@ pub struct KioskDeviceView {
     /// When it was set up, in seconds since 1970.
     #[ts(type = "number")]
     pub set_up_at: u64,
+    /// What the director calls it. Absent until it is given a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
+}
+
+/// `PUT /kiosk/devices/{number}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct KioskNameRequest {
+    /// The name, or an empty one to take it away.
+    pub name: String,
 }
 
 /// `GET /kiosk`: what the director sees about kiosks.
@@ -1041,6 +1112,21 @@ pub async fn delete_kiosk_code(
 ) -> Response {
     registry.pilot_access().kiosk_cancel_code(&code);
     kiosk_answer(&registry)
+}
+
+/// `PUT /kiosk/devices/{number}` — name a kiosk, so two tablets can be told apart.
+pub async fn put_kiosk_name(
+    State(registry): State<EventRegistry>,
+    Path(number): Path<u32>,
+    Json(body): Json<KioskNameRequest>,
+) -> Result<Response, ProtocolError> {
+    if !registry.pilot_access().kiosk_rename(number, &body.name) {
+        return Err(ProtocolError::new(
+            ErrorCode::UnknownScope,
+            "That kiosk is not on the list any more.",
+        ));
+    }
+    Ok(kiosk_answer(&registry))
 }
 
 /// `DELETE /kiosk/devices/{number}` — remove a kiosk. Its tablet stops being one.
@@ -1183,7 +1269,8 @@ mod tests {
             view.kiosks,
             [KioskDeviceView {
                 number: 1,
-                set_up_at: 1000
+                set_up_at: 1000,
+                name: None
             }]
         );
         // The code is not the cookie, and nothing but the token makes a kiosk.
@@ -1226,6 +1313,67 @@ mod tests {
             .map(|k| k.number)
             .collect();
         assert_eq!(numbers, [3, 4]);
+    }
+
+    #[test]
+    fn a_kiosk_can_be_named_and_the_name_is_tidied() {
+        let access = PilotAccess::new(None);
+        let code = access.kiosk_new_code().unwrap();
+        let token = access.kiosk_set_up(&code, 1).unwrap();
+        assert_eq!(access.kiosk_label(&token).as_deref(), Some("Kiosk 1"));
+        assert_eq!(access.kiosk_view().kiosks[0].name, None);
+        assert!(access.kiosk_rename(1, "  By   the\tgate\n "));
+        assert_eq!(
+            access.kiosk_view().kiosks[0].name.as_deref(),
+            Some("By the gate")
+        );
+        assert_eq!(access.kiosk_label(&token).as_deref(), Some("By the gate"));
+        // Cut at the limit, by characters and not bytes.
+        assert!(access.kiosk_rename(1, &"é".repeat(100)));
+        assert_eq!(
+            access.kiosk_view().kiosks[0]
+                .name
+                .as_ref()
+                .unwrap()
+                .chars()
+                .count(),
+            KIOSK_NAME_MAX
+        );
+        // An empty name, or one of spaces, takes the name away.
+        for empty in ["", "   ", "\n\t"] {
+            assert!(access.kiosk_rename(1, "x"));
+            assert!(access.kiosk_rename(1, empty));
+            assert_eq!(access.kiosk_view().kiosks[0].name, None, "{empty:?}");
+            assert_eq!(access.kiosk_label(&token).as_deref(), Some("Kiosk 1"));
+        }
+        // A kiosk that is not there, and a token that is not a kiosk's.
+        assert!(!access.kiosk_rename(2, "x"));
+        assert_eq!(access.kiosk_label(""), None);
+        assert_eq!(access.kiosk_label("nope"), None);
+        // The name has no power: it is not the token and does not make a kiosk.
+        access.kiosk_rename(1, &token);
+        assert!(access.is_kiosk(&token));
+        access.kiosk_rename(1, "Front desk");
+        assert!(!access.is_kiosk("Front desk"));
+    }
+
+    #[test]
+    fn a_kiosk_name_is_kept_and_an_old_file_without_one_loads() {
+        let dir =
+            std::env::temp_dir().join(format!("gridfpv-kiosk-{}", crate::auth::random_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(ACCESS_FILE),
+            r#"{"kiosks":[{"number":4,"token":"tok-en","set_up_at":9}],"last_kiosk":4}"#,
+        )
+        .unwrap();
+        let access = PilotAccess::new(Some(dir.clone()));
+        assert!(access.is_kiosk("tok-en"));
+        assert_eq!(access.kiosk_label("tok-en").as_deref(), Some("Kiosk 4"));
+        assert!(access.kiosk_rename(4, "Pit lane"));
+        let reopened = PilotAccess::new(Some(dir.clone()));
+        assert_eq!(reopened.kiosk_label("tok-en").as_deref(), Some("Pit lane"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
