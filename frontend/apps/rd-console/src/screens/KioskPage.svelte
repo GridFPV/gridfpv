@@ -14,11 +14,11 @@
    * Nobody stays signed in on a kiosk, and it never signs a pilot's own phone out.
    */
   import { Button, Input } from '@gridfpv/components';
-  import type { PublicPilot } from '@gridfpv/types';
+  import type { PhaseId, PublicPilot } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import { kioskCodeProblem, kioskLeft, kioskWarning, typedCode } from '../lib/kiosk.js';
   import { codeProblem, tidyCode } from '../lib/pilotAccess.js';
-  import { signupPhases } from '../lib/signup.js';
+  import { runsOf, signupPhases } from '../lib/signup.js';
   import type { PublicSource } from '../lib/spectator.js';
   import PilotSignup from './PilotSignup.svelte';
 
@@ -179,7 +179,21 @@
     if (eventName === undefined && here) done();
   });
 
-  const sheets = $derived(signupPhases(live?.view));
+  /**
+   * The sheets this pilot can use: the sign-up phases they are in. One is shown at a time,
+   * with a picker when there are several, so the page is one grid and not a long scroll.
+   */
+  const sheets = $derived(
+    signupPhases(live?.view).filter(
+      (sheet) => here !== undefined && runsOf(sheet.signup, here.pilot.id) !== undefined
+    )
+  );
+  let picked = $state<PhaseId | undefined>(undefined);
+  const sheet = $derived(sheets.find((entry) => entry.id === picked) ?? sheets[0]);
+  // Each pilot starts on the first sheet, whatever the last one was looking at.
+  $effect(() => {
+    if (!here) picked = undefined;
+  });
 </script>
 
 <main class="kiosk" data-screen={!ready ? 'setup' : here ? 'pilot' : 'wait'}>
@@ -268,8 +282,22 @@
     {#if !live?.view}
       <p class="muted" role="status">Loading…</p>
     {:else}
+      {#if sheets.length > 1}
+        <label class="which">
+          <span>Sign up for</span>
+          <select
+            aria-label="Sign up for"
+            value={sheet?.id}
+            onchange={(e) => (picked = (e.currentTarget as HTMLSelectElement).value)}
+          >
+            {#each sheets as entry (entry.id)}
+              <option value={entry.id}>{entry.name}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
       <PilotSignup
-        phases={sheets}
+        phases={sheet ? [sheet] : []}
         names={live.names}
         pilot={here.pilot}
         layout="grid"
@@ -388,6 +416,23 @@
     border: 1px solid var(--gf-warn);
     border-radius: var(--gf-radius-sm);
     color: var(--gf-warn);
+  }
+  .which {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+  }
+  .which select {
+    min-width: 16rem;
+    min-height: 3rem;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    background: var(--gf-surface);
+    color: var(--gf-text);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    font: inherit;
   }
   .warning {
     padding: var(--gf-space-2) var(--gf-space-3);

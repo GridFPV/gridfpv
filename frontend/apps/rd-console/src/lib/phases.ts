@@ -176,13 +176,20 @@ export function groupOfHeat(groups: readonly HeatGroup[], heat: PhaseId): HeatGr
 }
 
 /**
- * The heat the Run page opens on when none is named: the one with a race that is not
- * saved or discarded yet, else the first in the run queue, else the heat raced last, else
- * the first heat there is.
+ * The heat that is on the timer: the one the director is running now. The Director keeps
+ * it (`on_timer`): the heat of a race that is not saved or discarded yet, else the heat the
+ * director last put on the timer or last started.
+ *
+ * Before the director has put anything there, it is the heat they would run first: the
+ * first in the run queue, else the heat raced last, else the first heat there is.
  */
 export function defaultHeat(view: EventView): PhaseId | undefined {
   const racing = currentRace(view);
   if (racing) return racing.heat;
+  const onTimer = view.on_timer;
+  if (onTimer !== undefined && view.phases.some((p) => p.def.id === onTimer && isHeat(p.def))) {
+    return onTimer;
+  }
   if (view.queue.length > 0) return view.queue[0];
   const last = view.races.at(-1);
   if (last) return last.heat;

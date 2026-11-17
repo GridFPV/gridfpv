@@ -247,19 +247,31 @@
 
 <style>
   /* The kiosk grid: read standing up, pressed with a thumb. */
+  /* Rounded, like every other card: separate borders, so the corners can curve. */
   table {
     width: 100%;
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     table-layout: fixed;
     margin-top: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-lg, var(--gf-radius-md));
+    overflow: hidden;
   }
   th,
   td {
-    border: 1px solid var(--gf-border-subtle);
+    border-right: 1px solid var(--gf-border-subtle);
+    border-bottom: 1px solid var(--gf-border-subtle);
     padding: var(--gf-space-2) var(--gf-space-3);
     text-align: center;
     vertical-align: middle;
     height: 4.25rem;
+  }
+  tr > :last-child {
+    border-right: 0;
+  }
+  tbody tr:last-child > * {
+    border-bottom: 0;
   }
   thead th {
     height: auto;
@@ -292,8 +304,8 @@
     font-weight: var(--gf-font-weight-semibold);
   }
   td.mine {
-    outline: 2px solid var(--gf-accent);
-    outline-offset: -2px;
+    box-shadow: inset 0 0 0 2px var(--gf-accent);
+    border-radius: var(--gf-radius-sm);
   }
   td.mine .who {
     color: var(--gf-accent);

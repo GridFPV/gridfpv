@@ -1116,3 +1116,255 @@ async fn a_whole_round_heats_fill_fly_and_count_as_runs() {
     assert_eq!(heat_one["complete"], true);
     assert_eq!(heat_one["ranking"].as_array().unwrap().len(), 3);
 }
+
+// ── The heat on the timer ────────────────────────────────────────────────────
+
+impl Rig {
+    /// Any command from the director's console.
+    async fn direct_command(&self, command: Value) -> Answer {
+        send(
+            &self.app,
+            HERE,
+            Method::POST,
+            &format!("/events/{}/commands", self.event),
+            None,
+            Some(command),
+            &[],
+        )
+        .await
+    }
+    async fn put_on_timer(&self, n: u32) -> Answer {
+        self.direct_command(json!({"PutOnTimer": {"heat": heat(n)}}))
+            .await
+    }
+    async fn states(&self) -> Vec<String> {
+        self.signup().await["heats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|heat| heat["state"].as_str().unwrap().to_string())
+            .collect()
+    }
+    async fn visitor_state(&self) -> Value {
+        send(
+            &self.app,
+            "192.168.1.77:50000",
+            Method::GET,
+            "/public/event/state",
+            None,
+            None,
+            &[],
+        )
+        .await
+        .json()
+    }
+}
+
+#[tokio::test]
+async fn the_director_puts_a_heat_on_the_timer_and_everyone_is_told_which() {
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    // Nothing is on the timer until the director says so: the field is not there at all.
+    assert!(rig.state().await.get("on_timer").is_none());
+    assert!(rig.visitor_state().await.get("on_timer").is_none());
+    let answer = rig.put_on_timer(2).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(rig.state().await["on_timer"], heat(2));
+    // A spectator's phone is told the same heat.
+    assert_eq!(rig.visitor_state().await["on_timer"], heat(2));
+    // Putting it there again changes nothing and is not an error.
+    let before = rig.state().await["cursor"].clone();
+    assert_eq!(rig.put_on_timer(2).await.status, StatusCode::OK);
+    assert_eq!(rig.state().await["cursor"], before);
+}
+
+#[tokio::test]
+async fn a_sign_up_heat_on_the_timer_is_closed_to_pilots_and_the_next_one_opens() {
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    let ace = rig.sign_in("Ace").await;
+    let bee = rig.sign_in("Bee").await;
+    assert_eq!(rig.take(&ace, 1, 1).await.status, StatusCode::OK);
+    assert_eq!(rig.states().await, ["Open", "Open", "Open"]);
+    assert_eq!(rig.put_on_timer(1).await.status, StatusCode::OK);
+    // Closed to pilots, and a fourth heat so there are still three with room.
+    assert_eq!(rig.states().await, ["Closed", "Open", "Open", "Open"]);
+    let refused = rig.take(&bee, 1, 2).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.message(),
+        "Qualifying Heat 1 is closed to changes from a phone. Ask the director"
+    );
+    let stuck = rig.as_pilot(&ace, "leave", json!({"heat": heat(1)})).await;
+    assert_eq!(stuck.status, StatusCode::CONFLICT);
+    // The director can still add a pilot, up to the start.
+    let added = rig
+        .command(json!({"Take": {"heat": heat(1), "seat": seat(2), "pilot": rig.pilot("Bee"), "by": "Director"}}))
+        .await;
+    assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+    assert_eq!(rig.spots().await[0], "Ace,Bee,-");
+    // The director moves on without flying it: heat 1 is open to pilots again.
+    assert_eq!(rig.put_on_timer(2).await.status, StatusCode::OK);
+    assert_eq!(rig.states().await[..2], ["Open", "Closed"]);
+    assert_eq!(
+        rig.as_pilot(&ace, "leave", json!({"heat": heat(1)}))
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn starting_a_race_puts_its_heat_on_the_timer_and_no_other_can_go_there_until_it_is_decided()
+{
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    let ace = rig.sign_in("Ace").await;
+    rig.take(&ace, 2, 1).await;
+    rig.put_on_timer(1).await;
+    let started = rig
+        .direct_command(json!({"StartRace": {"heat": heat(2)}}))
+        .await;
+    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+    assert_eq!(rig.state().await["on_timer"], heat(2));
+    let refused = rig.put_on_timer(3).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused.message(),
+        "Qualifying Heat 2 has a race that is not saved or thrown out yet. Decide it first"
+    );
+    assert_eq!(rig.state().await["on_timer"], heat(2));
+    let race = format!("{}#1", heat(2));
+    rig.direct_command(json!({"StopRace": {"race": race}}))
+        .await;
+    rig.direct_command(json!({"SaveRace": {"race": race}}))
+        .await;
+    // Flown, it is still the heat on the timer until the director puts another there.
+    assert_eq!(rig.state().await["on_timer"], heat(2));
+    assert_eq!(rig.put_on_timer(3).await.status, StatusCode::OK);
+    assert_eq!(rig.state().await["on_timer"], heat(3));
+}
+
+#[tokio::test]
+async fn only_the_director_puts_a_heat_on_the_timer() {
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    let ace = rig.sign_in("Ace").await;
+    let commands = format!("/events/{}/commands", rig.event);
+    for cookie in [None, Some(ace.1.as_str())] {
+        let answer = send(
+            &rig.app,
+            &ace.0,
+            Method::POST,
+            &commands,
+            cookie,
+            Some(json!({"PutOnTimer": {"heat": heat(1)}})),
+            &[],
+        )
+        .await;
+        assert!(
+            answer.status == StatusCode::UNAUTHORIZED || answer.status == StatusCode::FORBIDDEN,
+            "{}",
+            answer.status
+        );
+    }
+    // Nor through the pilot's own routes, whatever the body says.
+    let sneaky = rig
+        .as_pilot(
+            &ace,
+            "take",
+            json!({"PutOnTimer": {"heat": heat(1)}, "heat": heat(1), "seat": seat(1)}),
+        )
+        .await;
+    assert_eq!(sneaky.status, StatusCode::OK);
+    assert!(rig.state().await.get("on_timer").is_none());
+    // The fact itself cannot be written into the log by a console either.
+    let raw = rig
+        .direct_command(json!({"Record": {"HeatOnTimer": {"heat": heat(1)}}}))
+        .await;
+    assert_eq!(raw.status, StatusCode::CONFLICT);
+    assert!(rig.state().await.get("on_timer").is_none());
+}
+
+#[tokio::test]
+async fn a_heat_that_is_not_there_or_is_not_a_heat_cannot_go_on_the_timer() {
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    for (target, words) in [(json!("nope"), "no phase"), (json!(QUALI), "Qualifying")] {
+        let answer = rig
+            .direct_command(json!({"PutOnTimer": {"heat": target}}))
+            .await;
+        assert_eq!(
+            answer.status,
+            StatusCode::CONFLICT,
+            "{target}: {}",
+            answer.body
+        );
+        assert!(
+            answer.message().contains(words) || answer.message().contains("heat"),
+            "{}",
+            answer.message()
+        );
+    }
+    for bad in [
+        json!({"PutOnTimer": {}}),
+        json!({"PutOnTimer": {"heat": 5}}),
+        json!({"PutOnTimer": null}),
+    ] {
+        let answer = rig.direct_command(bad.clone()).await;
+        assert!(answer.status.is_client_error(), "{bad}: {}", answer.status);
+    }
+    assert!(rig.state().await.get("on_timer").is_none());
+}
+
+#[tokio::test]
+async fn the_heat_on_the_timer_is_kept_when_grid_is_closed_and_opened() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let data = std::env::temp_dir().join(format!("gridfpv-on-timer-{nanos}"));
+    let assets = data.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<title>console</title>").unwrap();
+    let event;
+    {
+        let app = build_app(EventRegistry::new(Some(data.clone())).unwrap(), &assets);
+        event = direct(&app, Method::POST, "/events", json!({"name": "Kept"})).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        direct(&app, Method::PUT, "/active-event", json!({ "id": event })).await;
+        let commands = format!("/events/{event}/commands");
+        direct(
+            &app,
+            Method::POST,
+            &commands,
+            json!({"Record": {"PhaseDefined": {"def": {
+                "id": "final", "label": "Final", "kind": {"Heat": {"lineup": []}}
+            }}}}),
+        )
+        .await;
+        direct(
+            &app,
+            Method::POST,
+            &commands,
+            json!({"PutOnTimer": {"heat": "final"}}),
+        )
+        .await;
+    }
+    let app = build_app(EventRegistry::new(Some(data.clone())).unwrap(), &assets);
+    let state = send(
+        &app,
+        HERE,
+        Method::GET,
+        &format!("/events/{event}/state"),
+        None,
+        None,
+        &[],
+    )
+    .await
+    .json();
+    assert_eq!(state["on_timer"], "final");
+    std::fs::remove_dir_all(data).ok();
+}

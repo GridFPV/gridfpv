@@ -952,6 +952,11 @@ pub enum Event {
     /// The director closed a heat to pilots (nobody can join or leave it from a phone), or
     /// opened it to them again.
     SignupHeatClosed { heat: PhaseId, closed: bool },
+    /// The director put a heat **on the timer**: it is the heat being run now, whether its
+    /// race has started yet or not. It is what "the current race" means to everyone
+    /// watching, and a sign-up heat on the timer is closed to pilots. Starting a race puts
+    /// its heat on the timer too, with no fact of its own.
+    HeatOnTimer { heat: PhaseId },
     /// A protest was filed against a race.
     ProtestFiled {
         protest: ProtestId,
@@ -1126,6 +1131,9 @@ pub enum Command {
     Record(Box<Event>),
     /// A change to a sign-up phase: its rules, or who has which spot.
     Signup(SignupCommand),
+    /// Put a heat on the timer: make it the one being run now. Refused while a race of
+    /// another heat is still to be saved or thrown out.
+    PutOnTimer { heat: PhaseId },
 }
 
 #[cfg(test)]

@@ -85,6 +85,7 @@
       <SignupSheet
         phase={sheet}
         names={live.names}
+        onTimer={live.view.on_timer}
         send={(command) => live.send(command)}
         onrules={() => (rulesFor = sheet.id)}
       />

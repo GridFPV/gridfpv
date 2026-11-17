@@ -84,8 +84,8 @@
   }: {
     live: EventLive;
     /**
-     * The heat to run, when the URL names one. A wire handle; its label is what is shown.
-     * With none named the page runs the heat being raced, or the next one.
+     * A heat to show in place of the one on the timer. The app never passes it: the page
+     * always shows the heat on the timer, which the Director keeps. Tests use it.
      */
     heat?: PhaseId;
     /** Put another heat on the timer. */
@@ -96,10 +96,29 @@
 
   const names = $derived(live.names);
   const view = $derived(live.view);
-  /** The heat on this page: the one named, or the one the Director would race next. */
+  /** The heat on this page: the one on the timer. (A test may name another.) */
   const heatId = $derived(named ?? (view ? defaultHeat(view) : undefined));
+
   const phase = $derived(view?.phases.find((p) => p.def.id === heatId && isHeat(p.def)));
   const races = $derived(view && heatId !== undefined ? racesOfHeat(view, heatId) : []);
+
+  // The page says "On the timer" above a heat, so the Director must agree that it is.
+  // Before the director has put anything there, the page shows the heat they would run
+  // first; tell the Director so, once. After that only a choice made by hand changes it,
+  // so two consoles can never pull it back and forth.
+  let claimed = false;
+  $effect(() => {
+    if (claimed || named !== undefined || !view || view.on_timer !== undefined) return;
+    if (heatId === undefined || !phase) return;
+    claimed = true;
+    void live.send({ PutOnTimer: { heat: heatId } }).catch(() => {});
+  });
+  /** The heat to go to once this one is done: the first in the run order that is not it. */
+  const nextUp = $derived(
+    view && !view.current_race && phase && (phase.complete || phase.locked)
+      ? view.queue.find((id) => id !== heatId)
+      : undefined
+  );
 
   // ── On the timer: a phase, then one of its heats ───────────────────────────
   const groups = $derived(view ? heatGroups(view.phases) : []);
@@ -462,6 +481,16 @@
                   {/each}
                 </Select>
               </div>
+              {#if nextUp !== undefined}
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onclick={() => onrun(nextUp)}
+                  data-testid="next-heat"
+                >
+                  Next: {names.phase(nextUp)}
+                </Button>
+              {/if}
               <p class="rules" data-testid="run-rules">
                 {#if phase.format}
                   <a href={formatHash({ kind: 'page', page: 'formats' })}>{phase.format.name}</a>

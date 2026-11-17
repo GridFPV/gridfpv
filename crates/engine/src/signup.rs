@@ -282,7 +282,12 @@ impl EventState {
         }
         if saved || results.get(heat).is_some_and(|result| result.complete) {
             HeatStatus::Flown
-        } else if any || self.signups.closed.contains(heat) {
+        } else if any
+            || self.signups.closed.contains(heat)
+            // The heat on the timer is the one being called to the line: pilots cannot
+            // join or leave it from a phone any more. The director still can.
+            || self.on_timer().as_ref() == Some(heat)
+        {
             HeatStatus::Closed
         } else {
             HeatStatus::Open
@@ -820,6 +825,38 @@ impl EventState {
             return Err(Refusal::Locked(phase.clone()));
         }
         Ok(())
+    }
+
+    /// The heats to open because a heat of a sign-up phase is being put on the timer: it
+    /// is closed to pilots from then on, so there may be room for another. A heat of the
+    /// same phase that was on the timer before, and was never started or closed by the
+    /// director, is open to pilots again. Empty for any other heat.
+    pub fn signup_after_on_timer(&self, heat: &PhaseId) -> Vec<Event> {
+        let Ok(phase) = self.signup_phase_of(heat) else {
+            return Vec::new();
+        };
+        let Some(rules) = self.signups.rules.get(&phase).cloned() else {
+            return Vec::new();
+        };
+        let results = self.results();
+        let was = self.on_timer();
+        let mut heats = self.signup_heats(&phase, &rules, &results);
+        for other in heats.iter_mut() {
+            let id = &other.spots.heat;
+            if id == heat {
+                if other.spots.status == HeatStatus::Open {
+                    other.spots.status = HeatStatus::Closed;
+                }
+            } else if Some(id) == was.as_ref()
+                && other.spots.status == HeatStatus::Closed
+                && !self.signups.closed.contains(id)
+                && self.races.of_heat(id).next().is_none()
+            {
+                other.spots.status = HeatStatus::Open;
+            }
+        }
+        self.signup_top_up(&phase, &rules, &mut heats);
+        Self::signup_facts(heats)
     }
 
     /// The heats to open because a heat of a sign-up phase is being started: it is no
@@ -2552,5 +2589,217 @@ mod tests {
         assert!(results[&heat(1)].complete);
         // The phase above still evaluates with empty heats under it.
         assert!(results.contains_key(&pid(QUALI)));
+    }
+
+    // ── On the timer ─────────────────────────────────────────────────────────
+
+    impl Desk {
+        fn put(&mut self, n: u32) -> Result<Vec<Event>, Refusal> {
+            self.send(Command::PutOnTimer { heat: heat(n) })
+        }
+    }
+    use HeatStatus::{Closed, Flown, Open, Racing};
+
+    #[test]
+    fn nothing_is_on_the_timer_until_the_director_puts_a_heat_there() {
+        let mut desk = desk();
+        assert_eq!(desk.state.on_timer(), None);
+        assert_eq!(
+            desk.put(2).unwrap()[0],
+            Event::HeatOnTimer { heat: heat(2) }
+        );
+        assert_eq!(desk.state.on_timer(), Some(heat(2)));
+        // Putting the same heat there again says nothing new.
+        assert_eq!(desk.put(2).unwrap(), Vec::<Event>::new());
+        assert_eq!(desk.replayed().on_timer(), Some(heat(2)));
+    }
+
+    #[test]
+    fn only_a_heat_of_the_event_can_go_on_the_timer() {
+        let mut desk = desk();
+        assert_eq!(
+            desk.send(Command::PutOnTimer { heat: pid(QUALI) }),
+            Err(Refusal::NotAHeat(pid(QUALI)))
+        );
+        assert_eq!(
+            desk.send(Command::PutOnTimer { heat: pid("nope") }),
+            Err(Refusal::UnknownPhase(pid("nope")))
+        );
+        assert_eq!(desk.state.on_timer(), None);
+        // And the fact cannot be written straight into the log by a console.
+        assert_eq!(
+            desk.send(Command::Record(Box::new(Event::HeatOnTimer {
+                heat: heat(1)
+            }))),
+            Err(Refusal::NotACommand)
+        );
+    }
+
+    #[test]
+    fn a_heat_on_the_timer_is_closed_to_pilots_and_open_to_the_director() {
+        let mut desk = desk();
+        desk.take(1, 0, "ace").unwrap();
+        desk.put(1).unwrap();
+        assert_eq!(desk.statuses()[0], Closed);
+        assert_eq!(
+            desk.take(1, 1, "bee"),
+            Err(Refusal::HeatClosedToPilots(heat(1)))
+        );
+        assert_eq!(
+            desk.leave(1, "ace"),
+            Err(Refusal::HeatClosedToPilots(heat(1)))
+        );
+        // The director adds a pilot up to the start.
+        desk.direct(1, 1, "bee").unwrap();
+        assert_eq!(desk.spots()[0], "ace,bee,-");
+        // Next free on that seat skips the heat on the timer.
+        desk.signup(SignupCommand::TakeNext {
+            phase: pid(QUALI),
+            seat: seat(2),
+            pilot: pilot("cat"),
+            by: SignupBy::Pilot,
+        })
+        .unwrap();
+        assert_eq!(desk.spots()[0], "ace,bee,-");
+        assert_eq!(desk.spots()[1], "-,-,cat");
+    }
+
+    #[test]
+    fn putting_a_heat_on_the_timer_opens_another_so_pilots_still_have_three() {
+        let mut desk = desk();
+        assert_eq!(desk.statuses(), [Open, Open, Open]);
+        desk.put(1).unwrap();
+        assert_eq!(desk.statuses(), [Closed, Open, Open, Open]);
+        // The same heat again opens nothing more.
+        desk.put(1).unwrap();
+        assert_eq!(desk.statuses().len(), 4);
+        assert_eq!(
+            desk.replayed()
+                .signup_sheet(&pid(QUALI), &desk.state.results()),
+            Some(desk.sheet())
+        );
+    }
+
+    #[test]
+    fn moving_to_another_heat_reopens_the_one_that_was_never_started() {
+        let mut desk = desk();
+        desk.put(1).unwrap();
+        desk.put(2).unwrap();
+        // Heat 1 is open to pilots again; heat 2 is the closed one. No extra heat is made:
+        // three are open already.
+        assert_eq!(desk.statuses(), [Open, Closed, Open, Open]);
+        desk.take(1, 0, "ace").unwrap();
+        assert_eq!(
+            desk.take(2, 0, "bee"),
+            Err(Refusal::HeatClosedToPilots(heat(2)))
+        );
+    }
+
+    #[test]
+    fn a_heat_the_director_closed_stays_closed_when_it_leaves_the_timer() {
+        let mut desk = desk();
+        desk.signup(SignupCommand::CloseHeat {
+            heat: heat(1),
+            closed: true,
+        })
+        .unwrap();
+        desk.put(1).unwrap();
+        desk.put(2).unwrap();
+        assert_eq!(desk.statuses()[0], Closed);
+        assert_eq!(
+            desk.take(1, 0, "ace"),
+            Err(Refusal::HeatClosedToPilots(heat(1)))
+        );
+    }
+
+    #[test]
+    fn starting_a_race_puts_its_heat_on_the_timer_and_it_stays_after_the_save() {
+        let mut desk = desk();
+        desk.direct(2, 0, "ace").unwrap();
+        desk.put(1).unwrap();
+        let race = desk.start(2);
+        assert_eq!(desk.state.on_timer(), Some(heat(2)));
+        assert_eq!(desk.statuses()[..2], [Open, Racing]);
+        desk.send(Command::StopRace { race: race.clone() }).unwrap();
+        desk.send(Command::SaveRace {
+            race,
+            needs_marshal: false,
+            note: None,
+        })
+        .unwrap();
+        // The heat that was just flown is still the one on the timer, until another is put there.
+        assert_eq!(desk.state.on_timer(), Some(heat(2)));
+        assert_eq!(desk.statuses()[..2], [Open, Flown]);
+        assert_eq!(desk.replayed().on_timer(), Some(heat(2)));
+    }
+
+    #[test]
+    fn while_a_race_is_on_no_other_heat_can_go_on_the_timer() {
+        let mut desk = desk();
+        desk.direct(1, 0, "ace").unwrap();
+        let race = desk.start(1);
+        assert_eq!(desk.put(2), Err(Refusal::RaceStillOn(heat(1))));
+        assert_eq!(desk.state.on_timer(), Some(heat(1)));
+        // Its own heat is already there: nothing to say, and no refusal.
+        assert_eq!(desk.put(1).unwrap(), Vec::<Event>::new());
+        // Stopped is still not decided.
+        desk.send(Command::StopRace { race: race.clone() }).unwrap();
+        assert_eq!(desk.put(2), Err(Refusal::RaceStillOn(heat(1))));
+        desk.discard(&race);
+        desk.put(2).unwrap();
+        assert_eq!(desk.state.on_timer(), Some(heat(2)));
+        // The heat whose race was thrown out stays closed to pilots, as before.
+        assert_eq!(desk.statuses()[0], Closed);
+    }
+
+    #[test]
+    fn a_heat_that_is_removed_is_no_longer_on_the_timer() {
+        let mut desk = desk();
+        desk.put(3).unwrap();
+        desk.send(Command::Record(Box::new(Event::PhaseRemoved {
+            phase: heat(3),
+        })))
+        .unwrap();
+        assert_eq!(desk.state.on_timer(), None);
+        assert_eq!(desk.replayed().on_timer(), None);
+    }
+
+    #[test]
+    fn a_heat_outside_sign_up_goes_on_the_timer_with_no_sign_up_facts() {
+        let mut desk = desk();
+        desk.send(Command::Record(Box::new(Event::PhaseDefined {
+            def: PhaseDef {
+                id: pid("final"),
+                label: "Final".into(),
+                parent: None,
+                kind: PhaseKind::Heat { lineup: vec![] },
+                format: Some(format()),
+                false_start_limit: None,
+                display_hint: None,
+            },
+        })))
+        .unwrap();
+        let before = desk.sheet();
+        assert_eq!(
+            desk.send(Command::PutOnTimer { heat: pid("final") })
+                .unwrap(),
+            [Event::HeatOnTimer { heat: pid("final") }]
+        );
+        assert_eq!(desk.sheet(), before);
+        // Leaving a sign-up heat for it reopens that heat.
+        desk.put(1).unwrap();
+        assert_eq!(desk.statuses()[0], Closed);
+        desk.send(Command::PutOnTimer { heat: pid("final") })
+            .unwrap();
+        assert_eq!(desk.statuses()[0], Open);
+    }
+
+    #[test]
+    fn an_old_log_with_no_on_timer_fact_reads_as_nothing_on_the_timer_until_a_race_starts() {
+        let mut desk = desk();
+        desk.direct(1, 0, "ace").unwrap();
+        assert_eq!(desk.state.on_timer(), None);
+        desk.fly(1);
+        assert_eq!(desk.state.on_timer(), Some(heat(1)));
     }
 }

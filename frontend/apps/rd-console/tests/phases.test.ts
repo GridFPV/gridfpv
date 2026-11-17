@@ -202,6 +202,32 @@ describe('holderChoices', () => {
   });
 });
 
+describe('defaultHeat and the heat on the timer', () => {
+  const three = (over: Parameters<typeof eventView>[0] = {}) =>
+    eventView({
+      phases: [heat('a', 'A', []), heat('b', 'B', []), heat('c', 'C', []), group('g', 'G')],
+      queue: ['a', 'b', 'c'],
+      ...over
+    });
+
+  it('is the heat the Director has on the timer, ahead of the run order', () => {
+    expect(defaultHeat(three({ on_timer: 'c' }))).toBe('c');
+    // Even when that heat is done and no longer in the run order.
+    expect(defaultHeat(three({ on_timer: 'c', queue: ['a'] }))).toBe('c');
+  });
+
+  it('is the heat of a race that is on, whatever else is said', () => {
+    const on = race('b', 1, 'Running');
+    expect(defaultHeat(three({ on_timer: 'c', races: [on], current_race: on.race }))).toBe('b');
+  });
+
+  it('falls back to the run order when the heat on the timer is gone or is not a heat', () => {
+    expect(defaultHeat(three({ on_timer: 'gone' }))).toBe('a');
+    expect(defaultHeat(three({ on_timer: 'g' }))).toBe('a');
+    expect(defaultHeat(three())).toBe('a');
+  });
+});
+
 describe('defaultHeat', () => {
   const phases = [
     group('quali', 'Qualifying'),

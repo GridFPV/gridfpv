@@ -993,3 +993,105 @@ describe('RunPage: what times the heat', () => {
     expect(screen.queryByRole('link', { name: /^Tune/ })).toBeNull();
   });
 });
+
+describe("RunPage: the heat on the timer is the Director's", () => {
+  const H2 = 'quali-b2c3';
+  const two = (over: Partial<EventView> = {}) =>
+    eventView({
+      phases: [quali(), heat(H2, 'Qualifying Heat 2', ['p-2b'])],
+      queue: [HEAT, H2],
+      ...over
+    });
+  const sent = (session: LiveSession) =>
+    vi.mocked(session.sendCommand).mock.calls.map((call) => call[1]);
+
+  it('shows the heat the Director says is on the timer, whatever the run order', async () => {
+    await open(two({ on_timer: H2 }), {}, null);
+    expect(heatPicker().selectedOptions[0].textContent).toContain('Qualifying Heat 2');
+  });
+
+  it('follows another console that puts a different heat on the timer', async () => {
+    const view = two({ on_timer: HEAT });
+    const { live } = await open(view, {}, null);
+    expect(heatPicker().selectedOptions[0].textContent).toContain('Qualifying Heat 1');
+    live.view = { ...view, cursor: 2, on_timer: H2 };
+    await waitFor(() =>
+      expect(heatPicker().selectedOptions[0].textContent).toContain('Qualifying Heat 2')
+    );
+  });
+
+  it('with nothing on the timer yet, tells the Director which heat it is showing, once', async () => {
+    const view = two();
+    const { session, live } = await open(view, {}, null);
+    await waitFor(() => expect(sent(session)).toEqual([{ PutOnTimer: { heat: HEAT } }]));
+    // More snapshots with nothing on the timer do not make it say so again.
+    live.view = { ...view, cursor: 2 };
+    live.view = { ...view, cursor: 3 };
+    await new Promise((done) => setTimeout(done, 20));
+    expect(sent(session)).toHaveLength(1);
+  });
+
+  it('says nothing when the Director already has a heat on the timer', async () => {
+    const { session } = await open(two({ on_timer: H2 }), {}, null);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(sent(session)).toEqual([]);
+  });
+
+  it('says nothing when there is no heat to show', async () => {
+    const { session } = await open(eventView(), {}, null);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(sent(session)).toEqual([]);
+  });
+
+  it('picking another heat asks for it to go on the timer, and does not write it itself', async () => {
+    const { session, nav } = await open(two({ on_timer: HEAT }), {}, null);
+    await fireEvent.change(heatPicker(), { target: { value: H2 } });
+    expect(nav.onrun).toHaveBeenCalledWith(H2);
+    expect(sent(session)).toEqual([]);
+  });
+
+  it('offers the next heat once this one is complete, by name, and not before', async () => {
+    const { nav } = await open(two({ on_timer: HEAT }), {}, null);
+    expect(screen.queryByTestId('next-heat')).toBeNull();
+    const done = two({
+      on_timer: HEAT,
+      queue: [H2],
+      phases: [quali({ complete: true }), heat(H2, 'Qualifying Heat 2', ['p-2b'])],
+      races: [race(HEAT, 1, 'Saved')]
+    });
+    const flown = await open(done, {}, null);
+    const next = within(flown.container).getByTestId('next-heat');
+    expect(next).toHaveTextContent('Next: Qualifying Heat 2');
+    await fireEvent.click(next);
+    expect(flown.nav.onrun).toHaveBeenCalledWith(H2);
+    expect(nav.onrun).not.toHaveBeenCalled();
+    expectNoRawIds();
+  });
+
+  it('offers no next heat when nothing else is lined up, or while a race is on', async () => {
+    const last = await open(
+      two({
+        on_timer: HEAT,
+        queue: [],
+        phases: [quali({ complete: true })],
+        races: [race(HEAT, 1, 'Saved')]
+      }),
+      {},
+      null
+    );
+    expect(within(last.container).queryByTestId('next-heat')).toBeNull();
+    const on = race(HEAT, 2, 'Running', { started_at: 1 });
+    const racing = await open(
+      two({
+        on_timer: HEAT,
+        queue: [H2],
+        phases: [quali({ complete: true }), heat(H2, 'Qualifying Heat 2', ['p-2b'])],
+        races: [on],
+        current_race: on.race
+      }),
+      {},
+      null
+    );
+    expect(within(racing.container).queryByTestId('next-heat')).toBeNull();
+  });
+});

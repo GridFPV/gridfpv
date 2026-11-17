@@ -45,6 +45,12 @@ pub struct EventView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub current_race: Option<RaceId>,
+    /// The heat that is **on the timer**: the one the director is running now, whether its
+    /// race has started or not. It is the heat of `current_race` when there is one. Absent
+    /// until the director has put a heat on the timer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub on_timer: Option<PhaseId>,
     /// The run queue: the heats that can be raced now, in the suggested order. A
     /// suggestion only: any of them can be started.
     pub queue: Vec<PhaseId>,
@@ -661,6 +667,7 @@ impl EventView {
                 .map(|race| race_view(state, race))
                 .collect(),
             current_race: state.races.undecided().map(|race| race.setup.race.clone()),
+            on_timer: state.on_timer(),
             queue: state.queue(&results),
             protests: state
                 .rulings

@@ -24,7 +24,7 @@
    * `@gridfpv/components`; this shell only routes between them and owns the session.
    */
   import '@gridfpv/components/tokens.css';
-  import { ToastHost } from '@gridfpv/components';
+  import { ToastHost, toast } from '@gridfpv/components';
   import AppNav from './AppNav.svelte';
   import { Session } from './lib/session.svelte.js';
   import { EventLive } from './lib/eventLive.svelte.js';
@@ -48,7 +48,7 @@
   import SeatsPage from './screens/SeatsPage.svelte';
   import TimersPage from './screens/TimersPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
-  import type { PublicHello } from '@gridfpv/types';
+  import type { PhaseId, PublicHello } from '@gridfpv/types';
   import DataPage from './screens/DataPage.svelte';
   import NetworkPage from './screens/NetworkPage.svelte';
   import VisitorPage from './screens/VisitorPage.svelte';
@@ -113,6 +113,21 @@
   let hello = $state.raw<PublicHello | undefined>(undefined);
   let greeted = $state(false);
   const visitor = $derived(hello?.caller === 'Visitor');
+
+  /**
+   * Put a heat on the timer and open the Run page on it. The Director keeps which heat is
+   * on the timer, so every console, the spectators' page and sign-up all agree. If it
+   * refuses (a race of another heat is still to be decided), the Run page shows the heat
+   * that is on the timer and the reason is said.
+   */
+  async function putOnTimer(heat: PhaseId) {
+    try {
+      await live?.send({ PutOnTimer: { heat } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+    navigate({ kind: 'run' });
+  }
   const bare = $derived(isOverlay(route));
   $effect(() => {
     if (resumed || bare) return;
@@ -254,8 +269,7 @@
     {#if route.kind === 'run'}
       <RunPage
         {live}
-        heat={route.heat}
-        onrun={(heat) => navigate({ kind: 'run', heat })}
+        onrun={putOnTimer}
         ontune={(timer, seat) => navigate({ kind: 'capture', timer, seat })}
       />
     {:else if route.kind === 'marshal'}
@@ -263,11 +277,11 @@
         {live}
         race={route.race}
         onopen={(race) => navigate({ kind: 'marshal', race })}
-        onrun={(heat) => navigate({ kind: 'run', heat })}
+        onrun={putOnTimer}
         videoUrl={(event, race, which) => session.raceVideoUrl(event, race, which)}
       />
     {:else if route.kind === 'event' && route.section === 'phases'}
-      <PhasesPage {live} onrun={(heat) => navigate({ kind: 'run', heat })} />
+      <PhasesPage {live} onrun={putOnTimer} />
     {:else if route.kind === 'event' && route.section === 'results'}
       <ResultsPage {live} />
     {:else if route.kind === 'event' && route.section === 'overlays'}

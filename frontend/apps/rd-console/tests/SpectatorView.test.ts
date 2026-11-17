@@ -138,19 +138,22 @@ describe('SpectatorView: the race on now', () => {
     expect(tab('Current race')).toBeVisible();
   });
 
-  it('with the race just saved, shows how it ended, with the clock stopped on its time', async () => {
+  it('with the heat on the timer flown, shows how it ended, with the clock stopped on its time', async () => {
     const view = running();
     view.races[0] = { ...view.races[0], state: 'Saved', stopped_at: 111 * S };
     view.current_race = undefined;
+    view.on_timer = 'h1';
+    view.queue = ['h2'];
     await open(view);
     expect(tab('Current race')).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByTestId('race-heat')).toHaveTextContent('Qualifying Heat 1');
     expect(screen.getByTestId('race-word')).toHaveTextContent('Result');
     // The clock is always there. For a result it is the race's own time, and it does not run.
-    const shown = screen.getByRole('timer').textContent;
-    expect(shown).toBe('0:11.0');
-    await vi.advanceTimersByTimeAsync(3_000);
+    expect(screen.getByRole('timer').textContent).toBe('0:11.0');
+    // However long it is left, the result stays: the director has not moved on.
+    await vi.advanceTimersByTimeAsync(600_000);
     expect(screen.getByRole('timer')).toHaveTextContent('0:11.0');
+    expect(screen.getByTestId('race-word')).toHaveTextContent('Result');
     expect(
       within(screen.getByRole('table', { name: 'Pilots in this race' }))
         .getAllByRole('rowheader')
@@ -158,16 +161,23 @@ describe('SpectatorView: the race on now', () => {
     ).toEqual(['Bee', 'Ace']);
   });
 
-  it('two minutes after a result, moves on to the heat that is up next', async () => {
-    const view = running();
-    view.races[0] = { ...view.races[0], state: 'Saved', stopped_at: 111 * S };
-    view.current_race = undefined;
-    view.queue = ['h2'];
+  it('shows the heat the director put on the timer, out of the run order', async () => {
+    const view = eventView({
+      phases: [heat('h1', 'Heat 1', ['p-ace']), heat('h2', 'Heat 2', ['p-bee', 'p-cat'])],
+      queue: ['h1', 'h2'],
+      on_timer: 'h2'
+    });
     await open(view);
-    expect(screen.getByTestId('race-word')).toHaveTextContent('Result');
-    await vi.advanceTimersByTimeAsync(121_000);
+    expect(screen.getByTestId('race-heat')).toHaveTextContent('Heat 2');
     expect(screen.getByTestId('race-word')).toHaveTextContent('Up next');
-    expect(screen.getByTestId('race-heat')).toHaveTextContent('Qualifying Heat 2');
+    // It is on the Current race tab, so it is not listed again under Up next.
+    expect(tab(/Up next/)).toHaveTextContent('1');
+    await fireEvent.click(tab(/Up next/));
+    expect(
+      within(screen.getByRole('region', { name: 'Up next' }))
+        .getAllByRole('heading')
+        .map((h) => h.textContent)
+    ).toEqual(['Heat 1']);
   });
 
   it('with nothing raced yet, shows the heat that is up next: seats, pilots and a clock at zero', async () => {
@@ -196,11 +206,12 @@ describe('SpectatorView: the race on now', () => {
     expect(screen.getByRole('timer')).toHaveTextContent('0:00.0');
   });
 
-  it('follows the day by itself: up next, the race, its result, then the next heat', async () => {
+  it('follows the director: on the timer, the race, its result, then the next heat when it is put on', async () => {
     const start = eventView({
       now: 100 * S,
       phases: [heat('h1', 'Heat 1', ['p-ace']), heat('h2', 'Heat 2', ['p-bee'])],
-      queue: ['h1', 'h2']
+      queue: ['h1', 'h2'],
+      on_timer: 'h1'
     });
     const { live } = await open(start);
     const word = () => screen.getByTestId('race-word').textContent?.trim();
@@ -210,13 +221,17 @@ describe('SpectatorView: the race on now', () => {
       started_at: 100 * S,
       seats: [raceSeat(0, 'p-ace', { finish: 1, laps: [lap(1, 5)] })]
     });
-    live.view = { ...start, cursor: 2, races: [on], current_race: on.race, queue: ['h1', 'h2'] };
+    live.view = { ...start, cursor: 2, races: [on], current_race: on.race };
     await waitFor(() => expect([name(), word()]).toEqual(['Heat 1', 'Racing']));
     const saved = { ...on, state: 'Saved' as const, stopped_at: live.nowMicros() };
-    live.view = { ...start, cursor: 3, races: [saved], current_race: undefined, queue: ['h2'] };
+    const flown = { ...start, cursor: 3, races: [saved], current_race: undefined, queue: ['h2'] };
+    live.view = flown;
     await waitFor(() => expect([name(), word()]).toEqual(['Heat 1', 'Result']));
-    await vi.advanceTimersByTimeAsync(121_000);
-    expect([name(), word()]).toEqual(['Heat 2', 'Up next']);
+    // It stays on the result for as long as heat 1 is on the timer.
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect([name(), word()]).toEqual(['Heat 1', 'Result']);
+    live.view = { ...flown, cursor: 4, on_timer: 'h2' };
+    await waitFor(() => expect([name(), word()]).toEqual(['Heat 2', 'Up next']));
   });
 
   it('the tab is always called Current race, whatever it shows', async () => {
@@ -862,18 +877,24 @@ describe('SpectatorView: a signed-in pilot', () => {
     expect(within(results).getByRole('row', { name: /Ace/ })).toHaveClass('me');
   });
 
-  it("shows each seat's channel in what is coming up, to everyone", async () => {
+  it("shows each seat's channel wherever the seat is named, to everyone", async () => {
     await openAs(queued(), undefined);
-    await fireEvent.click(tab(/Up next/));
-    const heat1 = within(screen.getByRole('region', { name: 'Up next' })).getByRole('listitem', {
-      name: 'Heat 1'
-    });
-    // The channel is part of the seat's name, wherever the seat is named.
-    expect(within(heat1).getByText('Ace').closest('li')).toHaveTextContent('Seat 1 · R1');
+    // Heat 1 is the current race: its seats are on that tab, each with its channel.
+    const current = screen.getByRole('table', { name: 'Pilots in this race' });
+    expect(within(current).getByRole('row', { name: /Ace/ })).toHaveTextContent('Seat 1 · R1');
     // Seat 2 has no channel known: nothing is made up for it.
-    const bee = within(heat1).getByText('Bee').closest('li');
+    const bee = within(current).getByRole('row', { name: /Bee/ });
     expect(bee).toHaveTextContent('Seat 2');
     expect(bee).not.toHaveTextContent('·');
+    // And the same in what is coming up.
+    await fireEvent.click(tab(/Up next/));
+    const heat2 = within(screen.getByRole('region', { name: 'Up next' })).getByRole('listitem', {
+      name: 'Heat 2'
+    });
+    expect(within(heat2).getByText('Bee').closest('li')).toHaveTextContent('Seat 1 · R1');
+    expect(within(heat2).getByText('Cat').closest('li')).not.toHaveTextContent('·');
+    // One heat to a card.
+    expect(heat2).toHaveClass('card');
   });
 
   it('moves to Me when a pilot signs in, and off it when they sign out', async () => {

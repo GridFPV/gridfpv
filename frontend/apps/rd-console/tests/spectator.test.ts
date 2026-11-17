@@ -7,13 +7,12 @@ import type { Class, Pilot, TimerView } from '@gridfpv/types';
 import { buildNames } from '../src/lib/names.js';
 import {
   missingNames,
-  RESULT_STAYS_MICROS,
   currentRaceView,
   publicSource,
   raceWord,
   upcomingHeats
 } from '../src/lib/spectator.js';
-import { eventView, heat, placed, race, raceSeat, timerView } from './competition.js';
+import { eventView, group, heat, placed, race, raceSeat, timerView } from './competition.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -25,13 +24,16 @@ const PILOTS = [pilot('p-ace', 'Ace'), pilot('p-bee', 'Bee'), pilot('p-cat', 'Ca
 const klass = (id: string, name: string): Class => ({ id, name, source: 'Custom', builtin: false });
 
 describe('the current race', () => {
-  const NOW = 1_000_000_000;
-  const of = (view: ReturnType<typeof eventView> | undefined, now = NOW, decidedAt?: number) =>
-    currentRaceView(view, buildNames(view?.phases ?? [], PILOTS), now, decidedAt);
-  const twoHeats = (over: Parameters<typeof eventView>[0] = {}) =>
+  const of = (view: ReturnType<typeof eventView> | undefined) =>
+    currentRaceView(view, buildNames(view?.phases ?? [], PILOTS));
+  const threeHeats = (over: Parameters<typeof eventView>[0] = {}) =>
     eventView({
-      phases: [heat('h1', 'Heat 1', ['p-ace']), heat('h2', 'Heat 2', ['p-bee'])],
-      queue: ['h2'],
+      phases: [
+        heat('h1', 'Heat 1', ['p-ace']),
+        heat('h2', 'Heat 2', ['p-bee']),
+        heat('h3', 'Heat 3', ['p-cat'])
+      ],
+      queue: ['h1', 'h2', 'h3'],
       ...over
     });
 
@@ -40,77 +42,81 @@ describe('the current race', () => {
     expect(of(eventView())).toBeUndefined();
   });
 
-  it('is the race that is on, in every state it can be on in, whatever is lined up', () => {
+  it('is the race that is on, in every state it can be on in, whatever else is so', () => {
     for (const state of ['Staging', 'Running', 'Stopped'] as const) {
       const on = race('h1', 2, state);
-      const view = twoHeats({ races: [race('h1', 1, 'Saved'), on], current_race: on.race });
+      const view = threeHeats({
+        races: [race('h1', 1, 'Saved'), on],
+        current_race: on.race,
+        on_timer: 'h1'
+      });
       expect(of(view), state).toEqual({ kind: 'race', race: on });
     }
   });
 
-  it('before anything is raced, is the heat that is up next with who is in it', () => {
-    const found = of(twoHeats());
+  it('is the heat on the timer, with who is in it, before it has been flown', () => {
+    // The director put heat 2 on the timer, out of the run order.
+    const found = of(threeHeats({ on_timer: 'h2' }));
     expect(found?.kind).toBe('next');
     if (found?.kind !== 'next') return;
+    expect(found.heat.id).toBe('h2');
     expect(found.heat.name).toBe('Heat 2');
-    expect(found.heat.seats.map((seat) => seat.who)).toEqual(['Bee']);
+    expect(found.heat.seats.map((seat) => [seat.seatName, seat.who])).toEqual([['Seat 1', 'Bee']]);
   });
 
-  it('shows a result for two minutes after the race stopped, then the heat up next', () => {
-    const saved = race('h1', 1, 'Saved', { stopped_at: NOW });
-    const view = twoHeats({ races: [saved] });
-    expect(of(view, NOW + 1)).toEqual({ kind: 'result', race: saved });
-    expect(of(view, NOW + RESULT_STAYS_MICROS - 1)).toEqual({ kind: 'result', race: saved });
-    expect(of(view, NOW + RESULT_STAYS_MICROS)?.kind).toBe('next');
-    expect(of(view, NOW + RESULT_STAYS_MICROS * 50)?.kind).toBe('next');
-  });
-
-  it('counts from when the page saw the race end, when that is later than when it stopped', () => {
-    // Stopped long ago, but the director only just saved it.
-    const saved = race('h1', 1, 'Saved', { stopped_at: NOW - RESULT_STAYS_MICROS * 3 });
-    const view = twoHeats({ races: [saved] });
-    expect(of(view, NOW)?.kind).toBe('next');
-    expect(of(view, NOW, NOW - 5)).toEqual({ kind: 'result', race: saved });
-    expect(of(view, NOW + RESULT_STAYS_MICROS, NOW - 5)?.kind).toBe('next');
-  });
-
-  it('with nothing coming up, the last result stays however long ago it was', () => {
+  it('is the result of the heat on the timer once it is flown, however long ago', () => {
     const saved = race('h1', 1, 'Saved', { stopped_at: 1 });
-    const view = eventView({ races: [saved], now: 99_000_000_000 });
-    expect(of(view, 99_000_000_000)).toEqual({ kind: 'result', race: saved });
-    // Even one with no stop time on it.
-    const bare = race('h1', 1, 'Saved');
-    expect(of(eventView({ races: [bare] }))).toEqual({ kind: 'result', race: bare });
+    const view = threeHeats({ races: [saved], on_timer: 'h1', queue: ['h2', 'h3'], now: 9e12 });
+    expect(of(view)).toEqual({ kind: 'result', race: saved });
   });
 
-  it('a result with no time on it gives way to the heat up next', () => {
-    const view = twoHeats({ races: [race('h1', 1, 'Saved')] });
-    expect(of(view)?.kind).toBe('next');
+  it('moves to the next heat only when the director puts it on the timer', () => {
+    const saved = race('h1', 1, 'Saved', { stopped_at: 1 });
+    const flown = threeHeats({ races: [saved], queue: ['h2', 'h3'] });
+    expect(of({ ...flown, on_timer: 'h1' })?.kind).toBe('result');
+    const moved = of({ ...flown, on_timer: 'h2' });
+    expect(moved?.kind === 'next' && moved.heat.id).toBe('h2');
   });
 
-  it('never shows a race that was thrown out', () => {
-    expect(of(eventView({ races: [race('h1', 1, 'Discarded')] }))).toBeUndefined();
-    // An earlier saved race of the same heat is shown in its place.
-    const saved = race('h1', 1, 'Saved');
-    const again = eventView({ races: [saved, race('h1', 2, 'Discarded')] });
-    expect(of(again)).toEqual({ kind: 'result', race: saved });
-    // With a heat lined up and only a thrown-out race behind, it is the heat.
-    expect(of(twoHeats({ races: [race('h1', 1, 'Discarded', { stopped_at: NOW })] }))?.kind).toBe(
-      'next'
-    );
+  it('for a heat raced more than once, shows its latest saved race', () => {
+    const first = race('h1', 1, 'Saved');
+    const thrown = race('h1', 2, 'Discarded');
+    const third = race('h1', 3, 'Saved');
+    const view = threeHeats({ races: [first, thrown, third], on_timer: 'h1' });
+    expect(of(view)).toEqual({ kind: 'result', race: third });
+    // Only a thrown-out race behind it: the heat is still to be flown.
+    const again = of(threeHeats({ races: [race('h1', 1, 'Discarded')], on_timer: 'h1' }));
+    expect(again?.kind === 'next' && again.heat.id).toBe('h1');
   });
 
-  it('shows the heat raced last, not an older heat with a newer number', () => {
-    const older = race('h1', 3, 'Saved');
-    const newer = race('h2', 1, 'Saved');
-    const found = of(eventView({ races: [older, newer] }));
-    expect(found?.kind === 'result' && found.race).toBe(newer);
+  it('shows the heat on the timer, not a newer result from another heat', () => {
+    const other = race('h3', 1, 'Saved');
+    const found = of(threeHeats({ races: [other], on_timer: 'h2', queue: ['h1', 'h2'] }));
+    expect(found?.kind === 'next' && found.heat.id).toBe('h2');
   });
 
-  it('a clock that runs backwards does not make an old result new', () => {
-    const saved = race('h1', 1, 'Saved', { stopped_at: NOW });
-    // "Now" before the race stopped: still inside the two minutes, never negative trouble.
-    expect(of(twoHeats({ races: [saved] }), NOW - 10)).toEqual({ kind: 'result', race: saved });
+  describe('before the director has put anything on the timer', () => {
+    it('is the heat they would run first', () => {
+      const found = of(threeHeats());
+      expect(found?.kind === 'next' && found.heat.id).toBe('h1');
+    });
+
+    it('with nothing lined up, is the last result, and never a race that was thrown out', () => {
+      const saved = race('h1', 1, 'Saved');
+      expect(of(eventView({ races: [saved, race('h1', 2, 'Discarded')] }))).toEqual({
+        kind: 'result',
+        race: saved
+      });
+      expect(of(eventView({ races: [race('h1', 1, 'Discarded')] }))).toBeUndefined();
+    });
+  });
+
+  it('a heat on the timer that is no longer in the event is not shown', () => {
+    const found = of(threeHeats({ on_timer: 'gone' }));
+    expect(found?.kind === 'next' && found.heat.id).toBe('h1');
+    // Nor is a phase that holds heats, should one ever be named.
+    const view = eventView({ phases: [group('g', 'Group')], on_timer: 'g' });
+    expect(of(view)).toBeUndefined();
   });
 });
 
@@ -137,6 +143,29 @@ describe('the heats coming up', () => {
     expect(found[2].seats.map((seat) => [seat.seatName, seat.who])).toEqual([
       ['Seat 1', 'Cat'],
       ['Seat 2', 'Open seat']
+    ]);
+  });
+
+  it('puts the heat on the timer first, whatever the run order says', () => {
+    const view = eventView({
+      phases: [
+        heat('h1', 'Heat 1', ['p-ace']),
+        heat('h2', 'Heat 2', ['p-bee']),
+        heat('h3', 'Heat 3', ['p-cat'])
+      ],
+      queue: ['h1', 'h2', 'h3'],
+      on_timer: 'h3'
+    });
+    expect(upcomingHeats(view, names(view)).map((entry) => entry.name)).toEqual([
+      'Heat 3',
+      'Heat 1',
+      'Heat 2'
+    ]);
+    // A heat on the timer that is not coming up (it is flown) changes nothing.
+    const flown = { ...view, queue: ['h1', 'h2'], on_timer: 'h3' };
+    expect(upcomingHeats(flown, names(view)).map((entry) => entry.name)).toEqual([
+      'Heat 1',
+      'Heat 2'
     ]);
   });
 
