@@ -40,6 +40,8 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 # This computer's network addresses, to tell the director what to open on a phone. Already
 # in the tree through the timer discovery.
 if-addrs = "0.15"
+# A pilot's sign-in code as a QR picture the director shows them (`pilot_access.rs`).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

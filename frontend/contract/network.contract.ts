@@ -284,3 +284,97 @@ describe('switching it off again', () => {
     expect((await fetch(`${director.baseUrl}/health`)).status).toBe(200);
   });
 });
+
+describe('a pilot signs in with a code (docs/primitives.md §11.3)', () => {
+  let event: string;
+  let ace: string;
+  let code: string;
+
+  beforeAll(async () => {
+    const post = async <T>(path: string, body: unknown): Promise<T> => {
+      const res = await fetch(`${director.baseUrl}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...auth() },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`);
+      return (await res.json()) as T;
+    };
+    ace = (await post<{ id: string }>('/pilots', { callsign: 'Ace' })).id;
+    const open = (await post<{ id: string }>('/classes', { name: 'Open', source: 'Custom' })).id;
+    event = (await post<{ id: string }>('/events', { name: 'Sign-in Night' })).id;
+    await fetch(`${director.baseUrl}/active-event`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...auth() },
+      body: JSON.stringify({ id: event })
+    });
+    await post(`/events/${event}/commands`, {
+      Record: { RosterSet: { class: open, pilots: [ace] } }
+    });
+  });
+
+  it('GET /events/{id}/access lists each pilot with a six-character code, and is not kept', async () => {
+    const res = await fetch(`${director.baseUrl}/events/${event}/access`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const view = (await res.json()) as {
+      pilots: { pilot: string; code: string; signed_in: boolean }[];
+    };
+    expect(view.pilots).toHaveLength(1);
+    expect(Object.keys(view.pilots[0]).sort()).toEqual(['code', 'pilot', 'signed_in']);
+    expect(view.pilots[0].pilot).toBe(ace);
+    expect(view.pilots[0].code).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$/);
+    expect(view.pilots[0].signed_in).toBe(false);
+    code = view.pilots[0].code;
+  });
+
+  it('POST /public/pilot/session answers the pilot and sets a cookie no script can read', async () => {
+    const wrong = await fetch(`${director.baseUrl}/public/pilot/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code === 'AAAAAA' ? 'BBBBBB' : 'AAAAAA' })
+    });
+    expect(wrong.status).toBe(401);
+    expect(((await wrong.json()) as ProtocolError).code).toBe('Unauthorized');
+    expect(wrong.headers.get('set-cookie')).toBeNull();
+
+    const res = await fetch(`${director.baseUrl}/public/pilot/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code.toLowerCase() })
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: ace, callsign: 'Ace' });
+    const set = res.headers.get('set-cookie') ?? '';
+    expect(set).toContain('HttpOnly');
+    expect(set).toContain('SameSite=Strict');
+    const cookie = set.split(';')[0];
+    expect(cookie.startsWith('gridfpv_pilot=')).toBe(true);
+
+    const hello = (await (
+      await fetch(`${director.baseUrl}/public/hello`, { headers: { Cookie: cookie } })
+    ).json()) as PublicHello;
+    expect(hello.pilot).toEqual({ id: ace, callsign: 'Ace' });
+    // Without the cookie there is no pilot field at all.
+    const plain = (await (await fetch(`${director.baseUrl}/public/hello`)).json()) as PublicHello;
+    expect('pilot' in plain).toBe(false);
+
+    const out = await fetch(`${director.baseUrl}/public/pilot/session`, {
+      method: 'DELETE',
+      headers: { Cookie: cookie }
+    });
+    expect(out.status).toBe(204);
+    const after = (await (
+      await fetch(`${director.baseUrl}/public/hello`, { headers: { Cookie: cookie } })
+    ).json()) as PublicHello;
+    expect('pilot' in after).toBe(false);
+  });
+
+  it('the QR picture is refused with the reason while other devices cannot reach Grid', async () => {
+    const res = await fetch(`${director.baseUrl}/events/${event}/access/${ace}/qr`);
+    expect(res.status).toBe(409);
+    const error = (await res.json()) as ProtocolError;
+    expect(error.code).toBe('Refused');
+    expect(error.message).toContain('Network page');
+  });
+});

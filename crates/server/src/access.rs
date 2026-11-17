@@ -282,6 +282,8 @@ pub const PUBLIC_PREFIX: &str = "/public";
 /// Signing in and out as the director, from a visitor's browser. Open to visitors because
 /// it is how one stops being one; the handler checks the token itself.
 pub const SESSION_PATH: &str = "/public/session";
+/// Signing in and out as a pilot, with the pilot's own code (see `pilot_access`).
+pub const PILOT_SESSION_PATH: &str = "/public/pilot/session";
 
 /// Whether a visitor with no token may make this request of the **API**.
 pub fn is_public_api(method: &Method, raw_path: &str) -> bool {
@@ -290,7 +292,7 @@ pub fn is_public_api(method: &Method, raw_path: &str) -> bool {
     }
     let path = decoded(raw_path);
     let read = method == Method::GET || method == Method::HEAD;
-    if path == SESSION_PATH {
+    if path == SESSION_PATH || path == PILOT_SESSION_PATH {
         return read || method == Method::POST || method == Method::DELETE;
     }
     if !read {

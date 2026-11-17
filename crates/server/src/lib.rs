@@ -36,6 +36,7 @@ pub mod events;
 pub mod library;
 pub mod network;
 pub mod overlay;
+pub mod pilot_access;
 pub mod pilots;
 pub mod public;
 pub mod spectate;

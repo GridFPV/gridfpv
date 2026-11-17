@@ -32,7 +32,7 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use gridfpv_events::{ClassId, PilotId};
 
 use crate::auth::{ControlAuth, JoinTokenResponse};
@@ -157,6 +157,27 @@ pub fn router(registry: EventRegistry) -> Router {
         )
         // What a visitor on the network may ask for.
         .route("/public/hello", get(crate::public::get_hello))
+        // A pilot's sign-in (docs/primitives.md §11.3): the director's side, and the pilot's.
+        .route(
+            "/events/{event_id}/access",
+            get(crate::pilot_access::get_access),
+        )
+        .route(
+            "/events/{event_id}/access/{pilot_id}/reset",
+            post(crate::pilot_access::post_reset),
+        )
+        .route(
+            "/events/{event_id}/access/{pilot_id}/session",
+            delete(crate::pilot_access::delete_pilot_session),
+        )
+        .route(
+            "/events/{event_id}/access/{pilot_id}/qr",
+            get(crate::pilot_access::get_qr),
+        )
+        .route(
+            "/public/pilot/session",
+            post(crate::pilot_access::post_session).delete(crate::pilot_access::delete_session),
+        )
         // The open event, as a visitor may see it.
         .route("/public/event", get(crate::spectate::get_event))
         .route("/public/event/state", get(crate::spectate::get_state))

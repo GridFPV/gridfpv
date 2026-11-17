@@ -22,6 +22,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import ClassRosterDialog from './ClassRosterDialog.svelte';
   import EventClasses from './EventClasses.svelte';
+  import PilotSignIn from './PilotSignIn.svelte';
 
   let {
     session,
@@ -268,6 +269,8 @@
       {/snippet}
       <EventClasses {live} />
     </Card>
+
+    <PilotSignIn {session} event={event.id} names={live.names} cursor={view.cursor} />
   {/if}
 </Page>
 

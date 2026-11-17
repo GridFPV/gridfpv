@@ -45,3 +45,35 @@ A class is a name plus the pilots racing in it at this event.
 
 You do not need a class to race. A heat can name its pilots directly. Add a class when you
 want standings from first to last.
+
+## Pilot sign-in
+
+A pilot can sign in on their own phone, so Grid knows who they are. Each pilot in the event
+has a short **code** for it.
+
+Press **Show codes** on the **Pilot sign-in** card. The codes stay hidden until you do, so
+a screen left open shows none.
+
+To sign a pilot in:
+
+- Press **QR code** beside their name and let them scan it with the phone's camera. Or
+- Read them their code. On the phone they open Grid's address, press **I am a pilot**, and
+  type it. Capitals and spaces do not matter.
+
+Phones must be able to reach Grid first. Turn that on, on the
+[Network](#/help/network) page.
+
+What to know:
+
+- A code works for **this event only**. The same pilot has another code at another event.
+- **One phone at a time.** If a pilot signs in on a second phone, the first one is signed
+  out.
+- **Signed in** shows beside a pilot whose phone is signed in.
+- **New code** gives a pilot another code. The old one stops working and their phone is
+  signed out. Use it if a code got out.
+- **Sign out** signs a pilot's phone out. Their code still works.
+- A pilot taken out of the event is signed out, and their code stops working.
+- After ten wrong codes in a minute, a phone has to wait a minute.
+
+Signing in does not let a pilot change anything in the race. It only tells Grid who they
+are.

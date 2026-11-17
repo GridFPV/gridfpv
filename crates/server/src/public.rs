@@ -47,6 +47,10 @@ pub struct PublicHello {
     /// Whether a director can sign in from another device at all: an access token is set
     /// on this Director. With none set, the console is used on the Grid computer only.
     pub director_sign_in: bool,
+    /// The pilot this browser is signed in as, for the open event. Absent when it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pilot: Option<crate::pilot_access::PublicPilot>,
 }
 
 /// How long a director stays signed in on another device: half a day, which covers a race
@@ -68,12 +72,14 @@ fn caller(access: Option<Access>) -> Caller {
 pub async fn get_hello(
     State(registry): State<EventRegistry>,
     access: Option<Extension<Access>>,
+    headers: HeaderMap,
 ) -> Json<PublicHello> {
     Json(PublicHello {
         version: crate::BUILD_VERSION.to_string(),
         caller: caller(access.map(|Extension(access)| access)),
         event: registry.active().map(|event| event.name),
         director_sign_in: registry.tokens().has_control_credential(),
+        pilot: crate::pilot_access::signed_in_pilot(&registry, &headers),
     })
 }
 
