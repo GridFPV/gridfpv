@@ -1,6 +1,6 @@
 # Grid primitives
 
-**Status:** revision 8 (2026-11-12): the design to build against, with build progress in §8.
+**Status:** revision 9 (2026-11-16): the design to build against, with build progress in §8.
 Revision 1 was written from the design discussion of that day; revisions 2 to 7 fold in
 Ryan's notes and answers. Sections marked **Agreed** record what Ryan decided.
 
@@ -27,6 +27,11 @@ events and pilots carry outside ids (§4); a field can be seeded from an importe
 
 **What changed in revision 5:** removing a lap always folds its time into the next lap; a
 restart point is the separate case (§5.7).
+
+**What changed in revision 9** (Ryan, 2026-11-16): §11 is new. It covers the people at a
+race who are not the director: spectators and pilots on their own phones, how a pilot signs
+in, and pilots signing up for heats. It also sets the rules a remote server must keep. None
+of it is built.
 
 **What changed in revision 8** (Ryan, after the first night on real hardware): the minimum
 lap and "ignore crossings before" are lap rules of the **event**, set once (§5.1, §5.6). A
@@ -175,6 +180,7 @@ trace, and adjust the thresholds against it.
 A class simply has a roster (Agreed). There is no separate "entry" record.
 
 - **Check-in** comes later. When it does, a pilot joins a class roster at check-in.
+- **Pilots and spectators on their own phones**, and pilots signing up for heats, are in §11.
 - **Teams** may come later, and the design leaves room for them (Agreed): a team is a named
   group of pilots at an event. Lineups, passes and races stay about pilots. Team results are
   a ranking rule that combines the results of a team's members. Nothing in §5 has to change
@@ -911,3 +917,187 @@ of these was read in full on 2026-11-09, and its banner names the sections that 
 | `mock-race-day.md` | The mock harness; its steps follow the old heat flow |
 
 **Current:** this doc, and `conventions.html` (how docs are written).
+
+---
+
+## 11. People at the race: spectators, pilots and sign-up (Agreed, not built)
+
+Agreed with Ryan on 2026-11-16, over one long discussion. Nothing here is built. The
+GitHub issues are #14 (the page), #432 (who may do what) and #16 (the remote server).
+
+Until now only the director used Grid. This section adds the other people at a race.
+
+### 11.1 Two parts, and the rule between them
+
+- **Local:** people at the race use their own phones, on the field's network, served by
+  the Director. No internet is needed.
+- **Remote:** a server away from the field shows the same things and keeps long-term
+  records. It is covered in §11.7, as rules only.
+
+**The rule:** race day never needs the remote part. Grid must never rely on any one hosted
+service. Everything in §11.2 to §11.6 works with the laptop alone.
+
+### 11.2 Two kinds of visitor
+
+| Visitor | Signs in? | Can do |
+|---|---|---|
+| **Spectator** | No | Look only |
+| **Pilot** | Yes (§11.3) | Everything a spectator can, plus their own things |
+
+**A spectator sees:** the race that is on, results and standings, and the heats coming up
+with who is in them.
+
+**A pilot also sees:** their own upcoming heats, the channel for each one, the sign-up
+(§11.5), and their own race data laid out more cleanly.
+
+**Alerts** for a pilot: "you are 2 heats out", "you are next". With no internet these can
+only reach a phone that has the page open (a sound, a buzz, a banner). Alerts to a locked
+phone go through Apple's and Google's services, which need internet, so those belong to the
+remote part.
+
+The director's console is not part of this. It keeps its own access rules.
+
+### 11.3 Who a pilot is, at the race
+
+- **The Director's pilot list is who people are at a race.** It works with no internet.
+- **The director adds every pilot,** by hand or by import (from MultiGP, for example). A
+  pilot never adds themselves.
+- **Signing in:** each pilot has a short **code** for the event. The director shows it
+  from the console as a **QR code** and the pilot scans it, or the pilot types the code.
+  The QR code is only the code in a form a camera can read.
+- **It lasts for that event only.**
+- **One device.** If a pilot signs in on a second phone, the first one is signed out.
+- A pilot who is signed in through a remote server account does not need the event sign-in.
+
+There are two QR codes, for two jobs:
+
+| Code | Who it is for | What it does |
+|---|---|---|
+| **Event code** | Anyone | Opens the page as a spectator. It can be printed or put on a screen |
+| **Pilot code** | One pilot | Signs that pilot in. The director shows it from the console |
+
+### 11.4 The kiosk
+
+A **kiosk** is the same page on a shared tablet at the field, for a pilot with no phone or
+a flat battery. It must exist.
+
+A pilot does **not** just tap their name. To act at the kiosk they prove who they are with
+their code (§11.3): they type it, or hold up its QR code, on a phone or printed. There is
+no separate PIN.
+
+### 11.5 Sign-up
+
+A phase can be set so that **pilots put themselves into heats**. This is for practice and
+qualifying, in general.
+
+**Sign-up is never required.** A practice with open seats (§5.4) always works: the timer
+runs, pilots go up when they like and sort it out between themselves, and lap times are
+called out by seat or channel, not by name.
+
+**The rules:**
+
+- **Where it is set:** on the phase.
+- **Who can sign up:** the pilots registered for that phase. Where a phase serves two
+  classes, pilots from both can share a heat.
+- **When:** the director opens sign-up and closes it. The director can also set a time
+  for it to open and a time for it to close, so it happens by itself.
+- **Heats:** each has its number from the moment it appears, and heats fly in number
+  order. So a pilot who signed up for heat 7 knows heat 6 flies first.
+- **How many are open:** at most **N** heats that are not full are open at once. The
+  director sets N. When one fills, the next one opens.
+
+  Say N is 3. Heats 1, 2 and 3 open. Heat 1 gets one pilot, heat 2 fills, heat 3 gets
+  three. Heat 4 opens, because only heats 1 and 3 are not full. When heat 4 fills, heat 5
+  opens.
+- **A heat that is not full can still fly.** It is the director's job to see that no heat
+  flies with one pilot. The tool for that is the **pull** (below).
+- **Taking a spot:** a pilot picks a heat and a free seat. Any free seat: Grid does not
+  give pilots a seat. A seat is a channel, and it is the same channel for the whole phase.
+  There is also **next free** on a seat, which takes the first open spot on that seat.
+- **More than one spot:** a pilot can hold spots in several heats, even two in a row.
+
+**Limits**, all set by the director:
+
+| Limit | What it caps | Default |
+|---|---|---|
+| **Open heats (N)** | How many heats that are not full are open at once | 3 |
+| **Spots held at once** | How many spots a pilot can hold that are not flown yet | To be chosen |
+| **Total runs** | How many heats a pilot can fly in the phase | To be chosen |
+| **Rest between heats** | Heats a pilot must sit out between two of theirs | Off |
+
+The director raises a limit for **everyone at once**. That is the normal case ("one more
+run each"). The director can also change it for **one pilot**, at any time.
+
+**What uses up a run:** a race that is saved. A race that is discarded or flown again does
+not.
+
+**Leaving and dropping:**
+
+- A pilot can leave a spot until the director puts the heat on the timer.
+- From then on the heat is **locked** to pilots. Only the director can change it. The
+  director can still add a pilot up to the moment of Start.
+- The director can **drop** a pilot from a heat, and chooses whether it counts as a run.
+  Not counting it is for a pilot who never got to fly, or had video trouble.
+
+**The pull:** when a heat is thin, the director can pull a pilot forward from a later
+heat. A pilot is only pulled onto **the same seat** they signed up for, so their channel
+does not change. The pilot gets an alert. Grid does not ask them: the director asks in
+person first.
+
+**Three ways in:** the pilot's own phone, the kiosk, and the director's console.
+
+**Results:** every run a pilot flies in the phase feeds the phase's ranking under its
+format (§5.5, §5.6). Sign-up adds no new ranking rule.
+
+### 11.6 What is taken from ZippyQ, and what is not
+
+MultiGP's ZippyQ does a similar job and was looked at for ideas. Its rules are a good
+start. Ryan's view of its screens: "a pain and not user friendly". So Grid takes rules, not
+screens.
+
+- **Taken:** a limit on spots held at once beside the total; one button for the next free
+  spot; a kiosk; the run count shown beside each name; moving pilots up to fill a thin
+  heat.
+- **Different:** ZippyQ is one line per channel, and a pilot gets the next slot in it. In
+  Grid a pilot picks a heat and a seat, with N heats open, so friends can fly together.
+
+### 11.7 The remote server: rules only
+
+The server is not designed yet. These rules are agreed, and anything built must keep them.
+
+- **No reliance.** Grid never depends on any one hosted service. Race day works without
+  the server (§11.1).
+- **Self-hosted and hosted.** Anyone can run their own server. A hosted one may also be
+  offered.
+- **The open-source version always has every feature.** A hosted service may keep some
+  things private, but never a feature.
+- **Accounts belong to a server.** No single account for the whole world is needed.
+- **If there is ever one central Grid service,** accounts on it must be free, and it is
+  the most trusted source of who a pilot is.
+- **Matching a pilot to an account:** a pilot has an id on each server and gives it to the
+  director, who puts it on the pilot. It is one more outside id (§4).
+- **A pilot can link their accounts** on two servers. Both servers must agree to the link,
+  and servers need stronger sign-in than the event code. Once linked, the pilot can see
+  their data from either server.
+- **The server shows what the local page shows**, plus long-term records. So the page and
+  its reads should be one thing, served from two places.
+- **Video** on the server comes later.
+
+### 11.8 Order of work, and what is not decided
+
+**Local comes first** (Ryan, 2026-11-16). The remote part is second: "once we figure out
+local, then remote becomes easier." Long-term records come last.
+
+One case shows what remote is for. Ryan runs RaceGOW on a laptop in the garage and wants to
+see the results on his desktop upstairs while editing. A computer on the same home network
+can already do that by opening the local page. A server is for when the two are not on the
+same network, or the laptop is switched off.
+
+**Not decided yet:**
+
+- The defaults for spots held at once and total runs.
+- What the server stores, and how a Director sends it when there is internet. Future work.
+- Which long-term records come first: results per pilot, seasons, records per track.
+
+One thing to check in the code before sign-up is built: lap callouts for an open seat
+should say the seat or channel. Today a callout is written for a named pilot.
