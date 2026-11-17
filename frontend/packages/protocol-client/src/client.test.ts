@@ -764,3 +764,63 @@ describe('seat channels, for a visitor', () => {
     ).toBeUndefined();
   });
 });
+
+describe("a pilot's own sign-up (docs/primitives.md §11.5)", () => {
+  const recorder = (status: number, body: unknown) => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async (): Promise<unknown> => body,
+        text: async (): Promise<string> => JSON.stringify(body)
+      } as unknown as Response;
+    };
+    return { seen, fetch };
+  };
+  const seat = { adapter: 'gate-x1', seat: '0' };
+
+  it('takeSpot, takeNextSpot and leaveSpot POST to their routes with no token and no pilot', async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder(200, { cursor: 12 });
+    expect(await client.takeSpot('http://d.local:8081/', 'quali/heat-1', seat, { fetch })).toEqual({
+      cursor: 12
+    });
+    await client.takeNextSpot('http://d.local:8081', 'quali', seat, { fetch });
+    await client.leaveSpot('http://d.local:8081', 'quali/heat-1', { fetch });
+    expect(seen.map((call) => [call.init?.method, call.url])).toEqual([
+      ['POST', 'http://d.local:8081/public/pilot/signup/take'],
+      ['POST', 'http://d.local:8081/public/pilot/signup/next'],
+      ['POST', 'http://d.local:8081/public/pilot/signup/leave']
+    ]);
+    expect(seen.map((call) => JSON.parse(call.init?.body as string))).toEqual([
+      { heat: 'quali/heat-1', seat },
+      { phase: 'quali', seat },
+      { heat: 'quali/heat-1' }
+    ]);
+    for (const call of seen) {
+      expect(
+        (call.init?.headers as Record<string, string> | undefined)?.Authorization
+      ).toBeUndefined();
+    }
+  });
+
+  it("each rejects with the Director's reason when it refuses", async () => {
+    const client = await import('./client.js');
+    const refused = recorder(409, {
+      code: 'Refused',
+      message: 'that seat in Qualifying Heat 1 is already taken'
+    });
+    await expect(
+      client.takeSpot('http://d.local:8081', 'quali/heat-1', seat, { fetch: refused.fetch })
+    ).rejects.toThrow('that seat in Qualifying Heat 1 is already taken');
+    const signedOut = recorder(401, {
+      code: 'Unauthorized',
+      message: 'Sign in with your code first.'
+    });
+    await expect(
+      client.leaveSpot('http://d.local:8081', 'quali/heat-1', { fetch: signedOut.fetch })
+    ).rejects.toThrow('Sign in with your code first.');
+  });
+});

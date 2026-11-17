@@ -211,7 +211,18 @@
   {#if eventName}
     <p class="event" data-testid="visitor-event">{eventName}</p>
     {#if live}
-      <SpectatorView {live} {pilot} {channels} />
+      <SpectatorView
+        {live}
+        {pilot}
+        {channels}
+        signup={pilot
+          ? {
+              take: (heat, seat) => source.takeSpot(heat, seat).then(() => live?.reload()),
+              next: (phase, seat) => source.takeNextSpot(phase, seat).then(() => live?.reload()),
+              leave: (heat) => source.leaveSpot(heat).then(() => live?.reload())
+            }
+          : undefined}
+      />
     {/if}
   {:else}
     <Card elevation="sm">
@@ -262,7 +273,9 @@
       </Button>
     </p>
   {/if}
-  <p class="muted">You can look. The director runs the race from the Grid computer.</p>
+  {#if !pilot}
+    <p class="muted">You can look. The director runs the race from the Grid computer.</p>
+  {/if}
 
   {#if hello.director_sign_in}
     {#if asking}

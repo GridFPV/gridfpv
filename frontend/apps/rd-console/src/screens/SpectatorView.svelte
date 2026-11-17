@@ -21,14 +21,19 @@
   import { consecutiveLaps, overlayClock, overlayRows } from '../lib/overlay.js';
   import { defaultResult, resultChoices, resultTable } from '../lib/results.js';
   import { myHeats, myRaces, nearnessWords, pilotAlert, seatChannel } from '../lib/pilotView.js';
+  import { signupPhases } from '../lib/signup.js';
   import { missingNames, nowShowing, raceWord, upcomingHeats } from '../lib/spectator.js';
+  import PilotSignup, { type SignupActions } from './PilotSignup.svelte';
 
   let {
     live,
     pilot = undefined,
     channels = [],
-    buzz = (pattern) => navigator.vibrate?.(pattern)
+    buzz = (pattern) => navigator.vibrate?.(pattern),
+    signup = undefined
   }: {
+    /** What a signed-in pilot can ask for on the sign-up sheet. Left out: looking only. */
+    signup?: SignupActions | undefined;
     /** The pilot this phone is signed in as. Left out for a spectator. */
     pilot?: PublicPilot | undefined;
     /** Which video channel each seat is on, as far as the timers have said. */
@@ -54,7 +59,7 @@
   const time = (micros: number | null | undefined): string =>
     micros === undefined || micros === null ? '—' : formatMicros(micros);
 
-  type Tab = 'me' | 'now' | 'next' | 'results';
+  type Tab = 'me' | 'now' | 'next' | 'signup' | 'results';
   let tab = $state<Tab>('now');
 
   const view = $derived(live.view);
@@ -127,12 +132,20 @@
     wasPilot = isPilot;
   });
 
+  const sheets = $derived(signupPhases(view));
+
   const tabs = $derived([
     ...(pilot ? [{ id: 'me', label: 'Me', badge: mine.length > 0 ? mine.length : undefined }] : []),
     { id: 'now', label: showing?.live ? 'On now' : 'Last race' },
     { id: 'next', label: 'Up next', badge: upcoming.length > 0 ? upcoming.length : undefined },
+    // Only when there is something to sign up for.
+    ...(sheets.length > 0 ? [{ id: 'signup', label: 'Sign up' }] : []),
     { id: 'results', label: 'Results' }
   ]);
+  // A tab that has gone (sign-up was turned off) must not leave the page empty.
+  $effect(() => {
+    if (tab === 'signup' && sheets.length === 0) tab = 'now';
+  });
 </script>
 
 <div class="spectator">
@@ -290,6 +303,10 @@
           </ol>
         {/if}
       </section>
+    {:else if tab === 'signup'}
+      <section aria-label="Sign up">
+        <PilotSignup phases={sheets} {names} {pilot} {channels} actions={signup} />
+      </section>
     {:else if tab === 'results'}
       <section aria-label="Results">
         {#if choices.length === 0 || !table}
@@ -365,6 +382,13 @@
   }
   .spectator :global(.gf-tabs) {
     overflow-x: auto;
+  }
+  /* A pilot at an event with sign-up has five tabs. On a phone they only fit pulled in. */
+  @media (max-width: 30rem) {
+    .spectator :global(.gf-tab) {
+      padding-inline: var(--gf-space-1);
+      font-size: var(--gf-font-size-xs);
+    }
   }
   .notice,
   .empty {

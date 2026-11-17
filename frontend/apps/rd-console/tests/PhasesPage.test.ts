@@ -20,6 +20,7 @@ import {
   timerView,
   TWO_MINUTE_QUALI
 } from './competition.js';
+import { GATE, SIGNUP_PILOTS, signupEvent, signupSheet } from './signupFixtures.js';
 import { openLive } from './support.js';
 
 const PILOTS: Pilot[] = [
@@ -796,5 +797,88 @@ describe('starting from a class', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
     await waitFor(() => expect(createBracket).toHaveBeenCalled());
     expect(createBracket.mock.calls[0][1].field).toEqual([{ Imported: ['p-1a', 'p-2b'] }]);
+  });
+});
+
+describe('Pilot sign-up on the Phases page', () => {
+  it('offers Sign-up on a phase that holds heats, and not on a heat or a locked phase', async () => {
+    await open(
+      eventView({
+        phases: [
+          group('quali', 'Qualifying'),
+          group('mains', 'Mains', undefined, { locked: true }),
+          heat('h1', 'Practice Heat', [])
+        ]
+      })
+    );
+    expect(
+      screen.getByRole('button', { name: 'Set up pilot sign-up for Qualifying' })
+    ).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Set up pilot sign-up for Mains' })).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Set up pilot sign-up for Practice Heat' })
+    ).toBeNull();
+    // With no sign-up anywhere there is no sheet on the page.
+    expect(screen.queryByRole('table', { name: /^Heats of/ })).toBeNull();
+  });
+
+  it('turns sign-up on from the dialog, with one command', async () => {
+    const { session } = await open(eventView({ phases: [group('quali', 'Qualifying')] }), {
+      listTimers: vi.fn(async () => [GATE])
+    });
+    await fireEvent.click(
+      screen.getByRole('button', { name: 'Set up pilot sign-up for Qualifying' })
+    );
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading')).toHaveTextContent('Pilot sign-up: Qualifying');
+    await fireEvent.submit(within(dialog).getByRole('form', { name: 'Sign-up rules' }));
+    await waitFor(() => expect(sent(session)).toHaveLength(1));
+    expect(sent(session)[0]).toEqual({
+      Signup: {
+        Set: {
+          phase: 'quali',
+          rules: {
+            seats: [
+              { adapter: 'gate', seat: '0' },
+              { adapter: 'gate', seat: '1' },
+              { adapter: 'gate', seat: '2' }
+            ],
+            open_heats: 3,
+            rest_heats: 0,
+            open: false
+          }
+        }
+      }
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('shows the sheet of a phase that has sign-up, and no second Sign-up button for it', async () => {
+    await open(signupEvent(signupSheet()), {
+      listPilots: vi.fn(async () => SIGNUP_PILOTS),
+      listTimers: vi.fn(async () => [GATE])
+    });
+    const sheet = screen.getByRole('table', { name: 'Heats of Qualifying' });
+    expect(within(sheet).getAllByRole('row')[1]).toHaveTextContent('Ace');
+    expect(
+      screen.queryByRole('button', { name: 'Set up pilot sign-up for Qualifying' })
+    ).toBeNull();
+    // The rules are reached from the sheet, with what is in force filled in.
+    await fireEvent.click(screen.getByRole('button', { name: 'Rules' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeVisible();
+    expect(within(dialog).getByRole('button', { name: 'Turn sign-up off' })).toBeVisible();
+  });
+
+  it("sends the sheet's changes through the event, as the director", async () => {
+    const { session } = await open(signupEvent(signupSheet()), {
+      listPilots: vi.fn(async () => SIGNUP_PILOTS),
+      listTimers: vi.fn(async () => [GATE])
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Close sign-up' }));
+    await waitFor(() => expect(sent(session)).toHaveLength(1));
+    expect(sent(session)[0]).toMatchObject({
+      Signup: { Set: { phase: 'quali', rules: { open: false } } }
+    });
   });
 });

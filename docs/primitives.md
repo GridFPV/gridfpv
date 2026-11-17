@@ -952,8 +952,27 @@ Until now only the director used Grid. This section adds the other people at a r
   sits above every tab when they are two heats away or closer, next, or flying now, and
   the phone buzzes each time it gets closer. It only reaches a phone with the page open.
   Everyone, pilot or not, sees each seat's channel in the heats coming up. A pilot's row
-  is marked in the race, the heats and the results. A pilot still cannot change anything:
-  sign-up (§11.5) comes next.
+  is marked in the race, the heats and the results.
+- **Step 5, sign-up** (§11.5). A phase that holds heats can be set for pilots to sign up.
+  The director turns it on from the Phases page and gets a sheet: heats down, seats across.
+  Pilots take a free seat, leave theirs, or take the next free spot on a seat, from a
+  **Sign up** tab on their phones. Heats are plain heats under the phase, numbered as they
+  appear; at most N that are open and not full exist at once, and the next appears when one
+  fills, is started, or is closed. The limits (spots held, runs, rest) bind pilots; the
+  director is bound only by what cannot be otherwise. The director adds, drops (counted or
+  not), pulls forward on the same seat, closes a heat to pilots, and gives runs to everyone
+  or to one pilot.
+
+  Where the build differs from the text below, and why:
+
+  - **"On the timer."** §11.5 says a heat locks to pilots when the director puts it on the
+    timer. The Director does not know which heat the Run page is showing: that is the
+    console's own state. So a heat locks to pilots when its race is **started**, and the
+    director has a **Close to pilots** button for the time before that. The director can
+    add a pilot up to the start either way.
+  - **A drop after the race.** A pilot in a saved race has used a run. To give it back,
+    the director gives that pilot one more run, since a flown heat cannot be changed.
+  - **Not built:** opening and closing sign-up on a set time, and the kiosk (§11.4).
 
 ### 11.1 Two parts, and the rule between them
 

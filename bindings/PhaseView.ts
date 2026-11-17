@@ -4,6 +4,7 @@ import type { PhaseDef } from "./PhaseDef";
 import type { PilotId } from "./PilotId";
 import type { PlacedView } from "./PlacedView";
 import type { SeatView } from "./SeatView";
+import type { SignupView } from "./SignupView";
 
 /**
  * One phase and what has been worked out for it.
@@ -44,4 +45,8 @@ lineup: Array<SeatView>,
 /**
  * The field in ranked order.
  */
-ranking: Array<PlacedView>, };
+ranking: Array<PlacedView>, 
+/**
+ * Pilot sign-up, for a phase that has it switched on (docs/primitives.md §11.5).
+ */
+signup?: SignupView, };

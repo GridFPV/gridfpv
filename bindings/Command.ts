@@ -4,6 +4,7 @@ import type { Event } from "./Event";
 import type { PhaseId } from "./PhaseId";
 import type { PilotId } from "./PilotId";
 import type { RaceId } from "./RaceId";
+import type { SignupCommand } from "./SignupCommand";
 
 /**
  * What a console asks the Director to do in an event (`POST /events/{id}/commands`).
@@ -12,4 +13,4 @@ import type { RaceId } from "./RaceId";
  * stands for are appended to the log; if not, it is refused with the reason and nothing is
  * appended.
  */
-export type Command = { "StartRace": { heat: PhaseId, } } | { "StopRace": { race: RaceId, } } | { "SaveRace": { race: RaceId, needs_marshal: boolean, note?: string, } } | { "DiscardRace": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "FileProtest": { race: RaceId, by?: PilotId, note?: string, } } | { "Record": Event };
+export type Command = { "StartRace": { heat: PhaseId, } } | { "StopRace": { race: RaceId, } } | { "SaveRace": { race: RaceId, needs_marshal: boolean, note?: string, } } | { "DiscardRace": { race: RaceId, reason?: DiscardReason, note?: string, } } | { "FileProtest": { race: RaceId, by?: PilotId, note?: string, } } | { "Record": Event } | { "Signup": SignupCommand };

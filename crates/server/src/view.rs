@@ -14,7 +14,8 @@ use gridfpv_engine::race::{Race, RaceState};
 use gridfpv_engine::state::EventState;
 use gridfpv_events::{
     AdapterId, ClassId, DiscardReason, EndCondition, Format, LapRules, LogRef, PhaseDef, PhaseId,
-    PilotId, ProtestId, ProtestOutcome, RaceId, RemovalReason, SeatRef, SourceTime, StartOwner,
+    PilotId, ProtestId, ProtestOutcome, RaceId, RemovalReason, SeatRef, SignupRules, SourceTime,
+    StartOwner,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -103,6 +104,103 @@ pub struct PhaseView {
     pub lineup: Vec<SeatView>,
     /// The field in ranked order.
     pub ranking: Vec<PlacedView>,
+    /// Pilot sign-up, for a phase that has it switched on (docs/primitives.md §11.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub signup: Option<SignupView>,
+}
+
+/// A sign-up phase as it stands: its rules, its heats, and each pilot's runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignupView {
+    pub rules: SignupRules,
+    /// The phase's heats, in the order they fly.
+    pub heats: Vec<SignupHeatView>,
+    /// Every pilot who may sign up, and anyone else who holds a spot or has used a run.
+    pub pilots: Vec<SignupPilotView>,
+}
+
+/// One heat of a sign-up phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignupHeatView {
+    pub heat: PhaseId,
+    /// 1 for the first heat of the phase. Heats fly in this order.
+    pub number: u32,
+    /// Who is on each seat, in the order of the rules' seats. `null` is a free seat.
+    pub seats: Vec<Option<PilotId>>,
+    pub state: SignupHeatState,
+    /// Whether every seat has a pilot.
+    pub full: bool,
+}
+
+/// Where a sign-up heat stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SignupHeatState {
+    /// Pilots can join and leave.
+    Open,
+    /// Closed to pilots: the director closed it, or it was started and thrown out. The
+    /// director can still change it.
+    Closed,
+    /// A race of it is on.
+    Racing,
+    /// It has been flown. Nobody can change it.
+    Flown,
+}
+
+/// One pilot's runs in a sign-up phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignupPilotView {
+    pub pilot: PilotId,
+    /// Runs used up: saved races they were in, and drops the director ruled count.
+    pub used: u32,
+    /// Spots held in heats that have not been flown.
+    pub held: u32,
+    /// Their own allowance, added to the phase's limit. It can be negative.
+    pub extra: i32,
+    /// The most runs they may have. Absent: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub allowed: Option<u32>,
+}
+
+impl SignupView {
+    fn of(sheet: gridfpv_engine::signup::SignupSheet) -> Self {
+        use gridfpv_engine::signup::HeatStatus;
+        Self {
+            rules: sheet.rules,
+            heats: sheet
+                .heats
+                .into_iter()
+                .map(|heat| SignupHeatView {
+                    full: heat.full(),
+                    state: match heat.status {
+                        HeatStatus::Open => SignupHeatState::Open,
+                        HeatStatus::Closed => SignupHeatState::Closed,
+                        HeatStatus::Racing => SignupHeatState::Racing,
+                        HeatStatus::Flown => SignupHeatState::Flown,
+                    },
+                    heat: heat.heat,
+                    number: heat.number,
+                    seats: heat.seats,
+                })
+                .collect(),
+            pilots: sheet
+                .pilots
+                .into_iter()
+                .map(|runs| SignupPilotView {
+                    pilot: runs.pilot,
+                    used: runs.used,
+                    held: runs.held,
+                    extra: runs.extra,
+                    allowed: runs.allowed,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One seat of a heat's lineup.
@@ -494,6 +592,7 @@ impl EventView {
                     waiting: result.waiting,
                     complete: result.complete,
                     director_done: state.rulings.director_done(&def.id),
+                    signup: state.signup_sheet(&def.id, &results).map(SignupView::of),
                     field: result.field.clone(),
                     lineup: result
                         .lineup

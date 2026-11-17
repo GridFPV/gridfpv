@@ -18,6 +18,7 @@ import type { SessionId } from "./SessionId";
 import type { SignalChunk } from "./SignalChunk";
 import type { SignalHistory } from "./SignalHistory";
 import type { SignalThresholds } from "./SignalThresholds";
+import type { SignupRules } from "./SignupRules";
 import type { SourceTime } from "./SourceTime";
 
 /**
@@ -47,4 +48,4 @@ keep_place_empty: boolean, } } | { "PositionSet": { heat: PhaseId, pilot: PilotI
 /**
  * 1 for the top.
  */
-position: number, note?: string, } } | { "PositionCleared": { heat: PhaseId, pilot: PilotId, } } | { "Reinstated": { phase: PhaseId, pilot: PilotId, } } | { "PhaseLocked": { phase: PhaseId, } } | { "PhaseUnlocked": { phase: PhaseId, } } | { "RosterSet": { class: ClassId, pilots: Array<PilotId>, } } | { "RosterRemoved": { class: ClassId, } } | { "StandingsSet": { class: ClassId, phases: Array<PhaseId>, } } | { "VideoRecorded": { race: RaceId, file: string, first_frame_at: number, clean: boolean, overlay_file?: string, overlay_first_frame_at?: number, laps_key?: string, } } | { "VideoRendered": { race: RaceId, file: string, laps_key: string, } } | { "VideoRemoved": { race: RaceId, } } | { "LapRulesSet": { rules: LapRules, } } | { "QueueSet": { heats: Array<PhaseId>, } } | { "ProtestFiled": { protest: ProtestId, race: RaceId, by?: PilotId, note?: string, } } | { "ProtestResolved": { protest: ProtestId, outcome: ProtestOutcome, note?: string, } };
+position: number, note?: string, } } | { "PositionCleared": { heat: PhaseId, pilot: PilotId, } } | { "Reinstated": { phase: PhaseId, pilot: PilotId, } } | { "PhaseLocked": { phase: PhaseId, } } | { "PhaseUnlocked": { phase: PhaseId, } } | { "RosterSet": { class: ClassId, pilots: Array<PilotId>, } } | { "RosterRemoved": { class: ClassId, } } | { "StandingsSet": { class: ClassId, phases: Array<PhaseId>, } } | { "VideoRecorded": { race: RaceId, file: string, first_frame_at: number, clean: boolean, overlay_file?: string, overlay_first_frame_at?: number, laps_key?: string, } } | { "VideoRendered": { race: RaceId, file: string, laps_key: string, } } | { "VideoRemoved": { race: RaceId, } } | { "LapRulesSet": { rules: LapRules, } } | { "QueueSet": { heats: Array<PhaseId>, } } | { "SignupSet": { phase: PhaseId, rules?: SignupRules, } } | { "SignupRunsSet": { phase: PhaseId, pilot: PilotId, extra: number, } } | { "SignupCharged": { phase: PhaseId, heat: PhaseId, pilot: PilotId, } } | { "SignupHeatClosed": { heat: PhaseId, closed: boolean, } } | { "ProtestFiled": { protest: ProtestId, race: RaceId, by?: PilotId, note?: string, } } | { "ProtestResolved": { protest: ProtestId, outcome: ProtestOutcome, note?: string, } };

@@ -923,6 +923,35 @@ pub enum Event {
     /// listed follow after, in the default order. A suggestion only: any ready heat can
     /// be started at any time.
     QueueSet { heats: Vec<PhaseId> },
+    // --- pilot sign-up (docs/primitives.md §11.5) ---
+    // Who is in which heat is not here: a spot is a seat in a heat's lineup, so taking one
+    // is a `PhaseDefined` of that heat, like any other lineup. These four are what the
+    // lineups cannot say.
+    /// The director turned sign-up on for a phase, changed its rules, or (`None`) turned it
+    /// off. Turning it off leaves the heats and who is in them as they are.
+    SignupSet {
+        phase: PhaseId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        rules: Option<SignupRules>,
+    },
+    /// The director changed how many runs one pilot may have in a sign-up phase, as a
+    /// number added to the phase's limit. It can be negative. `0` is the phase's limit.
+    SignupRunsSet {
+        phase: PhaseId,
+        pilot: PilotId,
+        extra: i32,
+    },
+    /// The director dropped a pilot from a heat and ruled that it uses up one of their
+    /// runs all the same.
+    SignupCharged {
+        phase: PhaseId,
+        heat: PhaseId,
+        pilot: PilotId,
+    },
+    /// The director closed a heat to pilots (nobody can join or leave it from a phone), or
+    /// opened it to them again.
+    SignupHeatClosed { heat: PhaseId, closed: bool },
     /// A protest was filed against a race.
     ProtestFiled {
         protest: ProtestId,
@@ -942,6 +971,109 @@ pub enum Event {
         #[ts(optional)]
         note: Option<String>,
     },
+}
+
+/// One seat of a sign-up phase: every heat of the phase has it, and it is the same channel
+/// in each.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignupSeat {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+}
+
+/// The rules of a phase pilots sign up for (docs/primitives.md §11.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignupRules {
+    /// The seats of every heat, in order. A heat is full when each has a pilot.
+    pub seats: Vec<SignupSeat>,
+    /// How many heats that are not full are open to pilots at once. A new heat appears
+    /// when there are fewer.
+    pub open_heats: u32,
+    /// The most spots a pilot may hold at once in heats that have not flown. Absent: no
+    /// limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub held_limit: Option<u32>,
+    /// The most runs a pilot may have in the phase. Absent: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_limit: Option<u32>,
+    /// How many heats a pilot must sit out between two of theirs. `0` is none: a pilot may
+    /// fly heats back to back.
+    #[serde(default)]
+    pub rest_heats: u32,
+    /// Whether pilots can sign up right now. The director opens and closes it.
+    #[serde(default)]
+    pub open: bool,
+}
+
+/// Who is acting in a sign-up: a pilot for themselves, or the director for a pilot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SignupBy {
+    /// The pilot, from their own phone or the kiosk. Every rule applies.
+    Pilot,
+    /// The director, from the console. The limits are theirs to overrule; only what cannot
+    /// be (a seat that is taken, a heat that has started) still holds.
+    Director,
+}
+
+/// A change to who is signed up for what (docs/primitives.md §11.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum SignupCommand {
+    /// Turn sign-up on for a phase, change its rules, or (`None`) turn it off.
+    Set {
+        phase: PhaseId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        rules: Option<SignupRules>,
+    },
+    /// Take a seat in a heat.
+    Take {
+        heat: PhaseId,
+        seat: SignupSeat,
+        pilot: PilotId,
+        by: SignupBy,
+    },
+    /// Take the first free spot on a seat, in the earliest heat that has one.
+    TakeNext {
+        phase: PhaseId,
+        seat: SignupSeat,
+        pilot: PilotId,
+        by: SignupBy,
+    },
+    /// Give a spot up.
+    Leave {
+        heat: PhaseId,
+        pilot: PilotId,
+        by: SignupBy,
+    },
+    /// The director takes a pilot out of a heat. `counted` uses up one of their runs.
+    Drop {
+        heat: PhaseId,
+        pilot: PilotId,
+        #[serde(default)]
+        counted: bool,
+    },
+    /// The director moves a pilot forward, from a later heat into an earlier one, onto the
+    /// seat they already had.
+    Pull {
+        pilot: PilotId,
+        from: PhaseId,
+        to: PhaseId,
+    },
+    /// The director changes how many runs one pilot may have: a number added to the
+    /// phase's limit.
+    SetRuns {
+        phase: PhaseId,
+        pilot: PilotId,
+        extra: i32,
+    },
+    /// The director closes a heat to pilots, or opens it to them again.
+    CloseHeat { heat: PhaseId, closed: bool },
 }
 
 /// What a console asks the Director to do in an event (`POST /events/{id}/commands`).
@@ -992,6 +1124,8 @@ pub enum Command {
     /// position set by hand, a lock, a protest resolved. Facts that only a timer or the
     /// Director itself may log (passes, race starts and stops) are refused.
     Record(Box<Event>),
+    /// A change to a sign-up phase: its rules, or who has which spot.
+    Signup(SignupCommand),
 }
 
 #[cfg(test)]

@@ -34,6 +34,7 @@ import type {
   PublicHello,
   PublicPilot,
   SeatChannel,
+  SignupSeat,
   CreatePilotRequest,
   CreateTimerRequest,
   DiscoveredTimer,
@@ -44,6 +45,7 @@ import type {
   MainsRequest,
   PassRequest,
   Pilot,
+  PhaseId,
   PilotId,
   ProtocolError,
   RaceId,
@@ -895,6 +897,54 @@ export async function signOutPilot(
     '/public/pilot/session',
     { method: 'DELETE', fetch: options.fetch },
     'sign out'
+  );
+}
+
+/**
+ * The signed-in pilot takes a seat in a heat (`POST /public/pilot/signup/take`). Who the
+ * pilot is comes from their sign-in, never from here. Rejects with the Director's reason
+ * when the rules do not allow it.
+ */
+export async function takeSpot(
+  baseUrl: string,
+  heat: PhaseId,
+  seat: SignupSeat,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/signup/take',
+    { method: 'POST', body: { heat, seat }, fetch: options.fetch },
+    'take the spot'
+  );
+}
+
+/** The signed-in pilot takes the first free spot on a seat (`POST /public/pilot/signup/next`). */
+export async function takeNextSpot(
+  baseUrl: string,
+  phase: PhaseId,
+  seat: SignupSeat,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/signup/next',
+    { method: 'POST', body: { phase, seat }, fetch: options.fetch },
+    'take the next free spot'
+  );
+}
+
+/** The signed-in pilot gives their spot in a heat up (`POST /public/pilot/signup/leave`). */
+export async function leaveSpot(
+  baseUrl: string,
+  heat: PhaseId,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/signup/leave',
+    { method: 'POST', body: { heat }, fetch: options.fetch },
+    'leave the heat'
   );
 }
 

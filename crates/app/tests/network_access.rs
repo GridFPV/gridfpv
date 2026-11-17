@@ -289,6 +289,10 @@ fn open_to_visitors(method: &Method, path: &str) -> bool {
         "/public/session" | "/public/pilot/session" => {
             read || *method == Method::POST || *method == Method::DELETE
         }
+        // What a pilot does for themselves. Each route refuses a caller with no sign-in.
+        _ if path.starts_with("/public/pilot/") => {
+            read || *method == Method::POST || *method == Method::DELETE
+        }
         _ => false,
     }
 }
