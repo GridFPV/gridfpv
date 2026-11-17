@@ -723,8 +723,12 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      exit hold. A recording lives in the page only.
    - **Timers:** the directory, with timers found on the network.
    - **Pilots** and **Classes:** the lists that outlive events.
-   - **Phases:** the tree, Up next, and Add phase, Add heat, Add bracket. A phase or heat
-     is given a saved format; a heat under a phase can use the phase's.
+   - **Phases:** a short list (one line a phase, with where it stands and the heat on the
+     timer), then Up next, then heats that stand alone; and Add phase, Add heat, Add
+     bracket. A line opens **the phase's own page**: its heats and lineups, its ranking and
+     rulings, and its sign-up sheet. A phase or heat is given a saved format; a heat under
+     a phase can use the phase's. (Reworked 2026-11-17: the page used to be one long tree
+     with every sign-up sheet stacked above it.)
    - **Formats:** the saved formats (`/formats`) as a table, with an editor over the same
      rules-as-data the engine reads (§5.5). A new Director starts with four.
    - **Run:** a phase, then one of its heats, on the timer. Keyboard shortcuts, lap

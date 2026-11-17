@@ -38,6 +38,7 @@
   import HelpPage from './screens/HelpPage.svelte';
   import MarshalPage from './screens/MarshalPage.svelte';
   import OverlaysPage from './screens/OverlaysPage.svelte';
+  import PhasePage from './screens/PhasePage.svelte';
   import PhasesPage from './screens/PhasesPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import RaceOverlay from './screens/RaceOverlay.svelte';
@@ -280,6 +281,11 @@
         onrun={putOnTimer}
         videoUrl={(event, race, which) => session.raceVideoUrl(event, race, which)}
       />
+    {:else if route.kind === 'event' && route.section === 'phases' && route.phase !== undefined}
+      <!-- Keyed on the phase, so another phase starts with its own dialogs shut. -->
+      {#key route.phase}
+        <PhasePage {live} phase={route.phase} onrun={putOnTimer} />
+      {/key}
     {:else if route.kind === 'event' && route.section === 'phases'}
       <PhasesPage {live} onrun={putOnTimer} />
     {:else if route.kind === 'event' && route.section === 'results'}

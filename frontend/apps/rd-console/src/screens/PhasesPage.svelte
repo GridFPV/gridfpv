@@ -1,38 +1,43 @@
 <script lang="ts">
   /**
-   * PhasesPage — the competition of the open event, as a tree.
+   * PhasesPage — what is raced at the open event, at a glance.
    *
    * A **phase** takes pilots in and gives a ranking out: Practice, Qualifying, a bracket, a
    * main. A **heat** is the smallest phase, a lineup that is raced one or more times.
+   *
+   * The page is short on purpose:
+   *
+   * 1. **Phases**: one line for each phase that holds heats, with where it stands. A line
+   *    opens that phase's own page (`PhasePage`), which has its heats, lineups, ranking and
+   *    sign-up sheet.
+   * 2. **Up next**: the run order, the heats that can be raced now.
+   * 3. **Heats on their own**: heats under no phase, shown in full, since there is nothing
+   *    to open.
+   *
    * Everything raced at the event is added here:
    *
    * - **Add phase** makes a phase that holds heats, with one format for all of them.
    * - **Add heat** makes one heat, at the top of the event or under a phase.
    * - **Add bracket** makes every heat of an elimination bracket at once.
-   *
-   * "Up next" is the run queue: the heats that can be raced now, in an order the director
-   * can change. The tree under it shows each phase's state, lineup and ranking, and is where
-   * a phase is locked, unlocked or removed.
    */
-  import { Banner, Button, Card } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card } from '@gridfpv/components';
   import type { PhaseId } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { signupPhases } from '../lib/signup.js';
+  import { isHeat, PHASE_STATUS_LABELS, phaseSummaries, type PhaseStatus } from '../lib/phases.js';
+  import { formatHash } from '../lib/route.js';
   import AddBracketDialog from './AddBracketDialog.svelte';
   import AddHeatDialog from './AddHeatDialog.svelte';
   import AddPhaseDialog from './AddPhaseDialog.svelte';
   import PhaseList from './PhaseList.svelte';
   import RunQueue from './RunQueue.svelte';
-  import SignupRulesDialog from './SignupRulesDialog.svelte';
-  import SignupSheet from './SignupSheet.svelte';
 
   let {
     live,
     onrun
   }: {
     live: EventLive;
-    /** Open the Run page on a heat. */
+    /** Put a heat on the timer and open the Run page. */
     onrun: (heat: PhaseId) => void;
   } = $props();
 
@@ -42,17 +47,27 @@
   );
   const close = () => (adding = undefined);
 
-  // ── Pilot sign-up (docs/primitives.md §11.5) ───────────────────────────────
-  const sheets = $derived(signupPhases(live.view));
-  /** The phase whose sign-up rules are being set. */
-  let rulesFor = $state<PhaseId | undefined>(undefined);
-  const rulesPhase = $derived(live.view?.phases.find((phase) => phase.def.id === rulesFor));
+  const phases = $derived(live.view ? phaseSummaries(live.view) : []);
+  /** Whether any heat stands alone at the top of the event. */
+  const loneHeats = $derived(
+    live.view?.phases.some((phase) => phase.def.parent === undefined && isHeat(phase.def)) ?? false
+  );
+
+  const TONES: Record<PhaseStatus, 'neutral' | 'accent' | 'success' | 'warn' | 'info'> = {
+    waiting: 'neutral',
+    ready: 'accent',
+    racing: 'warn',
+    complete: 'success',
+    locked: 'info'
+  };
+  const heatsWords = (heats: number, flown: number): string =>
+    heats === 0 ? 'No heats yet' : `${heats} ${heats === 1 ? 'heat' : 'heats'} · ${flown} flown`;
 </script>
 
 <Page
   title="Phases"
   help="phases"
-  lede="What is raced at this event, in order. A phase holds heats and ranks the pilots in them. A heat is one lineup, raced one or more times."
+  lede="What is raced at this event, in order. A phase holds heats and ranks the pilots in them. Open a phase for its heats."
 >
   {#snippet actions()}
     <Button variant="secondary" onclick={() => (adding = { what: 'bracket' })}>
@@ -76,43 +91,58 @@
       </p>
     </Card>
   {:else}
+    {#if phases.length > 0}
+      <Card title="Phases" elevation="sm">
+        <ul class="phases" aria-label="Phases of the event">
+          {#each phases as phase (phase.id)}
+            <li>
+              <a
+                class="phase"
+                href={formatHash({ kind: 'event', section: 'phases', phase: phase.id })}
+                aria-label="Open {phase.name}"
+              >
+                <span class="name">{phase.name}</span>
+                <Badge tone={TONES[phase.status]} dot={phase.status === 'racing'}>
+                  {PHASE_STATUS_LABELS[phase.status]}
+                </Badge>
+                {#if phase.onTimer !== undefined}
+                  <Badge tone="accent">On the timer: {live.names.phase(phase.onTimer)}</Badge>
+                {/if}
+                {#if phase.signup}
+                  <Badge tone={phase.signup === 'open' ? 'success' : 'neutral'}>
+                    Sign-up {phase.signup}
+                  </Badge>
+                {/if}
+                {#if phase.needsDecision}<Badge tone="warn">Needs a decision</Badge>{/if}
+                <span class="facts">
+                  {#if phase.format}<span>{phase.format}</span>{/if}
+                  <span data-testid="phase-heats">{heatsWords(phase.heats, phase.flown)}</span>
+                </span>
+                <span class="open" aria-hidden="true">→</span>
+              </a>
+              <Button
+                size="sm"
+                variant="secondary"
+                aria-label="Add a heat under {phase.name}"
+                onclick={() => (adding = { what: 'heat', under: phase.id })}>+ Heat</Button
+              >
+            </li>
+          {/each}
+        </ul>
+      </Card>
+    {/if}
     {#if live.view.queue.length > 0}
       <Card title="Up next" elevation="sm">
         <RunQueue view={live.view} names={live.names} {live} {onrun} />
       </Card>
     {/if}
-    {#each sheets as sheet (sheet.id)}
-      <SignupSheet
-        phase={sheet}
-        names={live.names}
-        onTimer={live.view.on_timer}
-        send={(command) => live.send(command)}
-        onrules={() => (rulesFor = sheet.id)}
-      />
-    {/each}
-    <Card title="All phases" elevation="sm">
-      <PhaseList
-        view={live.view}
-        names={live.names}
-        {live}
-        {onrun}
-        onaddheat={(under) => (adding = { what: 'heat', under })}
-        onsignup={(phase) => (rulesFor = phase)}
-      />
-    </Card>
+    {#if loneHeats}
+      <Card title={phases.length > 0 ? 'Heats on their own' : 'Heats'} elevation="sm">
+        <PhaseList view={live.view} names={live.names} {live} {onrun} topHeats />
+      </Card>
+    {/if}
   {/if}
 </Page>
-
-{#if rulesPhase}
-  <SignupRulesDialog
-    phase={rulesPhase.def.id}
-    phaseName={rulesPhase.def.label}
-    rules={rulesPhase.signup?.rules}
-    sources={live.seatSources}
-    send={(command) => live.send(command)}
-    onclose={() => (rulesFor = undefined)}
-  />
-{/if}
 
 {#if adding?.what === 'phase'}
   <AddPhaseDialog {live} under={adding.under} onclose={close} />
@@ -127,5 +157,51 @@
     margin: 0;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
+  }
+  .phases {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--gf-space-2);
+  }
+  .phases li {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  /* The whole line opens the phase. */
+  .phase {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2) var(--gf-space-3);
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-md);
+    color: inherit;
+    text-decoration: none;
+  }
+  .phase:hover,
+  .phase:focus-visible {
+    border-color: var(--gf-accent);
+  }
+  .name {
+    font-size: var(--gf-font-size-lg);
+    font-weight: var(--gf-font-weight-semibold);
+    overflow-wrap: anywhere;
+  }
+  .facts {
+    display: flex;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+    margin-left: auto;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  .open {
+    color: var(--gf-text-muted);
   }
 </style>

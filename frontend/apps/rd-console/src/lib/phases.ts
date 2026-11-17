@@ -23,7 +23,20 @@ export interface PhaseRow {
  * phases in the order they were added, and that order is kept among siblings. A phase whose
  * parent is missing is shown at the top, so nothing is ever hidden.
  */
-export function phaseTree(phases: readonly PhaseView[]): PhaseRow[] {
+export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRow[] {
+  if (root !== undefined) {
+    // One phase and everything beneath it, with that phase at the top.
+    const all = phaseTree(phases);
+    const at = all.findIndex((row) => row.phase.def.id === root);
+    if (at < 0) return [];
+    const base = all[at].depth;
+    const rows = [{ phase: all[at].phase, depth: 0 }];
+    for (const row of all.slice(at + 1)) {
+      if (row.depth <= base) break;
+      rows.push({ phase: row.phase, depth: row.depth - base });
+    }
+    return rows;
+  }
   const ids = new Set(phases.map((phase) => phase.def.id));
   const children = new Map<PhaseId | undefined, PhaseView[]>();
   for (const phase of phases) {
@@ -87,6 +100,66 @@ export function phaseStatus(phase: PhaseView, view: EventView): PhaseStatus {
   if (phase.complete) return 'complete';
   if (phase.waiting) return 'waiting';
   return 'ready';
+}
+
+/** One phase at the top of the event, as the Phases page lists it: one line each. */
+export interface PhaseSummary {
+  id: PhaseId;
+  name: string;
+  status: PhaseStatus;
+  /** The format's name, when the phase sets one. */
+  format?: string;
+  /** How many heats are beneath it, at any depth. */
+  heats: number;
+  /** How many of them are done: complete, or with a race that was saved. */
+  flown: number;
+  /** Whether pilots sign themselves up for its heats, and whether that is open to them. */
+  signup?: 'open' | 'closed';
+  /** The heat on the timer, when it is one of this phase's. */
+  onTimer?: PhaseId;
+  /** Whether a pilot here has reached a false start limit and waits on a decision. */
+  needsDecision: boolean;
+}
+
+/**
+ * The phases at the top of the event that hold heats, in the order they were added. A heat
+ * that stands alone, under no phase, is not one of them: it has no inside to open.
+ */
+export function phaseSummaries(view: EventView): PhaseSummary[] {
+  const tree = phaseTree(view.phases);
+  const saved = new Set(
+    view.races.filter((race) => race.state === 'Saved').map((race) => race.heat)
+  );
+  const summaries: PhaseSummary[] = [];
+  tree.forEach((row, index) => {
+    if (row.depth !== 0 || isHeat(row.phase.def)) return;
+    const under: PhaseView[] = [];
+    for (const next of tree.slice(index + 1)) {
+      if (next.depth === 0) break;
+      under.push(next.phase);
+    }
+    const heats = under.filter((phase) => isHeat(phase.def));
+    const ids = new Set([row.phase.def.id, ...under.map((phase) => phase.def.id)]);
+    summaries.push({
+      id: row.phase.def.id,
+      name: row.phase.def.label,
+      status: phaseStatus(row.phase, view),
+      format: row.phase.format?.name,
+      heats: heats.length,
+      flown: heats.filter((heat) => heat.complete || saved.has(heat.def.id)).length,
+      signup: row.phase.signup ? (row.phase.signup.rules.open ? 'open' : 'closed') : undefined,
+      onTimer: view.on_timer !== undefined && ids.has(view.on_timer) ? view.on_timer : undefined,
+      // A proposal stands until the pilot is disqualified in that phase.
+      needsDecision: view.proposed_disqualifications.some(
+        (proposal) =>
+          ids.has(proposal.phase) &&
+          !view.phases
+            .find((phase) => phase.def.id === proposal.phase)
+            ?.ranking.find((placed) => placed.pilot === proposal.pilot)?.disqualified
+      )
+    });
+  });
+  return summaries;
 }
 
 /** The heats that share a parent, as the Run and Marshal pickers offer them. */

@@ -238,6 +238,7 @@ test('pilots sign up at the kiosk one after another, and nobody is left signed i
     await page.goto(director.baseUrl);
     await expect(pagesNav(page)).toBeVisible({ timeout: 15_000 });
     await openPage(page, 'Phases');
+    await page.getByRole('link', { name: 'Open Qualifying' }).click();
     const sheet = page.getByRole('table', { name: 'Heats of Qualifying' });
     const sheetRow = (n: number) => sheet.locator('tbody tr').nth(n - 1);
     await expect(sheet.locator('tbody tr')).toHaveCount(3);

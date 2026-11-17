@@ -58,11 +58,30 @@ describe('parseHash', () => {
     expect(parseHash('event/results')).toEqual({ kind: 'event', section: 'results' });
   });
 
+  it("a phase's own page is the Phases section with the phase named", () => {
+    expect(parseHash('#/event/phases/quali-x9z1')).toEqual({
+      kind: 'event',
+      section: 'phases',
+      phase: 'quali-x9z1'
+    });
+    // An id keeps its case, and one with a slash in it is one encoded segment.
+    const nested: Route = { kind: 'event', section: 'phases', phase: 'Quali/Heat-2' };
+    expect(formatHash(nested)).toBe('#/event/phases/Quali%2FHeat-2');
+    expect(parseHash(formatHash(nested))).toEqual(nested);
+    // The list page is still the bare section, and formats without a trailing part.
+    expect(formatHash({ kind: 'event', section: 'phases' })).toBe('#/event/phases');
+    // A phase on another section means nothing and is not written out.
+    expect(formatHash({ kind: 'event', section: 'results', phase: 'x' })).toBe('#/event/results');
+    // A segment that cannot be decoded opens the list.
+    expect(parseHash('#/event/phases/%E0%A4%A')).toEqual({ kind: 'event', section: 'phases' });
+  });
+
   it('falls back to the event page for an unknown hash', () => {
     expect(parseHash('#/nope')).toEqual(DEFAULT_ROUTE);
     expect(parseHash('#/foo/bar')).toEqual(DEFAULT_ROUTE);
     expect(parseHash('#/event/other')).toEqual(DEFAULT_ROUTE);
-    expect(parseHash('#/event/phases/extra')).toEqual(DEFAULT_ROUTE);
+    expect(parseHash('#/event/phases/one/two')).toEqual(DEFAULT_ROUTE);
+    expect(parseHash('#/event/results/extra')).toEqual(DEFAULT_ROUTE);
     expect(parseHash('#/pilots/extra')).toEqual(DEFAULT_ROUTE);
   });
 

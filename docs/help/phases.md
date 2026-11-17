@@ -2,6 +2,17 @@
 
 The Phases page holds everything that is raced at the event.
 
+It is a short page. From the top:
+
+- **Phases**: one line for each phase, with where it stands, its format, and how many of
+  its heats are flown. Click a line to open that phase. The line also says which heat is
+  **on the timer**, and whether pilots can sign up.
+- **Up next**: the order the heats will be run in.
+- **Heats on their own**: heats that are not under any phase.
+
+A phase's heats, lineups, ranking and sign-up sheet are on the phase's own page.
+**← All phases** takes you back.
+
 A **heat** is a lineup of pilots on seats. It can be raced once or many times. A **phase**
 is a part of the event that takes pilots in and gives a ranking out. Practice, Qualifying
 and a bracket are phases. A phase can hold heats, and it can hold other phases.
@@ -13,7 +24,7 @@ and a bracket are phases. A phase can hold heats, and it can hold other phases.
   class's roster. A heat can sit at the top of the event or **under** a phase.
 - **Add phase**: a phase that holds heats. Pick its format once and every heat under it
   uses it. **For the class** makes the class's roster the phase's field, so every pilot in
-  the class gets a place. Then add heats with **+ Heat** on the phase's row.
+  the class gets a place. Then add heats with **+ Heat** on the phase's line.
 - **Add bracket**: every heat of an elimination bracket at once. Pick the pilots in seed
   order, how many fly in each heat, how many move on, and single or double elimination.
 
@@ -26,8 +37,8 @@ A heat or a phase is given one of the saved [formats](#/help/formats). Grid copi
 format into the event. Changing the saved format later does not change a phase that
 already uses it.
 
-A heat under a phase can use the phase's format. The row of every phase shows the format
-in force.
+A heat under a phase can use the phase's format. The line of every phase shows its format,
+and on the phase's page each heat shows the format in force.
 
 ## Up next
 
@@ -35,10 +46,10 @@ in force.
 heat up or down. The order is only a suggestion. Any heat in the list can be run at any
 time.
 
-## The tree
+## A phase's page
 
-Each row shows a phase's name and where it stands: Waiting, Ready, Racing, Complete or
-Locked.
+Open a phase to see its heats. Each row shows a name and where it stands: Waiting, Ready,
+Racing, Complete or Locked. A heat also shows who is on each seat.
 
 - **Run** opens the heat on the [Run](#/help/run) page.
 - **Ranking** opens the phase's order. For a heat you can **Set position** by hand, and
@@ -59,7 +70,7 @@ phones. Pilots need to be [signed in](#/help/event) and phones need to
 
 ### Turning it on
 
-Press **Sign-up** on a phase that holds heats. Pick:
+Open the phase and press **Sign-up** on its row. Pick:
 
 - **Timed by** and the **seats** every heat has. A seat is the same channel in every heat.
 - **Heats open at once.** Grid keeps this many heats with room in them. Start with 3.

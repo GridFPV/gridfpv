@@ -51,8 +51,14 @@
     live,
     onrun,
     onaddheat,
-    onsignup = undefined
+    onsignup = undefined,
+    root = undefined,
+    topHeats = false
   }: {
+    /** Show one phase and everything beneath it, in place of the whole event. */
+    root?: PhaseId | undefined;
+    /** Show only the heats that stand alone at the top of the event, under no phase. */
+    topHeats?: boolean;
     view: EventView;
     names: Names;
     /** The live event, to send rulings through. */
@@ -71,9 +77,18 @@
     !view.phases.some((other) => other.def.parent === phase.def.id) &&
     racesOfHeat(view, phase.def.id).length === 0;
 
-  const rows = $derived(phaseTree(view.phases));
+  const rows = $derived(
+    topHeats
+      ? phaseTree(view.phases).filter((row) => row.depth === 0 && isHeat(row.phase.def))
+      : phaseTree(view.phases, root)
+  );
 
-  const proposals = $derived(openProposals(view));
+  /** The proposals about the phases shown here. Another page shows the rest. */
+  const proposals = $derived(
+    openProposals(view).filter((proposal) =>
+      rows.some((row) => row.phase.def.id === proposal.phase)
+    )
+  );
 
   let busy = $state(false);
   let error = $state<ProtocolError | undefined>(undefined);

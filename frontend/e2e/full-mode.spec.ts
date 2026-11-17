@@ -123,10 +123,11 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     await page.getByRole('button', { name: 'Add phase', exact: true }).click();
     await expect(phaseForm).toBeHidden({ timeout: 15_000 });
 
-    const tree = page.getByRole('list', { name: 'Phases' });
-    const phaseRow = tree.locator('li.phase').filter({ hasText: PHASE }).first();
-    await expect(phaseRow).toContainText(FORMAT);
-    await phaseRow.getByRole('button', { name: `Add a heat under ${PHASE}` }).click();
+    // The phase is one line on the list, with its format. A heat can be added from the line.
+    const line = page.getByRole('link', { name: `Open ${PHASE}` });
+    await expect(line).toContainText(FORMAT);
+    await expect(line).toContainText('No heats yet');
+    await page.getByRole('button', { name: `Add a heat under ${PHASE}` }).click();
     const heatForm = page.getByRole('form', { name: 'Add a heat' });
     await expect(heatForm.getByLabel('Under').locator('option:checked')).toHaveText(PHASE);
     // The format box starts on the phase's, so the heat carries none of its own.
@@ -137,6 +138,11 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     await heatForm.getByRole('button', { name: ACE, exact: true }).click();
     await page.getByRole('button', { name: 'Add heat', exact: true }).click();
     await expect(heatForm).toBeHidden({ timeout: 15_000 });
+    await expect(line).toContainText('1 heat', { timeout: 15_000 });
+    // The heat itself is on the phase's own page.
+    await line.click();
+    await expect(page.getByRole('heading', { name: PHASE, level: 1 })).toBeVisible();
+    const tree = page.getByRole('list', { name: 'Phases' });
     const heatRow = tree.locator('li.phase.heat').filter({ hasText: HEAT });
     await expect(heatRow).toContainText('Ready', { timeout: 15_000 });
     await expect(heatRow).toContainText(FORMAT);

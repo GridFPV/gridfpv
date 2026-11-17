@@ -5,6 +5,7 @@ import {
   TOP_LEVEL_HEATS,
   currentRace,
   defaultHeat,
+  phaseSummaries,
   groupOfHeat,
   heatGroups,
   holderChoices,
@@ -17,7 +18,7 @@ import {
   racesOfHeat,
   slugify
 } from '../src/lib/phases.js';
-import { eventView, group, heat, race } from './competition.js';
+import { TWO_MINUTE_QUALI as TWO_MINUTE, eventView, group, heat, race } from './competition.js';
 
 describe('phaseTree', () => {
   it('puts each child under its parent, keeping the order phases were added in', () => {
@@ -289,5 +290,177 @@ describe('phase ids', () => {
 
   it('two heats with the same name get different ids', () => {
     expect(newPhaseId('Heat 1')).not.toBe(newPhaseId('Heat 1'));
+  });
+});
+
+describe('phaseTree for one phase', () => {
+  const phases = [
+    group('quali', 'Qualifying'),
+    heat('q-1', 'Q1', [], { parent: 'quali' }),
+    group('finals', 'Finals'),
+    group('finals/w', 'Winners', 'finals'),
+    heat('finals/w/h1', 'W1', [], { parent: 'finals/w' }),
+    heat('finals/f', 'Final', [], { parent: 'finals' }),
+    heat('solo', 'Solo', [])
+  ];
+  const ids = (root: string) => phaseTree(phases, root).map((row) => [row.phase.def.id, row.depth]);
+
+  it('is that phase at the top with everything beneath it, and nothing beside it', () => {
+    expect(ids('finals')).toEqual([
+      ['finals', 0],
+      ['finals/w', 1],
+      ['finals/w/h1', 2],
+      ['finals/f', 1]
+    ]);
+    expect(ids('quali')).toEqual([
+      ['quali', 0],
+      ['q-1', 1]
+    ]);
+  });
+
+  it('starts the depth again from a phase in the middle of the tree', () => {
+    expect(ids('finals/w')).toEqual([
+      ['finals/w', 0],
+      ['finals/w/h1', 1]
+    ]);
+  });
+
+  it('a heat is itself alone, and a phase that is not there is nothing', () => {
+    expect(ids('solo')).toEqual([['solo', 0]]);
+    expect(ids('finals/f')).toEqual([['finals/f', 0]]);
+    expect(ids('gone')).toEqual([]);
+  });
+
+  it('the last phase of the event takes everything to the end, and no more', () => {
+    const tail = [group('a', 'A'), group('b', 'B'), heat('b1', 'B1', [], { parent: 'b' })];
+    expect(phaseTree(tail, 'b').map((row) => row.phase.def.id)).toEqual(['b', 'b1']);
+    expect(phaseTree(tail, 'a').map((row) => row.phase.def.id)).toEqual(['a']);
+  });
+});
+
+describe('phaseSummaries', () => {
+  it('is empty for an event with no phases, or with only heats on their own', () => {
+    expect(phaseSummaries(eventView())).toEqual([]);
+    expect(phaseSummaries(eventView({ phases: [heat('h', 'Heat', [])] }))).toEqual([]);
+  });
+
+  it('lists the phases at the top in the order they were added, each with its heats counted', () => {
+    const view = eventView({
+      phases: [
+        group('quali', 'Qualifying', undefined, { format: TWO_MINUTE }),
+        heat('q-1', 'Q1', [], { parent: 'quali', complete: true }),
+        heat('q-2', 'Q2', [], { parent: 'quali' }),
+        heat('q-3', 'Q3', [], { parent: 'quali' }),
+        heat('solo', 'Solo', []),
+        group('finals', 'Finals'),
+        group('finals/w', 'Winners', 'finals'),
+        heat('finals/w/h1', 'W1', [], { parent: 'finals/w' }),
+        heat('finals/f', 'Final', [], { parent: 'finals', waiting: true }),
+        group('empty', 'Empty')
+      ],
+      // A saved race counts as flown even before the heat is complete. A thrown-out one
+      // does not, and neither does a race still on.
+      races: [
+        race('q-2', 1, 'Saved'),
+        race('q-3', 1, 'Discarded'),
+        race('finals/w/h1', 1, 'Running')
+      ]
+    });
+    const found = phaseSummaries(view);
+    expect(found.map((phase) => [phase.name, phase.heats, phase.flown])).toEqual([
+      ['Qualifying', 3, 2],
+      ['Finals', 2, 0],
+      ['Empty', 0, 0]
+    ]);
+    expect(found[0].format).toBe(TWO_MINUTE.name);
+    expect(found[1].format).toBeUndefined();
+    // A phase nested inside another is not a line of its own.
+    expect(found.some((phase) => phase.name === 'Winners')).toBe(false);
+  });
+
+  it('says where each phase stands', () => {
+    const on = race('q-1', 1, 'Running');
+    const view = eventView({
+      phases: [
+        group('quali', 'Qualifying'),
+        heat('q-1', 'Q1', [], { parent: 'quali' }),
+        group('done', 'Done', undefined, { complete: true }),
+        group('shut', 'Shut', undefined, { locked: true }),
+        group('later', 'Later', undefined, { waiting: true })
+      ],
+      races: [on],
+      current_race: on.race
+    });
+    expect(phaseSummaries(view).map((phase) => phase.status)).toEqual([
+      'racing',
+      'complete',
+      'locked',
+      'waiting'
+    ]);
+  });
+
+  it('says whether pilots sign up for it, and whether that is open', () => {
+    const rules = { seats: [], open_heats: 1, rest_heats: 0, open: true };
+    const sheet = (open: boolean) => ({ rules: { ...rules, open }, heats: [], pilots: [] });
+    const view = eventView({
+      phases: [
+        group('a', 'A', undefined, { signup: sheet(true) }),
+        group('b', 'B', undefined, { signup: sheet(false) }),
+        group('c', 'C')
+      ]
+    });
+    expect(phaseSummaries(view).map((phase) => phase.signup)).toEqual([
+      'open',
+      'closed',
+      undefined
+    ]);
+  });
+
+  it('names the heat on the timer on the phase that holds it, at any depth, and on no other', () => {
+    const phases = [
+      group('quali', 'Qualifying'),
+      heat('q-1', 'Q1', [], { parent: 'quali' }),
+      group('finals', 'Finals'),
+      group('finals/w', 'Winners', 'finals'),
+      heat('finals/w/h1', 'W1', [], { parent: 'finals/w' }),
+      heat('solo', 'Solo', [])
+    ];
+    const at = (onTimer?: string) =>
+      phaseSummaries(eventView({ phases, on_timer: onTimer })).map((phase) => phase.onTimer);
+    expect(at('finals/w/h1')).toEqual([undefined, 'finals/w/h1']);
+    expect(at('q-1')).toEqual(['q-1', undefined]);
+    // A heat on its own, a heat that is gone, and nothing at all.
+    expect(at('solo')).toEqual([undefined, undefined]);
+    expect(at('gone')).toEqual([undefined, undefined]);
+    expect(at()).toEqual([undefined, undefined]);
+  });
+
+  it('flags a phase where a pilot waits on a decision, until they are disqualified', () => {
+    const phases = (disqualified: boolean) => [
+      group('quali', 'Qualifying'),
+      heat('q-1', 'Q1', [], {
+        parent: 'quali',
+        ranking: [
+          {
+            pilot: 'p-1',
+            position: 1,
+            disqualified,
+            position_set: false,
+            flew: true,
+            wins: 0,
+            points: 0,
+            laps: 1
+          }
+        ]
+      }),
+      group('finals', 'Finals')
+    ];
+    const proposal = { phase: 'q-1', pilot: 'p-1', false_starts: 2, limit: 2 };
+    const flags = (disqualified: boolean) =>
+      phaseSummaries(
+        eventView({ phases: phases(disqualified), proposed_disqualifications: [proposal] })
+      ).map((phase) => phase.needsDecision);
+    expect(flags(false)).toEqual([true, false]);
+    expect(flags(true)).toEqual([false, false]);
   });
 });
