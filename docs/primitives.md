@@ -973,20 +973,39 @@ Until now only the director used Grid. This section adds the other people at a r
   - **A drop after the race.** A pilot in a saved race has used a run. To give it back,
     the director gives that pilot one more run, since a flown heat cannot be changed.
   - **Not built:** opening and closing sign-up on a set time.
-- **Step 6, the kiosk** (§11.4). The visitor page opened as `#/kiosk` on a shared tablet.
-  The Network page gives the address. A pilot types their code (or a handheld scanner
-  types the link in their QR code), acts, and presses **Done**. The page signs them out
-  by itself after 45 seconds with no touch, counting down for the last 15. Nothing is
-  kept on the tablet: a reload signs out.
+- **Step 6, the kiosk** (§11.4). A tablet at the race director's stand, opened at
+  `#/kiosk`. **Only the director makes a tablet a kiosk**: the Network page makes a
+  **kiosk code**, the director types it on the tablet, and the code is used up. One code,
+  one tablet. The tablet is then listed on the Network page until the director removes
+  it. A pilot's phone cannot become a kiosk.
+
+  With nobody at it a kiosk shows a code box and nothing else. A pilot types their own
+  code (or a handheld scanner types the link in their QR code) and gets the sign-up sheet
+  as a large grid for a tablet on its side. They press **Done** when finished. The page
+  signs them out by itself after 45 seconds with no touch, counting down for the last 15.
+  A reload signs the pilot out too; the tablet stays a kiosk.
 
   A code typed at a kiosk does **not** count as the pilot's one device, so it never signs
   their phone out. The Director gives the kiosk a **pass** that lives in memory only,
-  works for that pilot and event, and stops 2 minutes after it was last used, or when the
-  director gives the pilot a new code or signs them out.
+  works for that pilot and event, only on a tablet that is still a kiosk, and stops 2
+  minutes after it was last used, or when the director gives the pilot a new code or
+  signs them out.
 
+  - **Not built: a listener of its own for kiosks.** Kiosks come in on the same listener
+    as phones. What keeps a phone from being a kiosk is the kiosk code, not the port.
   - **Not built: the tablet's camera reading a QR code.** A browser only gives a page the
     camera over HTTPS or on the computer itself, and Grid at the field is plain HTTP on
     the local network. A cheap handheld scanner that types what it reads works today.
+- **Step 7, the pages after the first try-out** (Ryan, 2026-11-17).
+  - **Spectators** get the race, the heats coming up and the results. They do not see
+    sign-up at all.
+  - **Pilots** get the same three, plus **Me** and **Sign up**. The way in is a **Pilot**
+    link in the top corner; signed in, their callsign and **Sign out** are there.
+  - **Results** are picked phase first, then **Overall** or one heat. A heat shows each
+    of its races, and a race opens to its lap times in a large format. So does a race on
+    the pilot's own tab.
+  - **The director's sign-in** from another device is at `#/director`. Nothing on the
+    visitor's page links to it. The director is expected at the Grid computer.
 
 ### 11.1 Two parts, and the rule between them
 
@@ -1039,8 +1058,9 @@ There are two QR codes, for two jobs:
 
 ### 11.4 The kiosk
 
-A **kiosk** is the same page on a shared tablet at the field, for a pilot with no phone or
-a flat battery. It must exist.
+A **kiosk** is a tablet the director sets up at the race director's stand, for a pilot
+with no phone or a flat battery. It must exist. Only the director can make one, with a
+kiosk code that works once (Ryan, 2026-11-17).
 
 A pilot does **not** just tap their name. To act at the kiosk they prove who they are with
 their code (§11.3): they type it, or hold up its QR code, on a phone or printed. There is

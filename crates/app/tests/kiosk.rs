@@ -55,6 +55,111 @@ impl Answer {
     }
 }
 
+/// Put in `extra` to send a request from a device that is not a kiosk.
+const NOT_A_KIOSK: &str = "test-not-a-kiosk";
+
+thread_local! {
+    /// The cookie of the tablet this test's requests come from. Each test runs on a thread
+    /// of its own, and `rig()` clears it, so it belongs to one Director.
+    static TABLET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One plain request as the director, or as a device with no cookies.
+async fn plain(
+    app: &Router,
+    peer: &str,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Option<String>, String) {
+    let local = peer.starts_with("127.");
+    let mut request = Request::builder().method(method).uri(uri).header(
+        header::HOST,
+        if local {
+            "127.0.0.1:8080"
+        } else {
+            "192.168.1.5:8081"
+        },
+    );
+    let body = match body {
+        Some(body) => {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(body.to_string())
+        }
+        None => Body::empty(),
+    };
+    let mut request = request.body(body).unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|value| value.to_str().unwrap().to_string());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, cookie, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// What the director's console shows about kiosks.
+async fn kiosks(app: &Router) -> Value {
+    let (status, _, body) = plain(app, HERE, Method::GET, "/kiosk", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+/// The director makes one more kiosk code.
+async fn new_code(app: &Router) -> String {
+    let (status, _, body) = plain(app, HERE, Method::POST, "/kiosk/codes", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view: Value = serde_json::from_str(&body).unwrap();
+    view["codes"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Type a kiosk code on a device. Gives the status, the cookie's token if one was set,
+/// and the body.
+async fn set_up(app: &Router, from: &str, code: &str) -> (StatusCode, Option<String>, String) {
+    let (status, cookie, body) = plain(
+        app,
+        from,
+        Method::POST,
+        "/public/pilot/kiosk/device",
+        Some(json!({ "code": code })),
+    )
+    .await;
+    let token = cookie.map(|set| {
+        set.split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_string()
+    });
+    (status, token, body)
+}
+
+/// The cookie token of this test's tablet, set up by the director the first time.
+async fn tablet(app: &Router) -> String {
+    if let Some(token) = TABLET.with(|kept| kept.borrow().clone()) {
+        return token;
+    }
+    let code = new_code(app).await;
+    let (status, token, body) = set_up(app, "192.168.1.50:50000", &code).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let token = token.unwrap();
+    TABLET.with(|kept| *kept.borrow_mut() = Some(token.clone()));
+    token
+}
+
 /// One request. `peer` decides who is asking; `cookie` is a pilot's sign-in.
 async fn send(
     app: &Router,
@@ -77,7 +182,15 @@ async fn send(
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, format!("gridfpv_pilot={cookie}"));
     }
-    for (name, value) in extra {
+    // Every device in these tests is a tablet the director set up as a kiosk, unless the
+    // test says it is not.
+    if !extra.iter().any(|(name, _)| *name == NOT_A_KIOSK) {
+        request = request.header(
+            header::COOKIE,
+            format!("gridfpv_kiosk={}", tablet(app).await),
+        );
+    }
+    for (name, value) in extra.iter().filter(|(name, _)| *name != NOT_A_KIOSK) {
         request = request.header(*name, *value);
     }
     let body = match body {
@@ -283,6 +396,7 @@ impl Rig {
 /// An open event with a qualifying phase for the class Open: Ace, Bee, Cat and Dan are in
 /// it. Eve is in the director's list only.
 async fn rig() -> Rig {
+    TABLET.with(|kept| *kept.borrow_mut() = None);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -472,6 +586,10 @@ async fn a_right_code_gives_the_pilot_and_a_pass_and_sets_no_cookie() {
         .uri("/public/pilot/kiosk")
         .header(header::HOST, "192.168.1.5:8081")
         .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::COOKIE,
+            format!("gridfpv_kiosk={}", tablet(&rig.app).await),
+        )
         .body(Body::from(json!({ "code": code }).to_string()))
         .unwrap();
     request
@@ -1201,4 +1319,481 @@ async fn many_pilots_at_many_kiosks_at_once_each_get_their_own_pass() {
         assert!(passes.insert(pass), "two kiosks got the same pass");
     }
     assert_eq!(passes.len(), 20);
+}
+
+// ── Only the director makes a device a kiosk ─────────────────────────────────
+
+const PHONE: &str = "192.168.1.77:50000";
+const NO: &[(&str, &str)] = &[(NOT_A_KIOSK, "")];
+const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+fn numbers(view: &Value) -> Vec<u64> {
+    view["kiosks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kiosk| kiosk["number"].as_u64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_device_that_is_not_a_kiosk_cannot_use_a_code_the_kiosk_way() {
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    let code = rig.code("Ace").await;
+    // No cookie, a made-up one, an empty one, and a pilot's own sign-in: none makes a
+    // phone a kiosk.
+    let (_, session) = rig.sign_in("Bee").await;
+    for (cookie, extra) in [
+        (None, NO.to_vec()),
+        (
+            None,
+            vec![(NOT_A_KIOSK, ""), ("cookie", "gridfpv_kiosk=AAAAAAAA")],
+        ),
+        (None, vec![(NOT_A_KIOSK, ""), ("cookie", "gridfpv_kiosk=")]),
+        (Some(session.as_str()), NO.to_vec()),
+    ] {
+        for typed in [code.as_str(), "ZZZZZZ"] {
+            let answer = send(
+                &rig.app,
+                PHONE,
+                Method::POST,
+                "/public/pilot/kiosk",
+                cookie,
+                Some(json!({ "code": typed })),
+                &extra,
+            )
+            .await;
+            // The same answer for a right code and a wrong one: it says nothing about the code.
+            assert_eq!(answer.status, StatusCode::FORBIDDEN, "{extra:?}");
+            assert_eq!(
+                answer.message(),
+                "This device is not set up as a kiosk. The director sets a kiosk up."
+            );
+            assert!(!answer.body.contains("pass"));
+        }
+    }
+    // The phone's own sign-in page still works for the pilot.
+    let own = send(
+        &rig.app,
+        PHONE,
+        Method::POST,
+        "/public/pilot/session",
+        None,
+        Some(json!({ "code": code })),
+        NO,
+    )
+    .await;
+    assert_eq!(own.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_pass_is_no_use_on_a_device_that_is_not_a_kiosk() {
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    let pass = rig.kiosk("Ace").await;
+    // Someone reads the pass off the tablet and tries it from their phone.
+    let stolen = send(
+        &rig.app,
+        PHONE,
+        Method::POST,
+        "/public/pilot/signup/take",
+        None,
+        Some(json!({"heat": heat(1), "seat": seat(1)})),
+        &[(NOT_A_KIOSK, ""), (PASS, &pass)],
+    )
+    .await;
+    assert_eq!(stolen.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(rig.spots().await[0], "-,-,-");
+    let hello = send(
+        &rig.app,
+        PHONE,
+        Method::GET,
+        "/public/hello",
+        None,
+        None,
+        &[(NOT_A_KIOSK, ""), (PASS, &pass)],
+    )
+    .await
+    .json();
+    assert_eq!(hello["pilot"], Value::Null);
+    assert_eq!(hello["kiosk"], false);
+    // On the tablet it still works.
+    assert_eq!(
+        rig.kiosk_take(&pass, None, 1, 1).await.status,
+        StatusCode::OK
+    );
+    assert_eq!(rig.hello(&[], None).await["kiosk"], true);
+}
+
+#[tokio::test]
+async fn the_director_makes_codes_and_nobody_else_can_see_or_make_them() {
+    let rig = rig().await;
+    // Nothing but this test's own tablet, which the rig set up as kiosk 1.
+    let start = kiosks(&rig.app).await;
+    assert_eq!(start["codes"], json!([]));
+    assert_eq!(numbers(&start), [1]);
+    let first = new_code(&rig.app).await;
+    let second = new_code(&rig.app).await;
+    assert_ne!(first, second);
+    for code in [&first, &second] {
+        assert_eq!(code.len(), 8);
+        assert!(code.bytes().all(|b| ALPHABET.contains(&b)), "{code}");
+    }
+    assert_eq!(kiosks(&rig.app).await["codes"], json!([first, second]));
+    // A visitor, a signed-in pilot and a kiosk itself are refused everything here.
+    let (_, session) = rig.sign_in("Ace").await;
+    let cancel = format!("/kiosk/codes/{first}");
+    for (method, uri) in [
+        (Method::GET, "/kiosk"),
+        (Method::POST, "/kiosk/codes"),
+        (Method::DELETE, cancel.as_str()),
+        (Method::DELETE, "/kiosk/devices/1"),
+    ] {
+        for (cookie, extra) in [
+            (None, NO.to_vec()),
+            (Some(session.as_str()), NO.to_vec()),
+            (None, vec![]),
+        ] {
+            let answer = send(&rig.app, PHONE, method.clone(), uri, cookie, None, &extra).await;
+            assert!(
+                answer.status == StatusCode::UNAUTHORIZED || answer.status == StatusCode::FORBIDDEN,
+                "{method} {uri}: {}",
+                answer.status
+            );
+            assert!(!answer.body.contains(&first) && !answer.body.contains(&second));
+        }
+    }
+    // Nothing was made, cancelled or removed by any of that. (One kiosk: this test's tablet.)
+    let after = kiosks(&rig.app).await;
+    assert_eq!(after["codes"], json!([first, second]));
+    assert_eq!(numbers(&after).len(), 1);
+    // Nothing a visitor can read holds a code.
+    for page in ["/public/hello", "/public/event", "/public/event/state"] {
+        let answer = send(&rig.app, PHONE, Method::GET, page, None, None, NO).await;
+        assert!(!answer.body.contains(&first), "{page} holds a kiosk code");
+    }
+}
+
+#[tokio::test]
+async fn a_kiosk_code_sets_up_one_tablet_once() {
+    let rig = rig().await;
+    let code = new_code(&rig.app).await;
+    let other = new_code(&rig.app).await;
+    let loose = format!(" {}-{} ", code[..4].to_lowercase(), &code[4..]);
+    let (status, token, body) = set_up(&rig.app, KIOSK, &loose).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let token = token.expect("a cookie is set");
+    // The cookie is a token of its own, not the code.
+    assert_ne!(token, code);
+    assert!(token.len() >= 32);
+    // The code is used up: the same tablet, or another, cannot use it again.
+    for from in [KIOSK, PHONE] {
+        let (status, token, body) = set_up(&rig.app, from, &code).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(token.is_none());
+        assert!(
+            body.contains("That kiosk code is not right, or it has been used."),
+            "{body}"
+        );
+    }
+    let view = kiosks(&rig.app).await;
+    assert_eq!(view["codes"], json!([other]));
+    // Kiosk 1 is this test's own tablet, from the rig.
+    assert_eq!(numbers(&view), [1, 2]);
+    assert!(view["kiosks"][1]["set_up_at"].as_u64().unwrap() > 1_700_000_000);
+    // The director's list never holds a tablet's token.
+    assert!(!view.to_string().contains(&token));
+    // The other code sets up a second tablet, with a token of its own.
+    let (status, second, _) = set_up(&rig.app, "192.168.1.51:50000", &other).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_ne!(second.unwrap(), token);
+    let view = kiosks(&rig.app).await;
+    assert_eq!(view["codes"], json!([]));
+    assert_eq!(numbers(&view), [1, 2, 3]);
+}
+
+#[tokio::test]
+async fn the_cookie_a_kiosk_gets_is_locked_down() {
+    let rig = rig().await;
+    let code = new_code(&rig.app).await;
+    let (status, cookie, _) = plain(
+        &rig.app,
+        KIOSK,
+        Method::POST,
+        "/public/pilot/kiosk/device",
+        Some(json!({ "code": code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let cookie = cookie.unwrap();
+    assert!(cookie.starts_with("gridfpv_kiosk="), "{cookie}");
+    for part in ["HttpOnly", "SameSite=Strict", "Path=/", "Max-Age=2592000"] {
+        assert!(cookie.contains(part), "{cookie} lacks {part}");
+    }
+}
+
+#[tokio::test]
+async fn when_two_tablets_type_the_same_code_at_once_one_becomes_a_kiosk() {
+    let rig = rig().await;
+    let code = new_code(&rig.app).await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = tokio::task::JoinSet::new();
+    for n in 0..8 {
+        let app = rig.app.clone();
+        let code = code.clone();
+        let barrier = barrier.clone();
+        tasks.spawn(async move {
+            barrier.wait().await;
+            set_up(&app, &format!("192.168.5.{}:50000", n + 1), &code)
+                .await
+                .0
+        });
+    }
+    let mut won = 0;
+    while let Some(status) = tasks.join_next().await {
+        match status.unwrap() {
+            StatusCode::NO_CONTENT => won += 1,
+            StatusCode::UNAUTHORIZED => {}
+            other => panic!("{other}"),
+        }
+    }
+    assert_eq!(won, 1);
+    // This test's own tablet, and the one that won.
+    assert_eq!(numbers(&kiosks(&rig.app).await), [1, 2]);
+}
+
+#[tokio::test]
+async fn a_wrong_kiosk_code_is_refused_and_ten_of_them_make_the_device_wait() {
+    let rig = rig().await;
+    let code = new_code(&rig.app).await;
+    let long = "A".repeat(4000);
+    for (index, wrong) in [
+        "",
+        " ",
+        "AAAAAAAA",
+        &code[..7],
+        &format!("{code}A"),
+        long.as_str(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let from = format!("192.168.4.{}:50000", index + 1);
+        let (status, token, body) = set_up(&rig.app, &from, wrong).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{wrong:?}");
+        assert!(token.is_none());
+        assert!(!body.contains(&code));
+    }
+    for _ in 0..10 {
+        assert_eq!(
+            set_up(&rig.app, PHONE, "ZZZZZZZZ").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // Now even a right code has to wait, and it is not used up by the try.
+    let (status, token, body) = set_up(&rig.app, PHONE, &code).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(token.is_none());
+    assert_eq!(kiosks(&rig.app).await["codes"], json!([code]));
+    // Another device is not held up.
+    assert_eq!(
+        set_up(&rig.app, "192.168.1.78:50000", &code).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn the_director_cancels_a_code_and_it_no_longer_works() {
+    let rig = rig().await;
+    let keep = new_code(&rig.app).await;
+    let drop = new_code(&rig.app).await;
+    let (status, _, body) = plain(
+        &rig.app,
+        HERE,
+        Method::DELETE,
+        &format!("/kiosk/codes/{}", drop.to_lowercase()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["codes"],
+        json!([keep])
+    );
+    assert_eq!(
+        set_up(&rig.app, KIOSK, &drop).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // Cancelling one that is not there changes nothing.
+    let (status, _, body) = plain(&rig.app, HERE, Method::DELETE, "/kiosk/codes/NOPE", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["codes"],
+        json!([keep])
+    );
+    assert_eq!(
+        set_up(&rig.app, KIOSK, &keep).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn only_so_many_codes_can_wait_at_once() {
+    let rig = rig().await;
+    for _ in 0..12 {
+        new_code(&rig.app).await;
+    }
+    let (status, _, body) = plain(&rig.app, HERE, Method::POST, "/kiosk/codes", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains("already a lot of kiosk codes waiting"),
+        "{body}"
+    );
+    let view = kiosks(&rig.app).await;
+    let codes = view["codes"].as_array().unwrap();
+    assert_eq!(codes.len(), 12);
+    // Using one makes room for one more.
+    set_up(&rig.app, KIOSK, codes[0].as_str().unwrap()).await;
+    new_code(&rig.app).await;
+}
+
+#[tokio::test]
+async fn removing_a_kiosk_stops_that_tablet_and_only_that_one() {
+    let rig = rig().await;
+    rig.set(json!({})).await;
+    // This test's tablet is kiosk 1. Set up a second.
+    let pass = rig.kiosk("Ace").await;
+    let code = new_code(&rig.app).await;
+    let (_, second, _) = set_up(&rig.app, "192.168.1.51:50000", &code).await;
+    let second = format!("gridfpv_kiosk={}", second.unwrap());
+    let on_second: &[(&str, &str)] = &[(NOT_A_KIOSK, ""), ("cookie", &second)];
+    assert_eq!(numbers(&kiosks(&rig.app).await), [1, 2]);
+    let (status, _, body) = plain(&rig.app, HERE, Method::DELETE, "/kiosk/devices/1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(numbers(&serde_json::from_str(&body).unwrap()), [2]);
+    // Tablet 1 is no longer a kiosk: its pilot cannot go on, and no code can be typed.
+    assert_eq!(rig.hello(&[], None).await["kiosk"], false);
+    assert_eq!(
+        rig.kiosk_take(&pass, None, 1, 1).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let ace = rig.code("Ace").await;
+    assert_eq!(
+        rig.type_code(KIOSK, &ace).await.status,
+        StatusCode::FORBIDDEN
+    );
+    // Tablet 2 carries on.
+    let typed = send(
+        &rig.app,
+        "192.168.1.51:50000",
+        Method::POST,
+        "/public/pilot/kiosk",
+        None,
+        Some(json!({ "code": ace })),
+        on_second,
+    )
+    .await;
+    assert_eq!(typed.status, StatusCode::OK);
+    // Removing one that is not there changes nothing. A number is never used again.
+    let (status, _, _) = plain(&rig.app, HERE, Method::DELETE, "/kiosk/devices/1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let code = new_code(&rig.app).await;
+    set_up(&rig.app, KIOSK, &code).await;
+    assert_eq!(numbers(&kiosks(&rig.app).await), [2, 3]);
+    let (status, _, _) = plain(&rig.app, HERE, Method::DELETE, "/kiosk/devices/abc", None).await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
+async fn a_tablet_can_stop_being_a_kiosk_itself_and_another_website_cannot_make_one() {
+    let rig = rig().await;
+    assert_eq!(rig.hello(&[], None).await["kiosk"], true);
+    let gone = send(
+        &rig.app,
+        KIOSK,
+        Method::DELETE,
+        "/public/pilot/kiosk/device",
+        None,
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(gone.status, StatusCode::NO_CONTENT);
+    // It is off the director's list, and its old cookie is no good.
+    assert_eq!(numbers(&kiosks(&rig.app).await), Vec::<u64>::new());
+    assert_eq!(rig.hello(&[], None).await["kiosk"], false);
+    let code = new_code(&rig.app).await;
+    let evil = send(
+        &rig.app,
+        PHONE,
+        Method::POST,
+        "/public/pilot/kiosk/device",
+        None,
+        Some(json!({ "code": code })),
+        &[(NOT_A_KIOSK, ""), ("origin", "http://evil.example")],
+    )
+    .await;
+    assert_eq!(evil.status, StatusCode::FORBIDDEN);
+    assert_eq!(kiosks(&rig.app).await["codes"], json!([code]));
+    for body in [
+        json!({}),
+        json!({"code": 12345678}),
+        json!({"code": null}),
+        json!([]),
+    ] {
+        let answer = send(
+            &rig.app,
+            PHONE,
+            Method::POST,
+            "/public/pilot/kiosk/device",
+            None,
+            Some(body.clone()),
+            NO,
+        )
+        .await;
+        assert!(answer.status.is_client_error(), "{body}: {}", answer.status);
+    }
+}
+
+#[tokio::test]
+async fn codes_and_kiosks_are_kept_when_grid_is_closed_and_opened() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let data = std::env::temp_dir().join(format!("gridfpv-kiosk-data-{nanos}"));
+    std::fs::create_dir_all(&data).unwrap();
+    let assets = data.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<title>console</title>").unwrap();
+    let first = build_app(EventRegistry::new(Some(data.clone())).unwrap(), &assets);
+    let used = new_code(&first).await;
+    let waiting = new_code(&first).await;
+    let (_, token, _) = set_up(&first, KIOSK, &used).await;
+    let token = token.unwrap();
+    drop(first);
+    let second = build_app(EventRegistry::new(Some(data.clone())).unwrap(), &assets);
+    let view = kiosks(&second).await;
+    assert_eq!(view["codes"], json!([waiting]));
+    assert_eq!(numbers(&view), [1]);
+    // The tablet is still a kiosk, and the used code is still used.
+    let cookie = format!("gridfpv_kiosk={token}");
+    let hello = send(
+        &second,
+        KIOSK,
+        Method::GET,
+        "/public/hello",
+        None,
+        None,
+        &[(NOT_A_KIOSK, ""), ("cookie", &cookie)],
+    )
+    .await
+    .json();
+    assert_eq!(hello["kiosk"], true);
+    assert_eq!(
+        set_up(&second, PHONE, &used).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    std::fs::remove_dir_all(data).ok();
 }

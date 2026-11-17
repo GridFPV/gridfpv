@@ -92,11 +92,11 @@ test('RD lets other devices in; a visitor sees the event and none of the console
     await expect(visitor.getByTestId('visitor-event')).toHaveText(E2E_EVENT_NAME, {
       timeout: 15_000
     });
-    await expect(visitor.getByText(/You can look\./)).toBeVisible();
+    await expect(visitor.getByRole('button', { name: 'Pilot', exact: true })).toBeVisible();
     // None of the console: no page row, no side switch, no director sign-in (no token is set).
     await expect(pagesNav(visitor)).toHaveCount(0);
     await expect(visitor.getByRole('navigation', { name: 'Setup or event' })).toHaveCount(0);
-    await expect(visitor.getByRole('button', { name: 'I am the director' })).toHaveCount(0);
+    await expect(visitor.getByText(/director/i)).toHaveCount(0);
     // The page asked the Director for public things only, and nothing of the console's API.
     const api = asked.filter((path) => !path.startsWith('/assets/') && path !== '/');
     expect(api).toContain('/public/hello');
@@ -195,7 +195,11 @@ test.describe('with an access token set', () => {
       await expect(page.getByTestId('visitor-event')).toHaveText('No event is open');
 
       // A wrong token is refused in the Director's words, and the page stays the visitor's.
-      await page.getByRole('button', { name: 'I am the director' }).click();
+      // Nothing on the page leads to the director's sign-in: the director knows its address.
+      await expect(page.getByRole('button', { name: /director/i })).toHaveCount(0);
+      await expect(page.getByRole('link', { name: /director/i })).toHaveCount(0);
+      await expect(page.getByLabel('Access token')).toHaveCount(0);
+      await page.goto(`${address}#/director`);
       await page.getByLabel('Access token').fill('not-the-token');
       await page.getByRole('button', { name: 'Sign in' }).click();
       await expect(page.getByRole('alert')).toHaveText("That is not the director's access token.");
@@ -264,7 +268,7 @@ test.describe('with an access token set', () => {
     try {
       const signedIn = await tablet.newPage();
       await signedIn.goto(address);
-      await signedIn.getByRole('button', { name: 'I am the director' }).click();
+      await signedIn.goto(`${address}#/director`);
       await signedIn.getByLabel('Access token').fill(TOKEN);
       await signedIn.getByRole('button', { name: 'Sign in' }).click();
       await expect(pagesNav(signedIn)).toBeVisible({ timeout: 15_000 });

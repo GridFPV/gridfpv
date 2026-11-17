@@ -80,7 +80,8 @@ The Grid computer is the director's. It needs no password.
 
 To run Grid from another device, Grid must be started with an **access token**. That is
 set when Grid is started, with `GRIDFPV_RD_TOKEN`. Then open the address on the other
-device, press **I am the director**, and type the token. The device is signed in for half
+device with `#/director` on the end, and type the token. Nothing on the page links there,
+so spectators never see it. The device is signed in for half
 a day, or until Grid is closed.
 
 To sign out, open the Network page on that device and press **Sign out on this device**.
@@ -94,14 +95,31 @@ With no access token set, nobody can run Grid from another device.
 If Grid was started on the network already (with `GRIDFPV_ADDR`), the page says it is
 always on and has no switch.
 
-## A shared tablet (kiosk)
+## Kiosks
 
-Some pilots have no phone with them, or a flat battery. Put a tablet on a table and open
-the **shared tablet** address from the Network page on it. It ends in `#/kiosk`.
+Some pilots have no phone with them, or a flat battery. A **kiosk** is a tablet at your
+stand where they type their code and sign up.
 
-- Everyone can look at the race and the sign-up sheet on it.
-- To sign up, a pilot types their **code** and presses **Go**. The codes are on the
-  event's Details page.
+Only you can make a tablet a kiosk. A pilot cannot turn a phone into one.
+
+### Setting one up
+
+1. On the tablet, open the kiosk address from the Network page. It ends in `#/kiosk`.
+2. On the Network page, press **New kiosk code**.
+3. Type the code on the tablet and press **Set up**.
+
+A code works **once**. For a second tablet, make a second code. A code you made and did
+not use can be cancelled.
+
+The tablet stays a kiosk, even if it is switched off and on. It is listed under **Kiosks
+set up**. Press **Remove** to stop a tablet being a kiosk.
+
+### Using it
+
+- With nobody at it, the kiosk shows a box for a code and nothing else.
+- A pilot types their **own code** and presses **Go**. The codes are on the event's Details
+  page.
+- They get the sign-up sheet, large: heats down, seats across.
 - When they are finished they press **Done**.
 - If they walk away, the tablet signs them out by itself after 45 seconds. It counts down
   first. Touching the screen stops the count.

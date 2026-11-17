@@ -80,7 +80,7 @@ describe('GET /public/hello', () => {
     expect(res.status).toBe(200);
     const hello = (await res.json()) as PublicHello;
     // No event is open on a fresh Director, so `event` is left out, not null.
-    expect(Object.keys(hello).sort()).toEqual(['caller', 'director_sign_in', 'version']);
+    expect(Object.keys(hello).sort()).toEqual(['caller', 'director_sign_in', 'kiosk', 'version']);
     expect(hello.caller).toBe('Local');
     expect(hello.director_sign_in).toBe(true);
     expect(typeof hello.version).toBe('string');

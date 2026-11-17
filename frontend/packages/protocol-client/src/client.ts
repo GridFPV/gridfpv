@@ -32,6 +32,7 @@ import type {
   EventView,
   Format,
   KioskPassView,
+  KioskView,
   MainsRequest,
   NetworkRequest,
   NetworkView,
@@ -904,6 +905,76 @@ export async function signOutPilot(
     '/public/pilot/session',
     { method: 'DELETE', fetch: options.fetch },
     'sign out'
+  );
+}
+
+/** The kiosk codes waiting to be used and the kiosks set up (`GET /kiosk`). Director only. */
+export async function getKiosks(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(baseUrl, '/kiosk', options, 'read the kiosks');
+}
+
+/** Make one more kiosk code (`POST /kiosk/codes`). Each sets up one tablet, once. */
+export async function newKioskCode(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    '/kiosk/codes',
+    { method: 'POST', token, fetch: options.fetch },
+    'make a kiosk code'
+  );
+}
+
+/** Cancel a kiosk code that has not been used (`DELETE /kiosk/codes/{code}`). */
+export async function cancelKioskCode(
+  baseUrl: string,
+  code: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    `/kiosk/codes/${encodeURIComponent(code)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'cancel the kiosk code'
+  );
+}
+
+/** Remove a kiosk, so its tablet stops being one (`DELETE /kiosk/devices/{number}`). */
+export async function removeKiosk(
+  baseUrl: string,
+  number: number,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    `/kiosk/devices/${number}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove the kiosk'
+  );
+}
+
+/**
+ * Make this device a kiosk, with a kiosk code the director made
+ * (`POST /public/pilot/kiosk/device`). The code is used up. The Director sets a cookie the
+ * browser then sends by itself.
+ */
+export async function kioskSetUp(
+  baseUrl: string,
+  code: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/pilot/kiosk/device',
+    { method: 'POST', body: { code }, fetch: options.fetch },
+    'set up the kiosk'
   );
 }
 

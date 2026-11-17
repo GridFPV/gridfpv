@@ -81,7 +81,7 @@ test.afterAll(async () => {
 });
 
 const signedIn = (page: Page) => page.getByTestId('pilot-signed-in');
-const iAmAPilot = (page: Page) => page.getByRole('button', { name: 'I am a pilot' });
+const iAmAPilot = (page: Page) => page.getByRole('button', { name: 'Pilot', exact: true });
 
 async function typeCode(page: Page, code: string): Promise<void> {
   await iAmAPilot(page).click();

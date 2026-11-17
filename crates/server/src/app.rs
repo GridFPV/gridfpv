@@ -179,6 +179,21 @@ pub fn router(registry: EventRegistry) -> Router {
             post(crate::pilot_access::post_session).delete(crate::pilot_access::delete_session),
         )
         // A pilot signing themselves up for a heat (docs/primitives.md §11.5).
+        .route("/kiosk", get(crate::pilot_access::get_kiosks))
+        .route("/kiosk/codes", post(crate::pilot_access::post_kiosk_code))
+        .route(
+            "/kiosk/codes/{code}",
+            delete(crate::pilot_access::delete_kiosk_code),
+        )
+        .route(
+            "/kiosk/devices/{number}",
+            delete(crate::pilot_access::delete_kiosk_number),
+        )
+        .route(
+            "/public/pilot/kiosk/device",
+            post(crate::pilot_access::post_kiosk_device)
+                .delete(crate::pilot_access::delete_kiosk_device),
+        )
         .route(
             "/public/pilot/kiosk",
             post(crate::pilot_access::post_kiosk).delete(crate::pilot_access::delete_kiosk),

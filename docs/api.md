@@ -50,7 +50,7 @@ A browser on another device signs in once and then carries a cookie:
 
 | Route | What it does |
 |---|---|
-| `GET /public/hello` | `{version, caller, event?, director_sign_in}`. `caller` is `Local`, `Director` or `Visitor`. `event` is the open event's name. `director_sign_in` says whether a token is set |
+| `GET /public/hello` | `{version, caller, event?, director_sign_in, kiosk}`. `caller` is `Local`, `Director` or `Visitor`. `event` is the open event's name. `director_sign_in` says whether a token is set |
 | `POST /public/session` | Sign in. Send the token as a `Bearer` header. Answers `204` and sets the cookie `gridfpv_director` (`HttpOnly`, `SameSite=Strict`, half a day). The cookie holds a sign-in of its own, never the token. A wrong token answers `401` |
 | `DELETE /public/session` | Sign out. The sign-in stops working at once. Always `204` |
 
@@ -112,14 +112,28 @@ The **director** sends `POST /events/{id}/commands` with `{"Signup": …}`:
 | `SetRuns { phase, pilot, extra }` | One pilot's own allowance, added to the limit |
 | `CloseHeat { heat, closed }` | Close a heat to pilots, or open it again |
 
-**The kiosk** (§11.4) is a shared tablet. `POST /public/pilot/kiosk` with `{code}` checks a
-pilot's code like a sign-in (same `401`, same count of wrong codes, same `429`) but sets no
-cookie and leaves the pilot's own device signed in. It answers `{pilot, pass,
-idle_seconds}`. The kiosk sends the pass in the `X-GridFPV-Kiosk` header on the pilot's
-routes below. When that header is there it alone decides who the pilot is: a pass that is
-wrong or has run out answers `401`, whatever cookie the tablet holds. A pass is kept in
-memory only and stops `idle_seconds` after it was last used. `DELETE /public/pilot/kiosk`
-with the header ends it (`204` always).
+**The kiosk** (§11.4) is a tablet the director sets up. Only the director makes one.
+
+| Route | Who | Does |
+|---|---|---|
+| `GET /kiosk` | Director | `{codes: [..], kiosks: [{number, set_up_at}]}`: the kiosk codes not used yet, and the tablets set up |
+| `POST /kiosk/codes` | Director | Make one more kiosk code (eight letters and digits). Answers the list. `409` when twelve are already waiting |
+| `DELETE /kiosk/codes/{code}` | Director | Cancel a code that has not been used. Answers the list |
+| `DELETE /kiosk/devices/{number}` | Director | Remove a kiosk: its tablet stops being one. Answers the list |
+| `POST /public/pilot/kiosk/device` | Anyone | `{code}`: a kiosk code. A right one is **used up**, sets the `gridfpv_kiosk` cookie (a token of that tablet's own, `HttpOnly`) and answers `204`. A wrong or used one answers `401`; wrong ones are counted with wrong pilot codes |
+| `DELETE /public/pilot/kiosk/device` | Anyone | This device stops being a kiosk. `204` always |
+
+`GET /public/hello` says `kiosk: true` to a tablet that is set up.
+
+On a kiosk, `POST /public/pilot/kiosk` with `{code}` checks a **pilot's** code like a
+sign-in (same `401`, same count of wrong codes, same `429`) but sets no cookie and leaves
+the pilot's own device signed in. It answers `{pilot, pass, idle_seconds}`. A device that
+is not a kiosk gets `403`, whatever the code. The kiosk sends the pass in the
+`X-GridFPV-Kiosk` header on the pilot's routes below. When that header is there it alone
+decides who the pilot is: a pass that is wrong or has run out, or that comes from a device
+that is not a kiosk, answers `401`, whatever other cookie the tablet holds. A pass is kept
+in memory only and stops `idle_seconds` after it was last used. `DELETE
+/public/pilot/kiosk` with the header ends it (`204` always).
 
 A **pilot** uses three routes of their own. The pilot is the one the request is signed in
 as, never one named in the body, and it always acts as `Pilot`, so every limit applies:

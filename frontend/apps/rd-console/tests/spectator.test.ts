@@ -341,6 +341,7 @@ describe("the visitor's source", () => {
     await source.takeNextSpot('quali', seat, 'pass-1');
     await source.leaveSpot('quali/heat-1', 'pass-1');
     await source.kioskDone('pass-1');
+    await source.kioskSetUp('ABCD2345');
     // A pilot on their own phone sends no pass at all.
     await source.takeSpot('quali/heat-1', seat);
     expect(
@@ -351,9 +352,11 @@ describe("the visitor's source", () => {
       ['POST', '/public/pilot/signup/next', 'pass-1'],
       ['POST', '/public/pilot/signup/leave', 'pass-1'],
       ['DELETE', '/public/pilot/kiosk', 'pass-1'],
+      ['POST', '/public/pilot/kiosk/device', undefined],
       ['POST', '/public/pilot/signup/take', undefined]
     ]);
     expect(JSON.parse(asked[0].body ?? 'null')).toEqual({ code: 'ABC234' });
+    expect(JSON.parse(asked[5].body ?? 'null')).toEqual({ code: 'ABCD2345' });
     // The pass is never in an address or a body.
     for (const call of asked) {
       expect(call.url).not.toContain('pass-1');

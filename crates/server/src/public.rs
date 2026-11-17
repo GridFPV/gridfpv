@@ -51,6 +51,9 @@ pub struct PublicHello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pilot: Option<crate::pilot_access::PublicPilot>,
+    /// Whether the director has set this device up as a kiosk.
+    #[serde(default)]
+    pub kiosk: bool,
 }
 
 /// How long a director stays signed in on another device: half a day, which covers a race
@@ -80,6 +83,7 @@ pub async fn get_hello(
         event: registry.active().map(|event| event.name),
         director_sign_in: registry.tokens().has_control_credential(),
         pilot: crate::pilot_access::signed_in_pilot(&registry, &headers),
+        kiosk: crate::pilot_access::is_kiosk_device(&registry, &headers),
     })
 }
 

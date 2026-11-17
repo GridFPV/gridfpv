@@ -22,4 +22,8 @@ director_sign_in: boolean,
 /**
  * The pilot this browser is signed in as, for the open event. Absent when it is not.
  */
-pilot?: PublicPilot, };
+pilot?: PublicPilot, 
+/**
+ * Whether the director has set this device up as a kiosk.
+ */
+kiosk: boolean, };

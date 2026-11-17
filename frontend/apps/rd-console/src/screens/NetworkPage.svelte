@@ -13,16 +13,26 @@
    * switch is hidden then, because it would do nothing.
    */
   import { Badge, Banner, Button, Card, Input, toast } from '@gridfpv/components';
-  import type { NetworkRequest, NetworkView, PublicHello } from '@gridfpv/types';
+  import type { KioskView, NetworkRequest, NetworkView, PublicHello } from '@gridfpv/types';
   import Page from '../Page.svelte';
-  import { kioskLink } from '../lib/kiosk.js';
+  import { kioskLink, setUpWords, spellKioskCode } from '../lib/kiosk.js';
   import { portProblem, reachable, refreshEvery, stateLabel, stateTone } from '../lib/network.js';
   import type { Session } from '../lib/session.svelte.js';
 
   let {
     session
   }: {
-    session: Pick<Session, 'getNetwork' | 'putNetwork' | 'hello' | 'signOutDirector'>;
+    session: Pick<
+      Session,
+      | 'getNetwork'
+      | 'putNetwork'
+      | 'hello'
+      | 'signOutDirector'
+      | 'getKiosks'
+      | 'newKioskCode'
+      | 'cancelKioskCode'
+      | 'removeKiosk'
+    >;
   } = $props();
 
   let view = $state<NetworkView | undefined>(undefined);
@@ -47,6 +57,31 @@
       loadError = undefined;
     } catch (err) {
       loadError = say(err);
+    }
+    // A kiosk code that a tablet has just used moves from one list to the other.
+    try {
+      kiosks = await session.getKiosks();
+    } catch {
+      // Keep the last list. The network setting above says if Grid cannot be reached.
+    }
+  }
+
+  // ── Kiosks ─────────────────────────────────────────────────────────────────
+  let kiosks = $state<KioskView | undefined>(undefined);
+  let kioskBusy = $state(false);
+  let kioskError = $state<string | undefined>(undefined);
+
+  async function kioskChange(what: () => Promise<KioskView | undefined>) {
+    if (kioskBusy) return;
+    kioskBusy = true;
+    kioskError = undefined;
+    try {
+      const next = await what();
+      if (next) kiosks = next;
+    } catch (err) {
+      kioskError = say(err);
+    } finally {
+      kioskBusy = false;
     }
   }
 
@@ -198,28 +233,6 @@
         </p>
       {/if}
 
-      {#if reachable(view) && view.addresses.length > 0}
-        <h3>For a shared tablet at the field</h3>
-        <p class="kiosk">
-          <a
-            href={kioskLink(view.addresses[0])}
-            target="_blank"
-            rel="noreferrer"
-            data-testid="kiosk-link">{kioskLink(view.addresses[0])}</a
-          >
-          <Button
-            size="sm"
-            variant="ghost"
-            aria-label="Copy the kiosk address"
-            onclick={() => copy(kioskLink(view!.addresses[0]))}>Copy</Button
-          >
-        </p>
-        <p class="muted">
-          This opens Grid as a kiosk. A pilot types their code there to sign up, and is signed out
-          again when they walk away.
-        </p>
-      {/if}
-
       {#if !always}
         <form class="port" onsubmit={savePort} aria-label="Port for other devices">
           <label for="network-port">Port</label>
@@ -245,6 +258,73 @@
           Leave the port alone unless Grid says it is in use. The first time you turn this on,
           Windows may ask whether Grid may use the network. Say yes for private networks.
         </p>
+      {/if}
+    </Card>
+
+    <Card title="Kiosks" elevation="sm">
+      <p>
+        A kiosk is a tablet at your stand where a pilot with no phone types their code to sign up.
+        Only a tablet you set up here can be one.
+      </p>
+      {#if kioskError}<Banner tone="danger">{kioskError}</Banner>{/if}
+      {#if reachable(view) && view.addresses.length > 0}
+        <ol class="steps">
+          <li>
+            On the tablet, open
+            <a
+              href={kioskLink(view.addresses[0])}
+              target="_blank"
+              rel="noreferrer"
+              data-testid="kiosk-link">{kioskLink(view.addresses[0])}</a
+            >
+          </li>
+          <li>Make a kiosk code here and type it on the tablet. A code works once.</li>
+        </ol>
+      {:else}
+        <p class="muted">Let other devices open Grid first. A kiosk is another device.</p>
+      {/if}
+      <div class="row">
+        <Button
+          variant="primary"
+          disabled={kioskBusy}
+          onclick={() => kioskChange(() => session.newKioskCode())}>New kiosk code</Button
+        >
+      </div>
+      {#if kiosks && kiosks.codes.length > 0}
+        <h3>Codes waiting to be used</h3>
+        <ul class="kiosk-list" aria-label="Kiosk codes waiting to be used">
+          {#each kiosks.codes as code (code)}
+            <li>
+              <span class="kiosk-code" data-testid="kiosk-code">{spellKioskCode(code)}</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={kioskBusy}
+                aria-label="Cancel kiosk code {spellKioskCode(code)}"
+                onclick={() => kioskChange(() => session.cancelKioskCode(code))}>Cancel</Button
+              >
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if kiosks && kiosks.kiosks.length > 0}
+        <h3>Kiosks set up</h3>
+        <ul class="kiosk-list" aria-label="Kiosks set up">
+          {#each kiosks.kiosks as kiosk (kiosk.number)}
+            <li>
+              <span>Kiosk {kiosk.number}</span>
+              <span class="muted">set up {setUpWords(kiosk.set_up_at)}</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={kioskBusy}
+                title="That tablet stops being a kiosk"
+                aria-label="Remove kiosk {kiosk.number}"
+                onclick={() => kioskChange(() => session.removeKiosk(kiosk.number))}>Remove</Button
+              >
+            </li>
+          {/each}
+        </ul>
       {/if}
     </Card>
 
@@ -310,17 +390,33 @@
   .addresses li:first-child a {
     font-size: var(--gf-font-size-lg);
   }
-  .kiosk {
+  .steps {
+    margin: 0 0 var(--gf-space-3);
+    padding-left: var(--gf-space-5);
+    display: grid;
+    gap: var(--gf-space-1);
+  }
+  .steps a {
+    font-family: var(--gf-font-mono);
+    overflow-wrap: anywhere;
+  }
+  .kiosk-list {
+    list-style: none;
+    margin: 0 0 var(--gf-space-2);
+    padding: 0;
+    display: grid;
+    gap: var(--gf-space-1);
+  }
+  .kiosk-list li {
     display: flex;
     align-items: center;
-    gap: var(--gf-space-2);
+    gap: var(--gf-space-3);
     flex-wrap: wrap;
-    margin-bottom: var(--gf-space-2);
   }
-  .kiosk a {
+  .kiosk-code {
     font-family: var(--gf-font-mono);
-    font-size: var(--gf-font-size-sm);
-    overflow-wrap: anywhere;
+    font-size: var(--gf-font-size-xl);
+    letter-spacing: 0.08em;
   }
   .port {
     display: flex;

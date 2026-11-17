@@ -1,9 +1,9 @@
 /**
- * The kiosk (docs/primitives.md §11.4), through real browsers: a shared tablet that comes
- * in by Grid's network address and opens `#/kiosk`, a pilot's own phone, and the
- * director's console.
+ * The kiosk (docs/primitives.md §11.4), through real browsers: a tablet that comes in by
+ * Grid's network address, a pilot's own phone, and the director's console.
  *
- * What must hold on a real page: nobody can act without typing a code; the pilot who typed
+ * What must hold on a real page: only the director makes a tablet a kiosk, with a code
+ * that works once; nobody can act at it without typing their own code; the pilot who typed
  * it is who acts; they are signed out by Done, by walking away, by a reload, and by the
  * director; and none of it signs their own phone out.
  */
@@ -119,36 +119,100 @@ test.afterAll(async () => {
   await director?.stop();
 });
 
-const phoneHeat = (page: Page, n: number) =>
-  page.getByRole('listitem', { name: `Qualifying Heat ${n}`, exact: true });
-const codeBox = (page: Page) => page.getByLabel('Pilots: type your code to sign up');
-const kioskBar = (page: Page) => page.getByRole('region', { name: 'Kiosk sign-in' });
+const kioskRow = (page: Page, n: number) =>
+  page.getByRole('row', { name: `Qualifying Heat ${n}`, exact: true });
+const setupBox = (page: Page) => page.getByLabel('Kiosk code', { exact: true });
+const codeBox = (page: Page) => page.getByLabel('Type your code', { exact: true });
 
 async function typeCode(page: Page, typed: string) {
   await codeBox(page).fill(typed);
   await page.getByRole('button', { name: 'Go', exact: true }).click();
 }
+/** A kiosk code, made the way the Network page makes one. */
+async function newKioskCode(): Promise<string> {
+  return (await direct<{ codes: string[] }>('POST', '/kiosk/codes')).codes.at(-1)!;
+}
+/** A tablet the director has set up, on the page that waits for a pilot's code. */
+async function setUpTablet(kiosk: Page) {
+  await kiosk.goto(`${address}#/kiosk`);
+  await setupBox(kiosk).fill(await newKioskCode());
+  await kiosk.getByRole('button', { name: 'Set up', exact: true }).click();
+  await expect(codeBox(kiosk)).toBeVisible({ timeout: 15_000 });
+}
 
-test('the Network page gives the kiosk address, and it opens the kiosk', async ({
+test('the director sets a tablet up with a code that works once, and can remove it', async ({
   page,
   browser
 }) => {
-  await page.goto(director.baseUrl);
-  await expect(pagesNav(page)).toBeVisible({ timeout: 15_000 });
-  await openPage(page, 'Network');
-  const link = page.getByTestId('kiosk-link');
-  await expect(link).toHaveText(/#\/kiosk$/);
-  const href = await link.getAttribute('href');
-  expect(href).toBe(await link.textContent());
-  // Whichever of this computer's addresses it names, it is Grid's network port and the kiosk.
-  expect(href).toMatch(new RegExp(`^http://[0-9.]+:${new URL(address).port}/#/kiosk$`));
-  const tablet = await browser.newContext({ viewport: { width: 1024, height: 768 } });
+  test.setTimeout(120_000);
+  const tablet = await browser.newContext({ viewport: { width: 1180, height: 820 } });
+  const other = await browser.newContext({ viewport: { width: 1180, height: 820 } });
   try {
+    // ── The Network page: the address, and a code ────────────────────────────────────────
+    await page.goto(director.baseUrl);
+    await expect(pagesNav(page)).toBeVisible({ timeout: 15_000 });
+    await openPage(page, 'Network');
+    const link = page.getByTestId('kiosk-link');
+    await expect(link).toHaveText(/#\/kiosk$/);
+    expect(await link.getAttribute('href')).toMatch(
+      new RegExp(`^http://[0-9.]+:${new URL(address).port}/#/kiosk$`)
+    );
+    await expect(page.getByTestId('kiosk-code')).toHaveCount(0);
+    await page.getByRole('button', { name: 'New kiosk code' }).click();
+    await expect(page.getByTestId('kiosk-code')).toHaveCount(1);
+    const shown = (await page.getByTestId('kiosk-code').textContent())!.trim();
+    expect(shown).toMatch(/^[A-Z2-9]{4} [A-Z2-9]{4}$/);
+
+    // ── A tablet nobody has set up: it asks for the code, and shows nothing of the race ──
     const kiosk = await tablet.newPage();
     await kiosk.goto(`${address}#/kiosk`);
+    await expect(setupBox(kiosk)).toBeVisible({ timeout: 15_000 });
+    await expect(kiosk.getByRole('tablist')).toHaveCount(0);
+    await expect(codeBox(kiosk)).toHaveCount(0);
+    // A pilot's code typed straight at the Director does nothing from here.
+    const sneak = await kiosk.request.post(`${address}public/pilot/kiosk`, {
+      data: { code: codes.Bee }
+    });
+    expect(sneak.status()).toBe(403);
+
+    // A wrong code, then the right one typed the way it is shown.
+    await setupBox(kiosk).fill('ZZZZ ZZZZ');
+    await kiosk.getByRole('button', { name: 'Set up', exact: true }).click();
+    await expect(kiosk.getByRole('alert')).toContainText('That kiosk code is not right');
+    await setupBox(kiosk).fill(shown.toLowerCase());
+    await kiosk.getByRole('button', { name: 'Set up', exact: true }).click();
     await expect(codeBox(kiosk)).toBeVisible({ timeout: 15_000 });
+
+    // ── The console sees it by itself: the code is used up, and Kiosk 1 is listed ────────
+    await expect(page.getByTestId('kiosk-code')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByRole('list', { name: 'Kiosks set up' })).toContainText('Kiosk 1');
+
+    // ── The same code on a second tablet does nothing ────────────────────────────────────
+    const second = await other.newPage();
+    await second.goto(`${address}#/kiosk`);
+    await setupBox(second).fill(shown);
+    await second.getByRole('button', { name: 'Set up', exact: true }).click();
+    await expect(second.getByRole('alert')).toContainText('or it has been used');
+    await expect(codeBox(second)).toHaveCount(0);
+
+    // ── The tablet stays a kiosk when it is loaded again, and holds only its own cookie ──
+    await kiosk.reload();
+    await expect(codeBox(kiosk)).toBeVisible({ timeout: 15_000 });
+    const cookies = await tablet.cookies();
+    expect(cookies.map((cookie) => cookie.name)).toEqual(['gridfpv_kiosk']);
+    expect(cookies[0].httpOnly).toBe(true);
+    expect(cookies[0].sameSite).toBe('Strict');
+    expect(cookies[0].value).not.toBe(shown.replace(' ', ''));
+
+    // ── The director removes it: the tablet goes back to asking for a kiosk code ─────────
+    await page.getByRole('button', { name: 'Remove kiosk 1' }).click();
+    await expect(page.getByRole('list', { name: 'Kiosks set up' })).toHaveCount(0);
+    await typeCode(kiosk, codes.Bee);
+    await expect(setupBox(kiosk)).toBeVisible({ timeout: 15_000 });
+    await expect(kiosk.getByTestId('kiosk-pilot')).toHaveCount(0);
   } finally {
     await tablet.close();
+    await other.close();
   }
 });
 
@@ -157,7 +221,7 @@ test('pilots sign up at the kiosk one after another, and nobody is left signed i
   browser
 }) => {
   test.setTimeout(180_000);
-  const tablet = await browser.newContext({ viewport: { width: 1024, height: 768 } });
+  const tablet = await browser.newContext({ viewport: { width: 1180, height: 820 } });
   const acePhone = await browser.newContext({ viewport: { width: 390, height: 844 } });
   try {
     // The director watches the sheet.
@@ -171,56 +235,51 @@ test('pilots sign up at the kiosk one after another, and nobody is left signed i
     // Ace is signed in on their own phone.
     const ace = await acePhone.newPage();
     await ace.goto(`${address}#/join/${codes.Ace}`);
-    await expect(ace.getByTestId('pilot-signed-in')).toHaveText(/Signed in as Ace/, {
+    await expect(ace.getByTestId('pilot-signed-in')).toHaveText(/Signed in as\s*Ace/, {
       timeout: 15_000
     });
 
-    // ── The kiosk, with nobody at it ─────────────────────────────────────────────────────
+    // ── The kiosk, with nobody at it: a code box and nothing else ────────────────────────
     const kiosk = await tablet.newPage();
     await kiosk.clock.install();
-    await kiosk.goto(`${address}#/kiosk`);
-    await expect(codeBox(kiosk)).toBeVisible({ timeout: 15_000 });
+    await setUpTablet(kiosk);
     await expect(kiosk.getByTestId('visitor-event')).toHaveText('Friday Night Whoops');
-    await expect(kiosk.getByRole('button', { name: 'I am a pilot' })).toHaveCount(0);
-    await kiosk.getByRole('tab', { name: 'Sign up' }).click();
-    await expect(phoneHeat(kiosk, 1)).toBeVisible();
-    await expect(kiosk.getByRole('button', { name: /^(Take|Leave|Next free)/ })).toHaveCount(0);
+    await expect(kiosk.getByRole('table')).toHaveCount(0);
+    await expect(kiosk.getByRole('tablist')).toHaveCount(0);
+    await expect(kiosk.getByRole('button')).toHaveCount(1);
 
     // ── A wrong code, then a slip ────────────────────────────────────────────────────────
     await typeCode(kiosk, 'ZZZ ZZZ');
-    await expect(kioskBar(kiosk).getByRole('alert')).toHaveText(
+    await expect(kiosk.getByRole('alert')).toHaveText(
       'That code is not right. Check it with the director.'
     );
     await expect(codeBox(kiosk)).toHaveValue('');
     await typeCode(kiosk, 'ABC');
-    await expect(kioskBar(kiosk).getByRole('alert')).toHaveText(
-      'A code has 6 letters and numbers.'
-    );
+    await expect(kiosk.getByRole('alert')).toHaveText('A code has 6 letters and numbers.');
 
-    // ── Bee types their code, loosely, and signs up ──────────────────────────────────────
+    // ── Bee types their code, loosely, and gets the sheet as a grid ──────────────────────
     const bee = codes.Bee;
     await typeCode(kiosk, ` ${bee.slice(0, 3).toLowerCase()}-${bee.slice(3)} `);
     await expect(kiosk.getByTestId('kiosk-pilot')).toContainText('Hi Bee');
-    await expect(kiosk.getByRole('tab', { name: 'Sign up' })).toHaveAttribute(
-      'aria-selected',
-      'true'
-    );
+    const grid = kiosk.getByRole('table', { name: 'Heats of Qualifying' });
+    await expect(grid.locator('tbody tr')).toHaveCount(3);
     await kiosk.getByRole('button', { name: 'Take Seat 1 in Qualifying Heat 1' }).click();
     await expect(kiosk.getByRole('button', { name: 'Leave Qualifying Heat 1' })).toBeVisible();
+    await expect(kioskRow(kiosk, 1)).toContainText('Bee');
     await expect(sheetRow(1)).toContainText('Bee', { timeout: 10_000 });
-    // Bee's own tab works at the kiosk too.
-    await kiosk.getByRole('tab', { name: /^Me/ }).click();
-    await expect(kiosk.getByRole('list', { name: 'My heats' })).toContainText('Qualifying Heat 1');
+    // The grid fits a tablet on its side with nothing to scroll sideways.
+    expect(await kiosk.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      1180
+    );
 
-    // ── Done: the next person finds nobody signed in ─────────────────────────────────────
+    // ── Done: the next person finds a code box and nothing of Bee ────────────────────────
     await kiosk.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(codeBox(kiosk)).toBeVisible();
-    await expect(kiosk.getByRole('tab', { name: /^Me/ })).toHaveCount(0);
-    await kiosk.getByRole('tab', { name: 'Sign up' }).click();
-    await expect(phoneHeat(kiosk, 1)).toContainText('Bee');
-    await expect(kiosk.getByRole('button', { name: /^(Take|Leave|Next free)/ })).toHaveCount(0);
+    await expect(kiosk.getByRole('table')).toHaveCount(0);
+    await expect(kiosk.getByText('Bee')).toHaveCount(0);
 
-    // ── Ace uses the kiosk too. It is Ace who acts, and Ace's phone stays signed in ──────
+    // ── Ace uses the kiosk too, by a scanned link. It is Ace who acts, and Ace's phone ───
+    // ── stays signed in. ─────────────────────────────────────────────────────────────────
     await typeCode(kiosk, `${address}#/join/${codes.Ace}`);
     await expect(kiosk.getByTestId('kiosk-pilot')).toContainText('Hi Ace');
     // Bee's seat is not Ace's to leave.
@@ -228,12 +287,14 @@ test('pilots sign up at the kiosk one after another, and nobody is left signed i
     await kiosk.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }).click();
     await expect(sheetRow(1)).toContainText('Ace', { timeout: 10_000 });
     await ace.reload();
-    await expect(ace.getByTestId('pilot-signed-in')).toHaveText(/Signed in as Ace/, {
+    await expect(ace.getByTestId('pilot-signed-in')).toHaveText(/Signed in as\s*Ace/, {
       timeout: 15_000
     });
     await ace.getByRole('tab', { name: 'Sign up' }).click();
     await ace.getByRole('button', { name: 'Take Seat 1 in Qualifying Heat 2' }).click();
     await expect(sheetRow(2)).toContainText('Ace', { timeout: 10_000 });
+    // The kiosk shows what the phone did, without being touched.
+    await expect(kioskRow(kiosk, 2)).toContainText('Ace', { timeout: 10_000 });
 
     // ── Ace walks away: the page counts down, then signs them out ────────────────────────
     await kiosk.clock.fastForward(31_000);
@@ -250,12 +311,12 @@ test('pilots sign up at the kiosk one after another, and nobody is left signed i
       'You were signed out. Nobody touched the screen.'
     );
     await expect(kiosk.getByTestId('kiosk-pilot')).toHaveCount(0);
-    await expect(kiosk.getByRole('button', { name: /^(Take|Leave|Next free)/ })).toHaveCount(0);
+    await expect(kiosk.getByRole('table')).toHaveCount(0);
 
-    // ── A reload signs out: the pass is kept nowhere ─────────────────────────────────────
+    // ── A reload signs the pilot out, and the tablet is still a kiosk ────────────────────
     await typeCode(kiosk, codes.Cat);
     await expect(kiosk.getByTestId('kiosk-pilot')).toContainText('Hi Cat');
-    expect(await tablet.cookies()).toEqual([]);
+    expect((await tablet.cookies()).map((cookie) => cookie.name)).toEqual(['gridfpv_kiosk']);
     expect(await kiosk.evaluate(() => localStorage.length + sessionStorage.length)).toBe(0);
     await kiosk.reload();
     await expect(codeBox(kiosk)).toBeVisible({ timeout: 15_000 });
@@ -279,7 +340,7 @@ test('pilots sign up at the kiosk one after another, and nobody is left signed i
     await expect(sheetRow(1)).not.toContainText('Cat');
     // The old code is no good, and the new one is.
     await typeCode(kiosk, codes.Cat);
-    await expect(kioskBar(kiosk).getByRole('alert')).toHaveText(
+    await expect(kiosk.getByRole('alert')).toHaveText(
       'That code is not right. Check it with the director.'
     );
     await typeCode(kiosk, fresh.code);
@@ -287,10 +348,38 @@ test('pilots sign up at the kiosk one after another, and nobody is left signed i
     await kiosk.getByRole('button', { name: 'Take Seat 3 in Qualifying Heat 1' }).click();
     await expect(sheetRow(1)).toContainText('Cat', { timeout: 10_000 });
     // Through all of it, Ace's phone was never signed out.
-    await expect(ace.getByTestId('pilot-signed-in')).toHaveText(/Signed in as Ace/);
-    await expect(phoneHeat(ace, 1)).toContainText('Cat', { timeout: 10_000 });
+    await expect(ace.getByTestId('pilot-signed-in')).toHaveText(/Signed in as\s*Ace/);
   } finally {
     await tablet.close();
     await acePhone.close();
+  }
+});
+
+test("a pilot's phone cannot make itself a kiosk", async ({ browser }) => {
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  try {
+    const page = await phone.newPage();
+    await page.goto(`${address}#/join/${codes.Bee}`);
+    await expect(page.getByTestId('pilot-signed-in')).toHaveText(/Signed in as\s*Bee/, {
+      timeout: 15_000
+    });
+    // Signed in as a pilot, the kiosk page still only asks for a code the director has.
+    await page.goto(`${address}#/kiosk`);
+    await expect(setupBox(page)).toBeVisible({ timeout: 15_000 });
+    await expect(codeBox(page)).toHaveCount(0);
+    // A pilot's own code is not a kiosk code.
+    await setupBox(page).fill(`${codes.Bee}AA`);
+    await page.getByRole('button', { name: 'Set up', exact: true }).click();
+    await expect(page.getByRole('alert')).toContainText('That kiosk code is not right');
+    // Nor can the phone ask for the director's codes.
+    for (const [method, path] of [
+      ['GET', 'kiosk'],
+      ['POST', 'kiosk/codes']
+    ] as const) {
+      const answer = await page.request.fetch(`${address}${path}`, { method });
+      expect([401, 403], `${method} /${path}`).toContain(answer.status());
+    }
+  } finally {
+    await phone.close();
   }
 });

@@ -206,6 +206,18 @@ test('a spectator watches a race from start to result without touching the page'
     await expect(results.getByRole('rowheader').first()).toContainText('Ace');
     await expect(results.locator('tbody tr').filter({ hasText: 'Ace' })).toContainText('1st');
     await expect(results.locator('tbody tr').filter({ hasText: 'Bee' })).toContainText('2nd');
+    // Pick the heat, then open its race's lap times large.
+    await page.getByLabel('Show', { exact: true }).selectOption({ label: 'Qualifying Heat 1' });
+    await expect(results).toHaveCount(0);
+    await page.getByRole('button', { name: /^Lap times of Qualifying Heat 1/ }).click();
+    const lapTimes = page.getByRole('dialog');
+    await expect(lapTimes.getByRole('heading')).toContainText('Lap times: Qualifying Heat 1');
+    await expect(lapTimes.getByRole('region', { name: 'Laps of Ace' })).toContainText('1st');
+    await expect(lapTimes.getByRole('region', { name: 'Laps of Bee' })).toBeVisible();
+    await lapTimes.getByRole('button', { name: 'Close' }).click();
+    await expect(lapTimes).toHaveCount(0);
+    await page.getByLabel('Show', { exact: true }).selectOption({ label: 'Overall' });
+    await expect(results).toBeVisible();
 
     // ── A pilot the phone has never heard of joins the event ─────────────────────────────
     const cat = (await direct<{ id: string }>('POST', '/pilots', { callsign: 'Cat' })).id;
