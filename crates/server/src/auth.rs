@@ -390,9 +390,23 @@ impl FromRequestParts<EventRegistry> for ControlAuth {
     ) -> Result<Self, Self::Rejection> {
         // The token store is Director-wide, so one RD token authorizes every write. A
         // director signed in from a browser on another device sends a cookie instead.
-        let token = crate::access::presented_token(&parts.headers);
-        registry.tokens().authenticate_control(token.as_deref())?;
-        Ok(ControlAuth { _private: () })
+        // Either is enough: a browser signed in by cookie may also send an old token it
+        // once had typed in, and that must not undo the sign-in.
+        let tokens = crate::access::presented_tokens(&parts.headers);
+        let mut refusal = None;
+        for token in &tokens {
+            match registry.tokens().authenticate_control(Some(token)) {
+                Ok(_) => return Ok(ControlAuth { _private: () }),
+                Err(err) => refusal = refusal.or(Some(err)),
+            }
+        }
+        match refusal {
+            Some(err) => Err(err),
+            None => {
+                registry.tokens().authenticate_control(None)?;
+                Ok(ControlAuth { _private: () })
+            }
+        }
     }
 }
 

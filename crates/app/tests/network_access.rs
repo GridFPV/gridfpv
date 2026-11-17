@@ -878,6 +878,93 @@ async fn the_count_is_per_device_whatever_port_it_calls_from() {
 // ── Signing in from a browser on another device ─────────────────────────────
 
 #[tokio::test]
+async fn an_old_token_the_browser_still_sends_does_not_undo_a_good_sign_in() {
+    // What happened to Ryan on 2026-11-17: the tab had an old token kept from an earlier
+    // run and sent it with every request, beside a good sign-in cookie.
+    let rig = rig(true);
+    let signed = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .bearer(TOKEN),
+    )
+    .await;
+    let session = signed.session();
+    let stale = "the-token-from-last-week";
+    // A read, the change feed and a write all work with the cookie and the old token.
+    assert_eq!(
+        status(
+            &rig.app,
+            get("/events").visitor().cookie(&session).bearer(stale)
+        )
+        .await,
+        StatusCode::OK
+    );
+    let made = send(
+        &rig.app,
+        post("/events", json!({"name": "With an old token too"}))
+            .visitor()
+            .cookie(&session)
+            .bearer(stale)
+            .header("origin", &format!("http://{LAN_HOST}")),
+    )
+    .await;
+    assert!(made.status.is_success(), "{}: {}", made.status, made.body);
+    let hello = send(
+        &rig.app,
+        get("/public/hello")
+            .visitor()
+            .cookie(&session)
+            .bearer(stale),
+    )
+    .await;
+    assert_eq!(hello.json()["caller"], "Director");
+    // And it never counts as a wrong guess: twenty of them do not lock the device out.
+    for _ in 0..20 {
+        assert_eq!(
+            status(
+                &rig.app,
+                get("/events").visitor().cookie(&session).bearer(stale)
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+    // The other way round too: a good token beside a cookie that has ended.
+    assert_eq!(
+        status(
+            &rig.app,
+            get("/events")
+                .visitor()
+                .cookie("ended-long-ago")
+                .bearer(TOKEN)
+        )
+        .await,
+        StatusCode::OK
+    );
+    // Two wrong ones are still refused, and still counted once per request.
+    assert_eq!(
+        status(
+            &rig.app,
+            get("/events").visitor().cookie("nope").bearer(stale)
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    // Signing in again with the right token while the old one is in the header is the
+    // header's business: the header is what the sign-in reads.
+    let again = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .cookie(&session)
+            .bearer(stale),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn a_director_signs_in_from_another_device_and_the_cookie_does_the_rest() {
     let rig = rig(true);
     let signed = send(

@@ -329,6 +329,26 @@ pub fn presented_token(headers: &HeaderMap) -> Option<String> {
     cookie_token(headers)
 }
 
+/// Every token a request carries: the `Bearer` header's, then the session cookie's. A
+/// caller is the director if **either** is good. A browser that is signed in by cookie may
+/// still send an old token it once had typed in, and that old token must not undo the
+/// sign-in.
+pub fn presented_tokens(headers: &HeaderMap) -> Vec<String> {
+    let bearer = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, token)| scheme.eq_ignore_ascii_case("Bearer") && !token.trim().is_empty())
+        .map(|(_, token)| token.trim().to_string());
+    let mut tokens: Vec<String> = bearer.into_iter().collect();
+    if let Some(cookie) = cookie_token(headers)
+        && !tokens.contains(&cookie)
+    {
+        tokens.push(cookie);
+    }
+    tokens
+}
+
 /// The session cookie's value, if the request has one.
 pub fn cookie_token(headers: &HeaderMap) -> Option<String> {
     headers
@@ -444,10 +464,10 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
         Part::Api => is_public_api(&method, request.uri().path()),
         Part::Files => may_read_files(&method, request.uri().path()),
     };
-    let token = presented_token(request.headers());
+    let tokens = presented_tokens(request.headers());
 
     let mut director = false;
-    if let Some(token) = &token {
+    if !tokens.is_empty() {
         if guesses.blocked(ip, now) {
             if !public {
                 return refuse(
@@ -455,11 +475,12 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
                     "Too many wrong access tokens from this device. Wait a minute and try again.",
                 );
             }
-        } else if registry
-            .tokens()
-            .session(token)
-            .is_some_and(|session| session.role.can_control())
-        {
+        } else if tokens.iter().any(|token| {
+            registry
+                .tokens()
+                .session(token)
+                .is_some_and(|session| session.role.can_control())
+        }) {
             guesses.cleared(ip);
             director = true;
         } else {
@@ -902,6 +923,27 @@ mod tests {
         ] {
             assert_eq!(presented_token(&none), None, "{none:?}");
         }
+        // Both are offered when both are there, the header first, and once when they match.
+        assert_eq!(
+            presented_tokens(&headers(&[
+                ("authorization", "Bearer header"),
+                ("cookie", "gridfpv_director=cookie")
+            ])),
+            ["header", "cookie"]
+        );
+        assert_eq!(
+            presented_tokens(&headers(&[
+                ("authorization", "Bearer same"),
+                ("cookie", "gridfpv_director=same")
+            ])),
+            ["same"]
+        );
+        assert_eq!(
+            presented_tokens(&headers(&[("cookie", "gridfpv_director=cookie")])),
+            ["cookie"]
+        );
+        assert!(presented_tokens(&headers(&[("authorization", "Basic abc")])).is_empty());
+        assert!(presented_tokens(&headers(&[])).is_empty());
         // A bad header falls back to the cookie.
         assert_eq!(
             presented_token(&headers(&[

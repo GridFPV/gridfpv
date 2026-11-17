@@ -1070,6 +1070,44 @@ describe('other devices on the network', () => {
     kiosk: false
   };
 
+  it('signing in as director drops a token the tab was still holding', async () => {
+    sessionStorage.clear();
+    const signInDirector = vi.fn(async () => {});
+    const listEvents = vi.fn(async () => []);
+    const session = new Session({ autoRestore: false, api: { signInDirector, listEvents } });
+    session.setToken('the-token-from-last-week');
+    await session.signInDirector('test');
+    expect(signInDirector).toHaveBeenCalledWith(session.baseUrl, 'test');
+    // What the console sends next carries no token at all: the cookie does the work.
+    await session.listEvents();
+    expect(JSON.stringify(listEvents.mock.calls[0])).not.toContain('last-week');
+    expect(JSON.stringify(listEvents.mock.calls[0])).not.toContain('"test"');
+    expect(session.hasToken).toBe(false);
+    // And a reload of the tab finds nothing kept.
+    expect(Object.values({ ...sessionStorage })).toEqual([]);
+  });
+
+  it('a sign-in that is refused leaves the held token alone', async () => {
+    sessionStorage.clear();
+    const signInDirector = vi.fn(async () => {
+      throw new Error("That is not the director's access token.");
+    });
+    const session = new Session({ autoRestore: false, api: { signInDirector } });
+    session.setToken('kept');
+    await expect(session.signInDirector('wrong')).rejects.toThrow('access token');
+    expect(Object.values({ ...sessionStorage })).toEqual(['kept']);
+  });
+
+  it('signing out as director forgets the token the tab holds', async () => {
+    sessionStorage.clear();
+    const signOutDirector = vi.fn(async () => {});
+    const session = new Session({ autoRestore: false, api: { signOutDirector } });
+    session.setToken('test');
+    await session.signOutDirector();
+    expect(session.hasToken).toBe(false);
+    expect(Object.values({ ...sessionStorage })).toEqual([]);
+  });
+
   it('listChannels asks the public route, with no token, and never prompts', async () => {
     const channels = [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }];
     const listPublicChannels = vi.fn(async () => channels);

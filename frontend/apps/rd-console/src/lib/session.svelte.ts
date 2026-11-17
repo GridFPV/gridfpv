@@ -704,13 +704,19 @@ export class Session {
   }
 
   /** Sign in as the director from another device. Rejects with the Director's words. */
-  signInDirector(token: string): Promise<void> {
-    return this.#api.signInDirector(this.baseUrl, token);
+  async signInDirector(token: string): Promise<void> {
+    await this.#api.signInDirector(this.baseUrl, token);
+    // Signed in, the cookie does the work. The typed token is not kept, and neither is
+    // one this tab was still holding from an earlier run: it would go out with every
+    // request the console makes next, and it may no longer be right.
+    this.clearToken();
   }
 
   /** Sign this browser out as the director. */
-  signOutDirector(): Promise<void> {
-    return this.#api.signOutDirector(this.baseUrl);
+  async signOutDirector(): Promise<void> {
+    await this.#api.signOutDirector(this.baseUrl);
+    // Signed out means signed out: the tab forgets the token too.
+    this.clearToken();
   }
 
   /** Where the race overlay sits and which logos it has (`GET /overlay/look`, open). */
