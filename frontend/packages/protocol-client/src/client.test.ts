@@ -539,3 +539,111 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     );
   });
 });
+
+describe('the open event, for a visitor (docs/primitives.md §11.2)', () => {
+  const recorder = (body: unknown) => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return {
+        ok: true,
+        status: 200,
+        json: async (): Promise<unknown> => body
+      } as unknown as Response;
+    };
+    return { seen, fetch };
+  };
+
+  it('each read goes to its public route, as a plain GET with no token', async () => {
+    const client = await import('./client.js');
+    const { seen, fetch } = recorder([]);
+    await client.getPublicEvent('http://d.local:8081/', { fetch });
+    await client.getPublicEventState('http://d.local:8081', { fetch });
+    await client.listPublicPilots('http://d.local:8081', { fetch });
+    await client.listPublicClasses('http://d.local:8081', { fetch });
+    await client.listPublicTimers('http://d.local:8081', { fetch });
+    expect(seen.map((call) => call.url)).toEqual([
+      'http://d.local:8081/public/event',
+      'http://d.local:8081/public/event/state',
+      'http://d.local:8081/public/event/pilots',
+      'http://d.local:8081/public/event/classes',
+      'http://d.local:8081/public/event/timers'
+    ]);
+    for (const call of seen) {
+      expect(call.init?.method ?? 'GET').toBe('GET');
+      expect(
+        (call.init?.headers as Record<string, string> | undefined)?.Authorization
+      ).toBeUndefined();
+      expect(call.init?.body).toBeUndefined();
+    }
+  });
+
+  it('getPublicEvent gives an empty answer when no event is open', async () => {
+    const { getPublicEvent } = await import('./client.js');
+    expect(await getPublicEvent('http://d.local:8081', { fetch: recorder({}).fetch })).toEqual({});
+  });
+
+  it("a read with no event open rejects with the Director's words", async () => {
+    const { getPublicEventState } = await import('./client.js');
+    const fetch: FetchLike = async () =>
+      ({
+        ok: false,
+        status: 404,
+        json: async (): Promise<unknown> => ({
+          code: 'UnknownScope',
+          message: 'No event is open.'
+        }),
+        text: async (): Promise<string> =>
+          JSON.stringify({ code: 'UnknownScope', message: 'No event is open.' })
+      }) as unknown as Response;
+    await expect(getPublicEventState('http://d.local:8081', { fetch })).rejects.toThrow(
+      'No event is open.'
+    );
+  });
+
+  it('subscribePublicChanges listens on the public feed and passes on each cursor', async () => {
+    const { subscribePublicChanges } = await import('./client.js');
+    const opened: string[] = [];
+    let closed = 0;
+    const listeners: Record<string, (event: { data: string }) => void> = {};
+    class FakeSource {
+      constructor(url: string) {
+        opened.push(url);
+      }
+      addEventListener(name: string, fn: (event: { data: string }) => void) {
+        listeners[name] = fn;
+      }
+      close() {
+        closed += 1;
+      }
+    }
+    const cursors: number[] = [];
+    let errors = 0;
+    const stop = subscribePublicChanges('http://d.local:8081/', (cursor) => cursors.push(cursor), {
+      EventSource: FakeSource,
+      onError: () => (errors += 1)
+    });
+    expect(opened).toEqual(['http://d.local:8081/public/event/changes']);
+    listeners.cursor({ data: '12' });
+    listeners.cursor({ data: 'not a number' });
+    listeners.cursor({ data: '13' });
+    expect(cursors).toEqual([12, 13]);
+    listeners.error({ data: '' });
+    expect(errors).toBe(1);
+    stop();
+    expect(closed).toBe(1);
+  });
+
+  it('subscribePublicChanges says so in a browser that cannot listen', async () => {
+    const { subscribePublicChanges } = await import('./client.js');
+    const had = (globalThis as { EventSource?: unknown }).EventSource;
+    delete (globalThis as { EventSource?: unknown }).EventSource;
+    try {
+      expect(() => subscribePublicChanges('http://d.local:8081', () => {})).toThrow(
+        'This browser cannot listen for live changes.'
+      );
+    } finally {
+      if (had) (globalThis as { EventSource?: unknown }).EventSource = had;
+    }
+  });
+});

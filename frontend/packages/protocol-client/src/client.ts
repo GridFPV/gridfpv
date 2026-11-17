@@ -28,6 +28,7 @@ import type {
   OverlayPlacement,
   NetworkRequest,
   NetworkView,
+  PublicEvent,
   PublicHello,
   CreatePilotRequest,
   CreateTimerRequest,
@@ -807,6 +808,70 @@ export async function getPublicHello(
   options: { token?: string; fetch?: FetchLike } = {}
 ): Promise<PublicHello> {
   return apiJson<PublicHello>(baseUrl, '/public/hello', options, 'reach Grid');
+}
+
+/** Which event is open, for a visitor (`GET /public/event`). Empty when none is. */
+export async function getPublicEvent(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PublicEvent> {
+  return apiJson<PublicEvent>(baseUrl, '/public/event', options, 'see which event is open');
+}
+
+/**
+ * The open event's snapshot as a visitor may see it (`GET /public/event/state`): the
+ * console's own shape, with the director's things taken out.
+ */
+export async function getPublicEventState(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventView> {
+  return apiJson<EventView>(baseUrl, '/public/event/state', options, 'read the event');
+}
+
+/** The pilots in the open event: callsign and colour only (`GET /public/event/pilots`). */
+export async function listPublicPilots(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Pilot[]> {
+  return apiJson<Pilot[]>(baseUrl, '/public/event/pilots', options, 'read the pilots');
+}
+
+/** The classes in the open event: name only (`GET /public/event/classes`). */
+export async function listPublicClasses(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Class[]> {
+  return apiJson<Class[]>(baseUrl, '/public/event/classes', options, 'read the classes');
+}
+
+/** The timers the open event is flown on: name and seats only (`GET /public/event/timers`). */
+export async function listPublicTimers(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<TimerView[]> {
+  return apiJson<TimerView[]>(baseUrl, '/public/event/timers', options, 'read the timers');
+}
+
+/**
+ * Hear when the open event changes, as a visitor (`GET /public/event/changes`). The same
+ * feed as {@link subscribeChanges}, for the one event that is open.
+ */
+export function subscribePublicChanges(
+  baseUrl: string,
+  onCursor: (cursor: number) => void,
+  opts: { EventSource?: EventSourceConstructor; onError?: () => void } = {}
+): () => void {
+  const Source: EventSourceConstructor | undefined =
+    opts.EventSource ?? (globalThis as { EventSource?: EventSourceConstructor }).EventSource;
+  if (!Source) throw new Error('This browser cannot listen for live changes.');
+  const source = new Source(`${trimSlash(baseUrl)}/public/event/changes`);
+  source.addEventListener('cursor', (event) => {
+    const cursor = Number(event.data);
+    if (Number.isFinite(cursor)) onCursor(cursor);
+  });
+  if (opts.onError) source.addEventListener('error', opts.onError);
+  return () => source.close();
 }
 
 /**

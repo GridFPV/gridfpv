@@ -54,6 +54,23 @@ A browser on another device signs in once and then carries a cookie:
 | `POST /public/session` | Sign in. Send the token as a `Bearer` header. Answers `204` and sets the cookie `gridfpv_director` (`HttpOnly`, `SameSite=Strict`, half a day). The cookie holds a sign-in of its own, never the token. A wrong token answers `401` |
 | `DELETE /public/session` | Sign out. The sign-in stops working at once. Always `204` |
 
+A visitor can read the **one event that is open**, and only that. These give the console's
+own shapes with the director's things taken out, so the same page code draws both
+(`crates/server/src/spectate.rs`).
+
+| Route | What it gives |
+|---|---|
+| `GET /public/event` | `{event?: {id, name}}`: the open event. Empty when none is |
+| `GET /public/event/state` | The snapshot (`EventView`). Left out: each race's video, note and to-do flag, crossings that do not count, protests, proposed disqualifications |
+| `GET /public/event/changes` | The same change feed as `GET /events/{id}/changes`, for the open event |
+| `GET /public/event/pilots` | The pilots the snapshot names: `id`, `callsign` and `color` only |
+| `GET /public/event/classes` | The classes in the event: name only |
+| `GET /public/event/timers` | The timers its heats are flown on: name and seats only. No address |
+
+With no event open, all but the first answer `404` with "No event is open." There is no way
+to ask for another event by id. A field added to one of those shapes later does not compile
+until someone decides, in `spectate.rs`, whether a visitor may see it.
+
 Ten wrong tokens from one address inside a minute shut that address out (`429`) until the
 minute has passed, whatever it sends. The public reads still answer it.
 

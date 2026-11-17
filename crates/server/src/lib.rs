@@ -38,6 +38,7 @@ pub mod network;
 pub mod overlay;
 pub mod pilots;
 pub mod public;
+pub mod spectate;
 pub mod timers;
 pub mod video;
 pub mod view;

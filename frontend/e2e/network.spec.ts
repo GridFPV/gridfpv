@@ -97,10 +97,12 @@ test('RD lets other devices in; a visitor sees the event and none of the console
     await expect(pagesNav(visitor)).toHaveCount(0);
     await expect(visitor.getByRole('navigation', { name: 'Setup or event' })).toHaveCount(0);
     await expect(visitor.getByRole('button', { name: 'I am the director' })).toHaveCount(0);
-    // The page asked the Director for the one public thing and nothing else of the API.
-    expect(asked.filter((path) => !path.startsWith('/assets/') && path !== '/')).toEqual([
-      '/public/hello'
-    ]);
+    // The page asked the Director for public things only, and nothing of the console's API.
+    const api = asked.filter((path) => !path.startsWith('/assets/') && path !== '/');
+    expect(api).toContain('/public/hello');
+    for (const path of api) {
+      expect(path.startsWith('/public/'), `the visitor's page asked for ${path}`).toBe(true);
+    }
 
     // A console link typed by hand is still the visitor's page.
     for (const hash of ['#/events', '#/network', '#/event/run', '#/pilots']) {

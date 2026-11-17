@@ -157,6 +157,13 @@ pub fn router(registry: EventRegistry) -> Router {
         )
         // What a visitor on the network may ask for.
         .route("/public/hello", get(crate::public::get_hello))
+        // The open event, as a visitor may see it.
+        .route("/public/event", get(crate::spectate::get_event))
+        .route("/public/event/state", get(crate::spectate::get_state))
+        .route("/public/event/changes", get(crate::spectate::get_changes))
+        .route("/public/event/pilots", get(crate::spectate::get_pilots))
+        .route("/public/event/classes", get(crate::spectate::get_classes))
+        .route("/public/event/timers", get(crate::spectate::get_timers))
         .route(
             "/public/session",
             post(crate::public::post_session).delete(crate::public::delete_session),

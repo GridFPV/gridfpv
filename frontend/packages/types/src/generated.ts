@@ -148,6 +148,8 @@ export type * from '@bindings/NetworkRequest';
 export type * from '@bindings/NetworkState';
 export type * from '@bindings/NetworkView';
 export type * from '@bindings/PublicHello';
+export type * from '@bindings/PublicEvent';
+export type * from '@bindings/PublicEventName';
 export type * from '@bindings/VideoRun';
 export type * from '@bindings/VideoRunState';
 export type * from '@bindings/VideoSettings';
