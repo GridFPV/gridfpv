@@ -68,6 +68,7 @@ export {
   newKioskCode,
   cancelKioskCode,
   removeKiosk,
+  renameKiosk,
   kioskDone,
   KIOSK_HEADER,
   takeSpot,

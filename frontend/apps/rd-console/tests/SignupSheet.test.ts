@@ -25,8 +25,7 @@ function open(sheet: SignupView = signupSheet(), locked = false) {
   const onrules = vi.fn();
   render(SignupSheet, {
     phase: signupPhase(sheet, locked),
-    names: signupNames(signupEvent(sheet)),
-    channels: [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }],
+    names: signupNames(signupEvent(sheet), [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }]),
     send,
     onrules
   });

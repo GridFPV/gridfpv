@@ -1070,6 +1070,14 @@ describe('other devices on the network', () => {
     kiosk: false
   };
 
+  it('listChannels asks the public route, with no token, and never prompts', async () => {
+    const channels = [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }];
+    const listPublicChannels = vi.fn(async () => channels);
+    const session = new Session({ autoRestore: false, api: { listPublicChannels } });
+    expect(await session.listChannels()).toEqual(channels);
+    expect(listPublicChannels).toHaveBeenCalledWith(session.baseUrl);
+  });
+
   it('hello and getNetwork are plain reads that never prompt', async () => {
     const getPublicHello = vi.fn(async () => HELLO);
     const getNetwork = vi.fn(async () => VIEW);

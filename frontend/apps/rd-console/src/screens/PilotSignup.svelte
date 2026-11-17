@@ -2,7 +2,10 @@
   /**
    * PilotSignup — the sign-up sheet on a phone (docs/primitives.md §11.5).
    *
-   * Everyone sees the heats and who is on each seat. A pilot who is signed in can also
+   * It lists the heats a pilot can still get into or out of: the ones that are open. A
+   * heat that is closed, on or flown is not on it. A full heat is: someone may drop out.
+   *
+   * Everyone given the sheet sees the heats and who is on each seat. A pilot who is signed in can also
    * take a free seat, give theirs up, or take the next free spot on a seat. A seat they
    * cannot take right now says why instead of offering a button.
    *
@@ -10,13 +13,7 @@
    * (another pilot got the seat first), its reason is shown and nothing changes.
    */
   import { Badge, Button } from '@gridfpv/components';
-  import type {
-    PhaseId,
-    PublicPilot,
-    SeatChannel,
-    SignupHeatView,
-    SignupSeat
-  } from '@gridfpv/types';
+  import type { PhaseId, PublicPilot, SignupHeatView, SignupSeat } from '@gridfpv/types';
   import type { Names } from '../lib/names.js';
   import {
     hasNextFree,
@@ -24,6 +21,7 @@
     runsOf,
     runsWords,
     seatAction,
+    openHeats,
     seatHeadings,
     type SignupPhase
   } from '../lib/signup.js';
@@ -39,7 +37,6 @@
     phases,
     names,
     pilot = undefined,
-    channels = [],
     actions = undefined,
     layout = 'list'
   }: {
@@ -53,7 +50,6 @@
     names: Names;
     /** The pilot this phone is signed in as. Left out for someone who is only looking. */
     pilot?: PublicPilot | undefined;
-    channels?: readonly SeatChannel[];
     /** Left out when nothing can be changed from here. */
     actions?: SignupActions | undefined;
   } = $props();
@@ -88,7 +84,8 @@
 
   {#each phases as phase (phase.id)}
     {@const signup = phase.signup}
-    {@const seats = seatHeadings(signup.rules, names, channels)}
+    {@const seats = seatHeadings(signup.rules, names)}
+    {@const heats = openHeats(signup)}
     <section aria-label="Sign-up for {phase.name}">
       <header>
         <h2>{phase.name}</h2>
@@ -119,7 +116,9 @@
         </div>
       {/if}
 
-      {#if layout === 'grid'}
+      {#if heats.length === 0}
+        <p class="muted" data-testid="no-open-heats">No heats are open right now.</p>
+      {:else if layout === 'grid'}
         <table aria-label="Heats of {phase.name}">
           <thead>
             <tr>
@@ -141,7 +140,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each signup.heats as heat (heat.heat)}
+            {#each heats as heat (heat.heat)}
               <tr aria-label={heatName(heat)} data-state={heat.state}>
                 <th scope="row">
                   <span class="heat-no">{heat.number}</span>
@@ -186,7 +185,7 @@
         </table>
       {:else}
         <ol class="heats">
-          {#each signup.heats as heat (heat.heat)}
+          {#each heats as heat (heat.heat)}
             <li aria-label={heatName(heat)} data-state={heat.state}>
               <div class="heat-head">
                 <strong>Heat {heat.number}</strong>

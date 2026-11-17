@@ -5,6 +5,7 @@
 import type {
   EventView,
   Pilot,
+  SeatChannel,
   SignupHeatView,
   SignupPilotView,
   SignupRules,
@@ -81,8 +82,8 @@ export function signupEvent(sheet: SignupView = signupSheet(), over: Partial<Eve
   });
 }
 
-export function signupNames(view: EventView): Names {
-  return buildNames(view.phases, SIGNUP_PILOTS, [GATE]);
+export function signupNames(view: EventView, channels: SeatChannel[] = []): Names {
+  return buildNames(view.phases, SIGNUP_PILOTS, [GATE], [], channels);
 }
 
 export function signupPhase(sheet: SignupView = signupSheet(), locked = false): SignupPhase {

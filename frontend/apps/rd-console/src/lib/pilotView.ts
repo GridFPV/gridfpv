@@ -6,22 +6,11 @@
  * Pure, over the same snapshot everyone reads. Nothing here is private to the pilot: it
  * is the public race data, picked out for one person.
  */
-import type { EventView, PhaseId, PilotId, RaceView, SeatChannel } from '@gridfpv/types';
-import { frequencyLabel } from './channels.js';
+import type { EventView, PhaseId, PilotId, RaceView } from '@gridfpv/types';
 import type { Names } from './names.js';
 import { raceNumber } from './marshal.js';
 import { currentRace } from './phases.js';
 import { upcomingHeats } from './spectator.js';
-
-/** The channel of one seat, in words, when the timer has said it. */
-export function seatChannel(
-  channels: readonly SeatChannel[],
-  adapter: string,
-  seat: string
-): string | undefined {
-  const found = channels.find((entry) => entry.adapter === adapter && entry.seat === seat);
-  return found ? frequencyLabel(found.freq_mhz) : undefined;
-}
 
 /** How close a pilot is to flying. */
 export type Nearness = 'now' | 'next' | 'soon' | 'later';
@@ -50,12 +39,7 @@ export const SOON_WITHIN = 2;
  * `heatsBefore` counts whole heats still to fly before theirs, the one on now included.
  * So with a race on, the first heat in the queue has one heat before it.
  */
-export function myHeats(
-  view: EventView | undefined,
-  names: Names,
-  pilot: PilotId,
-  channels: readonly SeatChannel[] = []
-): MyHeat[] {
+export function myHeats(view: EventView | undefined, names: Names, pilot: PilotId): MyHeat[] {
   if (!view) return [];
   const found: MyHeat[] = [];
   const on = currentRace(view);
@@ -66,8 +50,8 @@ export function myHeats(
       found.push({
         id: on.heat,
         name: names.phase(on.heat),
-        seatName: names.seat(seat.adapter, seat.seat, index),
-        channel: seatChannel(channels, seat.adapter, seat.seat),
+        seatName: names.seatPlain(seat.adapter, seat.seat, index),
+        channel: names.channel(seat.adapter, seat.seat),
         heatsBefore: 0,
         nearness: 'now'
       });
@@ -75,14 +59,16 @@ export function myHeats(
   }
   const racing = on ? 1 : 0;
   upcomingHeats(view, names).forEach((heat, position) => {
-    const seat = heat.seats.find((entry) => entry.pilot === pilot);
+    const index = heat.seats.findIndex((entry) => entry.pilot === pilot);
+    const seat = heat.seats[index];
     if (!seat) return;
     const heatsBefore = position + racing;
     found.push({
       id: heat.id,
       name: heat.name,
-      seatName: seat.seatName,
-      channel: seatChannel(channels, seat.adapter, seat.seat),
+      // The channel is shown in full beside it, so the seat is named without one.
+      seatName: names.seatPlain(seat.adapter, seat.seat, index),
+      channel: names.channel(seat.adapter, seat.seat),
       heatsBefore,
       nearness: heatsBefore === 0 ? 'next' : heatsBefore <= SOON_WITHIN ? 'soon' : 'later'
     });

@@ -1797,3 +1797,121 @@ async fn codes_and_kiosks_are_kept_when_grid_is_closed_and_opened() {
     );
     std::fs::remove_dir_all(data).ok();
 }
+
+#[tokio::test]
+async fn the_director_names_a_kiosk_and_the_tablet_is_told_its_name() {
+    let rig = rig().await;
+    // This test's tablet is kiosk 1.
+    assert_eq!(rig.hello(&[], None).await["kiosk_name"], "Kiosk 1");
+    let (status, _, body) = plain(
+        &rig.app,
+        HERE,
+        Method::PUT,
+        "/kiosk/devices/1",
+        Some(json!({"name": "  By the   gate "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let view: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(view["kiosks"][0]["name"], "By the gate");
+    assert_eq!(rig.hello(&[], None).await["kiosk_name"], "By the gate");
+    // A device that is not a kiosk is told no name.
+    let phone = send(
+        &rig.app,
+        PHONE,
+        Method::GET,
+        "/public/hello",
+        None,
+        None,
+        NO,
+    )
+    .await
+    .json();
+    assert_eq!(phone["kiosk_name"], Value::Null);
+    // Markup in a name is only ever text.
+    let (status, _, body) = plain(
+        &rig.app,
+        HERE,
+        Method::PUT,
+        "/kiosk/devices/1",
+        Some(json!({"name": "<img src=x onerror=alert(1)>"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["kiosks"][0]["name"],
+        "<img src=x onerror=alert(1)>"
+    );
+    // An empty name takes it away.
+    let (_, _, body) = plain(
+        &rig.app,
+        HERE,
+        Method::PUT,
+        "/kiosk/devices/1",
+        Some(json!({"name": ""})),
+    )
+    .await;
+    assert!(
+        serde_json::from_str::<Value>(&body).unwrap()["kiosks"][0]
+            .get("name")
+            .is_none()
+    );
+    assert_eq!(rig.hello(&[], None).await["kiosk_name"], "Kiosk 1");
+}
+
+#[tokio::test]
+async fn naming_a_kiosk_is_the_directors_alone_and_needs_a_kiosk_that_is_there() {
+    let rig = rig().await;
+    let (_, session) = rig.sign_in("Ace").await;
+    for (cookie, extra) in [
+        (None, NO.to_vec()),
+        (Some(session.as_str()), NO.to_vec()),
+        (None, vec![]),
+    ] {
+        let answer = send(
+            &rig.app,
+            PHONE,
+            Method::PUT,
+            "/kiosk/devices/1",
+            cookie,
+            Some(json!({"name": "Mine now"})),
+            &extra,
+        )
+        .await;
+        assert!(
+            answer.status == StatusCode::UNAUTHORIZED || answer.status == StatusCode::FORBIDDEN,
+            "{}",
+            answer.status
+        );
+    }
+    assert!(kiosks(&rig.app).await["kiosks"][0].get("name").is_none());
+    let (status, _, body) = plain(
+        &rig.app,
+        HERE,
+        Method::PUT,
+        "/kiosk/devices/99",
+        Some(json!({"name": "Nobody"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body.contains("That kiosk is not on the list any more."),
+        "{body}"
+    );
+    for bad in [
+        json!({}),
+        json!({"name": 5}),
+        json!({"name": null}),
+        json!([]),
+    ] {
+        let (status, _, _) = plain(
+            &rig.app,
+            HERE,
+            Method::PUT,
+            "/kiosk/devices/1",
+            Some(bad.clone()),
+        )
+        .await;
+        assert!(status.is_client_error(), "{bad}: {status}");
+    }
+}

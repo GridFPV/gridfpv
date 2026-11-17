@@ -10,7 +10,6 @@ import {
   myRaces,
   nearnessWords,
   pilotAlert,
-  seatChannel,
   SOON_WITHIN
 } from '../src/lib/pilotView.js';
 import { eventView, heat, lap, race, raceSeat } from './competition.js';
@@ -38,20 +37,6 @@ function queued(over: Parameters<typeof eventView>[0] = {}) {
   });
   return { view, names: buildNames(view.phases, PILOTS) };
 }
-
-describe("a seat's channel", () => {
-  it('is the band and channel with the frequency, or the frequency alone off the usual bands', () => {
-    expect(seatChannel(CHANNELS, 'gate', '0')).toBe('R1 · 5658 MHz');
-    expect(seatChannel(CHANNELS, 'gate', '1')).toBe('5700 MHz');
-  });
-
-  it('is nothing for a seat the timer has not spoken for', () => {
-    expect(seatChannel(CHANNELS, 'gate', '2')).toBeUndefined();
-    expect(seatChannel(CHANNELS, 'other', '0')).toBeUndefined();
-    expect(seatChannel(CHANNELS, 'bench', 'seat-1')).toBeUndefined();
-    expect(seatChannel([], 'gate', '0')).toBeUndefined();
-  });
-});
 
 describe("a pilot's heats", () => {
   it('is empty with no snapshot, and for a pilot who is in none', () => {
@@ -130,10 +115,15 @@ describe("a pilot's heats", () => {
       ],
       queue: ['h1']
     });
-    const names = buildNames(view.phases, PILOTS);
-    expect(myHeats(view, names, 'p-ace', CHANNELS)[0].channel).toBe('R1 · 5658 MHz');
-    expect(myHeats(view, names, 'p-bee', CHANNELS)[0].channel).toBe('5700 MHz');
-    expect(myHeats(view, names, 'p-ace', [])[0].channel).toBeUndefined();
+    const names = buildNames(view.phases, PILOTS, [], [], CHANNELS);
+    const ace = myHeats(view, names, 'p-ace')[0];
+    expect(ace.channel).toBe('R1 · 5658 MHz');
+    // The channel is beside it in full, so the seat is named without one.
+    expect(ace.seatName).toBe('Seat 1');
+    expect(myHeats(view, names, 'p-bee')[0].channel).toBe('5700 MHz');
+    // With nothing from the timer, there is no channel to give.
+    const bare = buildNames(view.phases, PILOTS);
+    expect(myHeats(view, bare, 'p-ace')[0].channel).toBeUndefined();
   });
 
   it('includes a heat that still waits on another, after the ready ones', () => {
@@ -163,7 +153,7 @@ describe("a pilot's heats", () => {
 describe('the alert', () => {
   const alertFor = (id: string, over: Parameters<typeof queued>[0] = {}) => {
     const { view, names } = queued(over);
-    return pilotAlert(myHeats(view, names, id, CHANNELS));
+    return pilotAlert(myHeats(view, names, id));
   };
 
   it('says nothing to a pilot with no heat, or whose next heat is far off', () => {
@@ -202,13 +192,19 @@ describe('the alert', () => {
       ],
       queue: ['h1']
     });
-    const names = buildNames(view.phases, PILOTS, [
-      {
-        timer: { id: 'gate', name: 'Gate', kind: 'Oft', address: '' },
-        status: { connected: true, seats: ['0', '1'] }
-      }
-    ]);
-    expect(pilotAlert(myHeats(view, names, 'p-ace', CHANNELS))?.detail).toBe(
+    const names = buildNames(
+      view.phases,
+      PILOTS,
+      [
+        {
+          timer: { id: 'gate', name: 'Gate', kind: 'Oft', address: '' },
+          status: { connected: true, seats: ['0', '1'] }
+        }
+      ],
+      [],
+      CHANNELS
+    );
+    expect(pilotAlert(myHeats(view, names, 'p-ace'))?.detail).toBe(
       'Heat 1 · Seat 1 · R1 · 5658 MHz'
     );
   });

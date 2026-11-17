@@ -16,10 +16,12 @@ import type {
   PhaseView,
   Pilot,
   PilotId,
+  SeatChannel,
   SeatRef,
   SeatWhoView,
   TimerView
 } from '@gridfpv/types';
+import { channelLabel, formatMhz, frequencyLabel } from './channels.js';
 import { seatLabel, timerName } from './seats.js';
 
 /** Shown for a pilot who is no longer in the pilot directory. */
@@ -39,10 +41,16 @@ export interface Names {
   /** Who is on a seat: a callsign, or where the pilot will come from. */
   who(who: SeatWhoView): string;
   /**
-   * A seat: "Seat 2". `position` is the seat's place in its lineup, counted from 0, used
-   * only when the timer directory cannot say (the timer was removed).
+   * A seat, with the video channel it is on when the timer has said it: "Seat 2 · R2".
+   * The channel is what a pilot needs, so it goes wherever the seat is named. `position`
+   * is the seat's place in its lineup, counted from 0, used only when the timer directory
+   * cannot say (the timer was removed).
    */
   seat(adapter: AdapterId, seat: SeatRef, position?: number): string;
+  /** A seat with no channel: "Seat 2". For a place that shows the channel in full beside it. */
+  seatPlain(adapter: AdapterId, seat: SeatRef, position?: number): string;
+  /** A seat's channel in full: "R2 · 5695 MHz". `undefined` until the timer has said it. */
+  channel(adapter: AdapterId, seat: SeatRef): string | undefined;
   /** What times a seat: the timer's name, "Bench", or "Unknown timer". */
   timer(adapter: AdapterId): string;
   /** The pilot's own colour (`#RRGGBB`), when they have one. For a dot beside the name. */
@@ -83,7 +91,8 @@ export function buildNames(
   phases: readonly PhaseView[],
   pilots: readonly Pilot[],
   timers: readonly TimerView[] = [],
-  classes: readonly Class[] = []
+  classes: readonly Class[] = [],
+  channels: readonly SeatChannel[] = []
 ): Names {
   const phaseLabels = new Map(phases.map((phase) => [phase.def.id, phase.def.label]));
   const callsigns = new Map(pilots.map((pilot) => [pilot.id, pilot.callsign]));
@@ -98,10 +107,23 @@ export function buildNames(
     if ('Pilot' in seat) return pilot(seat.Pilot);
     return placeOf(seat.Waiting.position, phase(seat.Waiting.phase));
   };
-  const seat = (adapter: AdapterId, ref: SeatRef, position?: number): string =>
+  const frequency = new Map(
+    channels.map((entry) => [`${entry.adapter}\u0000${entry.seat}`, entry.freq_mhz])
+  );
+  const seatPlain = (adapter: AdapterId, ref: SeatRef, position?: number): string =>
     seatLabel(timers, adapter, ref, position);
+  const seat = (adapter: AdapterId, ref: SeatRef, position?: number): string => {
+    const mhz = frequency.get(`${adapter}\u0000${ref}`);
+    const plain = seatPlain(adapter, ref, position);
+    // "R2" when the frequency is a named channel, else the frequency itself.
+    return mhz === undefined ? plain : `${plain} · ${channelLabel(mhz) ?? formatMhz(mhz)}`;
+  };
+  const channel = (adapter: AdapterId, ref: SeatRef): string | undefined => {
+    const mhz = frequency.get(`${adapter}\u0000${ref}`);
+    return mhz === undefined ? undefined : frequencyLabel(mhz);
+  };
   const timer = (adapter: AdapterId): string => timerName(timers, adapter);
   const colors = new Map(pilots.map((p) => [p.id, p.color]));
   const pilotColor = (id: PilotId): string | undefined => colors.get(id);
-  return { phase, pilot, klass, who, seat, timer, pilotColor };
+  return { phase, pilot, klass, who, seat, seatPlain, channel, timer, pilotColor };
 }

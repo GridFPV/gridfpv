@@ -23,7 +23,7 @@
    */
   import { untrack } from 'svelte';
   import { Button, Card, Input } from '@gridfpv/components';
-  import type { PublicEventName, PublicHello, PublicPilot, SeatChannel } from '@gridfpv/types';
+  import type { PublicEventName, PublicHello, PublicPilot } from '@gridfpv/types';
   import { isKioskHash } from '../lib/kiosk.js';
   import { codeInHash, codeProblem, tidyCode } from '../lib/pilotAccess.js';
   import { EventLive } from '../lib/eventLive.svelte.js';
@@ -34,8 +34,6 @@
 
   /** How often to ask which event is open, in milliseconds. */
   const EVENT_POLL_MS = 5000;
-  /** How often to ask which channel each seat is on. They change rarely. */
-  const CHANNEL_POLL_MS = 20_000;
   /** The page address a director signs in at from another device. */
   const DIRECTOR_HASH = '#/director';
 
@@ -173,31 +171,6 @@
     void sendCode(scanned);
   });
 
-  // Which channel each seat is on. Asked for while an event is open, and again when
-  // another one is. A failure keeps what was known: channels are a help, not the race.
-  let channels = $state.raw<SeatChannel[]>([]);
-  $effect(() => {
-    if (openId === undefined) {
-      channels = [];
-      return;
-    }
-    let stopped = false;
-    const ask = async () => {
-      try {
-        const found = await source.getChannels();
-        if (!stopped) channels = found;
-      } catch {
-        // Keep the last answer.
-      }
-    };
-    void ask();
-    const timer = setInterval(ask, CHANNEL_POLL_MS);
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
-  });
-
   // ── The director, at `#/director` ──────────────────────────────────────────
   let token = $state('');
   let busy = $state(false);
@@ -222,7 +195,14 @@
 </script>
 
 {#if kiosk}
-  <KioskPage {source} isKiosk={hello.kiosk} {eventName} {live} {channels} {offline} />
+  <KioskPage
+    {source}
+    isKiosk={hello.kiosk}
+    kioskName={hello.kiosk_name}
+    {eventName}
+    {live}
+    {offline}
+  />
 {:else}
   <main class="visitor">
     <header class="top">
@@ -323,7 +303,6 @@
           <SpectatorView
             {live}
             {pilot}
-            {channels}
             signup={pilot && {
               take: (heat, seat) => source.takeSpot(heat, seat).then(() => live?.reload()),
               next: (phase, seat) => source.takeNextSpot(phase, seat).then(() => live?.reload()),

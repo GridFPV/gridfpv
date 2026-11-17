@@ -10,7 +10,7 @@
    * Every change is one command. The sheet shown afterwards is the Director's.
    */
   import { Badge, Banner, Button, Card, Dialog } from '@gridfpv/components';
-  import type { Command, PilotId, SeatChannel, SignupHeatView } from '@gridfpv/types';
+  import type { Command, PilotId, SignupHeatView } from '@gridfpv/types';
   import type { Names } from '../lib/names.js';
   import {
     heatStateWords,
@@ -23,13 +23,11 @@
   let {
     phase,
     names,
-    channels = [],
     send,
     onrules
   }: {
     phase: SignupPhase;
     names: Names;
-    channels?: readonly SeatChannel[];
     /** Send one command. Rejects with the Director's reason when it is refused. */
     send: (command: Command) => Promise<unknown>;
     /** Open the rules dialog. */
@@ -38,7 +36,7 @@
 
   const signup = $derived(phase.signup);
   const rules = $derived(signup.rules);
-  const seats = $derived(seatHeadings(rules, names, channels));
+  const seats = $derived(seatHeadings(rules, names));
   const editable = $derived(!phase.locked);
 
   let busy = $state(false);

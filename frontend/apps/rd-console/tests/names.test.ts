@@ -135,3 +135,59 @@ describe('buildNames: seats and timers', () => {
     expect(bare.timer('gate-x1y2')).toBe(UNKNOWN_TIMER);
   });
 });
+
+describe("a seat's channel in its name", () => {
+  const timers = [
+    {
+      timer: { id: 'gate', name: 'Gate', kind: 'Oft' as const, address: '' },
+      status: { connected: true, seats: ['0', '1', '2'] }
+    }
+  ];
+  const names = buildNames(
+    [],
+    [],
+    timers,
+    [],
+    [
+      { adapter: 'gate', seat: '0', freq_mhz: 5658 },
+      { adapter: 'gate', seat: '1', freq_mhz: 5700 }
+    ]
+  );
+
+  it('goes after the seat: the band and channel, or the frequency off the usual bands', () => {
+    expect(names.seat('gate', '0')).toBe('Seat 1 · R1');
+    expect(names.seat('gate', '1')).toBe('Seat 2 · 5700 MHz');
+  });
+
+  it('is left off a seat the timer has not spoken for', () => {
+    expect(names.seat('gate', '2')).toBe('Seat 3');
+    expect(names.seat('bench', 'seat-1', 0)).toBe('Seat 1');
+    expect(names.seat('other', '0', 4)).toBe('Seat 5');
+    expect(buildNames([], [], timers).seat('gate', '0')).toBe('Seat 1');
+  });
+
+  it('seatPlain never has it, and channel gives it in full', () => {
+    expect(names.seatPlain('gate', '0')).toBe('Seat 1');
+    expect(names.channel('gate', '0')).toBe('R1 · 5658 MHz');
+    expect(names.channel('gate', '1')).toBe('5700 MHz');
+    expect(names.channel('gate', '2')).toBeUndefined();
+    expect(names.channel('other', '0')).toBeUndefined();
+    expect(names.channel('bench', 'seat-1')).toBeUndefined();
+  });
+
+  it('a seat on another timer with the same number keeps its own channel', () => {
+    const two = buildNames(
+      [],
+      [],
+      [],
+      [],
+      [
+        { adapter: 'a', seat: '0', freq_mhz: 5658 },
+        { adapter: 'b', seat: '0', freq_mhz: 5695 }
+      ]
+    );
+    expect(two.channel('a', '0')).toBe('R1 · 5658 MHz');
+    expect(two.channel('b', '0')).toBe('R2 · 5695 MHz');
+    expect(two.seat('b', '0', 0)).toBe('Seat 1 · R2');
+  });
+});

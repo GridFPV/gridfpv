@@ -116,14 +116,16 @@ The **director** sends `POST /events/{id}/commands` with `{"Signup": …}`:
 
 | Route | Who | Does |
 |---|---|---|
-| `GET /kiosk` | Director | `{codes: [..], kiosks: [{number, set_up_at}]}`: the kiosk codes not used yet, and the tablets set up |
+| `GET /kiosk` | Director | `{codes: [..], kiosks: [{number, set_up_at, name?}]}`: the kiosk codes not used yet, and the tablets set up |
 | `POST /kiosk/codes` | Director | Make one more kiosk code (eight letters and digits). Answers the list. `409` when twelve are already waiting |
 | `DELETE /kiosk/codes/{code}` | Director | Cancel a code that has not been used. Answers the list |
+| `PUT /kiosk/devices/{number}` | Director | `{name}`: name a kiosk (trimmed, 40 characters at most; empty takes the name away). Answers the list. `404` for a kiosk that is not there |
 | `DELETE /kiosk/devices/{number}` | Director | Remove a kiosk: its tablet stops being one. Answers the list |
 | `POST /public/pilot/kiosk/device` | Anyone | `{code}`: a kiosk code. A right one is **used up**, sets the `gridfpv_kiosk` cookie (a token of that tablet's own, `HttpOnly`) and answers `204`. A wrong or used one answers `401`; wrong ones are counted with wrong pilot codes |
 | `DELETE /public/pilot/kiosk/device` | Anyone | This device stops being a kiosk. `204` always |
 
-`GET /public/hello` says `kiosk: true` to a tablet that is set up.
+`GET /public/hello` says `kiosk: true` to a tablet that is set up, with `kiosk_name`: the
+name the director gave it, or "Kiosk 2".
 
 On a kiosk, `POST /public/pilot/kiosk` with `{code}` checks a **pilot's** code like a
 sign-in (same `401`, same count of wrong codes, same `429`) but sets no cookie and leaves

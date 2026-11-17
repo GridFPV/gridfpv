@@ -60,6 +60,17 @@ function open(
       kiosks = { ...kiosks, codes: kiosks.codes.filter((kept) => kept !== code) };
       return kiosks;
     }),
+    renameKiosk: vi.fn(async (number: number, name: string): Promise<KioskView | undefined> => {
+      kiosks = {
+        ...kiosks,
+        kiosks: kiosks.kiosks.map((kept) => {
+          if (kept.number !== number) return kept;
+          const { name: _old, ...rest } = kept;
+          return name === '' ? rest : { ...rest, name };
+        })
+      };
+      return kiosks;
+    }),
     removeKiosk: vi.fn(async (number: number): Promise<KioskView | undefined> => {
       kiosks = { ...kiosks, kiosks: kiosks.kiosks.filter((kept) => kept.number !== number) };
       return kiosks;
@@ -425,5 +436,80 @@ describe('NetworkPage: kiosks', () => {
     const { session } = open(OFF);
     await fireEvent.click(await screen.findByRole('button', { name: 'New kiosk code' }));
     await waitFor(() => expect(session.newKioskCode).toHaveBeenCalledOnce());
+  });
+
+  describe('naming a kiosk', () => {
+    const NAMED: KioskView = {
+      codes: [],
+      kiosks: [
+        { number: 1, set_up_at: 1_794_800_000 },
+        { number: 2, set_up_at: 1_794_800_100, name: 'By the gate' }
+      ]
+    };
+    const nameBox = () => screen.getByLabelText('Name') as HTMLInputElement;
+
+    it('shows a name beside the kiosk that has one, as text whatever is in it', async () => {
+      open(ON, HELLO, {
+        codes: [],
+        kiosks: [{ number: 1, set_up_at: 1, name: '<img src=x onerror=alert(1)> & co' }]
+      });
+      expect((await screen.findByTestId('kiosk-name')).textContent).toBe(
+        '<img src=x onerror=alert(1)> & co'
+      );
+      expect(document.querySelector('img')).toBeNull();
+    });
+
+    it('names a kiosk that has none', async () => {
+      const { session } = open(ON, HELLO, NAMED);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Name kiosk 1' }));
+      const dialog = screen.getByRole('dialog');
+      expect(within(dialog).getByRole('heading')).toHaveTextContent('Name kiosk 1');
+      expect(nameBox().value).toBe('');
+      await fireEvent.input(nameBox(), { target: { value: '  Pit lane  ' } });
+      await fireEvent.submit(within(dialog).getByRole('form', { name: 'Kiosk name' }));
+      await waitFor(() => expect(session.renameKiosk).toHaveBeenCalledWith(1, 'Pit lane'));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(screen.getAllByTestId('kiosk-name').map((el) => el.textContent)).toEqual([
+        'Pit lane',
+        'By the gate'
+      ]);
+    });
+
+    it('opens on the name it has, and an empty name takes it away', async () => {
+      const { session } = open(ON, HELLO, NAMED);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Name kiosk 2' }));
+      expect(nameBox().value).toBe('By the gate');
+      expect(nameBox()).toHaveAttribute('maxlength', '40');
+      await fireEvent.input(nameBox(), { target: { value: '   ' } });
+      await fireEvent.submit(screen.getByRole('form', { name: 'Kiosk name' }));
+      await waitFor(() => expect(session.renameKiosk).toHaveBeenCalledWith(2, ''));
+      await waitFor(() => expect(screen.queryByTestId('kiosk-name')).toBeNull());
+    });
+
+    it('cancel sends nothing', async () => {
+      const { session } = open(ON, HELLO, NAMED);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Name kiosk 1' }));
+      await fireEvent.input(nameBox(), { target: { value: 'Never' } });
+      await fireEvent.click(
+        within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' })
+      );
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(session.renameKiosk).not.toHaveBeenCalled();
+    });
+
+    it("stays open with the Director's reason when it refuses", async () => {
+      const { session } = open(ON, HELLO, NAMED);
+      session.renameKiosk.mockRejectedValueOnce(
+        new Error('That kiosk is not on the list any more.')
+      );
+      await fireEvent.click(await screen.findByRole('button', { name: 'Name kiosk 1' }));
+      await fireEvent.input(nameBox(), { target: { value: 'Gone' } });
+      await fireEvent.submit(screen.getByRole('form', { name: 'Kiosk name' }));
+      const dialog = screen.getByRole('dialog');
+      expect(
+        await within(dialog).findByText('That kiosk is not on the list any more.')
+      ).toBeVisible();
+      expect(nameBox().value).toBe('Gone');
+    });
   });
 });

@@ -17,7 +17,7 @@
    * anything: a spectator can only look.
    */
   import { Badge, Button, Tabs, formatMicros } from '@gridfpv/components';
-  import type { PhaseId, PublicPilot, RaceId, RaceView, SeatChannel } from '@gridfpv/types';
+  import type { PhaseId, PublicPilot, RaceId, RaceView } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import { ordinal } from '../lib/names.js';
   import { consecutiveLaps, overlayClock, overlayRows } from '../lib/overlay.js';
@@ -29,16 +29,16 @@
     resultPhases,
     resultTable
   } from '../lib/results.js';
-  import { myHeats, myRaces, nearnessWords, pilotAlert, seatChannel } from '../lib/pilotView.js';
+  import { myHeats, myRaces, nearnessWords, pilotAlert } from '../lib/pilotView.js';
+  import { currentRace } from '../lib/phases.js';
   import { signupPhases } from '../lib/signup.js';
-  import { missingNames, nowShowing, raceWord, upcomingHeats } from '../lib/spectator.js';
+  import { currentRaceView, missingNames, raceWord, upcomingHeats } from '../lib/spectator.js';
   import PilotSignup, { type SignupActions } from './PilotSignup.svelte';
   import RaceLaps from './RaceLaps.svelte';
 
   let {
     live,
     pilot = undefined,
-    channels = [],
     buzz = (pattern) => navigator.vibrate?.(pattern),
     signup = undefined
   }: {
@@ -46,8 +46,6 @@
     signup?: SignupActions | undefined;
     /** The pilot this phone is signed in as. Left out for a spectator. */
     pilot?: PublicPilot | undefined;
-    /** Which video channel each seat is on, as far as the timers have said. */
-    channels?: readonly SeatChannel[];
     /** Make the phone buzz. A test passes its own. */
     buzz?: (pattern: number[]) => void;
     live: Pick<
@@ -74,7 +72,6 @@
 
   const view = $derived(live.view);
   const names = $derived(live.names);
-  const showing = $derived(nowShowing(view));
   const upcoming = $derived(upcomingHeats(view, names));
 
   // The names a visitor is given are only the ones the event uses. When the snapshot
@@ -86,21 +83,33 @@
     if (missing.timers) void live.reloadTimers();
   });
 
-  // ── The race on top ────────────────────────────────────────────────────────
-  const heat = $derived(
-    showing ? view?.phases.find((phase) => phase.def.id === showing.race.heat) : undefined
-  );
-  const runLength = $derived(consecutiveLaps(heat?.format));
-  const rows = $derived(showing ? overlayRows(showing.race, names, runLength) : []);
-  /** The Director's clock, read again a few times a second while a race is on. */
+  // ── The current race ───────────────────────────────────────────────────────
+  /** The Director's clock. Read often while a race is on, and once a second otherwise. */
   let now = $state(0);
+  const onNow = $derived(view ? currentRace(view)?.race : undefined);
   $effect(() => {
     now = live.nowMicros();
-    if (!showing?.live) return;
-    const timer = setInterval(() => (now = live.nowMicros()), 200);
+    const timer = setInterval(() => (now = live.nowMicros()), onNow === undefined ? 1000 : 200);
     return () => clearInterval(timer);
   });
-  const clock = $derived(showing?.live ? overlayClock(showing.race, now) : undefined);
+  /** When this page saw the race that was on go away: it was saved, or thrown out. */
+  let decidedAt = $state<number | undefined>(undefined);
+  let wasOn: RaceId | undefined;
+  $effect(() => {
+    const id = onNow;
+    if (wasOn !== undefined && id === undefined) decidedAt = live.nowMicros();
+    wasOn = id;
+  });
+  const current = $derived(currentRaceView(view, names, now, decidedAt));
+  /** The race on the tab, when it is showing one and not the heat that is up next. */
+  const shown = $derived(current && current.kind !== 'next' ? current.race : undefined);
+  const heat = $derived(
+    shown ? view?.phases.find((phase) => phase.def.id === shown.heat) : undefined
+  );
+  const runLength = $derived(consecutiveLaps(heat?.format));
+  const rows = $derived(shown ? overlayRows(shown, names, runLength) : []);
+  /** The clock is always there: counting for a race, its last time for a result, zero before. */
+  const clock = $derived(overlayClock(shown, now));
 
   // ── Results ────────────────────────────────────────────────────────────────
   const choices = $derived(view ? resultPhases(view) : []);
@@ -155,7 +164,7 @@
   );
 
   // ── The pilot's own ────────────────────────────────────────────────────────
-  const mine = $derived(pilot ? myHeats(view, names, pilot.id, channels) : []);
+  const mine = $derived(pilot ? myHeats(view, names, pilot.id) : []);
   const flown = $derived(pilot ? myRaces(view, names, pilot.id) : []);
   const alert = $derived(pilotAlert(mine));
   // Buzz once each time the alert is about something new: closer, or another heat.
@@ -184,7 +193,7 @@
 
   const tabs = $derived([
     ...(pilot ? [{ id: 'me', label: 'Me', badge: mine.length > 0 ? mine.length : undefined }] : []),
-    { id: 'now', label: showing?.live ? 'On now' : 'Last race' },
+    { id: 'now', label: 'Current race' },
     { id: 'next', label: 'Up next', badge: upcoming.length > 0 ? upcoming.length : undefined },
     // Only for a pilot, and only when there is something to sign up for.
     ...(pilot && sheets.length > 0 ? [{ id: 'signup', label: 'Sign up' }] : []),
@@ -287,50 +296,71 @@
     {/if}
 
     {#if tab === 'now'}
-      <section aria-label={showing?.live ? 'On now' : 'Last race'}>
-        {#if !showing}
+      <section aria-label="Current race">
+        {#if !current}
           <p class="empty" data-testid="no-race">No race yet.</p>
         {:else}
           <header class="race">
-            <h2 data-testid="race-heat">{names.phase(showing.race.heat)}</h2>
+            <h2 data-testid="race-heat">
+              {current.kind === 'next' ? current.heat.name : names.phase(current.race.heat)}
+            </h2>
             <span class="word">
-              <Badge tone={showing.live ? 'success' : 'neutral'}>
-                <span data-testid="race-word">{raceWord(showing.race)}</span>
+              <Badge tone={current.kind === 'race' ? 'success' : 'neutral'}>
+                <span data-testid="race-word">
+                  {current.kind === 'next' ? 'Up next' : raceWord(current.race)}
+                </span>
               </Badge>
             </span>
-            {#if clock}
-              <span class="clock" role="timer" data-testid="race-clock">{clock.text}</span>
-            {/if}
+            <span class="clock" role="timer" data-testid="race-clock">{clock.text}</span>
           </header>
-          <table aria-label="Pilots in this race">
-            <thead>
-              <tr>
-                <th scope="col"><span class="visually-hidden">Place</span></th>
-                <th scope="col">Pilot</th>
-                <th scope="col" class="num">Laps</th>
-                <th scope="col" class="num">Last</th>
-                <th scope="col" class="num">{runLength ? `Best ${runLength}` : 'Best'}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each rows as row (row.key)}
-                <tr class:me={pilot !== undefined && row.pilot === pilot.id}>
-                  <td class="place">{row.place === undefined ? '' : ordinal(row.place)}</td>
-                  <th scope="row">
-                    {#if row.color}
-                      <span class="dot" style:background={row.color} aria-hidden="true"></span>
-                    {/if}
-                    {row.name}
-                  </th>
-                  <td class="num">{row.laps}</td>
-                  <td class="num">{time(row.lastLapMicros)}</td>
-                  <td class="num">
-                    {time(runLength ? row.bestRun?.totalMicros : row.bestLapMicros)}
-                  </td>
+          {#if current.kind === 'next'}
+            <table aria-label="Pilots in this race">
+              <thead>
+                <tr>
+                  <th scope="col">Seat</th>
+                  <th scope="col">Pilot</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {#each current.heat.seats as seat (`${seat.adapter}\u0000${seat.seat}`)}
+                  <tr class:me={pilot !== undefined && seat.pilot === pilot.id}>
+                    <td class="seat-cell">{seat.seatName}</td>
+                    <th scope="row">{seat.who}</th>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {:else}
+            <table aria-label="Pilots in this race">
+              <thead>
+                <tr>
+                  <th scope="col"><span class="visually-hidden">Place</span></th>
+                  <th scope="col">Pilot</th>
+                  <th scope="col" class="num">Laps</th>
+                  <th scope="col" class="num">Last</th>
+                  <th scope="col" class="num">{runLength ? `Best ${runLength}` : 'Best'}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each rows as row (row.key)}
+                  <tr class:me={pilot !== undefined && row.pilot === pilot.id}>
+                    <td class="place">{row.place === undefined ? '' : ordinal(row.place)}</td>
+                    <th scope="row">
+                      {#if row.color}
+                        <span class="dot" style:background={row.color} aria-hidden="true"></span>
+                      {/if}
+                      {row.name}
+                    </th>
+                    <td class="num">{row.laps}</td>
+                    <td class="num">{time(row.lastLapMicros)}</td>
+                    <td class="num">
+                      {time(runLength ? row.bestRun?.totalMicros : row.bestLapMicros)}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
         {/if}
       </section>
     {:else if tab === 'next'}
@@ -347,10 +377,6 @@
                     <li class:me={pilot !== undefined && seat.pilot === pilot.id}>
                       <span class="seat">{seat.seatName}</span>
                       <span class="who">{seat.who}</span>
-                      {#if seatChannel(channels, seat.adapter, seat.seat)}
-                        <span class="channel">{seatChannel(channels, seat.adapter, seat.seat)}</span
-                        >
-                      {/if}
                     </li>
                   {/each}
                 </ul>
@@ -361,7 +387,7 @@
       </section>
     {:else if tab === 'signup' && pilot}
       <section aria-label="Sign up">
-        <PilotSignup phases={sheets} {names} {pilot} {channels} actions={signup} />
+        <PilotSignup phases={sheets} {names} {pilot} actions={signup} />
       </section>
     {:else if tab === 'results'}
       <section aria-label="Results">
@@ -604,6 +630,10 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
+  .seat-cell {
+    color: var(--gf-text-muted);
+    white-space: nowrap;
+  }
   .place {
     width: 2.5rem;
     color: var(--gf-text-muted);
@@ -668,13 +698,6 @@
   tr.me th,
   li.me .who {
     color: var(--gf-accent);
-  }
-  .channel {
-    margin-left: auto;
-    color: var(--gf-text-muted);
-    font-family: var(--gf-font-mono);
-    font-size: var(--gf-font-size-xs);
-    white-space: nowrap;
   }
   .alert {
     display: grid;

@@ -65,7 +65,7 @@ function open(hello: PublicHello = HELLO, event: PublicEvent = hello.event ? NIG
       subscribeChanges: vi.fn(() => stop)
     }),
     getEvent: vi.fn(async () => event),
-    getChannels: vi.fn(async () => [{ adapter: 'bench', seat: 'seat-1', freq_mhz: 5658 }]),
+    listChannels: vi.fn(async () => [{ adapter: 'bench', seat: 'seat-1', freq_mhz: 5658 }]),
     takeSpot: vi.fn(async () => {}),
     takeNextSpot: vi.fn(async () => {}),
     leaveSpot: vi.fn(async () => {}),
@@ -487,7 +487,7 @@ describe('VisitorPage: a pilot signs in', () => {
       source: {
         ...fakeLiveSession(racing()),
         getEvent: vi.fn(async () => NIGHT),
-        getChannels: vi.fn(async () => []),
+        listChannels: vi.fn(async () => []),
         takeSpot: vi.fn(async () => {}),
         takeNextSpot: vi.fn(async () => {}),
         leaveSpot: vi.fn(async () => {}),
@@ -548,17 +548,17 @@ describe('VisitorPage: what a signed-in pilot gets', () => {
     const alert = await screen.findByTestId('pilot-alert');
     expect(alert).toHaveTextContent('You are flying now');
     await waitFor(() => expect(alert).toHaveTextContent('R1 · 5658 MHz'));
-    expect(source.getChannels).toHaveBeenCalled();
+    expect(source.listChannels).toHaveBeenCalled();
   });
 
   it('asks for the channels again now and then, and keeps the last answer when that fails', async () => {
     const { source } = open({ ...HELLO, pilot: { id: 'p-ace', callsign: 'Ace' } });
     const alert = await screen.findByTestId('pilot-alert');
     await waitFor(() => expect(alert).toHaveTextContent('R1 · 5658 MHz'));
-    const asked = vi.mocked(source.getChannels).mock.calls.length;
-    vi.mocked(source.getChannels).mockRejectedValue(new Error('Failed to fetch'));
+    const asked = vi.mocked(source.listChannels).mock.calls.length;
+    vi.mocked(source.listChannels).mockRejectedValue(new Error('Failed to fetch'));
     await vi.advanceTimersByTimeAsync(21_000);
-    expect(vi.mocked(source.getChannels).mock.calls.length).toBeGreaterThan(asked);
+    expect(vi.mocked(source.listChannels).mock.calls.length).toBeGreaterThan(asked);
     expect(screen.getByTestId('pilot-alert')).toHaveTextContent('R1 · 5658 MHz');
   });
 
@@ -566,7 +566,7 @@ describe('VisitorPage: what a signed-in pilot gets', () => {
     const { event: _none, ...noEvent } = HELLO;
     const { source } = open(noEvent, {});
     await vi.advanceTimersByTimeAsync(25_000);
-    expect(source.getChannels).not.toHaveBeenCalled();
+    expect(source.listChannels).not.toHaveBeenCalled();
   });
 
   it('signing out takes the Me tab and the alert away', async () => {
@@ -593,7 +593,7 @@ describe('VisitorPage: signing up for a heat', () => {
         listTimers: vi.fn(async () => [GATE])
       }),
       getEvent: vi.fn(async () => NIGHT),
-      getChannels: vi.fn(async () => []),
+      listChannels: vi.fn(async () => []),
       takeSpot: vi.fn(async () => {}),
       takeNextSpot: vi.fn(async () => {}),
       leaveSpot: vi.fn(async () => {}),
@@ -618,7 +618,7 @@ describe('VisitorPage: signing up for a heat', () => {
     expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Sign-up for Qualifying' })).toBeNull();
     expect(screen.getAllByRole('tab').map((el) => el.textContent?.trim())).toEqual([
-      'Last race',
+      'Current race',
       'Up next',
       'Results'
     ]);
@@ -667,7 +667,10 @@ describe('VisitorPage: signing up for a heat', () => {
     expect(screen.queryByRole('button', { name: /^Take/ })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Sign-up for Qualifying' })).toBeNull();
     // The page falls back to the race, not to nothing.
-    expect(screen.getByRole('tab', { name: 'Last race' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Current race' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
   });
 
   it('opened as a kiosk it is the kiosk page, with none of the visitor page', async () => {

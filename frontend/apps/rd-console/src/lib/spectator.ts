@@ -46,7 +46,7 @@ import { BENCH_ADAPTER } from './seats.js';
 export interface PublicSource extends LiveSession {
   getEvent(): Promise<PublicEvent>;
   /** Which video channel each seat is on. */
-  getChannels(): Promise<SeatChannel[]>;
+  listChannels(): Promise<SeatChannel[]>;
   /**
    * What a signed-in pilot does for themselves (§11.5). Who the pilot is comes from their
    * sign-in. Each rejects with the Director's reason when the rules do not allow it.
@@ -76,7 +76,7 @@ const refuse = (): Promise<never> => Promise.reject(new Error(NOT_FOR_VISITORS))
 export function publicSource(baseUrl: string): PublicSource {
   return {
     getEvent: () => getPublicEvent(baseUrl),
-    getChannels: () => listPublicChannels(baseUrl),
+    listChannels: () => listPublicChannels(baseUrl),
     takeSpot: (heat, seat, kiosk) => takeSpot(baseUrl, heat, seat, { kiosk }),
     takeNextSpot: (phase, seat, kiosk) => takeNextSpot(baseUrl, phase, seat, { kiosk }),
     leaveSpot: (heat, kiosk) => leaveSpot(baseUrl, heat, { kiosk }),
@@ -99,24 +99,50 @@ export function publicSource(baseUrl: string): PublicSource {
   };
 }
 
-/** The race the page shows on top. */
-export interface NowShowing {
-  race: RaceView;
-  /** True while it is counting down, running, or stopped and not yet saved. */
-  live: boolean;
-}
+/**
+ * How long a result stays on the Current race tab once the race is saved, before the tab
+ * moves on to the heat that is up next: two minutes. The Results tab has it for good.
+ */
+export const RESULT_STAYS_MICROS = 120_000_000;
 
 /**
- * The race to show: the one that is on, or else the last one that was saved. Unlike the
- * video overlay, a result stays up until the next race starts: someone who looks at their
- * phone five minutes after a heat still wants to see how it ended.
+ * What the Current race tab shows. One thing at a time, always with a clock:
+ *
+ * - `race`: a race that is counting down, running, or stopped and not yet saved.
+ * - `result`: the race that was just saved, for {@link RESULT_STAYS_MICROS}.
+ * - `next`: the heat that is up next, with who is in it.
  */
-export function nowShowing(view: EventView | undefined): NowShowing | undefined {
+export type CurrentRace =
+  | { kind: 'race'; race: RaceView }
+  | { kind: 'result'; race: RaceView }
+  | { kind: 'next'; heat: UpcomingHeat };
+
+/**
+ * What to show as the current race at `now` (Director clock, microseconds).
+ *
+ * The Director does not know which heat the director has on the Run page, so "current" is
+ * worked out from what has happened: a race that is on wins; then the result just saved,
+ * for a while; then the first heat in the run order. With nothing coming up, the last
+ * result stays. `decidedAt` is when this page saw the race end, which is the best it has
+ * for when it was saved; a page opened later goes by when the race stopped.
+ */
+export function currentRaceView(
+  view: EventView | undefined,
+  names: Names,
+  now: number,
+  decidedAt?: number
+): CurrentRace | undefined {
   if (!view) return undefined;
-  const current = currentRace(view);
-  if (current) return { race: current, live: true };
+  const on = currentRace(view);
+  if (on) return { kind: 'race', race: on };
   const result = lastResult(view);
-  return result ? { race: result, live: false } : undefined;
+  const next = upcomingHeats(view, names)[0];
+  if (result) {
+    const since = Math.max(result.stopped_at ?? Number.NEGATIVE_INFINITY, decidedAt ?? 0);
+    const fresh = Number.isFinite(since) && since > 0 && now - since < RESULT_STAYS_MICROS;
+    if (fresh || !next) return { kind: 'result', race: result };
+  }
+  return next ? { kind: 'next', heat: next } : undefined;
 }
 
 /** A heat that is coming up. */

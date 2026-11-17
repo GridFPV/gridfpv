@@ -187,6 +187,16 @@ test('the director sets a tablet up with a code that works once, and can remove 
     await expect(page.getByTestId('kiosk-code')).toHaveCount(0, { timeout: 15_000 });
     await expect(page.getByRole('list', { name: 'Kiosks set up' })).toContainText('Kiosk 1');
 
+    // ── The director names it, and the tablet shows the name while it waits ──────────────
+    await page.getByRole('button', { name: 'Name kiosk 1' }).click();
+    const naming = page.getByRole('dialog');
+    await naming.getByLabel('Name', { exact: true }).fill('By the gate');
+    await naming.getByRole('button', { name: 'Save' }).click();
+    await expect(naming).toHaveCount(0);
+    await expect(page.getByTestId('kiosk-name')).toHaveText('By the gate');
+    await kiosk.reload();
+    await expect(kiosk.getByTestId('kiosk-name')).toHaveText('By the gate', { timeout: 15_000 });
+
     // ── The same code on a second tablet does nothing ────────────────────────────────────
     const second = await other.newPage();
     await second.goto(`${address}#/kiosk`);

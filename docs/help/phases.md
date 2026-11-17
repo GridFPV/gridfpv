@@ -102,7 +102,11 @@ none.
 
 On their phone, a **Sign up** tab. They press **Take** on a free seat, **Leave** on their
 own, or **Next free** for the first open spot on a seat. A seat they cannot take says why:
-no runs left, the heat is closed, sign-up is closed.
+no runs left, or sign-up is closed.
+
+Pilots only see heats that are still open. A heat you have closed, started or flown drops
+off their list. A full heat stays on it, in case someone leaves. You always see every heat.
+Spectators do not see sign-up at all.
 
 ### Turning it off
 

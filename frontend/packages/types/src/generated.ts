@@ -68,6 +68,7 @@ export type * from '@bindings/Hello';
 export type * from '@bindings/JoinTokenResponse';
 export type * from '@bindings/KioskDeviceRequest';
 export type * from '@bindings/KioskDeviceView';
+export type * from '@bindings/KioskNameRequest';
 export type * from '@bindings/KioskPassView';
 export type * from '@bindings/KioskView';
 export type * from '@bindings/LapView';

@@ -46,7 +46,6 @@ function open(
     isKiosk: over.isKiosk ?? true,
     eventName: 'eventName' in over ? over.eventName : 'Friday Night Whoops',
     live: 'eventName' in over && over.eventName === undefined ? undefined : live,
-    channels: [],
     offline: over.offline ?? false
   };
   const page = render(KioskPage, props);
@@ -147,6 +146,34 @@ describe('KioskPage: waiting for a pilot', () => {
     expect(screen.queryByRole('tablist')).toBeNull();
     expect(document.body.textContent).not.toContain('Ace');
     expect(screen.getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Go']);
+  });
+
+  it('shows what the director calls it while it waits, and not while a pilot is at it', async () => {
+    const { page, props } = open();
+    expect(screen.queryByTestId('kiosk-name')).toBeNull();
+    await page.rerender({ ...props, kioskName: '<b>By the gate</b>' });
+    // As text, whatever is in it.
+    expect(screen.getByTestId('kiosk-name').textContent).toBe('<b>By the gate</b>');
+    await beeSignsIn();
+    expect(screen.queryByTestId('kiosk-name')).toBeNull();
+  });
+
+  it('a tablet that is not set up shows no kiosk name', () => {
+    render(KioskPage, {
+      source: {
+        kioskSetUp: vi.fn(),
+        kioskIn: vi.fn(),
+        kioskDone: vi.fn(),
+        takeSpot: vi.fn(),
+        takeNextSpot: vi.fn(),
+        leaveSpot: vi.fn()
+      },
+      isKiosk: false,
+      kioskName: 'Leftover',
+      eventName: 'Friday Night Whoops',
+      live: undefined
+    });
+    expect(screen.queryByTestId('kiosk-name')).toBeNull();
   });
 
   it('with no event open it says so and has no code box', () => {

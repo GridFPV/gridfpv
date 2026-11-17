@@ -200,13 +200,13 @@ test("a pilot's phone counts them down to their race and then shows their laps",
     const heat3 = page.getByRole('region', { name: 'Up next' }).getByRole('listitem', {
       name: 'Heat 3'
     });
-    await expect(heat3.locator('li').filter({ hasText: 'Cat' })).toContainText('R2 · 5695 MHz');
+    // The channel is part of the seat's name, wherever a seat is named.
+    await expect(heat3.locator('li').filter({ hasText: 'Cat' })).toContainText(/Seat \d · R2/);
     await me.click();
 
     // ── Heat 1 runs: still one heat away. It is saved: next. ─────────────────────────────
     await command({ StartRace: { heat: 'heat-1' } });
-    await expect(page.getByRole('tab', { name: 'On now' })).toBeVisible({ timeout: 10_000 });
-    await expect(alert).toContainText('You are 1 heat away');
+    await expect(alert).toContainText('You are 1 heat away', { timeout: 10_000 });
     await command({ StopRace: { race: 'heat-1#1' } });
     await command({ SaveRace: { race: 'heat-1#1' } });
     await expect(alert).toContainText('You are next', { timeout: 10_000 });
@@ -220,7 +220,7 @@ test("a pilot's phone counts them down to their race and then shows their laps",
     await expect(mine.nth(0)).toContainText('On now');
     await expect.poll(async () => (await buzzes()).length).toBe(3);
     // On the race tab, the pilot's own row is the marked one.
-    await page.getByRole('tab', { name: 'On now' }).click();
+    await page.getByRole('tab', { name: 'Current race' }).click();
     const race = page.getByRole('table', { name: 'Pilots in this race' });
     await expect(race.locator('tbody tr.me')).toHaveCount(1);
     await expect(race.locator('tbody tr.me')).toContainText('Ace');

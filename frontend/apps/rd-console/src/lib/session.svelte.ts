@@ -40,6 +40,7 @@ import {
   deleteClass,
   setClassHidden,
   listTimers,
+  listPublicChannels,
   listDiscoveredTimers,
   createTimer,
   deleteTimer,
@@ -71,6 +72,7 @@ import {
   newKioskCode,
   cancelKioskCode,
   removeKiosk,
+  renameKiosk,
   getPublicHello,
   getPilotAccess,
   resetPilotCode,
@@ -130,6 +132,7 @@ import type {
   RaceSignal,
   RenderRequest,
   SavedFormat,
+  SeatChannel,
   SeatProfile,
   SeatProfileRequest,
   Timer,
@@ -216,6 +219,7 @@ const realApi = {
   deleteClass,
   setClassHidden,
   listTimers,
+  listPublicChannels,
   listDiscoveredTimers,
   createTimer,
   deleteTimer,
@@ -247,6 +251,7 @@ const realApi = {
   newKioskCode,
   cancelKioskCode,
   removeKiosk,
+  renameKiosk,
   getPublicHello,
   getPilotAccess,
   resetPilotCode,
@@ -484,6 +489,11 @@ export class Session {
   // Timers are application-level, like pilots and classes: an open read, gated writes on the
   // same token path. The Director holds the connection to each timer; this only keeps the list.
 
+  /** Which video channel each seat of the open event is on, as the timers say. */
+  listChannels(): Promise<SeatChannel[]> {
+    return this.#api.listPublicChannels(this.baseUrl);
+  }
+
   /**
    * List every timer with its status right now (`GET /timers`, open, no token). There is no
    * change feed for timers, so a screen that shows them calls this again every couple of seconds.
@@ -679,6 +689,13 @@ export class Session {
   /** Cancel a kiosk code that has not been used. */
   cancelKioskCode(code: string): Promise<KioskView | undefined> {
     return this.#privilegedWrite((token) => this.#api.cancelKioskCode(this.baseUrl, code, token));
+  }
+
+  /** Name a kiosk, so two tablets can be told apart. An empty name takes it away. */
+  renameKiosk(number: number, name: string): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.renameKiosk(this.baseUrl, number, name, token)
+    );
   }
 
   /** Remove a kiosk: its tablet stops being one. */
