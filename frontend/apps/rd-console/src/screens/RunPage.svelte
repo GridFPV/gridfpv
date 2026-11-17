@@ -179,8 +179,24 @@
     return undefined;
   });
 
+  /**
+   * The race the seat cards show when none is on: the heat's last saved race, once the heat
+   * is done and will not be raced again. A finished heat on the timer shows how it ended,
+   * not a row of empty cards. A heat with races still to fly shows its lineup, ready.
+   */
+  const flown = $derived(
+    !race && phase && (phase.complete || phase.locked)
+      ? races.filter((r) => r.state === 'Saved').at(-1)
+      : undefined
+  );
   const rows: SeatRow[] = $derived(
-    race ? raceSeatRows(race, names) : phase ? lineupSeatRows(phase, names) : []
+    race
+      ? raceSeatRows(race, names)
+      : flown
+        ? raceSeatRows(flown, names)
+        : phase
+          ? lineupSeatRows(phase, names)
+          : []
   );
   /**
    * What times this heat, by name, and what is wrong with it when something is. A heat is
