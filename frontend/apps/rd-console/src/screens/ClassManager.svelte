@@ -103,10 +103,10 @@
     try {
       const back = await session.restoreBuiltinClasses();
       if (back === undefined) {
-        toast.info('A control token is required to put the built-in classes back.');
+        toast.info('A control token is required to put the classes back.');
         return;
       }
-      toast.success('The built-in classes are back.');
+      toast.success('The classes that came with Grid are back.');
       await reload();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -163,8 +163,6 @@
   }
 
   function openEdit(cls: Class) {
-    // Built-ins are read-only — never open the edit form for one (the UI offers no Edit on them).
-    if (isBuiltin(cls)) return;
     editing = cls;
     form = formFromClass(cls);
     formError = undefined;
@@ -334,20 +332,16 @@
                 {isHidden(cls) ? 'Unhide' : 'Hide'}
               </Button>
             {/if}
-            {#if !isBuiltin(cls)}
-              <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
-            {/if}
-            <!-- A built-in can be removed where classes are managed. It cannot be edited. -->
-            {#if !isBuiltin(cls) || manageHidden}
-              <Button
-                variant="danger"
-                size="sm"
-                loading={removing === cls.id}
-                onclick={() => askRemove(cls)}
-              >
-                Remove
-              </Button>
-            {/if}
+            <!-- Every class is the same here, the ones that came with Grid too. -->
+            <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
+            <Button
+              variant="danger"
+              size="sm"
+              loading={removing === cls.id}
+              onclick={() => askRemove(cls)}
+            >
+              Remove
+            </Button>
           </div>
         </li>
       {/each}
@@ -357,9 +351,10 @@
   {#if loadState.kind === 'ready' && removedBuiltins > 0}
     <p class="removed-builtins" data-testid="removed-builtins">
       {removedBuiltins}
-      built-in {removedBuiltins === 1 ? 'class has' : 'classes have'} been removed.
+      {removedBuiltins === 1 ? 'class' : 'classes'} that came with Grid
+      {removedBuiltins === 1 ? 'has' : 'have'} been removed.
       <Button variant="ghost" size="sm" loading={restoring} onclick={restoreBuiltins}>
-        Put the built-in classes back
+        Put them back
       </Button>
     </p>
   {/if}
@@ -429,8 +424,7 @@
   </p>
   {#if confirming && isBuiltin(confirming)}
     <p class="confirm-text">
-      It is a built-in class. You can put the built-in classes back at any time, from the bottom of
-      this page.
+      It came with Grid. You can put those classes back at any time, from the bottom of this page.
     </p>
   {/if}
   {#snippet footer()}

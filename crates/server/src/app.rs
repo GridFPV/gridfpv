@@ -113,8 +113,8 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/pilots", get(list_pilots).post(create_pilot))
         .route("/pilots/{pilot_id}", put(update_pilot).delete(delete_pilot))
         // The app-level class directory: an open list; create/edit/delete are RD-gated. The
-        // built-in classes cannot be edited, but any class can be hidden or removed, and the
-        // built-ins that were removed can be put back.
+        // classes that come with Grid are like any other: edited, hidden or removed. The ones
+        // that were removed can be put back.
         .route("/classes", get(list_classes).post(create_class))
         .route(
             "/classes/builtins",
@@ -578,8 +578,6 @@ fn pilot_error_to_protocol(error: PilotError) -> ProtocolError {
 fn class_error_to_protocol(error: ClassError) -> ProtocolError {
     let code = match error.kind {
         ClassErrorKind::Invalid => ErrorCode::BadRequest,
-        // A read-only built-in edit/delete is a rejected bad request (the built-in is canonical).
-        ClassErrorKind::ReadOnly => ErrorCode::BadRequest,
         ClassErrorKind::NotFound => ErrorCode::UnknownScope,
         ClassErrorKind::Internal => ErrorCode::Internal,
     };
@@ -1377,7 +1375,7 @@ mod tests {
         assert_eq!(back.len(), all);
         let again = back.iter().find(|class| class.id == built_in.id).unwrap();
         assert!(again.builtin && !again.hidden);
-        // It still cannot be edited.
+        // It is edited like any other class.
         let (status, raw) = send(
             registry.clone(),
             "PUT",
@@ -1386,8 +1384,10 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(error_of(&raw).code, ErrorCode::BadRequest);
+        assert_eq!(status, StatusCode::OK);
+        let renamed: Class = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(renamed.name, "Renamed");
+        assert_eq!(renamed.id, built_in.id);
 
         // An unknown class is a 404.
         let (status, raw) = send(

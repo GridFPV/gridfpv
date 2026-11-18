@@ -32,8 +32,8 @@ test('Classes page lists the built-ins (org badges, not editable), full CRUD on 
   // It carries its real org as a badge, and no lock or "Built-in" label…
   await expect(openBuiltin.getByText('MultiGP', { exact: true })).toBeVisible();
   await expect(openBuiltin.getByText('Built-in')).toHaveCount(0);
-  // …and cannot be edited. It can be removed, which is tried at the end of this test.
-  await expect(openBuiltin.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+  // …and the same Edit and Remove as any other class. Both are tried at the end of this test.
+  await expect(openBuiltin.getByRole('button', { name: 'Edit' })).toBeVisible();
   await expect(openBuiltin.getByRole('button', { name: 'Remove' })).toBeVisible();
   await expect(page.getByTestId('removed-builtins')).toHaveCount(0);
   // A couple more are listed, across orgs.
@@ -88,15 +88,26 @@ test('Classes page lists the built-ins (org badges, not editable), full CRUD on 
   // The built-in is still there afterward.
   await expect(list.getByRole('listitem').filter({ hasText: 'Open Class' })).toBeVisible();
 
-  // ── Remove a built-in, see that it stays gone, and put the built-ins back ────────────────
+  // ── Edit a class that came with Grid, remove it, and put it back as shipped ──────────────
   const shrieker = list.getByRole('listitem').filter({ hasText: 'Shrieker' });
   try {
+    await shrieker.getByRole('button', { name: 'Edit' }).click();
+    const shipped = page.getByRole('form', { name: 'Edit class' });
+    await expect(shipped.getByLabel('Name')).toHaveValue('Shrieker');
+    await expect(shipped.getByLabel('Org')).toHaveValue('UDL');
+    await shipped.getByLabel('Org').fill('E2E League');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect(shrieker.getByTestId('class-org')).toHaveText('E2E League', { timeout: 15_000 });
+    // The edit is kept across a reload.
+    await page.reload();
+    await expect(shrieker.getByTestId('class-org')).toHaveText('E2E League', { timeout: 15_000 });
+
     await shrieker.getByRole('button', { name: 'Remove' }).click();
-    await expect(confirm).toContainText('You can put the built-in classes back at any time');
+    await expect(confirm).toContainText('You can put those classes back at any time');
     await confirm.getByRole('button', { name: 'Remove' }).click();
     await expect(shrieker).toHaveCount(0, { timeout: 15_000 });
     await expect(page.getByTestId('removed-builtins')).toContainText(
-      '1 built-in class has been removed.'
+      '1 class that came with Grid has been removed.'
     );
     // The Director dropped it, and a reload does not bring it back.
     const ids = async () =>
@@ -108,9 +119,10 @@ test('Classes page lists the built-ins (org badges, not editable), full CRUD on 
     });
     await expect(shrieker).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'Put the built-in classes back' }).click();
+    await page.getByRole('button', { name: 'Put them back' }).click();
     await expect(shrieker).toBeVisible({ timeout: 15_000 });
-    await expect(shrieker.getByText('UDL', { exact: true })).toBeVisible();
+    // It is back as Grid ships it: the edit made above went with the removal.
+    await expect(shrieker.getByTestId('class-org')).toHaveText('UDL');
     await expect(page.getByTestId('removed-builtins')).toHaveCount(0);
     expect(await ids()).toContain('udl-shrieker');
   } finally {

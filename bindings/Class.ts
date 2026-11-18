@@ -40,9 +40,9 @@ description?: string,
 /**
  * Whether this is a **code-defined built-in** class (issue #84) — one of the canonical
  * standard FPV classes seeded into every directory with a fixed id, so cross-event /
- * cross-Director standings aggregate with zero reconciliation. Built-ins are **read-only**:
- * they cannot be edited or deleted, and are **not** persisted to `classes.json` (they are
- * re-seeded on every boot). A class the director made is never a built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
+ * cross-Director standings aggregate with zero reconciliation. A built-in is like any other class: it can
+ * be edited, hidden or removed. One still as shipped is **not** written to `classes.json`
+ * (it is seeded again at each start); once edited it is. A class the director made is never a built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
  * class's JSON is unchanged.
  */
 builtin?: boolean, 

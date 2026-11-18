@@ -44,8 +44,9 @@ export function orgProblem(text: string): string | undefined {
 }
 
 /**
- * Whether a class is a read-only **built-in** (issue #84): a canonical, fixed-id class the Director
- * seeds and that cannot be edited or removed. The server flags these with `builtin: true`.
+ * Whether a class **came with Grid**: one of the standard classes the Director seeds, with a
+ * fixed id. It is edited, hidden and removed like any other; the page only uses this to say
+ * that a removed one can be put back. The server flags these with `builtin: true`.
  */
 export function isBuiltin(c: Class): boolean {
   return c.builtin === true;
@@ -55,8 +56,8 @@ export function isBuiltin(c: Class): boolean {
  * Whether a class is **hidden / archived** (hide/archive classes): the RD tucked it away, while it
  * stays in the directory and on the Classes page.
  * The server flags these with `hidden: true` (derived from a persisted hidden-set, so a hidden
- * built-in survives a restart). Hiding is a visibility preference, not an edit — so a built-in can
- * be hidden too, even though its edit/delete stay disabled.
+ * built-in survives a restart). Hiding is a visibility preference, not an edit — so it
+ * is kept apart from the class's own fields.
  */
 export function isHidden(c: Class): boolean {
   return c.hidden === true;
@@ -92,7 +93,7 @@ export function emptyForm(): ClassFormValues {
   return { name: '', org: '', reference: '', description: '' };
 }
 
-/** Seed the form from an existing class for the **Edit** flow (Custom classes only). */
+/** Seed the form from an existing class for the **Edit** flow. */
 export function formFromClass(c: Class): ClassFormValues {
   return {
     name: c.name,
@@ -125,8 +126,6 @@ export function buildCreateRequest(v: ClassFormValues): CreateClassRequest {
  *  - `org` / `reference` / `description` — the **clear-via-null** three-state: omit if unchanged, `null` if
  *    the user emptied a field that had a value (clears it), value if set. Mirrors
  *    `buildUpdateRequest` in `lib/pilots.ts`.
- *
- * Built-in classes are read-only and never reach this path (the UI offers no Edit on them).
  */
 export function buildUpdateRequest(prev: Class, v: ClassFormValues): UpdateClassRequest {
   const req: UpdateClassRequest = {};

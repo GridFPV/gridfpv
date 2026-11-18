@@ -457,8 +457,8 @@ describe('seam 11: the application-level pilot directory (#74)', () => {
  *    classes (present on every Director, flagged `builtin`, carrying their org as `org`).
  *  - `POST /classes` is **RD-gated** (no/bad token → 401), requires a `name`, auto-generates an id,
  *    carries the `org`/`reference`/`description` metadata, and the new class appears in the listing.
- *  - `PUT /classes/{id}` on a **built-in** id is rejected (it cannot be edited). `DELETE` removes
- *    one, and `POST /classes/builtins` puts the removed ones back; user/Custom classes are
+ *  - `PUT /classes/{id}` and `DELETE /classes/{id}` work on a **built-in** id as on any other.
+ *    `POST /classes/builtins` puts the removed ones back, as shipped; user/Custom classes are
  *    full CRUD (set / clear via wire-`null` — the `OptionalEdit` three-state).
  *  - `PUT /classes/{id}/hidden` hides or un-hides any class, built-ins included.
  */
@@ -522,16 +522,20 @@ describe('seam 12: the application-level class directory (#84)', () => {
     for (const cls of classes) expect(wireShapeProblems(cls, 'Class')).toEqual([]);
   });
 
-  it('a built-in class cannot be edited, but can be removed and put back', async () => {
+  it('a class that came with Grid is edited, removed and put back like any other', async () => {
     const auth = { Authorization: `Bearer ${TOKEN}` };
     const put = await fetch(`${director.baseUrl}/classes/mgp-open`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ name: 'Hacked' })
     });
-    expect(put.status).toBe(400);
+    expect(put.status).toBe(200);
+    const edited = (await put.json()) as Class;
+    expect(edited.id).toBe('mgp-open');
+    expect(edited.name).toBe('Hacked');
+    expect(edited.builtin).toBe(true);
     const before = await listClasses();
-    expect(before.find((c) => c.id === 'mgp-open')?.name).toBe('Open Class');
+    expect(before.find((c) => c.id === 'mgp-open')?.name).toBe('Hacked');
     const removed = async (): Promise<unknown> =>
       (await fetch(`${director.baseUrl}/classes/builtins`)).json();
     expect(await removed()).toEqual({ removed: 0 });
@@ -560,6 +564,7 @@ describe('seam 12: the application-level class directory (#84)', () => {
     const list = (await back.json()) as Class[];
     expect(list).toHaveLength(before.length);
     const again = list.find((c) => c.id === 'mgp-open');
+    // Put back, it is the class as Grid ships it, not the edited one.
     expect(again?.name).toBe('Open Class');
     expect(again?.builtin).toBe(true);
     expect(await removed()).toEqual({ removed: 0 });

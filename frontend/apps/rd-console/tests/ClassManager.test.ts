@@ -5,7 +5,7 @@ import type { Class } from '@gridfpv/types';
 import ClassManager from '../src/screens/ClassManager.svelte';
 import { makeTestSession } from './support.js';
 
-/** A locked, fixed-id built-in (read-only: no Edit/Remove, shows a lock + org badge). */
+/** A class that came with Grid: a fixed id and an org tag, and otherwise like any other. */
 const OPEN: Class = {
   id: 'mgp-open',
   name: 'Open Class',
@@ -24,7 +24,7 @@ async function openAdd(manager: { openAdd: () => void }) {
 }
 
 describe('ClassManager (#84)', () => {
-  it('lists built-ins (locked, org badge, no Edit/Remove) and Custom rows (full controls)', async () => {
+  it('lists every class the same way: Edit and Remove on each, a tag only where there is an org', async () => {
     const listClassesImpl = vi.fn(async () => [OPEN, HOUSE]);
     const { session } = makeTestSession({ noEnter: true, listClassesImpl });
     render(ClassManager, { session });
@@ -34,8 +34,8 @@ describe('ClassManager (#84)', () => {
     const rows = within(list).getAllByRole('listitem');
     expect(rows).toHaveLength(2);
 
-    // The built-in shows its MultiGP org badge + a reference link + a built-in/lock indicator, and
-    // has NO Edit/Remove (it is read-only).
+    // The class that came with Grid shows its MultiGP org tag and a reference link, and
+    // the same Edit and Remove as any other.
     expect(within(rows[0]).getByText('MultiGP')).toBeInTheDocument();
     expect(
       within(rows[0]).getByRole('link', { name: 'Reference for Open Class' })
@@ -43,8 +43,8 @@ describe('ClassManager (#84)', () => {
     // The org badge says where it is from. There is no lock or "Built-in" label beside it.
     expect(within(rows[0]).queryByLabelText('Built-in')).not.toBeInTheDocument();
     expect(rows[0]).not.toHaveTextContent('Built-in');
-    expect(within(rows[0]).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
-    expect(within(rows[0]).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
+    expect(within(rows[0]).getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(within(rows[0]).getByRole('button', { name: 'Remove' })).toBeInTheDocument();
 
     // A class with no org has no tag at all, and keeps full Edit/Remove controls.
     expect(within(rows[1]).queryByTestId('class-org')).toBeNull();
@@ -156,7 +156,7 @@ describe('ClassManager (#84)', () => {
 
     await screen.findByText('House');
     const list = screen.getByRole('list', { name: 'Class directory' });
-    // The Custom row (index 1) is the removable one; the built-in (index 0) has no Remove.
+    // The director's own class is the second row.
     const houseRow = within(list).getAllByRole('listitem')[1];
     await fireEvent.click(within(houseRow).getByRole('button', { name: 'Remove' }));
 
@@ -181,9 +181,7 @@ describe('ClassManager — hide / archive (manageHidden)', () => {
 
     await screen.findByText('Open Class');
     const list = screen.getByRole('list', { name: 'Class directory' });
-    // A built-in has no Edit, but DOES get a Hide button (visibility is not an edit).
     const builtinRow = within(list).getAllByRole('listitem')[0];
-    expect(within(builtinRow).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     await fireEvent.click(within(builtinRow).getByRole('button', { name: 'Hide' }));
 
     await waitFor(() => expect(setClassHiddenImpl).toHaveBeenCalledTimes(1));
@@ -237,8 +235,8 @@ describe('ClassManager — the hidden filter (filterHidden)', () => {
   });
 });
 
-describe('ClassManager — removing built-in classes (manageHidden)', () => {
-  it('a built-in can be removed after a confirm that says it can be put back, and never edited', async () => {
+describe('ClassManager — the classes that came with Grid', () => {
+  it('a class that came with Grid is removed after a confirm that says it can be put back', async () => {
     let calls = 0;
     const listClassesImpl = vi.fn(async () => (calls++ === 0 ? [OPEN, HOUSE] : [HOUSE]));
     const deleteClassImpl = vi.fn(async () => undefined as unknown as void);
@@ -252,11 +250,10 @@ describe('ClassManager — removing built-in classes (manageHidden)', () => {
     const builtinRow = within(screen.getByRole('list', { name: 'Class directory' })).getAllByRole(
       'listitem'
     )[0];
-    expect(within(builtinRow).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     await fireEvent.click(within(builtinRow).getByRole('button', { name: 'Remove' }));
 
     // Nothing is removed until the director says so.
-    await screen.findByText(/You can put the built-in classes back at any time/);
+    await screen.findByText(/It came with Grid\. You can put those classes back at any time/);
     expect(deleteClassImpl).not.toHaveBeenCalled();
     const buttons = screen.getAllByRole('button', { name: 'Remove' });
     await fireEvent.click(buttons[buttons.length - 1]);
@@ -267,7 +264,7 @@ describe('ClassManager — removing built-in classes (manageHidden)', () => {
     // It is gone from the list, and the page offers to put it back.
     await waitFor(() => expect(screen.queryByText('Open Class')).toBeNull());
     expect(await screen.findByTestId('removed-builtins')).toHaveTextContent(
-      '1 built-in class has been removed.'
+      '1 class that came with Grid has been removed.'
     );
   });
 
@@ -282,7 +279,7 @@ describe('ClassManager — removing built-in classes (manageHidden)', () => {
     )[1];
     await fireEvent.click(within(houseRow).getByRole('button', { name: 'Remove' }));
     await screen.findByText(/Remove class/i);
-    expect(screen.queryByText(/It is a built-in class/)).toBeNull();
+    expect(screen.queryByText(/It came with Grid/)).toBeNull();
   });
 
   it('puts the built-in classes back, and the offer goes away', async () => {
@@ -295,10 +292,10 @@ describe('ClassManager — removing built-in classes (manageHidden)', () => {
     render(ClassManager, { session, manageHidden: true });
 
     expect(await screen.findByTestId('removed-builtins')).toHaveTextContent(
-      '3 built-in classes have been removed.'
+      '3 classes that came with Grid have been removed.'
     );
     expect(screen.queryByText('Open Class')).toBeNull();
-    await fireEvent.click(screen.getByRole('button', { name: 'Put the built-in classes back' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Put them back' }));
     await waitFor(() => expect(restore).toHaveBeenCalledOnce());
     expect(await screen.findByText('Open Class')).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByTestId('removed-builtins')).toBeNull());
@@ -310,26 +307,52 @@ describe('ClassManager — removing built-in classes (manageHidden)', () => {
     vi.spyOn(session, 'removedBuiltinClasses').mockResolvedValue(2);
     const restore = vi.spyOn(session, 'restoreBuiltinClasses').mockResolvedValue(undefined);
     render(ClassManager, { session, manageHidden: true });
-    await fireEvent.click(
-      await screen.findByRole('button', { name: 'Put the built-in classes back' })
-    );
+    await fireEvent.click(await screen.findByRole('button', { name: 'Put them back' }));
     await waitFor(() => expect(restore).toHaveBeenCalledOnce());
     expect(screen.getByTestId('removed-builtins')).toBeInTheDocument();
     expect(listClassesImpl).toHaveBeenCalledOnce();
   });
 
-  it('where classes are only picked, a built-in has no Remove and nothing is said of removed ones', async () => {
+  it('where classes are only picked, nothing is said of removed ones', async () => {
     const listClassesImpl = vi.fn(async () => [OPEN, HOUSE]);
     const { session } = makeTestSession({ noEnter: true, listClassesImpl });
     const removed = vi.spyOn(session, 'removedBuiltinClasses').mockResolvedValue(4);
     render(ClassManager, { session });
     await screen.findByText('Open Class');
-    const builtinRow = within(screen.getByRole('list', { name: 'Class directory' })).getAllByRole(
-      'listitem'
-    )[0];
-    expect(within(builtinRow).queryByRole('button', { name: 'Remove' })).toBeNull();
     expect(screen.queryByTestId('removed-builtins')).toBeNull();
     expect(removed).not.toHaveBeenCalled();
+  });
+
+  it('a class that came with Grid opens for editing like any other, and the change is sent', async () => {
+    const listClassesImpl = vi.fn(async () => [OPEN, HOUSE]);
+    const updateClassImpl = vi.fn(async () => ({ ...OPEN, name: 'Open 5 inch' }));
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl, updateClassImpl });
+    render(ClassManager, { session, manageHidden: true });
+    await screen.findByText('Open Class');
+    const row = within(screen.getByRole('list', { name: 'Class directory' })).getAllByRole(
+      'listitem'
+    )[0];
+    await fireEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+    const form = await screen.findByRole('form', { name: 'Edit class' });
+    // Everything about it is there to change: its name, its org, its reference, its description.
+    expect(within(form).getByLabelText('Name')).toHaveValue('Open Class');
+    expect(within(form).getByLabelText('Org')).toHaveValue('MultiGP');
+    expect(within(form).getByLabelText('Reference')).toHaveValue(
+      'https://www.multigp.com/class-specifications/'
+    );
+    await fireEvent.input(within(form).getByLabelText('Name'), {
+      target: { value: 'Open 5 inch' }
+    });
+    await fireEvent.input(within(form).getByLabelText('Org'), { target: { value: 'My Club' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(updateClassImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        'mgp-open',
+        { name: 'Open 5 inch', org: 'My Club' },
+        'tok'
+      )
+    );
   });
 });
 
