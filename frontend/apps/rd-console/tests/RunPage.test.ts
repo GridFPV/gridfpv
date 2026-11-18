@@ -1095,3 +1095,86 @@ describe("RunPage: the heat on the timer is the Director's", () => {
     expect(within(racing.container).queryByTestId('next-heat')).toBeNull();
   });
 });
+
+describe('RunPage: a finished heat shows how it ended', () => {
+  /** The seat cards. A card lists its laps too, and those are not cards. */
+  const seats = () =>
+    within(screen.getByRole('list', { name: 'Seats' }))
+      .getAllByRole('listitem')
+      .filter((item) => item.getAttribute('aria-label')?.startsWith('Seat'));
+  const flownRace = (number: number, state: 'Saved' | 'Discarded', aceLaps: number[]) =>
+    race(HEAT, number, state, {
+      started_at: 1,
+      stopped_at: 60 * S,
+      seats: [
+        raceSeat(0, 'p-1a', {
+          finish: 1,
+          laps: aceLaps.map((seconds, i) => lap(i + 1, seconds)),
+          best_lap_micros: Math.min(...aceLaps) * S
+        }),
+        raceSeat(1, 'p-2b', { finish: 2, laps: [lap(9, 20)], best_lap_micros: 20 * S })
+      ]
+    });
+
+  it('a complete heat shows its last saved race on the seat cards, not empty ones', async () => {
+    await open(
+      eventView({
+        phases: [quali({ complete: true })],
+        races: [flownRace(1, 'Saved', [11, 10.5, 12])]
+      })
+    );
+    const [ace, bee] = seats();
+    expect(ace).toHaveTextContent('Place P1');
+    expect(ace).toHaveTextContent('Laps 3');
+    expect(ace).toHaveTextContent('10.500');
+    expect(bee).toHaveTextContent('Place P2');
+    expect(bee).toHaveTextContent('20.000');
+  });
+
+  it('shows the last race that counts: a later one that was thrown out is passed over', async () => {
+    await open(
+      eventView({
+        phases: [quali({ complete: true })],
+        races: [flownRace(1, 'Saved', [11, 10.5]), flownRace(2, 'Discarded', [5, 5, 5, 5])]
+      })
+    );
+    expect(seats()[0]).toHaveTextContent('10.500');
+    expect(seats()[0]).not.toHaveTextContent('5.000');
+  });
+
+  it('a heat with races still to fly shows its lineup, ready, not the last race', async () => {
+    await open(
+      eventView({
+        phases: [quali()],
+        races: [flownRace(1, 'Saved', [11, 10.5, 12])]
+      })
+    );
+    expect(seats()[0]).not.toHaveTextContent('P1');
+    expect(seats()[0]).not.toHaveTextContent('10.500');
+    expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
+  });
+
+  it('a race that is on is always what the cards show', async () => {
+    const on = race(HEAT, 2, 'Running', {
+      started_at: 1,
+      seats: [raceSeat(0, 'p-1a', { laps: [lap(1, 7)] }), raceSeat(1, 'p-2b')]
+    });
+    await open(
+      eventView({
+        phases: [quali({ complete: true })],
+        races: [flownRace(1, 'Saved', [11, 10.5, 12]), on],
+        current_race: on.race
+      })
+    );
+    expect(seats()[0]).toHaveTextContent('7.000');
+    expect(seats()[0]).not.toHaveTextContent('10.500');
+  });
+
+  it('a complete heat with no saved race shows its lineup', async () => {
+    await open(eventView({ phases: [quali({ complete: true })] }));
+    expect(seats().map((seat) => seat.getAttribute('aria-label'))).toEqual([
+      'Seat 1, Ace',
+      'Seat 2, Bee'
+    ]);
+  });
+});

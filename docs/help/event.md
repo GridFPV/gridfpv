@@ -46,6 +46,8 @@ A class is a name plus the pilots racing in it at this event.
 You do not need a class to race. A heat can name its pilots directly. Add a class when you
 want standings from first to last.
 
+Until a phase counts, a class shows who is in it. Once one counts, it shows the standings.
+
 ## Pilot sign-in
 
 A pilot can sign in on their own phone, so Grid knows who they are. Each pilot in the event

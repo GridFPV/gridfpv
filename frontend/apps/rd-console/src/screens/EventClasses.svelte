@@ -1,8 +1,9 @@
 <script lang="ts">
   /**
-   * EventClasses — the classes at this event: each with its roster, the phases that count
-   * toward its standings, and the standings table (position, callsign, and the phase that
-   * placed each pilot, by name).
+   * EventClasses — the classes at this event: each with its roster and the phases that count
+   * toward its standings. Once a phase counts, the standings table is shown (position,
+   * callsign, and the phase that placed each pilot, by name). Before that there is no order
+   * to show, so the roster is a short list of callsigns and not a table of blanks.
    *
    * A class is added from the class directory with a roster picked from the pilot directory.
    * The standings are the Director's; this only shows them.
@@ -65,7 +66,16 @@
               .join(', then ')}.
           {/if}
         </p>
-        {#if rows.length > 0}
+        {#if roster.counted_phases.length === 0}
+          <!-- Nothing counts yet, so there is no order: just who is in the class. -->
+          {#if roster.pilots.length > 0}
+            <ul class="roster" aria-label="Pilots in {name}">
+              {#each roster.pilots as pilot (pilot)}
+                <li>{names.pilot(pilot)}</li>
+              {/each}
+            </ul>
+          {/if}
+        {:else if rows.length > 0}
           <table class="standings" aria-label="Standings of {name}">
             <thead>
               <tr>
@@ -141,6 +151,20 @@
     margin-left: auto;
     display: flex;
     gap: var(--gf-space-1);
+  }
+  .roster {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gf-space-1) var(--gf-space-2);
+    font-size: var(--gf-font-size-sm);
+  }
+  .roster li {
+    padding: 2px var(--gf-space-2);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
   }
   .standings {
     width: 100%;

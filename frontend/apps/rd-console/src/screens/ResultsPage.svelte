@@ -2,7 +2,8 @@
   /**
    * ResultsPage — what the event has decided so far.
    *
-   * - **Class standings**: each class from 1 to n, and the phase that placed each pilot.
+   * - **Class standings**, under the phase results: each class from 1 to n, and the phase
+   *   that placed each pilot. A class with nothing counting yet shows one line, not a table.
    * - **Phase results**: one phase's ranking at a time, with the numbers behind each place.
    *   It opens on the phase raced last. A best time names the race it was flown in.
    * - **The phase's races**: every race under the phase, with who finished where.
@@ -70,7 +71,7 @@
 <Page
   title="Results"
   help="results"
-  lede="Class standings and each phase's ranking. A result is provisional until its phase is locked."
+  lede="Each phase's ranking, then the class standings. A result is provisional until its phase is locked."
 >
   {#if live.loadError}
     <Banner tone="danger" title="The event could not be read.">{live.loadError}</Banner>
@@ -79,43 +80,6 @@
   {#if !view}
     {#if !live.loadError}<p class="muted" role="status">Loading…</p>{/if}
   {:else}
-    {#each view.rosters as roster (roster.class)}
-      {@const rows = standingRows(roster, names)}
-      {@const name = names.klass(roster.class)}
-      <Card title="{name} standings" elevation="sm">
-        <p class="muted">
-          {#if roster.counted_phases.length === 0}
-            No phase counts toward this class yet. Choose what counts on the
-            <a href={formatHash({ kind: 'event', section: 'event' })}>Details page</a>.
-          {:else}
-            From {roster.counted_phases.map((id) => names.phase(id)).join(', then ')}.
-          {/if}
-        </p>
-        {#if rows.length > 0}
-          <table aria-label="Standings of {name}">
-            <thead>
-              <tr>
-                <th scope="col" class="num">Place</th>
-                <th scope="col">Pilot</th>
-                <th scope="col">Placed by</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each rows as row (`${row.position}/${row.callsign}`)}
-                <tr>
-                  <td class="num">{row.position}</td>
-                  <th scope="row">{row.callsign}</th>
-                  <td class:faint={row.placedBy === undefined}>
-                    {row.placedBy ?? 'Not placed yet'}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      </Card>
-    {/each}
-
     <Card title="Phase results" elevation="sm">
       {#if choices.length === 0}
         <p class="muted" data-testid="no-results">
@@ -340,6 +304,44 @@
         {/if}
       {/if}
     </Card>
+
+    {#each view.rosters as roster (roster.class)}
+      {@const rows = standingRows(roster, names)}
+      {@const name = names.klass(roster.class)}
+      <Card title="{name} standings" elevation="sm">
+        <p class="muted">
+          {#if roster.counted_phases.length === 0}
+            No phase counts toward this class yet. Choose what counts on the
+            <a href={formatHash({ kind: 'event', section: 'event' })}>Details page</a>.
+          {:else}
+            From {roster.counted_phases.map((id) => names.phase(id)).join(', then ')}.
+          {/if}
+        </p>
+        <!-- With nothing counting yet there is no order to show, only the roster again. -->
+        {#if rows.length > 0 && roster.counted_phases.length > 0}
+          <table aria-label="Standings of {name}">
+            <thead>
+              <tr>
+                <th scope="col" class="num">Place</th>
+                <th scope="col">Pilot</th>
+                <th scope="col">Placed by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each rows as row (`${row.position}/${row.callsign}`)}
+                <tr>
+                  <td class="num">{row.position}</td>
+                  <th scope="row">{row.callsign}</th>
+                  <td class:faint={row.placedBy === undefined}>
+                    {row.placedBy ?? 'Not placed yet'}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </Card>
+    {/each}
   {/if}
 </Page>
 
