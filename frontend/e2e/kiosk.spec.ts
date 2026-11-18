@@ -183,6 +183,21 @@ test('the director sets a tablet up with a code that works once, and can remove 
     await kiosk.getByRole('button', { name: 'Set up', exact: true }).click();
     await expect(codeBox(kiosk)).toBeVisible({ timeout: 15_000 });
 
+    // ── While it waits, the kiosk shows a QR code that opens Grid on a pilot's phone ─────
+    const qr = kiosk.getByRole('img', { name: 'QR code that opens Grid on your phone' });
+    await expect(qr).toBeVisible();
+    // The picture really loaded: it has a size of its own.
+    await expect
+      .poll(() => qr.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBeGreaterThan(0);
+    // It is Grid's colours, and holds the address the tablet itself opened and nothing else.
+    const picture = await kiosk.request.get(new URL('/public/qr', kiosk.url()).toString());
+    expect(picture.headers()['content-type']).toBe('image/svg+xml');
+    const svg = await picture.text();
+    expect(svg).toContain('#0a0d12');
+    expect(svg).toContain('#dffcef');
+    expect(svg).not.toContain('#000000');
+
     // ── The console sees it by itself: the code is used up, and Kiosk 1 is listed ────────
     await expect(page.getByTestId('kiosk-code')).toHaveCount(0, { timeout: 15_000 });
     await expect(page.getByRole('list', { name: 'Kiosks set up' })).toContainText('Kiosk 1');

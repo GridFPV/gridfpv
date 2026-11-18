@@ -457,7 +457,8 @@ describe('seam 11: the application-level pilot directory (#74)', () => {
  *    classes (present on every Director, flagged `builtin`, carrying their real org as `source`).
  *  - `POST /classes` is **RD-gated** (no/bad token → 401), requires a `name`, auto-generates an id,
  *    carries the `source`/`reference`/`description` metadata, and the new class appears in the listing.
- *  - `PUT/DELETE /classes/{id}` on a **built-in** id is rejected (read-only); user/Custom classes are
+ *  - `PUT /classes/{id}` on a **built-in** id is rejected (it cannot be edited). `DELETE` removes
+ *    one, and `POST /classes/builtins` puts the removed ones back; user/Custom classes are
  *    full CRUD (set / clear via wire-`null` — the `OptionalEdit` three-state).
  *  - `PUT /classes/{id}/hidden` hides or un-hides any class, built-ins included.
  */
@@ -521,24 +522,47 @@ describe('seam 12: the application-level class directory (#84)', () => {
     for (const cls of classes) expect(wireShapeProblems(cls, 'Class')).toEqual([]);
   });
 
-  it('PUT/DELETE on a built-in class is rejected — built-ins are read-only', async () => {
+  it('a built-in class cannot be edited, but can be removed and put back', async () => {
+    const auth = { Authorization: `Bearer ${TOKEN}` };
     const put = await fetch(`${director.baseUrl}/classes/mgp-open`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ name: 'Hacked' })
     });
     expect(put.status).toBe(400);
+    const before = await listClasses();
+    expect(before.find((c) => c.id === 'mgp-open')?.name).toBe('Open Class');
+    const removed = async (): Promise<unknown> =>
+      (await fetch(`${director.baseUrl}/classes/builtins`)).json();
+    expect(await removed()).toEqual({ removed: 0 });
 
+    // Removing needs the director.
+    expect((await fetch(`${director.baseUrl}/classes/mgp-open`, { method: 'DELETE' })).status).toBe(
+      401
+    );
     const del = await fetch(`${director.baseUrl}/classes/mgp-open`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${TOKEN}` }
+      headers: auth
     });
-    expect(del.status).toBe(400);
+    expect(del.status).toBe(200);
+    expect((await listClasses()).find((c) => c.id === 'mgp-open')).toBeUndefined();
+    expect(await removed()).toEqual({ removed: 1 });
 
-    // The built-in is untouched.
-    const stillThere = (await listClasses()).find((c) => c.id === 'mgp-open');
-    expect(stillThere?.name).toBe('Open Class');
-    expect(stillThere?.builtin).toBe(true);
+    // Putting the built-ins back needs the director, and answers the whole list.
+    expect((await fetch(`${director.baseUrl}/classes/builtins`, { method: 'POST' })).status).toBe(
+      401
+    );
+    const back = await fetch(`${director.baseUrl}/classes/builtins`, {
+      method: 'POST',
+      headers: auth
+    });
+    expect(back.status).toBe(200);
+    const list = (await back.json()) as Class[];
+    expect(list).toHaveLength(before.length);
+    const again = list.find((c) => c.id === 'mgp-open');
+    expect(again?.name).toBe('Open Class');
+    expect(again?.builtin).toBe(true);
+    expect(await removed()).toEqual({ removed: 0 });
   });
 
   it('POST /classes requires the RD token — no/bad token → 401', async () => {

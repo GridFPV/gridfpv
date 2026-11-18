@@ -1331,11 +1331,14 @@ The rules:
 
 A kiosk, a pilot's QR code and the spectator's page all use the **Public** address.
 
+**The kiosk's QR code** (built 2026-11-18). While a kiosk waits for a pilot it shows a QR
+code that opens the public pages on a pilot's own phone. It holds an address and nothing
+else. It is drawn in Grid's colours, not black and white: Grid's dark ground for the
+squares, a pale tint of Grid's green behind them. The squares are always the dark ones, so
+every phone camera reads it. The address is the one the kiosk itself opened Grid by.
+
 **Agreed, not built.** Each of these is decided (Ryan, 2026-11-18) and waits its turn.
 
-- **A QR code on the kiosk.** The kiosk's sign-in page shows a QR code that opens the
-  public pages on a pilot's own phone. It is drawn in the app's colours, not black and
-  white, with dark squares on a light ground so every phone camera reads it. Next in line.
 - **A name for the race network.** Where the field's network has DNS, the director types a
   name such as `grid.race.lan` on the Network page. Every address Grid gives out, and every
   QR code, then uses the name and not a number. Grid does not run DNS itself; it only uses
@@ -1349,3 +1352,54 @@ A kiosk, a pilot's QR code and the spectator's page all use the **Public** addre
   them at the Public door, since an overlay shows only what a spectator may see, and to
   keep the overlay settings for the director. To check first: that the overlay pages read
   nothing but the public routes.
+
+## 12. Setup is set once (Agreed 2026-11-18)
+
+**The rule:** Setup is what a director sets before the event and then leaves alone. During
+an event the only Setup page they should need is a timer's seats. Anything that belongs to
+one event is on the event's side.
+
+What that changed (built 2026-11-18):
+
+- **Video** in Setup is only how OBS is set up. What was recorded, and the overlay runs,
+  are on the event's **Recordings** page.
+- **Seats** puts the timer's own settings first, and each seat's signal inside that seat's
+  row, with its settings.
+- **Formats** is laid out like Classes: one row each.
+- **Classes:** Grid still ships with the built-in classes, and the director can remove the
+  ones they never fly. Removed built-ins can all be put back. A built-in still cannot be
+  edited.
+- **Data** is out of the menu. Grid is portable, so "where the data is" is not shown. The
+  page still works at its address, and the Director's routes are unchanged.
+
+### 12.1 More than one timer (Agreed in outline, not designed, not built)
+
+Today a heat's seats are on one timer, and the Seats page shows one timer at a time, with
+a picker when there are several. Two things are wanted, and they are different:
+
+- **Primary and backups.** Two or more timers at the **same gate**, the start/finish. One
+  is the primary. If it misses a pass, or fails, a backup's pass stands in.
+- **Splits.** Timers at **other gates** round the course. A pass there is not a lap. It
+  gives split times, and shows a pilot's progress during a lap.
+
+Open questions, to settle before any of it is built:
+
+1. **Which pass counts** when the primary and a backup both saw it, and when only the
+   backup did. How close in time two passes must be to be the same pass. Whether the
+   marshal sees the backup's passes and can take one by hand.
+2. **Failover.** Whether Grid switches to a backup by itself when the primary drops, or
+   the director does it.
+3. **What a split is** in the model: a pass (§2) that is not a lap. Where it is kept, how a
+   lap's splits are shown, and whether any ranking rule may use them.
+4. **Seats.** One seat is one pilot's channel. With several timers a seat is on each of
+   them. Whether the channel is set once and written to every timer, or per timer.
+5. **The Seats page** with several timers: one page per timer as now, or one row per seat
+   with a column per timer.
+
+### 12.2 Saved OBS profiles (Wanted, not designed)
+
+A named set of video settings the director can switch between, as a seat profile is for a
+timer. To decide: whether a profile holds only where OBS is (address and password), or also
+what records, the scenes and where the files go. The password is never shown again once
+stored (§ security), so a profile can be switched to but not read back.
+

@@ -541,3 +541,69 @@ describe('KioskPage: one sheet at a time', () => {
     expect(tables()).toEqual(['Heats of Qualifying']);
   });
 });
+
+describe('KioskPage: the QR code for a pilot with a phone', () => {
+  const QR = 'http://192.168.1.20/public/qr';
+  const withQr = (over: Parameters<typeof open>[0] = {}) => {
+    const opened = open(over);
+    cleanup();
+    const source = { ...opened.source, publicQrUrl: () => QR };
+    render(KioskPage, { ...opened.props, source });
+    return source;
+  };
+  const picture = () =>
+    screen.queryByRole('img', { name: 'QR code that opens Grid on your phone' });
+
+  it('is shown while the kiosk waits for a pilot, with one line saying what it is for', async () => {
+    withQr();
+    await screen.findByLabelText('Type your code');
+    expect(picture()).toHaveAttribute('src', QR);
+    const aside = screen.getByRole('complementary', { name: 'Open Grid on your phone' });
+    expect(aside).toHaveTextContent('Got a phone?');
+    expect(aside).toHaveTextContent('Scan this to open Grid on it.');
+    // The code box is still first: the QR code is an extra, not in its way.
+    expect(
+      screen.getByLabelText('Type your code').compareDocumentPosition(picture()!) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
+  it('is not shown on a tablet that is not a kiosk yet, or with no event open', async () => {
+    withQr({ isKiosk: false });
+    await screen.findByLabelText('Kiosk code');
+    expect(picture()).toBeNull();
+    cleanup();
+    withQr({ eventName: undefined });
+    await screen.findByText('No event is open');
+    expect(picture()).toBeNull();
+  });
+
+  it('goes away while a pilot is at the kiosk, and comes back when they are done', async () => {
+    withQr();
+    await fireEvent.input(await screen.findByLabelText('Type your code'), {
+      target: { value: 'ABC234' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Go' }));
+    await screen.findByRole('button', { name: 'Done' });
+    expect(picture()).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await screen.findByLabelText('Type your code');
+    expect(picture()).not.toBeNull();
+  });
+
+  it('is left out, not shown broken, when Grid has no picture to give', async () => {
+    withQr();
+    await screen.findByLabelText('Type your code');
+    await fireEvent.error(picture()!);
+    await waitFor(() => expect(picture()).toBeNull());
+    expect(screen.queryByText('Got a phone?')).toBeNull();
+    // The kiosk itself is untouched.
+    expect(screen.getByLabelText('Type your code')).toBeVisible();
+  });
+
+  it('is not shown where there is no picture address at all', async () => {
+    open();
+    await screen.findByLabelText('Type your code');
+    expect(picture()).toBeNull();
+  });
+});

@@ -923,6 +923,85 @@ pub fn qr_svg(text: &str) -> Result<String, String> {
         .build())
 }
 
+/// The dark squares of a QR code drawn in Grid's colours: the console's own dark ground.
+pub const QR_DARK: &str = "#0a0d12";
+/// Its light ground: a pale tint of Grid's green. A camera needs dark squares on a light
+/// ground, so the colours are this way round whatever the page behind looks like.
+pub const QR_LIGHT: &str = "#dffcef";
+
+/// A QR code for `text` in Grid's colours ([`QR_DARK`] on [`QR_LIGHT`]), as an SVG picture
+/// with the quiet border a camera needs.
+pub fn qr_svg_themed(text: &str) -> Result<String, String> {
+    let code = qrcode::QrCode::new(text.as_bytes()).map_err(|err| err.to_string())?;
+    Ok(code
+        .render::<qrcode::render::svg::Color<'_>>()
+        .min_dimensions(240, 240)
+        .dark_color(qrcode::render::svg::Color(QR_DARK))
+        .light_color(qrcode::render::svg::Color(QR_LIGHT))
+        .quiet_zone(true)
+        .build())
+}
+
+/// The address a phone should open to reach the public pages, for a caller who asked at
+/// `host`.
+///
+/// The name the caller itself used comes first: it reached Grid that way, so a phone on the
+/// same network can too, and on a computer with two networks it is the right one of the two.
+/// A caller on the Grid computer (`localhost`) used a name no phone can, so for it, and for
+/// a host that is not plainly a name and a port, the Public door's own address is given.
+pub fn public_link(host: Option<&str>, public_address: Option<String>) -> Option<String> {
+    let plain = |host: &&str| {
+        !host.is_empty()
+            && host.len() <= 255
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+            && !crate::access::is_loopback_host(host)
+    };
+    match host.map(str::trim).filter(plain) {
+        Some(host) => Some(format!("http://{host}/")),
+        None => public_address,
+    }
+}
+
+/// `GET /public/qr` — a QR code that opens Grid's public pages, in Grid's colours. A kiosk
+/// shows it, so a pilot with a phone can carry on there. It holds an address and nothing
+/// else: no code, and nothing about who is asking.
+pub async fn get_public_qr(
+    State(registry): State<EventRegistry>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, ProtocolError> {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok());
+    let Some(address) = public_link(host, registry.network().public_address()) else {
+        return Err(ProtocolError::new(
+            ErrorCode::Refused,
+            "Other devices cannot reach Grid yet. Switch on Public, on the Network page, to get a QR code.",
+        ));
+    };
+    let svg = qr_svg_themed(&address).map_err(|err| {
+        ProtocolError::new(
+            ErrorCode::Internal,
+            format!("The QR code could not be drawn: {err}"),
+        )
+    })?;
+    Ok((
+        [
+            (CONTENT_TYPE, "image/svg+xml"),
+            // The address changes when the computer changes network.
+            (CACHE_CONTROL, "no-store"),
+            // An SVG is a document: it may draw, and nothing more.
+            (
+                CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            ),
+        ],
+        svg,
+    )
+        .into_response())
+}
+
 /// The address wrong codes are counted against: the caller's, or one shared count when it
 /// is not known.
 fn guesser(peer: Option<ConnectInfo<SocketAddr>>) -> IpAddr {
@@ -2064,6 +2143,77 @@ mod tests {
             join_link("http://192.168.1.20:8081", "ABC234"),
             "http://192.168.1.20:8081/#/join/ABC234"
         );
+    }
+
+    #[test]
+    fn a_themed_qr_code_is_dark_on_light_in_grids_colours_and_never_the_other_way() {
+        let svg = qr_svg_themed("http://192.168.1.20/").unwrap();
+        assert!(svg.starts_with("<?xml") || svg.starts_with("<svg"), "{svg}");
+        assert!(svg.contains(QR_DARK) && svg.contains(QR_LIGHT));
+        assert!(!svg.contains("#000000") && !svg.contains("#ffffff"));
+        assert!(!svg.contains("<script"));
+        // Dark squares on a light ground: a camera cannot read the reverse. The check is on
+        // the colours themselves, so a change of palette cannot swap them by mistake.
+        let brightness = |hex: &str| {
+            let part = |at: usize| u32::from_str_radix(&hex[at..at + 2], 16).unwrap();
+            (299 * part(1) + 587 * part(3) + 114 * part(5)) / 1000
+        };
+        assert!(brightness(QR_DARK) < 40, "the squares are dark");
+        assert!(brightness(QR_LIGHT) > 215, "the ground is light");
+        // The same squares as the plain code: only the colours differ.
+        let plain = qr_svg("http://192.168.1.20/").unwrap();
+        assert_eq!(
+            svg.replace(QR_DARK, "#000000").replace(QR_LIGHT, "#ffffff"),
+            plain
+        );
+    }
+
+    #[test]
+    fn the_public_link_is_the_name_the_caller_used_unless_no_phone_could_use_it() {
+        let door = || Some("http://192.168.1.20:8081/".to_string());
+        // The name the caller reached Grid by.
+        for host in [
+            "192.168.1.20",
+            "192.168.1.20:8081",
+            "10.42.0.1:80",
+            "grid.race.lan",
+            "grid.race.lan:8081",
+            "[fd00::7]:8081",
+        ] {
+            assert_eq!(
+                public_link(Some(host), door()),
+                Some(format!("http://{host}/")),
+                "{host}"
+            );
+        }
+        // On the Grid computer, or with no usable name: the Public door's address.
+        for host in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1:8080",
+            "[::1]:8080",
+            "",
+            "  ",
+        ] {
+            assert_eq!(public_link(Some(host), door()), door(), "{host:?}");
+        }
+        assert_eq!(public_link(None, door()), door());
+        // A host that is not plainly a name and a port is never put in a picture.
+        for host in [
+            "evil.example/path",
+            "a b",
+            "x@y",
+            "grid.lan?x=1",
+            "grid.lan#/join/ABC234",
+            "<svg>",
+            "grid.lan\"onload=",
+        ] {
+            assert_eq!(public_link(Some(host), door()), door(), "{host}");
+            assert_eq!(public_link(Some(host), None), None, "{host}");
+        }
+        let long = "a".repeat(300);
+        assert_eq!(public_link(Some(&long), None), None);
+        assert_eq!(public_link(Some("localhost"), None), None);
     }
 
     #[test]

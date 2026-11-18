@@ -166,6 +166,8 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/network/{door}", put(crate::network::put_door))
         // What a visitor on the network may ask for.
         .route("/public/hello", get(crate::public::get_hello))
+        // A QR code that opens the public pages, for a kiosk to show.
+        .route("/public/qr", get(crate::pilot_access::get_public_qr))
         // A pilot's sign-in (docs/primitives.md §11.3): the director's side, and the pilot's.
         .route(
             "/events/{event_id}/access",

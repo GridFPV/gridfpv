@@ -80,6 +80,11 @@ export interface PublicSource extends LiveSession {
   kioskDone(pass: string): Promise<void>;
   /** Make this device a kiosk, with a kiosk code the director made. It is used up. */
   kioskSetUp(code: string): Promise<void>;
+  /**
+   * Where the QR code that opens the public pages is: a picture in Grid's colours, for a
+   * kiosk to show. Left out where there is none to show.
+   */
+  publicQrUrl?: () => string;
 }
 
 const NOT_FOR_VISITORS = 'Only the director can do this.';
@@ -102,6 +107,7 @@ export function publicSource(baseUrl: string): PublicSource {
     kioskIn: (code) => kioskIn(baseUrl, code),
     kioskDone: (pass) => kioskDone(baseUrl, pass),
     kioskSetUp: (code) => kioskSetUp(baseUrl, code),
+    publicQrUrl: () => `${baseUrl.replace(/\/$/, '')}/public/qr`,
     getEventState: () => getPublicEventState(baseUrl),
     subscribeChanges: (_id, onCursor) => subscribePublicChanges(baseUrl, onCursor),
     listPilots: () => listPublicPilots(baseUrl),

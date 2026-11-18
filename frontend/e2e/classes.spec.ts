@@ -18,7 +18,7 @@
 import { expect, test } from './observability.js';
 import { gotoPage } from './nav.js';
 
-test('Classes page lists the locked built-ins (org badges, not removable) and full CRUD on a Custom class', async ({
+test('Classes page lists the built-ins (org badges, not editable), full CRUD on a Custom class, and a built-in is removed and put back', async ({
   page
 }) => {
   const NAME = `E2E-Class-${Date.now()}`;
@@ -32,9 +32,10 @@ test('Classes page lists the locked built-ins (org badges, not removable) and fu
   // It carries its real org as a badge + a built-in/lock indicator…
   await expect(openBuiltin.getByText('MultiGP', { exact: true })).toBeVisible();
   await expect(openBuiltin.getByLabel('Built-in')).toBeVisible();
-  // …and is read-only: no Edit / Remove on a built-in row.
-  await expect(openBuiltin.getByRole('button', { name: 'Remove' })).toHaveCount(0);
+  // …and cannot be edited. It can be removed, which is tried at the end of this test.
   await expect(openBuiltin.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+  await expect(openBuiltin.getByRole('button', { name: 'Remove' })).toBeVisible();
+  await expect(page.getByTestId('removed-builtins')).toHaveCount(0);
   // A couple more are listed, across orgs.
   await expect(list.getByRole('listitem').filter({ hasText: 'Tiny Trainer' })).toBeVisible();
   await expect(list.getByRole('listitem').filter({ hasText: 'Street League' })).toBeVisible();
@@ -67,6 +68,36 @@ test('Classes page lists the locked built-ins (org badges, not removable) and fu
   });
   // The built-in is still there afterward.
   await expect(list.getByRole('listitem').filter({ hasText: 'Open Class' })).toBeVisible();
+
+  // ── Remove a built-in, see that it stays gone, and put the built-ins back ────────────────
+  const shrieker = list.getByRole('listitem').filter({ hasText: 'Shrieker' });
+  try {
+    await shrieker.getByRole('button', { name: 'Remove' }).click();
+    await expect(confirm).toContainText('You can put the built-in classes back at any time');
+    await confirm.getByRole('button', { name: 'Remove' }).click();
+    await expect(shrieker).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByTestId('removed-builtins')).toContainText(
+      '1 built-in class has been removed.'
+    );
+    // The Director dropped it, and a reload does not bring it back.
+    const ids = async () =>
+      ((await (await page.request.get('/classes')).json()) as { id: string }[]).map((c) => c.id);
+    expect(await ids()).not.toContain('udl-shrieker');
+    await page.reload();
+    await expect(list.getByRole('listitem').filter({ hasText: 'Open Class' })).toBeVisible({
+      timeout: 15_000
+    });
+    await expect(shrieker).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Put the built-in classes back' }).click();
+    await expect(shrieker).toBeVisible({ timeout: 15_000 });
+    await expect(shrieker.getByLabel('Built-in')).toBeVisible();
+    await expect(page.getByTestId('removed-builtins')).toHaveCount(0);
+    expect(await ids()).toContain('udl-shrieker');
+  } finally {
+    // Leave the shared Director with every built-in, whatever happened above.
+    await page.request.post('/classes/builtins');
+  }
 });
 
 test('RD hides a class on the Classes page; it stays hidden across a reload; unhide restores it', async ({

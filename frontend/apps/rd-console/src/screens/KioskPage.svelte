@@ -6,7 +6,8 @@
    *
    * 1. **Not a kiosk yet.** The director types a kiosk code from the console's Network
    *    page. The code is used up and this tablet is a kiosk from then on.
-   * 2. **Waiting for a pilot.** Nothing but the event's name and a box for a pilot's code.
+   * 2. **Waiting for a pilot.** The event's name, a box for a pilot's code, and a QR code
+   *    that opens Grid on a pilot's own phone, for whoever would sooner use that.
    * 3. **A pilot is here.** The sign-up sheet, large, for a tablet on its side. **Done**
    *    signs them out. So does walking away: after a while with no touch the page counts
    *    down and signs them out by itself.
@@ -42,6 +43,7 @@
       | 'leaveSpot'
       | 'takeSeat'
       | 'dropSeat'
+      | 'publicQrUrl'
     >;
     /** Whether the Director said, when the page loaded, that this device is a kiosk. */
     isKiosk: boolean;
@@ -54,6 +56,10 @@
     /** Whether Grid cannot be reached right now. */
     offline?: boolean;
   } = $props();
+
+  /** The QR picture's address. A picture that cannot be had is left out, not shown broken. */
+  const qrUrl = $derived(source.publicQrUrl?.());
+  let qrFailed = $state(false);
 
   // ── 1. Setting the tablet up ───────────────────────────────────────────────
   // svelte-ignore state_referenced_locally
@@ -286,6 +292,24 @@
         {/if}
       </form>
     </section>
+    <!-- A pilot with a phone need not queue at the tablet: the code opens the same pages
+         there. The picture is Grid's own colours, dark squares on a light ground. -->
+    {#if qrUrl && !qrFailed}
+      <aside class="phone" aria-label="Open Grid on your phone">
+        <img
+          class="qr"
+          src={qrUrl}
+          alt="QR code that opens Grid on your phone"
+          width="200"
+          height="200"
+          onerror={() => (qrFailed = true)}
+        />
+        <p>
+          <strong>Got a phone?</strong>
+          Scan this to open Grid on it.
+        </p>
+      </aside>
+    {/if}
   {:else}
     {#if warning}
       <p class="warning" role="status" data-testid="kiosk-warning">{warning}</p>
@@ -436,6 +460,39 @@
   .muted {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-md, 1rem);
+  }
+  /* The QR code, under the code box: a framed picture and one line. */
+  .phone {
+    justify-self: center;
+    width: min(100%, 32rem);
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-4);
+    padding: var(--gf-space-4);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    background: var(--gf-surface);
+  }
+  .phone p {
+    margin: 0;
+    font-size: var(--gf-font-size-lg);
+  }
+  .phone strong {
+    display: block;
+    color: var(--gf-accent);
+  }
+  .qr {
+    flex: none;
+    width: 12.5rem;
+    height: 12.5rem;
+    border-radius: var(--gf-radius-md);
+    border: 3px solid var(--gf-accent);
+  }
+  @media (max-width: 30rem) {
+    .phone {
+      flex-direction: column;
+      text-align: center;
+    }
   }
   .error {
     color: var(--gf-danger);

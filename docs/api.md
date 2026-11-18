@@ -79,6 +79,7 @@ own shapes with the director's things taken out, so the same page code draws bot
 | `GET /public/event/changes` | The same change feed as `GET /events/{id}/changes`, for the open event |
 | `GET /public/event/pilots` | The pilots the snapshot names: `id`, `callsign` and `color` only |
 | `GET /public/event/classes` | The classes in the event: name only |
+| `GET /public/qr` | An SVG picture: a QR code that opens the public pages, in Grid's colours. It holds the address the caller asked at (or the Public door's own, for a caller on the Grid computer) and nothing else. `409` when there is no address to give |
 | `GET /public/event/timers` | The timers its heats are flown on: name and seats only. No address |
 | `GET /public/event/channels` | `[{adapter, seat, freq_mhz}]`: the video channel of each switched-on seat on those timers. A bench seat has none. The Director asks a timer at most once in 15 seconds, however many are asking, and keeps the last answer when a timer does not reply |
 
@@ -210,6 +211,7 @@ Director on a machine with no screen, open an SSH tunnel to it
 |---|---|
 | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | The pilot list |
 | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | The class list |
+| `GET /classes/builtins`, `POST /classes/builtins` | `GET` answers `{removed}`: how many built-in classes have been removed. `POST` puts them all back and answers the class list. A built-in class can be removed with `DELETE /classes/{id}`; it cannot be edited |
 | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | The timer list, each with its live status |
 | `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added (by its own id, or by its address) |
 | `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer: seats, frequencies, thresholds, the exit hold and the lap cooldown. A write that leaves the lap cooldown out keeps the timer's. A timer that can keep its settings across a restart (`keeps_settings` in its status) is asked to keep them after every write |

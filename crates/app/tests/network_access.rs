@@ -276,6 +276,8 @@ fn open_to_visitors(method: &Method, path: &str) -> bool {
     let read = *method == Method::GET || *method == Method::HEAD;
     match path {
         "/health" | "/about" | "/time" | "/public/hello" => read,
+        // A QR code that opens the public pages. It holds an address and nothing else.
+        "/public/qr" => read,
         // The open event, as a visitor may see it (`spectator.rs` checks what is in them).
         "/public/event"
         | "/public/event/state"
@@ -3056,4 +3058,52 @@ async fn the_doors_and_the_token_are_remembered_across_a_restart() {
     assert_eq!(code, 200);
     again.stop().await;
     std::fs::remove_dir_all(data).ok();
+}
+
+#[tokio::test]
+async fn the_public_qr_code_is_a_picture_of_an_address_and_gives_nothing_else_away() {
+    let rig = rig(true);
+    let access = open_remote(&rig);
+    let public = through(&rig, Door::Public);
+    let answer = send(&public, get("/public/qr").visitor()).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.headers[header::CONTENT_TYPE], "image/svg+xml");
+    assert_eq!(answer.headers[header::CACHE_CONTROL], "no-store");
+    assert!(
+        answer.headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("sandbox")
+    );
+    assert!(answer.body.contains("<svg") && !answer.body.contains("<script"));
+    // Grid's colours, dark on light. Never plain black and white.
+    assert!(answer.body.contains("#0a0d12") && answer.body.contains("#dffcef"));
+    assert!(!answer.body.contains("#000000"));
+    // The same picture whoever asks and whatever they hold: nothing of the caller is in it.
+    for other in [
+        get("/public/qr").visitor().bearer(&access),
+        get("/public/qr").visitor().bearer(TOKEN),
+        get("/public/qr").visitor().from("192.168.1.99:50000"),
+    ] {
+        assert_eq!(send(&public, other).await.body, answer.body);
+    }
+    // Another address asked for is another picture: the code follows the name the kiosk used.
+    let named = send(&public, get("/public/qr").visitor().host("grid.race.lan")).await;
+    assert_eq!(named.status, StatusCode::OK);
+    assert_ne!(named.body, answer.body);
+    // A host that is not a name and a port is never drawn. With the Public door shut there
+    // is then no address to draw, and the answer says so.
+    let odd = send(&public, get("/public/qr").visitor().host("evil.example/x")).await;
+    assert_eq!(odd.status, StatusCode::CONFLICT);
+    assert!(odd.body.contains("Switch on Public"));
+    // Not at the Remote RD door, which is not for the public.
+    let remote = send(&through(&rig, Door::Remote), get("/public/qr").visitor()).await;
+    assert_eq!(remote.status, StatusCode::UNAUTHORIZED);
+    // It cannot be written to.
+    for method in [Method::POST, Method::PUT, Method::DELETE] {
+        assert_ne!(
+            status(&public, call(method, "/public/qr").visitor()).await,
+            StatusCode::OK
+        );
+    }
 }

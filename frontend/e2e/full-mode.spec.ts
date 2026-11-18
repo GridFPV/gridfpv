@@ -100,7 +100,7 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     );
     await page.getByRole('button', { name: 'Save format' }).click();
     await expect(editor).toBeHidden({ timeout: 15_000 });
-    const made = formats.getByRole('row').filter({ hasText: FORMAT });
+    const made = formats.getByRole('listitem').filter({ hasText: FORMAT });
     await expect(made).toContainText('First to 2 laps');
     await expect(made).toContainText('Starts at once');
     // The same name again is refused, in the Director's words, and the dialog stays open.
