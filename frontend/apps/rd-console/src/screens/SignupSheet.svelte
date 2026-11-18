@@ -213,7 +213,7 @@
                   disabled={busy}
                   title="Pilots can no longer join or leave this heat from a phone. You still can."
                   aria-label="Close {heatName(heat)} to pilots"
-                  onclick={() => closeHeat(heat, true)}>Close to pilots</Button
+                  onclick={() => closeHeat(heat, true)}>Close</Button
                 >
               {:else if editable && heat.state === 'Closed' && heat.heat !== onTimer}
                 <Button
@@ -221,7 +221,7 @@
                   variant="ghost"
                   disabled={busy}
                   aria-label="Open {heatName(heat)} to pilots"
-                  onclick={() => closeHeat(heat, false)}>Open to pilots</Button
+                  onclick={() => closeHeat(heat, false)}>Open</Button
                 >
               {/if}
             </td>

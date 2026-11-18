@@ -371,6 +371,7 @@
             {#each upcoming as entry (entry.id)}
               <li class="card" aria-label={entry.name}>
                 <h3>{entry.name}</h3>
+                {#if entry.within}<p class="within">{entry.within}</p>{/if}
                 <ul>
                   {#each entry.seats as seat (`${seat.adapter}\u0000${seat.seat}`)}
                     <li class:me={pilot !== undefined && seat.pilot === pilot.id}>
@@ -671,6 +672,11 @@
   .heats h3 {
     margin: 0 0 var(--gf-space-1);
     font-size: var(--gf-font-size-md, 1rem);
+  }
+  .heats .within {
+    margin: 0 0 var(--gf-space-2);
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
   }
   .heats ul {
     list-style: none;

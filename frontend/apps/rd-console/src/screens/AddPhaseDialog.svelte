@@ -1,21 +1,28 @@
 <script lang="ts">
   /**
-   * AddPhaseDialog — add a phase that holds heats: Practice, Qualifying, a track of a home
-   * series. A name, the phase it goes under, the class it is for, and a format.
+   * AddPhaseDialog — add a phase. One dialog for every kind, so the page needs one button:
    *
-   * A format set here is used by every heat added under the phase, so it is picked once.
-   * The phase's own ranking takes each pilot's best result across its heats, by the same
-   * rule the format ranks one heat with. A phase with no format, or an unranked one, lists
-   * its heats in order and ranks nobody.
+   * - **Empty**: a phase with no heats yet (Practice, Qualifying). The director adds them.
+   * - **Bracket**: every heat of a single or double elimination bracket.
+   * - **Multi-Main**: stacked mains with bump-ups, each main a bracket.
    *
-   * The parent mounts this only while it is open. It sends one `PhaseDefined` fact; a
-   * refusal is shown here in the Director's words.
+   * A bracket and a multi-main are generators: the Director builds their phases and heats
+   * from the answers. What they make are ordinary phases, so they can be changed afterwards.
+   * A new generator is one more choice in "Kind", never one more button on the page.
+   *
+   * The name and the phase it goes under are asked here. The rest of the questions belong
+   * to the kind and live in its own fields component, which also sends the request. A
+   * refusal, or a missing answer, is shown here in a sentence and the dialog stays open.
+   *
+   * The parent mounts this only while it is open.
    */
   import { Banner, Button, Dialog, Field, Input, Select } from '@gridfpv/components';
-  import type { PhaseDef } from '@gridfpv/types';
+  import type { PhaseId } from '@gridfpv/types';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { holderChoices, newPhaseId } from '../lib/phases.js';
-  import FormatPicker from './FormatPicker.svelte';
+  import { holderChoices } from '../lib/phases.js';
+  import PhaseBracketFields from './PhaseBracketFields.svelte';
+  import PhaseEmptyFields from './PhaseEmptyFields.svelte';
+  import PhaseMainsFields from './PhaseMainsFields.svelte';
 
   let {
     live,
@@ -24,22 +31,40 @@
   }: {
     live: EventLive;
     /** The phase the new one starts under, when it was opened from one. */
-    under?: PhaseDef['id'];
+    under?: PhaseId;
     onclose: () => void;
   } = $props();
 
+  type Kind = 'empty' | 'bracket' | 'mains';
+  const KINDS: Record<Kind, { label: string; says: string; example: string }> = {
+    empty: {
+      label: 'Empty',
+      says: 'A phase with no heats yet. You add the heats yourself.',
+      example: 'e.g. Qualifying'
+    },
+    bracket: {
+      label: 'Bracket',
+      says: 'Every heat of a single or double elimination bracket, made for you.',
+      example: 'e.g. Finals'
+    },
+    mains: {
+      label: 'Multi-Main',
+      says: 'Stacked mains, each one a bracket. The top pilots of a main bump up into the next.',
+      example: 'e.g. Mains'
+    }
+  };
+
+  let kind = $state<Kind>('empty');
   let name = $state('');
   // svelte-ignore state_referenced_locally
-  let parent = $state(under ?? '');
-  let classId = $state('');
-  let formatId = $state('');
+  let parent = $state<PhaseId | ''>(under ?? '');
   let busy = $state(false);
   let nameError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
+  /** The fields of the kind picked. It sends the request. */
+  let fields = $state<{ add: (label: string) => Promise<boolean> } | undefined>(undefined);
 
   const holders = $derived(holderChoices(live.view?.phases ?? []));
-  const rosters = $derived(live.view?.rosters ?? []);
-  const inherited = $derived(holders.find((holder) => holder.id === parent)?.format);
 
   $effect(() => {
     void live.reloadFormats();
@@ -47,7 +72,7 @@
 
   async function submit(e?: Event) {
     e?.preventDefault();
-    if (busy) return;
+    if (busy || !fields) return;
     nameError = undefined;
     error = undefined;
     const label = name.trim();
@@ -55,25 +80,11 @@
       nameError = 'Give the phase a name.';
       return;
     }
-    const format = live.formats.find((saved) => saved.id === formatId)?.format;
-    // The rule the phase ranks by: its format's, or the one it inherits.
-    const ranking = (format ?? inherited)?.ranking;
-    const def: PhaseDef = {
-      id: newPhaseId(label),
-      label,
-      kind: {
-        Group: {
-          ...(classId ? { field: [{ Class: classId }] } : {}),
-          combine: ranking ? { Measures: ranking } : 'Stack'
-        }
-      },
-      ...(parent ? { parent } : {}),
-      ...(format ? { format } : {})
-    };
     busy = true;
     try {
-      if (await live.send({ Record: { PhaseDefined: { def } } })) onclose();
+      if (await fields.add(label)) onclose();
     } catch (err) {
+      // A missing answer, or the Director's own sentence, shown as it is.
       error = err instanceof Error ? err.message : String(err);
     } finally {
       busy = false;
@@ -83,10 +94,22 @@
 
 <Dialog open={true} title="Add a phase" {onclose}>
   <form class="form" aria-label="Add a phase" onsubmit={submit}>
+    <Field label="Kind" hint={KINDS[kind].says}>
+      <Select
+        bind:value={kind}
+        aria-label="Kind"
+        disabled={busy}
+        onchange={() => (error = undefined)}
+      >
+        {#each Object.entries(KINDS) as [value, choice] (value)}
+          <option {value}>{choice.label}</option>
+        {/each}
+      </Select>
+    </Field>
     <Field label="Phase name" required error={nameError}>
       <Input
         bind:value={name}
-        placeholder="e.g. Qualifying"
+        placeholder={KINDS[kind].example}
         aria-label="Phase name"
         autocomplete="off"
         disabled={busy}
@@ -104,28 +127,13 @@
         </Select>
       </Field>
     {/if}
-    {#if rosters.length > 0}
-      <Field
-        label="For the class"
-        hint="A ranked phase is for one class. Its roster is then the phase's field, so every pilot in it gets a place."
-      >
-        <Select bind:value={classId} aria-label="For the class" disabled={busy}>
-          <option value="">Whoever flies in its heats</option>
-          {#each rosters as roster (roster.class)}
-            <option value={roster.class}>{live.names.klass(roster.class)}</option>
-          {/each}
-        </Select>
-      </Field>
+    {#if kind === 'empty'}
+      <PhaseEmptyFields bind:this={fields} {live} {parent} {busy} />
+    {:else if kind === 'bracket'}
+      <PhaseBracketFields bind:this={fields} {live} {parent} {busy} />
+    {:else}
+      <PhaseMainsFields bind:this={fields} {live} {parent} {busy} />
     {/if}
-    <FormatPicker
-      formats={live.formats}
-      bind:value={formatId}
-      none={inherited ? `The phase above's: ${inherited.name}` : 'None of its own'}
-      noneSummary={inherited
-        ? 'Its heats follow the format of the phase above.'
-        : 'Each heat under it is then given its own format.'}
-      disabled={busy}
-    />
     {#if error}
       <Banner tone="danger">{error}</Banner>
     {/if}

@@ -16,7 +16,8 @@
  *   - `#/` (or empty)   → the open event's page
  *   - `#/events`        → the Events page: open, add or delete an event
  *   - `#/event`         → the open event's page (details, lap rules, classes)
- *   - `#/event/phases`  → the Phases page: the competition as a tree, where heats are added
+ *   - `#/event/phases`  → the Phases page: the event's phases and the heat order
+ *   - `#/event/phases/‹phase›` → one phase's page: its heats, ranking and sign-up
  *   - `#/event/run`     → the Run page, on the heat the Director is racing or would race next,
  *     and `#/event/run/‹heat›` → the Run page for one heat. `‹heat›` is the heat's id,
  *     percent-encoded (a heat id can hold slashes).
@@ -73,7 +74,11 @@ export type Route =
   | { kind: 'seats'; timer?: AdapterId }
   /** One seat's Tune page: record its signal, then set its levels on the recording. */
   | { kind: 'capture'; timer: AdapterId; seat: SeatRef }
-  | { kind: 'event'; section: EventSection }
+  /**
+   * A page of the open event. `phase` is for the Phases section only: one phase's own
+   * page, with its heats, ranking and sign-up.
+   */
+  | { kind: 'event'; section: EventSection; phase?: PhaseId }
   /** The Run page. With no heat named it opens on the heat being raced, or the next one. */
   | { kind: 'run'; heat?: PhaseId }
   | { kind: 'marshal'; race?: RaceId }
@@ -178,6 +183,11 @@ export function parseHash(hash: string): Route {
       const race = decodeSegment(segments[2]);
       return race ? { kind: 'marshal', race } : { kind: 'marshal' };
     }
+    // `event/phases/‹phase›`: one phase's own page. A broken segment opens the list.
+    if (section === 'phases' && segments.length === 3) {
+      const phase = decodeSegment(segments[2]);
+      return phase ? { kind: 'event', section: 'phases', phase } : { kind: 'event', section };
+    }
     if (segments.length === 2 && (EVENT_SECTIONS as readonly string[]).includes(section ?? '')) {
       return { kind: 'event', section: section as EventSection };
     }
@@ -218,6 +228,9 @@ export function formatHash(route: Route): string {
         route.theme === 'light' ? '/light' : ''
       }`;
     case 'event':
+      if (route.section === 'phases' && route.phase !== undefined) {
+        return `#/event/phases/${part(route.phase)}`;
+      }
       return route.section === 'event' ? '#/event' : `#/event/${route.section}`;
     case 'run':
       return route.heat === undefined ? '#/event/run' : `#/event/run/${part(route.heat)}`;

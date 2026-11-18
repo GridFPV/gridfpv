@@ -4,10 +4,10 @@
  * and removing a phase nothing was raced in. Rendered against a stand-in live store.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { Command, EventView, Pilot } from '@gridfpv/types';
-import PhasesPage from '../src/screens/PhasesPage.svelte';
+import PhasePage from '../src/screens/PhasePage.svelte';
 import type { LiveSession } from '../src/lib/eventLive.svelte.js';
 import { eventView, group, heat, race } from './competition.js';
 import { openLive } from './support.js';
@@ -30,13 +30,15 @@ const placed = (pilot: string, position: number, over = {}) => ({
   ...over
 });
 
-async function open(view: EventView, over: Partial<LiveSession> = {}) {
+async function open(view: EventView, over: Partial<LiveSession> = {}, phase?: string) {
   const { session, live } = await openLive(view, {
     listPilots: vi.fn(async () => PILOTS),
     ...over
   });
   const onrun = vi.fn();
-  render(PhasesPage, { live, onrun });
+  // Rulings are made on a phase's own page. These fixtures have one phase at the top.
+  const top = view.phases.find((entry) => entry.def.parent === undefined);
+  render(PhasePage, { live, phase: phase ?? top?.def.id ?? 'none', onrun });
   return { session, onrun };
 }
 
@@ -237,11 +239,13 @@ describe('heat and phase rulings', () => {
 });
 
 describe('removing a phase', () => {
+  /** A heat's row, or, for the phase the page is about, its own group of buttons. */
   const rowOf = (label: string): HTMLElement =>
-    within(screen.getByRole('list', { name: 'Phases' }))
+    screen.queryByRole('group', { name: `${label}: what you can do` }) ??
+    (within(screen.getByRole('list', { name: /^(Phases|Heats of .+)$/ }))
       .getAllByRole('listitem')
       .filter((item) => item.classList.contains('phase'))
-      .find((item) => item.querySelector('.label')?.textContent === label) as HTMLElement;
+      .find((item) => item.querySelector('.label')?.textContent === label) as HTMLElement);
 
   const view = () =>
     eventView({
@@ -259,13 +263,18 @@ describe('removing a phase', () => {
     await open(view());
     const offers = (label: string) =>
       within(rowOf(label)).queryByRole('button', { name: /^Remove / }) !== null;
-    // Qualifying holds heats; Heat 1 has a race; the Final is locked.
+    // Qualifying holds heats, and its Heat 1 has a race. Heat 2 was never raced.
     expect(offers('Qualifying')).toBe(false);
     expect(offers('Qualifying Heat 1')).toBe(false);
-    expect(offers('Final')).toBe(false);
-    // Heat 2 was never raced, and Finals holds nothing.
     expect(offers('Qualifying Heat 2')).toBe(true);
+    cleanup();
+    // Finals holds nothing: on its own page it can be removed.
+    await open(view(), {}, 'finals');
     expect(offers('Finals')).toBe(true);
+    cleanup();
+    // The Final is locked.
+    await open(view(), {}, 'f-1');
+    expect(offers('Final')).toBe(false);
   });
 
   it('asks first: the first click sends nothing, and Cancel backs out', async () => {
@@ -290,11 +299,15 @@ describe('removing a phase', () => {
 
   it("shows the Director's sentence when it refuses to remove", async () => {
     const SAID = 'Finals is counted by a class. Take it out of the standings first.';
-    await open(view(), {
-      sendCommand: vi.fn(async () =>
-        Promise.reject(Object.assign(new Error(SAID), { status: 409, code: 'Refused' }))
-      )
-    });
+    await open(
+      view(),
+      {
+        sendCommand: vi.fn(async () =>
+          Promise.reject(Object.assign(new Error(SAID), { status: 409, code: 'Refused' }))
+        )
+      },
+      'finals'
+    );
     const row = rowOf('Finals');
     await fireEvent.click(within(row).getByRole('button', { name: /^Remove / }));
     await fireEvent.click(within(row).getByRole('button', { name: 'Confirm' }));

@@ -504,11 +504,25 @@ seat references and formats. The director can then edit any part by hand.
 | Time trial | Lineups from the roster; each heat ranked by best N consecutive; parent takes each pilot's best result |
 | Head-to-head round | Lineups from a seed; ranked by points or finish order |
 | Points heat | One heat, N races, points summed across them |
-| Bracket | A chain of rounds where each lineup refers to earlier heats (see below) |
+| Bracket | A chain of rounds where each lineup refers to earlier heats (see below). Every round is a phase that holds its heats, the final too, so each round opens the same way |
 | Mains | Brackets stacked with bump-ups (§6.1) |
 | Chase the Ace | One heat, raced until a pilot has two wins |
 | Single pilot | One heat with one pilot, done when the director says so, best 3 consecutive |
 | Season | A ranking rule over several events |
+
+**Built 2026-11-18:** a generated bracket makes every round a phase, even a round with one
+heat (it used to put a one-heat round straight in the bracket). The Director keeps a
+bracket's rounds latest first, because the ranking stacks them in that order. The console
+shows them first round first, the order they are flown.
+
+**Built 2026-11-18:** the console has one Add phase dialog for every kind (Ryan: no row
+of different "add" buttons). Its "Kind" is Empty, Bracket or Multi-Main. A new generator is
+one more kind there. A phase's own page has Add phase too, for a phase inside it. Mains are
+kept best first (A-Main first) and shown bottom main first, the order they are flown.
+
+**Decided 2026-11-18:** Chase the Ace stays one heat, raced until a pilot has two wins. It
+is not split into several heats in a phase. In a bracket that heat still sits in its own
+"Final" phase, like every other round, so the final is never a heat on its own.
 
 **Brackets** (Agreed). One generator covers every shape Ryan runs: single or double
 elimination, heats of 2 to 8 pilots, and any field from 3 pilots up. The director picks the
@@ -723,8 +737,15 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      exit hold. A recording lives in the page only.
    - **Timers:** the directory, with timers found on the network.
    - **Pilots** and **Classes:** the lists that outlive events.
-   - **Phases:** the tree, Up next, and Add phase, Add heat, Add bracket. A phase or heat
-     is given a saved format; a heat under a phase can use the phase's.
+   - **Phases:** a short list (one line a phase, with where it stands and the heat on the
+     timer), then Up next, then heats that stand alone; and Add phase, Add heat, Add
+     bracket. A line opens **the phase's own page**: its own heats and lineups, its ranking
+     and rulings, and its sign-up sheet. A phase inside a phase (a bracket's round) is not
+     shown there in full: the page lists the phases inside as lines, and each has a page
+     of its own. On the list, a phase that holds phases unfolds to show them. A phase or
+     heat is given a saved format; a heat under a phase can use the phase's. (Reworked
+     2026-11-17: the page used to be one long tree with every sign-up sheet stacked above
+     it.)
    - **Formats:** the saved formats (`/formats`) as a table, with an editor over the same
      rules-as-data the engine reads (§5.5). A new Director starts with four.
    - **Run:** a phase, then one of its heats, on the timer. Keyboard shortcuts, lap

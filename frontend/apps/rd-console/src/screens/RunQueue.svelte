@@ -60,7 +60,12 @@
       <li aria-label={phase.def.label}>
         <span class="n">{index + 1}</span>
         <span class="what">
-          <span class="label">{phase.def.label}</span>
+          <span class="label">
+            {phase.def.label}
+            {#if names.within(phase.def.id)}
+              <span class="within">{names.within(phase.def.id)}</span>
+            {/if}
+          </span>
           <span class="lineup">
             {phase.lineup
               .filter((seat) => seat.who !== 'Nobody')
@@ -133,6 +138,12 @@
   .label {
     font-weight: var(--gf-font-weight-semibold);
     overflow-wrap: anywhere;
+  }
+  .within {
+    margin-left: var(--gf-space-2);
+    font-size: var(--gf-font-size-sm);
+    font-weight: var(--gf-font-weight-regular, 400);
+    color: var(--gf-text-muted);
   }
   .lineup {
     font-size: var(--gf-font-size-sm);

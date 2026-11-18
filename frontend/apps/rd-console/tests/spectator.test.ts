@@ -146,6 +146,24 @@ describe('the heats coming up', () => {
     ]);
   });
 
+  it('says which phase a heat is in when its name does not', () => {
+    const view = eventView({
+      phases: [
+        group('sport', 'Sport'),
+        heat('sport/a', 'A-Main', ['p-ace'], { parent: 'sport' }),
+        group('whoop', 'Whoop'),
+        heat('whoop/a', 'A-Main', ['p-bee'], { parent: 'whoop' }),
+        heat('whoop/1', 'Whoop Heat 1', ['p-cat'], { parent: 'whoop' })
+      ],
+      queue: ['sport/a', 'whoop/a', 'whoop/1']
+    });
+    expect(upcomingHeats(view, names(view)).map((entry) => [entry.name, entry.within])).toEqual([
+      ['A-Main', 'Sport'],
+      ['A-Main', 'Whoop'],
+      ['Whoop Heat 1', undefined]
+    ]);
+  });
+
   it('puts the heat on the timer first, whatever the run order says', () => {
     const view = eventView({
       phases: [

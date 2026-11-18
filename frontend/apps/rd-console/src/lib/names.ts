@@ -34,6 +34,13 @@ export const UNKNOWN_PHASE = 'Unknown phase';
 export interface Names {
   /** A phase's label, e.g. "Winners Round 1 Heat 2". */
   phase(id: PhaseId): string;
+  /**
+   * The phases that hold a phase, outermost first: "Sport Finals › Semi-finals". It says
+   * which "Semi-final 1" this is when two classes each have one. A phase above whose name
+   * the phase's own name already starts with is left out ("Practice Heat 3" needs no
+   * "Practice"). `undefined` when nothing is left to say.
+   */
+  within(id: PhaseId): string | undefined;
   /** A pilot's callsign. */
   pilot(id: PilotId): string;
   /** A class's name, e.g. "Open". */
@@ -98,6 +105,21 @@ export function buildNames(
   const callsigns = new Map(pilots.map((pilot) => [pilot.id, pilot.callsign]));
 
   const phase = (id: PhaseId): string => phaseLabels.get(id) ?? UNKNOWN_PHASE;
+  const parents = new Map(phases.map((entry) => [entry.def.id, entry.def.parent]));
+  const within = (id: PhaseId): string | undefined => {
+    const own = phaseLabels.get(id);
+    if (own === undefined) return undefined;
+    const above: string[] = [];
+    let at = parents.get(id);
+    // Bounded by the number of phases, so a loop in a bad snapshot cannot hang the page.
+    for (let steps = 0; at !== undefined && steps <= phases.length; steps += 1) {
+      const label = phaseLabels.get(at);
+      if (label === undefined) break;
+      if (!own.startsWith(label)) above.unshift(label);
+      at = parents.get(at);
+    }
+    return above.length > 0 ? above.join(' › ') : undefined;
+  };
   const classNames = new Map(classes.map((c) => [c.id, c.name]));
   const pilot = (id: PilotId): string => callsigns.get(id) ?? UNKNOWN_PILOT;
   const klass = (id: ClassId): string => classNames.get(id) ?? UNKNOWN_CLASS;
@@ -142,5 +164,5 @@ export function buildNames(
   const timer = (adapter: AdapterId): string => timerName(timers, adapter);
   const colors = new Map(pilots.map((p) => [p.id, p.color]));
   const pilotColor = (id: PilotId): string | undefined => colors.get(id);
-  return { phase, pilot, klass, who, seat, seatPlain, channel, timer, pilotColor };
+  return { phase, within, pilot, klass, who, seat, seatPlain, channel, timer, pilotColor };
 }

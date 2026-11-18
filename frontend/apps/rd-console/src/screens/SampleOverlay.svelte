@@ -76,6 +76,7 @@
   /** The made-up race has one pilot and no event, so every name is said here. */
   const names: Names = {
     phase: () => 'Track 2',
+    within: () => undefined,
     pilot: () => 'Your pilot',
     klass: () => 'Class',
     who: () => 'Your pilot',

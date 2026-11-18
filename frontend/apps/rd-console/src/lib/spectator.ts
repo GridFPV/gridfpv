@@ -92,6 +92,7 @@ export function publicSource(baseUrl: string): PublicSource {
     listFormats: async () => [],
     sendCommand: refuse,
     createBracket: refuse,
+    createMains: refuse,
     postPass: refuse,
     getRaceSignal: refuse,
     getVideoSettings: refuse,
@@ -149,6 +150,8 @@ export interface UpcomingHeat {
   id: PhaseId;
   /** "Qualifying Heat 3". */
   name: string;
+  /** The phases that hold it, when its name does not say: "Sport Finals › Semi-finals". */
+  within?: string;
   /** Who is in it, in seat order. */
   seats: SeatRow[];
 }
@@ -183,6 +186,7 @@ export function upcomingHeats(view: EventView | undefined, names: Names): Upcomi
   return coming.map((phase) => ({
     id: phase.def.id,
     name: names.phase(phase.def.id),
+    within: names.within(phase.def.id),
     seats: lineupSeatRows(phase, names)
   }));
 }
