@@ -7,6 +7,7 @@ import {
   groupOfHeat,
   heatGroups,
   holderChoices,
+  holdsOnlyRounds,
   isBye,
   isHeat,
   mainName,
@@ -112,6 +113,21 @@ describe('phaseStatus', () => {
   });
 });
 
+/** A bracket heat whose seats are filled from other phases, as the generator writes them. */
+function fed(id: string, label: string, parent: string, from: string[]) {
+  const made = heat(id, label, [], { parent });
+  made.def.kind = {
+    Heat: {
+      lineup: from.map((phase, index) => ({
+        adapter: 'bench',
+        seat: `seat-${index + 1}`,
+        source: { FromPhase: { phase, position: 1 } }
+      }))
+    }
+  };
+  return made;
+}
+
 describe('a bracket in the tree', () => {
   // The Director keeps a bracket's rounds latest first.
   const bracket = (hint: string | undefined) => {
@@ -121,10 +137,10 @@ describe('a bracket in the tree', () => {
       group('q', 'Qualifying'),
       top,
       group('b/final', 'Final', 'b'),
-      heat('b/final/1', 'Final', [], { parent: 'b/final' }),
+      fed('b/final/1', 'Final', 'b/final', ['b/r2/1', 'b/r2/2']),
       group('b/r2', 'Round 2', 'b'),
-      heat('b/r2/1', 'Round 2 Heat 1', [], { parent: 'b/r2' }),
-      heat('b/r2/2', 'Round 2 Heat 2', [], { parent: 'b/r2' }),
+      fed('b/r2/1', 'Round 2 Heat 1', 'b/r2', ['b/r1/1']),
+      fed('b/r2/2', 'Round 2 Heat 2', 'b/r2', ['b/r1/1']),
       group('b/r1', 'Round 1', 'b'),
       heat('b/r1/1', 'Round 1 Heat 1', [], { parent: 'b/r1' })
     ];
@@ -166,7 +182,10 @@ describe('a bracket in the tree', () => {
       mains,
       a,
       group('m/a/final', 'Final', 'm/a'),
+      fed('m/a/final/1', 'Final', 'm/a/final', ['m/a/r1/1']),
       group('m/a/r1', 'Round 1', 'm/a'),
+      // The A-Main's first round takes pilots who bump up from the B-Main.
+      fed('m/a/r1/1', 'Round 1', 'm/a/r1', ['m/b']),
       b,
       group('m/b/final', 'Final', 'm/b')
     ]);
@@ -176,7 +195,65 @@ describe('a bracket in the tree', () => {
       'm/b/final',
       'm/a',
       'm/a/r1',
-      'm/a/final'
+      'm/a/r1/1',
+      'm/a/final',
+      'm/a/final/1'
+    ]);
+  });
+
+  it('interleaves double elimination: a winners round, then the losers rounds it feeds', () => {
+    // Sixteen pilots in heats of four, as the Director keeps it: latest round first, and
+    // the losers side ahead of the winners side.
+    const top = group('d', 'Bracket');
+    top.def.display_hint = 'double-elimination';
+    const round = (id: string, label: string, from: string[]) => [
+      group(`d/${id}`, label, 'd'),
+      fed(`d/${id}/1`, label, `d/${id}`, from)
+    ];
+    const phases = [
+      top,
+      ...round('final', 'Final', ['d/wf/1', 'd/lf/1']),
+      // The losers final takes the winners final's losers and the survivors of losers 2.
+      ...round('lf', 'Losers Final', ['d/wf/1', 'd/l2/1']),
+      // Losers 2 takes the losers of winners 2 and the survivors of losers 1.
+      ...round('l2', 'Losers Round 2', ['d/w2/1', 'd/l1/1']),
+      ...round('l1', 'Losers Round 1', ['d/w1/1']),
+      ...round('wf', 'Winners Final', ['d/w2/1']),
+      ...round('w2', 'Winners Round 2', ['d/w1/1']),
+      // Round 1 is seeded from qualifying, which is not part of the bracket.
+      ...round('w1', 'Winners Round 1', ['q'])
+    ];
+    expect(
+      phaseTree(phases)
+        .filter((row) => row.depth === 1)
+        .map((row) => row.phase.def.label)
+    ).toEqual([
+      'Winners Round 1',
+      'Losers Round 1',
+      'Winners Round 2',
+      'Losers Round 2',
+      'Winners Final',
+      'Losers Final',
+      'Final'
+    ]);
+  });
+
+  it('a bad snapshot where two rounds feed each other still lays out every round once', () => {
+    const top = group('x', 'Bracket');
+    top.def.display_hint = 'single-elimination';
+    const rows = phaseTree([
+      top,
+      group('x/a', 'A', 'x'),
+      fed('x/a/1', 'A', 'x/a', ['x/b/1']),
+      group('x/b', 'B', 'x'),
+      fed('x/b/1', 'B', 'x/b', ['x/a/1'])
+    ]);
+    expect(rows.map((row) => row.phase.def.id).sort()).toEqual([
+      'x',
+      'x/a',
+      'x/a/1',
+      'x/b',
+      'x/b/1'
     ]);
   });
 
@@ -631,5 +708,41 @@ describe('how many mains a field takes', () => {
 
   it('names them as the Director does', () => {
     expect([0, 1, 25, 26].map(mainName)).toEqual(['A-Main', 'B-Main', 'Z-Main', 'Main 27']);
+  });
+});
+
+describe('a phase that keeps its heats in its rounds', () => {
+  const made = (hint: string | undefined) => {
+    const top = group('b', 'Bracket');
+    top.def.display_hint = hint;
+    return top;
+  };
+  const round = [group('b/r1', 'Round 1', 'b'), heat('b/r1/1', 'Round 1', [], { parent: 'b/r1' })];
+
+  it('is one a generator made, holding phases and no heat of its own', () => {
+    for (const hint of ['single-elimination', 'double-elimination', 'mains', 'round-robin']) {
+      const top = made(hint);
+      expect(holdsOnlyRounds(top, [top, ...round])).toBe(true);
+    }
+  });
+
+  it('is never a phase the director made by hand, an empty one, or one with a loose heat', () => {
+    const byHand = made(undefined);
+    expect(holdsOnlyRounds(byHand, [byHand, ...round])).toBe(false);
+    const empty = made('double-elimination');
+    expect(holdsOnlyRounds(empty, [empty])).toBe(false);
+    const mixed = made('double-elimination');
+    expect(
+      holdsOnlyRounds(mixed, [mixed, ...round, heat('b/extra', 'Extra', [], { parent: 'b' })])
+    ).toBe(false);
+  });
+
+  it('is marked on the summary, and the rounds inside it are not', () => {
+    const top = made('double-elimination');
+    const summaries = phaseSummaries(eventView({ phases: [top, ...round] }));
+    expect(summaries.map((entry) => [entry.name, entry.roundsOnly])).toEqual([
+      ['Bracket', true],
+      ['Round 1', false]
+    ]);
   });
 });

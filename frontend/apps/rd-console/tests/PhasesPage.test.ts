@@ -1418,6 +1418,46 @@ describe('phases inside a phase, on the list', () => {
   });
 });
 
+describe('a phase a generator made, with its heats in its rounds', () => {
+  const made = () => {
+    const bracket = group('finals', 'Finals');
+    bracket.def.display_hint = 'double-elimination';
+    return eventView({
+      phases: [
+        group('quali', 'Qualifying'),
+        bracket,
+        group('finals/final', 'Final', 'finals'),
+        heat('finals/final/heat-1', 'Final', ['p-1a'], { parent: 'finals/final' })
+      ]
+    });
+  };
+
+  it('has no + Heat on its line of the list, and a plain phase still has one', async () => {
+    await open(made());
+    expect(screen.queryByRole('button', { name: 'Add a heat under Finals' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add a heat under Qualifying' })).toBeVisible();
+  });
+
+  it('shows a Ranking card on its page, with no empty-heats note and no + Heat or Sign-up', async () => {
+    await openPhase(made(), 'finals');
+    expect(screen.getByRole('list', { name: 'Phases in Finals' })).toBeVisible();
+    expect(screen.getByText('Ranking', { selector: '.gf-card__title, h2, h3' })).toBeVisible();
+    expect(screen.queryByText('Heats and ranking')).toBeNull();
+    expect(screen.queryByTestId('no-heats')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add a heat under Finals' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Set up pilot sign-up/ })).toBeNull();
+    // It can still be locked, and a phase can still be added inside it.
+    expect(screen.getByRole('button', { name: /^Lock Finals/ })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Add a phase inside Finals' })).toBeVisible();
+  });
+
+  it('a round inside it is an ordinary page: its heats, and + Heat', async () => {
+    await openPhase(made(), 'finals/final');
+    expect(screen.getByText('Heats and ranking')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Add a heat under Final' })).toBeVisible();
+  });
+});
+
 describe("a phase's own page", () => {
   const view = () =>
     eventView({

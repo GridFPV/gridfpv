@@ -18,11 +18,67 @@ export interface PhaseRow {
   depth: number;
 }
 
+/** The display hints a bracket carries. Wire values, never shown. */
+const BRACKET_HINTS = new Set(['single-elimination', 'double-elimination']);
+/** The display hint a set of mains carries. The Director keeps them best first (A-Main). */
+const MAINS_HINT = 'mains';
+
 /**
- * The display hints of phases the Director keeps last-flown first: a bracket's rounds and a
- * set of mains (A-Main first). Wire values, never shown.
+ * A bracket's rounds in the order they are flown.
+ *
+ * A round can be flown once every round that feeds it has been. So each round gets a
+ * level: 0 when nothing in the bracket feeds it, else one more than the latest round that
+ * does. Rounds are laid out level by level. Two rounds on one level could be flown in
+ * either order; the losers round goes first, so the list reads a winners round, then the
+ * losers rounds it feeds, then the next winners round (Ryan, 2026-11-18). The Director
+ * keeps rounds latest first with the losers side ahead of the winners side, so keeping
+ * that order within a level is what puts losers first.
  */
-const FLOWN_LAST_FIRST = new Set(['single-elimination', 'double-elimination', 'mains']);
+function flyingOrder(
+  bracket: PhaseId,
+  rounds: readonly PhaseView[],
+  phases: readonly PhaseView[]
+): PhaseView[] {
+  const parents = new Map(phases.map((phase) => [phase.def.id, phase.def.parent]));
+  /** The round of this bracket that a phase is, or sits inside. */
+  const roundOf = (id: PhaseId): PhaseId | undefined => {
+    let at: PhaseId | undefined = id;
+    for (let steps = 0; at !== undefined && steps <= phases.length; steps += 1) {
+      const parent = parents.get(at);
+      if (parent === bracket) return at;
+      at = parent;
+    }
+    return undefined;
+  };
+  // Which rounds feed each round: the rounds its heats' seats are filled from.
+  const feeds = new Map<PhaseId, Set<PhaseId>>();
+  for (const phase of phases) {
+    if (!('Heat' in phase.def.kind)) continue;
+    const into = roundOf(phase.def.id);
+    if (into === undefined) continue;
+    for (const seat of phase.def.kind.Heat.lineup) {
+      if (typeof seat.source !== 'object' || !('FromPhase' in seat.source)) continue;
+      const from = roundOf(seat.source.FromPhase.phase);
+      if (from === undefined || from === into) continue;
+      feeds.set(into, (feeds.get(into) ?? new Set()).add(from));
+    }
+  }
+  const levels = new Map<PhaseId, number>();
+  const levelOf = (round: PhaseId, trail: readonly PhaseId[] = []): number => {
+    const known = levels.get(round);
+    if (known !== undefined) return known;
+    // A loop cannot be made by the generator; this only keeps a bad snapshot from hanging.
+    if (trail.includes(round)) return 0;
+    const level = Math.max(
+      0,
+      ...[...(feeds.get(round) ?? [])].map((from) => levelOf(from, [...trail, round]) + 1)
+    );
+    levels.set(round, level);
+    return level;
+  };
+  // A stable sort: rounds on one level keep the order the Director gave them.
+  return [...rounds].sort((a, b) => levelOf(a.def.id) - levelOf(b.def.id));
+}
 
 /**
  * How many mains a field takes, when each starts `perMain` pilots and `bump` of them come
@@ -47,7 +103,8 @@ export function mainName(index: number): string {
  * A bracket and a set of mains are the exceptions to the order. The Director keeps a
  * bracket's rounds latest first and the mains best first (A-Main, then B-Main), because that
  * is the order the ranking stacks them in. A person reads them in the order they are flown,
- * so rounds are laid out first round first and mains bottom main first.
+ * so a bracket's rounds are laid out as they can be flown (see `flyingOrder`) and mains
+ * bottom main first.
  */
 export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRow[] {
   if (root !== undefined) {
@@ -82,12 +139,26 @@ export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRo
     }
   };
   for (const phase of phases) {
-    if (phase.def.display_hint !== undefined && FLOWN_LAST_FIRST.has(phase.def.display_hint)) {
-      children.get(phase.def.id)?.reverse();
+    const inside = children.get(phase.def.id);
+    if (inside === undefined || phase.def.display_hint === undefined) continue;
+    if (phase.def.display_hint === MAINS_HINT) inside.reverse();
+    else if (BRACKET_HINTS.has(phase.def.display_hint)) {
+      children.set(phase.def.id, flyingOrder(phase.def.id, inside, phases));
     }
   }
   walk(undefined, 0);
   return rows;
+}
+
+/**
+ * Whether a generator made this phase and keeps every heat inside its rounds: it carries a
+ * display hint, holds phases, and has no heat directly under it. A phase the director made
+ * by hand never counts, whatever it holds.
+ */
+export function holdsOnlyRounds(phase: PhaseView, phases: readonly PhaseView[]): boolean {
+  if (phase.def.display_hint === undefined) return false;
+  const inside = phases.filter((other) => other.def.parent === phase.def.id);
+  return inside.length > 0 && inside.every((other) => !isHeat(other.def));
 }
 
 /** Where a phase stands, as the Event page shows it. */
@@ -156,6 +227,12 @@ export interface PhaseSummary {
   parent?: PhaseId;
   /** How many phases sit directly inside it (a bracket's rounds). Heats are not counted. */
   inside: number;
+  /**
+   * Whether a generator made it and keeps every heat inside its rounds: a bracket, a set
+   * of mains, a round robin. Such a phase has no heats of its own, and a loose heat beside
+   * its rounds would make no sense, so the pages offer no "+ Heat" on it.
+   */
+  roundsOnly: boolean;
   status: PhaseStatus;
   /** The format's name, when the phase sets one. */
   format?: string;
@@ -200,6 +277,7 @@ export function phaseSummaries(view: EventView): PhaseSummary[] {
         : {}),
       inside: under.filter((next) => next.depth === row.depth + 1 && !isHeat(next.phase.def))
         .length,
+      roundsOnly: holdsOnlyRounds(row.phase, view.phases),
       status: phaseStatus(row.phase, view),
       format: row.phase.format?.name,
       heats: heats.length,

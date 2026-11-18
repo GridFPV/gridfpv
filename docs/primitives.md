@@ -527,7 +527,12 @@ seat references and formats. The director can then edit any part by hand.
 **Built 2026-11-18:** a generated bracket makes every round a phase, even a round with one
 heat (it used to put a one-heat round straight in the bracket). The Director keeps a
 bracket's rounds latest first, because the ranking stacks them in that order. The console
-shows them first round first, the order they are flown.
+shows them in the order they can be flown: a round comes after every round that feeds it.
+Where two could go in either order the losers round is first, so double elimination reads
+a winners round, then the losers rounds it feeds, then the next winners round (Ryan,
+2026-11-18). A bracket, a set of mains and a round robin keep every heat in their rounds, so
+the console offers no "+ Heat" or sign-up on the phase itself, and its page shows a
+"Ranking" card where a plain phase shows "Heats and ranking".
 
 **Built 2026-11-18:** the console has one Add phase dialog for every kind (Ryan: no row
 of different "add" buttons). Its "Kind" is Empty, Bracket, Multi-Main or Round Robin. A new generator is

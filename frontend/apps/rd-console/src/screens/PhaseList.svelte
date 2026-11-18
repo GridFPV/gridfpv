@@ -54,6 +54,7 @@
     onsignup = undefined,
     root = undefined,
     heatsOf = undefined,
+    emptyNote = true,
     topHeats = false
   }: {
     /**
@@ -62,6 +63,8 @@
      * inside it are not shown; the phase's page lists those apart.
      */
     heatsOf?: PhaseId | undefined;
+    /** With `heatsOf`: say so when the phase has no heats. Off for a phase that never will. */
+    emptyNote?: boolean;
     /** Show one phase and everything beneath it, in place of the whole event. */
     root?: PhaseId | undefined;
     /** Show only the heats that stand alone at the top of the event, under no phase. */
@@ -351,7 +354,7 @@
     </span>
     {@render ranking(own, false)}
   </div>
-  {#if rows.length === 0}
+  {#if rows.length === 0 && emptyNote}
     <p class="none" data-testid="no-heats">No heats in this phase yet.</p>
   {/if}
 {/if}
