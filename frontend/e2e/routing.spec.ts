@@ -135,7 +135,6 @@ test('the switch moves between Setup and the event, and each side remembers its 
     'Marshal',
     'Results',
     'Recordings',
-    'Overlays',
     'Help'
   ]);
 
@@ -149,6 +148,7 @@ test('the switch moves between Setup and the event, and each side remembers its 
     'Classes',
     'Formats',
     'Video',
+    'Overlays',
     'Network',
     'Help'
   ]);

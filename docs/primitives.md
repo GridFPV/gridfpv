@@ -1339,10 +1339,22 @@ every phone camera reads it. The address is the one the kiosk itself opened Grid
 
 **Agreed, not built.** Each of these is decided (Ryan, 2026-11-18) and waits its turn.
 
-- **A name for the race network.** Where the field's network has DNS, the director types a
-  name such as `grid.race.lan` on the Network page. Every address Grid gives out, and every
-  QR code, then uses the name and not a number. Grid does not run DNS itself; it only uses
-  the name it is told.
+- **A public address.** The director types the address people should use to reach the
+  public pages, on the Network page. Every address Grid gives out for the public pages, and
+  every QR code (a pilot's, and the kiosk's), then uses it and not a number. It is a whole
+  address, with `http` or `https`, so it covers both cases:
+  - **A name on the race network**, where the field's network has DNS:
+    `http://grid.race.lan`.
+  - **An address on the internet.** The Director runs at the track on a hotspot or a
+    satellite link, and a tunnel (Cloudflare Tunnel, or the like) carries an internet
+    address such as `https://race.example.org` to the Public door. People then need not be
+    on the field's network at all, and the kiosk's QR code must point there.
+
+  Grid does not run DNS or a tunnel itself; it only uses the address it is told. Only the
+  **Public** door is ever put behind a tunnel: the Remote RD door and the Grid computer's
+  own listener stay on the field's network. Until this is built, the kiosk's QR code holds
+  the address the kiosk itself opened Grid by, so a kiosk opened by the internet address
+  already gives the right one, as long as that address is plain `http`.
 - **HTTPS.** Three ways, built in this order: the director's own key and certificate; a
   certificate Grid signs itself (every phone warns about it, so it suits Remote RD more
   than Public); and Certbot, as an option only, since it needs the internet and race day
@@ -1361,6 +1373,8 @@ one event is on the event's side.
 
 What that changed (built 2026-11-18):
 
+- **Overlays** is a Setup page. What an overlay shows is the open event, but where it
+  sits, its logos and its URLs are the same for every event.
 - **Video** in Setup is only how OBS is set up. What was recorded, and the overlay runs,
   are on the event's **Recordings** page.
 - **Seats** puts the timer's own settings first, and each seat's signal inside that seat's

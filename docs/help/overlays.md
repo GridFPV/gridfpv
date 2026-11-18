@@ -2,6 +2,9 @@
 
 An overlay is a page you put on top of your video in OBS.
 
+The Overlays page is under **Setup**. You set the overlays up once, and they follow
+whichever event is open.
+
 ## Adding one to OBS
 
 1. In OBS, add a **Browser** source.

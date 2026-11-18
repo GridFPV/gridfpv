@@ -249,6 +249,8 @@
       <VideoPage {session} />
     {:else if route.page === 'network'}
       <NetworkPage {session} />
+    {:else if route.page === 'overlays'}
+      <OverlaysPage {session} />
     {:else if route.page === 'data'}
       <DataPage {session} />
     {:else if route.page === 'timers'}
@@ -293,8 +295,6 @@
       <ResultsPage {live} />
     {:else if route.kind === 'event' && route.section === 'recordings'}
       <RecordingsPage {session} {live} />
-    {:else if route.kind === 'event' && route.section === 'overlays'}
-      <OverlaysPage {session} />
     {:else}
       <EventPage {session} event={session.currentEvent} {live} />
     {/if}

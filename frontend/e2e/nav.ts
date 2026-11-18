@@ -18,6 +18,7 @@ const SETUP_PAGES = [
   'Classes',
   'Formats',
   'Video',
+  'Overlays',
   'Network'
 ];
 
