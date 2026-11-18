@@ -49,6 +49,7 @@
     { key: 'run', label: 'Run', to: { kind: 'run' } },
     { key: 'marshal', label: 'Marshal', to: { kind: 'marshal' } },
     { key: 'results', label: 'Results', to: { kind: 'event', section: 'results' } },
+    { key: 'recordings', label: 'Recordings', to: { kind: 'event', section: 'recordings' } },
     { key: 'overlays', label: 'Overlays', to: { kind: 'event', section: 'overlays' } }
   ];
   /** What is kept for every event. */

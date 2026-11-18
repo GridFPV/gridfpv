@@ -7,14 +7,11 @@
    * the race. A discarded race's recording goes to a trash folder beside it.
    *
    * The page has the settings (where OBS is, its password, what records, the tail, the
-   * trash), whether OBS is connected right now, and the runs recorded since the Director
-   * started. The password is write-only: the Director never sends it back, so the field only
-   * says whether one is stored.
+   * trash) and whether OBS is connected right now. The password is write-only: the Director
+   * never sends it back, so the field only says whether one is stored.
    *
-   * A race recorded clean (a scene with the camera and no overlay) can have the overlay
-   * drawn onto it afterwards, with the laps as they stand. The Recordings card lists the
-   * open event's recorded races with where each one's overlay stands, and the buttons that
-   * draw it.
+   * This is set up once. What was recorded belongs to an event, and is on the event's
+   * **Recordings** page (`RecordingsPage`).
    *
    * The status has no change feed, so the page asks for it again every
    * {@link TIMER_POLL_MS} while it is open.
@@ -30,42 +27,13 @@
     StatusPill,
     toast
   } from '@gridfpv/components';
-  import type {
-    RaceId,
-    RecordFrom,
-    RenderWhen,
-    SaveIn,
-    VideoSettings,
-    VideoStatus
-  } from '@gridfpv/types';
+  import type { RecordFrom, RenderWhen, SaveIn, VideoSettings, VideoStatus } from '@gridfpv/types';
   import Page from '../Page.svelte';
-  import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { raceName } from '../lib/marshal.js';
   import type { Session } from '../lib/session.svelte.js';
   import { TIMER_POLL_MS } from '../lib/timers.js';
-  import {
-    OVERLAY_HINTS,
-    OVERLAY_LABELS,
-    OVERLAY_TONES,
-    RUN_STATE_LABELS,
-    RUN_STATE_TONES,
-    canDraw,
-    isDrawing,
-    needsDrawing,
-    renderOf,
-    renderWords,
-    sceneChoices,
-    startWords
-  } from '../lib/video.js';
+  import { sceneChoices } from '../lib/video.js';
 
-  let {
-    session,
-    live
-  }: {
-    session: Session;
-    /** The open event's live competition, when an event is open: its recorded races. */
-    live?: EventLive;
-  } = $props();
+  let { session }: { session: Session } = $props();
 
   const say = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -230,21 +198,6 @@
   const obs = $derived(status?.obs);
   const tools = $derived(status?.tools);
 
-  // ── The open event's recordings ────────────────────────────────────────────
-  /** The open event's races that have a recording, newest first. */
-  const recorded = $derived.by(() => {
-    const view = live?.view;
-    if (!view || !live) return [];
-    const names = live.names;
-    return view.races
-      .flatMap((race) =>
-        race.video
-          ? [{ race: race.race, name: raceName(view, names, race), video: race.video }]
-          : []
-      )
-      .reverse();
-  });
-  const waiting = $derived(recorded.filter((entry) => needsDrawing(entry.video.overlay)).length);
   /** "Get ffmpeg" was just pressed, until the Director answers. */
   let askingFfmpeg = $state(false);
   async function getFfmpeg() {
@@ -258,24 +211,6 @@
       saveError = say(err);
     } finally {
       askingFfmpeg = false;
-    }
-  }
-
-  /** The race whose button was just pressed, or `'all'`, until the Director answers. */
-  let asking = $state<RaceId | 'all' | undefined>(undefined);
-  let drawError = $state<string | undefined>(undefined);
-
-  async function draw(race?: RaceId) {
-    if (!live || asking !== undefined) return;
-    asking = race ?? 'all';
-    drawError = undefined;
-    try {
-      await session.renderVideo({ event: live.eventId, ...(race === undefined ? {} : { race }) });
-      await loadStatus();
-    } catch (err) {
-      drawError = say(err);
-    } finally {
-      asking = undefined;
     }
   }
 </script>
@@ -525,96 +460,6 @@
         </div>
       </form>
     </Card>
-
-    {#if live}
-      <Card title="Recordings" elevation="sm">
-        {#snippet actions()}
-          {#if waiting > 0}
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={asking !== undefined}
-              onclick={() => draw()}
-              title="Draw the overlay for every race here that has none, or whose laps changed"
-            >
-              Draw all {waiting}
-            </Button>
-          {/if}
-        {/snippet}
-        {#if drawError}
-          <Banner tone="danger" ondismiss={() => (drawError = undefined)}>{drawError}</Banner>
-        {/if}
-        {#if recorded.length === 0}
-          <p class="muted" data-testid="no-recordings">This event has no recorded race yet.</p>
-        {:else}
-          <ul class="runs" aria-label="Recordings">
-            {#each recorded as entry (entry.race)}
-              {@const job = renderOf(status, live.eventId, entry.race)}
-              {@const busy = isDrawing(job) || asking === entry.race}
-              <li aria-label={entry.name}>
-                <div class="run-head">
-                  <span class="run-name">{entry.name}</span>
-                  <span title={OVERLAY_HINTS[entry.video.overlay]}>
-                    <Badge tone={OVERLAY_TONES[entry.video.overlay]}>
-                      {OVERLAY_LABELS[entry.video.overlay]}
-                    </Badge>
-                  </span>
-                  {#if renderWords(job)}
-                    <span class="muted" role="status">{renderWords(job)}</span>
-                  {/if}
-                  {#if canDraw(entry.video.overlay)}
-                    <span class="draw">
-                      <Button
-                        size="sm"
-                        variant={needsDrawing(entry.video.overlay) ? 'primary' : 'ghost'}
-                        disabled={busy || asking === 'all'}
-                        onclick={() => draw(entry.race)}
-                      >
-                        {needsDrawing(entry.video.overlay) ? 'Draw overlay' : 'Draw again'}
-                      </Button>
-                    </span>
-                  {/if}
-                </div>
-                <code class="file">{entry.video.overlaid_file ?? entry.video.file}</code>
-                {#if job?.state === 'Failed' && job.note}<p class="note">{job.note}</p>{/if}
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </Card>
-    {/if}
-
-    <Card title="Runs" elevation="sm">
-      {#if !status || status.runs.length === 0}
-        <p class="muted" data-testid="no-runs">
-          {settings.enabled
-            ? 'No race has been recorded since Grid started. A run shows up here as its race begins.'
-            : 'Video is off. Switch it on above to have every race recorded.'}
-        </p>
-      {:else}
-        <ul class="runs" aria-label="Recorded runs">
-          {#each status.runs as run (`${run.event}/${run.race}`)}
-            <li aria-label={run.name}>
-              <div class="run-head">
-                <span class="run-name">{run.name}</span>
-                <Badge tone={RUN_STATE_TONES[run.state]} dot={run.state === 'Recording'}>
-                  {RUN_STATE_LABELS[run.state]}
-                </Badge>
-                {#if startWords(run.start_at_ms)}
-                  <span class="muted" title="Where the start tone is in the recording">
-                    Start {startWords(run.start_at_ms)}
-                  </span>
-                {/if}
-              </div>
-              {#if run.file}
-                <code class="file">{run.file}</code>
-              {/if}
-              {#if run.note}<p class="note">{run.note}</p>{/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </Card>
   {:else if !loadError}
     <p class="muted" role="status">Loading…</p>
   {/if}
@@ -660,44 +505,5 @@
     display: flex;
     justify-content: flex-end;
     gap: var(--gf-space-2);
-  }
-  .runs {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--gf-space-2);
-  }
-  .runs li {
-    display: grid;
-    gap: var(--gf-space-1);
-    padding: var(--gf-space-3);
-    border: 1px solid var(--gf-border);
-    border-radius: var(--gf-radius-sm);
-    background: var(--gf-surface-sunken);
-  }
-  .run-head {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-3);
-    flex-wrap: wrap;
-  }
-  .run-name {
-    font-weight: var(--gf-font-weight-semibold);
-  }
-  .draw {
-    margin-left: auto;
-  }
-  .file {
-    font-family: var(--gf-font-mono);
-    font-size: var(--gf-font-size-sm);
-    color: var(--gf-text-secondary);
-    overflow-wrap: anywhere;
-  }
-  .note {
-    margin: 0;
-    font-size: var(--gf-font-size-sm);
-    color: var(--gf-warn);
   }
 </style>

@@ -32,6 +32,7 @@ const EVENT_ROW = [
   ['Run', '#/event/run'],
   ['Marshal', '#/event/marshal'],
   ['Results', '#/event/results'],
+  ['Recordings', '#/event/recordings'],
   ['Overlays', '#/event/overlays'],
   ['Help', '#/help']
 ];

@@ -176,8 +176,8 @@ test('the replay overlay shows a finished race as it stood at each moment', asyn
     await expect(replay.getByRole('region', { name: 'Race overlay' })).toHaveCount(0);
     expect(replayErrors).toEqual([]);
 
-    // ── The Video page, and the Director's refusals ──────────────────────────────────────
-    await gotoPage(page, 'Video');
+    // ── The Recordings page, and the Director's refusals ─────────────────────────────────
+    await gotoPage(page, 'Recordings');
     await expect(page.getByTestId('no-recordings')).toHaveText(
       'This event has no recorded race yet.'
     );
@@ -187,7 +187,10 @@ test('the replay overlay shows a finished race as it stood at each moment', asyn
     // Every race that needs it: none does.
     const all = await page.request.post('/video/render', { data: { event: eventId } });
     expect(await all.json()).toBe(0);
-    // Recording a scene needs a scene.
+    // Recording a scene needs a scene. That is set up on the Video page, which the
+    // Recordings page links to.
+    await page.getByRole('link', { name: 'Video setup' }).click();
+    await expect(page.getByRole('heading', { name: 'Video', level: 1 })).toBeVisible();
     const form = page.getByRole('form', { name: 'Video settings' });
     await form.getByLabel('What records each race').selectOption('Scenes');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
