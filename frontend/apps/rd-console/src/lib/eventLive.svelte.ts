@@ -20,6 +20,7 @@
 import { isRequestFailure } from '@gridfpv/protocol-client';
 import type {
   BracketRequest,
+  MainsRequest,
   Class,
   Command,
   EventId,
@@ -47,6 +48,7 @@ export type LiveSession = Pick<
   | 'subscribeChanges'
   | 'sendCommand'
   | 'createBracket'
+  | 'createMains'
   | 'postPass'
   | 'getRaceSignal'
   | 'listPilots'
@@ -326,6 +328,11 @@ export class EventLive {
   /** Generate a bracket. Same answers as {@link send}. */
   async createBracket(request: BracketRequest): Promise<boolean> {
     return this.#wrote(await this.#session.createBracket(this.eventId, request));
+  }
+
+  /** Generate stacked mains. Same answers as {@link send}. */
+  async createMains(request: MainsRequest): Promise<boolean> {
+    return this.#wrote(await this.#session.createMains(this.eventId, request));
   }
 
   /** Log one gate crossing. Same answers as {@link send}. */

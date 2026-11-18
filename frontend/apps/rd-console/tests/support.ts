@@ -132,6 +132,7 @@ export function fakeLiveSession(view: EventView, over: Partial<LiveSession> = {}
     subscribeChanges: vi.fn(() => () => {}),
     sendCommand: vi.fn(async () => ({ cursor: view.cursor })),
     createBracket: vi.fn(async () => ({ cursor: view.cursor })),
+    createMains: vi.fn(async () => ({ cursor: view.cursor })),
     postPass: vi.fn(async () => ({ cursor: view.cursor })),
     getRaceSignal: vi.fn(async (_id: string, race: string) => ({ race, seats: [] })),
     listPilots: vi.fn(async () => []),

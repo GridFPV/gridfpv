@@ -515,6 +515,11 @@ heat (it used to put a one-heat round straight in the bracket). The Director kee
 bracket's rounds latest first, because the ranking stacks them in that order. The console
 shows them first round first, the order they are flown.
 
+**Built 2026-11-18:** the console has one Add phase dialog for every kind (Ryan: no row
+of different "add" buttons). Its "Kind" is Empty, Bracket or Multi-Main. A new generator is
+one more kind there. A phase's own page has Add phase too, for a phase inside it. Mains are
+kept best first (A-Main first) and shown bottom main first, the order they are flown.
+
 **Decided 2026-11-18:** Chase the Ace stays one heat, raced until a pilot has two wins. It
 is not split into several heats in a phase. In a bracket that heat still sits in its own
 "Final" phase, like every other round, so the final is never a heat on its own.

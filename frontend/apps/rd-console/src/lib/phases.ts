@@ -18,17 +18,36 @@ export interface PhaseRow {
   depth: number;
 }
 
-/** The display hints a bracket carries. Wire values, never shown. */
-const BRACKET_HINTS = new Set(['single-elimination', 'double-elimination']);
+/**
+ * The display hints of phases the Director keeps last-flown first: a bracket's rounds and a
+ * set of mains (A-Main first). Wire values, never shown.
+ */
+const FLOWN_LAST_FIRST = new Set(['single-elimination', 'double-elimination', 'mains']);
+
+/**
+ * How many mains a field takes, when each starts `perMain` pilots and `bump` of them come
+ * up from the main below. The Director works it out the same way (`mains_needed`).
+ */
+export function mainsNeeded(pilots: number, perMain: number, bump: number): number {
+  if (pilots <= perMain) return 1;
+  const direct = Math.max(1, perMain - bump);
+  return 1 + Math.ceil((pilots - perMain) / direct);
+}
+
+/** The name the Director gives a main, best first: "A-Main", "B-Main", then "Main 27". */
+export function mainName(index: number): string {
+  return index < 26 ? `${String.fromCharCode(65 + index)}-Main` : `Main ${index + 1}`;
+}
 
 /**
  * Lay the phases out as a tree, each parent followed by its children. The snapshot lists
  * phases in the order they were added, and that order is kept among siblings. A phase whose
  * parent is missing is shown at the top, so nothing is ever hidden.
  *
- * A bracket is the one exception to the order. The Director keeps a bracket's rounds latest
- * first, because that is the order its ranking stacks them in. A person reads a bracket in
- * the order it is flown, so its rounds are laid out first round first.
+ * A bracket and a set of mains are the exceptions to the order. The Director keeps a
+ * bracket's rounds latest first and the mains best first (A-Main, then B-Main), because that
+ * is the order the ranking stacks them in. A person reads them in the order they are flown,
+ * so rounds are laid out first round first and mains bottom main first.
  */
 export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRow[] {
   if (root !== undefined) {
@@ -63,7 +82,7 @@ export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRo
     }
   };
   for (const phase of phases) {
-    if (phase.def.display_hint !== undefined && BRACKET_HINTS.has(phase.def.display_hint)) {
+    if (phase.def.display_hint !== undefined && FLOWN_LAST_FIRST.has(phase.def.display_hint)) {
       children.get(phase.def.id)?.reverse();
     }
   }

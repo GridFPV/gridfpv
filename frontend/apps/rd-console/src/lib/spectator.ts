@@ -92,6 +92,7 @@ export function publicSource(baseUrl: string): PublicSource {
     listFormats: async () => [],
     sendCommand: refuse,
     createBracket: refuse,
+    createMains: refuse,
     postPass: refuse,
     getRaceSignal: refuse,
     getVideoSettings: refuse,

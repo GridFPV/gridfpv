@@ -2,22 +2,24 @@
 import { describe, expect, it } from 'vitest';
 import type { Format } from '@gridfpv/types';
 import {
-  TOP_LEVEL_HEATS,
   currentRace,
   defaultHeat,
-  phaseSummaries,
-  shownSummaries,
   groupOfHeat,
   heatGroups,
   holderChoices,
   isBye,
   isHeat,
+  mainName,
+  mainsNeeded,
   newPhaseId,
   phaseStatus,
+  phaseSummaries,
   phaseTree,
   pilotsInLineup,
   racesOfHeat,
-  slugify
+  shownSummaries,
+  slugify,
+  TOP_LEVEL_HEATS
 } from '../src/lib/phases.js';
 import { TWO_MINUTE_QUALI as TWO_MINUTE, eventView, group, heat, race } from './competition.js';
 
@@ -148,9 +150,34 @@ describe('a bracket in the tree', () => {
   });
 
   it('leaves any other phase in the order it was added', () => {
-    for (const hint of [undefined, 'mains']) {
+    for (const hint of [undefined, 'points-table']) {
       expect(order(hint).slice(2, 4)).toEqual(['b/final', 'b/final/1']);
     }
+  });
+
+  it('lays mains out bottom main first, the order they are flown', () => {
+    // The Director keeps the mains best first, each one a bracket of its own.
+    const mains = group('m', 'Mains');
+    mains.def.display_hint = 'mains';
+    const a = group('m/a', 'A-Main', 'm');
+    const b = group('m/b', 'B-Main', 'm');
+    a.def.display_hint = b.def.display_hint = 'double-elimination';
+    const tree = phaseTree([
+      mains,
+      a,
+      group('m/a/final', 'Final', 'm/a'),
+      group('m/a/r1', 'Round 1', 'm/a'),
+      b,
+      group('m/b/final', 'Final', 'm/b')
+    ]);
+    expect(tree.map((row) => row.phase.def.id)).toEqual([
+      'm',
+      'm/b',
+      'm/b/final',
+      'm/a',
+      'm/a/r1',
+      'm/a/final'
+    ]);
   });
 
   it('gives the phase list and the pickers the same order', () => {
@@ -589,5 +616,20 @@ describe('phaseSummaries', () => {
       ).map((phase) => phase.needsDecision);
     expect(flags(false)).toEqual([true, false]);
     expect(flags(true)).toEqual([false, false]);
+  });
+});
+
+describe('how many mains a field takes', () => {
+  it('matches the Director: the top main is full, each main below adds the pilots who do not bump', () => {
+    expect(mainsNeeded(64, 16, 4)).toBe(5);
+    expect(mainsNeeded(96, 16, 2)).toBe(7);
+    expect(mainsNeeded(8, 6, 2)).toBe(2);
+    expect(mainsNeeded(16, 16, 4)).toBe(1);
+    expect(mainsNeeded(3, 16, 2)).toBe(1);
+    expect(mainsNeeded(17, 16, 0)).toBe(2);
+  });
+
+  it('names them as the Director does', () => {
+    expect([0, 1, 25, 26].map(mainName)).toEqual(['A-Main', 'B-Main', 'Z-Main', 'Main 27']);
   });
 });

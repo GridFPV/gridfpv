@@ -27,13 +27,23 @@ and a bracket are phases. A phase can hold heats, and it can hold other phases.
 - **Add heat**: one heat. Give it a name, pick what times it, pick the pilots in seat
   order, and pick a format. The first pilot gets Seat 1. **Start from a class** fills in a
   class's roster. A heat can sit at the top of the event or **under** a phase.
-- **Add phase**: a phase that holds heats. Pick its format once and every heat under it
-  uses it. **For the class** makes the class's roster the phase's field, so every pilot in
-  the class gets a place. Then add heats with **+ Heat** on the phase's line.
-- **Add bracket**: every heat of an elimination bracket at once. Pick the pilots in seed
-  order, how many fly in each heat, how many move on, and single or double elimination.
-  Each round of the bracket is a phase of its own that holds the round's heats. The final
-  is one too, even though it has one heat. The rounds are listed in the order you fly them.
+- **Add phase**: a phase. **Kind** picks what you start with:
+  - **Empty**: a phase with no heats yet. Pick its format once and every heat under it
+    uses it. **For the class** makes the class's roster the phase's field, so every pilot
+    in the class gets a place. Then add heats with **+ Heat** on the phase's line.
+  - **Bracket**: every heat of an elimination bracket at once. Pick the pilots in seed
+    order, how many fly in each heat, how many move on, and single or double elimination.
+    Each round of the bracket is a phase of its own that holds the round's heats. The
+    final is one too, even though it has one heat. The rounds are listed in the order you
+    fly them.
+  - **Multi-Main**: mains stacked on each other (A-Main, B-Main and so on). Each main is a
+    bracket. **Seeded from** is the phase whose ranking fills the mains, such as
+    Qualifying. Say how many pilots start in each main and how many **bump up** from a
+    main into the one above. The dialog tells you how many mains that makes. The bottom
+    main is flown first, so it is listed first. **A-Main final** lets the last heat of the
+    top main use its own format, such as Chase the Ace.
+
+A phase's own page has **+ Add phase** too. It adds the new phase inside that phase.
 
 **Timed by** picks the timer. **Bench** is not a timer. On a Bench heat you log passes by
 hand on the Run page, which is handy for trying things with no hardware.

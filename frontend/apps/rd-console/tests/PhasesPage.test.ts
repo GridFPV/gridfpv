@@ -6,7 +6,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
-import type { BracketRequest, Class, Command, EventView, PhaseDef, Pilot } from '@gridfpv/types';
+import type {
+  BracketRequest,
+  Class,
+  Command,
+  EventView,
+  MainsRequest,
+  PhaseDef,
+  Pilot
+} from '@gridfpv/types';
 import PhasePage from '../src/screens/PhasePage.svelte';
 import PhasesPage from '../src/screens/PhasesPage.svelte';
 import { unfolded } from '../src/lib/phaseFold.svelte.js';
@@ -91,7 +99,7 @@ describe('PhasesPage', () => {
     expect(screen.getByTestId('no-phases')).toHaveTextContent(/^Nothing to race yet\./);
     expect(screen.queryByRole('list', { name: 'Phases' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Up next' })).toBeNull();
-    for (const name of ['+ Add heat', '+ Add phase', '+ Add bracket']) {
+    for (const name of ['+ Add heat', '+ Add phase']) {
       expect(screen.getByRole('button', { name })).toBeEnabled();
     }
     expect(screen.getByRole('link', { name: 'Help for Phases' })).toHaveAttribute(
@@ -473,6 +481,14 @@ describe('Under a phase', () => {
   });
 });
 
+/** Open Add phase and pick a kind: the generators are choices in the one dialog. */
+async function addPhaseOf(kind: 'empty' | 'bracket' | 'mains') {
+  await fireEvent.click(screen.getByRole('button', { name: '+ Add phase' }));
+  const form = await screen.findByRole('form', { name: 'Add a phase' });
+  await fireEvent.change(within(form).getByLabelText('Kind'), { target: { value: kind } });
+  return form;
+}
+
 describe('Add a phase', () => {
   async function dialog() {
     await fireEvent.click(screen.getByRole('button', { name: '+ Add phase' }));
@@ -604,9 +620,8 @@ describe('Add a phase', () => {
 
 describe('Add a bracket', () => {
   async function fill() {
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add bracket' }));
-    const form = await screen.findByRole('form', { name: 'Add a bracket' });
-    await fireEvent.input(within(form).getByLabelText('Bracket name'), {
+    const form = await addPhaseOf('bracket');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
       target: { value: 'Finals' }
     });
     for (const callsign of ['Cat', 'Ace', 'Bee']) {
@@ -624,7 +639,7 @@ describe('Add a bracket', () => {
     await fireEvent.change(within(form).getByLabelText('Elimination'), {
       target: { value: 'Single' }
     });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
 
     await waitFor(() => expect(session.createBracket).toHaveBeenCalled());
     const { id, ...request } = vi.mocked(session.createBracket).mock.calls[0][1] as BracketRequest;
@@ -647,8 +662,7 @@ describe('Add a bracket', () => {
 
   it('offers only the saved formats that rank a heat', async () => {
     await open(eventView());
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add bracket' }));
-    const form = await screen.findByRole('form', { name: 'Add a bracket' });
+    const form = await addPhaseOf('bracket');
     const format = within(form).getByLabelText('Format');
     expect(optionTexts(format)).toEqual(['First to 3 laps', '2 minute qualifying']);
     expect(format).toHaveValue('fmt-first3-7q1x');
@@ -660,7 +674,7 @@ describe('Add a bracket', () => {
     });
     const form = await fill();
     expect(within(form).getByTestId('format-reads')).toHaveTextContent('No saved format fits.');
-    await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
     expect(await within(form).findByRole('alert')).toHaveTextContent(
       'Pick a format that ranks the heat. It decides who moves on.'
     );
@@ -671,7 +685,7 @@ describe('Add a bracket', () => {
     const { session } = await open(eventView({ phases: [group('mains', 'Mains')] }));
     const form = await fill();
     await fireEvent.change(within(form).getByLabelText('Under'), { target: { value: 'mains' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
     await waitFor(() => expect(session.createBracket).toHaveBeenCalled());
     expect(vi.mocked(session.createBracket).mock.calls[0][1].parent).toBe('mains');
   });
@@ -684,9 +698,148 @@ describe('Add a bracket', () => {
       )
     });
     const form = await fill();
-    await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
     expect(await within(form).findByRole('alert')).toHaveTextContent(SAID);
-    expect(screen.getByRole('form', { name: 'Add a bracket' })).toBeVisible();
+    expect(screen.getByRole('form', { name: 'Add a phase' })).toBeVisible();
+  });
+});
+
+describe('Add a multi-main', () => {
+  const seeded = () =>
+    eventView({
+      phases: [
+        group('quali', 'Qualifying', undefined, { field: ['p-1a', 'p-2b', 'p-3c'] }),
+        group('fun', 'Fun Flying')
+      ]
+    });
+
+  it('is a kind of phase, with no button of its own on the page', async () => {
+    await open(seeded());
+    expect(screen.queryByRole('button', { name: /bracket|main/i })).toBeNull();
+    const form = await addPhaseOf('empty');
+    expect(optionTexts(within(form).getByLabelText('Kind'))).toEqual([
+      'Empty',
+      'Bracket',
+      'Multi-Main'
+    ]);
+  });
+
+  it('keeps the name and the phase above when the kind is changed', async () => {
+    await open(seeded());
+    const form = await addPhaseOf('empty');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Whoop Mains' }
+    });
+    await fireEvent.change(within(form).getByLabelText('Under'), { target: { value: 'fun' } });
+    await fireEvent.change(within(form).getByLabelText('Kind'), { target: { value: 'mains' } });
+    expect(within(form).getByLabelText('Phase name')).toHaveValue('Whoop Mains');
+    expect(within(form).getByLabelText('Under')).toHaveValue('fun');
+    expect(within(form).getByLabelText('Seeded from')).toBeVisible();
+  });
+
+  it('starts from the phase that ranks pilots and says how many mains the numbers make', async () => {
+    await open(seeded());
+    const form = await addPhaseOf('mains');
+    expect(within(form).getByLabelText('Seeded from')).toHaveValue('quali');
+    expect(within(form).getByLabelText('Pilots')).toHaveValue(3);
+    expect(within(form).getByTestId('mains-count')).toHaveTextContent(
+      'This makes 1 main, the A-Main.'
+    );
+    await fireEvent.input(within(form).getByLabelText('Pilots'), { target: { value: '64' } });
+    await fireEvent.input(within(form).getByLabelText('How many bump up'), {
+      target: { value: '4' }
+    });
+    expect(within(form).getByTestId('mains-count')).toHaveTextContent(
+      'This makes 5 mains, A-Main to E-Main. The E-Main is flown first.'
+    );
+    expectNoRawIds();
+  });
+
+  it('starts from a finished phase before one still being flown', async () => {
+    await open(
+      eventView({
+        phases: [
+          group('practice', 'Practice', undefined, { field: ['p-1a', 'p-2b', 'p-3c'] }),
+          group('quali', 'Qualifying', undefined, { field: ['p-1a', 'p-2b'], complete: true })
+        ]
+      })
+    );
+    const form = await addPhaseOf('mains');
+    expect(within(form).getByLabelText('Seeded from')).toHaveValue('quali');
+    expect(within(form).getByLabelText('Pilots')).toHaveValue(2);
+  });
+
+  it('sends the mains: the seeding phase, the numbers, the heat shape and the top final', async () => {
+    const { session } = await open(seeded());
+    const form = await addPhaseOf('mains');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Mains' }
+    });
+    await fireEvent.input(within(form).getByLabelText('Pilots'), { target: { value: '20' } });
+    await fireEvent.input(within(form).getByLabelText('Pilots in each main'), {
+      target: { value: '8' }
+    });
+    await fireEvent.change(within(form).getByLabelText('Pilots in each heat'), {
+      target: { value: '2' }
+    });
+    await fireEvent.change(within(form).getByLabelText('A-Main final'), {
+      target: { value: SAVED_FORMATS[2].id }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+
+    await waitFor(() => expect(session.createMains).toHaveBeenCalled());
+    const { id, ...request } = vi.mocked(session.createMains).mock.calls[0][1] as MainsRequest;
+    expect(id).toMatch(/^mains-[0-9a-z]{4}$/);
+    expect(request).toEqual({
+      label: 'Mains',
+      seeded_from: 'quali',
+      pilots: 20,
+      per_main: 8,
+      bump: 2,
+      seats: [
+        { adapter: 'bench', seat: 'seat-1' },
+        { adapter: 'bench', seat: 'seat-2' }
+      ],
+      advance: 1,
+      elimination: 'Double',
+      format: FIRST_TO_3,
+      top_final_format: SAVED_FORMATS[2].format
+    });
+    expect(session.createBracket).not.toHaveBeenCalled();
+  });
+
+  it('says what is wrong with the numbers, and sends nothing', async () => {
+    const { session } = await open(seeded());
+    const form = await addPhaseOf('mains');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Mains' }
+    });
+    await fireEvent.input(within(form).getByLabelText('Pilots in each main'), {
+      target: { value: '2' }
+    });
+    expect(within(form).getByTestId('mains-count')).toHaveTextContent(
+      'Fewer pilots must bump up than start in a main.'
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(
+      'Fewer pilots must bump up than start in a main.'
+    );
+    expect(session.createMains).not.toHaveBeenCalled();
+  });
+
+  it("shows the Director's sentence when it says no, and stays open", async () => {
+    const SAID = '20 pilots do not fit: 2 mains hold 14';
+    await open(seeded(), {
+      createMains: vi.fn(async () =>
+        Promise.reject(Object.assign(new Error(SAID), { status: 400, code: 'BadRequest' }))
+      )
+    });
+    const form = await addPhaseOf('mains');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Mains' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(SAID);
   });
 });
 
@@ -767,21 +920,20 @@ describe('Timed by', () => {
     const { session } = await open(eventView(), {
       listTimers: vi.fn(async () => [timerView('gate-x1y2', 'Gate', 3)])
     });
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add bracket' }));
-    const form = await screen.findByRole('form', { name: 'Add a bracket' });
+    const form = await addPhaseOf('bracket');
     expect(timedBy(form).value).toBe('gate-x1y2');
     const sizes = within(form).getByLabelText('Pilots in each heat') as HTMLSelectElement;
     expect([...sizes.options].map((option) => option.value)).toEqual(['2', '3']);
     // It started on 4, which this timer cannot seat, so it is pulled back to 3.
     await waitFor(() => expect(sizes.value).toBe('3'));
 
-    await fireEvent.input(within(form).getByLabelText('Bracket name'), {
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
       target: { value: 'Finals' }
     });
     for (const callsign of ['Cat', 'Ace', 'Bee']) {
       await fireEvent.click(within(form).getByRole('button', { name: callsign }));
     }
-    await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
     await waitFor(() => expect(session.createBracket).toHaveBeenCalled());
     const request = vi.mocked(session.createBracket).mock.calls[0][1] as BracketRequest;
     expect(request.seats).toEqual([
@@ -838,15 +990,14 @@ describe('starting from a class', () => {
   it('a new bracket can start from a class roster as its field', async () => {
     const createBracket = vi.fn<LiveSession['createBracket']>(async () => ({ cursor: 1 }));
     await open(view(), { createBracket });
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add bracket' }));
-    const form = await screen.findByRole('form', { name: 'Add a bracket' });
-    await fireEvent.input(within(form).getByLabelText('Bracket name'), {
+    const form = await addPhaseOf('bracket');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
       target: { value: 'Open Finals' }
     });
     await fireEvent.change(within(form).getByLabelText('Start from a class'), {
       target: { value: 'cls-open' }
     });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add bracket' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
     await waitFor(() => expect(createBracket).toHaveBeenCalled());
     expect(createBracket.mock.calls[0][1].field).toEqual([{ Imported: ['p-1a', 'p-2b'] }]);
   });
@@ -1168,11 +1319,33 @@ describe("a phase's own page", () => {
     expect(screen.queryByTestId('back-to-parent')).toBeNull();
   });
 
-  it('has no run order and no add-phase buttons: those are on the list', async () => {
+  it('has no run order: that is on the list', async () => {
     await openPhase(view(), 'quali');
     expect(screen.queryByText('Up next')).toBeNull();
-    expect(screen.queryByRole('button', { name: '+ Add phase' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '+ Add bracket' })).toBeNull();
+  });
+
+  it('adds a phase inside this one, with Under already set to it', async () => {
+    const { session } = await openPhase(view(), 'mains');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a phase inside Mains' }));
+    const form = await screen.findByRole('form', { name: 'Add a phase' });
+    expect(within(form).getByLabelText('Under')).toHaveValue('mains');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Consolation' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+    expect(definedPhase(sent(session)[0], 'consolation').parent).toBe('mains');
+  });
+
+  it('offers no Add phase on a heat or on a locked phase', async () => {
+    const locked = eventView({
+      phases: [group('mains', 'Mains', undefined, { locked: true }), heat('h1', 'Solo', [])]
+    });
+    await openPhase(locked, 'mains');
+    expect(screen.queryByRole('button', { name: /^Add a phase inside/ })).toBeNull();
+    cleanup();
+    await openPhase(locked, 'h1');
+    expect(screen.queryByRole('button', { name: /^Add a phase inside/ })).toBeNull();
   });
 
   it('runs a heat and adds one under the phase from here', async () => {

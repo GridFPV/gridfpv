@@ -7,7 +7,7 @@
    * lineups, the rulings (lock, set a position, disqualify), adding a heat, and, for a
    * phase pilots sign up for, the sheet.
    */
-  import { Badge, Banner, Card } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card } from '@gridfpv/components';
   import type { PhaseId } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
@@ -21,6 +21,7 @@
   import { formatHash } from '../lib/route.js';
   import { signupPhases } from '../lib/signup.js';
   import AddHeatDialog from './AddHeatDialog.svelte';
+  import AddPhaseDialog from './AddPhaseDialog.svelte';
   import PhaseList from './PhaseList.svelte';
   import SignupRulesDialog from './SignupRulesDialog.svelte';
   import SignupSheet from './SignupSheet.svelte';
@@ -63,6 +64,8 @@
 
   /** The phase a heat is being added under. */
   let addingUnder = $state<PhaseId | undefined>(undefined);
+  /** Whether a phase is being added inside this one. */
+  let addingPhase = $state(false);
   /** The phase whose sign-up rules are being set. */
   let rulesFor = $state<PhaseId | undefined>(undefined);
   const rulesPhase = $derived(view?.phases.find((entry) => entry.def.id === rulesFor));
@@ -88,6 +91,13 @@
         </a>
       {/if}
     </nav>
+    {#if phase && !isHeat(phase.def) && !phase.locked}
+      <Button
+        variant="secondary"
+        aria-label="Add a phase inside {phase.def.label}"
+        onclick={() => (addingPhase = true)}>+ Add phase</Button
+      >
+    {/if}
   {/snippet}
 
   {#if live.loadError}
@@ -171,6 +181,10 @@
     send={(command) => live.send(command)}
     onclose={() => (rulesFor = undefined)}
   />
+{/if}
+
+{#if addingPhase}
+  <AddPhaseDialog {live} under={phaseId} onclose={() => (addingPhase = false)} />
 {/if}
 
 {#if addingUnder !== undefined}

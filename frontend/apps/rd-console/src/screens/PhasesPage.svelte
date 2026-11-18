@@ -16,9 +16,9 @@
    *
    * Everything raced at the event is added here:
    *
-   * - **Add phase** makes a phase that holds heats, with one format for all of them.
+   * - **Add phase** makes a phase: an empty one that heats are added to, or one a generator
+   *   fills (a bracket, a multi-main).
    * - **Add heat** makes one heat, at the top of the event or under a phase.
-   * - **Add bracket** makes every heat of an elimination bracket at once.
    */
   import { Badge, Banner, Button, Card } from '@gridfpv/components';
   import type { PhaseId } from '@gridfpv/types';
@@ -33,7 +33,6 @@
     type PhaseStatus
   } from '../lib/phases.js';
   import { formatHash } from '../lib/route.js';
-  import AddBracketDialog from './AddBracketDialog.svelte';
   import AddHeatDialog from './AddHeatDialog.svelte';
   import AddPhaseDialog from './AddPhaseDialog.svelte';
   import PhaseList from './PhaseList.svelte';
@@ -49,9 +48,7 @@
   } = $props();
 
   // Each dialog is mounted only while open, so a closed one never sits in the page.
-  let adding = $state<{ what: 'phase' | 'heat' | 'bracket'; under?: PhaseId } | undefined>(
-    undefined
-  );
+  let adding = $state<{ what: 'phase' | 'heat'; under?: PhaseId } | undefined>(undefined);
   const close = () => (adding = undefined);
 
   const every = $derived(live.view ? phaseSummaries(live.view) : []);
@@ -81,9 +78,6 @@
   lede="What is raced at this event, in order. A phase holds heats and ranks the pilots in them. Open a phase for its heats."
 >
   {#snippet actions()}
-    <Button variant="secondary" onclick={() => (adding = { what: 'bracket' })}>
-      + Add bracket
-    </Button>
     <Button variant="secondary" onclick={() => (adding = { what: 'phase' })}>+ Add phase</Button>
     <Button variant="primary" onclick={() => (adding = { what: 'heat' })}>+ Add heat</Button>
   {/snippet}
@@ -178,8 +172,6 @@
   <AddPhaseDialog {live} under={adding.under} onclose={close} />
 {:else if adding?.what === 'heat'}
   <AddHeatDialog {live} under={adding.under} onclose={close} />
-{:else if adding?.what === 'bracket'}
-  <AddBracketDialog {live} under={adding.under} onclose={close} />
 {/if}
 
 <style>
