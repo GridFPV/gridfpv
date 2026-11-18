@@ -480,6 +480,9 @@ pub struct RaceSeatView {
     pub start_at: Option<SourceTime>,
     /// Whether a false start is recorded against the pilot in this race.
     pub false_start: bool,
+    /// Whether the pilot is marked out of this race (crashed, not going to finish). The
+    /// race no longer waits for them.
+    pub out: bool,
     /// The seat's place in the race so far, 1 first. Absent for an open seat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -783,6 +786,10 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
                     .pilot
                     .as_ref()
                     .is_some_and(|pilot| state.rulings.has_false_start(id, pilot)),
+                out: entry
+                    .pilot
+                    .as_ref()
+                    .is_some_and(|pilot| state.rulings.is_out(id, pilot)),
                 finish: entry.pilot.as_ref().and_then(|pilot| {
                     finish
                         .iter()

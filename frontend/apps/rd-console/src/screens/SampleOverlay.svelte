@@ -62,6 +62,7 @@
           pilot: 'sample',
           start_at: startedAt,
           false_start: false,
+          out: false,
           finish: 1,
           hole_shot: { crossing: 1, at: startedAt + HOLE_SHOT * S },
           laps,

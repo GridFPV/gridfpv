@@ -818,7 +818,7 @@ describe('SpectatorView: a signed-in pilot', () => {
         ]
       }),
       race('h3', 1, 'Saved', {
-        seats: [raceSeat(0, 'p-ace', { finish: 1, false_start: true, laps: [] })]
+        seats: [raceSeat(0, 'p-ace', { finish: 1, false_start: true, out: true, laps: [] })]
       })
     ];
     await openAs(view, ACE);
@@ -850,6 +850,8 @@ describe('SpectatorView: a signed-in pilot', () => {
     expect(first).toHaveTextContent('Total 20.400');
     const second = screen.getByText('Heat 3 · race 1').closest('li')!;
     expect(second).toHaveTextContent('False start');
+    expect(within(second).getByText('Out')).toBeVisible();
+    expect(within(first).queryByText('Out')).toBeNull();
     expect(second).toHaveTextContent('No laps.');
   });
 
