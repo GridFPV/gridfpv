@@ -84,7 +84,7 @@ describe('seat rows', () => {
     });
     // The marked restart is not a lap.
     expect(first.laps.map((l) => l.micros)).toEqual([9 * S, 8 * S]);
-    expect(open).toMatchObject({ seatName: 'Seat 2', who: 'Open seat', onCourse: false });
+    expect(open).toMatchObject({ seatName: 'Seat 2', who: 'Seat 2', onCourse: false });
     expect(open.place).toBeUndefined();
   });
 

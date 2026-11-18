@@ -82,6 +82,7 @@
     pilot: () => 'Your pilot',
     klass: () => 'Class',
     who: () => 'Your pilot',
+    seatWho: () => 'Your pilot',
     seat: () => 'Seat 1',
     seatPlain: () => 'Seat 1',
     channel: () => undefined,

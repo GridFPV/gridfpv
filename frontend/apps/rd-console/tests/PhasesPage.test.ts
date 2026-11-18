@@ -251,7 +251,7 @@ describe('Up next', () => {
     expect(items).toHaveLength(2);
     expect(items[0]).toHaveTextContent('Qualifying Heat 1');
     expect(items[0]).toHaveTextContent('Ace, Bee');
-    expect(items[1]).toHaveTextContent('Cat, Open seat');
+    expect(items[1]).toHaveTextContent('Cat, Seat 2');
     await fireEvent.click(screen.getByRole('button', { name: 'Run Qualifying Heat 2 next' }));
     expect(onrun).toHaveBeenCalledWith('q-2');
     expectNoRawIds();

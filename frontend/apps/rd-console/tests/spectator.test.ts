@@ -142,7 +142,7 @@ describe('the heats coming up', () => {
     expect(found.map((entry) => entry.name)).toEqual(['Heat 3', 'Heat 1', 'Heat 2']);
     expect(found[2].seats.map((seat) => [seat.seatName, seat.who])).toEqual([
       ['Seat 1', 'Cat'],
-      ['Seat 2', 'Open seat']
+      ['Seat 2', 'Seat 2']
     ]);
   });
 

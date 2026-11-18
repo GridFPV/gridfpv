@@ -117,7 +117,10 @@ export function raceSeatRows(race: RaceView, names: Names): SeatRow[] {
       seat: seat.seat,
       seatName: names.seat(seat.adapter, seat.seat, index),
       bench: isBench(seat.adapter),
-      who: seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot),
+      who:
+        seat.pilot === undefined
+          ? names.seatWho('Open', seat.adapter, seat.seat, index)
+          : names.pilot(seat.pilot),
       pilot: seat.pilot,
       place: seat.finish,
       laps,
@@ -138,7 +141,7 @@ export function lineupSeatRows(phase: PhaseView, names: Names): SeatRow[] {
     seat: seat.seat,
     seatName: names.seat(seat.adapter, seat.seat, index),
     bench: isBench(seat.adapter),
-    who: names.who(seat.who),
+    who: names.seatWho(seat.who, seat.adapter, seat.seat, index),
     pilot: typeof seat.who === 'object' && 'Pilot' in seat.who ? seat.who.Pilot : undefined,
     laps: [],
     onCourse: false,
