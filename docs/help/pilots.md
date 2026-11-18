@@ -21,6 +21,9 @@ A pilot is put into a race in one of two ways. A heat can name them directly on 
 The **Classes** page, also under Setup, holds the classes an event can race. The standard FPV classes
 come with Grid. **Add class** makes one of your own; it needs only a name.
 
+**Org** is whose class it is, such as MultiGP or your own club. It shows as a small tag
+beside the class. Type anything up to 24 letters, or leave it empty for no tag.
+
 A built-in class cannot be changed, but you do not have to keep it:
 
 - **Hide** keeps it in this list and takes it out of the list an event picks from.

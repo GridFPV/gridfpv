@@ -34,7 +34,8 @@
     formFromClass,
     isBuiltin,
     isHidden,
-    sourceTone,
+    orgProblem,
+    orgTone,
     type ClassFormValues
   } from '../lib/classes.js';
 
@@ -177,6 +178,7 @@
       formError = 'A name is required.';
       return;
     }
+    if (orgProblem(form.org)) return;
     saving = true;
     formError = undefined;
     try {
@@ -300,7 +302,10 @@
           <div class="class-main">
             <div class="class-head">
               <span class="class-name">{cls.name}</span>
-              <Badge tone={sourceTone(cls.source)}>{cls.source}</Badge>
+              {#if cls.org}
+                <Badge tone={orgTone(cls.org)}><span data-testid="class-org">{cls.org}</span></Badge
+                >
+              {/if}
               {#if isHidden(cls)}
                 <Badge tone="neutral">Hidden</Badge>
               {/if}
@@ -363,20 +368,26 @@
 <!-- The add / edit dialog stacks above whatever embeds the manager. -->
 <Dialog bind:open={formOpen} title={editing ? 'Edit class' : 'Add class'}>
   <form class="class-form" onsubmit={submitForm} aria-label={editing ? 'Edit class' : 'Add class'}>
-    {#if !editing}
-      <!-- New classes are always Custom; the canonical org classes ship as locked built-ins. -->
-      <p class="custom-note">
-        New classes are <strong>Custom</strong>. The standard org classes (MultiGP, Five33, …) are
-        built in.
-      </p>
-    {/if}
-
     <Field label="Name" required error={formError}>
       <Input
         bind:value={form.name}
         placeholder="e.g. House Spec"
         aria-label="Name"
         autocomplete="off"
+      />
+    </Field>
+
+    <Field
+      label="Org"
+      hint="Whose class it is, such as MultiGP or your club. It shows as a tag beside the name. Leave it empty for none."
+      error={orgProblem(form.org)}
+    >
+      <Input
+        bind:value={form.org}
+        placeholder="e.g. MultiGP"
+        aria-label="Org"
+        autocomplete="off"
+        maxlength={48}
       />
     </Field>
 
@@ -395,7 +406,12 @@
   </form>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (formOpen = false)} disabled={saving}>Cancel</Button>
-    <Button variant="primary" onclick={submitForm} loading={saving} disabled={!form.name.trim()}>
+    <Button
+      variant="primary"
+      onclick={submitForm}
+      loading={saving}
+      disabled={!form.name.trim() || orgProblem(form.org) !== undefined}
+    >
       {editing ? 'Save changes' : 'Add class'}
     </Button>
   {/snippet}
@@ -556,15 +572,6 @@
     font-size: var(--gf-font-size-md);
     font-weight: var(--gf-font-weight-semibold);
     letter-spacing: var(--gf-tracking-tight);
-  }
-  .custom-note {
-    margin: 0;
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
-    line-height: 1.5;
-  }
-  .custom-note strong {
-    color: var(--gf-text-secondary);
   }
   .reference {
     font-size: var(--gf-font-size-xs);

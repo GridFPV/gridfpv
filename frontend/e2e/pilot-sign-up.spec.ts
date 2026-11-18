@@ -63,9 +63,7 @@ test.beforeAll(async () => {
   for (const callsign of ['Ace', 'Bee', 'Cat']) {
     ids[callsign] = (await direct<{ id: string }>('POST', '/pilots', { callsign })).id;
   }
-  const open = (
-    await direct<{ id: string }>('POST', '/classes', { name: 'Open', source: 'Custom' })
-  ).id;
+  const open = (await direct<{ id: string }>('POST', '/classes', { name: 'Open' })).id;
   event = (await direct<{ id: string }>('POST', '/events', { name: 'Friday Night Whoops' })).id;
   await direct('PUT', '/active-event', { id: event });
   await command({ Record: { RosterSet: { class: open, pilots: Object.values(ids) } } });

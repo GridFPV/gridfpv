@@ -1382,7 +1382,8 @@ What that changed (built 2026-11-18):
 - **Formats** is laid out like Classes: one row each.
 - **Classes:** Grid still ships with the built-in classes, and the director can remove the
   ones they never fly. Removed built-ins can all be put back. A built-in still cannot be
-  edited.
+  edited. The tag beside a class is its **org**: free text the director types for a class
+  of their own, or leaves empty. There is no fixed list of orgs and no "Custom" tag.
 - **Data** is out of the menu. Grid is portable, so "where the data is" is not shown. The
   page still works at its address, and the Director's routes are unchanged.
 

@@ -530,7 +530,7 @@ describe('Session', () => {
   });
 
   describe('classes (#84)', () => {
-    const OPEN: Class = { id: 'c1', name: 'Open', source: 'MultiGP' };
+    const OPEN: Class = { id: 'c1', name: 'Open', org: 'MultiGP' };
 
     function classSession(overrides?: SessionOverrides) {
       return new Session({
@@ -551,7 +551,7 @@ describe('Session', () => {
     it('createClass returns the new class (full-trust, no token)', async () => {
       const createClass = vi.fn(async () => OPEN);
       const session = classSession({ createClass });
-      const req: CreateClassRequest = { name: 'Open', source: 'MultiGP' };
+      const req: CreateClassRequest = { name: 'Open', org: 'MultiGP' };
       const result = await session.createClass(req);
       expect(result).toEqual(OPEN);
       expect(createClass).toHaveBeenCalledWith('http://d.local', req, undefined);
@@ -564,7 +564,7 @@ describe('Session', () => {
         .mockResolvedValueOnce(OPEN);
       const session = classSession({ createClass });
       session.setTokenProvider(async () => 'tok');
-      const result = await session.createClass({ name: 'Open', source: 'MultiGP' });
+      const result = await session.createClass({ name: 'Open', org: 'MultiGP' });
       expect(result).toEqual(OPEN);
       expect(createClass).toHaveBeenCalledTimes(2);
       expect(createClass).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');

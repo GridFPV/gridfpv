@@ -6,8 +6,8 @@
  *  1. **Built-ins + Custom CRUD** — open the console, land on the **home hub**, open the **Classes**
  *     page, and confirm the standard **built-in** classes are listed with org source badges and a
  *     built-in/lock indicator, and are **not removable** (no Remove button). Then **add** a class:
- *     the form has no org source picker (new classes are `Custom`), and the created row shows the
- *     `Custom` badge and keeps Edit/Remove; finally **remove** it.
+ *     the form takes an org the director types, and the created row shows it as
+ *     its tag and keeps Edit/Remove; finally **remove** it.
  *  2. **Hide / unhide** — hide a built-in, see it marked Hidden (and flagged on the wire), reload
  *     to prove it persisted, and unhide it again.
  *
@@ -40,23 +40,42 @@ test('Classes page lists the built-ins (org badges, not editable), full CRUD on 
   await expect(list.getByRole('listitem').filter({ hasText: 'Tiny Trainer' })).toBeVisible();
   await expect(list.getByRole('listitem').filter({ hasText: 'Street League' })).toBeVisible();
 
-  // ── Add a class — the form offers NO org source picker; new classes are Custom ───────────
+  // ── Add a class, with an org of the director's own typed in ──────────────────────────────
+  const ORG = 'E2E Club';
   await page.getByRole('button', { name: '+ Add class' }).click();
   const addForm = page.getByRole('form', { name: 'Add class' });
   await expect(addForm).toBeVisible();
   await expect(addForm.getByLabel('Source')).toHaveCount(0);
-  await expect(addForm.getByLabel('Add from MultiGP')).toHaveCount(0);
+  await expect(addForm).not.toContainText('Custom');
   await addForm.getByLabel('Name').fill(NAME);
+  // An org too long to be a tag is refused on the spot.
+  await addForm.getByLabel('Org').fill('x'.repeat(25));
+  await expect(addForm).toContainText('An org name can have 24 characters at most.');
+  await expect(page.getByRole('button', { name: 'Add class', exact: true })).toBeDisabled();
+  await addForm.getByLabel('Org').fill(ORG);
 
   await page.getByRole('button', { name: 'Add class', exact: true }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
-  // The created class appears as a Custom row with full Edit/Remove controls.
+  // The created class appears with the org typed as its tag, and full Edit/Remove controls.
   const row = list.getByRole('listitem').filter({ hasText: NAME });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  await expect(row.getByText('Custom', { exact: true })).toBeVisible();
-  await expect(row.getByLabel('Built-in')).toHaveCount(0);
+  await expect(row.getByTestId('class-org')).toHaveText(ORG);
+  await expect(row.getByText('Custom', { exact: true })).toHaveCount(0);
   await expect(row.getByRole('button', { name: 'Edit' })).toBeVisible();
+
+  // ── Clear the org: the tag goes away, and the Director has none for it ───────────────────
+  await row.getByRole('button', { name: 'Edit' }).click();
+  const editForm = page.getByRole('form', { name: 'Edit class' });
+  await expect(editForm.getByLabel('Org')).toHaveValue(ORG);
+  await editForm.getByLabel('Org').fill('');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(row.getByTestId('class-org')).toHaveCount(0, { timeout: 15_000 });
+  const saved = (
+    (await (await page.request.get('/classes')).json()) as { name: string; org?: string }[]
+  ).find((c) => c.name === NAME);
+  expect(saved).toBeDefined();
+  expect(saved?.org).toBeUndefined();
 
   // ── Remove the Custom class (with the confirm step) ──────────────────────────────────────
   await row.getByRole('button', { name: 'Remove' }).click();

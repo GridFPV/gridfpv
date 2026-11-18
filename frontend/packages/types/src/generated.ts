@@ -39,7 +39,6 @@ export type * from '@bindings/BracketRequest';
 export type * from '@bindings/Class';
 export type * from '@bindings/ClassId';
 export type * from '@bindings/ClassPlaceView';
-export type * from '@bindings/ClassSource';
 export type * from '@bindings/CombineRule';
 export type * from '@bindings/Command';
 export type * from '@bindings/CommandOutcome';

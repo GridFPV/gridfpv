@@ -451,7 +451,7 @@ describe('a pilot signs in with a code (docs/primitives.md §11.3)', () => {
       return (await res.json()) as T;
     };
     ace = (await post<{ id: string }>('/pilots', { callsign: 'Ace' })).id;
-    const open = (await post<{ id: string }>('/classes', { name: 'Open', source: 'Custom' })).id;
+    const open = (await post<{ id: string }>('/classes', { name: 'Open' })).id;
     event = (await post<{ id: string }>('/events', { name: 'Sign-in Night' })).id;
     await fetch(`${director.baseUrl}/active-event`, {
       method: 'PUT',

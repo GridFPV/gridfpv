@@ -9,13 +9,13 @@ import { makeTestSession } from './support.js';
 const OPEN: Class = {
   id: 'mgp-open',
   name: 'Open Class',
-  source: 'MultiGP',
+  org: 'MultiGP',
   reference: 'https://www.multigp.com/class-specifications/',
   description: 'Unlimited.',
   builtin: true
 };
 /** A user-created Custom class (full CRUD). */
-const HOUSE: Class = { id: 'c2', name: 'House', source: 'Custom' };
+const HOUSE: Class = { id: 'c2', name: 'House' };
 
 /** Open the Add form via the manager's exported `openAdd()` (the page button calls it). */
 async function openAdd(manager: { openAdd: () => void }) {
@@ -46,8 +46,9 @@ describe('ClassManager (#84)', () => {
     expect(within(rows[0]).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(within(rows[0]).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
 
-    // The Custom row shows its badge and keeps full Edit/Remove controls.
-    expect(within(rows[1]).getByText('Custom')).toBeInTheDocument();
+    // A class with no org has no tag at all, and keeps full Edit/Remove controls.
+    expect(within(rows[1]).queryByTestId('class-org')).toBeNull();
+    expect(within(rows[1]).queryByText('Custom')).toBeNull();
     expect(within(rows[1]).queryByLabelText('Built-in')).not.toBeInTheDocument();
     expect(within(rows[1]).getByRole('button', { name: 'Edit' })).toBeInTheDocument();
     expect(within(rows[1]).getByRole('button', { name: 'Remove' })).toBeInTheDocument();
@@ -73,12 +74,12 @@ describe('ClassManager (#84)', () => {
     expect(createClassImpl).not.toHaveBeenCalled();
   });
 
-  it('creates a Custom class (no source picker — always Custom) with name + reference + description', async () => {
+  it('creates a class with a name, an org typed by the director, a reference and a description', async () => {
     let calls = 0;
     const created: Class = {
       id: 'c9',
       name: 'Spec',
-      source: 'Custom',
+      org: 'Tri-County FPV',
       reference: 'ref-1',
       description: 'A spec class.'
     };
@@ -89,9 +90,10 @@ describe('ClassManager (#84)', () => {
     await screen.findByText(/No classes/i);
     await openAdd(component as unknown as { openAdd: () => void });
 
-    // The add form offers no org source picker — new classes are always Custom.
+    // The org is typed, not picked from a list, and nothing says a new class is "Custom".
     expect(screen.queryByLabelText('Source')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Add from MultiGP')).not.toBeInTheDocument();
+    expect(screen.getByRole('form', { name: 'Add class' })).not.toHaveTextContent('Custom');
+    await fireEvent.input(screen.getByLabelText('Org'), { target: { value: ' Tri-County FPV ' } });
 
     await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'Spec' } });
     await fireEvent.input(screen.getByLabelText('Reference'), { target: { value: 'ref-1' } });
@@ -104,17 +106,18 @@ describe('ClassManager (#84)', () => {
     await waitFor(() => expect(createClassImpl).toHaveBeenCalledTimes(1));
     expect(createClassImpl).toHaveBeenCalledWith(
       'http://d.local',
-      { name: 'Spec', source: 'Custom', reference: 'ref-1', description: 'A spec class.' },
+      { name: 'Spec', org: 'Tri-County FPV', reference: 'ref-1', description: 'A spec class.' },
       'tok'
     );
     await screen.findByText('Spec');
+    // The org typed is the tag on the row.
+    expect(screen.getByTestId('class-org')).toHaveTextContent('Tri-County FPV');
   });
 
   it('edits a Custom class and CLEARS reference + description, sending null for each', async () => {
     const CUSTOM: Class = {
       id: 'c1',
       name: 'House',
-      source: 'Custom',
       reference: 'ref',
       description: 'notes'
     };
@@ -206,7 +209,7 @@ describe('ClassManager — hide / archive (manageHidden)', () => {
 });
 
 describe('ClassManager — the hidden filter (filterHidden)', () => {
-  const HIDDEN: Class = { id: 'c3', name: 'Archived', source: 'Custom', hidden: true };
+  const HIDDEN: Class = { id: 'c3', name: 'Archived', hidden: true };
 
   it('filters hidden classes out of the offered list', async () => {
     const listClassesImpl = vi.fn(async () => [OPEN, HOUSE, HIDDEN]);
@@ -327,5 +330,39 @@ describe('ClassManager — removing built-in classes (manageHidden)', () => {
     expect(within(builtinRow).queryByRole('button', { name: 'Remove' })).toBeNull();
     expect(screen.queryByTestId('removed-builtins')).toBeNull();
     expect(removed).not.toHaveBeenCalled();
+  });
+});
+
+describe('ClassManager — the org tag', () => {
+  it('refuses an org too long to be a tag before sending anything', async () => {
+    const listClassesImpl = vi.fn(async () => []);
+    const createClassImpl = vi.fn(async () => HOUSE);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl, createClassImpl });
+    const { component } = render(ClassManager, { session });
+    await screen.findByText(/No classes/i);
+    await openAdd(component as unknown as { openAdd: () => void });
+    await fireEvent.input(screen.getByLabelText('Name'), { target: { value: 'Spec' } });
+    await fireEvent.input(screen.getByLabelText('Org'), { target: { value: 'x'.repeat(25) } });
+    expect(screen.getByText('An org name can have 24 characters at most.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Add class' })).toBeDisabled();
+    await fireEvent.submit(screen.getByRole('form', { name: 'Add class' }));
+    expect(createClassImpl).not.toHaveBeenCalled();
+  });
+
+  it("opens a class's org for editing, and clearing it sends null", async () => {
+    const mine: Class = { id: 'c2', name: 'House', org: 'My Club' };
+    const listClassesImpl = vi.fn(async () => [mine]);
+    const updateClassImpl = vi.fn(async () => ({ id: 'c2', name: 'House' }) as Class);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl, updateClassImpl });
+    render(ClassManager, { session });
+    expect(await screen.findByTestId('class-org')).toHaveTextContent('My Club');
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const org = (await screen.findByLabelText('Org')) as HTMLInputElement;
+    expect(org.value).toBe('My Club');
+    await fireEvent.input(org, { target: { value: '' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(updateClassImpl).toHaveBeenCalledWith('http://d.local', 'c2', { org: null }, 'tok')
+    );
   });
 });

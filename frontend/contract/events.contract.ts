@@ -454,9 +454,9 @@ describe('seam 11: the application-level pilot directory (#74)', () => {
  *
  * guards:
  *  - `GET /classes` is an **open read** → `Class[]` carrying the 9 locked, fixed-id **built-in**
- *    classes (present on every Director, flagged `builtin`, carrying their real org as `source`).
+ *    classes (present on every Director, flagged `builtin`, carrying their org as `org`).
  *  - `POST /classes` is **RD-gated** (no/bad token → 401), requires a `name`, auto-generates an id,
- *    carries the `source`/`reference`/`description` metadata, and the new class appears in the listing.
+ *    carries the `org`/`reference`/`description` metadata, and the new class appears in the listing.
  *  - `PUT /classes/{id}` on a **built-in** id is rejected (it cannot be edited). `DELETE` removes
  *    one, and `POST /classes/builtins` puts the removed ones back; user/Custom classes are
  *    full CRUD (set / clear via wire-`null` — the `OptionalEdit` three-state).
@@ -513,12 +513,12 @@ describe('seam 12: the application-level class directory (#84)', () => {
       expect(cls, `built-in ${id} present`).toBeDefined();
       expect(cls?.builtin).toBe(true);
     }
-    // They carry their real org as the source (a badge), not Custom.
-    expect(byId.get('mgp-open')?.source).toBe('MultiGP');
-    expect(byId.get('five33-tiny-trainer')?.source).toBe('Five33');
-    expect(byId.get('freedom-spec')?.source).toBe('FreedomSpec');
-    expect(byId.get('street-league')?.source).toBe('StreetLeague');
-    expect(byId.get('udl-igniter')?.source).toBe('UDL');
+    // They carry the org that defines them, shown as a tag.
+    expect(byId.get('mgp-open')?.org).toBe('MultiGP');
+    expect(byId.get('five33-tiny-trainer')?.org).toBe('Five33');
+    expect(byId.get('freedom-spec')?.org).toBe('Freedom Spec');
+    expect(byId.get('street-league')?.org).toBe('Street League');
+    expect(byId.get('udl-igniter')?.org).toBe('UDL');
     for (const cls of classes) expect(wireShapeProblems(cls, 'Class')).toEqual([]);
   });
 
@@ -578,19 +578,21 @@ describe('seam 12: the application-level class directory (#84)', () => {
   it('POST /classes creates a class (with metadata) and it appears in the listing', async () => {
     const created = (
       await createClass(
-        { name: 'Open', source: 'MultiGP', reference: 'mgp-open', description: 'The open class' },
+        { name: 'Open', org: 'My Club', reference: 'mgp-open', description: 'The open class' },
         TOKEN
       )
     ).body as Class;
     expect(created.id).toMatch(/^open-/);
     expect(created.name).toBe('Open');
-    expect(created.source).toBe('MultiGP');
+    expect(created.org).toBe('My Club');
     expect(created.reference).toBe('mgp-open');
     expect(created.description).toBe('The open class');
 
-    // The source defaults to "Custom" when omitted.
-    const custom = (await createClass({ name: 'Spec' }, TOKEN)).body as Class;
-    expect(custom.source).toBe('Custom');
+    // With no org given there is none: the field is left out, not filled in.
+    const bare = (await createClass({ name: 'Spec' }, TOKEN)).body as Class;
+    expect('org' in bare).toBe(false);
+    // An org too long to be a tag is refused.
+    expect((await createClass({ name: 'Long', org: 'x'.repeat(25) }, TOKEN)).status).toBe(400);
 
     const ids = (await listClasses()).map((c) => c.id);
     expect(ids).toContain(created.id);
@@ -612,11 +614,10 @@ describe('seam 12: the application-level class directory (#84)', () => {
       return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
     };
 
-    // Set name + source, leave reference/description untouched (absent → unchanged).
-    const updated = (await put(created.id, { name: 'Renamed', source: 'Other' }, TOKEN))
-      .body as Class;
+    // Set name + org, leave reference/description untouched (absent → unchanged).
+    const updated = (await put(created.id, { name: 'Renamed', org: 'Other' }, TOKEN)).body as Class;
     expect(updated.name).toBe('Renamed');
-    expect(updated.source).toBe('Other');
+    expect(updated.org).toBe('Other');
     expect(updated.reference).toBe('ref-1'); // unchanged
     expect(updated.description).toBe('desc'); // unchanged
 

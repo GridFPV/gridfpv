@@ -210,7 +210,7 @@ Director on a machine with no screen, open an SSH tunnel to it
 | Route | What |
 |---|---|
 | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | The pilot list |
-| `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | The class list |
+| `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | The class list. A class is `{id, name, org?, reference?, description?, builtin?, hidden?}`. `org` is free text, 24 characters at most, shown as a tag; in a `PUT`, `null` clears it |
 | `GET /classes/builtins`, `POST /classes/builtins` | `GET` answers `{removed}`: how many built-in classes have been removed. `POST` puts them all back and answers the class list. A built-in class can be removed with `DELETE /classes/{id}`; it cannot be edited |
 | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | The timer list, each with its live status |
 | `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added (by its own id, or by its address) |

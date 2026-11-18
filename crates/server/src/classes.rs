@@ -12,7 +12,7 @@
 //! with **fixed ids**, identical on every Director, so cross-event / cross-Director standings
 //! aggregate with zero reconciliation. The built-ins are **read-only** (non-editable,
 //! non-deletable) and are **never** written to `classes.json` (re-seeded on every boot). Users
-//! only ever create [`Custom`](ClassSource::Custom) classes (full CRUD).
+//! create classes of their own (full CRUD), with an org tag if they type one.
 //!
 //! This is the directory of *which classes exist*. Which classes run at an event, and who races
 //! in each, belongs to the event and is built on the primitives (`docs/primitives.md` §5.3).
@@ -47,41 +47,14 @@ pub const HIDDEN_CLASSES_FILE: &str = "hidden_classes.json";
 /// back (`POST /classes/builtins`) empties it.
 pub const REMOVED_CLASSES_FILE: &str = "removed_classes.json";
 
-/// Where a [`Class`] came from (issue #84).
-///
-/// A small closed enum the directory records so the RD can tell a canonical built-in class (e.g. a
-/// MultiGP spec class) from one they typed in themselves. Externally tagged (the default serde enum
-/// representation) so it maps to a TS string union (`"MultiGP" | "Five33" | … | "Custom" |
-/// "Other"`), exactly like [`VtxType`](crate::pilots::VtxType). The org variants name the standard
-/// FPV racing leagues / spec bodies the built-in classes carry as their provenance (shown as a
-/// badge). Defaults to [`Custom`](ClassSource::Custom) — a class the RD created by hand; users only
-/// ever create `Custom` classes. [`Other`](ClassSource::Other) is the catch-all for any provenance
-/// not enumerated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum ClassSource {
-    /// Imported from / aligned with **MultiGP** (a GQ / spec class).
-    MultiGP,
-    /// Aligned with **Five33** (flyfive33.com spec classes, e.g. Tiny Trainer).
-    Five33,
-    /// Aligned with the **Freedom Spec** open-spec class (freedomspec.com).
-    FreedomSpec,
-    /// Aligned with **Street League** (streetleague.io spec).
-    StreetLeague,
-    /// Aligned with the **Underground Drone League** (UDL, undergrounddroneleague.com).
-    UDL,
-    /// A **custom** class the RD created by hand (the default). The only source a user creates.
-    #[default]
-    Custom,
-    /// Any other provenance not enumerated above (catch-all).
-    Other,
-}
+/// The most characters an org name may have. It is shown as a small tag beside the class.
+pub const ORG_MAX: usize = 24;
 
 /// One class in the application-level directory (issue #84).
 ///
 /// The wire shape `GET /classes` returns and the on-disk shape `classes.json` persists: a stable
-/// [`ClassId`] (auto-generated, never user-entered), a required `name`, a [`source`](Class::source)
-/// provenance, and a little optional metadata. The optional fields are omitted from the wire when
+/// [`ClassId`] (auto-generated, never user-entered), a required `name`, and a little optional
+/// metadata, the org among it. The optional fields are omitted from the wire when
 /// unset (`skip_serializing_if`). Derives serde (its JSON *is* both the wire and the persisted form)
 /// and `ts_rs::TS` so the frontend reads a generated `Class` type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -94,10 +67,12 @@ pub struct Class {
     /// The class's **name** — the required display label (e.g. `"Open"`, `"Spec 5\""`). The
     /// directory's one mandatory field; everything else is optional metadata.
     pub name: String,
-    /// Where this class came from (see [`ClassSource`]). Defaults to
-    /// [`Custom`](ClassSource::Custom).
-    #[serde(default)]
-    pub source: ClassSource,
+    /// The **org** whose class this is, such as `"MultiGP"` or a club's own name. Free text,
+    /// shown as a tag beside the class. A built-in carries the org that defines it; the
+    /// director types one, or none, for a class of their own. Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub org: Option<String>,
     /// An optional **reference** id/handle into the source system (e.g. a MultiGP class id), if
     /// recorded. Free-form. Omitted from the wire when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,8 +86,7 @@ pub struct Class {
     /// standard FPV classes seeded into every directory with a fixed id, so cross-event /
     /// cross-Director standings aggregate with zero reconciliation. Built-ins are **read-only**:
     /// they cannot be edited or deleted, and are **not** persisted to `classes.json` (they are
-    /// re-seeded on every boot). A user-created [`Custom`](ClassSource::Custom) class is never a
-    /// built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
+    /// re-seeded on every boot). A class the director made is never a built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
     /// class's JSON is unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub builtin: bool,
@@ -142,8 +116,8 @@ struct BuiltinClass {
     id: &'static str,
     /// The canonical display name.
     name: &'static str,
-    /// The real org this class belongs to (shown as a source badge).
-    source: ClassSource,
+    /// The org that defines this class (shown as a tag).
+    org: &'static str,
     /// A reference URL into the org's rules.
     reference: &'static str,
     /// A short canonical description.
@@ -152,83 +126,83 @@ struct BuiltinClass {
 
 /// The 9 standard FPV racing classes seeded into **every** directory with **fixed ids** (issue
 /// #84). Present on every Director identically so cross-event / cross-Director season standings
-/// aggregate without reconciliation; carry their real org as [`source`](Class::source) (a badge);
+/// aggregate without reconciliation; carry their org as [`org`](Class::org) (a tag);
 /// are read-only (non-editable, non-deletable); and are **not** persisted to `classes.json`.
 const BUILTIN_CLASSES: &[BuiltinClass] = &[
     BuiltinClass {
         id: "mgp-open",
         name: "Open Class",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/class-specifications/",
         description: "Open/unlimited 5–6\" class — no motor/prop/electronics limits.",
     },
     BuiltinClass {
         id: "mgp-pro-spec",
         name: "Pro Spec",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/prospec/",
         description: "MultiGP's official 7\" spec class (Pro Spec frame, spec motor).",
     },
     BuiltinClass {
         id: "mgp-whoop",
         name: "Whoop Class",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/class-specifications/",
         description: "1S indoor micro whoop (65mm ducted).",
     },
     BuiltinClass {
         id: "mgp-micro",
         name: "Micro Class",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/class-specifications/microclass/",
         description: "3\" micro class (1404 motor, 3S).",
     },
     BuiltinClass {
         id: "five33-tiny-trainer",
         name: "Tiny Trainer",
-        source: ClassSource::Five33,
+        org: "Five33",
         reference: "https://flyfive33.com/pages/tt-spec",
         description: "Five33 3\" spec (Tiny Trainer frame, 1404, 3S).",
     },
     BuiltinClass {
         id: "freedom-spec",
         name: "Freedom Spec",
-        source: ClassSource::FreedomSpec,
+        org: "Freedom Spec",
         reference: "https://freedomspec.com/",
         description: "Open 5\" spec class with a standardized motor-RPM cap.",
     },
     BuiltinClass {
         id: "street-league",
         name: "Street League",
-        source: ClassSource::StreetLeague,
+        org: "Street League",
         reference: "https://streetleague.io/spec",
         description: "7\" spec on firmware that equalizes motors via an RPM limiter.",
     },
     BuiltinClass {
         id: "udl-igniter",
         name: "Igniter",
-        source: ClassSource::UDL,
+        org: "UDL",
         reference: "https://undergrounddroneleague.com/igniter-legal-parts",
         description: "Indoor 1S 75mm-ducted spec, approved-parts-only, RPM-limited.",
     },
     BuiltinClass {
         id: "udl-shrieker",
         name: "Shrieker",
-        source: ClassSource::UDL,
+        org: "UDL",
         reference: "https://undergrounddroneleague.com/drone-types",
         description: "Fast 1S 65mm micro, near-open ruleset.",
     },
 ];
 
 /// Build the 9 built-in [`Class`]es (issue #84) — the canonical, fixed-id, read-only classes seeded
-/// into every directory. Each carries `builtin = true` and its real org as the source.
+/// into every directory. Each carries `builtin = true` and its org.
 fn builtin_classes() -> Vec<Class> {
     BUILTIN_CLASSES
         .iter()
         .map(|b| Class {
             id: ClassId(b.id.to_string()),
             name: b.name.to_string(),
-            source: b.source,
+            org: Some(b.org.to_string()),
             reference: Some(b.reference.to_string()),
             description: Some(b.description.to_string()),
             builtin: true,
@@ -254,10 +228,10 @@ fn is_builtin_id(id: &ClassId) -> bool {
 pub struct CreateClassRequest {
     /// The required name for the new class.
     pub name: String,
-    /// The class's provenance, stored on [`Class::source`]. Defaults to
-    /// [`Custom`](ClassSource::Custom).
-    #[serde(default)]
-    pub source: ClassSource,
+    /// Optional org, stored on [`Class::org`]. At most [`ORG_MAX`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub org: Option<String>,
     /// Optional reference id, stored on [`Class::reference`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -272,7 +246,7 @@ pub struct CreateClassRequest {
 ///
 /// Every field is optional so a partial edit is a one-field body; the id is fixed (it is in the
 /// path). A present `name` replaces it (a blank one is ignored — the name is required and never
-/// cleared). A present `source` replaces the provenance. Each optional-metadata field is a
+/// cleared). Each optional-metadata field is a
 /// three-state [`OptionalEdit`]: **absent** leaves it unchanged ([`Keep`](OptionalEdit::Keep)),
 /// present **`null`** clears it ([`Clear`](OptionalEdit::Clear)), and present **with a value** sets
 /// it ([`Set`](OptionalEdit::Set)) — exactly the `UpdatePilotRequest` semantics.
@@ -283,10 +257,10 @@ pub struct UpdateClassRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub name: Option<String>,
-    /// A new provenance, or `None` to leave it unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub source: Option<ClassSource>,
+    /// A new org (set / clear / leave-unchanged, like [`reference`](Self::reference)).
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub org: OptionalEdit<String>,
     /// A new reference id: present value → set, present `null` → clear, absent → leave unchanged.
     #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
     #[ts(optional = nullable)]
@@ -460,6 +434,8 @@ impl ClassDirectory {
         if name.is_empty() {
             return Err(ClassError::invalid("a class name is required"));
         }
+        let org = normalize_optional(&request.org);
+        check_org(org.as_deref())?;
         let mut dir = self.write();
         let id = loop {
             let candidate = ClassId(format!("{}-{}", slugify(name), short_suffix()));
@@ -470,7 +446,7 @@ impl ClassDirectory {
         let class = Class {
             id: id.clone(),
             name: name.to_string(),
-            source: request.source,
+            org,
             reference: normalize_optional(&request.reference),
             description: normalize_optional(&request.description),
             builtin: false,
@@ -496,6 +472,9 @@ impl ClassDirectory {
                 id.0
             )));
         }
+        if let OptionalEdit::Set(org) = &request.org {
+            check_org(Some(org.trim()))?;
+        }
         let mut dir = self.write();
         let class = dir
             .classes
@@ -507,9 +486,7 @@ impl ClassDirectory {
                 class.name = trimmed.to_string();
             }
         }
-        if let Some(source) = request.source {
-            class.source = source;
-        }
+        apply_string_edit(&mut class.org, &request.org);
         apply_string_edit(&mut class.reference, &request.reference);
         apply_string_edit(&mut class.description, &request.description);
         let updated = class.clone();
@@ -778,6 +755,16 @@ fn slugify(name: &str) -> String {
     }
 }
 
+/// Refuse an org name too long to be a tag.
+fn check_org(org: Option<&str>) -> Result<(), ClassError> {
+    match org {
+        Some(org) if org.chars().count() > ORG_MAX => Err(ClassError::invalid(format!(
+            "An org name can have {ORG_MAX} characters at most."
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// A short random lowercase-alphanumeric suffix making an auto-generated id unique (same source as
 /// the pilot/event registries — the OS CSPRNG).
 fn short_suffix() -> String {
@@ -829,7 +816,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {}", spec.id));
             assert!(got.builtin, "{} must be flagged built-in", spec.id);
             assert_eq!(got.name, spec.name);
-            assert_eq!(got.source, spec.source);
+            assert_eq!(got.org.as_deref(), Some(spec.org));
             assert_eq!(got.reference.as_deref(), Some(spec.reference));
             assert_eq!(got.description.as_deref(), Some(spec.description));
         }
@@ -848,29 +835,13 @@ mod tests {
         ] {
             assert!(ids.contains(expected), "missing built-in id {expected}");
         }
-        // The org sources are the expected spread.
-        assert_eq!(
-            dir.get(&ClassId("mgp-open".into())).unwrap().source,
-            ClassSource::MultiGP
-        );
-        assert_eq!(
-            dir.get(&ClassId("five33-tiny-trainer".into()))
-                .unwrap()
-                .source,
-            ClassSource::Five33
-        );
-        assert_eq!(
-            dir.get(&ClassId("freedom-spec".into())).unwrap().source,
-            ClassSource::FreedomSpec
-        );
-        assert_eq!(
-            dir.get(&ClassId("street-league".into())).unwrap().source,
-            ClassSource::StreetLeague
-        );
-        assert_eq!(
-            dir.get(&ClassId("udl-igniter".into())).unwrap().source,
-            ClassSource::UDL
-        );
+        // The orgs are the expected spread, spelled as they are shown.
+        let org = |id: &str| dir.get(&ClassId(id.into())).unwrap().org;
+        assert_eq!(org("mgp-open").as_deref(), Some("MultiGP"));
+        assert_eq!(org("five33-tiny-trainer").as_deref(), Some("Five33"));
+        assert_eq!(org("freedom-spec").as_deref(), Some("Freedom Spec"));
+        assert_eq!(org("street-league").as_deref(), Some("Street League"));
+        assert_eq!(org("udl-igniter").as_deref(), Some("UDL"));
     }
 
     #[test]
@@ -1003,11 +974,84 @@ mod tests {
     }
 
     #[test]
-    fn class_source_defaults_to_custom() {
-        assert_eq!(ClassSource::default(), ClassSource::Custom);
+    fn a_class_made_with_no_org_has_none_and_says_nothing_of_it_on_the_wire() {
         let dir = ClassDirectory::new(None).unwrap();
         let class = dir.create(&req("Open")).unwrap();
-        assert_eq!(class.source, ClassSource::Custom);
+        assert_eq!(class.org, None);
+        let wire = serde_json::to_value(&class).unwrap();
+        assert!(wire.get("org").is_none(), "{wire}");
+        assert!(wire.get("source").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn an_org_is_free_text_trimmed_and_kept_short() {
+        let dir = ClassDirectory::new(None).unwrap();
+        let with = |org: &str| CreateClassRequest {
+            name: "Club Spec".into(),
+            org: Some(org.into()),
+            ..Default::default()
+        };
+        // Anything the director types, tidied of the spaces around it.
+        assert_eq!(
+            dir.create(&with("  Tri-County FPV  "))
+                .unwrap()
+                .org
+                .as_deref(),
+            Some("Tri-County FPV")
+        );
+        // Blank is none.
+        assert_eq!(dir.create(&with("   ")).unwrap().org, None);
+        // As long as it may be, and no longer.
+        let longest = "x".repeat(ORG_MAX);
+        assert_eq!(
+            dir.create(&with(&longest)).unwrap().org.as_deref(),
+            Some(longest.as_str())
+        );
+        let before = dir.list().len();
+        let err = dir.create(&with(&"x".repeat(ORG_MAX + 1))).unwrap_err();
+        assert_eq!(err.kind, ClassErrorKind::Invalid);
+        assert!(err.message.contains("24 characters"), "{}", err.message);
+        assert_eq!(dir.list().len(), before, "a refused class is not made");
+
+        // An edit can set it, change it, clear it, and leave it alone.
+        let class = dir.create(&req("House")).unwrap();
+        let edit = |body: &str| dir.update(&class.id, &serde_json::from_str(body).unwrap());
+        assert_eq!(
+            edit(r#"{"org":" MultiGP "}"#).unwrap().org.as_deref(),
+            Some("MultiGP")
+        );
+        assert_eq!(
+            edit(r#"{"name":"House 2"}"#).unwrap().org.as_deref(),
+            Some("MultiGP")
+        );
+        assert_eq!(
+            edit(r#"{"org":"Mine"}"#).unwrap().org.as_deref(),
+            Some("Mine")
+        );
+        let too_long = format!(r#"{{"org":"{}"}}"#, "y".repeat(ORG_MAX + 1));
+        assert_eq!(edit(&too_long).unwrap_err().kind, ClassErrorKind::Invalid);
+        assert_eq!(dir.get(&class.id).unwrap().org.as_deref(), Some("Mine"));
+        assert_eq!(edit(r#"{"org":null}"#).unwrap().org, None);
+    }
+
+    #[test]
+    fn a_class_saved_by_an_older_grid_with_a_source_still_loads() {
+        let data = removal_dir("old-source");
+        std::fs::write(
+            data.join(CLASSES_FILE),
+            r#"[{"id":"house-ab12","name":"House","source":"Custom"},
+                {"id":"club-cd34","name":"Club","source":"MultiGP","reference":"x"}]"#,
+        )
+        .unwrap();
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        let house = dir.get(&ClassId("house-ab12".into())).unwrap();
+        assert_eq!(house.name, "House");
+        assert_eq!(house.org, None);
+        // The old tag is not carried over; the class and the rest of it are.
+        let club = dir.get(&ClassId("club-cd34".into())).unwrap();
+        assert_eq!(club.org, None);
+        assert_eq!(club.reference.as_deref(), Some("x"));
+        std::fs::remove_dir_all(data).ok();
     }
 
     #[test]
@@ -1036,12 +1080,12 @@ mod tests {
         let class = dir
             .create(&CreateClassRequest {
                 name: "Open".to_string(),
-                source: ClassSource::MultiGP,
+                org: Some("MultiGP".to_string()),
                 reference: Some("  mgp-open  ".to_string()), // trimmed
                 description: Some("  ".to_string()),         // blank → unset
             })
             .unwrap();
-        assert_eq!(class.source, ClassSource::MultiGP);
+        assert_eq!(class.org.as_deref(), Some("MultiGP"));
         assert_eq!(class.reference.as_deref(), Some("mgp-open"));
         assert_eq!(class.description, None);
     }
@@ -1052,7 +1096,7 @@ mod tests {
         let created = dir
             .create(&CreateClassRequest {
                 name: "Old".to_string(),
-                source: ClassSource::Custom,
+                org: None,
                 reference: Some("ref-1".to_string()),
                 description: Some("desc".to_string()),
             })
@@ -1064,14 +1108,14 @@ mod tests {
                 &created.id,
                 &UpdateClassRequest {
                     name: Some("New".to_string()),
-                    source: Some(ClassSource::MultiGP),
+                    org: OptionalEdit::Set("MultiGP".to_string()),
                     reference: OptionalEdit::Clear, // explicit clear
                     ..Default::default()
                 },
             )
             .unwrap();
         assert_eq!(updated.name, "New");
-        assert_eq!(updated.source, ClassSource::MultiGP);
+        assert_eq!(updated.org.as_deref(), Some("MultiGP"));
         assert_eq!(updated.reference, None);
         assert_eq!(updated.description.as_deref(), Some("desc")); // absent → unchanged
 
@@ -1113,7 +1157,7 @@ mod tests {
             let created = dir
                 .create(&CreateClassRequest {
                     name: "Clearable".to_string(),
-                    source: ClassSource::Other,
+                    org: Some("Other".to_string()),
                     reference: Some("ref-x".to_string()),
                     description: Some("a description".to_string()),
                 })
@@ -1128,14 +1172,14 @@ mod tests {
                 cleared.description, None,
                 "wire null must clear description"
             );
-            assert_eq!(cleared.source, ClassSource::Other); // absent → unchanged
+            assert_eq!(cleared.org.as_deref(), Some("Other")); // absent → unchanged
 
             // The clear survives a restart (it was persisted to classes.json, not just in mem).
             let reopened = ClassDirectory::new(Some(data_dir.clone())).unwrap();
             let got = reopened.get(&created.id).unwrap();
             assert_eq!(got.reference, None);
             assert_eq!(got.description, None);
-            assert_eq!(got.source, ClassSource::Other);
+            assert_eq!(got.org.as_deref(), Some("Other"));
         }
         std::fs::remove_dir_all(&data_dir).ok();
     }
@@ -1176,7 +1220,7 @@ mod tests {
             let created = dir
                 .create(&CreateClassRequest {
                     name: "Persisted".to_string(),
-                    source: ClassSource::MultiGP,
+                    org: Some("MultiGP".to_string()),
                     reference: Some("mgp-7".to_string()),
                     description: Some("the persisted class".to_string()),
                 })
@@ -1185,7 +1229,7 @@ mod tests {
             let reopened = ClassDirectory::new(Some(data_dir.clone())).unwrap();
             let got = reopened.get(&created.id).unwrap();
             assert_eq!(got.name, "Persisted");
-            assert_eq!(got.source, ClassSource::MultiGP);
+            assert_eq!(got.org.as_deref(), Some("MultiGP"));
             assert_eq!(got.reference.as_deref(), Some("mgp-7"));
             assert_eq!(got.description.as_deref(), Some("the persisted class"));
         }
@@ -1218,7 +1262,7 @@ mod tests {
                 })
                 .unwrap();
             assert!(!created.builtin);
-            assert_eq!(created.source, ClassSource::Custom);
+            assert_eq!(created.org, None);
 
             // …but the on-disk file holds ONLY the user class — never a built-in.
             let raw = std::fs::read_to_string(classes_path(&data_dir)).unwrap();

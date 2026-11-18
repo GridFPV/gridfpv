@@ -8,15 +8,17 @@ import {
   isBuiltin,
   isHidden,
   partitionHidden,
-  sourceTone,
+  orgProblem,
+  orgTone,
+  ORG_MAX,
   type ClassFormValues
 } from '../src/lib/classes.js';
 
-/** A custom class with every field populated — the baseline for the edit/diff tests. */
+/** A class of the director's own with every field filled: the baseline for the edit tests. */
 const FULL: Class = {
   id: 'c1',
   name: 'House Spec',
-  source: 'Custom',
+  org: 'Tri-County FPV',
   reference: 'https://example.com/spec',
   description: 'The house spec class.'
 };
@@ -25,30 +27,32 @@ const FULL: Class = {
 const BUILTIN: Class = {
   id: 'mgp-open',
   name: 'Open Class',
-  source: 'MultiGP',
+  org: 'MultiGP',
   reference: 'https://www.multigp.com/class-specifications/',
   description: 'Open/unlimited 5–6" class.',
   builtin: true
 };
 
-describe('buildCreateRequest (create = Custom only)', () => {
-  it('always sends source=Custom + the name + filled optionals (blank optionals omitted)', () => {
+describe('buildCreateRequest', () => {
+  it('sends the name and the filled optionals, tidied; blank optionals are left out', () => {
     const v = emptyForm();
     v.name = '  Spec  ';
+    v.org = '  MultiGP ';
     v.reference = 'mg-spec';
     const req = buildCreateRequest(v);
-    expect(req).toEqual({ name: 'Spec', source: 'Custom', reference: 'mg-spec' });
+    expect(req).toEqual({ name: 'Spec', org: 'MultiGP', reference: 'mg-spec' });
     expect(req).not.toHaveProperty('description');
   });
 
-  it('defaults to a Custom class on a blank add form', () => {
+  it('a class with no org typed is sent with none, and never a made-up one', () => {
     const v = emptyForm();
     v.name = 'House';
-    expect(buildCreateRequest(v)).toEqual({ name: 'House', source: 'Custom' });
+    v.org = '   ';
+    expect(buildCreateRequest(v)).toEqual({ name: 'House' });
   });
 });
 
-describe('buildUpdateRequest — clear-via-null (no source field)', () => {
+describe('buildUpdateRequest — clear-via-null', () => {
   function valuesFrom(c: Class): ClassFormValues {
     return formFromClass(c);
   }
@@ -57,11 +61,13 @@ describe('buildUpdateRequest — clear-via-null (no source field)', () => {
     expect(buildUpdateRequest(FULL, valuesFrom(FULL))).toEqual({});
   });
 
-  it('emits null for reference and description when the user clears them', () => {
+  it('emits null for org, reference and description when the user clears them', () => {
     const v = valuesFrom(FULL);
+    v.org = ' ';
     v.reference = '';
     v.description = '';
     const req = buildUpdateRequest(FULL, v);
+    expect(req.org).toBeNull();
     expect(req.reference).toBeNull();
     expect(req.description).toBeNull();
     expect(req).not.toHaveProperty('name');
@@ -73,34 +79,49 @@ describe('buildUpdateRequest — clear-via-null (no source field)', () => {
     expect(buildUpdateRequest(FULL, v)).toEqual({ name: 'Pro House' });
   });
 
+  it('sets a changed org, and an org on a class that had none', () => {
+    const v = valuesFrom(FULL);
+    v.org = 'MultiGP';
+    expect(buildUpdateRequest(FULL, v)).toEqual({ org: 'MultiGP' });
+    const { org: _none, ...bare } = FULL;
+    const w = valuesFrom(bare);
+    expect(w.org).toBe('');
+    w.org = 'My Club';
+    expect(buildUpdateRequest(bare, w)).toEqual({ org: 'My Club' });
+  });
+
   it('never clears the name when blanked', () => {
     const v = valuesFrom(FULL);
     v.name = '   ';
     expect(buildUpdateRequest(FULL, v)).not.toHaveProperty('name');
   });
-
-  it('never emits a source (the create/edit forms no longer pick a source)', () => {
-    const v = valuesFrom(FULL);
-    v.name = 'Renamed';
-    expect(buildUpdateRequest(FULL, v)).not.toHaveProperty('source');
-  });
 });
 
-describe('isBuiltin + source badges', () => {
+describe('isBuiltin + org tags', () => {
   it('flags only built-in classes', () => {
     expect(isBuiltin(BUILTIN)).toBe(true);
     expect(isBuiltin(FULL)).toBe(false);
     expect(isBuiltin({ ...FULL, builtin: false })).toBe(false);
   });
 
-  it('gives each org source a distinct badge tone, Custom its own violet, Other neutral', () => {
-    expect(sourceTone('MultiGP')).toBe('accent');
-    expect(sourceTone('Five33')).toBe('success');
-    expect(sourceTone('FreedomSpec')).toBe('info');
-    expect(sourceTone('StreetLeague')).toBe('warn');
-    expect(sourceTone('UDL')).toBe('danger');
-    expect(sourceTone('Custom')).toBe('violet');
-    expect(sourceTone('Other')).toBe('neutral');
+  it("gives each org that comes with Grid its own tag colour, and the director's own violet", () => {
+    expect(orgTone('MultiGP')).toBe('accent');
+    expect(orgTone('Five33')).toBe('success');
+    expect(orgTone('Freedom Spec')).toBe('info');
+    expect(orgTone('Street League')).toBe('warn');
+    expect(orgTone('UDL')).toBe('danger');
+    // Typed by a director: the same org is the same colour however it is spelled.
+    expect(orgTone(' multigp ')).toBe('accent');
+    expect(orgTone('udl')).toBe('danger');
+    expect(orgTone('Tri-County FPV')).toBe('violet');
+    expect(orgTone('')).toBe('violet');
+  });
+
+  it('takes an org up to the limit, and says so past it', () => {
+    expect(orgProblem('')).toBeUndefined();
+    expect(orgProblem('x'.repeat(ORG_MAX))).toBeUndefined();
+    expect(orgProblem(`  ${'x'.repeat(ORG_MAX)}  `)).toBeUndefined();
+    expect(orgProblem('x'.repeat(ORG_MAX + 1))).toBe('An org name can have 24 characters at most.');
   });
 });
 

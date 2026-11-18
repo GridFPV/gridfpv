@@ -21,7 +21,7 @@ afterEach(() => {
 
 const pilot = (id: string, callsign: string): Pilot => ({ id, callsign, vtx_types: [] });
 const PILOTS = [pilot('p-ace', 'Ace'), pilot('p-bee', 'Bee'), pilot('p-cat', 'Cat')];
-const klass = (id: string, name: string): Class => ({ id, name, source: 'Custom', builtin: false });
+const klass = (id: string, name: string): Class => ({ id, name, builtin: false });
 
 describe('the current race', () => {
   const of = (view: ReturnType<typeof eventView> | undefined) =>

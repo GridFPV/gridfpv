@@ -28,7 +28,7 @@ const PILOTS: Pilot[] = [
   { id: 'p-2b', callsign: 'Bee', vtx_types: [] },
   { id: 'p-3c', callsign: 'Cat', vtx_types: [] }
 ];
-const CLASSES: Class[] = [{ id: 'cls-open', name: 'Open', source: 'Custom' }];
+const CLASSES: Class[] = [{ id: 'cls-open', name: 'Open' }];
 
 async function open(view: EventView, over: Partial<LiveSession> = {}) {
   const { live } = await openLive(view, {
