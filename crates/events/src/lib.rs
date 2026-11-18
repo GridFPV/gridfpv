@@ -848,6 +848,12 @@ pub enum Event {
     FalseStart { race: RaceId, pilot: PilotId },
     /// A false start was taken back.
     FalseStartCleared { race: RaceId, pilot: PilotId },
+    /// A pilot is out of a race: crashed, or otherwise not going to finish it. The rules
+    /// that end a race stop waiting for them. The laps they flew still count, and they are
+    /// ranked on them like anyone else.
+    PilotOut { race: RaceId, pilot: PilotId },
+    /// A pilot marked out is back in the race.
+    PilotBackIn { race: RaceId, pilot: PilotId },
     /// The director disqualified a pilot from a phase: they are dropped from its later
     /// lineups and ranked below everyone who kept racing.
     Disqualified {

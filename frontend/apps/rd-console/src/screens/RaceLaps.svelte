@@ -52,6 +52,7 @@
           <strong>{row.name}</strong>
           {#if row.place !== undefined}<Badge tone="accent">{ordinal(row.place)}</Badge>{/if}
           {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
+          {#if row.out}<Badge tone="warn">Out</Badge>{/if}
         </header>
         {#if row.lapList.length === 0}
           <p class="muted">No laps.</p>

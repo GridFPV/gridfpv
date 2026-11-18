@@ -5,6 +5,10 @@
    * in a row it also shows that run: this race's, the heat's best so far, and which laps
    * make it up.
    *
+   * While a race is being flown, or has stopped and is not saved yet, a seat with a pilot
+   * has an **Out** button: the pilot has crashed or will not finish. The race then stops
+   * waiting for them. Their laps still count. **Back in** takes it back.
+   *
    * A bench seat has no timer behind it, so it also carries a "Crossing" button marked
    * "Bench" that logs a crossing by hand. A seat on a real timer never shows it.
    */
@@ -19,7 +23,8 @@
     run,
     heatBestMicros,
     tuneHref,
-    oncrossing
+    oncrossing,
+    onout
   }: {
     row: SeatRow;
     /** Whether a race is running, so a crossing would count. */
@@ -34,15 +39,35 @@
     tuneHref?: string;
     /** Log a crossing on this seat by hand (the bench tool). */
     oncrossing: () => void;
+    /**
+     * Mark the pilot out of the race (`true`), or back in (`false`). Left out when there
+     * is no race a pilot could be out of, and the button is then not shown.
+     */
+    onout?: (out: boolean) => void;
   } = $props();
 </script>
 
-<li class="seat" aria-label="{row.seatName}, {row.who}">
+<li class="seat" class:out={row.out} aria-label="{row.seatName}, {row.who}">
   <div class="head">
     <span class="seat-name">{row.seatName}</span>
     <span class="who">{row.who}</span>
     {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
-    {#if row.onCourse && racing}<Badge tone="success" dot>On course</Badge>{/if}
+    {#if row.out}
+      <Badge tone="warn">Out</Badge>
+    {:else if row.onCourse && racing}
+      <Badge tone="success" dot>On course</Badge>
+    {/if}
+    {#if onout && row.pilot !== undefined}
+      <Button
+        size="sm"
+        variant="secondary"
+        title={row.out
+          ? 'Put this pilot back in the race'
+          : 'This pilot has crashed or will not finish. The race stops waiting for them.'}
+        aria-label={row.out ? `Put ${row.who} back in` : `Mark ${row.who} out`}
+        onclick={() => onout(!row.out)}>{row.out ? 'Back in' : 'Out'}</Button
+      >
+    {/if}
     {#if tuneHref}<a class="tune" href={tuneHref} aria-label="Tune {row.seatName}">tune</a>{/if}
     {#if row.bench}
       <span class="bench">
@@ -107,6 +132,14 @@
     display: grid;
     gap: var(--gf-space-3);
     align-content: start;
+  }
+  /* A pilot who is out is no longer the one to watch. */
+  .seat.out {
+    border-style: dashed;
+  }
+  .seat.out .who,
+  .seat.out .stats {
+    opacity: 0.6;
   }
   .head {
     display: flex;

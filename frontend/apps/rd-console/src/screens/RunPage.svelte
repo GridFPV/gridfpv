@@ -412,6 +412,22 @@
     }
   }
 
+  /** Whether the race on screen is one a pilot can be marked out of. */
+  const canMarkOut = $derived(
+    race !== undefined && ['Staging', 'Running', 'Stopped'].includes(race.state)
+  );
+
+  /** Mark a pilot out of the race on screen, or put them back in. */
+  async function markOut(row: SeatRow, out: boolean) {
+    if (!race || row.pilot === undefined) return;
+    const fact = { race: race.race, pilot: row.pilot };
+    try {
+      await live.send({ Record: out ? { PilotOut: fact } : { PilotBackIn: fact } });
+    } catch (e) {
+      error = toProtocolError(e);
+    }
+  }
+
   const STATE_TONES = {
     Staging: 'warn',
     Running: 'success',
@@ -686,6 +702,7 @@
               ? formatHash({ kind: 'capture', timer: row.adapter, seat: row.seat })
               : undefined}
             oncrossing={() => crossing(row)}
+            onout={canMarkOut ? (out) => markOut(row, out) : undefined}
           />
         {/each}
       </ul>

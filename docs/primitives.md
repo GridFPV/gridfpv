@@ -384,7 +384,8 @@ format.
 it. As an option it stops by itself a set wait after every pilot has finished. The wait is
 there for a hard track, where extra crossings are likely and the director may need the race
 kept open to sort laps out. If a finishing lap is removed during the wait, the race keeps
-going. A pilot who never finishes means the race never stops by itself.
+going. A pilot who never finishes means the race never stops by itself, unless the director
+marks them **out** (below).
 
 **A time limit** (Agreed) can be set on any race that is not timed: first-to-N or open. The
 race stops by itself at the limit, whoever has or has not finished. With both a limit and
@@ -412,6 +413,17 @@ A ruling is a human decision recorded as a fact in the log. Rulings are never au
   means B has no lap time at all, and A and C both stay as they were. A and C can never be
   used together: "best N consecutive" may not span a restart. Always marked by a person.
 - **False start:** names the pilot and the race.
+- **Out** (Built 2026-11-18, #510): names the pilot and the race. The pilot crashed or will
+  not finish. It answers the two open questions this way:
+  - "DNF" and "crashed" are **one thing**, called Out. Grid does not ask why.
+  - **It changes when the race ends, never the result.** A race that stops by itself stops
+    waiting for a pilot who is out. The laps they flew still count, and they are ranked on
+    them like anyone else. In a first-to-N race that already puts them below every pilot
+    who finished, since they have fewer laps.
+  - It can be marked while the race is staging, running or stopped, and taken back
+    ("Back in"). Once the race is saved the mark stays as part of the record.
+  - **Not built:** ignoring gate crossings after the mark. A quad carried back through the
+    gate still counts a lap, and the marshal removes it.
 - Penalties: time added, points changed, disqualification.
 - **Position override:** the director can always set a pilot's position **in a heat**. It
   takes effect from there on: every lineup and ranking that reads the heat sees the new
