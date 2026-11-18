@@ -824,15 +824,6 @@ pub enum Event {
     PhaseDefined { def: PhaseDef },
     /// A phase was taken out of the tree.
     PhaseRemoved { phase: PhaseId },
-    /// The director said a heat is done. Only this completes a "director decides" heat.
-    HeatDone { heat: PhaseId },
-    /// The director took that back.
-    HeatReopened { heat: PhaseId },
-    /// A pilot false started in a race. Recorded against the pilot so it can be counted;
-    /// the race itself is discarded and re-run.
-    FalseStart { race: RaceId, pilot: PilotId },
-    /// A false start was taken back.
-    FalseStartCleared { race: RaceId, pilot: PilotId },
     /// A pilot took an open seat part-way through a race (check-in, for practice run as
     /// one long heat). The laps on the seat are theirs from their next crossing, until
     /// someone else takes the seat or they drop it.
@@ -848,6 +839,15 @@ pub enum Event {
         adapter: AdapterId,
         seat: SeatRef,
     },
+    /// The director said a heat is done. Only this completes a "director decides" heat.
+    HeatDone { heat: PhaseId },
+    /// The director took that back.
+    HeatReopened { heat: PhaseId },
+    /// A pilot false started in a race. Recorded against the pilot so it can be counted;
+    /// the race itself is discarded and re-run.
+    FalseStart { race: RaceId, pilot: PilotId },
+    /// A false start was taken back.
+    FalseStartCleared { race: RaceId, pilot: PilotId },
     /// The director disqualified a pilot from a phase: they are dropped from its later
     /// lineups and ranked below everyone who kept racing.
     Disqualified {

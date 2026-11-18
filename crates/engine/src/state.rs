@@ -81,14 +81,14 @@ pub enum Refusal {
     PilotNotInRace { race: RaceId, pilot: PilotId },
     #[error("pilot {pilot:?} is not in {phase:?}")]
     PilotNotInPhase { phase: PhaseId, pilot: PilotId },
-    #[error("a position starts at 1")]
-    BadPosition,
     #[error("that seat in race {0:?} has a pilot named on it, so it cannot be taken")]
     SeatNotOpen(RaceId),
     #[error("pilot {pilot:?} already has a seat of their own in race {race:?}")]
     AlreadyInRace { race: RaceId, pilot: PilotId },
     #[error("pilot {pilot:?} already has that seat in race {race:?}")]
     AlreadyOnSeat { race: RaceId, pilot: PilotId },
+    #[error("a position starts at 1")]
+    BadPosition,
     #[error("there is nothing to undo")]
     NothingToUndo,
     #[error("there is no open protest {0:?}")]
@@ -926,32 +926,6 @@ impl EventState {
                 }
                 Ok(())
             }
-            Event::HeatDone { heat } | Event::HeatReopened { heat } => {
-                self.heat(heat)?;
-                self.unlocked(heat)
-            }
-            Event::FalseStart { race, pilot } => {
-                let found = self.open_race(race)?;
-                let flying = found
-                    .setup
-                    .lineup
-                    .iter()
-                    .any(|entry| entry.pilot.as_ref() == Some(pilot));
-                if !flying {
-                    return Err(Refusal::PilotNotInRace {
-                        race: race.clone(),
-                        pilot: pilot.clone(),
-                    });
-                }
-                Ok(())
-            }
-            Event::FalseStartCleared { race, pilot } => {
-                self.open_race(race)?;
-                if !self.rulings.has_false_start(race, pilot) {
-                    return Err(Refusal::NothingToUndo);
-                }
-                Ok(())
-            }
             Event::SeatTaken {
                 race,
                 adapter,
@@ -1004,6 +978,32 @@ impl EventState {
             } => {
                 self.open_race(race)?;
                 if self.check_ins.holder(race, adapter, seat).is_none() {
+                    return Err(Refusal::NothingToUndo);
+                }
+                Ok(())
+            }
+            Event::HeatDone { heat } | Event::HeatReopened { heat } => {
+                self.heat(heat)?;
+                self.unlocked(heat)
+            }
+            Event::FalseStart { race, pilot } => {
+                let found = self.open_race(race)?;
+                let flying = found
+                    .setup
+                    .lineup
+                    .iter()
+                    .any(|entry| entry.pilot.as_ref() == Some(pilot));
+                if !flying {
+                    return Err(Refusal::PilotNotInRace {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                Ok(())
+            }
+            Event::FalseStartCleared { race, pilot } => {
+                self.open_race(race)?;
+                if !self.rulings.has_false_start(race, pilot) {
                     return Err(Refusal::NothingToUndo);
                 }
                 Ok(())
@@ -1941,6 +1941,35 @@ mod tests {
         assert_eq!(director.replayed(), director.state);
     }
 
+    #[test]
+    fn removing_a_finishing_lap_during_the_wait_keeps_the_race_going() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        // A false reading "finishes" Ben.
+        let stray = director.cross("seat-1", 10 * S + 1);
+        assert_eq!(director.state.next_due(), Some(71 * S));
+        director.now = 20 * S;
+        director
+            .record(Event::LapRemoved {
+                race: rid("heat#1"),
+                crossing: stray,
+                reason: None,
+                note: None,
+            })
+            .unwrap();
+        assert_eq!(director.state.next_due(), None);
+        director.now = 500 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Running);
+        // Ben really finishes; the wait starts from then.
+        director.cross("seat-1", 40 * S);
+        assert_eq!(director.state.next_due(), Some(560 * S));
+    }
+
     // --- Check-in: taking an open seat part-way through a race ---------------------
 
     /// Open practice as one long heat: two open seats and one with Cat named on it.
@@ -2209,35 +2238,6 @@ mod tests {
         assert!(!stints_of(&director, "seat-0")[0].1);
         assert!(stints_of(&director, "seat-1")[0].1);
         assert_eq!(director.state.next_due(), Some(90 * S));
-    }
-
-    #[test]
-    fn removing_a_finishing_lap_during_the_wait_keeps_the_race_going() {
-        let mut director = two_pilot_heat(Some(60 * S));
-        director.now = S;
-        director.cross("seat-0", 0);
-        director.cross("seat-1", 0);
-        director.now = 11 * S;
-        director.cross("seat-0", 10 * S);
-        // A false reading "finishes" Ben.
-        let stray = director.cross("seat-1", 10 * S + 1);
-        assert_eq!(director.state.next_due(), Some(71 * S));
-        director.now = 20 * S;
-        director
-            .record(Event::LapRemoved {
-                race: rid("heat#1"),
-                crossing: stray,
-                reason: None,
-                note: None,
-            })
-            .unwrap();
-        assert_eq!(director.state.next_due(), None);
-        director.now = 500 * S;
-        director.catch_up();
-        assert_eq!(state_of(&director), RaceState::Running);
-        // Ben really finishes; the wait starts from then.
-        director.cross("seat-1", 40 * S);
-        assert_eq!(director.state.next_due(), Some(560 * S));
     }
 
     #[test]
