@@ -309,6 +309,7 @@ event's log. The video setup, the log files and the recordings are not in it.
 | `POST /events/{id}/commands` | One command |
 | `POST /events/{id}/presets/bracket` | Generate a bracket's phases |
 | `POST /events/{id}/presets/mains` | Generate stacked mains |
+| `POST /events/{id}/presets/round-robin` | Generate a round robin |
 | `POST /events/{id}/passes` | A gate crossing from outside (the bench, tools, tests) |
 | `GET /events/{id}/signal?race=…` | A race's logged signal, for the marshal |
 

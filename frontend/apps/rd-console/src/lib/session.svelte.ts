@@ -92,6 +92,7 @@ import {
   sendCommand,
   createBracket,
   createMains,
+  createRoundRobin,
   postPass,
   getRaceSignal,
   subscribeChanges,
@@ -103,6 +104,7 @@ import type {
   AdapterId,
   BracketRequest,
   MainsRequest,
+  RoundRobinRequest,
   Class,
   ClassId,
   Command,
@@ -273,6 +275,7 @@ const realApi = {
   sendCommand,
   createBracket,
   createMains,
+  createRoundRobin,
   postPass,
   getRaceSignal,
   subscribeChanges,
@@ -896,6 +899,16 @@ export class Session {
   createMains(id: EventMeta['id'], request: MainsRequest): Promise<CommandOutcome | undefined> {
     return this.#privilegedWrite((token) =>
       this.#api.createMains(this.baseUrl, id, request, token)
+    );
+  }
+
+  /** Generate a round robin. Same answers as {@link sendCommand}. */
+  createRoundRobin(
+    id: EventMeta['id'],
+    request: RoundRobinRequest
+  ): Promise<CommandOutcome | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.createRoundRobin(this.baseUrl, id, request, token)
     );
   }
 

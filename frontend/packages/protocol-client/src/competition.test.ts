@@ -5,6 +5,7 @@ import type {
   EventView,
   Format,
   MainsRequest,
+  RoundRobinRequest,
   RaceSignal
 } from '@gridfpv/types';
 import type { EventSourceLike, FetchLike } from './client.js';
@@ -154,6 +155,27 @@ describe('presets and passes', () => {
     await createMains(BASE, EVT, request, undefined, { fetch });
     expect(seen[0].url).toBe(`${ROOT}/presets/mains`);
     expect(sentBody(seen[0].init)).toEqual(request);
+  });
+
+  it('createRoundRobin POSTs the request to /presets/round-robin', async () => {
+    const { fetch, seen } = recording({ cursor: 31 });
+    const { createRoundRobin } = await import('./client.js');
+    const request: RoundRobinRequest = {
+      id: 'robin',
+      label: 'Round Robin',
+      field: [{ Imported: ['ana', 'ben'] }],
+      entrants: [{ Pilot: 'ana' }, { Pilot: 'ben' }],
+      seats: [{ adapter: 'bench', seat: 'seat-1' }],
+      rounds: 3,
+      format: FORMAT
+    };
+    expect(await createRoundRobin(BASE, EVT, request, 'rd-tok', { fetch })).toEqual({
+      cursor: 31
+    });
+    expect(seen[0].url).toBe(`${ROOT}/presets/round-robin`);
+    expect(seen[0].init?.method).toBe('POST');
+    expect(sentBody(seen[0].init)).toEqual(request);
+    expect(sentHeaders(seen[0].init).Authorization).toBe('Bearer rd-tok');
   });
 
   it('postPass POSTs adapter, seat and time to /passes', async () => {

@@ -19,6 +19,7 @@
 //! | `POST /events/{id}/commands` | one [`Command`]; refused with `Refused` (409) and a reason |
 //! | `POST /events/{id}/presets/bracket` | generate a bracket's phases |
 //! | `POST /events/{id}/presets/mains` | generate stacked mains |
+//! | `POST /events/{id}/presets/round-robin` | generate a round robin |
 //! | `POST /events/{id}/passes` | a gate crossing from outside |
 //! | `GET /events/{id}/changes` | server-sent `cursor` events |
 //! | `GET /events/{id}/signal?race=…` | a race's logged signal, for the marshal |
@@ -34,11 +35,11 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream::{self, Stream};
-use gridfpv_engine::presets::{self, Bracket, Elimination, Mains};
+use gridfpv_engine::presets::{self, Bracket, Elimination, Mains, RoundRobin};
 use gridfpv_engine::state::EventState;
 use gridfpv_events::{
-    AdapterId, Command, Event, FieldSlice, Format, GateIndex, Pass, PhaseDef, PhaseId, RaceId,
-    SeatRef, SeatSource, SignalChunk, SignalThresholds, SourceTime,
+    AdapterId, Command, Event, FieldSlice, Format, GateIndex, Measure, Pass, PhaseDef, PhaseId,
+    RaceId, RankingRule, SeatRef, SeatSource, SignalChunk, SignalThresholds, SourceTime,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -448,6 +449,61 @@ pub async fn post_mains(
         elimination: body.elimination.into(),
         format: body.format,
         top_final_format: body.top_final_format,
+    })
+    .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    with_event(&registry, &event_id, |session| {
+        define(session, defs)?;
+        Ok(Json(session.outcome()))
+    })
+}
+
+/// What `POST /events/{id}/presets/round-robin` takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RoundRobinRequest {
+    /// The id for the round robin phase. Its rounds and heats get ids beneath it.
+    pub id: PhaseId,
+    /// The director's name for it.
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent: Option<PhaseId>,
+    /// The round robin's field, in seed order.
+    pub field: Vec<FieldSlice>,
+    /// Who flies, top seed first.
+    pub entrants: Vec<SeatSource>,
+    /// The seats a heat is flown on. How many there are is the most pilots in a heat.
+    pub seats: Vec<PresetSeat>,
+    /// How many rounds. Every pilot flies one heat in each.
+    pub rounds: u32,
+    /// The format for every heat. Its points table scores each race.
+    pub format: Format,
+    /// How the pilots are ranked across every heat. Left out: most points, then most
+    /// wins, then best lap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ranking: Option<RankingRule>,
+}
+
+/// `POST /events/{event_id}/presets/round-robin` — generate a round robin, RD-gated.
+pub async fn post_round_robin(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<RoundRobinRequest>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    let defs = presets::round_robin(RoundRobin {
+        id: body.id,
+        label: body.label,
+        parent: body.parent,
+        field: body.field,
+        entrants: body.entrants,
+        seats: seats(body.seats),
+        rounds: body.rounds,
+        format: body.format,
+        ranking: body.ranking.unwrap_or_else(|| RankingRule {
+            sort: vec![Measure::Points, Measure::Wins, Measure::BestLap],
+        }),
     })
     .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
     with_event(&registry, &event_id, |session| {
@@ -957,6 +1013,72 @@ mod tests {
             .map(|phase| phase.def.label.as_str())
             .collect();
         assert_eq!(labels, vec!["A-Main", "B-Main", "C-Main"]);
+    }
+
+    #[tokio::test]
+    async fn a_round_robin_is_generated_whole_and_ranks_by_points_unless_told_otherwise() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = new_event(&registry);
+        let pilots: Vec<PilotId> = ["ana", "ben", "cat", "dee", "eve", "fin"]
+            .iter()
+            .map(|name| PilotId((*name).into()))
+            .collect();
+        let mut request = serde_json::to_value(RoundRobinRequest {
+            id: PhaseId("robin".into()),
+            label: "Round Robin".into(),
+            parent: None,
+            field: vec![FieldSlice::Imported(pilots.clone())],
+            entrants: pilots.into_iter().map(SeatSource::Pilot).collect(),
+            seats: (0..3)
+                .map(|i| PresetSeat {
+                    adapter: AdapterId("oft".into()),
+                    seat: SeatRef(format!("seat-{i}")),
+                })
+                .collect(),
+            rounds: 3,
+            format: format(0),
+            ranking: None,
+        })
+        .unwrap();
+        let uri = format!("/events/{}/presets/round-robin", event.0);
+        let (status, _) = send(&registry, "POST", &uri, Some(request.clone()), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view = state(&registry, &event).await;
+        let robin = &view.phases[0];
+        assert_eq!(robin.def.display_hint.as_deref(), Some("round-robin"));
+        assert_eq!(
+            robin.def.kind,
+            gridfpv_events::PhaseKind::Group {
+                field: vec![FieldSlice::Imported(
+                    ["ana", "ben", "cat", "dee", "eve", "fin"]
+                        .iter()
+                        .map(|name| PilotId((*name).into()))
+                        .collect()
+                )],
+                combine: gridfpv_events::CombineRule::Measures(RankingRule {
+                    sort: vec![Measure::Points, Measure::Wins, Measure::BestLap],
+                }),
+            }
+        );
+        // Three rounds, each a phase holding two heats of three.
+        let rounds: Vec<&str> = view
+            .phases
+            .iter()
+            .filter(|phase| phase.def.parent == Some(PhaseId("robin".into())))
+            .map(|phase| phase.def.label.as_str())
+            .collect();
+        assert_eq!(rounds, vec!["Round 1", "Round 2", "Round 3"]);
+        assert_eq!(view.phases.len(), 1 + 3 + 6);
+        // Every heat can be flown from the start.
+        assert_eq!(view.queue.len(), 6);
+
+        // A shape that cannot work is a bad request, and nothing is logged.
+        request["id"] = json!("robin-2");
+        request["rounds"] = json!(0);
+        let (status, body) = send(&registry, "POST", &uri, Some(request), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.to_string().contains("at least one round"), "{body}");
+        assert_eq!(state(&registry, &event).await.phases.len(), 10);
     }
 
     #[tokio::test]

@@ -390,6 +390,7 @@ describe("request failures carry the Director's words (#433)", () => {
       ['sendCommand', (fetch) => c.sendCommand(BASE, EVT, REQ, TOKEN, { fetch })],
       ['createBracket', (fetch) => c.createBracket(BASE, EVT, REQ, TOKEN, { fetch })],
       ['createMains', (fetch) => c.createMains(BASE, EVT, REQ, TOKEN, { fetch })],
+      ['createRoundRobin', (fetch) => c.createRoundRobin(BASE, EVT, REQ, TOKEN, { fetch })],
       ['postPass', (fetch) => c.postPass(BASE, EVT, REQ, TOKEN, { fetch })]
     ];
 

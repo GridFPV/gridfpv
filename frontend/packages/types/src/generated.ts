@@ -102,6 +102,7 @@ export type * from '@bindings/RaceView';
 export type * from '@bindings/RankingRule';
 export type * from '@bindings/RemovalReason';
 export type * from '@bindings/RosterView';
+export type * from '@bindings/RoundRobinRequest';
 export type * from '@bindings/SeatLevels';
 export type * from '@bindings/SeatRef';
 export type * from '@bindings/SeatSignal';

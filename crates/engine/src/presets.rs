@@ -10,10 +10,12 @@
 //! - [`bracket`]: single or double elimination, for any number of entrants, with heats of
 //!   two pilots and up, and any number advancing from each heat (up to half of it).
 //! - [`mains`]: brackets stacked with bump-ups, for big fields.
+//! - [`round_robin`]: rounds of heats where the pilots are dealt differently each round,
+//!   ranked by points summed across every heat.
 
 use gridfpv_events::{
-    AdapterId, CombineRule, FieldSlice, Format, HeatSeat, PhaseDef, PhaseId, PhaseKind, SeatRef,
-    SeatSource,
+    AdapterId, CombineRule, FieldSlice, Format, HeatSeat, PhaseDef, PhaseId, PhaseKind,
+    RankingRule, SeatRef, SeatSource,
 };
 use thiserror::Error;
 
@@ -23,12 +25,14 @@ pub const HINT_SINGLE_ELIMINATION: &str = "single-elimination";
 pub const HINT_DOUBLE_ELIMINATION: &str = "double-elimination";
 /// The display hint stacked mains carry.
 pub const HINT_MAINS: &str = "mains";
+/// The display hint a round robin carries.
+pub const HINT_ROUND_ROBIN: &str = "round-robin";
 
 /// Why a preset could not be generated.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PresetError {
     /// A heat needs at least two seats.
-    #[error("a bracket heat needs at least two seats, not {0}")]
+    #[error("a heat needs at least two seats, not {0}")]
     HeatTooSmall(usize),
     /// At least one pilot must advance from a heat, and at most half of it.
     #[error("{advance} cannot advance from a heat of {heat_size}: it must be 1 to {max}")]
@@ -37,9 +41,12 @@ pub enum PresetError {
         heat_size: usize,
         max: usize,
     },
-    /// A bracket needs somebody in it.
-    #[error("a bracket needs at least one entrant")]
+    /// A preset needs somebody in it.
+    #[error("there must be at least one pilot")]
     NoEntrants,
+    /// A round robin needs a round.
+    #[error("a round robin needs at least one round")]
+    NoRounds,
     /// A main must hold more pilots than bump up into it.
     #[error("{bump} cannot bump up into a main of {per_main}")]
     BadBump { bump: u32, per_main: u32 },
@@ -537,6 +544,277 @@ pub fn mains(spec: Mains) -> Result<Vec<PhaseDef>, PresetError> {
         })?);
     }
     Ok(out)
+}
+
+/// How many swaps the round robin deal tries, at most, when it mixes the rounds.
+const DEAL_TRIES: usize = 200_000;
+
+/// Deal `pilots` (seeds `0..pilots`) into heats for each of `rounds` rounds. The answer is,
+/// for each round, each heat's pilots as (seat index, seed).
+///
+/// Seed `i` is in row `i / heats`. A row is the pilots who share a seat: in every round one
+/// of them goes to each heat. That is what keeps the heats even and a pilot on one seat.
+///
+/// Round 1 puts column `c` of every row in heat `c`, which spreads the seeds. The later
+/// rounds are then mixed together, not one at a time, so that the meetings between pilots
+/// come out as even as they can across the whole round robin: it tries swapping two of a
+/// row's pilots between heats in some round, takes the swap when it evens the meetings out,
+/// and at first also when it is a little worse, by less and less as the tries run out. The
+/// swaps are picked by a fixed sequence of numbers, so the same request always deals the
+/// same heats.
+fn deal_rounds(pilots: usize, heat_size: usize, rounds: usize) -> Vec<Vec<Vec<(usize, usize)>>> {
+    let heats = pilots.div_ceil(heat_size);
+    let row_count = pilots.div_ceil(heats);
+    let row_of = |seed: usize| seed / heats;
+    // `heat_of[round][seed]`. Every round starts with each row turned a different way.
+    let mut heat_of: Vec<Vec<usize>> = (0..rounds)
+        .map(|round| {
+            (0..pilots)
+                .map(|seed| (seed % heats + round * row_of(seed)) % heats)
+                .collect()
+        })
+        .collect();
+    // How many times each pair of pilots shares a heat.
+    let mut met = vec![vec![0i64; pilots]; pilots];
+    for round in &heat_of {
+        for a in 0..pilots {
+            for b in 0..pilots {
+                if a != b && round[a] == round[b] {
+                    met[a][b] += 1;
+                }
+            }
+        }
+    }
+    // The pilot of `row` in `heat` in a round, if the row has one there.
+    let pilot_in = |heat_of: &[Vec<usize>], round: usize, row: usize, heat: usize| {
+        (row * heats..pilots.min((row + 1) * heats)).find(|seed| heat_of[round][*seed] == heat)
+    };
+    // What moving `seed` from heat `from` to heat `to` in `round` does to the unevenness
+    // (the sum of every pair's meetings squared), leaving out the pilot `swapped` with it.
+    let moving = |heat_of: &[Vec<usize>],
+                  met: &[Vec<i64>],
+                  round: usize,
+                  seed: usize,
+                  from: usize,
+                  to: usize|
+     -> i64 {
+        (0..pilots)
+            .filter(|other| row_of(*other) != row_of(seed))
+            .map(|other| match heat_of[round][other] {
+                heat if heat == from => 1 - 2 * met[seed][other],
+                heat if heat == to => 1 + 2 * met[seed][other],
+                _ => 0,
+            })
+            .sum()
+    };
+    // Swap the pilots of `row` in heats `x` and `y` of `round` (either heat may have none
+    // of that row) if the change is no worse than `slack`. Returns whether it swapped.
+    let mut try_swap = |heat_of: &mut Vec<Vec<usize>>,
+                        round: usize,
+                        row: usize,
+                        x: usize,
+                        y: usize,
+                        slack: i64|
+     -> bool {
+        let at_x = pilot_in(heat_of, round, row, x);
+        let at_y = pilot_in(heat_of, round, row, y);
+        if at_x.is_none() && at_y.is_none() {
+            return false;
+        }
+        let change = at_x.map_or(0, |seed| moving(heat_of, &met, round, seed, x, y))
+            + at_y.map_or(0, |seed| moving(heat_of, &met, round, seed, y, x));
+        if change > slack {
+            return false;
+        }
+        for (seed, from, to) in [(at_x, x, y), (at_y, y, x)] {
+            let Some(seed) = seed else { continue };
+            for other in 0..pilots {
+                if row_of(other) == row_of(seed) {
+                    continue;
+                }
+                let step = match heat_of[round][other] {
+                    heat if heat == from => -1,
+                    heat if heat == to => 1,
+                    _ => 0,
+                };
+                met[seed][other] += step;
+                met[other][seed] += step;
+            }
+        }
+        if let Some(seed) = at_x {
+            heat_of[round][seed] = y;
+        }
+        if let Some(seed) = at_y {
+            heat_of[round][seed] = x;
+        }
+        true
+    };
+
+    // Round 1 and row 0 stay as they are: turning them only renames heats.
+    if heats > 1 && row_count > 1 && rounds > 1 {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = |below: usize| -> usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize) % below
+        };
+        let tries = (2_000 * row_count * rounds).min(DEAL_TRIES);
+        for attempt in 0..tries {
+            let round = 1 + next(rounds - 1);
+            let row = 1 + next(row_count - 1);
+            let x = next(heats);
+            let y = (x + 1 + next(heats - 1)) % heats;
+            // How much worse a swap may be and still be taken: from 4 down to 0.
+            let slack = (4 * (tries - attempt) / tries) as i64;
+            try_swap(&mut heat_of, round, row, x, y, slack);
+        }
+        // Last, take every swap that still helps, until none does.
+        for _ in 0..pilots {
+            let mut better = false;
+            for round in 1..rounds {
+                for row in 1..row_count {
+                    for x in 0..heats {
+                        for y in x + 1..heats {
+                            better |= try_swap(&mut heat_of, round, row, x, y, -1);
+                        }
+                    }
+                }
+            }
+            if !better {
+                break;
+            }
+        }
+    }
+
+    heat_of
+        .iter()
+        .map(|round| {
+            (0..heats)
+                .map(|heat| {
+                    (0..pilots)
+                        .filter(|seed| round[*seed] == heat)
+                        .map(|seed| (row_of(seed), seed))
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// What a round robin is built from.
+pub struct RoundRobin {
+    /// The id of the phase that holds every round.
+    pub id: PhaseId,
+    /// Its name ("Round Robin").
+    pub label: String,
+    pub parent: Option<PhaseId>,
+    /// The phase's field.
+    pub field: Vec<FieldSlice>,
+    /// Who flies, in seed order: named pilots, or places of another phase's ranking.
+    pub entrants: Vec<SeatSource>,
+    /// The seats a heat is flown on. Their count is the most pilots in one heat.
+    pub seats: Vec<(AdapterId, SeatRef)>,
+    /// How many rounds. Every pilot flies one heat in each.
+    pub rounds: u32,
+    /// The format for every heat. Its points table scores each race.
+    pub format: Format,
+    /// How the pilots are ranked across every heat (points first, as a rule).
+    pub ranking: RankingRule,
+}
+
+/// A round robin: `rounds` rounds of heats, every pilot in one heat each round, ranked by
+/// the points (or whatever `ranking` names) they score across all of them.
+///
+/// **Shape.** Each round has as few heats as hold the field, the same size or one apart.
+/// Round 1 spreads the seeds across the heats. Each later round deals the pilots again so
+/// that, as far as it can, a pilot meets the pilots they have met least.
+///
+/// **A pilot keeps their seat.** Every heat a pilot flies is on the same seat, so they stay
+/// on one video channel all day. The price is that two pilots who share a seat never meet.
+///
+/// **Ids.** `‹id›/round-N` is a group holding that round's heats, `‹id›/round-N/heat-M`.
+/// The rounds are kept in the order they are flown.
+///
+/// **Ranking.** The phase pools every race beneath it and sorts by `ranking`. Each round
+/// ranks its own heats the same way, so a round has a table too.
+///
+/// Every heat's lineup is known from the start, so the whole round robin can be flown in
+/// any order.
+pub fn round_robin(spec: RoundRobin) -> Result<Vec<PhaseDef>, PresetError> {
+    let RoundRobin {
+        id,
+        label,
+        parent,
+        field,
+        entrants,
+        seats,
+        rounds,
+        format,
+        ranking,
+    } = spec;
+    if seats.len() < 2 {
+        return Err(PresetError::HeatTooSmall(seats.len()));
+    }
+    if entrants.is_empty() {
+        return Err(PresetError::NoEntrants);
+    }
+    if rounds == 0 {
+        return Err(PresetError::NoRounds);
+    }
+    let dealt = deal_rounds(entrants.len(), seats.len(), rounds as usize);
+    let heats = dealt[0].len();
+
+    let mut defs = vec![PhaseDef {
+        id: id.clone(),
+        label,
+        parent,
+        kind: PhaseKind::Group {
+            field,
+            combine: CombineRule::Measures(ranking.clone()),
+        },
+        format: Some(format),
+        false_start_limit: None,
+        display_hint: Some(HINT_ROUND_ROBIN.to_owned()),
+    }];
+    for (round, dealt) in (1..=rounds).zip(&dealt) {
+        let round_id = child(&id, &format!("round-{round}"));
+        let round_label = format!("Round {round}");
+        defs.push(PhaseDef {
+            id: round_id.clone(),
+            label: round_label.clone(),
+            parent: Some(id.clone()),
+            kind: PhaseKind::Group {
+                field: Vec::new(),
+                combine: CombineRule::Measures(ranking.clone()),
+            },
+            format: None,
+            false_start_limit: None,
+            display_hint: None,
+        });
+        for (index, pilots) in dealt.iter().enumerate() {
+            // A round's only heat takes the round's name: "Round 1", not "Round 1 Heat 1".
+            let heat_label = if heats == 1 {
+                round_label.clone()
+            } else {
+                format!("{round_label} Heat {}", index + 1)
+            };
+            // The row is the seat, so a pilot is on the same seat in every round.
+            let (heat_seats, sources): (Vec<_>, Vec<_>) = pilots
+                .iter()
+                .map(|(row, seed)| (seats[*row].clone(), entrants[*seed].clone()))
+                .unzip();
+            defs.push(heat(
+                child(&round_id, &format!("heat-{}", index + 1)),
+                heat_label,
+                &round_id,
+                &heat_seats,
+                sources,
+                None,
+            ));
+        }
+    }
+    Ok(defs)
 }
 
 #[cfg(test)]
@@ -1441,6 +1719,403 @@ mod tests {
                 capacity: 30,
                 needed: 3
             }
+        );
+    }
+
+    // --- Round robin ---------------------------------------------------------------
+
+    fn points_race() -> Format {
+        Format {
+            points: vec![4, 3, 2, 1],
+            ..one_race()
+        }
+    }
+
+    fn by_points() -> RankingRule {
+        RankingRule {
+            sort: vec![Measure::Points, Measure::Wins, Measure::BestLap],
+        }
+    }
+
+    fn robin_spec(entrants: usize, heat_size: usize, rounds: u32) -> RoundRobin {
+        RoundRobin {
+            id: pid("robin"),
+            label: "Round Robin".into(),
+            parent: None,
+            field: vec![FieldSlice::Imported(pilots(entrants))],
+            entrants: pilots(entrants)
+                .into_iter()
+                .map(SeatSource::Pilot)
+                .collect(),
+            seats: seats_of(heat_size),
+            rounds,
+            format: points_race(),
+            ranking: by_points(),
+        }
+    }
+
+    fn robin(entrants: usize, heat_size: usize, rounds: u32) -> Tree {
+        let mut tree = Tree::new();
+        for def in round_robin(robin_spec(entrants, heat_size, rounds)).unwrap() {
+            tree.put(def);
+        }
+        tree
+    }
+
+    /// Each heat as (round, the pilots with their seats), in the order generated.
+    fn robin_heats(defs: &[PhaseDef]) -> Vec<(String, Vec<(String, String)>)> {
+        defs.iter()
+            .filter_map(|def| match &def.kind {
+                PhaseKind::Heat { lineup } => Some((
+                    def.parent.clone().unwrap().0,
+                    lineup
+                        .iter()
+                        .map(|seat| match &seat.source {
+                            SeatSource::Pilot(pilot) => (pilot.0.clone(), seat.seat.0.clone()),
+                            other => panic!("unexpected source {other:?}"),
+                        })
+                        .collect(),
+                )),
+                PhaseKind::Group { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_round_robin_puts_every_pilot_in_one_heat_of_every_round() {
+        for (entrants, heat_size, rounds) in
+            [(8, 4, 3), (10, 4, 4), (5, 2, 5), (3, 4, 2), (13, 6, 3)]
+        {
+            let defs = round_robin(robin_spec(entrants, heat_size, rounds)).unwrap();
+            let heats = robin_heats(&defs);
+            for round in 1..=rounds {
+                let mut flying: Vec<String> = heats
+                    .iter()
+                    .filter(|(parent, _)| parent == &format!("robin/round-{round}"))
+                    .flat_map(|(_, lineup)| lineup.iter().map(|(pilot, _)| pilot.clone()))
+                    .collect();
+                flying.sort();
+                let expected: Vec<String> = pilots(entrants).into_iter().map(|p| p.0).collect();
+                assert_eq!(flying, expected, "{entrants} pilots, round {round}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_round_has_as_few_heats_as_hold_the_field_and_they_are_even() {
+        for (entrants, heat_size, heats_wanted) in [(8, 4, 2), (10, 4, 3), (13, 6, 3), (3, 4, 1)] {
+            let defs = round_robin(robin_spec(entrants, heat_size, 3)).unwrap();
+            let heats = robin_heats(&defs);
+            assert_eq!(heats.len(), heats_wanted * 3);
+            let sizes: Vec<usize> = heats.iter().map(|(_, lineup)| lineup.len()).collect();
+            let (least, most) = (sizes.iter().min().unwrap(), sizes.iter().max().unwrap());
+            assert!(most - least <= 1, "{entrants} pilots: {sizes:?}");
+            assert!(*most <= heat_size);
+        }
+    }
+
+    #[test]
+    fn a_pilot_keeps_the_same_seat_in_every_round() {
+        let defs = round_robin(robin_spec(10, 4, 5)).unwrap();
+        let mut seat_of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (_, lineup) in robin_heats(&defs) {
+            // No seat is used twice in a heat.
+            let seats: BTreeSet<&String> = lineup.iter().map(|(_, seat)| seat).collect();
+            assert_eq!(seats.len(), lineup.len());
+            for (pilot, seat) in lineup {
+                seat_of.entry(pilot).or_default().insert(seat);
+            }
+        }
+        assert_eq!(seat_of.len(), 10);
+        assert!(seat_of.values().all(|seats| seats.len() == 1));
+    }
+
+    #[test]
+    fn round_one_spreads_the_top_seeds_across_the_heats() {
+        let defs = round_robin(robin_spec(8, 4, 1)).unwrap();
+        let heats = robin_heats(&defs);
+        let pilots_of = |index: usize| -> Vec<&str> {
+            heats[index]
+                .1
+                .iter()
+                .map(|(pilot, _)| pilot.as_str())
+                .collect()
+        };
+        assert_eq!(pilots_of(0), vec!["p01", "p03", "p05", "p07"]);
+        assert_eq!(pilots_of(1), vec!["p02", "p04", "p06", "p08"]);
+    }
+
+    /// How many times each pair shared a heat, for pairs that can meet (different seats).
+    fn meetings(defs: &[PhaseDef]) -> Vec<u32> {
+        let heats = robin_heats(defs);
+        let mut seat_of: BTreeMap<String, String> = BTreeMap::new();
+        let mut met: BTreeMap<(String, String), u32> = BTreeMap::new();
+        for (_, lineup) in &heats {
+            for (a, seat) in lineup {
+                seat_of.insert(a.clone(), seat.clone());
+                for (b, _) in lineup {
+                    if a < b {
+                        *met.entry((a.clone(), b.clone())).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let everyone: Vec<&String> = seat_of.keys().collect();
+        let mut counts = Vec::new();
+        for a in &everyone {
+            for b in &everyone {
+                if a < b && seat_of[*a] != seat_of[*b] {
+                    counts.push(met.get(&((*a).clone(), (*b).clone())).copied().unwrap_or(0));
+                }
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn later_rounds_mix_the_pilots_so_meetings_stay_even() {
+        // Eight pilots in two heats of four: over four rounds every pair that can meet
+        // meets exactly twice.
+        let counts = meetings(&round_robin(robin_spec(8, 4, 4)).unwrap());
+        assert_eq!(counts.len(), 24);
+        assert!(counts.iter().all(|met| *met == 2), "{counts:?}");
+
+        // Nine pilots in three heats of three: over three rounds nobody meets twice.
+        let counts = meetings(&round_robin(robin_spec(9, 3, 3)).unwrap());
+        assert!(counts.iter().all(|met| *met == 1), "{counts:?}");
+
+        // Bigger and uneven fields: no pair is far ahead of another.
+        for (entrants, heat_size, rounds) in [
+            (16, 4, 5),
+            (10, 4, 4),
+            (13, 6, 4),
+            (12, 4, 4),
+            (8, 2, 6),
+            (6, 2, 5),
+            (20, 6, 5),
+        ] {
+            let counts = meetings(&round_robin(robin_spec(entrants, heat_size, rounds)).unwrap());
+            let (least, most) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
+            assert!(most - least <= 2, "{entrants} pilots: {least} to {most}");
+        }
+
+        // Full heats of eight leave less room to mix, since eight pilots share each seat's
+        // row. Even so, no two pilots fly together in every round, and most pairs sit at
+        // the middle of the range.
+        for (entrants, heat_size, rounds) in [(24, 8, 6), (32, 8, 4)] {
+            let counts = meetings(&round_robin(robin_spec(entrants, heat_size, rounds)).unwrap());
+            let most = *counts.iter().max().unwrap();
+            assert!(most < rounds, "{entrants} pilots: a pair met {most} times");
+            let far = counts.iter().filter(|met| **met + 1 >= rounds).count();
+            assert!(far * 20 <= counts.len(), "{entrants} pilots: {far} pairs");
+        }
+    }
+
+    #[test]
+    fn the_same_request_always_deals_the_same_heats() {
+        assert_eq!(
+            round_robin(robin_spec(13, 6, 4)).unwrap(),
+            round_robin(robin_spec(13, 6, 4)).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_round_robin_is_rounds_of_heats_under_one_phase_in_flying_order() {
+        let defs = round_robin(robin_spec(8, 4, 2)).unwrap();
+        let shape: Vec<(&str, &str, Option<&str>)> = defs
+            .iter()
+            .map(|def| {
+                (
+                    def.id.0.as_str(),
+                    def.label.as_str(),
+                    def.parent.as_ref().map(|p| p.0.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("robin", "Round Robin", None),
+                ("robin/round-1", "Round 1", Some("robin")),
+                (
+                    "robin/round-1/heat-1",
+                    "Round 1 Heat 1",
+                    Some("robin/round-1")
+                ),
+                (
+                    "robin/round-1/heat-2",
+                    "Round 1 Heat 2",
+                    Some("robin/round-1")
+                ),
+                ("robin/round-2", "Round 2", Some("robin")),
+                (
+                    "robin/round-2/heat-1",
+                    "Round 2 Heat 1",
+                    Some("robin/round-2")
+                ),
+                (
+                    "robin/round-2/heat-2",
+                    "Round 2 Heat 2",
+                    Some("robin/round-2")
+                ),
+            ]
+        );
+        assert_eq!(defs[0].display_hint.as_deref(), Some(HINT_ROUND_ROBIN));
+        assert_eq!(defs[0].format, Some(points_race()));
+        // Only the top carries the format and the hint; the rest inherit.
+        assert!(
+            defs[1..]
+                .iter()
+                .all(|def| def.format.is_none() && def.display_hint.is_none())
+        );
+    }
+
+    #[test]
+    fn a_field_that_fits_one_heat_flies_the_same_heat_each_round_named_for_the_round() {
+        let defs = round_robin(robin_spec(3, 4, 2)).unwrap();
+        let labels: Vec<&str> = defs.iter().map(|def| def.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["Round Robin", "Round 1", "Round 1", "Round 2", "Round 2"]
+        );
+    }
+
+    #[test]
+    fn a_round_robin_ranks_by_points_summed_across_every_heat() {
+        let tree = robin(8, 4, 3);
+        let mut world = world(8);
+        // Every heat can be flown from the start: nothing waits on another heat.
+        let ready = tree.evaluate(&world);
+        assert!(tree.iter().all(|def| !ready[&def.id].waiting));
+        assert_eq!(world.fly_everything(&tree), 6);
+
+        let results = tree.evaluate(&world);
+        let table = &results[&pid("robin")];
+        assert!(table.complete);
+        assert_eq!(table.ranking.len(), 8);
+        let total: u32 = table.ranking.iter().map(|p| p.result.points).sum();
+        // Two heats of four a round, 4+3+2+1 points a heat, three rounds.
+        assert_eq!(total, 60);
+        // The fastest pilot wins every heat they fly; the slowest is last in every one.
+        assert_eq!(table.ranking[0].pilot, PilotId("p01".into()));
+        assert_eq!(table.ranking[0].result.points, 12);
+        assert_eq!(table.ranking[7].pilot, PilotId("p08".into()));
+        assert_eq!(table.ranking[7].result.points, 3);
+        let points: Vec<u32> = table.ranking.iter().map(|p| p.result.points).collect();
+        assert!(
+            points.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{points:?}"
+        );
+
+        // A round has a table of its own, from that round's heats only.
+        let round = &results[&pid("robin/round-1")];
+        assert!(round.complete);
+        assert_eq!(
+            round.ranking.iter().map(|p| p.result.points).sum::<u32>(),
+            20
+        );
+    }
+
+    #[test]
+    fn a_round_robin_is_not_complete_until_every_round_is_flown() {
+        let tree = robin(4, 2, 2);
+        let mut world = world(4);
+        let first = tree
+            .iter()
+            .find(|def| matches!(def.kind, PhaseKind::Heat { .. }))
+            .unwrap()
+            .id
+            .clone();
+        let field = tree.evaluate(&world)[&first].field.clone();
+        let entries = field
+            .iter()
+            .map(|pilot| RaceEntry {
+                pilot: pilot.clone(),
+                laps: world.laps(pilot),
+            })
+            .collect();
+        world.races.entry(first).or_default().push(entries);
+        let results = tree.evaluate(&world);
+        assert!(!results[&pid("robin")].complete);
+        // The table already counts the heat that was flown.
+        assert_eq!(
+            results[&pid("robin")]
+                .ranking
+                .iter()
+                .map(|p| p.result.points)
+                .sum::<u32>(),
+            7
+        );
+    }
+
+    #[test]
+    fn a_round_robin_can_be_seeded_from_another_phase() {
+        // Qualifying is one heat of eight. Its ranking seeds the round robin.
+        let mut tree = Tree::new();
+        tree.put(PhaseDef {
+            id: pid("quali"),
+            label: "Qualifying".into(),
+            parent: None,
+            kind: PhaseKind::Group {
+                field: vec![FieldSlice::Imported(pilots(8))],
+                combine: CombineRule::Stack,
+            },
+            format: Some(one_race()),
+            false_start_limit: None,
+            display_hint: None,
+        });
+        tree.put(heat(
+            pid("quali/heat"),
+            "Qualifying Heat".into(),
+            &pid("quali"),
+            &seats_of(8),
+            pilots(8).into_iter().map(SeatSource::Pilot).collect(),
+            None,
+        ));
+        for def in round_robin(RoundRobin {
+            field: vec![FieldSlice::FromPhase {
+                phase: pid("quali"),
+                from: 1,
+                to: 8,
+            }],
+            entrants: (1..=8).map(|place| from(&pid("quali"), place)).collect(),
+            ..robin_spec(8, 4, 2)
+        })
+        .unwrap()
+        {
+            tree.put(def);
+        }
+        let mut world = world(8);
+        // The slowest pilot is fastest today, so qualifying turns the order round.
+        for (i, pilot) in pilots(8).into_iter().enumerate() {
+            world.speed.insert(pilot, 8 - i as i64);
+        }
+        // Until qualifying is flown, nobody knows who is in which heat.
+        assert!(tree.evaluate(&world)[&pid("robin")].waiting);
+        assert_eq!(world.fly_everything(&tree), 5);
+        let results = tree.evaluate(&world);
+        assert!(results[&pid("robin")].complete);
+        assert_eq!(results[&pid("robin")].ranking.len(), 8);
+        // The top seed is whoever won qualifying, and they fly in round 1 heat 1.
+        assert_eq!(
+            results[&pid("robin/round-1/heat-1")].field[0],
+            PilotId("p08".into())
+        );
+    }
+
+    #[test]
+    fn a_round_robin_refuses_a_shape_that_cannot_work() {
+        assert_eq!(
+            round_robin(robin_spec(4, 1, 2)).unwrap_err(),
+            PresetError::HeatTooSmall(1)
+        );
+        assert_eq!(
+            round_robin(robin_spec(0, 4, 2)).unwrap_err(),
+            PresetError::NoEntrants
+        );
+        assert_eq!(
+            round_robin(robin_spec(4, 4, 0)).unwrap_err(),
+            PresetError::NoRounds
         );
     }
 }

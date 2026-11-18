@@ -504,6 +504,7 @@ seat references and formats. The director can then edit any part by hand.
 | Time trial | Lineups from the roster; each heat ranked by best N consecutive; parent takes each pilot's best result |
 | Head-to-head round | Lineups from a seed; ranked by points or finish order |
 | Points heat | One heat, N races, points summed across them |
+| Round robin | R rounds of heats, pilots dealt differently each round; ranked by points summed across every heat |
 | Bracket | A chain of rounds where each lineup refers to earlier heats (see below). Every round is a phase that holds its heats, the final too, so each round opens the same way |
 | Mains | Brackets stacked with bump-ups (§6.1) |
 | Chase the Ace | One heat, raced until a pilot has two wins |
@@ -516,9 +517,23 @@ bracket's rounds latest first, because the ranking stacks them in that order. Th
 shows them first round first, the order they are flown.
 
 **Built 2026-11-18:** the console has one Add phase dialog for every kind (Ryan: no row
-of different "add" buttons). Its "Kind" is Empty, Bracket or Multi-Main. A new generator is
+of different "add" buttons). Its "Kind" is Empty, Bracket, Multi-Main or Round Robin. A new generator is
 one more kind there. A phase's own page has Add phase too, for a phase inside it. Mains are
 kept best first (A-Main first) and shown bottom main first, the order they are flown.
+
+**Built 2026-11-18: the round robin preset** (#69). It writes one phase holding a phase for
+each round, each holding that round's heats. Rules it keeps:
+
+- A round has as few heats as hold the field, the same size or one apart. Round 1 spreads
+  the seeds across the heats.
+- **A pilot keeps one seat for the whole round robin**, so they never change video channel.
+  The price: the pilots who share a seat never meet.
+- The later rounds are mixed so that pairs of pilots meet as evenly as they can. The deal is
+  worked out from fixed numbers, so the same request always gives the same heats.
+- It ranks by the format's points summed across every heat, then wins, then best lap. Each
+  round has its own table too.
+- Lineups are named pilots, or places of another phase's ranking, so every heat is ready as
+  soon as the field is known.
 
 **Decided 2026-11-18:** Chase the Ace stays one heat, raced until a pilot has two wins. It
 is not split into several heats in a phase. In a bracket that heat still sits in its own

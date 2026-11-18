@@ -34,6 +34,7 @@ import type {
   KioskPassView,
   KioskView,
   MainsRequest,
+  RoundRobinRequest,
   NetworkRequest,
   NetworkView,
   OverlayLook,
@@ -1439,6 +1440,25 @@ export async function createMains(
     eventPath(id, '/presets/mains'),
     { method: 'POST', body: request, token, fetch: options.fetch },
     'add the mains'
+  );
+}
+
+/**
+ * Generate a round robin (`POST /events/{id}/presets/round-robin`). RD-gated. All or none,
+ * like {@link createBracket}.
+ */
+export async function createRoundRobin(
+  baseUrl: string,
+  id: EventId,
+  request: RoundRobinRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    eventPath(id, '/presets/round-robin'),
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the round robin'
   );
 }
 

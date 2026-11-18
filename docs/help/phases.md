@@ -43,6 +43,13 @@ and a bracket are phases. A phase can hold heats, and it can hold other phases.
     main is flown first, so it is listed first. **A-Main final** lets the last heat of the
     top main use its own format, such as Chase the Ace.
 
+  - **Round Robin**: rounds of heats where nobody goes out. Every pilot flies one heat in
+    each round. Grid mixes the pilots between rounds so they meet different pilots. A pilot
+    keeps the same seat in every round, so they stay on one video channel. **Points by
+    place** is what each finishing place scores, first place first. Points from every heat
+    are added up and the most points wins. Every heat can be flown from the start, in any
+    order.
+
 A phase's own page has **+ Add phase** too. It adds the new phase inside that phase.
 
 **Timed by** picks the timer. **Bench** is not a timer. On a Bench heat you log passes by

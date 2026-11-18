@@ -12,6 +12,7 @@ import type {
   Command,
   EventView,
   MainsRequest,
+  RoundRobinRequest,
   PhaseDef,
   Pilot
 } from '@gridfpv/types';
@@ -482,7 +483,7 @@ describe('Under a phase', () => {
 });
 
 /** Open Add phase and pick a kind: the generators are choices in the one dialog. */
-async function addPhaseOf(kind: 'empty' | 'bracket' | 'mains') {
+async function addPhaseOf(kind: 'empty' | 'bracket' | 'mains' | 'round-robin') {
   await fireEvent.click(screen.getByRole('button', { name: '+ Add phase' }));
   const form = await screen.findByRole('form', { name: 'Add a phase' });
   await fireEvent.change(within(form).getByLabelText('Kind'), { target: { value: kind } });
@@ -720,7 +721,8 @@ describe('Add a multi-main', () => {
     expect(optionTexts(within(form).getByLabelText('Kind'))).toEqual([
       'Empty',
       'Bracket',
-      'Multi-Main'
+      'Multi-Main',
+      'Round Robin'
     ]);
   });
 
@@ -840,6 +842,135 @@ describe('Add a multi-main', () => {
     });
     await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
     expect(await within(form).findByRole('alert')).toHaveTextContent(SAID);
+  });
+});
+
+describe('Add a round robin', () => {
+  async function fill() {
+    const form = await addPhaseOf('round-robin');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Robin' }
+    });
+    for (const callsign of ['Cat', 'Ace', 'Bee']) {
+      await fireEvent.click(within(form).getByRole('button', { name: callsign }));
+    }
+    return form;
+  }
+
+  it('asks nothing about elimination: nobody goes out of a round robin', async () => {
+    await open(eventView());
+    const form = await addPhaseOf('round-robin');
+    expect(within(form).queryByLabelText('Elimination')).toBeNull();
+    expect(within(form).queryByLabelText('How many move on')).toBeNull();
+    expect(within(form).getByLabelText('Pilots in each heat')).toBeVisible();
+    expect(within(form).getByLabelText('Rounds')).toHaveValue(3);
+  });
+
+  it('offers points for the heat size and says how many heats it makes', async () => {
+    await open(eventView());
+    const form = await fill();
+    expect(within(form).getByLabelText('Points by place')).toHaveValue('4, 3, 2, 1');
+    expect(within(form).getByTestId('round-robin-count')).toHaveTextContent(
+      'This makes 3 rounds of 1 heat, 3 heats in all. Each pilot keeps the same seat in every round.'
+    );
+    await fireEvent.change(within(form).getByLabelText('Pilots in each heat'), {
+      target: { value: '2' }
+    });
+    expect(within(form).getByLabelText('Points by place')).toHaveValue('2, 1');
+    expect(within(form).getByTestId('round-robin-count')).toHaveTextContent(
+      'This makes 3 rounds of 2 heats, 6 heats in all.'
+    );
+    expectNoRawIds();
+  });
+
+  it('sends the pilots in seed order, the rounds, and the points on a copy of the format', async () => {
+    const { session } = await open(eventView());
+    const form = await fill();
+    await fireEvent.change(within(form).getByLabelText('Pilots in each heat'), {
+      target: { value: '2' }
+    });
+    await fireEvent.input(within(form).getByLabelText('Rounds'), { target: { value: '5' } });
+    await fireEvent.input(within(form).getByLabelText('Points by place'), {
+      target: { value: '10, 6' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+
+    await waitFor(() => expect(session.createRoundRobin).toHaveBeenCalled());
+    const { id, ...request } = vi.mocked(session.createRoundRobin).mock
+      .calls[0][1] as RoundRobinRequest;
+    expect(id).toMatch(/^robin-[0-9a-z]{4}$/);
+    expect(request).toEqual({
+      label: 'Robin',
+      field: [{ Imported: ['p-3c', 'p-1a', 'p-2b'] }],
+      entrants: [{ Pilot: 'p-3c' }, { Pilot: 'p-1a' }, { Pilot: 'p-2b' }],
+      seats: [
+        { adapter: 'bench', seat: 'seat-1' },
+        { adapter: 'bench', seat: 'seat-2' }
+      ],
+      rounds: 5,
+      format: { ...FIRST_TO_3, points: [10, 6] }
+    });
+    // The saved format itself is untouched.
+    expect(FIRST_TO_3.points ?? []).toEqual([]);
+    expect(session.createBracket).not.toHaveBeenCalled();
+  });
+
+  it('keeps points the director typed when the heat size changes', async () => {
+    await open(eventView());
+    const form = await fill();
+    await fireEvent.input(within(form).getByLabelText('Points by place'), {
+      target: { value: '5, 3, 1' }
+    });
+    await fireEvent.change(within(form).getByLabelText('Pilots in each heat'), {
+      target: { value: '2' }
+    });
+    expect(within(form).getByLabelText('Points by place')).toHaveValue('5, 3, 1');
+  });
+
+  it.each([
+    ['Rounds', '0', 'Say how many rounds, one at least.'],
+    [
+      'Points by place',
+      'ten, six',
+      'List the points for each place, first place first, like 4, 3, 2, 1.'
+    ]
+  ])('refuses a bad %s and sends nothing', async (label, value, says) => {
+    const { session } = await open(eventView());
+    const form = await fill();
+    await fireEvent.input(within(form).getByLabelText(label), { target: { value } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(says);
+    expect(session.createRoundRobin).not.toHaveBeenCalled();
+  });
+
+  it('needs two pilots, and can go under a phase', async () => {
+    const { session } = await open(eventView({ phases: [group('day', 'Day One')] }));
+    const form = await addPhaseOf('round-robin');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Robin' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Choose at least two pilots.');
+    for (const callsign of ['Ace', 'Bee']) {
+      await fireEvent.click(within(form).getByRole('button', { name: callsign }));
+    }
+    await fireEvent.change(within(form).getByLabelText('Under'), { target: { value: 'day' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    await waitFor(() => expect(session.createRoundRobin).toHaveBeenCalled());
+    expect(vi.mocked(session.createRoundRobin).mock.calls[0][1].parent).toBe('day');
+  });
+
+  it("shows the Director's sentence when it says no, and stays open", async () => {
+    const SAID = 'a round robin needs at least one round';
+    await open(eventView(), {
+      createRoundRobin: vi.fn(async () =>
+        Promise.reject(Object.assign(new Error(SAID), { status: 400, code: 'BadRequest' }))
+      )
+    });
+    const form = await fill();
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(SAID);
+    expect(screen.getByRole('form', { name: 'Add a phase' })).toBeVisible();
   });
 });
 

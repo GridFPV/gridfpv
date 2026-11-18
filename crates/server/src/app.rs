@@ -13,7 +13,7 @@
 //! | `POST /events/{id}/auth/join-token` | mint a read-only join token |
 //! | `GET /events/{id}/state` | the event's competition snapshot |
 //! | `POST /events/{id}/commands` | one console command: checked, then logged as facts |
-//! | `POST /events/{id}/presets/bracket`, `…/presets/mains` | generate phases from a preset |
+//! | `POST /events/{id}/presets/bracket`, `…/presets/mains`, `…/presets/round-robin` | generate phases from a preset |
 //! | `POST /events/{id}/passes` | a gate crossing from outside (tools and tests) |
 //! | `GET /events/{id}/changes` | server-sent events: the log cursor, each time it moves |
 //! | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | the pilot directory |
@@ -98,6 +98,10 @@ pub fn router(registry: EventRegistry) -> Router {
         .route(
             "/events/{event_id}/presets/mains",
             post(crate::control::post_mains),
+        )
+        .route(
+            "/events/{event_id}/presets/round-robin",
+            post(crate::control::post_round_robin),
         )
         .route("/events/{event_id}/passes", post(crate::control::post_pass))
         .route(

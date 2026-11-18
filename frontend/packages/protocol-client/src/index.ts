@@ -94,6 +94,7 @@ export {
   sendCommand,
   createBracket,
   createMains,
+  createRoundRobin,
   postPass,
   getRaceSignal,
   subscribeChanges,
