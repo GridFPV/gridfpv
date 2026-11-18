@@ -5,6 +5,7 @@
    *
    * A bracket and a set of mains (each main is a bracket) ask the same things, so both use
    * this. `shape()` gives the answers, or throws the sentence to show when one is missing.
+   * A round robin has no elimination, so it switches those two questions off.
    *
    * "Timed by" lists every seat source by name (`lib/seats.ts`). A heat cannot hold more
    * pilots than the chosen source has seats.
@@ -16,7 +17,19 @@
   import { canChoose, chosenSource, presetSeats, sourceOptionLabel } from '../lib/seats.js';
   import FormatPicker from './FormatPicker.svelte';
 
-  let { live, busy = false }: { live: EventLive; busy?: boolean } = $props();
+  let {
+    live,
+    busy = false,
+    eliminates = true,
+    heatSize = $bindable('4')
+  }: {
+    live: EventLive;
+    busy?: boolean;
+    /** Whether pilots move on and go out: ask how many move on, and single or double. */
+    eliminates?: boolean;
+    /** How many pilots fly in each heat, for a parent that shows what the answers make. */
+    heatSize?: string;
+  } = $props();
 
   /** The source the director picked. Until they pick, the default is used. */
   let pickedSource = $state<AdapterId | undefined>(undefined);
@@ -26,7 +39,6 @@
     Array.from({ length: Math.max(0, source.seats.length - 1) }, (_, index) => index + 2)
   );
   // The selects hold strings; they are turned into numbers where they are used.
-  let heatSize = $state('4');
   let advance = $state('2');
   let elimination = $state<EliminationKind>('Double');
   /**
@@ -72,7 +84,7 @@
   } {
     if (heatSizes.length === 0) {
       throw new Error(
-        `A bracket heat needs at least two seats. ${source.name} has ${source.seats.length}.`
+        `A heat here needs at least two seats. ${source.name} has ${source.seats.length}.`
       );
     }
     const format = ranked.find((saved) => saved.id === formatValue)?.format;
@@ -113,20 +125,24 @@
       {/each}
     </Select>
   </Field>
-  <Field label="How many move on">
-    <Select bind:value={advance} aria-label="How many move on" disabled={busy}>
-      {#each advanceChoices as count (count)}
-        <option value={String(count)}>{count}</option>
-      {/each}
+  {#if eliminates}
+    <Field label="How many move on">
+      <Select bind:value={advance} aria-label="How many move on" disabled={busy}>
+        {#each advanceChoices as count (count)}
+          <option value={String(count)}>{count}</option>
+        {/each}
+      </Select>
+    </Field>
+  {/if}
+</div>
+{#if eliminates}
+  <Field label="Elimination">
+    <Select bind:value={elimination} aria-label="Elimination" disabled={busy}>
+      <option value="Single">Single: one loss and a pilot is out</option>
+      <option value="Double">Double: a pilot is out after two losses</option>
     </Select>
   </Field>
-</div>
-<Field label="Elimination">
-  <Select bind:value={elimination} aria-label="Elimination" disabled={busy}>
-    <option value="Single">Single: one loss and a pilot is out</option>
-    <option value="Double">Double: a pilot is out after two losses</option>
-  </Select>
-</Field>
+{/if}
 <FormatPicker
   formats={live.formats}
   bind:value={() => formatValue, (id) => (formatId = id)}

@@ -5,8 +5,9 @@
    * - **Empty**: a phase with no heats yet (Practice, Qualifying). The director adds them.
    * - **Bracket**: every heat of a single or double elimination bracket.
    * - **Multi-Main**: stacked mains with bump-ups, each main a bracket.
+   * - **Round Robin**: rounds of heats with the pilots mixed each round, ranked by points.
    *
-   * A bracket and a multi-main are generators: the Director builds their phases and heats
+   * A bracket, a multi-main and a round robin are generators: the Director builds their phases and heats
    * from the answers. What they make are ordinary phases, so they can be changed afterwards.
    * A new generator is one more choice in "Kind", never one more button on the page.
    *
@@ -23,6 +24,7 @@
   import PhaseBracketFields from './PhaseBracketFields.svelte';
   import PhaseEmptyFields from './PhaseEmptyFields.svelte';
   import PhaseMainsFields from './PhaseMainsFields.svelte';
+  import PhaseRoundRobinFields from './PhaseRoundRobinFields.svelte';
 
   let {
     live,
@@ -35,7 +37,7 @@
     onclose: () => void;
   } = $props();
 
-  type Kind = 'empty' | 'bracket' | 'mains';
+  type Kind = 'empty' | 'bracket' | 'mains' | 'round-robin';
   const KINDS: Record<Kind, { label: string; says: string; example: string }> = {
     empty: {
       label: 'Empty',
@@ -51,6 +53,11 @@
       label: 'Multi-Main',
       says: 'Stacked mains, each one a bracket. The top pilots of a main bump up into the next.',
       example: 'e.g. Mains'
+    },
+    'round-robin': {
+      label: 'Round Robin',
+      says: 'Rounds of heats. The pilots are mixed each round and ranked by their points over all of them.',
+      example: 'e.g. Round Robin'
     }
   };
 
@@ -131,8 +138,10 @@
       <PhaseEmptyFields bind:this={fields} {live} {parent} {busy} />
     {:else if kind === 'bracket'}
       <PhaseBracketFields bind:this={fields} {live} {parent} {busy} />
-    {:else}
+    {:else if kind === 'mains'}
       <PhaseMainsFields bind:this={fields} {live} {parent} {busy} />
+    {:else}
+      <PhaseRoundRobinFields bind:this={fields} {live} {parent} {busy} />
     {/if}
     {#if error}
       <Banner tone="danger">{error}</Banner>

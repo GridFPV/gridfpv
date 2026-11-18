@@ -21,6 +21,7 @@ import { isRequestFailure } from '@gridfpv/protocol-client';
 import type {
   BracketRequest,
   MainsRequest,
+  RoundRobinRequest,
   Class,
   Command,
   EventId,
@@ -49,6 +50,7 @@ export type LiveSession = Pick<
   | 'sendCommand'
   | 'createBracket'
   | 'createMains'
+  | 'createRoundRobin'
   | 'postPass'
   | 'getRaceSignal'
   | 'listPilots'
@@ -333,6 +335,11 @@ export class EventLive {
   /** Generate stacked mains. Same answers as {@link send}. */
   async createMains(request: MainsRequest): Promise<boolean> {
     return this.#wrote(await this.#session.createMains(this.eventId, request));
+  }
+
+  /** Generate a round robin. Same answers as {@link send}. */
+  async createRoundRobin(request: RoundRobinRequest): Promise<boolean> {
+    return this.#wrote(await this.#session.createRoundRobin(this.eventId, request));
   }
 
   /** Log one gate crossing. Same answers as {@link send}. */

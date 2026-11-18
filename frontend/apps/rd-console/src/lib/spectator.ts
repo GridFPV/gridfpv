@@ -112,6 +112,7 @@ export function publicSource(baseUrl: string): PublicSource {
     sendCommand: refuse,
     createBracket: refuse,
     createMains: refuse,
+    createRoundRobin: refuse,
     postPass: refuse,
     getRaceSignal: refuse,
     getVideoSettings: refuse,

@@ -83,6 +83,7 @@ function open(
     sendCommand: vi.fn(async () => ({ cursor: 1 })),
     createBracket: vi.fn(async () => ({ cursor: 1 })),
     createMains: vi.fn(async () => ({ cursor: 1 })),
+    createRoundRobin: vi.fn(async () => ({ cursor: 1 })),
     postPass: vi.fn(async () => ({ cursor: 1 })),
     getVideoSettings: vi.fn(async () => VIDEO_OFF),
     getVideoStatus: vi.fn(async () => VIDEO_IDLE),

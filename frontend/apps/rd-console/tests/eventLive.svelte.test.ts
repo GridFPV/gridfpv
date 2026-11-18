@@ -34,6 +34,7 @@ function fakeSession(over: Partial<LiveSession> = {}): {
     sendCommand: vi.fn(async () => ({ cursor: 2 })),
     createBracket: vi.fn(async () => ({ cursor: 2 })),
     createMains: vi.fn(async () => ({ cursor: 2 })),
+    createRoundRobin: vi.fn(async () => ({ cursor: 2 })),
     postPass: vi.fn(async () => ({ cursor: 2 })),
     getRaceSignal: vi.fn(async (_id, race) => ({ race, seats: [] })),
     listPilots: vi.fn(async (): Promise<Pilot[]> => []),
