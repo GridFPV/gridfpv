@@ -82,6 +82,51 @@ describe('buildNames', () => {
   });
 });
 
+describe('the phases that hold a phase', () => {
+  const names = buildNames(
+    [
+      group('sf', 'Sport Finals'),
+      group('sf/s', 'Semi-finals', 'sf'),
+      heat('sf/s/1', 'Semi-final 1', [], { parent: 'sf/s' }),
+      group('p', 'Practice'),
+      heat('p/3', 'Practice Heat 3', [], { parent: 'p' }),
+      group('b', 'Whoop Bracket'),
+      group('b/w1', 'Winners Round 1', 'b'),
+      heat('b/w1/1', 'Winners Round 1 Heat 1', [], { parent: 'b/w1' }),
+      group('b/f', 'Final', 'b'),
+      heat('b/f/1', 'Final', [], { parent: 'b/f' }),
+      heat('solo', 'Solo', []),
+      heat('lost', 'Lost', [], { parent: 'gone' })
+    ],
+    []
+  );
+
+  it('are a path, outermost first', () => {
+    expect(names.within('sf/s/1')).toBe('Sport Finals › Semi-finals');
+    expect(names.within('sf/s')).toBe('Sport Finals');
+  });
+
+  it('leave out a phase the name already starts with', () => {
+    expect(names.within('p/3')).toBeUndefined();
+    // The round is in the heat's name; the bracket is not.
+    expect(names.within('b/w1/1')).toBe('Whoop Bracket');
+    expect(names.within('b/f/1')).toBe('Whoop Bracket');
+  });
+
+  it('are nothing for a phase at the top, one whose parent is gone, or one that is gone', () => {
+    expect(names.within('solo')).toBeUndefined();
+    expect(names.within('sf')).toBeUndefined();
+    expect(names.within('lost')).toBeUndefined();
+    expect(names.within('never-was')).toBeUndefined();
+  });
+
+  it('never shows a raw id', () => {
+    for (const id of ['sf/s/1', 'b/w1/1', 'b/f/1']) {
+      expect(names.within(id)).not.toMatch(/\//);
+    }
+  });
+});
+
 describe('buildNames: seats and timers', () => {
   const TIMERS = [
     timerView('gate-x1y2', 'Gate', 4),

@@ -19,11 +19,50 @@ export interface PhaseRow {
 }
 
 /**
+ * The display hints of phases the Director keeps last-flown first: a bracket's rounds and a
+ * set of mains (A-Main first). Wire values, never shown.
+ */
+const FLOWN_LAST_FIRST = new Set(['single-elimination', 'double-elimination', 'mains']);
+
+/**
+ * How many mains a field takes, when each starts `perMain` pilots and `bump` of them come
+ * up from the main below. The Director works it out the same way (`mains_needed`).
+ */
+export function mainsNeeded(pilots: number, perMain: number, bump: number): number {
+  if (pilots <= perMain) return 1;
+  const direct = Math.max(1, perMain - bump);
+  return 1 + Math.ceil((pilots - perMain) / direct);
+}
+
+/** The name the Director gives a main, best first: "A-Main", "B-Main", then "Main 27". */
+export function mainName(index: number): string {
+  return index < 26 ? `${String.fromCharCode(65 + index)}-Main` : `Main ${index + 1}`;
+}
+
+/**
  * Lay the phases out as a tree, each parent followed by its children. The snapshot lists
  * phases in the order they were added, and that order is kept among siblings. A phase whose
  * parent is missing is shown at the top, so nothing is ever hidden.
+ *
+ * A bracket and a set of mains are the exceptions to the order. The Director keeps a
+ * bracket's rounds latest first and the mains best first (A-Main, then B-Main), because that
+ * is the order the ranking stacks them in. A person reads them in the order they are flown,
+ * so rounds are laid out first round first and mains bottom main first.
  */
-export function phaseTree(phases: readonly PhaseView[]): PhaseRow[] {
+export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRow[] {
+  if (root !== undefined) {
+    // One phase and everything beneath it, with that phase at the top.
+    const all = phaseTree(phases);
+    const at = all.findIndex((row) => row.phase.def.id === root);
+    if (at < 0) return [];
+    const base = all[at].depth;
+    const rows = [{ phase: all[at].phase, depth: 0 }];
+    for (const row of all.slice(at + 1)) {
+      if (row.depth <= base) break;
+      rows.push({ phase: row.phase, depth: row.depth - base });
+    }
+    return rows;
+  }
   const ids = new Set(phases.map((phase) => phase.def.id));
   const children = new Map<PhaseId | undefined, PhaseView[]>();
   for (const phase of phases) {
@@ -42,6 +81,11 @@ export function phaseTree(phases: readonly PhaseView[]): PhaseRow[] {
       walk(phase.def.id, depth + 1);
     }
   };
+  for (const phase of phases) {
+    if (phase.def.display_hint !== undefined && FLOWN_LAST_FIRST.has(phase.def.display_hint)) {
+      children.get(phase.def.id)?.reverse();
+    }
+  }
   walk(undefined, 0);
   return rows;
 }
@@ -85,8 +129,111 @@ export function phaseStatus(phase: PhaseView, view: EventView): PhaseStatus {
   if (racing && isWithin(view.phases, racing.heat, phase.def.id)) return 'racing';
   if (phase.locked) return 'locked';
   if (phase.complete) return 'complete';
-  if (phase.waiting) return 'waiting';
-  return 'ready';
+  if (isHeat(phase.def)) return phase.waiting ? 'waiting' : 'ready';
+  // For a phase that holds things, the Director's "waiting" means its list of pilots is
+  // not settled yet, which is true of any finals until the last semi-final is flown. What
+  // the director asks is whether there is something to fly: one heat that can be, anywhere
+  // beneath it, makes it ready.
+  const heats = view.phases.filter(
+    (other) =>
+      isHeat(other.def) &&
+      other.def.id !== phase.def.id &&
+      isWithin(view.phases, other.def.id, phase.def.id)
+  );
+  if (heats.length === 0) return phase.waiting ? 'waiting' : 'ready';
+  return heats.some((heat) => !heat.waiting && !heat.complete && !heat.locked)
+    ? 'ready'
+    : 'waiting';
+}
+
+/** One phase that holds heats or phases, as the Phases page lists it: one line each. */
+export interface PhaseSummary {
+  id: PhaseId;
+  name: string;
+  /** 0 for a phase at the top of the event, 1 for a phase inside it, and so on. */
+  depth: number;
+  /** The phase that holds it, when one does. A wire handle, never shown. */
+  parent?: PhaseId;
+  /** How many phases sit directly inside it (a bracket's rounds). Heats are not counted. */
+  inside: number;
+  status: PhaseStatus;
+  /** The format's name, when the phase sets one. */
+  format?: string;
+  /** How many heats are beneath it, at any depth. */
+  heats: number;
+  /** How many of them are done: complete, or with a race that was saved. */
+  flown: number;
+  /** Whether pilots sign themselves up for its heats, and whether that is open to them. */
+  signup?: 'open' | 'closed';
+  /** The heat on the timer, when it is one of this phase's. */
+  onTimer?: PhaseId;
+  /** Whether a pilot here has reached a false start limit and waits on a decision. */
+  needsDecision: boolean;
+}
+
+/**
+ * Every phase that holds heats or phases, as a tree laid flat: each one is followed by the
+ * phases inside it, one deeper. A heat is never one of them: it has no inside to open.
+ */
+export function phaseSummaries(view: EventView): PhaseSummary[] {
+  const tree = phaseTree(view.phases);
+  const saved = new Set(
+    view.races.filter((race) => race.state === 'Saved').map((race) => race.heat)
+  );
+  const summaries: PhaseSummary[] = [];
+  tree.forEach((row, index) => {
+    if (isHeat(row.phase.def)) return;
+    const under: PhaseRow[] = [];
+    for (const next of tree.slice(index + 1)) {
+      if (next.depth <= row.depth) break;
+      under.push(next);
+    }
+    const heats = under.map((next) => next.phase).filter((phase) => isHeat(phase.def));
+    const ids = new Set([row.phase.def.id, ...under.map((next) => next.phase.def.id)]);
+    summaries.push({
+      id: row.phase.def.id,
+      name: row.phase.def.label,
+      depth: row.depth,
+      // A phase whose parent is missing is laid out at the top, so it has none here.
+      ...(row.depth > 0 && row.phase.def.parent !== undefined
+        ? { parent: row.phase.def.parent }
+        : {}),
+      inside: under.filter((next) => next.depth === row.depth + 1 && !isHeat(next.phase.def))
+        .length,
+      status: phaseStatus(row.phase, view),
+      format: row.phase.format?.name,
+      heats: heats.length,
+      flown: heats.filter((heat) => heat.complete || saved.has(heat.def.id)).length,
+      signup: row.phase.signup ? (row.phase.signup.rules.open ? 'open' : 'closed') : undefined,
+      onTimer: view.on_timer !== undefined && ids.has(view.on_timer) ? view.on_timer : undefined,
+      // A proposal stands until the pilot is disqualified in that phase.
+      needsDecision: view.proposed_disqualifications.some(
+        (proposal) =>
+          ids.has(proposal.phase) &&
+          !view.phases
+            .find((phase) => phase.def.id === proposal.phase)
+            ?.ranking.find((placed) => placed.pilot === proposal.pilot)?.disqualified
+      )
+    });
+  });
+  return summaries;
+}
+
+/**
+ * The lines the Phases page shows: a phase at the top always, and a phase inside another
+ * only while every phase above it is unfolded.
+ */
+export function shownSummaries(
+  summaries: readonly PhaseSummary[],
+  unfolded: { has(id: PhaseId): boolean }
+): PhaseSummary[] {
+  const shown = new Set<PhaseId>();
+  return summaries.filter((phase) => {
+    const visible =
+      phase.parent === undefined || (shown.has(phase.parent) && unfolded.has(phase.parent));
+    if (visible) shown.add(phase.id);
+    return visible;
+  });
 }
 
 /** The heats that share a parent, as the Run and Marshal pickers offer them. */

@@ -91,6 +91,7 @@ import {
   getEventState,
   sendCommand,
   createBracket,
+  createMains,
   postPass,
   getRaceSignal,
   subscribeChanges,
@@ -101,6 +102,7 @@ import type { TimerLiveHandlers } from '@gridfpv/protocol-client';
 import type {
   AdapterId,
   BracketRequest,
+  MainsRequest,
   Class,
   ClassId,
   Command,
@@ -270,6 +272,7 @@ const realApi = {
   getEventState,
   sendCommand,
   createBracket,
+  createMains,
   postPass,
   getRaceSignal,
   subscribeChanges,
@@ -886,6 +889,13 @@ export class Session {
   createBracket(id: EventMeta['id'], request: BracketRequest): Promise<CommandOutcome | undefined> {
     return this.#privilegedWrite((token) =>
       this.#api.createBracket(this.baseUrl, id, request, token)
+    );
+  }
+
+  /** Generate stacked mains. Same answers as {@link sendCommand}. */
+  createMains(id: EventMeta['id'], request: MainsRequest): Promise<CommandOutcome | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.createMains(this.baseUrl, id, request, token)
     );
   }
 

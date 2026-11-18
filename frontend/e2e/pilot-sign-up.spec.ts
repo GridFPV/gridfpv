@@ -132,6 +132,8 @@ test('the director turns sign-up on, two pilots sign up on their phones, and eve
     await page.goto(director.baseUrl);
     await expect(pagesNav(page)).toBeVisible({ timeout: 15_000 });
     await openPage(page, 'Phases');
+    // Sign-up is set up on the phase's own page.
+    await page.getByRole('link', { name: 'Open Qualifying' }).click();
     await page.getByRole('button', { name: 'Set up pilot sign-up for Qualifying' }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByRole('heading')).toHaveText('Pilot sign-up: Qualifying');

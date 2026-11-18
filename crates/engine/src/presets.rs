@@ -138,9 +138,10 @@ struct Slot {
 
 /// One round once it is built.
 struct Round {
-    /// The phase the bracket holds for this round: the heat itself, or a group of heats.
+    /// The phase the bracket holds for this round. Every round is a phase that holds its
+    /// heats, even a final with one heat, so every round reads and opens the same way.
     top: PhaseDef,
-    /// The round's heats under a group. Empty when `top` is the only heat.
+    /// The round's heats, under `top`.
     heats: Vec<PhaseDef>,
     /// Each heat's id and how many places it has.
     sizes: Vec<(PhaseId, usize)>,
@@ -199,20 +200,6 @@ fn round(
     let id = child(bracket, name);
     let sources =
         |slots: &Vec<Slot>| -> Vec<SeatSource> { slots.iter().map(|s| s.source.clone()).collect() };
-    if let [only] = &dealt[..] {
-        return Round {
-            top: heat(
-                id.clone(),
-                label.to_owned(),
-                bracket,
-                seats,
-                sources(only),
-                format,
-            ),
-            heats: Vec::new(),
-            sizes: vec![(id, only.len())],
-        };
-    }
     let top = PhaseDef {
         id: id.clone(),
         label: label.to_owned(),
@@ -231,14 +218,13 @@ fn round(
     for (index, slots) in dealt.iter().enumerate() {
         let heat_id = child(&id, &format!("heat-{}", index + 1));
         sizes.push((heat_id.clone(), slots.len()));
-        heats.push(heat(
-            heat_id,
-            format!("{label} Heat {}", index + 1),
-            &id,
-            seats,
-            sources(slots),
-            None,
-        ));
+        // A round's only heat takes the round's name: "Final", not "Final Heat 1".
+        let heat_label = if dealt.len() == 1 {
+            label.to_owned()
+        } else {
+            format!("{label} Heat {}", index + 1)
+        };
+        heats.push(heat(heat_id, heat_label, &id, seats, sources(slots), None));
     }
     Round { top, heats, sizes }
 }
@@ -255,11 +241,12 @@ fn round(
 ///   there drop to the losers side, which races down between each drop. The top `advance` of
 ///   the winners final and of the losers final meet in the final.
 ///
-/// A field that fits in one heat is just a final.
+/// A field that fits in one heat is just a final. Every round is a phase that holds its heats,
+/// the final too.
 ///
 /// **Ids.** `‹id›/final`, and for double elimination `‹id›/winners-final`,
 /// `‹id›/losers-final`, `‹id›/winners-N`, `‹id›/losers-N`; for single elimination
-/// `‹id›/round-N`. A round with several heats is a group holding `…/heat-M`.
+/// `‹id›/round-N`. Each is a group holding its heats, `…/heat-M`.
 ///
 /// **Ranking.** The bracket stacks its rounds latest first, so every pilot is placed by the
 /// last round they flew. Pilots who go out in the same round are ordered by their place in
@@ -904,6 +891,54 @@ mod tests {
     }
 
     #[test]
+    fn every_round_is_a_phase_that_holds_its_heats_even_a_round_of_one() {
+        let spec = Bracket {
+            id: pid("bracket"),
+            label: "Bracket".into(),
+            parent: None,
+            field: vec![FieldSlice::Imported(pilots(8))],
+            entrants: pilots(8).into_iter().map(SeatSource::Pilot).collect(),
+            seats: seats_of(4),
+            advance: 2,
+            elimination: Elimination::Double,
+            format: one_race(),
+            final_format: None,
+        };
+        let defs = bracket(spec).unwrap();
+        let bracket_id = pid("bracket");
+        for def in &defs {
+            match &def.kind {
+                // No heat sits directly in the bracket: each is under its round.
+                PhaseKind::Heat { .. } => {
+                    assert_ne!(def.parent.as_ref(), Some(&bracket_id), "{:?}", def.id);
+                }
+                PhaseKind::Group { .. } if def.id != bracket_id => {
+                    assert_eq!(def.parent.as_ref(), Some(&bracket_id), "{:?}", def.id);
+                    assert!(
+                        defs.iter()
+                            .any(|heat| heat.parent.as_ref() == Some(&def.id)),
+                        "{:?} holds no heat",
+                        def.id
+                    );
+                }
+                PhaseKind::Group { .. } => {}
+            }
+        }
+        // A round's only heat takes the round's name. A round of two numbers them.
+        let label = |id: &str| {
+            defs.iter()
+                .find(|def| def.id == pid(id))
+                .map(|def| def.label.clone())
+        };
+        assert_eq!(label("bracket/final").as_deref(), Some("Final"));
+        assert_eq!(label("bracket/final/heat-1").as_deref(), Some("Final"));
+        assert_eq!(
+            label("bracket/winners-1/heat-2").as_deref(),
+            Some("Winners Round 1 Heat 2")
+        );
+    }
+
+    #[test]
     fn three_pilots_head_to_head_gives_the_top_seed_a_bye() {
         let tree = shaped(3, 2, 1, Elimination::Double);
         let world_ = world(3);
@@ -1173,8 +1208,8 @@ mod tests {
         for main in ["mains/main-1", "mains/main-2", "mains/main-3", "mains"] {
             assert!(results[&pid(main)].complete, "{main} did not finish");
         }
-        assert_eq!(world.0.races[&pid("mains/main-1/final")].len(), 2);
-        assert_eq!(world.0.races[&pid("mains/main-2/final")].len(), 1);
+        assert_eq!(world.0.races[&pid("mains/main-1/final/heat-1")].len(), 2);
+        assert_eq!(world.0.races[&pid("mains/main-2/final/heat-1")].len(), 1);
 
         // The bump-ups: p13 and p14 won the C-Main, then the B-Main, and reached the A-Main.
         let c_main = names(&results[&pid("mains/main-3")]);
