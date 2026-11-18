@@ -132,6 +132,10 @@ struct Stored {
     /// The access token for the Remote RD door.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// The address people use to reach the public pages, when the director has typed one:
+    /// a name on the race network, or an address on the internet a tunnel carries here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
 }
 
 /// Where a door's listener stands.
@@ -179,6 +183,11 @@ pub struct DoorView {
 pub struct NetworkView {
     pub public: DoorView,
     pub remote: DoorView,
+    /// The public address the director typed, such as `https://race.example.org/`. When
+    /// set, every public link and QR code Grid gives out uses it. Absent when none is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub public_address: Option<String>,
     /// The access token for the Remote RD door. Given to the Grid computer only: a device
     /// that signed in with it is never told it back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +214,65 @@ pub struct TokenRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub token: Option<String>,
+}
+
+/// `PUT /network/address`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct AddressRequest {
+    /// The public address, such as `http://grid.race.lan` or `https://race.example.org`.
+    /// Left out or empty: none, and Grid gives out its own address on the network again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub address: Option<String>,
+}
+
+/// The most characters a public address may have.
+pub const ADDRESS_MAX: usize = 200;
+
+/// A public address as typed, tidied into the form Grid gives out: `scheme://host[:port]/`.
+///
+/// It must be a plain web address: `http` or `https`, a name or a number, and at most a
+/// port. No path, no user name, nothing after a `?` or `#`: Grid adds its own page to the
+/// end, and nothing else may ride along in a QR code.
+pub fn tidy_address(typed: &str) -> Result<String, String> {
+    let typed = typed.trim();
+    if typed.chars().count() > ADDRESS_MAX {
+        return Err(format!(
+            "A public address can have {ADDRESS_MAX} characters at most."
+        ));
+    }
+    let how = "Type a web address, such as http://grid.race.lan or https://race.example.org.";
+    let (scheme, rest) = match typed.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        None => return Err(how.to_string()),
+    };
+    if scheme != "http" && scheme != "https" {
+        return Err(how.to_string());
+    }
+    let host = rest.strip_suffix('/').unwrap_or(rest);
+    let plain = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    if !plain {
+        return Err(format!(
+            "A public address is only a name and, if needed, a port. {how}"
+        ));
+    }
+    // A port, when there is one, is a number. (An IPv6 address in brackets has colons too.)
+    let after_brackets = host.rsplit(']').next().unwrap_or(host);
+    if let Some((name, port)) = after_brackets.rsplit_once(':')
+        && (port.parse::<u16>().is_err() || (name.is_empty() && !host.contains(']')))
+    {
+        return Err(format!("The port in a public address is a number. {how}"));
+    }
+    if crate::access::is_loopback_host(host) {
+        return Err(
+            "That address is this computer itself. No other device can use it.".to_string(),
+        );
+    }
+    Ok(format!("{scheme}://{}/", host.to_ascii_lowercase()))
 }
 
 /// What the app reports about one listener.
@@ -334,6 +402,11 @@ impl NetworkDesk {
         {
             stored.token = None;
         }
+        // An address edited by hand into something Grid would not have taken is dropped.
+        stored.address = stored
+            .address
+            .as_deref()
+            .and_then(|address| tidy_address(address).ok());
         // The Remote RD door is never open with no token to ask for.
         if stored.remote.enabled && stored.token.is_none() {
             stored.remote.enabled = false;
@@ -497,9 +570,30 @@ impl NetworkDesk {
         Ok(())
     }
 
-    /// The first address other devices open the public pages at, if the Public door is up.
+    /// The address other devices open the public pages at, if the Public door is up: the
+    /// one the director typed, or else this computer's first address on the network.
     pub fn public_address(&self) -> Option<String> {
         self.view(false).public.addresses.into_iter().next()
+    }
+
+    /// The public address the director typed, whether or not the Public door is up.
+    pub fn typed_address(&self) -> Option<String> {
+        self.read().stored.address.clone()
+    }
+
+    /// Set the public address, or clear it with `None` or an empty one.
+    pub fn set_address(&self, address: Option<&str>) -> Result<(), ProtocolError> {
+        let address = match address.map(str::trim).filter(|typed| !typed.is_empty()) {
+            Some(typed) => Some(
+                tidy_address(typed)
+                    .map_err(|why| ProtocolError::new(ErrorCode::BadRequest, why))?,
+            ),
+            None => None,
+        };
+        let mut inner = self.write();
+        let mut stored = inner.stored.clone();
+        stored.address = address;
+        Self::keep(&mut inner, stored)
     }
 
     /// What the console shows. `with_token`: the caller is on the Grid computer, and may
@@ -531,6 +625,14 @@ impl NetworkDesk {
                     view.state = DoorState::On;
                     view.port = *port;
                     view.addresses = addresses.iter().map(|ip| url(*ip, *port)).collect();
+                    // The address the director typed is the one to give out, so it is
+                    // first. This computer's own addresses follow, for a device beside it.
+                    if door == Door::Public
+                        && let Some(typed) = &inner.stored.address
+                    {
+                        view.addresses.retain(|address| address != typed);
+                        view.addresses.insert(0, typed.clone());
+                    }
                     if view.addresses.is_empty() {
                         view.problem = Some(
                             "This computer is not on a network, so there is no address to give out."
@@ -554,6 +656,7 @@ impl NetworkDesk {
         NetworkView {
             public: door(Door::Public),
             remote: door(Door::Remote),
+            public_address: inner.stored.address.clone(),
             token: with_token.then(|| inner.stored.token.clone()).flatten(),
         }
     }
@@ -682,6 +785,18 @@ pub async fn put_door(
     if network.set(door, body)? {
         registry.tokens().end_browser_sessions();
     }
+    Ok(Json(network.view(on_grid_computer(access))))
+}
+
+/// `PUT /network/address` — set or clear the public address.
+pub async fn put_address(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    access: Option<Extension<Access>>,
+    Json(body): Json<AddressRequest>,
+) -> Result<Json<NetworkView>, ProtocolError> {
+    let network = registry.network();
+    network.set_address(body.address.as_deref())?;
     Ok(Json(network.view(on_grid_computer(access))))
 }
 
@@ -1182,6 +1297,135 @@ mod tests {
         assert_eq!(desk.settings(), NetworkSettings::default());
         assert_eq!(desk.view_with(HOME, true).token, None);
         assert!(!heard.has_changed().unwrap());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_public_address_is_tidied_into_the_form_grid_gives_out() {
+        for (typed, tidy) in [
+            ("http://grid.race.lan", "http://grid.race.lan/"),
+            ("http://grid.race.lan/", "http://grid.race.lan/"),
+            ("  https://Race.Example.ORG  ", "https://race.example.org/"),
+            (
+                "HTTPS://race.example.org:8443/",
+                "https://race.example.org:8443/",
+            ),
+            ("http://192.168.1.20:8081", "http://192.168.1.20:8081/"),
+            ("http://[fd00::7]:8081", "http://[fd00::7]:8081/"),
+            ("http://[fd00::7]", "http://[fd00::7]/"),
+        ] {
+            assert_eq!(tidy_address(typed).as_deref(), Ok(tidy), "{typed}");
+        }
+    }
+
+    #[test]
+    fn a_public_address_that_is_not_a_plain_web_address_is_refused() {
+        let long = format!("http://{}.example.org", "a".repeat(ADDRESS_MAX));
+        for typed in [
+            "",
+            "grid.race.lan",
+            "race.example.org:8081",
+            "ftp://race.example.org",
+            "javascript://alert(1)",
+            "http://",
+            "http:///",
+            // Nothing may ride along in a QR code: no path, no query, no page, no user.
+            "http://race.example.org/join",
+            "http://race.example.org/#/director",
+            "http://race.example.org?x=1",
+            "http://user@race.example.org",
+            "http://user:pw@race.example.org",
+            "http://race.example.org/..",
+            "http://race example.org",
+            "http://race.example.org:port",
+            "http://race.example.org:99999",
+            "http://:8081",
+            "http://<svg>",
+            // This computer itself: no other device can use it.
+            "http://localhost",
+            "http://localhost:8080/",
+            "http://127.0.0.1:8081",
+            "http://[::1]:8081",
+            &long,
+        ] {
+            assert!(tidy_address(typed).is_err(), "{typed:?} was taken");
+        }
+    }
+
+    #[test]
+    fn the_address_typed_is_the_one_given_out_first_while_the_public_door_is_up() {
+        let desk = desk();
+        desk.set_address(Some(" https://race.example.org "))
+            .unwrap();
+        assert_eq!(
+            desk.typed_address().as_deref(),
+            Some("https://race.example.org/")
+        );
+        // With the door shut there is no address to give out, typed or not.
+        assert!(desk.view_with(HOME, true).public.addresses.is_empty());
+        assert_eq!(desk.public_address(), None);
+        assert_eq!(
+            desk.view_with(HOME, true).public_address.as_deref(),
+            Some("https://race.example.org/")
+        );
+
+        desk.set(Door::Public, on(Some(9000))).unwrap();
+        desk.report(Door::Public, Listener::Up(9000));
+        let view = desk.view_with(HOME, true);
+        assert_eq!(
+            view.public.addresses,
+            ["https://race.example.org/", "http://192.168.1.20:9000/"]
+        );
+        // The Remote RD door is never given the public address.
+        desk.set(Door::Remote, on(None)).unwrap();
+        desk.report(Door::Remote, Listener::Up(REMOTE_PORT));
+        assert_eq!(
+            desk.view_with(HOME, true).remote.addresses,
+            ["http://192.168.1.20:8082/"]
+        );
+        // On a computer with no network address of its own, the typed one still stands,
+        // and nothing is said to be wrong.
+        let alone = desk.view_with(&[], true).public;
+        assert_eq!(alone.addresses, ["https://race.example.org/"]);
+        assert_eq!(alone.problem, None);
+        // Typed the same as this computer's own address, it is listed once.
+        desk.set_address(Some("http://192.168.1.20:9000")).unwrap();
+        assert_eq!(
+            desk.view_with(HOME, true).public.addresses,
+            ["http://192.168.1.20:9000/"]
+        );
+        // Cleared, by nothing or by an empty one.
+        for cleared in [None, Some(""), Some("   ")] {
+            desk.set_address(Some("http://grid.race.lan")).unwrap();
+            desk.set_address(cleared).unwrap();
+            assert_eq!(desk.typed_address(), None);
+            assert_eq!(desk.view_with(HOME, true).public_address, None);
+        }
+    }
+
+    #[test]
+    fn a_refused_address_changes_nothing_and_a_typed_one_is_kept_across_a_restart() {
+        let dir = tempdir("address");
+        let desk = NetworkDesk::new(Some(dir.clone()));
+        desk.set_address(Some("http://grid.race.lan")).unwrap();
+        let err = desk.set_address(Some("grid.race.lan/x")).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(
+            desk.typed_address().as_deref(),
+            Some("http://grid.race.lan/")
+        );
+        let again = NetworkDesk::new(Some(dir.clone()));
+        assert_eq!(
+            again.typed_address().as_deref(),
+            Some("http://grid.race.lan/")
+        );
+        // Edited by hand into something Grid would not have taken: dropped, not a failure.
+        std::fs::write(
+            dir.join(NETWORK_FILE),
+            r#"{"address":"http://race.example.org/#/director"}"#,
+        )
+        .unwrap();
+        assert_eq!(NetworkDesk::new(Some(dir.clone())).typed_address(), None);
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -55,6 +55,7 @@
   import VisitorPage from './screens/VisitorPage.svelte';
   import VideoPage from './screens/VideoPage.svelte';
   import RecordingsPage from './screens/RecordingsPage.svelte';
+  import PilotCodesPage from './screens/PilotCodesPage.svelte';
   import {
     parseHash,
     formatHash,
@@ -293,6 +294,8 @@
       <PhasesPage {live} onrun={putOnTimer} />
     {:else if route.kind === 'event' && route.section === 'results'}
       <ResultsPage {live} />
+    {:else if route.kind === 'event' && route.section === 'codes'}
+      <PilotCodesPage {session} event={session.currentEvent} {live} />
     {:else if route.kind === 'event' && route.section === 'recordings'}
       <RecordingsPage {session} {live} />
     {:else}

@@ -27,6 +27,7 @@
       | 'getNetwork'
       | 'putDoor'
       | 'putAccessToken'
+      | 'putPublicAddress'
       | 'hello'
       | 'signOutDirector'
       | 'getKiosks'
@@ -140,6 +141,21 @@
   const setDoor = (door: Door) => (request: DoorRequest) =>
     change(() => session.putDoor(door, request));
 
+  // ── The public address ─────────────────────────────────────────────────────
+  /** The address as typed. Follows the Director's until the director edits it. */
+  let addressText = $state('');
+  let addressEdited = $state(false);
+  $effect(() => {
+    if (!addressEdited) addressText = view?.public_address ?? '';
+  });
+  const addressChanged = $derived(
+    addressEdited && addressText.trim() !== (view?.public_address ?? '')
+  );
+  async function saveAddress(e: Event) {
+    e.preventDefault();
+    if (await change(() => session.putPublicAddress(addressText))) addressEdited = false;
+  }
+
   // ── The access token ───────────────────────────────────────────────────────
   /** The token dialog: open, and what is typed in it. */
   let changing = $state<{ typed: string } | undefined>(undefined);
@@ -189,7 +205,26 @@
         door={view.public}
         {busy}
         onchange={setDoor('Public')}
-      />
+      >
+        <form class="address" onsubmit={saveAddress} aria-label="Public address">
+          <label for="public-address">Public address</label>
+          <span class="address-input">
+            <Input
+              id="public-address"
+              size="sm"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="None. Type one to use a name or a tunnel"
+              bind:value={addressText}
+              oninput={() => (addressEdited = true)}
+              disabled={busy}
+            />
+          </span>
+          {#if addressChanged}
+            <Button size="sm" type="submit" disabled={busy}>Save</Button>
+          {/if}
+        </form>
+      </DoorCard>
       <DoorCard
         name="Remote RD"
         what="Run Grid from another device"
@@ -406,6 +441,18 @@
     font-weight: var(--gf-font-weight-semibold);
     overflow-wrap: anywhere;
     justify-self: start;
+  }
+  .address {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text-muted);
+  }
+  .address-input {
+    flex: 1;
+    min-width: 14rem;
   }
   .token {
     display: flex;

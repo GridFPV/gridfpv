@@ -3107,3 +3107,81 @@ async fn the_public_qr_code_is_a_picture_of_an_address_and_gives_nothing_else_aw
         );
     }
 }
+
+#[tokio::test]
+async fn the_public_address_is_set_by_the_director_and_every_qr_code_then_uses_it() {
+    let rig = rig(false);
+    let network = rig.registry.network();
+    network
+        .set(
+            Door::Public,
+            DoorRequest {
+                enabled: true,
+                port: Some(9000),
+            },
+        )
+        .unwrap();
+    network.report(Door::Public, Listener::Up(9000));
+    let public = through(&rig, Door::Public);
+    let by_number = send(&public, get("/public/qr").visitor()).await;
+    assert_eq!(by_number.status, StatusCode::OK);
+
+    // A visitor cannot set it, at either door or with any path trick.
+    let change =
+        || call(Method::PUT, "/network/address").json(json!({"address": "http://evil.example"}));
+    assert_eq!(
+        status(&public, change().visitor()).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status(&rig.app, change().visitor()).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(network.typed_address(), None);
+
+    // The director sets it. What is not a plain web address is refused.
+    for bad in [
+        json!({"address": "race.example.org"}),
+        json!({"address": "https://race.example.org/#/director"}),
+        json!({"address": "http://localhost:8080"}),
+    ] {
+        let answer = send(
+            &rig.app,
+            call(Method::PUT, "/network/address").json(bad.clone()),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let set = send(
+        &rig.app,
+        call(Method::PUT, "/network/address").json(json!({"address": "https://race.example.org"})),
+    )
+    .await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    assert_eq!(set.json()["public_address"], "https://race.example.org/");
+    assert_eq!(
+        set.json()["public"]["addresses"][0],
+        "https://race.example.org/"
+    );
+
+    // The kiosk's QR code now holds that address, whatever name the kiosk itself used: a
+    // tablet on the field's network must still send phones to the address on the internet.
+    let typed = send(&public, get("/public/qr").visitor()).await;
+    assert_eq!(typed.status, StatusCode::OK);
+    assert_ne!(typed.body, by_number.body);
+    let other_host = send(&public, get("/public/qr").visitor().host("10.42.0.1:9000")).await;
+    assert_eq!(other_host.body, typed.body);
+
+    // Cleared, the kiosk's own name is used again.
+    let cleared = send(
+        &rig.app,
+        call(Method::PUT, "/network/address").json(json!({})),
+    )
+    .await;
+    assert_eq!(cleared.status, StatusCode::OK);
+    assert!(cleared.json().get("public_address").is_none());
+    assert_eq!(
+        send(&public, get("/public/qr").visitor()).await.body,
+        by_number.body
+    );
+}

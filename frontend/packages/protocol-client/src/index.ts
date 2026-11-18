@@ -59,6 +59,7 @@ export {
   getNetwork,
   putDoor,
   putAccessToken,
+  putPublicAddress,
   getPublicHello,
   getPilotAccess,
   resetPilotCode,

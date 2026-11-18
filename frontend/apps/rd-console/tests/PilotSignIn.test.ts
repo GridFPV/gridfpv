@@ -247,3 +247,106 @@ describe('PilotSignIn', () => {
     );
   });
 });
+
+describe('PilotSignIn: the printed sheet', () => {
+  const MANY: PilotAccessView = {
+    address: 'http://192.168.1.20/',
+    pilots: Array.from({ length: 11 }, (_, n) => ({
+      pilot: n === 0 ? 'p-ace' : n === 1 ? 'p-bee' : `p-x${n}`,
+      code: `AAA${String(200 + n)}`,
+      signed_in: false
+    }))
+  };
+  /** Press Print, and answer what the sheet held at the moment the print box opened. */
+  async function printed(access: PilotAccessView, perPage?: '4' | '9') {
+    const opened = open(access);
+    let sheet:
+      | { pages: number; cards: string[]; perPage: string | undefined; src: string[] }
+      | undefined;
+    const print = vi.spyOn(window, 'print').mockImplementation(() => {
+      const el = screen.getByTestId('code-sheet');
+      sheet = {
+        pages: within(el).getAllByRole('region').length,
+        cards: within(el)
+          .getAllByRole('article')
+          .map((card) => (card.textContent ?? '').replace(/\s+/g, ' ').trim()),
+        perPage: el.dataset.perPage,
+        src: [...el.querySelectorAll('img')].map((img) => img.getAttribute('src') ?? '')
+      };
+    });
+    if (perPage) {
+      await fireEvent.change(screen.getByLabelText('Cards on a page'), {
+        target: { value: perPage }
+      });
+    }
+    await fireEvent.click(screen.getByRole('button', { name: 'Print' }));
+    // The QR pictures never load in a test: say they have, as a browser would. The page
+    // starts waiting for them a moment after the sheet appears, so keep saying it.
+    await waitFor(() => {
+      for (const img of screen.queryByTestId('code-sheet')?.querySelectorAll('img') ?? []) {
+        void fireEvent.load(img);
+      }
+      expect(print).toHaveBeenCalledOnce();
+    });
+    return { ...opened, sheet: sheet!, print };
+  }
+
+  it('prints a card for every pilot, by callsign, with their code and a QR code of their own', async () => {
+    const { sheet, session } = await printed(ACCESS);
+    expect(sheet.cards).toHaveLength(2);
+    // In the same order as the table: by callsign.
+    expect(sheet.cards[0]).toContain('Ace');
+    expect(sheet.cards[0]).toContain('ABC 234');
+    expect(sheet.cards[1]).toContain('Bee');
+    expect(sheet.cards[1]).toContain('XYZ 789');
+    expect(sheet.cards[0]).toContain('open http://192.168.1.20:8081/ and type the code');
+    expect(sheet.src).toEqual([
+      '/events/evt-night/access/p-ace/qr',
+      '/events/evt-night/access/p-bee/qr'
+    ]);
+    // No id on paper.
+    expect(sheet.cards.join(' ')).not.toMatch(/p-ace|p-bee|evt-night/);
+    // It read the codes fresh, without the card having been opened.
+    expect(session.getPilotAccess).toHaveBeenCalled();
+  });
+
+  it('puts nine to a page unless four is picked', async () => {
+    const nine = await printed(MANY);
+    expect(nine.sheet.perPage).toBe('9');
+    expect(nine.sheet.cards).toHaveLength(11);
+    expect(nine.sheet.pages).toBe(2);
+    cleanup();
+    vi.restoreAllMocks();
+    const four = await printed(MANY, '4');
+    expect(four.sheet.perPage).toBe('4');
+    expect(four.sheet.cards).toHaveLength(11);
+    expect(four.sheet.pages).toBe(3);
+  });
+
+  it('leaves no codes in the page once the print box is closed, and none before it was pressed', async () => {
+    open(ACCESS);
+    expect(screen.queryByTestId('code-sheet')).toBeNull();
+    expect(document.body.textContent).not.toContain('ABC 234');
+    cleanup();
+    await printed(ACCESS);
+    await waitFor(() => expect(screen.queryByTestId('code-sheet')).toBeNull());
+    expect(document.body.textContent).not.toContain('ABC 234');
+  });
+
+  it('does not print with no address for the QR codes, and says what to switch on', async () => {
+    open({ ...ACCESS, address: undefined });
+    const print = vi.spyOn(window, 'print').mockImplementation(() => {});
+    await fireEvent.click(screen.getByRole('button', { name: 'Print' }));
+    expect(await screen.findByText(/Switch on Public, on the Network page, first/)).toBeVisible();
+    expect(print).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('code-sheet')).toBeNull();
+  });
+
+  it('does not print an empty sheet', async () => {
+    open({ pilots: [], address: 'http://192.168.1.20/' });
+    const print = vi.spyOn(window, 'print').mockImplementation(() => {});
+    await fireEvent.click(screen.getByRole('button', { name: 'Print' }));
+    expect(await screen.findByText('No pilot is in this event yet.')).toBeVisible();
+    expect(print).not.toHaveBeenCalled();
+  });
+});

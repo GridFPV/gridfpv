@@ -28,6 +28,7 @@ const currentSide = () =>
 
 const EVENT_ROW = [
   ['Details', '#/event'],
+  ['Pilot codes', '#/event/codes'],
   ['Phases', '#/event/phases'],
   ['Run', '#/event/run'],
   ['Marshal', '#/event/marshal'],
@@ -66,6 +67,7 @@ describe('AppNav: the two sides', () => {
     ['the Phases page', { kind: 'event', section: 'phases' }, 'Event', 'Phases'],
     ['the Results page', { kind: 'event', section: 'results' }, 'Event', 'Results'],
     ['the Recordings page', { kind: 'event', section: 'recordings' }, 'Event', 'Recordings'],
+    ['the Pilot codes page', { kind: 'event', section: 'codes' }, 'Event', 'Pilot codes'],
     ['the Run page', { kind: 'run' }, 'Event', 'Run'],
     ['the Run page of one heat', { kind: 'run', heat: 'q-1' }, 'Event', 'Run'],
     ['the Marshal page', { kind: 'marshal' }, 'Event', 'Marshal'],

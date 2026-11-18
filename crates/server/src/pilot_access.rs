@@ -974,7 +974,13 @@ pub async fn get_public_qr(
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok());
-    let Some(address) = public_link(host, registry.network().public_address()) else {
+    // The address the director typed wins: a kiosk opened by its number on the field's
+    // network must still send phones to the address on the internet.
+    let network = registry.network();
+    let typed = network
+        .public_address()
+        .filter(|_| network.typed_address().is_some());
+    let Some(address) = typed.or_else(|| public_link(host, network.public_address())) else {
         return Err(ProtocolError::new(
             ErrorCode::Refused,
             "Other devices cannot reach Grid yet. Switch on Public, on the Network page, to get a QR code.",

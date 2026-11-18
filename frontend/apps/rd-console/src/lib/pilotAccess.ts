@@ -49,3 +49,14 @@ export function codeInHash(hash: string): string | undefined {
   }
   return codeProblem(code) === undefined ? tidyCode(code) : undefined;
 }
+
+/** How many cards a printed page of sign-in codes may hold. */
+export const PER_PAGE_CHOICES = [4, 9] as const;
+export type PerPage = (typeof PER_PAGE_CHOICES)[number];
+
+/** Split `rows` into pages of `perPage`, in order. No rows is no pages. */
+export function sheetPages<T>(rows: readonly T[], perPage: PerPage): T[][] {
+  const pages: T[][] = [];
+  for (let at = 0; at < rows.length; at += perPage) pages.push(rows.slice(at, at + perPage));
+  return pages;
+}

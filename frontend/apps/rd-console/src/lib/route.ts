@@ -24,6 +24,7 @@
  *   - `#/event/marshal` → the Marshal page, and `#/event/marshal/‹race›` → the same page with
  *     one race open. `‹race›` is the race's id, percent-encoded.
  *   - `#/event/results` → the Results page
+ *   - `#/event/codes`   → the Pilot codes page: sign-in codes, and a sheet of them to print
  *   - `#/event/recordings` → the Recordings page: the event's recorded races
  *   - `#/overlays`      → the Overlays page, in Setup: the URLs that go into OBS and how the
  *     overlay looks. (`#/overlay/‹name›`, with no `s`, is an overlay itself.)
@@ -65,7 +66,7 @@ export type AppPage =
   | 'data';
 
 /** The pages of the open event that take no further argument. */
-export type EventSection = 'event' | 'phases' | 'results' | 'recordings';
+export type EventSection = 'event' | 'codes' | 'phases' | 'results' | 'recordings';
 
 /**
  * A parsed route. This is the pure view-intent the hash encodes; reconciliation against the
@@ -129,7 +130,13 @@ const APP_PAGES: readonly AppPage[] = [
   'overlays',
   'data'
 ];
-const EVENT_SECTIONS: readonly EventSection[] = ['event', 'phases', 'results', 'recordings'];
+const EVENT_SECTIONS: readonly EventSection[] = [
+  'event',
+  'codes',
+  'phases',
+  'results',
+  'recordings'
+];
 
 /** The route shown when the hash is empty or unrecognised: the open event's page. */
 export const DEFAULT_ROUTE: Route = { kind: 'event', section: 'event' };

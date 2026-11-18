@@ -12,6 +12,7 @@
  */
 
 import type {
+  AddressRequest,
   BuiltinClasses,
   ActiveEvent,
   AdapterId,
@@ -837,6 +838,25 @@ export async function putAccessToken(
     '/network/token',
     { method: 'PUT', body: request, token, fetch: options.fetch },
     'change the access token'
+  );
+}
+
+/**
+ * Set the public address (`PUT /network/address`): the address every public link and QR code
+ * uses, such as a name on the race network or an internet address a tunnel carries to the
+ * Public door. An empty one clears it. RD-gated.
+ */
+export async function putPublicAddress(
+  baseUrl: string,
+  request: AddressRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(
+    baseUrl,
+    '/network/address',
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the public address'
   );
 }
 

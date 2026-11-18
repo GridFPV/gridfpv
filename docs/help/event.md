@@ -39,22 +39,38 @@ cooldown is longer, the timer hides passes before Grid ever sees them.
 A class is a name plus the pilots racing in it at this event.
 
 - **Add class** picks a class from the class list and its pilots from the pilot list.
-- **Edit roster** changes who is in it.
+- Each class is one line: its name and how many pilots. **Click it to open it.** Inside is
+  its roster. Press a pilot to add them, or the × beside one to take them out, then press
+  **Save roster**. Nothing changes until you save.
 - **What counts** picks which phases decide the class's standings, in order. The first
   phase decides. A later one is only used for pilots the first one did not place.
 
 You do not need a class to race. A heat can name its pilots directly. Add a class when you
 want standings from first to last.
 
-Until a phase counts, a class shows who is in it. Once one counts, it shows the standings.
+Once a phase counts, the open class also shows its standings.
 
 ## Pilot sign-in
 
 A pilot can sign in on their own phone, so Grid knows who they are. Each pilot in the event
 has a short **code** for it.
 
-Press **Show codes** on the **Pilot sign-in** card. The codes stay hidden until you do, so
-a screen left open shows none.
+The codes are on the event's **Pilot codes** page, next to Details in the menu. Press
+**Show codes** there. The codes stay hidden until you do, so a screen left open shows none.
+
+### Printing the codes
+
+Press **Print** on the Pilot codes page to make a sheet to cut up and hand out. Each pilot
+gets a card with their callsign, their QR code, and the code as letters. Pick **4 to a
+page** for big cards or **9 to a page** to save paper.
+
+Your browser's print box opens. Pick a printer, or pick "Save as PDF" to keep a file.
+
+Turn **Public** on, on the Network page, before you print: the QR codes hold Grid's
+address. If you gave Grid a **public address** there, the QR codes use it.
+
+A printed code is like a password on paper. If a pilot loses theirs, give them a **New
+code**. The old card then stops working.
 
 To sign a pilot in:
 

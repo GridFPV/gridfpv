@@ -6,6 +6,11 @@ import type { DoorView } from "./DoorView";
  */
 export type NetworkView = { public: DoorView, remote: DoorView, 
 /**
+ * The public address the director typed, such as `https://race.example.org/`. When
+ * set, every public link and QR code Grid gives out uses it. Absent when none is set.
+ */
+public_address?: string, 
+/**
  * The access token for the Remote RD door. Given to the Grid computer only: a device
  * that signed in with it is never told it back.
  */

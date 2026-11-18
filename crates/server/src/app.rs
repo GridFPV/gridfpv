@@ -163,6 +163,7 @@ pub fn router(registry: EventRegistry) -> Router {
         // and the access token. The token route is listed first so it is not read as a door.
         .route("/network", get(crate::network::get_network))
         .route("/network/token", put(crate::network::put_token))
+        .route("/network/address", put(crate::network::put_address))
         .route("/network/{door}", put(crate::network::put_door))
         // What a visitor on the network may ask for.
         .route("/public/hello", get(crate::public::get_hello))

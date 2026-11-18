@@ -78,6 +78,26 @@ machine makes.
 
 If the page shows no address, the Grid computer is not on a network.
 
+## A public address
+
+By default Grid gives out its own number on your network, like `192.168.1.20`. You can
+give it a better address for people to use. Type it in the **Public address** box on the
+Public card and press **Save**.
+
+Two cases:
+
+- **Your race network has names.** Type the name, such as `http://grid.race.lan`.
+- **You put Grid on the internet with a tunnel.** Type the internet address, such as
+  `https://race.example.org`. People then do not need to be on your network.
+
+Every address Grid shows for the public pages, and every QR code (a pilot's, the printed
+sheet, the kiosk's), then uses it.
+
+Grid does not make the name or the tunnel work. It only uses the address you type. Only
+ever point a tunnel at the **Public** port, never at Remote RD.
+
+Clear the box and press **Save** to go back to Grid's own number.
+
 ## The port
 
 The number after the colon in an address is the port. Each switch has its own.

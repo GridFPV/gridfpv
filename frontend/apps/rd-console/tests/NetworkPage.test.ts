@@ -95,6 +95,13 @@ function open(
       now = { ...now, token: typed ?? 'NEW2-NEW3-NEW4' };
       return now;
     }),
+    putPublicAddress: vi.fn(async (address: string): Promise<NetworkView | undefined> => {
+      const typed = address.trim();
+      const { public_address: _old, ...rest } = now;
+      // The Director tidies it: lower case, and a slash on the end.
+      now = typed === '' ? rest : { ...rest, public_address: `${typed.toLowerCase()}/` };
+      return now;
+    }),
     hello: vi.fn(async () => hello),
     signOutDirector: vi.fn(async () => {}),
     getKiosks: vi.fn(async (): Promise<KioskView> => kiosks),
@@ -539,6 +546,65 @@ describe('NetworkPage: the access token', () => {
       await within(dialog).findByText(/can only be changed on the Grid computer/)
     ).toBeVisible();
     expect(screen.getByTestId('access-token')).toHaveTextContent(TOKEN);
+  });
+});
+
+describe('NetworkPage: the public address', () => {
+  const box = async () =>
+    within(await card('public')).getByRole('textbox', {
+      name: 'Public address'
+    }) as HTMLInputElement;
+
+  it('is empty until one is typed, with nothing to save', async () => {
+    open(ON);
+    expect((await box()).value).toBe('');
+    const pub = await card('public');
+    expect(within(pub).queryByRole('button', { name: 'Save' })).toBeNull();
+    // It belongs to the Public door only.
+    expect(
+      within(await card('remote-rd')).queryByRole('textbox', { name: 'Public address' })
+    ).toBeNull();
+  });
+
+  it('is saved as typed, and shown back the way the Director keeps it', async () => {
+    const { session } = open(ON);
+    const input = await box();
+    await fireEvent.input(input, { target: { value: ' https://Race.Example.org ' } });
+    const pub = await card('public');
+    await fireEvent.click(within(pub).getByRole('button', { name: 'Save' }));
+    expect(session.putPublicAddress).toHaveBeenCalledWith(' https://Race.Example.org ');
+    await waitFor(() => expect(input.value).toBe('https://race.example.org/'));
+    expect(within(pub).queryByRole('button', { name: 'Save' })).toBeNull();
+  });
+
+  it('shows the one that is set, and clearing it sends an empty one', async () => {
+    const { session } = open({ ...ON, public_address: 'http://grid.race.lan/' });
+    const input = await box();
+    expect(input.value).toBe('http://grid.race.lan/');
+    await fireEvent.input(input, { target: { value: '' } });
+    await fireEvent.click(within(await card('public')).getByRole('button', { name: 'Save' }));
+    expect(session.putPublicAddress).toHaveBeenCalledWith('');
+    await waitFor(() => expect(input.value).toBe(''));
+  });
+
+  it("shows the Director's words when it is refused, and keeps what was typed", async () => {
+    const { session } = open(ON);
+    session.putPublicAddress.mockRejectedValueOnce(
+      new Error('Type a web address, such as http://grid.race.lan or https://race.example.org.')
+    );
+    const input = await box();
+    await fireEvent.input(input, { target: { value: 'grid.race.lan' } });
+    await fireEvent.click(within(await card('public')).getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/Type a web address, such as/)).toBeVisible();
+    expect(input.value).toBe('grid.race.lan');
+  });
+
+  it('keeps what is being typed when the page reads the setting again', async () => {
+    open(ON);
+    const input = await box();
+    await fireEvent.input(input, { target: { value: 'https://ra' } });
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(input.value).toBe('https://ra');
   });
 });
 
