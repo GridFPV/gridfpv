@@ -215,6 +215,7 @@
       <span class="num">total {formatMicros(seat.total_micros)}</span>
     {/if}
     {#if seat.false_start}<Badge tone="danger">False start</Badge>{/if}
+    {#if seat.out}<Badge tone="warn">Out</Badge>{/if}
     {#if editable && seat.pilot !== undefined}
       {@const pilot = seat.pilot}
       <span class="head-action">

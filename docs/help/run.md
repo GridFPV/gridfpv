@@ -65,6 +65,18 @@ In a heat ranked on the fastest laps in a row, the card also shows **Best 3** fo
 race and **Heat best 3** for the whole heat. The laps that make up this race's best run
 are filled in.
 
+**Out** marks a pilot as out of the race. Use it when a pilot crashes or will not finish.
+
+- A race set to stop by itself stops waiting for that pilot. When every pilot still
+  flying has finished, the race ends as usual.
+- The laps the pilot flew still count. They are ranked on those laps like anyone else.
+- **Back in** takes it back if the pilot gets going again.
+- The button is there while a race is counting down, running or stopped. After you save
+  the race, the mark stays on it and shows on the results as **Out**.
+
+Grid still counts a lap if the quad is carried through the gate. Take that lap off on the
+[Marshal](#/help/marshal) page.
+
 **tune** opens the seat's tuning page. A **Bench** seat has a **Crossing** button, which
 logs a pass by hand.
 

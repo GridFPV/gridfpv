@@ -284,6 +284,8 @@ export interface RaceDetailRow {
   /** From the start of lap 1 to the last counted crossing. */
   totalMicros?: number;
   falseStart: boolean;
+  /** Whether the pilot was marked out of the race (crashed, did not finish). */
+  out: boolean;
   /** The hole shot, then every counted lap in order. */
   lapList: RaceLap[];
 }
@@ -310,6 +312,7 @@ export function raceDetail(race: RaceView, names: Names, runLength?: number): Ra
       bestRun,
       totalMicros: seat.total_micros,
       falseStart: seat.false_start,
+      out: seat.out,
       lapList: [
         ...(shot === undefined
           ? []

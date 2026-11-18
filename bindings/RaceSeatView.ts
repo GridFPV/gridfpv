@@ -26,6 +26,11 @@ start_at?: SourceTime,
  */
 false_start: boolean, 
 /**
+ * Whether the pilot is marked out of this race (crashed, not going to finish). The
+ * race no longer waits for them.
+ */
+out: boolean, 
+/**
  * The seat's place in the race so far, 1 first. Absent for an open seat.
  */
 finish?: number, 

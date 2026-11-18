@@ -117,6 +117,7 @@ export function raceSeat(
     seat: `seat-${index + 1}`,
     pilot,
     false_start: false,
+    out: false,
     laps: [],
     uncounted: [],
     ...over

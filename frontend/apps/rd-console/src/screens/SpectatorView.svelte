@@ -262,6 +262,7 @@
                   {#if entry.place !== undefined}<Badge tone="accent">{ordinal(entry.place)}</Badge
                     >{/if}
                   {#if entry.falseStart}<Badge tone="danger">False start</Badge>{/if}
+                  {#if entry.out}<Badge tone="warn">Out</Badge>{/if}
                   <span class="open">
                     <Button
                       size="sm"
@@ -500,6 +501,7 @@
                         {#if isOut(race.view, row.key)}<Badge tone="danger">Disqualified</Badge
                           >{/if}
                         {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
+                        {#if row.out}<Badge tone="warn">Out</Badge>{/if}
                       </th>
                       <td class="num">{row.laps}</td>
                       {#if runOf}<td class="num">{time(row.bestRun?.totalMicros)}</td>{/if}

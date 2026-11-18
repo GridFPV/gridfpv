@@ -135,6 +135,8 @@ export interface MyRace {
   totalMicros?: number;
   /** Whether a false start is recorded against the pilot in this race. */
   falseStart: boolean;
+  /** Whether the pilot was marked out of this race (crashed, did not finish). */
+  out: boolean;
 }
 
 /**
@@ -161,7 +163,8 @@ export function myRaces(view: EventView | undefined, names: Names, pilot: PilotI
       bestLapMicros: best,
       bestLapIndex: bestLapIndex >= 0 ? bestLapIndex : undefined,
       totalMicros: seat.total_micros ?? undefined,
-      falseStart: seat.false_start
+      falseStart: seat.false_start,
+      out: seat.out
     });
   }
   return mine.reverse();

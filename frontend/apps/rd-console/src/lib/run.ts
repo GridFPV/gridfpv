@@ -76,6 +76,8 @@ export interface SeatRow {
   /** Whether the seat has crossed the gate to start lap 1. */
   onCourse: boolean;
   falseStart: boolean;
+  /** Whether the pilot is marked out of the race (crashed, not going to finish). */
+  out: boolean;
 }
 
 /** The rows for a race in progress: one per seat of its lineup, with the laps so far. */
@@ -94,7 +96,8 @@ export function raceSeatRows(race: RaceView, names: Names): SeatRow[] {
       lastLapMicros: laps.at(-1)?.micros,
       bestLapMicros: seat.best_lap_micros,
       onCourse: seat.hole_shot !== undefined || laps.length > 0,
-      falseStart: seat.false_start
+      falseStart: seat.false_start,
+      out: seat.out
     };
   });
 }
@@ -110,7 +113,8 @@ export function lineupSeatRows(phase: PhaseView, names: Names): SeatRow[] {
     pilot: typeof seat.who === 'object' && 'Pilot' in seat.who ? seat.who.Pilot : undefined,
     laps: [],
     onCourse: false,
-    falseStart: false
+    falseStart: false,
+    out: false
   }));
 }
 
