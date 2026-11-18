@@ -139,9 +139,9 @@ test.beforeAll(async () => {
   aceCode = access.pilots.find((entry) => entry.pilot === ace)!.code;
 
   const port = await freePort();
-  await direct('PUT', '/network', { enabled: true, port });
+  await direct('PUT', '/network/public', { enabled: true, port });
   await expect
-    .poll(async () => (await direct<{ state: string }>('GET', '/network')).state)
+    .poll(async () => (await direct<{ public: { state: string } }>('GET', '/network')).public.state)
     .toBe('On');
   address = `http://${lan}:${port}/`;
 });

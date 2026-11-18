@@ -67,7 +67,8 @@ import {
   postDataImport,
   deleteDataImport,
   getNetwork,
-  putNetwork,
+  putDoor,
+  putAccessToken,
   getKiosks,
   newKioskCode,
   cancelKioskCode,
@@ -121,7 +122,8 @@ import type {
   EventView,
   Format,
   KioskView,
-  NetworkRequest,
+  Door,
+  DoorRequest,
   NetworkView,
   OverlayLook,
   OverlayPlacement,
@@ -250,7 +252,8 @@ const realApi = {
   postDataImport,
   deleteDataImport,
   getNetwork,
-  putNetwork,
+  putDoor,
+  putAccessToken,
   getKiosks,
   newKioskCode,
   cancelKioskCode,
@@ -672,14 +675,23 @@ export class Session {
     return this.#api.signOutPilot(this.baseUrl);
   }
 
-  /** Whether other devices can reach the Director, and on what address. */
+  /** The two doors other devices come in by, and where their listeners stand. */
   getNetwork(): Promise<NetworkView> {
     return this.#api.getNetwork(this.baseUrl, { token: this.#token });
   }
 
-  /** Let other devices in, shut them out, or change the port. `undefined` on a cancelled prompt. */
-  putNetwork(request: NetworkRequest): Promise<NetworkView | undefined> {
-    return this.#privilegedWrite((token) => this.#api.putNetwork(this.baseUrl, request, token));
+  /** Open or shut a door, or change its port. `undefined` on a cancelled prompt. */
+  putDoor(door: Door, request: DoorRequest): Promise<NetworkView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.putDoor(this.baseUrl, door, request, token));
+  }
+
+  /**
+   * Change the access token of the Remote RD door: to `typed`, or to a new one Grid makes.
+   * `undefined` on a cancelled prompt.
+   */
+  putAccessToken(typed?: string): Promise<NetworkView | undefined> {
+    const request = typed === undefined ? {} : { token: typed };
+    return this.#privilegedWrite((token) => this.#api.putAccessToken(this.baseUrl, request, token));
   }
 
   /** The kiosk codes waiting to be used, and the kiosks set up. */

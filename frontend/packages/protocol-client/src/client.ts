@@ -35,8 +35,10 @@ import type {
   KioskView,
   MainsRequest,
   RoundRobinRequest,
-  NetworkRequest,
+  Door,
+  DoorRequest,
   NetworkView,
+  TokenRequest,
   OverlayLook,
   OverlayPlacement,
   PassRequest,
@@ -792,7 +794,10 @@ export async function deleteDataImport(
   );
 }
 
-/** Whether other devices can reach the Director, and on what address (`GET /network`). */
+/**
+ * The two doors other devices come in by, and where their listeners stand (`GET /network`).
+ * The access token is in the answer only on the Grid computer.
+ */
 export async function getNetwork(
   baseUrl: string,
   options: { token?: string; fetch?: FetchLike } = {}
@@ -800,18 +805,37 @@ export async function getNetwork(
   return apiJson<NetworkView>(baseUrl, '/network', options, 'read the network setting');
 }
 
-/** Let other devices in, shut them out, or change the port (`PUT /network`), RD-gated. */
-export async function putNetwork(
+/** Open or shut a door, or change its port (`PUT /network/{door}`), RD-gated. */
+export async function putDoor(
   baseUrl: string,
-  request: NetworkRequest,
+  door: Door,
+  request: DoorRequest,
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<NetworkView> {
   return apiJson<NetworkView>(
     baseUrl,
-    '/network',
+    `/network/${door === 'Public' ? 'public' : 'remote'}`,
     { method: 'PUT', body: request, token, fetch: options.fetch },
     'change the network setting'
+  );
+}
+
+/**
+ * Change the access token of the Remote RD door (`PUT /network/token`): to the one given,
+ * or to a new one Grid makes. Only the Grid computer may.
+ */
+export async function putAccessToken(
+  baseUrl: string,
+  request: TokenRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(
+    baseUrl,
+    '/network/token',
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the access token'
   );
 }
 

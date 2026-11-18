@@ -854,12 +854,31 @@ async fn the_qr_code_needs_an_address_to_point_at() {
         off.json()["message"]
             .as_str()
             .unwrap()
-            .contains("Network page")
+            .contains("Switch on Public, on the Network page")
     );
-    // A Director that is on the network. (Only checked where this computer has an address.)
-    rig.registry
-        .network()
-        .set_main("0.0.0.0:8090".parse().unwrap());
+    // The Remote RD door is not where pilots come in: it gives no address for a code.
+    let network = rig.registry.network();
+    let on_at = |port| gridfpv_server::network::DoorRequest {
+        enabled: true,
+        port: Some(port),
+    };
+    network
+        .set(gridfpv_server::network::Door::Remote, on_at(8092))
+        .unwrap();
+    network.report(
+        gridfpv_server::network::Door::Remote,
+        gridfpv_server::network::Listener::Up(8092),
+    );
+    let remote_only = send(&rig, call(Method::GET, &uri)).await;
+    assert_eq!(remote_only.status, StatusCode::CONFLICT);
+    // The Public door is open. (Only checked where this computer has an address.)
+    network
+        .set(gridfpv_server::network::Door::Public, on_at(8090))
+        .unwrap();
+    network.report(
+        gridfpv_server::network::Door::Public,
+        gridfpv_server::network::Listener::Up(8090),
+    );
     if gridfpv_server::network::local_addresses().is_empty() {
         return;
     }

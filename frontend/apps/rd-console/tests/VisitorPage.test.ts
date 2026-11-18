@@ -125,8 +125,51 @@ describe('VisitorPage', () => {
     await askToSignIn();
     expect(screen.queryByLabelText('Access token')).toBeNull();
     expect(screen.getByTestId('no-director-sign-in')).toHaveTextContent(
-      'A director cannot sign in from another device.'
+      'A director cannot sign in here.'
     );
+  });
+
+  it('at the Remote RD address the page is the sign-in and nothing else', async () => {
+    const { source } = open({
+      version: '0.5.1',
+      caller: 'Visitor',
+      door: 'Remote',
+      director_sign_in: true,
+      kiosk: false
+    });
+    // No address to know: the sign-in is the page.
+    expect(await screen.findByLabelText('Access token')).toBeVisible();
+    expect(screen.queryByTestId('visitor-event')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Pilot' })).toBeNull();
+    // Nothing public is asked for there: the Director would refuse it.
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(source.getEvent).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('visitor-offline')).toBeNull();
+  });
+
+  it('at the Remote RD address the kiosk address is still the sign-in', async () => {
+    location.hash = '#/kiosk';
+    open({
+      version: '0.5.1',
+      caller: 'Visitor',
+      door: 'Remote',
+      director_sign_in: true,
+      kiosk: false
+    });
+    expect(await screen.findByLabelText('Access token')).toBeVisible();
+  });
+
+  it('at the Public address there is no director sign-in, even at its old address', async () => {
+    open({ ...HELLO, door: 'Public', director_sign_in: false });
+    location.hash = '#/director';
+    window.dispatchEvent(new Event('hashchange'));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(screen.queryByText('Director sign-in')).toBeNull();
+    expect(screen.queryByLabelText('Access token')).toBeNull();
+    expect(screen.queryByTestId('no-director-sign-in')).toBeNull();
+    // It is the spectator's page, as at any other address there.
+    expect(screen.getByTestId('visitor-event')).toHaveTextContent('Friday Night Whoops');
+    expect(document.body.textContent).not.toMatch(/director/i);
   });
 
   it("the director's page shows the sign-in and nothing of the race or the pilots", async () => {

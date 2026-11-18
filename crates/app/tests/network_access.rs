@@ -17,7 +17,6 @@ use axum::http::{Method, Request, StatusCode, header};
 use gridfpv_app::director::{build_app, local_origin, run_director};
 use gridfpv_server::access::MAX_FAILURES;
 use gridfpv_server::events::{CreateEventRequest, EventRegistry};
-use gridfpv_server::network::DEFAULT_PORT;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1214,7 +1213,11 @@ async fn a_change_asked_for_by_another_website_is_refused_even_on_the_grid_compu
     ] {
         for (method, path, body) in [
             (Method::POST, "/events", Some(json!({"name": "Sneaky"}))),
-            (Method::PUT, "/network", Some(json!({"enabled": true}))),
+            (
+                Method::PUT,
+                "/network/public",
+                Some(json!({"enabled": true})),
+            ),
             (
                 Method::DELETE,
                 format!("/events/{}", rig.event).as_str(),
@@ -1235,7 +1238,7 @@ async fn a_change_asked_for_by_another_website_is_refused_even_on_the_grid_compu
         }
     }
     assert_eq!(event_names(&rig).await, [EVENT]);
-    assert!(!rig.registry.network().settings().enabled);
+    assert!(!rig.registry.network().settings().public.enabled);
 }
 
 #[tokio::test]
@@ -1380,43 +1383,64 @@ fn a_local_origin_is_a_page_on_this_computer() {
 async fn the_network_setting_is_read_and_changed_by_the_director_only() {
     let rig = rig(true);
     let view = send(&rig.app, get("/network")).await.json();
-    assert_eq!(view["enabled"], false);
-    assert_eq!(view["port"], DEFAULT_PORT);
-    assert_eq!(view["state"], "Off");
-    assert_eq!(view["addresses"], json!([]));
-
-    let change = || call(Method::PUT, "/network").json(json!({"enabled": true, "port": 9000}));
-    // A visitor, the Grid computer with no token, a wrong token: all refused.
-    assert_eq!(
-        status(&rig.app, change().visitor()).await,
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(status(&rig.app, change()).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        status(&rig.app, change().bearer("nope")).await,
-        StatusCode::UNAUTHORIZED
-    );
-    assert!(!rig.registry.network().settings().enabled);
-
-    let changed = send(&rig.app, change().bearer(TOKEN)).await;
-    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
-    assert_eq!(changed.json()["enabled"], true);
-    assert_eq!(changed.json()["port"], 9000);
-    assert_eq!(changed.json()["state"], "Starting");
-    assert_eq!(rig.registry.network().settings().port, 9000);
-
-    for bad in [
-        json!({"enabled": true, "port": 80}),
-        json!({"enabled": true, "port": 0}),
-        json!({"enabled": true, "port": 1023}),
-    ] {
-        let answer = send(
-            &rig.app,
-            call(Method::PUT, "/network").json(bad).bearer(TOKEN),
-        )
-        .await;
-        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+    for door in ["public", "remote"] {
+        assert_eq!(view[door]["enabled"], false, "{door}");
+        assert_eq!(view[door]["state"], "Off", "{door}");
+        assert_eq!(view[door]["addresses"], json!([]), "{door}");
+        assert_eq!(view[door]["port_picked"], false, "{door}");
     }
+    assert_eq!(view["public"]["port"], 80);
+    assert_eq!(view["remote"]["port"], 8082);
+
+    for door in ["public", "remote"] {
+        let path = format!("/network/{door}");
+        let change = || call(Method::PUT, &path).json(json!({"enabled": true, "port": 9000}));
+        // A visitor, the Grid computer with no token, a wrong token: all refused.
+        assert_eq!(
+            status(&rig.app, change().visitor()).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(status(&rig.app, change()).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            status(&rig.app, change().bearer("nope")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let token = || call(Method::PUT, "/network/token").json(json!({}));
+    assert_eq!(
+        status(&rig.app, token().visitor()).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(status(&rig.app, token()).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(rig.registry.network().settings(), Default::default());
+
+    let changed = send(
+        &rig.app,
+        call(Method::PUT, "/network/public")
+            .json(json!({"enabled": true, "port": 9000}))
+            .bearer(TOKEN),
+    )
+    .await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    assert_eq!(changed.json()["public"]["enabled"], true);
+    assert_eq!(changed.json()["public"]["port"], 9000);
+    assert_eq!(changed.json()["public"]["port_picked"], true);
+    assert_eq!(changed.json()["public"]["state"], "Starting");
+    assert_eq!(changed.json()["remote"]["enabled"], false);
+    assert_eq!(rig.registry.network().settings().public.port, Some(9000));
+
+    // The other door's port. (The Director's own port is refused over real sockets: a
+    // rig with no listener has none.)
+    let clash = send(
+        &rig.app,
+        call(Method::PUT, "/network/remote")
+            .json(json!({"enabled": true, "port": 9000}))
+            .bearer(TOKEN),
+    )
+    .await;
+    assert_eq!(clash.status, StatusCode::BAD_REQUEST, "{}", clash.body);
+    assert!(clash.body.contains("Public"), "{}", clash.body);
+    assert!(!rig.registry.network().settings().remote.enabled);
     for malformed in [
         json!({}),
         json!({"port": 9000}),
@@ -1428,7 +1452,7 @@ async fn the_network_setting_is_read_and_changed_by_the_director_only() {
     ] {
         let answer = send(
             &rig.app,
-            call(Method::PUT, "/network")
+            call(Method::PUT, "/network/public")
                 .json(malformed.clone())
                 .bearer(TOKEN),
         )
@@ -1439,7 +1463,18 @@ async fn the_network_setting_is_read_and_changed_by_the_director_only() {
             answer.status
         );
     }
-    assert_eq!(rig.registry.network().settings().port, 9000);
+    // There are two doors and no third.
+    for door in ["main", "Public", "private", "public%2F..%2Ftoken"] {
+        let answer = send(
+            &rig.app,
+            call(Method::PUT, &format!("/network/{door}"))
+                .json(json!({"enabled": true}))
+                .bearer(TOKEN),
+        )
+        .await;
+        assert!(answer.status.is_client_error(), "{door}: {}", answer.status);
+    }
+    assert_eq!(rig.registry.network().settings().public.port, Some(9000));
 }
 
 // ── Over real sockets ───────────────────────────────────────────────────────
@@ -1504,8 +1539,8 @@ impl Running {
     fn local(&self, port: u16) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
     }
-    /// `GET /network`, asked from this computer.
-    async fn network(&self) -> Value {
+    /// `GET /network`, asked from this computer: both doors and the token.
+    async fn whole_network(&self) -> Value {
         let answer = raw(
             self.addr,
             &request("GET", "/network", &self.addr.to_string(), "", ""),
@@ -1514,12 +1549,23 @@ impl Running {
         .unwrap();
         serde_json::from_str(answer.split("\r\n\r\n").nth(1).unwrap()).unwrap()
     }
+    /// The Public door, as `GET /network` gives it.
+    async fn network(&self) -> Value {
+        self.door("public").await
+    }
+    async fn door(&self, door: &str) -> Value {
+        self.whole_network().await[door].clone()
+    }
+    /// Change the Public door.
     async fn set_network(&self, body: Value) -> u16 {
+        self.set_door("public", body).await
+    }
+    async fn set_door(&self, door: &str, body: Value) -> u16 {
         let answer = raw(
             self.addr,
             &request(
                 "PUT",
-                "/network",
+                &format!("/network/{door}"),
                 &self.addr.to_string(),
                 "",
                 &body.to_string(),
@@ -1528,6 +1574,17 @@ impl Running {
         .await
         .unwrap();
         status_of(&answer)
+    }
+    /// Wait until a door says `state`.
+    async fn door_until(&self, door: &str, state: &str) -> Value {
+        for _ in 0..240 {
+            let view = self.door(door).await;
+            if view["state"] == state {
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("{door} never reached {state}: {}", self.door(door).await);
     }
     /// Wait until the network listener says `state`.
     async fn until(&self, state: &str) -> Value {
@@ -1823,14 +1880,21 @@ async fn switching_off_ends_the_connections_that_were_open() {
 
     let port = free_port().await;
     running
-        .set_network(json!({"enabled": true, "port": port}))
+        .set_door("remote", json!({"enabled": true, "port": port}))
         .await;
-    running.until("On").await;
+    running.door_until("remote", "On").await;
+    let token = running.whole_network().await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
-    // Follow the event's changes through the network listener, and leave the feed open.
+    // Follow the event's changes through the Remote RD door, and leave the feed open.
     let mut feed = TcpStream::connect(running.local(port)).await.unwrap();
     feed.write_all(
-        format!("GET /events/{id}/changes HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
+        format!(
+            "GET /events/{id}/changes HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
+        )
+        .as_bytes(),
     )
     .await
     .unwrap();
@@ -1842,8 +1906,8 @@ async fn switching_off_ends_the_connections_that_were_open() {
     let head = String::from_utf8_lossy(&first[..read]).into_owned();
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
 
-    running.set_network(json!({"enabled": false})).await;
-    running.until("Off").await;
+    running.set_door("remote", json!({"enabled": false})).await;
+    running.door_until("remote", "Off").await;
     // The feed is cut: reading it ends (or fails) soon, and does not hang.
     let ended = tokio::time::timeout(Duration::from_secs(3), async {
         let mut sink = [0u8; 1024];
@@ -1899,7 +1963,7 @@ async fn a_saved_on_setting_starts_the_listener_with_the_director() {
     let port = free_port().await;
     std::fs::write(
         data.join("network.json"),
-        json!({"enabled": true, "port": port}).to_string(),
+        json!({"public": {"enabled": true, "port": port}}).to_string(),
     )
     .unwrap();
     let running = start(
@@ -1948,20 +2012,43 @@ async fn stopping_the_director_stops_the_listener_for_other_devices() {
 }
 
 #[tokio::test]
-async fn a_director_started_on_the_network_says_it_is_always_on_and_adds_no_listener() {
-    let running = start(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), None).await;
-    let view = running.network().await;
-    assert_eq!(view["state"], "Always");
-    assert_eq!(view["port"], running.addr.port());
-    // The switch is kept but starts nothing.
-    let port = free_port().await;
-    running
-        .set_network(json!({"enabled": true, "port": port}))
-        .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(running.network().await["state"], "Always");
-    assert!(TcpStream::connect(running.local(port)).await.is_err());
-    running.stop().await;
+async fn the_director_refuses_to_put_its_own_listener_on_the_network() {
+    // Whoever reaches the Director's own listener is trusted as the director, so it only
+    // ever listens on this computer. Asked for any other address, it does not start.
+    let mut asked = vec![SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))];
+    asked.push("[::]:0".parse().unwrap());
+    if let Some(lan) = gridfpv_server::network::local_addresses()
+        .into_iter()
+        .next()
+    {
+        asked.push(SocketAddr::from((lan, 0)));
+    }
+    for addr in asked {
+        let dir = temp_dir("refused");
+        let started = Arc::new(Mutex::new(false));
+        let report = started.clone();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_director(
+                addr,
+                None,
+                dir.clone(),
+                move |_| *report.lock().unwrap() = true,
+                std::future::pending::<()>(),
+            ),
+        )
+        .await
+        .expect("it answers at once, and does not serve");
+        let err = outcome.expect_err("it does not start").to_string();
+        assert!(err.contains("this computer only"), "{addr}: {err}");
+        assert!(!*started.lock().unwrap(), "{addr}: it never said it was up");
+        std::fs::remove_dir_all(dir).ok();
+    }
+    // This computer's own addresses are fine, by number or as IPv6.
+    for addr in ["127.0.0.1:0", "127.0.0.2:0"] {
+        let running = start(addr.parse().unwrap(), None).await;
+        running.stop().await;
+    }
 }
 
 /// The real thing: a caller that reaches this computer by its network address is a visitor.
@@ -2009,7 +2096,9 @@ async fn a_caller_that_comes_in_by_this_computers_network_address_is_a_visitor()
         ("GET", "/network", ""),
         ("GET", "/video/settings", ""),
         ("POST", "/events", r#"{"name":"Sneaky"}"#),
-        ("PUT", "/network", r#"{"enabled":false}"#),
+        ("PUT", "/network/public", r#"{"enabled":false}"#),
+        ("PUT", "/network/remote", r#"{"enabled":true}"#),
+        ("PUT", "/network/token", r#"{}"#),
     ] {
         // Claiming to be local in the Host header changes nothing: the peer is not.
         for claimed in [host.as_str(), "127.0.0.1:8080", "localhost"] {
@@ -2032,13 +2121,939 @@ async fn a_caller_that_comes_in_by_this_computers_network_address_is_a_visitor()
     .unwrap();
     assert!(!events.contains("Sneaky"), "{events}");
     assert_eq!(running.network().await["state"], "On");
-    // The same listener, reached from this computer by its loopback address, is local.
-    let local = raw(
+    // The same door, reached from this computer by its loopback address, is still a door:
+    // nobody who comes in by it is local.
+    let by_loopback = raw(
         running.local(port),
         &request("GET", "/events", &format!("127.0.0.1:{port}"), "", ""),
     )
     .await
     .unwrap();
-    assert_eq!(status_of(&local), 200, "{local}");
+    assert_eq!(status_of(&by_loopback), 401, "{by_loopback}");
+    assert_eq!(running.door("remote").await["state"], "Off");
     running.stop().await;
+}
+
+// ── The two doors (docs/primitives.md §11.10) ───────────────────────────────
+
+use gridfpv_server::network::{Door, DoorRequest, Listener};
+
+/// The app as one door's listener serves it: every request marked with the door.
+fn through(rig: &Rig, door: Door) -> Router {
+    rig.app.clone().layer(axum::Extension(door))
+}
+
+/// Open the Remote RD door and answer its access token.
+fn open_remote(rig: &Rig) -> String {
+    let network = rig.registry.network();
+    network
+        .set(
+            Door::Remote,
+            DoorRequest {
+                enabled: true,
+                port: None,
+            },
+        )
+        .unwrap();
+    network.report(Door::Remote, Listener::Up(8082));
+    network
+        .view(true)
+        .token
+        .expect("opening the door made a token")
+}
+
+/// Every way a caller at a door could claim to be somebody: by where they call from, the
+/// name they ask for, and whatever they hold.
+fn disguises(call: Call, holding: &[String]) -> Vec<(String, Call)> {
+    let mut found = Vec::new();
+    for (place, placed) in [
+        ("a phone", call.clone().visitor()),
+        ("this computer", call.clone()),
+        ("this computer by name", call.clone().host("localhost:8080")),
+        ("no known address", call.clone().no_peer()),
+        ("no host", call.clone().visitor().no_host()),
+    ] {
+        found.push((format!("{place}, holding nothing"), placed.clone()));
+        for held in holding {
+            found.push((
+                format!("{place}, with a bearer token"),
+                placed.clone().bearer(held),
+            ));
+            found.push((
+                format!("{place}, with a cookie"),
+                placed.clone().cookie(held),
+            ));
+            found.push((
+                format!("{place}, with both"),
+                placed.clone().bearer(held).cookie(held),
+            ));
+        }
+    }
+    found
+}
+
+/// Sign in at the Remote RD door with the access token, and answer the session.
+async fn sign_in_at_remote(rig: &Rig, token: &str) -> String {
+    let answer = send(
+        &through(rig, Door::Remote),
+        call(Method::POST, "/public/session")
+            .visitor()
+            .bearer(token),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::NO_CONTENT, "{}", answer.body);
+    answer.session()
+}
+
+#[tokio::test]
+async fn nobody_is_the_director_at_the_public_door_whatever_they_hold() {
+    // A Director started with a token of its own, the Remote RD door open, and a director
+    // signed in from another device: every key there is.
+    let rig = rig(true);
+    let access = open_remote(&rig);
+    let session = sign_in_at_remote(&rig, &access).await;
+    let keys = [TOKEN.to_string(), access, session];
+    let public = through(&rig, Door::Public);
+
+    for path in api_paths() {
+        for method in METHODS {
+            let open = open_to_visitors(&method, &path) && path != "/public/session";
+            for (who, request) in disguises(call(method.clone(), &path), &keys) {
+                let answer = send(&public, request).await;
+                if open {
+                    assert_ne!(
+                        answer.status,
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {path} should be open at the public door ({who})"
+                    );
+                } else {
+                    assert_eq!(
+                        answer.status,
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {path} from {who} answered {}: {}",
+                        answer.status,
+                        answer.body
+                    );
+                    if method != Method::HEAD {
+                        assert!(
+                            !answer.body.contains(EVENT),
+                            "{method} {path} from {who} gave something away"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Nothing was changed by any of it, and nobody was shut out for guessing.
+    assert_eq!(event_names(&rig).await, [EVENT]);
+    assert!(!rig.registry.network().settings().public.enabled);
+    let hello = send(&public, get("/public/hello").visitor()).await;
+    assert_eq!(hello.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_public_door_has_no_director_sign_in() {
+    let rig = rig(true);
+    let access = open_remote(&rig);
+    let public = through(&rig, Door::Public);
+    for key in [TOKEN, access.as_str()] {
+        for request in [
+            call(Method::POST, "/public/session").visitor().bearer(key),
+            call(Method::POST, "/public/session").bearer(key),
+            call(Method::POST, "/public/session")
+                .host("localhost:8080")
+                .bearer(key),
+        ] {
+            let answer = send(&public, request).await;
+            assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{}", answer.body);
+            assert!(answer.set_cookie().is_none(), "no sign-in is ever given");
+            assert!(answer.body.contains("not open to the public"));
+        }
+    }
+    let hello = send(&public, get("/public/hello").visitor().bearer(TOKEN))
+        .await
+        .json();
+    assert_eq!(hello["caller"], "Visitor");
+    assert_eq!(hello["door"], "Public");
+    assert_eq!(hello["director_sign_in"], false);
+    assert_eq!(hello["event"], EVENT);
+}
+
+#[tokio::test]
+async fn wrong_tokens_sent_to_the_public_door_are_not_even_counted() {
+    // A phone that once held a token must not be shut out of the pages for everyone.
+    let rig = rig(true);
+    let public = through(&rig, Door::Public);
+    for n in 0..(MAX_FAILURES * 3) {
+        let answer = send(
+            &public,
+            get("/public/event").visitor().bearer(&format!("guess-{n}")),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK, "try {n}");
+    }
+    // And the same address can still sign in at the other door.
+    let access = open_remote(&rig);
+    sign_in_at_remote(&rig, &access).await;
+}
+
+#[tokio::test]
+async fn the_console_files_are_read_at_both_doors_and_nothing_is_sent_to_them() {
+    let rig = rig(false);
+    open_remote(&rig);
+    for door in [Door::Public, Door::Remote] {
+        let app = through(&rig, door);
+        for path in ["/", "/index.html", "/assets/app.js", "/some/page"] {
+            let answer = send(&app, get(path).visitor()).await;
+            assert_eq!(answer.status, StatusCode::OK, "{door:?} {path}");
+        }
+        for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+            let answer = send(&app, call(method.clone(), "/index.html").visitor()).await;
+            assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{door:?} {method}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn at_the_remote_door_a_caller_with_no_token_can_only_say_hello_and_sign_in() {
+    let rig = rig(false);
+    open_remote(&rig);
+    let remote = through(&rig, Door::Remote);
+    let open = |method: &Method, path: &str| {
+        let read = *method == Method::GET || *method == Method::HEAD;
+        match path {
+            "/health" | "/about" | "/time" | "/public/hello" => read,
+            "/public/session" => read || *method == Method::POST || *method == Method::DELETE,
+            _ => false,
+        }
+    };
+    for path in api_paths() {
+        for method in METHODS {
+            for (who, request) in disguises(call(method.clone(), &path), &[]) {
+                let answer = send(&remote, request).await;
+                if path == "/public/session" && method == Method::POST {
+                    assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+                    assert!(answer.body.contains("not the director's access token"));
+                } else if open(&method, &path) {
+                    assert_ne!(
+                        answer.status,
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {path} ({who})"
+                    );
+                } else {
+                    assert_eq!(
+                        answer.status,
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {path} from {who} answered {}: {}",
+                        answer.status,
+                        answer.body
+                    );
+                    if method != Method::HEAD {
+                        assert!(!answer.body.contains(EVENT), "{method} {path} ({who})");
+                    }
+                }
+            }
+        }
+    }
+    // Not even the event's name is said before the token is shown.
+    let hello = send(&remote, get("/public/hello").visitor()).await;
+    assert!(!hello.body.contains(EVENT), "{}", hello.body);
+    let hello = hello.json();
+    assert_eq!(hello["caller"], "Visitor");
+    assert_eq!(hello["door"], "Remote");
+    assert_eq!(hello["director_sign_in"], true);
+    assert_eq!(event_names(&rig).await, [EVENT]);
+}
+
+#[tokio::test]
+async fn the_access_token_opens_the_whole_director_at_the_remote_door() {
+    let rig = rig(false);
+    let access = open_remote(&rig);
+    let remote = through(&rig, Door::Remote);
+    for path in api_paths() {
+        let answer = send(&remote, get(&path).visitor().bearer(&access)).await;
+        assert_ne!(answer.status, StatusCode::UNAUTHORIZED, "GET {path}");
+        assert_ne!(answer.status, StatusCode::FORBIDDEN, "GET {path}");
+    }
+    let made = send(
+        &remote,
+        post("/events", json!({"name": "From the pits"}))
+            .visitor()
+            .bearer(&access),
+    )
+    .await;
+    assert!(made.status.is_success(), "{}", made.body);
+    let hello = send(&remote, get("/public/hello").visitor().bearer(&access))
+        .await
+        .json();
+    assert_eq!(hello["caller"], "Director");
+    assert_eq!(hello["event"], EVENT);
+}
+
+#[tokio::test]
+async fn the_access_token_works_beside_a_token_the_director_was_started_with() {
+    // With a fixed token set, a write is checked a second time after the gate. The access
+    // token must pass that check too, and so must a sign-in made with it.
+    let rig = rig(true);
+    let access = open_remote(&rig);
+    let remote = through(&rig, Door::Remote);
+    let session = sign_in_at_remote(&rig, &access).await;
+    for (n, request) in [
+        post("/events", json!({"name": "One"}))
+            .visitor()
+            .bearer(&access),
+        post("/events", json!({"name": "Two"}))
+            .visitor()
+            .cookie(&session),
+        post("/events", json!({"name": "Three"}))
+            .visitor()
+            .bearer(TOKEN),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let made = send(&remote, request).await;
+        assert!(made.status.is_success(), "{n}: {}", made.body);
+    }
+}
+
+#[tokio::test]
+async fn the_access_token_is_taken_at_the_remote_door_and_nowhere_else() {
+    let rig = rig(false);
+    let access = open_remote(&rig);
+    // The Grid computer's own listener, reached as a visitor (through a proxy, say).
+    for request in [
+        get("/events").visitor().bearer(&access),
+        get("/events")
+            .header("x-forwarded-for", "10.0.0.9")
+            .bearer(&access),
+        get("/events").host("evil.example").bearer(&access),
+        get("/events").no_peer().bearer(&access),
+    ] {
+        assert_eq!(
+            status(&rig.app, request).await,
+            StatusCode::UNAUTHORIZED,
+            "the Grid computer's own listener took the access token"
+        );
+    }
+    let sign_in = send(
+        &rig.app,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .bearer(&access),
+    )
+    .await;
+    assert_eq!(sign_in.status, StatusCode::UNAUTHORIZED);
+    assert!(sign_in.set_cookie().is_none());
+    // The public door.
+    assert_eq!(
+        status(
+            &through(&rig, Door::Public),
+            get("/events").visitor().bearer(&access)
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    // On the Grid computer nothing is asked for, open door or not.
+    let made = send(&rig.app, post("/events", json!({"name": "At the desk"}))).await;
+    assert!(made.status.is_success(), "{}", made.body);
+}
+
+#[tokio::test]
+async fn a_sign_in_at_the_remote_door_does_not_carry_to_the_public_door() {
+    // A browser sends its cookies to every port of an address. A director who signed in at
+    // the Remote RD door and then opens the public pages is a visitor there.
+    let rig = rig(false);
+    let access = open_remote(&rig);
+    let session = sign_in_at_remote(&rig, &access).await;
+    let remote = through(&rig, Door::Remote);
+    let public = through(&rig, Door::Public);
+    assert_eq!(
+        status(&remote, get("/events").visitor().cookie(&session)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(&public, get("/events").visitor().cookie(&session)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let hello = send(&public, get("/public/hello").visitor().cookie(&session))
+        .await
+        .json();
+    assert_eq!(hello["caller"], "Visitor");
+}
+
+#[tokio::test]
+async fn nobody_who_comes_in_by_a_door_is_local_even_from_this_computer() {
+    let rig = rig(false);
+    open_remote(&rig);
+    for door in [Door::Public, Door::Remote] {
+        let app = through(&rig, door);
+        for request in [
+            get("/events"),
+            get("/events").host("localhost"),
+            get("/events").from("[::1]:50000").host("[::1]:8080"),
+            post("/events", json!({"name": "Sneaky"})),
+        ] {
+            assert_eq!(
+                status(&app, request).await,
+                StatusCode::UNAUTHORIZED,
+                "{door:?}"
+            );
+        }
+        let hello = send(&app, get("/public/hello")).await.json();
+        assert_eq!(hello["caller"], "Visitor", "{door:?}");
+    }
+    assert_eq!(event_names(&rig).await, [EVENT]);
+}
+
+#[tokio::test]
+async fn a_new_access_token_signs_every_other_device_out() {
+    let rig = rig(false);
+    let first = open_remote(&rig);
+    let remote = through(&rig, Door::Remote);
+    let session = sign_in_at_remote(&rig, &first).await;
+    let other = sign_in_at_remote(&rig, &first).await;
+    assert_ne!(session, other);
+
+    // Changed on the Grid computer, to one the director typed.
+    let changed = send(
+        &rig.app,
+        call(Method::PUT, "/network/token").json(json!({"token": "sunday-race-7"})),
+    )
+    .await;
+    assert_eq!(changed.status, StatusCode::OK, "{}", changed.body);
+    assert_eq!(changed.json()["token"], "sunday-race-7");
+
+    for held in [&session, &other] {
+        assert_eq!(
+            status(&remote, get("/events").visitor().cookie(held)).await,
+            StatusCode::UNAUTHORIZED,
+            "a sign-in made with the old token still worked"
+        );
+    }
+    assert_eq!(
+        status(&remote, get("/events").visitor().bearer(&first)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status(&remote, get("/events").visitor().bearer("sunday-race-7")).await,
+        StatusCode::OK
+    );
+    // Left out: Grid makes one.
+    let made = send(
+        &rig.app,
+        call(Method::PUT, "/network/token").json(json!({})),
+    )
+    .await
+    .json();
+    let made = made["token"].as_str().unwrap().to_string();
+    assert_eq!(made.len(), 14);
+    assert_eq!(
+        status(&remote, get("/events").visitor().bearer("sunday-race-7")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status(&remote, get("/events").visitor().bearer(&made)).await,
+        StatusCode::OK
+    );
+    // A token that cannot be used is refused, and the one in use stays.
+    let short = send(
+        &rig.app,
+        call(Method::PUT, "/network/token").json(json!({"token": "abc"})),
+    )
+    .await;
+    assert_eq!(short.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        status(&remote, get("/events").visitor().bearer(&made)).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn shutting_the_remote_door_signs_every_other_device_out() {
+    let rig = rig(false);
+    let access = open_remote(&rig);
+    let remote = through(&rig, Door::Remote);
+    let session = sign_in_at_remote(&rig, &access).await;
+    let shut = send(
+        &rig.app,
+        call(Method::PUT, "/network/remote").json(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(shut.status, StatusCode::OK, "{}", shut.body);
+    // The listener is gone by now; were a request to arrive all the same, it gets nothing.
+    for request in [
+        get("/events").visitor().cookie(&session),
+        get("/events").visitor().bearer(&access),
+    ] {
+        assert_eq!(status(&remote, request).await, StatusCode::UNAUTHORIZED);
+    }
+    let hello = send(&remote, get("/public/hello").visitor()).await.json();
+    assert_eq!(hello["director_sign_in"], false);
+    // Opened again, the same token works, and the old sign-in does not come back.
+    let again = send(
+        &rig.app,
+        call(Method::PUT, "/network/remote").json(json!({"enabled": true})),
+    )
+    .await
+    .json();
+    assert_eq!(again["token"], access);
+    assert_eq!(
+        status(&remote, get("/events").visitor().cookie(&session)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        status(&remote, get("/events").visitor().bearer(&access)).await,
+        StatusCode::OK
+    );
+    // Shutting the public door signs nobody out.
+    let session = sign_in_at_remote(&rig, &access).await;
+    send(
+        &rig.app,
+        call(Method::PUT, "/network/public").json(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(
+        status(&remote, get("/events").visitor().cookie(&session)).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn the_access_token_is_read_and_changed_on_the_grid_computer_only() {
+    let rig = rig(false);
+    let access = open_remote(&rig);
+    let remote = through(&rig, Door::Remote);
+    let session = sign_in_at_remote(&rig, &access).await;
+
+    // Read on the Grid computer.
+    let here = send(&rig.app, get("/network")).await.json();
+    assert_eq!(here["token"], access);
+    // A director on another device runs the whole console, but is never told the token.
+    for request in [
+        get("/network").visitor().bearer(&access),
+        get("/network").visitor().cookie(&session),
+    ] {
+        let answer = send(&remote, request).await;
+        assert_eq!(answer.status, StatusCode::OK);
+        assert!(answer.json().get("token").is_none(), "{}", answer.body);
+        assert!(!answer.body.contains(&access), "{}", answer.body);
+    }
+    // They may open and shut the doors, and the answer still holds no token.
+    let switched = send(
+        &remote,
+        call(Method::PUT, "/network/public")
+            .json(json!({"enabled": true, "port": 9000}))
+            .visitor()
+            .cookie(&session),
+    )
+    .await;
+    assert_eq!(switched.status, StatusCode::OK, "{}", switched.body);
+    assert!(!switched.body.contains(&access));
+    // They may not change the token.
+    for body in [json!({}), json!({"token": "mine-now-thanks"})] {
+        let answer = send(
+            &remote,
+            call(Method::PUT, "/network/token")
+                .json(body)
+                .visitor()
+                .cookie(&session),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+        assert!(answer.body.contains("on the Grid computer"));
+    }
+    assert!(rig.registry.network().is_token(&access));
+}
+
+#[tokio::test]
+async fn wrong_access_tokens_at_the_remote_door_shut_a_device_out_for_a_while() {
+    let rig = rig(false);
+    let access = open_remote(&rig);
+    let remote = through(&rig, Door::Remote);
+    for n in 0..MAX_FAILURES {
+        let answer = send(
+            &remote,
+            get("/events").visitor().bearer(&format!("guess-{n}")),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "try {n}");
+    }
+    // Now even the right one is refused, and told to wait.
+    let late = send(&remote, get("/events").visitor().bearer(&access)).await;
+    assert_eq!(late.status, StatusCode::TOO_MANY_REQUESTS, "{}", late.body);
+    let sign_in = send(
+        &remote,
+        call(Method::POST, "/public/session")
+            .visitor()
+            .bearer(&access),
+    )
+    .await;
+    assert_eq!(sign_in.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(sign_in.set_cookie().is_none());
+    // Another device is not held up by it.
+    assert_eq!(
+        status(
+            &remote,
+            get("/events")
+                .visitor()
+                .from("192.168.1.99:50000")
+                .bearer(&access)
+        )
+        .await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn another_website_cannot_change_anything_through_a_door() {
+    let rig = rig(false);
+    let access = open_remote(&rig);
+    let session = sign_in_at_remote(&rig, &access).await;
+    let remote = through(&rig, Door::Remote);
+    for origin in ["http://evil.example", "http://192.168.1.5:80", "null"] {
+        let answer = send(
+            &remote,
+            post("/events", json!({"name": "Sneaky"}))
+                .visitor()
+                .cookie(&session)
+                .header("origin", origin),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN, "{origin}");
+    }
+    // The door's own pages may.
+    let own = send(
+        &remote,
+        post("/events", json!({"name": "Mine"}))
+            .visitor()
+            .cookie(&session)
+            .header("origin", &format!("http://{LAN_HOST}")),
+    )
+    .await;
+    assert!(own.status.is_success(), "{}", own.body);
+}
+
+// ── The two doors, over real sockets ────────────────────────────────────────
+
+/// One request over a real connection, and its status.
+async fn ask(addr: SocketAddr, method: &str, path: &str, extra: &str, body: &str) -> (u16, String) {
+    let answer = raw(addr, &request(method, path, &addr.to_string(), extra, body))
+        .await
+        .unwrap();
+    (status_of(&answer), answer)
+}
+
+#[tokio::test]
+async fn over_real_sockets_each_door_is_its_own_port_and_keeps_its_own_rule() {
+    let running = start_local().await;
+    let made = raw(
+        running.addr,
+        &request(
+            "POST",
+            "/events",
+            &running.addr.to_string(),
+            "",
+            r#"{"name":"Real"}"#,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!((200..300).contains(&status_of(&made)), "{made}");
+
+    let (public, remote) = (free_port().await, free_port().await);
+    assert_ne!(public, remote);
+    assert_eq!(
+        running
+            .set_door("public", json!({"enabled": true, "port": public}))
+            .await,
+        200
+    );
+    assert_eq!(
+        running
+            .set_door("remote", json!({"enabled": true, "port": remote}))
+            .await,
+        200
+    );
+    running.door_until("public", "On").await;
+    running.door_until("remote", "On").await;
+    let token = running.whole_network().await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bearer = format!("Authorization: Bearer {token}\r\n");
+    let (public, remote) = (running.local(public), running.local(remote));
+
+    // The public door: the pages and the public routes, token or no token.
+    for extra in ["", bearer.as_str()] {
+        assert_eq!(ask(public, "GET", "/", extra, "").await.0, 200);
+        let (code, hello) = ask(public, "GET", "/public/hello", extra, "").await;
+        assert_eq!(code, 200);
+        assert!(hello.contains(r#""door":"Public""#), "{hello}");
+        assert!(hello.contains(r#""caller":"Visitor""#), "{hello}");
+        for (method, path, body) in [
+            ("GET", "/events", ""),
+            ("GET", "/network", ""),
+            ("POST", "/events", r#"{"name":"Sneaky"}"#),
+            ("POST", "/public/session", ""),
+            ("PUT", "/network/remote", r#"{"enabled":false}"#),
+            ("PUT", "/network/token", r#"{}"#),
+        ] {
+            let (code, answer) = ask(public, method, path, extra, body).await;
+            assert_eq!(code, 401, "{method} {path} ({extra:?}): {answer}");
+        }
+    }
+
+    // The remote door: nothing but the sign-in without the token, everything with it.
+    assert_eq!(ask(remote, "GET", "/", "", "").await.0, 200);
+    let (code, hello) = ask(remote, "GET", "/public/hello", "", "").await;
+    assert_eq!(code, 200);
+    assert!(hello.contains(r#""door":"Remote""#), "{hello}");
+    for (method, path) in [
+        ("GET", "/events"),
+        ("GET", "/network"),
+        ("GET", "/public/event"),
+        ("GET", "/public/event/state"),
+    ] {
+        assert_eq!(ask(remote, method, path, "", "").await.0, 401, "{path}");
+    }
+    let (code, events) = ask(remote, "GET", "/events", &bearer, "").await;
+    assert_eq!(code, 200, "{events}");
+    assert!(events.contains("Real"));
+    let (code, network) = ask(remote, "GET", "/network", &bearer, "").await;
+    assert_eq!(code, 200);
+    assert!(
+        !network.contains(&token),
+        "the token was told back: {network}"
+    );
+
+    // Signing in gives a cookie that works at the remote door and not at the public one.
+    let (code, signed) = ask(remote, "POST", "/public/session", &bearer, "").await;
+    assert_eq!(code, 204, "{signed}");
+    let session = signed
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("set-cookie")
+                .then(|| value.trim().split(';').next().unwrap().to_string())
+        })
+        .expect("a cookie was set");
+    let cookie = format!("Cookie: {session}\r\n");
+    assert_eq!(ask(remote, "GET", "/events", &cookie, "").await.0, 200);
+    assert_eq!(ask(public, "GET", "/events", &cookie, "").await.0, 401);
+
+    // Nothing was changed through the public door.
+    let (_, events) = ask(running.addr, "GET", "/events", "", "").await;
+    assert!(!events.contains("Sneaky"), "{events}");
+    assert_eq!(running.door("remote").await["state"], "On");
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_new_token_cuts_what_was_open_at_the_remote_door_and_leaves_the_public_door_alone() {
+    let running = start_local().await;
+    let host = running.addr.to_string();
+    let made = raw(
+        running.addr,
+        &request("POST", "/events", &host, "", r#"{"name":"Live"}"#),
+    )
+    .await
+    .unwrap();
+    let id = serde_json::from_str::<Value>(made.split("\r\n\r\n").nth(1).unwrap()).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let opened = raw(
+        running.addr,
+        &request(
+            "PUT",
+            "/active-event",
+            &host,
+            "",
+            &json!({"id": id}).to_string(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!((200..300).contains(&status_of(&opened)), "{opened}");
+
+    let (public, remote) = (free_port().await, free_port().await);
+    running
+        .set_door("public", json!({"enabled": true, "port": public}))
+        .await;
+    running
+        .set_door("remote", json!({"enabled": true, "port": remote}))
+        .await;
+    running.door_until("public", "On").await;
+    running.door_until("remote", "On").await;
+    let token = running.whole_network().await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    async fn follow(addr: SocketAddr, path: &str, extra: &str) -> TcpStream {
+        let mut feed = TcpStream::connect(addr).await.unwrap();
+        feed.write_all(format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut first = [0u8; 256];
+        let read = tokio::time::timeout(Duration::from_secs(3), feed.read(&mut first))
+            .await
+            .expect("the feed answered")
+            .unwrap();
+        let head = String::from_utf8_lossy(&first[..read]).into_owned();
+        assert!(head.starts_with("HTTP/1.1 200"), "{path}: {head}");
+        feed
+    }
+    async fn ends_soon(feed: &mut TcpStream) -> bool {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut sink = [0u8; 1024];
+            loop {
+                match feed.read(&mut sink).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    let mut director = follow(
+        running.local(remote),
+        &format!("/events/{id}/changes"),
+        &format!("Authorization: Bearer {token}\r\n"),
+    )
+    .await;
+    let mut spectator = follow(running.local(public), "/public/event/changes", "").await;
+
+    // A new token, made on the Grid computer.
+    let changed = raw(
+        running.addr,
+        &request("PUT", "/network/token", &host, "", "{}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status_of(&changed), 200, "{changed}");
+    assert!(
+        ends_soon(&mut director).await,
+        "a feed opened with the old token stayed open"
+    );
+    assert!(
+        !ends_soon(&mut spectator).await,
+        "a spectator's feed was cut by a change to the director's token"
+    );
+    // The remote door comes back on the same port, and takes the new token only.
+    let view = running.door_until("remote", "On").await;
+    assert_eq!(view["port"], remote);
+    let next = running.whole_network().await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(next, token);
+    let mut answered = (0, String::new());
+    for _ in 0..40 {
+        if let Ok(answer) = raw(
+            running.local(remote),
+            &request(
+                "GET",
+                "/events",
+                &format!("127.0.0.1:{remote}"),
+                &format!("Authorization: Bearer {next}\r\n"),
+                "",
+            ),
+        )
+        .await
+        {
+            answered = (status_of(&answer), answer);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(answered.0, 200, "{}", answered.1);
+    let (old, _) = ask(
+        running.local(remote),
+        "GET",
+        "/events",
+        &format!("Authorization: Bearer {token}\r\n"),
+        "",
+    )
+    .await;
+    assert_eq!(old, 401);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn the_two_doors_cannot_be_put_on_one_port_or_on_the_directors_own() {
+    let running = start_local().await;
+    let own = running.addr.port();
+    for door in ["public", "remote"] {
+        assert_eq!(
+            running
+                .set_door(door, json!({"enabled": true, "port": own}))
+                .await,
+            400,
+            "{door}"
+        );
+    }
+    let port = free_port().await;
+    assert_eq!(
+        running
+            .set_door("public", json!({"enabled": true, "port": port}))
+            .await,
+        200
+    );
+    running.door_until("public", "On").await;
+    assert_eq!(
+        running
+            .set_door("remote", json!({"enabled": true, "port": port}))
+            .await,
+        400
+    );
+    assert_eq!(running.door("remote").await["state"], "Off");
+    assert_eq!(running.door("public").await["state"], "On");
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn the_doors_and_the_token_are_remembered_across_a_restart() {
+    let data = temp_dir("doors-saved");
+    let (public, remote) = (free_port().await, free_port().await);
+    let running = start(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        Some(data.clone()),
+    )
+    .await;
+    running
+        .set_door("public", json!({"enabled": true, "port": public}))
+        .await;
+    running
+        .set_door("remote", json!({"enabled": true, "port": remote}))
+        .await;
+    running.door_until("remote", "On").await;
+    let token = running.whole_network().await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    running.stop().await;
+
+    let again = start(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        Some(data.clone()),
+    )
+    .await;
+    assert_eq!(again.door_until("public", "On").await["port"], public);
+    assert_eq!(again.door_until("remote", "On").await["port"], remote);
+    assert_eq!(again.whole_network().await["token"], token);
+    let (code, _) = ask(
+        again.local(remote),
+        "GET",
+        "/events",
+        &format!("Authorization: Bearer {token}\r\n"),
+        "",
+    )
+    .await;
+    assert_eq!(code, 200);
+    again.stop().await;
+    std::fs::remove_dir_all(data).ok();
 }

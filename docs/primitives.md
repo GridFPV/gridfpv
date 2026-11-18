@@ -1287,3 +1287,65 @@ Check-in is for practice with no plan at all.
 **Not built:** counting a checked-in pilot in the heat's ranking; a pilot marking themselves
 "out" (a checked-in pilot drops the seat instead); check-in to a class roster (§4), which is
 a different thing with the same name.
+
+### 11.10 Three ways in: the Grid computer, Public and Remote RD (Built 2026-11-18)
+
+Grid is reached three ways. Each is a listener on its own port, and the way a request came
+in decides what it may do.
+
+| Way in | For | Port | Switch |
+|---|---|---|---|
+| **The Grid computer** | The director, sitting at it. No password | 8080, this computer only | Always on |
+| **Public** | Spectators, pilots, kiosks (§11.2 to §11.5) | 80, or 8081 when 80 cannot be used | **Enable Public** |
+| **Remote RD** | The director, on another device. The whole console | 8082 | **Enable Remote RD** |
+
+The rules:
+
+- **The Grid computer's own listener is never put on the network.** Whoever reaches it is
+  trusted as the director, so it only ever listens on this computer. There is no setting,
+  flag or start-up option that changes this. A Director on a machine with no screen is
+  reached through an SSH tunnel, which arrives as the machine itself.
+- **Nobody is the director at the Public door.** A token or a director's sign-in sent
+  there is not looked at, and the director's sign-in does not answer there. This holds even
+  for a browser that is signed in at the Remote RD door: a browser sends its cookies to
+  every port of an address, and at the Public door they count for nothing.
+- **The Remote RD door is not for looking.** Until the access token is shown it gives the
+  sign-in page and nothing about the race, not even the event's name.
+- **Nobody who comes in by a door is local,** even from the Grid computer itself.
+- **Both doors are off until switched on,** each by its own switch on the Network page.
+  Switching one off closes every connection it had open.
+- **Ports.** Each door has a usual port and the director can pick another. Public tries 80
+  first, so the address is short to type and to put in a QR code; where the computer does
+  not allow that, it uses 8081 and says so. The two doors and the Grid computer's own
+  listener never share a port.
+
+**The access token** is what the Remote RD door asks for.
+
+- Grid makes it the first time the door is opened: twelve letters and digits, in three
+  groups, with none that look alike. The director can type their own instead.
+- It is **shown on the Grid computer**, at any time. A device that signed in with it is
+  never told it, and cannot change it.
+- Changing it, or shutting the door, signs every other device out at once and closes what
+  they had open.
+- It is kept in `network.json`, which stays out of a copy made on the Data page.
+
+A kiosk, a pilot's QR code and the spectator's page all use the **Public** address.
+
+**Agreed, not built.** Each of these is decided (Ryan, 2026-11-18) and waits its turn.
+
+- **A QR code on the kiosk.** The kiosk's sign-in page shows a QR code that opens the
+  public pages on a pilot's own phone. It is drawn in the app's colours, not black and
+  white, with dark squares on a light ground so every phone camera reads it. Next in line.
+- **A name for the race network.** Where the field's network has DNS, the director types a
+  name such as `grid.race.lan` on the Network page. Every address Grid gives out, and every
+  QR code, then uses the name and not a number. Grid does not run DNS itself; it only uses
+  the name it is told.
+- **HTTPS.** Three ways, built in this order: the director's own key and certificate; a
+  certificate Grid signs itself (every phone warns about it, so it suits Remote RD more
+  than Public); and Certbot, as an option only, since it needs the internet and race day
+  must not (§11.1). With HTTPS on, Public's usual port is 443.
+- **Overlays for an OBS on a second computer.** Today the overlay pages are served by the
+  Grid computer's own listener, so OBS must run on the Grid computer. The plan is to serve
+  them at the Public door, since an overlay shows only what a spectator may see, and to
+  keep the overlay settings for the director. To check first: that the overlay pages read
+  nothing but the public routes.

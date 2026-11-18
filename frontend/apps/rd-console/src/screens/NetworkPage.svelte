@@ -1,23 +1,23 @@
 <script lang="ts">
   /**
-   * NetworkPage — whether other devices can open Grid (docs/primitives.md §11).
+   * NetworkPage — how other devices reach Grid (docs/primitives.md §11.10).
    *
-   * Grid starts out answering only the computer it runs on. This page has the one switch
-   * that lets phones, tablets and other computers on the same network open it too, and
-   * shows the address to type on them.
+   * Grid starts out answering only the computer it runs on. This page has two switches,
+   * each with its own port:
    *
-   * It also says, plainly, what those devices can do: look. Nothing on this page gives a
-   * visitor more than that. The rule itself is in the Director (`access.rs`).
+   * - **Public**: the spectator, pilot and kiosk pages.
+   * - **Remote RD**: the whole console, for a director on another device. It asks for the
+   *   access token, which is shown here on the Grid computer and nowhere else.
    *
-   * A Director that was started on the network already (`GRIDFPV_ADDR`) is always on. The
-   * switch is hidden then, because it would do nothing.
+   * What a caller at each door may do is decided in the Director (`access.rs`).
    */
-  import { Badge, Banner, Button, Card, Dialog, Input, toast } from '@gridfpv/components';
-  import type { KioskView, NetworkRequest, NetworkView, PublicHello } from '@gridfpv/types';
+  import { Banner, Button, Card, Dialog, Input, toast } from '@gridfpv/components';
+  import type { Door, DoorRequest, KioskView, NetworkView, PublicHello } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import { kioskLink, setUpWords, spellKioskCode } from '../lib/kiosk.js';
-  import { portProblem, reachable, refreshEvery, stateLabel, stateTone } from '../lib/network.js';
+  import { hostOf, reachable, refreshEvery, tokenProblem } from '../lib/network.js';
   import type { Session } from '../lib/session.svelte.js';
+  import DoorCard from './DoorCard.svelte';
 
   let {
     session
@@ -25,7 +25,8 @@
     session: Pick<
       Session,
       | 'getNetwork'
-      | 'putNetwork'
+      | 'putDoor'
+      | 'putAccessToken'
       | 'hello'
       | 'signOutDirector'
       | 'getKiosks'
@@ -41,20 +42,12 @@
   let loadError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
   let busy = $state(false);
-  /** The port as typed. Follows the Director's until the director edits it. */
-  let portText = $state('');
-  let portEdited = $state(false);
 
   const say = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-  function take(next: NetworkView) {
-    view = next;
-    if (!portEdited) portText = String(next.port);
-  }
-
   async function load() {
     try {
-      take(await session.getNetwork());
+      view = await session.getNetwork();
       loadError = undefined;
     } catch (err) {
       loadError = say(err);
@@ -99,7 +92,7 @@
     }
   }
 
-  // Read it now, and keep reading: the listener starts a moment after the switch, and this
+  // Read it now, and keep reading: a listener starts a moment after its switch, and this
   // computer's address changes when it joins another network.
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -110,7 +103,7 @@
     timer = setTimeout(async () => {
       await load();
       schedule();
-    }, refreshEvery(view?.state));
+    }, refreshEvery(view));
   }
   $effect(() => {
     stopped = false;
@@ -125,47 +118,49 @@
     };
   });
 
-  async function send(request: NetworkRequest, done?: string) {
-    if (busy) return;
+  /** Send a change, and take the Director's answer. `true` when it was taken. */
+  async function change(what: () => Promise<NetworkView | undefined>): Promise<boolean> {
+    if (busy) return false;
     busy = true;
     error = undefined;
     try {
-      const next = await session.putNetwork(request);
-      if (next) {
-        portEdited = false;
-        take(next);
-        // The wait before the next read depends on the state, which has just changed.
-        schedule();
-        if (done) toast.success(done);
-      }
+      const next = await what();
+      if (!next) return false;
+      view = next;
+      // The wait before the next read depends on the state, which has just changed.
+      schedule();
+      return true;
     } catch (err) {
       error = say(err);
+      return false;
     } finally {
       busy = false;
     }
   }
+  const setDoor = (door: Door) => (request: DoorRequest) =>
+    change(() => session.putDoor(door, request));
 
-  const always = $derived(view?.state === 'Always');
-  const portTrouble = $derived(portEdited ? portProblem(portText) : undefined);
-  const portChanged = $derived(
-    portEdited && view !== undefined && portText.trim() !== String(view.port)
-  );
+  // ── The access token ───────────────────────────────────────────────────────
+  /** The token dialog: open, and what is typed in it. */
+  let changing = $state<{ typed: string } | undefined>(undefined);
+  const tokenTrouble = $derived(changing ? tokenProblem(changing.typed) : undefined);
 
-  function turn(on: boolean) {
-    void send({ enabled: on }, on ? undefined : 'Other devices can no longer open Grid.');
+  async function saveToken(e: Event) {
+    e.preventDefault();
+    const typed = changing?.typed.trim();
+    if (typed === undefined || tokenTrouble) return;
+    if (await change(() => session.putAccessToken(typed === '' ? undefined : typed))) {
+      changing = undefined;
+      toast.success('The access token is changed.');
+    }
   }
-  function savePort(e?: Event) {
-    e?.preventDefault();
-    if (!view || portProblem(portText)) return;
-    void send({ enabled: view.enabled, port: Number(portText.trim()) });
-  }
 
-  async function copy(address: string) {
+  async function copy(text: string) {
     try {
-      await navigator.clipboard.writeText(address);
+      await navigator.clipboard.writeText(text);
       toast.success('Copied.');
     } catch {
-      toast.error('Could not copy. Select the address and copy it by hand.');
+      toast.error('Could not copy. Select it and copy it by hand.');
     }
   }
 
@@ -178,11 +173,7 @@
   }
 </script>
 
-<Page
-  title="Network"
-  help="network"
-  lede="Let phones and other computers on your network open Grid to look."
->
+<Page title="Network" help="network" lede="Let other devices on your network open Grid.">
   {#if loadError}
     <Banner tone="danger" title="Grid could not read its network setting.">{loadError}</Banner>
   {/if}
@@ -191,187 +182,155 @@
   {/if}
 
   {#if view}
-    <Card title="Other devices" elevation="sm">
-      <p class="state">
-        <Badge tone={stateTone(view.state)}>
-          <span data-testid="network-state">{stateLabel(view.state)}</span>
-        </Badge>
-        {#if view.state === 'Off'}
-          Only this computer can open Grid.
-        {:else if view.state === 'Starting'}
-          Starting…
-        {:else if reachable(view)}
-          Other devices on this network can open Grid.
-        {/if}
-      </p>
-
-      {#if view.problem}
-        <Banner tone={view.state === 'Failed' ? 'danger' : 'warn'}>
-          <span data-testid="network-problem">{view.problem}</span>
-        </Banner>
-      {/if}
-
-      {#if always}
-        <p>
-          Grid was started on the network, so this is always on. To turn it off, start Grid without
-          a network address.
-        </p>
-      {:else}
-        <div class="row">
-          {#if view.enabled}
-            <Button disabled={busy} onclick={() => turn(false)}>Turn off</Button>
-          {:else}
-            <Button variant="primary" disabled={busy} onclick={() => turn(true)}>
-              Let other devices open Grid
-            </Button>
-          {/if}
-        </div>
-      {/if}
-
-      {#if reachable(view)}
-        <h3>Open this on the other device</h3>
-        <ul class="addresses" aria-label="Addresses for other devices">
-          {#each view.addresses as address (address)}
-            <li>
-              <a href={address} target="_blank" rel="noreferrer">{address}</a>
-              <Button size="sm" variant="ghost" onclick={() => copy(address)}>Copy</Button>
-            </li>
-          {/each}
-        </ul>
-        <p class="muted">
-          The device must be on the same Wi-Fi or network as this computer.
-          {#if view.addresses.length > 1}
-            The first address is the one that usually works. This computer is on more than one
-            network, so if it does not open, try the next one.
-          {/if}
-        </p>
-      {/if}
-
-      {#if !always}
-        <form class="port" onsubmit={savePort} aria-label="Port for other devices">
-          <label for="network-port">Port</label>
-          <span class="port-input">
-            <Input
-              id="network-port"
+    <div class="doors">
+      <DoorCard
+        name="Public"
+        what="Spectators, pilots and kiosks"
+        door={view.public}
+        {busy}
+        onchange={setDoor('Public')}
+      />
+      <DoorCard
+        name="Remote RD"
+        what="Run Grid from another device"
+        door={view.remote}
+        {busy}
+        onchange={setDoor('Remote')}
+      >
+        {#if view.token}
+          <div class="token">
+            <span class="token-label" id="token-label">Access token</span>
+            <code aria-labelledby="token-label" data-testid="access-token">{view.token}</code>
+            <Button
               size="sm"
-              inputmode="numeric"
-              autocomplete="off"
-              bind:value={portText}
-              oninput={() => (portEdited = true)}
-              disabled={busy}
-            />
-          </span>
-          <Button
-            size="sm"
-            type="submit"
-            disabled={busy || !portChanged || portTrouble !== undefined}>Change port</Button
-          >
-          {#if portTrouble}<span class="error" role="alert">{portTrouble}</span>{/if}
-        </form>
-        <p class="muted">
-          Leave the port alone unless Grid says it is in use. The first time you turn this on,
-          Windows may ask whether Grid may use the network. Say yes for private networks.
-        </p>
-      {/if}
-    </Card>
-
-    <Card title="Kiosks" elevation="sm">
-      <p>
-        A kiosk is a tablet at your stand where a pilot with no phone types their code to sign up.
-        Only a tablet you set up here can be one.
-      </p>
-      {#if kioskError}<Banner tone="danger">{kioskError}</Banner>{/if}
-      {#if reachable(view) && view.addresses.length > 0}
-        <ol class="steps">
-          <li>
-            On the tablet, open
-            <a
-              href={kioskLink(view.addresses[0])}
-              target="_blank"
-              rel="noreferrer"
-              data-testid="kiosk-link">{kioskLink(view.addresses[0])}</a
+              variant="ghost"
+              aria-label="Copy the access token"
+              onclick={() => view?.token && copy(view.token)}>Copy</Button
             >
-          </li>
-          <li>Make a kiosk code here and type it on the tablet. A code works once.</li>
-        </ol>
-      {:else}
-        <p class="muted">Let other devices open Grid first. A kiosk is another device.</p>
-      {/if}
-      <div class="row">
-        <Button
-          variant="primary"
-          disabled={kioskBusy}
-          onclick={() => kioskChange(() => session.newKioskCode())}>New kiosk code</Button
-        >
-      </div>
-      {#if kiosks && kiosks.codes.length > 0}
-        <h3>Codes waiting to be used</h3>
-        <ul class="kiosk-list" aria-label="Kiosk codes waiting to be used">
-          {#each kiosks.codes as code (code)}
-            <li>
-              <span class="kiosk-code" data-testid="kiosk-code">{spellKioskCode(code)}</span>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={kioskBusy}
-                aria-label="Cancel kiosk code {spellKioskCode(code)}"
-                onclick={() => kioskChange(() => session.cancelKioskCode(code))}>Cancel</Button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      {#if kiosks && kiosks.kiosks.length > 0}
-        <h3>Kiosks set up</h3>
-        <ul class="kiosk-list" aria-label="Kiosks set up">
-          {#each kiosks.kiosks as kiosk (kiosk.number)}
-            <li>
-              <span>
-                Kiosk {kiosk.number}{#if kiosk.name}{': '}<strong data-testid="kiosk-name"
-                    >{kiosk.name}</strong
-                  >{/if}
-              </span>
-              <span class="muted">set up {setUpWords(kiosk.set_up_at)}</span>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={kioskBusy}
-                aria-label="Name kiosk {kiosk.number}"
-                onclick={() => (naming = { number: kiosk.number, name: kiosk.name ?? '' })}
-                >{kiosk.name ? 'Rename' : 'Name it'}</Button
-              >
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={kioskBusy}
-                title="That tablet stops being a kiosk"
-                aria-label="Remove kiosk {kiosk.number}"
-                onclick={() => kioskChange(() => session.removeKiosk(kiosk.number))}>Remove</Button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </Card>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onclick={() => (changing = { typed: '' })}>Change…</Button
+            >
+          </div>
+        {/if}
+        {#if hello?.caller === 'Director'}
+          <p class="signed-in">
+            This device is signed in with the access token.
+            <Button size="sm" onclick={signOut}>Sign out on this device</Button>
+          </p>
+        {/if}
+      </DoorCard>
+    </div>
 
-    <Card title="What other devices can do" elevation="sm">
-      <p>
-        They can look. They cannot start or stop a race, change a lap, or change any setting. Only
-        this computer can do those things.
-      </p>
-      <p>
-        Anyone on the same network can open the address above, so turn this on only on a network you
-        are happy to share the race with.
-      </p>
-      {#if hello?.caller === 'Director'}
-        <p>
-          This device is signed in as the director with the access token.
-          <Button size="sm" onclick={signOut}>Sign out on this device</Button>
-        </p>
-      {/if}
+    <Card elevation="sm">
+      <div class="kiosks" data-testid="kiosks">
+        <header>
+          <div class="title">
+            <h2>Kiosks</h2>
+            <p class="what">A tablet where pilots sign up</p>
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={kioskBusy}
+            onclick={() => kioskChange(() => session.newKioskCode())}>New kiosk code</Button
+          >
+        </header>
+        {#if kioskError}<Banner tone="danger">{kioskError}</Banner>{/if}
+        {#if reachable(view.public)}
+          <a
+            class="kiosk-address"
+            href={kioskLink(view.public.addresses[0])}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="kiosk-link">{hostOf(kioskLink(view.public.addresses[0]))}</a
+          >
+        {:else}
+          <p class="muted">Enable Public first.</p>
+        {/if}
+        {#if kiosks && kiosks.codes.length > 0}
+          <ul class="kiosk-list" aria-label="Kiosk codes waiting to be used">
+            {#each kiosks.codes as code (code)}
+              <li>
+                <span class="kiosk-code" data-testid="kiosk-code">{spellKioskCode(code)}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={kioskBusy}
+                  aria-label="Cancel kiosk code {spellKioskCode(code)}"
+                  onclick={() => kioskChange(() => session.cancelKioskCode(code))}>Cancel</Button
+                >
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if kiosks && kiosks.kiosks.length > 0}
+          <ul class="kiosk-list" aria-label="Kiosks set up">
+            {#each kiosks.kiosks as kiosk (kiosk.number)}
+              <li>
+                <span>
+                  Kiosk {kiosk.number}{#if kiosk.name}{': '}<strong data-testid="kiosk-name"
+                      >{kiosk.name}</strong
+                    >{/if}
+                </span>
+                <span class="muted">set up {setUpWords(kiosk.set_up_at)}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={kioskBusy}
+                  aria-label="Name kiosk {kiosk.number}"
+                  onclick={() => (naming = { number: kiosk.number, name: kiosk.name ?? '' })}
+                  >{kiosk.name ? 'Rename' : 'Name it'}</Button
+                >
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={kioskBusy}
+                  title="That tablet stops being a kiosk"
+                  aria-label="Remove kiosk {kiosk.number}"
+                  onclick={() => kioskChange(() => session.removeKiosk(kiosk.number))}
+                  >Remove</Button
+                >
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     </Card>
   {/if}
 </Page>
+
+{#if changing}
+  {@const draft = changing}
+  <Dialog open={true} title="Change the access token" onclose={() => (changing = undefined)}>
+    <form id="access-token" onsubmit={saveToken} aria-label="Access token">
+      <label for="access-token-box">New token</label>
+      <Input
+        id="access-token-box"
+        autocomplete="off"
+        spellcheck="false"
+        maxlength={64}
+        placeholder="Leave empty and Grid makes one"
+        bind:value={draft.typed}
+        disabled={busy}
+      />
+      {#if tokenTrouble}<p class="error" role="alert">{tokenTrouble}</p>{/if}
+      <p class="muted">Every device signed in with the old token is signed out.</p>
+      {#if error}<Banner tone="danger">{error}</Banner>{/if}
+    </form>
+    {#snippet footer()}
+      <Button variant="ghost" onclick={() => (changing = undefined)}>Cancel</Button>
+      <Button
+        variant="primary"
+        type="submit"
+        form="access-token"
+        disabled={busy || tokenTrouble !== undefined}>Change</Button
+      >
+    {/snippet}
+  </Dialog>
+{/if}
 
 {#if naming}
   {@const target = naming}
@@ -404,57 +363,80 @@
     margin: 0 0 var(--gf-space-3);
     max-width: 65ch;
   }
-  h3 {
-    margin: var(--gf-space-3) 0 var(--gf-space-2);
-    font-size: var(--gf-font-size-sm);
-  }
-  .state {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-2);
-    flex-wrap: wrap;
-  }
-  .row {
-    display: flex;
-    gap: var(--gf-space-3);
-    align-items: center;
-    margin-bottom: var(--gf-space-3);
-  }
-  .addresses {
-    list-style: none;
-    margin: 0 0 var(--gf-space-2);
-    padding: 0;
+  /* The two doors are always the same height, whatever each has to show. */
+  .doors {
     display: grid;
-    gap: var(--gf-space-1);
+    grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+    gap: var(--gf-space-4);
+    align-items: stretch;
+    margin-bottom: var(--gf-space-4);
   }
-  .addresses li {
+  .doors > :global(*) {
+    height: 100%;
+    box-sizing: border-box;
+  }
+  /* The kiosks card is laid out like a door's: a name, a few words, an address. */
+  .kiosks {
+    display: grid;
+    gap: var(--gf-space-3);
+  }
+  .kiosks header {
     display: flex;
     align-items: center;
-    gap: var(--gf-space-2);
-    flex-wrap: wrap;
+    gap: var(--gf-space-3);
   }
-  .addresses a {
-    font-family: var(--gf-font-mono);
-    font-size: var(--gf-font-size-sm);
-    overflow-wrap: anywhere;
+  .kiosks .title {
+    flex: 1;
+    min-width: 0;
   }
-  /* The first address is the one to use. The rest are there in case. */
-  .addresses li:first-child a {
+  .kiosks h2 {
+    margin: 0;
     font-size: var(--gf-font-size-lg);
   }
-  .steps {
-    margin: 0 0 var(--gf-space-3);
-    padding-left: var(--gf-space-5);
-    display: grid;
-    gap: var(--gf-space-1);
+  .kiosks p {
+    margin: 0;
   }
-  .steps a {
+  .what {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  .kiosk-address {
     font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-xl);
+    font-weight: var(--gf-font-weight-semibold);
     overflow-wrap: anywhere;
+    justify-self: start;
+  }
+  .token {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+  }
+  .token-label {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  .token code {
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-lg);
+    letter-spacing: 0.06em;
+    padding: var(--gf-space-1) var(--gf-space-2);
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    user-select: all;
+  }
+  .signed-in {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    font-size: var(--gf-font-size-sm);
   }
   .kiosk-list {
     list-style: none;
-    margin: 0 0 var(--gf-space-2);
+    margin: 0;
     padding: 0;
     display: grid;
     gap: var(--gf-space-1);
@@ -469,20 +451,6 @@
     font-family: var(--gf-font-mono);
     font-size: var(--gf-font-size-xl);
     letter-spacing: 0.08em;
-  }
-  .port {
-    display: flex;
-    align-items: center;
-    gap: var(--gf-space-2);
-    flex-wrap: wrap;
-    margin: var(--gf-space-3) 0 var(--gf-space-2);
-    font-size: var(--gf-font-size-sm);
-  }
-  .port label {
-    font-weight: var(--gf-font-weight-semibold);
-  }
-  .port-input {
-    width: 7rem;
   }
   .muted {
     color: var(--gf-text-muted);

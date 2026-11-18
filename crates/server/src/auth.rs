@@ -191,6 +191,15 @@ impl TokenStore {
     }
 
     /// Register a session for `role` under a fresh opaque token and return the token.
+    /// End every browser sign-in at once: the access token was changed, or the door a
+    /// director signs in by was shut. A fixed token (the Director's own) is kept.
+    pub fn end_browser_sessions(&self) {
+        self.sessions
+            .write()
+            .expect("token store lock poisoned")
+            .retain(|_, session| !session.browser);
+    }
+
     fn issue(&self, role: Role) -> String {
         let token = random_token();
         self.sessions
@@ -392,6 +401,16 @@ impl FromRequestParts<EventRegistry> for ControlAuth {
         // director signed in from a browser on another device sends a cookie instead.
         // Either is enough: a browser signed in by cookie may also send an old token it
         // once had typed in, and that must not undo the sign-in.
+        //
+        // A caller the gate has already taken for the director, by the access token of the
+        // Remote RD door or a sign-in made with it, needs nothing more here.
+        if parts
+            .extensions
+            .get::<crate::access::Access>()
+            .is_some_and(|access| access.director)
+        {
+            return Ok(ControlAuth { _private: () });
+        }
         let tokens = crate::access::presented_tokens(&parts.headers);
         let mut refusal = None;
         for token in &tokens {
