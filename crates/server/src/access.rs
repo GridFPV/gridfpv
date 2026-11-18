@@ -1,21 +1,32 @@
-//! Who is asking, and what they may do (docs/primitives.md §11).
+//! Who is asking, and what they may do (docs/primitives.md §11, §11.10).
 //!
-//! The Director is used from two places. The **Grid computer itself** is trusted: that is
-//! the director, sitting at it. **Everything else on the network** is a visitor: a phone at
-//! the field, a tablet, another computer. A visitor may look at what is public and nothing
-//! more, unless they hold the director's access token.
+//! There are three ways in, each a listener on its own port:
 //!
-//! The gate is the one place that rule is applied. [`guard`] puts it around the whole app:
-//! [`gate_api`] on every API route, and [`gate_files`] on everything else (the console's
-//! files and pages). The two differ in one way only, which is what a visitor may read. A
-//! request is judged by which of the two actually answers it, never by the look of its
-//! path, so a new API route is closed to visitors until it is listed here.
+//! - **The Grid computer's own**, which answers this computer only. A caller there is the
+//!   director, and needs no token.
+//! - **The Public door** ([`Door::Public`]), for spectators, pilots and kiosks. A caller
+//!   there may read the console's files and use what is under `/public`, and nothing else.
+//!   **Nobody is the director at this door.** A token or a director's sign-in sent to it is
+//!   not even looked at, and the director's sign-in route does not answer.
+//! - **The Remote RD door** ([`Door::Remote`]), for a director on another device. A caller
+//!   there who shows the access token (or a sign-in made with it) has the whole Director.
+//!   One who does not gets the console's files, so the sign-in page can load, and the few
+//!   routes that page needs ([`is_remote_open_api`]). Nothing public is read there.
+//!
+//! The gate is the one place those rules are applied. [`guard`] puts it around the whole
+//! app: [`gate_api`] on every API route, and [`gate_files`] on everything else (the
+//! console's files and pages). A request is judged by which of the two actually answers
+//! it, never by the look of its path, so a new API route is closed to visitors until it is
+//! listed here. Which door a request came in by is said by the listener that took it
+//! (`gridfpv_app::network` adds the [`Door`] to each request); a request with none came in
+//! by the Grid computer's own listener.
 //!
 //! A router with no gate around it (the unit tests' `router(...)`) behaves as before.
 //!
 //! # Who counts as local
 //!
-//! All of these must hold ([`classify`]):
+//! Only a caller at the Grid computer's own listener can. All of these must hold
+//! ([`classify`]):
 //!
 //! - the connection comes from this computer (a loopback address);
 //! - the request was not passed on by a proxy (no `Forwarded`, `X-Forwarded-*`, `X-Real-IP`
@@ -25,20 +36,13 @@
 //!   rebinding") fails this, and is treated as a visitor.
 //!
 //! Anything that cannot be told is a visitor. A request with no known peer address is a
-//! visitor.
-//!
-//! # What a visitor may do
-//!
-//! Without the token: read the console's files ([`may_read_files`]), and read `/health`,
-//! `/about`, `/time` and everything under `/public` ([`is_public_api`]). Everything else
-//! answers 401.
-//!
-//! With the director's token (a `Bearer` header, or the session cookie set by
-//! `POST /public/session`): everything, exactly as on the Grid computer.
+//! visitor. A visitor at the Grid computer's own listener (one of the cases above) may read
+//! what is public, and is the director only with a token the Director was started with.
+//! The access token of the Remote RD door is taken at that door and nowhere else.
 //!
 //! # Guessing the token
 //!
-//! A visitor who sends a wrong token is counted, by address. After
+//! A caller who sends a wrong token is counted, by address. After
 //! [`MAX_FAILURES`] wrong tries in [`FAILURE_WINDOW`], that address is refused (429) until
 //! the window has passed, whatever token it sends.
 //!
@@ -63,6 +67,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
+pub use crate::network::Door;
 
 /// Where a request came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +82,8 @@ pub enum Origin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Access {
     pub origin: Origin,
+    /// The door the request came in by. `None`: the Grid computer's own listener.
+    pub door: Option<Door>,
     /// Whether the caller showed the director's token. Always `false` for a local caller,
     /// who needs none.
     pub director: bool,
@@ -323,6 +330,8 @@ pub const PUBLIC_PREFIX: &str = "/public";
 /// Signing in and out as the director, from a visitor's browser. Open to visitors because
 /// it is how one stops being one; the handler checks the token itself.
 pub const SESSION_PATH: &str = "/public/session";
+/// Who the Director takes the caller for. Every door answers it.
+pub const HELLO_PATH: &str = "/public/hello";
 /// Signing in and out as a pilot, with the pilot's own code (see `pilot_access`).
 pub const PILOT_SESSION_PATH: &str = "/public/pilot/session";
 /// What a pilot does for themselves, such as signing up for a heat. A visitor may send
@@ -348,6 +357,21 @@ pub fn is_public_api(method: &Method, raw_path: &str) -> bool {
         || path
             .strip_prefix(PUBLIC_PREFIX)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether a caller at the Remote RD door who has not shown the token may make this
+/// request of the **API**: say hello, sign in and out, and the plain reads a page needs to
+/// tell that Grid is there. Nothing about the race.
+pub fn is_remote_open_api(method: &Method, raw_path: &str) -> bool {
+    if is_odd_path(raw_path) {
+        return false;
+    }
+    let path = decoded(raw_path);
+    let read = method == Method::GET || method == Method::HEAD;
+    if path == SESSION_PATH {
+        return read || method == Method::POST || method == Method::DELETE;
+    }
+    read && (PUBLIC_READS.contains(&path.as_str()) || path == HELLO_PATH)
 }
 
 /// Whether a visitor with no token may make this request of the **console's files**: any
@@ -488,7 +512,13 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0);
-    let origin = classify(peer, request.headers(), request.uri());
+    let door = request.extensions().get::<Door>().copied();
+    // Only the Grid computer's own listener has local callers. Whoever comes in by a door
+    // is on the network, even from this computer.
+    let origin = match door {
+        None => classify(peer, request.headers(), request.uri()),
+        Some(_) => Origin::Network,
+    };
     let method = request.method().clone();
     let reads = method == Method::GET || method == Method::HEAD || method == Method::OPTIONS;
 
@@ -502,6 +532,31 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
     if origin == Origin::Local {
         request.extensions_mut().insert(Access {
             origin,
+            door,
+            director: false,
+            blocked: false,
+        });
+        return next.run(request).await;
+    }
+
+    let path = request.uri().path().to_string();
+
+    // The Public door. Nobody is the director here: no token is looked at, and the
+    // director's sign-in does not answer.
+    if door == Some(Door::Public) {
+        let allowed = match part {
+            Part::Api => is_public_api(&method, &path) && decoded(&path) != SESSION_PATH,
+            Part::Files => may_read_files(&method, &path),
+        };
+        if !allowed {
+            return refuse(
+                ErrorCode::Unauthorized,
+                "This is not open to the public. The director runs Grid from another address.",
+            );
+        }
+        request.extensions_mut().insert(Access {
+            origin,
+            door,
             director: false,
             blocked: false,
         });
@@ -512,11 +567,22 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
     let ip = peer.map_or(IpAddr::from([0, 0, 0, 0]), |peer| peer.ip().to_canonical());
     let guesses = registry.guesses();
     let now = Instant::now();
-    let public = match part {
-        Part::Api => is_public_api(&method, request.uri().path()),
-        Part::Files => may_read_files(&method, request.uri().path()),
+    // What this caller may have with no token.
+    let open = match (part, door) {
+        (Part::Files, _) => may_read_files(&method, &path),
+        (Part::Api, Some(Door::Remote)) => is_remote_open_api(&method, &path),
+        (Part::Api, _) => is_public_api(&method, &path),
     };
     let tokens = presented_tokens(request.headers());
+    // The access token is taken at the Remote RD door only. A sign-in made with it, or a
+    // token the Director was started with, is taken at either.
+    let good = |token: &String| {
+        (door == Some(Door::Remote) && registry.network().is_token(token))
+            || registry
+                .tokens()
+                .session(token)
+                .is_some_and(|session| session.role.can_control())
+    };
 
     // Only a token in the `Bearer` header can be a guess. A sign-in cookie that has ended
     // (the Director was restarted, or half a day passed) is not one: nobody typed it.
@@ -526,18 +592,13 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
     if !tokens.is_empty() {
         if guesses.blocked(ip, now) {
             blocked = true;
-            if !public {
+            if !open {
                 return refuse(
                     ErrorCode::TooManyRequests,
                     "Too many wrong access tokens from this device. Wait a minute and try again.",
                 );
             }
-        } else if tokens.iter().any(|token| {
-            registry
-                .tokens()
-                .session(token)
-                .is_some_and(|session| session.role.can_control())
-        }) {
+        } else if tokens.iter().any(good) {
             guesses.cleared(ip);
             director = true;
         } else if let Some(typed) = &typed {
@@ -545,7 +606,7 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
         }
     }
 
-    if !director && !public {
+    if !director && !open {
         return refuse(
             ErrorCode::Unauthorized,
             "Only the director can do this from another device. It needs the director's access token.",
@@ -553,6 +614,7 @@ async fn gate(part: Part, registry: EventRegistry, mut request: Request, next: N
     }
     request.extensions_mut().insert(Access {
         origin,
+        door,
         director,
         blocked,
     });
@@ -1188,10 +1250,47 @@ mod tests {
     }
 
     #[test]
+    fn at_the_remote_door_a_caller_with_no_token_may_only_say_hello_and_sign_in() {
+        for (method, path) in [
+            (Method::GET, "/public/hello"),
+            (Method::HEAD, "/public/hello"),
+            (Method::POST, "/public/session"),
+            (Method::DELETE, "/public/session"),
+            (Method::GET, "/health"),
+            (Method::GET, "/about"),
+            (Method::GET, "/time"),
+        ] {
+            assert!(is_remote_open_api(&method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            // Everything a spectator reads is shut here: this door is not for looking.
+            (Method::GET, "/public"),
+            (Method::GET, "/public/event"),
+            (Method::GET, "/public/event/state"),
+            (Method::GET, "/public/event/changes"),
+            (Method::GET, "/public/pilot/session"),
+            (Method::POST, "/public/pilot/session"),
+            (Method::POST, "/public/pilot/signup/take"),
+            (Method::POST, "/public/hello"),
+            (Method::PUT, "/public/session"),
+            (Method::GET, "/network"),
+            (Method::GET, "/events"),
+            (Method::GET, "/public/hello/"),
+            (Method::GET, "/public/hello/x"),
+            (Method::GET, "/public/../network"),
+            (Method::GET, "/public/hello%2f..%2f..%2fnetwork"),
+            (Method::GET, "//public/hello"),
+        ] {
+            assert!(!is_remote_open_api(&method, path), "{method} {path}");
+        }
+    }
+
+    #[test]
     fn full_access_is_local_or_a_visitor_with_the_token() {
         let access = |origin, director| {
             Access {
                 origin,
+                door: None,
                 director,
                 blocked: false,
             }

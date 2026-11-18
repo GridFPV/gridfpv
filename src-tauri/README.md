@@ -33,8 +33,9 @@ it, which changed on every restart — and an **OBS browser source** holding an 
 (`http://127.0.0.1:<port>/#/overlay/race`) broke every time. The port is now the same one the
 hosted binary defaults to, and the same after every launch. If it is taken, the app falls back
 to an ephemeral port **and says so in the log** rather than refusing to start; set
-`GRIDFPV_ADDR=127.0.0.1:<other>` to pick a different fixed port (or a LAN address for OBS on
-another machine — off loopback, set `GRIDFPV_RD_TOKEN` to gate control).
+`GRIDFPV_ADDR=127.0.0.1:<other>` to pick a different fixed port. It must be an address on
+this computer: other devices come in by the **Public** and **Remote RD** switches on the
+Network page (docs/primitives.md §11.10).
 
 Because the window loads the Director's HTTP origin directly (rather than the bundled assets
 over `tauri://`), the SPA's **same-origin** API calls (`/snapshot/...`, `/control/...`) and

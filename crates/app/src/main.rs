@@ -98,18 +98,14 @@ fn print_startup(
     );
     println!("  listening on : http://{bound}");
     println!("  console URL  : http://{url_host}/");
-    match rd_token {
-        Some(rd_token) => {
-            println!("  RD token     : {rd_token}");
-            println!("    (use as `Authorization: Bearer {rd_token}` on the control path)");
-        }
-        None => {
-            println!("  RD token     : (none — control is OPEN, full-trust)");
-            println!(
-                "    (no GRIDFPV_RD_TOKEN configured: the control path requires no credential — \
-                 safe on loopback / a trusted LAN; set GRIDFPV_RD_TOKEN to gate control)"
-            );
-        }
+    println!(
+        "    (this computer only. Other devices come in by Public or Remote RD: Network page)"
+    );
+    if let Some(rd_token) = rd_token {
+        println!("  fixed token  : {rd_token}");
+        println!(
+            "    (GRIDFPV_RD_TOKEN is set: every change needs `Authorization: Bearer {rd_token}`)"
+        );
     }
     match &config.data_dir {
         Some(dir) => println!("  events       : persist under {}", dir.display()),

@@ -29,13 +29,23 @@ use axum::routing::get;
 use axum::{Json, Router};
 use gridfpv_server::app::{router, smart_fallback};
 use gridfpv_server::events::EventRegistry;
+use gridfpv_server::network::Door;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 #[cfg(not(feature = "embed-assets"))]
 use tower_http::services::ServeDir;
 
-/// The default listen address: every interface on port 8080, so the RD console and the
-/// LAN spectators reach the Director without extra config.
-pub const DEFAULT_ADDR: &str = "0.0.0.0:8080";
+/// The default listen address: this computer only, on port 8080. Other devices come in by
+/// the two doors the director switches on in the console (docs/primitives.md §11.10).
+pub const DEFAULT_ADDR: &str = "127.0.0.1:8080";
+
+/// Why an address that is not on this computer is refused, in words.
+pub fn not_this_computer(addr: SocketAddr) -> String {
+    format!(
+        "Grid itself listens on this computer only, and {addr} is not an address on this \
+         computer. Use 127.0.0.1 and a port, such as 127.0.0.1:8080. To let other devices in, \
+         switch on Public or Remote RD on the Network page."
+    )
+}
 
 /// Resolved Director configuration, read from the environment with sane defaults.
 ///
@@ -59,7 +69,8 @@ pub struct Config {
 impl Config {
     /// Read the Director config from the environment, applying defaults.
     ///
-    /// - `GRIDFPV_ADDR` — listen address (default `0.0.0.0:8080`).
+    /// - `GRIDFPV_ADDR` — listen address (default `127.0.0.1:8080`). It must be an address on
+    ///   this computer: the Director's own listener is never put on the network.
     /// - `GRIDFPV_DATA_DIR` — directory for persistent events' SQLite files (one per created
     ///   event) and the pilot/class directories; unset ⇒ everything is in-memory
     ///   (non-durable).
@@ -67,9 +78,15 @@ impl Config {
     ///   `frontend/apps/rd-console/dist`, resolved relative to the workspace root.
     pub fn from_env() -> Result<Self, String> {
         let addr = match std::env::var("GRIDFPV_ADDR") {
-            Ok(value) => value.parse().map_err(|e| {
-                format!("GRIDFPV_ADDR ({value:?}) is not a valid socket address: {e}")
-            })?,
+            Ok(value) => {
+                let addr: SocketAddr = value.parse().map_err(|e| {
+                    format!("GRIDFPV_ADDR ({value:?}) is not a valid socket address: {e}")
+                })?;
+                if !addr.ip().to_canonical().is_loopback() {
+                    return Err(format!("GRIDFPV_ADDR: {}", not_this_computer(addr)));
+                }
+                addr
+            }
             Err(_) => DEFAULT_ADDR
                 .parse()
                 .expect("DEFAULT_ADDR is a valid address"),
@@ -159,6 +176,13 @@ where
         _ => None,
     };
 
+    // The Director's own listener is for this computer only (docs/primitives.md §11.10).
+    // Whoever reaches it is trusted as the director, so it is never put on the network,
+    // whoever asks.
+    if !addr.ip().to_canonical().is_loopback() {
+        return Err(not_this_computer(addr).into());
+    }
+
     // Bind first. If the port is taken this returns here, before anything long-lived has
     // been started: the desktop app tries again on another port, and a first try that had
     // already started the timer connections would leave a second set running.
@@ -181,13 +205,12 @@ where
 
     let app = build_app(registry.clone(), &assets);
 
-    // Other devices (docs/primitives.md §11). A Director that was started on the network
-    // already is reachable as it is. One on this computer only gets a second listener,
-    // which the director switches on and off in the console.
+    // Other devices (docs/primitives.md §11.10) come in by two more listeners, the Public
+    // door and the Remote RD door, which the director switches on and off in the console.
     let network = registry.network();
     network.set_main(bound);
-    let others = (bound.ip().to_canonical().is_loopback())
-        .then(|| crate::network::spawn(registry.clone(), app.clone()));
+    let doors = [Door::Public, Door::Remote]
+        .map(|door| crate::network::spawn(registry.clone(), app.clone(), door));
 
     on_ready(&DirectorReady {
         bound,
@@ -202,8 +225,8 @@ where
     )
     .with_graceful_shutdown(shutdown)
     .await;
-    if let Some(others) = others {
-        others.abort();
+    for door in doors {
+        door.abort();
     }
     timers.abort();
     video.abort();

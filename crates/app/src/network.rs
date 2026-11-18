@@ -1,17 +1,20 @@
-//! The listener other devices reach the Director on (docs/primitives.md §11).
+//! The listeners other devices reach the Director on (docs/primitives.md §11.10).
 //!
-//! The Director's own listener is for the Grid computer. This one is for the network: it is
-//! started when the director switches "other devices" on, stopped when they switch it off,
-//! and moved when they change its port. The setting and the status live in
-//! [`gridfpv_server::network::NetworkDesk`]; this module only follows it.
+//! The Director's own listener is for the Grid computer. These two are for the network: the
+//! **Public** door and the **Remote RD** door. Each is started when the director switches
+//! it on, stopped when they switch it off, and moved when they change its port. The
+//! settings and the status live in [`gridfpv_server::network::NetworkDesk`]; this module
+//! only follows it.
 //!
-//! It serves the very same app as the Director's own listener, gate included. A request
-//! that arrives here from another device is a visitor's, and the gate treats it as one.
+//! Each serves the very same app as the Director's own listener, gate included, and marks
+//! every request with the [`Door`] it came in by. The gate decides from that what the
+//! caller may do.
 //!
-//! **Off means off.** Stopping the listener also ends every connection it had open, so a
+//! **Off means off.** Stopping a listener also ends every connection it had open, so a
 //! phone that was following a race stops getting updates the moment the switch goes off.
 //! That is why the connections are served here by hand and not by `axum::serve`, which
-//! leaves open connections running.
+//! leaves open connections running. Changing the access token starts the Remote RD
+//! listener again for the same reason: nothing opened with the old token stays open.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -19,7 +22,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::ConnectInfo;
 use gridfpv_server::events::EventRegistry;
-use gridfpv_server::network::{Listener, NetworkSettings};
+use gridfpv_server::network::{Door, DoorSettings, Listener, NetworkSettings};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
@@ -36,6 +39,9 @@ pub fn bind_problem(port: u16, err: &std::io::Error) -> String {
         std::io::ErrorKind::AddrInUse => {
             format!("Port {port} is in use by another program on this computer. Pick another port.")
         }
+        std::io::ErrorKind::PermissionDenied if port < 1024 => format!(
+            "This computer does not let Grid use port {port}. Ports under 1024 need special rights here. Pick a port from 1024 up."
+        ),
         std::io::ErrorKind::PermissionDenied => format!(
             "This computer did not let Grid listen on port {port}. Pick another port, or check the firewall."
         ),
@@ -74,9 +80,10 @@ async fn serve(listener: TcpListener, app: Router) {
 }
 
 /// A listener that is up. Dropping it stops it and ends its connections, so it can never
-/// outlive the task that follows the setting, however that task ends.
+/// outlive the task that follows the settings, however that task ends.
 struct Up {
-    port: u16,
+    /// The setting it was started for.
+    wanted: (DoorSettings, u32),
     task: JoinHandle<()>,
 }
 
@@ -94,26 +101,54 @@ impl Up {
     }
 }
 
-/// Follow the network setting for as long as the Director runs.
-///
-/// `bind` is the address family to listen on; the port comes from the setting.
-pub fn spawn(registry: EventRegistry, app: Router) -> JoinHandle<()> {
-    spawn_on(registry, app, Ipv4Addr::UNSPECIFIED)
+/// What makes one door's listener the right one: its setting, and for the Remote RD door
+/// the turn of the access token.
+fn wanted_of(door: Door, settings: &NetworkSettings) -> (DoorSettings, u32) {
+    let turn = match door {
+        Door::Public => 0,
+        Door::Remote => settings.token_turn,
+    };
+    (settings.door(door), turn)
+}
+
+/// Listen on the first of `ports` that can be had. On none: why the last could not.
+async fn bind_first(bind: Ipv4Addr, ports: &[u16]) -> Result<TcpListener, String> {
+    let mut problem = String::from("Grid has no port to listen on.");
+    for port in ports {
+        match TcpListener::bind(SocketAddr::from((bind, *port))).await {
+            Ok(listener) => return Ok(listener),
+            Err(err) => problem = bind_problem(*port, &err),
+        }
+    }
+    Err(problem)
+}
+
+/// Follow one door's setting for as long as the Director runs.
+pub fn spawn(registry: EventRegistry, app: Router, door: Door) -> JoinHandle<()> {
+    spawn_on(registry, app, door, Ipv4Addr::UNSPECIFIED)
 }
 
 /// [`spawn`], listening on one address. Tests listen on loopback only.
-pub fn spawn_on(registry: EventRegistry, app: Router, bind: Ipv4Addr) -> JoinHandle<()> {
+pub fn spawn_on(
+    registry: EventRegistry,
+    app: Router,
+    door: Door,
+    bind: Ipv4Addr,
+) -> JoinHandle<()> {
+    // Every request taken here says which door it came in by.
+    let app = app.layer(axum::Extension(door));
     tokio::spawn(async move {
         let desk = registry.network();
-        let mut wanted = desk.subscribe();
+        let mut heard = desk.subscribe();
         // The listener that is up, if one is.
         let mut up: Option<Up> = None;
         loop {
-            let settings: NetworkSettings = *wanted.borrow_and_update();
+            let wanted = wanted_of(door, &heard.borrow_and_update());
+            let settings = wanted.0;
             let finished = up.as_ref().is_some_and(|up| up.task.is_finished());
             let right = up
                 .as_ref()
-                .is_some_and(|up| settings.enabled && up.port == settings.port);
+                .is_some_and(|up| settings.enabled && up.wanted == wanted);
             if (!right || finished)
                 && let Some(old) = up.take()
             {
@@ -122,21 +157,19 @@ pub fn spawn_on(registry: EventRegistry, app: Router, bind: Ipv4Addr) -> JoinHan
             }
             let mut retry = false;
             if !settings.enabled {
-                desk.report(Listener::Stopped);
+                desk.report(door, Listener::Stopped);
             } else if up.is_none() {
-                match TcpListener::bind(SocketAddr::from((bind, settings.port))).await {
+                match bind_first(bind, &settings.ports(door)).await {
                     Ok(listener) => {
-                        // Port 0 is never set by the console, but a test asks for it: report
-                        // the port that was really taken.
-                        let port = listener.local_addr().map_or(settings.port, |a| a.port());
+                        let port = listener.local_addr().map_or(0, |a| a.port());
                         up = Some(Up {
-                            port: settings.port,
+                            wanted,
                             task: tokio::spawn(serve(listener, app.clone())),
                         });
-                        desk.report(Listener::Up(port));
+                        desk.report(door, Listener::Up(port));
                     }
-                    Err(err) => {
-                        desk.report(Listener::Failed(bind_problem(settings.port, &err)));
+                    Err(problem) => {
+                        desk.report(door, Listener::Failed(problem));
                         retry = true;
                     }
                 }
@@ -144,12 +177,12 @@ pub fn spawn_on(registry: EventRegistry, app: Router, bind: Ipv4Addr) -> JoinHan
             // Wait for the setting to change. While a listener could not start, also look
             // again every few seconds.
             let changed = if retry {
-                match tokio::time::timeout(RETRY, wanted.changed()).await {
+                match tokio::time::timeout(RETRY, heard.changed()).await {
                     Ok(changed) => changed,
                     Err(_) => Ok(()),
                 }
             } else {
-                wanted.changed().await
+                heard.changed().await
             };
             if changed.is_err() {
                 // The desk is gone: the Director is closing. Dropping `up` stops the listener.

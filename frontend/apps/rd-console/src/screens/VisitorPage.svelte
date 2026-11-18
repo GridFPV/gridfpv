@@ -17,9 +17,10 @@
    * Opened as `#/kiosk` the page is a **kiosk** (`KioskPage`): a tablet the director sets
    * up at the race director's stand.
    *
-   * A **director** on another device signs in at `#/director`, with the access token.
-   * Nothing on the page links there: the director knows the address. The Director sets a
-   * cookie, the page loads again, and this time it is the console.
+   * A **director** on another device opens the **Remote RD** address (§11.10), which has
+   * its own port. There this page is the sign-in and nothing else: it takes the access
+   * token, the Director sets a cookie, the page loads again, and this time it is the
+   * console. At the **Public** address there is no director sign-in at all.
    */
   import { untrack } from 'svelte';
   import { Button, Card, Input } from '@gridfpv/components';
@@ -63,7 +64,12 @@
    */
   let offline = $state(false);
 
+  /** At the Remote RD address: the director's sign-in, and nothing about the race. */
+  const atRemote = $derived(hello.door === 'Remote');
+
   $effect(() => {
+    // Nothing public is read at the Remote RD address, so there is nothing to ask for.
+    if (atRemote) return;
     let stopped = false;
     const ask = async () => {
       try {
@@ -109,8 +115,8 @@
     window.addEventListener('hashchange', follow);
     return () => window.removeEventListener('hashchange', follow);
   });
-  const kiosk = $derived(isKioskHash(hash));
-  const directorPage = $derived(hash === DIRECTOR_HASH);
+  const kiosk = $derived(!atRemote && isKioskHash(hash));
+  const directorPage = $derived(atRemote || (hash === DIRECTOR_HASH && hello.door !== 'Public'));
 
   // ── The pilot ──────────────────────────────────────────────────────────────
   /** Who this browser is signed in as. Starts from what the Director said at load. */
@@ -255,8 +261,8 @@
       {:else}
         <Card title="Director sign-in" elevation="sm">
           <p data-testid="no-director-sign-in">
-            This Grid is run from the Grid computer only. A director cannot sign in from another
-            device.
+            A director cannot sign in here. On the Grid computer, open the Network page and enable
+            Remote RD.
           </p>
         </Card>
       {/if}

@@ -1,27 +1,23 @@
 /**
- * Other devices on the network, through real browsers (docs/primitives.md §11).
+ * Other devices on the network, through real browsers (docs/primitives.md §11.10).
  *
- * One browser is the director's, on the Grid computer. A second opens Grid by the
- * computer's network address, the way a phone at the field does. That second browser must
- * get the visitor's page and nothing of the console, and the Director must refuse whatever
- * it asks for directly.
+ * One browser is the director's, on the Grid computer. It switches on the two doors on the
+ * Network page: **Public** and **Remote RD**, each on its own port.
  *
- * A second pair of tests boots a Director with an access token and signs the visitor in as
- * the director.
+ * A second browser opens the Public address, the way a phone at the field does. It must get
+ * the visitor's page and nothing of the console, the Director must refuse whatever it asks
+ * for directly, and no token, cookie or page address may make it the director there.
+ *
+ * A third opens the Remote RD address, signs in with the access token read off the Network
+ * page, and runs the console. Its sign-in must not carry to the Public address.
  */
 import { createServer } from 'node:net';
 import { networkInterfaces } from 'node:os';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
-import { type Director, startDirector } from '../test-harness/director.js';
 import { gotoEvents, gotoPage, openPage, pagesNav } from './nav.js';
 import { E2E_EVENT_NAME, expect, test } from './observability.js';
-
-const here = fileURLToPath(new URL('.', import.meta.url));
-const dist = resolve(here, '..', 'apps', 'rd-console', 'dist');
 
 /** This computer's address on its network. A build machine and a laptop both have one. */
 const lan = Object.values(networkInterfaces())
@@ -43,28 +39,40 @@ function freePort(): Promise<number> {
   });
 }
 
-const state = (page: Page) => page.getByTestId('network-state');
+type DoorName = 'Public' | 'Remote RD';
 
-/** On the Network page: pick a free port, switch on, and give back the address shown. */
-async function switchOn(page: Page): Promise<string> {
+/** One door's card on the Network page. */
+const card = (page: Page, door: DoorName): Locator =>
+  page.getByTestId(door === 'Public' ? 'door-public' : 'door-remote-rd');
+const toggle = (page: Page, door: DoorName): Locator =>
+  page.getByRole('switch', { name: `Enable ${door}` });
+
+/** On the Network page: give a door a free port, switch it on, and give back its address. */
+async function switchOn(page: Page, door: DoorName): Promise<string> {
   const port = await freePort();
-  await page.getByLabel('Port', { exact: true }).fill(String(port));
-  await page.getByRole('button', { name: 'Change port' }).click();
-  await expect(page.getByLabel('Port', { exact: true })).toHaveValue(String(port));
-  await page.getByRole('button', { name: 'Let other devices open Grid' }).click();
-  await expect(state(page)).toHaveText('On', { timeout: 15_000 });
-  const address = `http://${lan}:${port}/`;
+  const box = card(page, door).getByLabel('Port', { exact: true });
+  await box.fill(String(port));
+  await card(page, door).getByRole('button', { name: 'Change port' }).click();
+  await expect(box).toHaveValue(String(port));
+  await toggle(page, door).click();
+  await expect(toggle(page, door)).toBeChecked();
+  const shown = `${lan}:${port}`;
   await expect(
-    page.getByRole('list', { name: 'Addresses for other devices' }).getByRole('link', {
-      name: address
-    })
-  ).toBeVisible();
-  return address;
+    page.getByRole('list', { name: `${door} addresses` }).getByRole('link', { name: shown })
+  ).toBeVisible({ timeout: 15_000 });
+  return `http://${shown}/`;
+}
+
+/** Shut both doors over the API, so the shared Director is left as it was found. */
+async function shutBoth(page: Page) {
+  for (const door of ['public', 'remote']) {
+    await page.request.put(`/network/${door}`, { data: { enabled: false } });
+  }
 }
 
 test.skip(lan === undefined, 'this computer has no network address to come in by');
 
-test('RD lets other devices in; a visitor sees the event and none of the console; RD shuts them out', async ({
+test('Public: a visitor sees the event and none of the console, whatever they try; RD shuts them out', async ({
   page,
   browser
 }) => {
@@ -77,10 +85,13 @@ test('RD lets other devices in; a visitor sees the event and none of the console
 
   await gotoPage(page, 'Network');
   await expect(page).toHaveURL(/#\/network$/);
-  await expect(state(page)).toHaveText('Off');
-  await expect(page.getByText('Only this computer can open Grid.')).toBeVisible();
+  await expect(toggle(page, 'Public')).not.toBeChecked();
+  await expect(toggle(page, 'Remote RD')).not.toBeChecked();
+  await expect(page.getByText('What other devices can do')).toHaveCount(0);
 
-  const address = await switchOn(page);
+  const address = await switchOn(page, 'Public');
+  // The other switch is its own: still off.
+  await expect(toggle(page, 'Remote RD')).not.toBeChecked();
 
   // ── The other device ───────────────────────────────────────────────────────────────────
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -93,7 +104,7 @@ test('RD lets other devices in; a visitor sees the event and none of the console
       timeout: 15_000
     });
     await expect(visitor.getByRole('button', { name: 'Pilot', exact: true })).toBeVisible();
-    // None of the console: no page row, no side switch, no director sign-in (no token is set).
+    // None of the console: no page row, no side switch, no word of the director.
     await expect(pagesNav(visitor)).toHaveCount(0);
     await expect(visitor.getByRole('navigation', { name: 'Setup or event' })).toHaveCount(0);
     await expect(visitor.getByText(/director/i)).toHaveCount(0);
@@ -104,12 +115,15 @@ test('RD lets other devices in; a visitor sees the event and none of the console
       expect(path.startsWith('/public/'), `the visitor's page asked for ${path}`).toBe(true);
     }
 
-    // A console link typed by hand is still the visitor's page.
-    for (const hash of ['#/events', '#/network', '#/event/run', '#/pilots']) {
+    // A console link typed by hand is still the visitor's page. So is the address a
+    // director used to sign in at: this door has no sign-in.
+    for (const hash of ['#/events', '#/network', '#/event/run', '#/pilots', '#/director']) {
       await visitor.goto(`${address}${hash}`);
       await visitor.reload();
       await expect(visitor.getByTestId('visitor-event')).toBeVisible();
       await expect(pagesNav(visitor)).toHaveCount(0);
+      await expect(visitor.getByLabel('Access token')).toHaveCount(0);
+      await expect(visitor.getByText(/director/i)).toHaveCount(0);
     }
 
     // Asking the Director directly gets nowhere.
@@ -117,10 +131,21 @@ test('RD lets other devices in; a visitor sees the event and none of the console
       const read = await visitor.request.get(`${address}${path}`);
       expect(read.status(), `GET /${path}`).toBe(401);
     }
-    const write = await visitor.request.put(`${address}network`, { data: { enabled: false } });
-    expect(write.status()).toBe(401);
+    for (const door of ['public', 'remote']) {
+      const write = await visitor.request.put(`${address}network/${door}`, {
+        data: { enabled: door === 'remote' }
+      });
+      expect(write.status(), `PUT /network/${door}`).toBe(401);
+    }
+    expect((await visitor.request.put(`${address}network/token`, { data: {} })).status()).toBe(401);
     const made = await visitor.request.post(`${address}events`, { data: { name: 'Sneaky' } });
     expect(made.status()).toBe(401);
+    // The director's sign-in does not answer here.
+    const signIn = await visitor.request.post(`${address}public/session`, {
+      headers: { Authorization: 'Bearer anything-at-all' }
+    });
+    expect(signIn.status()).toBe(401);
+    expect(signIn.headers()['set-cookie']).toBeUndefined();
     // From inside the page too, where the browser adds its own headers.
     const fromPage = await visitor.evaluate(async () => {
       const res = await fetch('/events', {
@@ -133,14 +158,15 @@ test('RD lets other devices in; a visitor sees the event and none of the console
     expect(fromPage).toBe(401);
 
     // Nothing changed, and the director's page still says on.
-    await expect(state(page)).toHaveText('On');
+    await expect(toggle(page, 'Public')).toBeChecked();
+    await expect(toggle(page, 'Remote RD')).not.toBeChecked();
     const events = (await (await page.request.get('/events')).json()) as { name: string }[];
     expect(events.map((event) => event.name)).not.toContain('Sneaky');
 
     // ── Shut them out ────────────────────────────────────────────────────────────────────
-    await page.getByRole('button', { name: 'Turn off' }).click();
-    await expect(state(page)).toHaveText('Off');
-    await expect(page.getByRole('list', { name: 'Addresses for other devices' })).toHaveCount(0);
+    await toggle(page, 'Public').click();
+    await expect(toggle(page, 'Public')).not.toBeChecked();
+    await expect(page.getByRole('list', { name: 'Public addresses' })).toHaveCount(0);
     await expect
       .poll(
         async () =>
@@ -153,134 +179,183 @@ test('RD lets other devices in; a visitor sees the event and none of the console
       .toBe('refused');
   } finally {
     await phone.close();
-    // Leave the shared Director as it was found.
-    await page.request.put('/network', { data: { enabled: false } });
+    await shutBoth(page);
   }
 });
 
-test.describe('with an access token set', () => {
-  const TOKEN = 'e2e-director-token';
-  let director: Director;
+test('Remote RD: a director signs in with the token from the Network page, runs the console, and the sign-in stays at that door', async ({
+  page,
+  browser
+}) => {
+  await gotoEvents(page);
+  await page
+    .getByRole('button', { name: new RegExp(E2E_EVENT_NAME) })
+    .first()
+    .click();
+  await gotoPage(page, 'Network');
 
-  test.beforeAll(async () => {
-    director = await startDirector({ token: TOKEN, assets: dist });
-  });
-  test.afterAll(async () => {
-    await director?.stop();
-  });
+  const publicAddress = await switchOn(page, 'Public');
+  // No token until the door is first opened; then it is there to read.
+  const remoteAddress = await switchOn(page, 'Remote RD');
+  const token = (await page.getByTestId('access-token').innerText()).trim();
+  expect(token).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
 
-  /** Switch the listener on over the API, as the director, and give back the address. */
-  async function listen(): Promise<string> {
-    const port = await freePort();
-    const res = await fetch(`${director.baseUrl}/network`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ enabled: true, port })
+  const tablet = await browser.newContext();
+  const phone = await browser.newContext();
+  try {
+    // ── The Remote RD address is the sign-in, and nothing about the race ─────────────────
+    const remote = await tablet.newPage();
+    const asked: string[] = [];
+    remote.on('request', (request) => asked.push(new URL(request.url()).pathname));
+    await remote.goto(remoteAddress);
+    await expect(remote.getByLabel('Access token')).toBeVisible({ timeout: 15_000 });
+    await expect(remote.getByText(E2E_EVENT_NAME)).toHaveCount(0);
+    await expect(remote.getByTestId('visitor-event')).toHaveCount(0);
+    await expect(pagesNav(remote)).toHaveCount(0);
+    // Before the token is shown, the Director gives nothing away at this door.
+    for (const path of ['events', 'network', 'public/event', 'public/event/state']) {
+      expect((await remote.request.get(`${remoteAddress}${path}`)).status(), path).toBe(401);
+    }
+    const hello = await (await remote.request.get(`${remoteAddress}public/hello`)).json();
+    expect(hello.event).toBeUndefined();
+    // The sign-in page asked for nothing it would be refused.
+    expect(asked.filter((path) => path.startsWith('/public/event'))).toEqual([]);
+
+    // A wrong token is refused in the Director's words, and the page stays the sign-in.
+    await remote.getByLabel('Access token').fill('not-the-token');
+    await remote.getByRole('button', { name: 'Sign in' }).click();
+    await expect(remote.getByRole('alert')).toHaveText("That is not the director's access token.");
+    await expect(pagesNav(remote)).toHaveCount(0);
+
+    // The right one opens the console.
+    await remote.getByLabel('Access token').fill(token);
+    await remote.getByRole('button', { name: 'Sign in' }).click();
+    await expect(pagesNav(remote)).toBeVisible({ timeout: 15_000 });
+    // The token is nowhere a script could read it: not in storage, not in a readable cookie.
+    const kept = await remote.evaluate(() => ({
+      cookie: document.cookie,
+      local: JSON.stringify(localStorage),
+      session: JSON.stringify(sessionStorage)
+    }));
+    expect(JSON.stringify(kept)).not.toContain(token);
+    expect(kept.cookie).not.toContain('gridfpv_director');
+
+    // The console there is the whole one: it can read and change.
+    expect((await remote.request.get(`${remoteAddress}events`)).status()).toBe(200);
+    const made = await remote.request.post(`${remoteAddress}events`, {
+      data: { name: 'From the tablet' },
+      headers: { Origin: remoteAddress.replace(/\/$/, '') }
     });
-    expect(res.ok).toBe(true);
+    expect(made.ok()).toBe(true);
+
+    // It survives a reload and a new tab, which have no memory of the token.
+    await remote.reload();
+    await expect(pagesNav(remote)).toBeVisible({ timeout: 15_000 });
+    const second = await tablet.newPage();
+    await second.goto(remoteAddress);
+    await expect(pagesNav(second)).toBeVisible({ timeout: 15_000 });
+    await second.close();
+
+    // The Network page there shows both doors, but never the token it signed in with.
+    await openPage(remote, 'Network');
+    await expect(toggle(remote, 'Remote RD')).toBeChecked();
+    await expect(remote.getByTestId('access-token')).toHaveCount(0);
+    await expect(remote.getByText(token)).toHaveCount(0);
+    const told = await (await remote.request.get(`${remoteAddress}network`)).text();
+    expect(told).not.toContain(token);
+    // And it cannot change the token.
+    const changed = await remote.request.put(`${remoteAddress}network/token`, {
+      data: { token: 'mine-now-thanks' },
+      headers: { Origin: remoteAddress.replace(/\/$/, '') }
+    });
+    expect(changed.status()).toBe(403);
+
+    // ── The same browser at the Public address is a visitor ──────────────────────────────
+    // A browser sends its cookies to every port of an address, so this one arrives with
+    // the director's sign-in. It must count for nothing there.
+    const sameBrowser = await tablet.newPage();
+    await sameBrowser.goto(publicAddress);
+    await expect(sameBrowser.getByTestId('visitor-event')).toBeVisible({ timeout: 15_000 });
+    await expect(pagesNav(sameBrowser)).toHaveCount(0);
+    expect((await sameBrowser.request.get(`${publicAddress}events`)).status()).toBe(401);
+    // Nor does the token itself, sent the way a script would.
+    expect(
+      (
+        await sameBrowser.request.get(`${publicAddress}events`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+      ).status()
+    ).toBe(401);
+    await sameBrowser.close();
+
+    // ── Another browser does not share the sign-in ───────────────────────────────────────
+    const other = await phone.newPage();
+    await other.goto(remoteAddress);
+    await expect(other.getByLabel('Access token')).toBeVisible({ timeout: 15_000 });
+    await expect(pagesNav(other)).toHaveCount(0);
+    expect((await other.request.get(`${remoteAddress}events`)).status()).toBe(401);
+
+    // ── A new token, made on the Grid computer, signs the tablet out ─────────────────────
+    await page.getByRole('button', { name: 'Change…' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('Every device signed in with the old token is signed out.');
+    await dialog.getByRole('button', { name: 'Change', exact: true }).click();
+    await expect(page.getByTestId('access-token')).not.toHaveText(token, { timeout: 15_000 });
+    const next = (await page.getByTestId('access-token').innerText()).trim();
     await expect
-      .poll(async () => (await (await fetch(`${director.baseUrl}/network`)).json()).state)
-      .toBe('On');
-    return `http://${lan}:${port}/`;
+      .poll(
+        async () =>
+          remote.request
+            .get(`${remoteAddress}events`, { timeout: 2000 })
+            .then((res) => res.status())
+            .catch(() => 0),
+        { timeout: 15_000 }
+      )
+      .toBe(401);
+    await remote.goto(remoteAddress);
+    await expect(remote.getByLabel('Access token')).toBeVisible({ timeout: 15_000 });
+    // The old token no longer signs in; the new one does.
+    await remote.getByLabel('Access token').fill(token);
+    await remote.getByRole('button', { name: 'Sign in' }).click();
+    await expect(remote.getByRole('alert')).toHaveText("That is not the director's access token.");
+    await remote.getByLabel('Access token').fill(next);
+    await remote.getByRole('button', { name: 'Sign in' }).click();
+    await expect(pagesNav(remote)).toBeVisible({ timeout: 15_000 });
+
+    // ── Sign out on the Network page: back to the sign-in ────────────────────────────────
+    // By the nav, not by address: `goto('/')` would land on the worker's own Director.
+    await openPage(remote, 'Network');
+    await remote.getByRole('button', { name: 'Sign out on this device' }).click();
+    await expect(remote.getByLabel('Access token')).toBeVisible({ timeout: 15_000 });
+    await expect(pagesNav(remote)).toHaveCount(0);
+    expect((await remote.request.get(`${remoteAddress}events`)).status()).toBe(401);
+
+    // ── Switched off, the door is gone ───────────────────────────────────────────────────
+    await toggle(page, 'Remote RD').click();
+    await expect(toggle(page, 'Remote RD')).not.toBeChecked();
+    await expect
+      .poll(
+        async () =>
+          remote.request
+            .get(`${remoteAddress}public/hello`, { timeout: 2000 })
+            .then(() => 'answered')
+            .catch(() => 'refused'),
+        { timeout: 10_000 }
+      )
+      .toBe('refused');
+    // The Public door is untouched by it.
+    expect((await phone.request.get(`${publicAddress}public/hello`)).status()).toBe(200);
+  } finally {
+    await tablet.close();
+    await phone.close();
+    await shutBoth(page);
+    // The event the tablet made is not left for the next spec to trip on.
+    const events = (await (await page.request.get('/events')).json()) as {
+      id: string;
+      name: string;
+    }[];
+    for (const event of events.filter((event) => event.name === 'From the tablet')) {
+      await page.request.delete(`/events/${event.id}`);
+    }
   }
-
-  test('a director signs in from another device, runs the console there, and signs out', async ({
-    browser
-  }) => {
-    const address = await listen();
-    const tablet = await browser.newContext();
-    const page = await tablet.newPage();
-    try {
-      await page.goto(address);
-      await expect(page.getByTestId('visitor-event')).toHaveText('No event is open');
-
-      // A wrong token is refused in the Director's words, and the page stays the visitor's.
-      // Nothing on the page leads to the director's sign-in: the director knows its address.
-      await expect(page.getByRole('button', { name: /director/i })).toHaveCount(0);
-      await expect(page.getByRole('link', { name: /director/i })).toHaveCount(0);
-      await expect(page.getByLabel('Access token')).toHaveCount(0);
-      await page.goto(`${address}#/director`);
-      await page.getByLabel('Access token').fill('not-the-token');
-      await page.getByRole('button', { name: 'Sign in' }).click();
-      await expect(page.getByRole('alert')).toHaveText("That is not the director's access token.");
-      await expect(pagesNav(page)).toHaveCount(0);
-
-      // The right one opens the console.
-      await page.getByLabel('Access token').fill(TOKEN);
-      await page.getByRole('button', { name: 'Sign in' }).click();
-      await expect(pagesNav(page)).toBeVisible({ timeout: 15_000 });
-      // The token is nowhere a script could read it: not in storage, not in a readable cookie.
-      const kept = await page.evaluate(() => ({
-        cookie: document.cookie,
-        local: JSON.stringify(localStorage),
-        session: JSON.stringify(sessionStorage)
-      }));
-      expect(JSON.stringify(kept)).not.toContain(TOKEN);
-      expect(kept.cookie).not.toContain('gridfpv_director');
-
-      // A write from the other device, with no token typed again.
-      await page
-        .getByRole('button', { name: /Create your first event|New event/ })
-        .first()
-        .click();
-      const form = page.getByRole('form', { name: 'New event' });
-      await form.getByLabel('Event name').fill('From the tablet');
-      await page.getByRole('button', { name: 'Create & enter' }).click();
-      await expect(page.getByRole('heading', { name: 'From the tablet', level: 1 })).toBeVisible({
-        timeout: 15_000
-      });
-      await expect
-        .poll(async () =>
-          (
-            (await (
-              await fetch(`${director.baseUrl}/events`, {
-                headers: { Authorization: `Bearer ${TOKEN}` }
-              })
-            ).json()) as { name: string }[]
-          ).map((event) => event.name)
-        )
-        .toContain('From the tablet');
-
-      // It survives a reload and a new tab, which have no memory of the token.
-      await page.reload();
-      await expect(pagesNav(page)).toBeVisible({ timeout: 15_000 });
-      const second = await tablet.newPage();
-      await second.goto(address);
-      await expect(pagesNav(second)).toBeVisible({ timeout: 15_000 });
-      await second.close();
-
-      // Sign out on the Network page: back to the visitor's page, in every tab.
-      // By the nav, not by address: `goto('/')` would land on the worker's own Director.
-      await openPage(page, 'Network');
-      await page.getByRole('button', { name: 'Sign out on this device' }).click();
-      await expect(page.getByTestId('visitor-event')).toBeVisible({ timeout: 15_000 });
-      await expect(pagesNav(page)).toHaveCount(0);
-      expect((await page.request.get(`${address}events`)).status()).toBe(401);
-    } finally {
-      await tablet.close();
-    }
-  });
-
-  test('another browser does not share the sign-in', async ({ browser }) => {
-    const address = await listen();
-    const tablet = await browser.newContext();
-    const phone = await browser.newContext();
-    try {
-      const signedIn = await tablet.newPage();
-      await signedIn.goto(address);
-      await signedIn.goto(`${address}#/director`);
-      await signedIn.getByLabel('Access token').fill(TOKEN);
-      await signedIn.getByRole('button', { name: 'Sign in' }).click();
-      await expect(pagesNav(signedIn)).toBeVisible({ timeout: 15_000 });
-
-      const other = await phone.newPage();
-      await other.goto(address);
-      await expect(other.getByTestId('visitor-event')).toBeVisible({ timeout: 15_000 });
-      await expect(pagesNav(other)).toHaveCount(0);
-      expect((await other.request.get(`${address}events`)).status()).toBe(401);
-    } finally {
-      await tablet.close();
-      await phone.close();
-    }
-  });
 });

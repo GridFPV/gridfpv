@@ -29,30 +29,44 @@ writes one by hand.
 
 ## Who may do what
 
-The Director sorts every caller into one of three (`crates/server/src/access.rs`).
+There are three ways in, each a listener on its own port (`crates/server/src/access.rs`,
+`docs/primitives.md` §11.10). The way a request came in decides what it may do.
 
-| Caller | Who it is | What it may do |
+| Way in | Who comes in by it | What they may do |
 |---|---|---|
-| **Local** | A request from the Grid computer itself | Everything. Reads need no token. Writes need the director's token only if one is set |
-| **Director** | A request from another device that shows the director's token | Everything, the same as local |
-| **Visitor** | Any other request from another device | Read the console's files, `/health`, `/about`, `/time` and everything under `/public`. Nothing else |
+| **The Grid computer's own** (`127.0.0.1:8080`) | The director, at the Grid computer | Everything. No token is asked for |
+| **Public** (port 80, or 8081) | Spectators, pilots, kiosks | Read the console's files, `/health`, `/about`, `/time` and everything under `/public` but the director's sign-in. Nothing else, **whatever token or cookie is sent** |
+| **Remote RD** (port 8082) | The director, on another device | With the access token: everything. Without it: the console's files, `GET /public/hello`, `/public/session`, `/health`, `/about`, `/time`. Nothing about the race |
 
-A caller is **local** only when all three hold: the connection comes from a loopback
-address; the request was not passed on by a proxy (no `Forwarded`, `X-Forwarded-*`,
-`X-Real-IP` or `Via` header); and the `Host` it asked for is `localhost` or a loopback
-address. If any of that cannot be told, the caller is a visitor.
+The Grid computer's own listener only ever binds a loopback address. A caller there is
+**local** when all three hold: the connection comes from a loopback address; the request
+was not passed on by a proxy (no `Forwarded`, `X-Forwarded-*`, `X-Real-IP` or `Via`
+header); and the `Host` it asked for is `localhost` or a loopback address. A caller there
+who fails one of these (a proxy on the Grid computer, a page that points its own name at
+`127.0.0.1`) is a visitor: public reads only. Nobody who comes in by Public or Remote RD is
+ever local, even from the Grid computer.
 
-The director's token is the value of `GRIDFPV_RD_TOKEN` when the Director was started. It is
-sent as `Authorization: Bearer <token>`. With no token set, the Grid computer writes freely
-and **no other device can sign in at all**.
+`hello.caller` names the result: `Local`, `Director` (the token was shown) or `Visitor`.
 
-A browser on another device signs in once and then carries a cookie:
+**The access token** belongs to the Remote RD door. Grid makes it when the door is first
+opened, and it is changed on the Network page. It is sent as `Authorization: Bearer
+<token>`, at the Remote RD door only. For scripts: `curl -H "Authorization: Bearer <token>"
+http://<address>:8082/events`.
+
+A browser at the Remote RD door signs in once and then carries a cookie:
 
 | Route | What it does |
 |---|---|
-| `GET /public/hello` | `{version, caller, event?, director_sign_in, kiosk}`. `caller` is `Local`, `Director` or `Visitor`. `event` is the open event's name. `director_sign_in` says whether a token is set |
-| `POST /public/session` | Sign in. Send the token as a `Bearer` header. Answers `204` and sets the cookie `gridfpv_director` (`HttpOnly`, `SameSite=Strict`, half a day). The cookie holds a sign-in of its own, never the token. A wrong token answers `401` |
+| `GET /public/hello` | `{version, caller, door?, event?, director_sign_in, kiosk}`. `door` is `Public` or `Remote`, and absent on the Grid computer's own address. `event` is the open event's name; it is left out at the Remote RD door until the token is shown. `director_sign_in` says whether a director can sign in at this address |
+| `POST /public/session` | Sign in. Send the token as a `Bearer` header. Answers `204` and sets the cookie `gridfpv_director` (`HttpOnly`, `SameSite=Strict`, half a day). The cookie holds a sign-in of its own, never the token. A wrong token answers `401`. At the Public door this route answers `401` to everyone |
 | `DELETE /public/session` | Sign out. The sign-in stops working at once. Always `204` |
+
+A browser sends a cookie to every port of an address, so a director's browser carries the
+sign-in to the Public door too. It counts for nothing there.
+
+`GRIDFPV_RD_TOKEN`, set when the Director is started, is a separate and older thing, kept
+for the test harness: with it set, every change needs that token **even on the Grid
+computer**. It is not how a director signs in from another device.
 
 A visitor can read the **one event that is open**, and only that. These give the console's
 own shapes with the director's things taken out, so the same page code draws both
@@ -160,20 +174,26 @@ decides which origins get a CORS answer.
 
 ## Other devices on the network
 
-The desktop app listens on its own computer only. A second listener lets other devices in.
-It is off until the director switches it on, and it serves the same app with the same rules.
+The Director's own listener is on its own computer only. Two more listeners, the **doors**,
+let other devices in. Each is off until the director switches it on.
 
 | Route | What it does |
 |---|---|
-| `GET /network` | `{enabled, port, state, addresses, problem?}`. `state` is `Off`, `Starting`, `On`, `Failed` or `Always`. `addresses` are the URLs to open on another device. `problem` says in words why the listener is not up |
-| `PUT /network` | `{enabled, port?}`. The port must be 1024 to 65535 and not the Director's own. Answers the same shape as the `GET` |
+| `GET /network` | `{public, remote, token?}`. Each door is `{enabled, port, port_picked, state, addresses, problem?, note?}`. `state` is `Off`, `Starting`, `On` or `Failed`. `addresses` are the URLs to open on another device. `problem` says in words why the listener is not up. `note` says when Grid is on its second choice of port. `token` is the access token, and is in the answer **only on the Grid computer** |
+| `PUT /network/public`, `PUT /network/remote` | `{enabled, port?}`. Leave `port` out to keep it; `0` lets Grid pick again. A picked port must not be the Director's own or the other door's. Opening the Remote RD door with no token makes one. Shutting it signs every other device out. Answers the same shape as the `GET` |
+| `PUT /network/token` | `{token?}`. Changes the access token to the one given (8 to 64 characters, no spaces), or to a new one Grid makes. Signs every other device out and closes what they had open. **Only the Grid computer may** (`403` otherwise) |
 
-`Always` means the Director itself was started on the network (`GRIDFPV_ADDR`). Then there
-is no second listener and the switch does nothing.
+When no port is picked, Public tries **80**, then **8081**; Remote RD uses **8082**.
 
-Switching off closes the listener and every connection it had open. A port that is taken
-gives `Failed` with the reason, and the Director tries again every few seconds. The setting
-is kept in `network.json` in the data folder. It is not part of a copy made on the Data page.
+Switching a door off closes its listener and every connection it had open. A port that is
+taken gives `Failed` with the reason, and the Director tries again every few seconds. The
+settings and the token are kept in `network.json` in the data folder. They are not part of
+a copy made on the Data page.
+
+The Director's own listener cannot be put on the network. `GRIDFPV_ADDR` picks its port, and
+must be a loopback address; anything else and the Director does not start. To use a
+Director on a machine with no screen, open an SSH tunnel to it
+(`ssh -L 8080:127.0.0.1:8080 <machine>`) and browse to `http://localhost:8080`.
 
 ## The Director
 

@@ -808,7 +808,7 @@ pub async fn get_access(
         [(CACHE_CONTROL, "no-store")],
         Json(PilotAccessView {
             pilots: registry.pilot_access().codes(&event_id, &pilots),
-            address: registry.network().view().addresses.into_iter().next(),
+            address: registry.network().public_address(),
         }),
     )
         .into_response())
@@ -876,10 +876,10 @@ pub async fn get_qr(
         .find(|entry| entry.pilot == pilot_id)
         .ok_or_else(not_in_event)?
         .code;
-    let Some(address) = registry.network().view().addresses.into_iter().next() else {
+    let Some(address) = registry.network().public_address() else {
         return Err(ProtocolError::new(
             ErrorCode::Refused,
-            "Other devices cannot reach Grid yet. Turn it on, on the Network page, to get a QR code.",
+            "Other devices cannot reach Grid yet. Switch on Public, on the Network page, to get a QR code.",
         ));
     };
     let svg = qr_svg(&join_link(&address, &code)).map_err(|err| {

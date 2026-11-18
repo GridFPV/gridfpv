@@ -454,7 +454,14 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     };
     return { seen, fetch };
   };
-  const view = { enabled: true, port: 8081, state: 'On', addresses: ['http://192.168.1.20:8081/'] };
+  const door = {
+    enabled: true,
+    port: 8081,
+    port_picked: false,
+    state: 'On',
+    addresses: ['http://192.168.1.20:8081/']
+  };
+  const view = { public: door, remote: { ...door, enabled: false, state: 'Off', addresses: [] } };
 
   it('getNetwork GETs /network', async () => {
     const { seen, fetch } = recorder(200, view);
@@ -464,28 +471,43 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     expect(seen[0].init?.method ?? 'GET').toBe('GET');
   });
 
-  it('putNetwork PUTs the request with the token, and leaves the port out when it is not given', async () => {
+  it('putDoor PUTs to the door named, with the token, and leaves the port out when it is not given', async () => {
     const { seen, fetch } = recorder(200, view);
-    const { putNetwork } = await import('./client.js');
-    await putNetwork('http://d.local:8080', { enabled: true }, 'rd-tok', { fetch });
-    await putNetwork('http://d.local:8080', { enabled: false, port: 9000 }, undefined, { fetch });
-    expect(seen[0].url).toBe('http://d.local:8080/network');
+    const { putDoor } = await import('./client.js');
+    await putDoor('http://d.local:8080', 'Public', { enabled: true }, 'rd-tok', { fetch });
+    await putDoor('http://d.local:8080', 'Remote', { enabled: false, port: 9000 }, undefined, {
+      fetch
+    });
+    expect(seen[0].url).toBe('http://d.local:8080/network/public');
     expect(seen[0].init?.method).toBe('PUT');
     expect((seen[0].init?.headers as Record<string, string>).Authorization).toBe('Bearer rd-tok');
     expect(JSON.parse(seen[0].init?.body as string)).toEqual({ enabled: true });
+    expect(seen[1].url).toBe('http://d.local:8080/network/remote');
     expect((seen[1].init?.headers as Record<string, string>).Authorization).toBeUndefined();
     expect(JSON.parse(seen[1].init?.body as string)).toEqual({ enabled: false, port: 9000 });
   });
 
-  it("putNetwork rejects with the Director's own words", async () => {
+  it("putDoor rejects with the Director's own words", async () => {
     const { fetch } = recorder(400, {
       code: 'BadRequest',
-      message: 'Pick a port from 1024 to 65535.'
+      message: 'Port 8080 is the one Grid itself uses on this computer. Pick another.'
     });
-    const { putNetwork } = await import('./client.js');
+    const { putDoor } = await import('./client.js');
     await expect(
-      putNetwork('http://d.local:8080', { enabled: true, port: 80 }, undefined, { fetch })
-    ).rejects.toThrow('Pick a port from 1024 to 65535.');
+      putDoor('http://d.local:8080', 'Public', { enabled: true, port: 8080 }, undefined, { fetch })
+    ).rejects.toThrow('Port 8080 is the one Grid itself uses on this computer. Pick another.');
+  });
+
+  it('putAccessToken PUTs the token typed, or nothing for a new one', async () => {
+    const { seen, fetch } = recorder(200, { ...view, token: 'K7QM-2XWD-9HRA' });
+    const { putAccessToken } = await import('./client.js');
+    const made = await putAccessToken('http://d.local:8080', {}, undefined, { fetch });
+    await putAccessToken('http://d.local:8080', { token: 'sunday-race-7' }, undefined, { fetch });
+    expect(made.token).toBe('K7QM-2XWD-9HRA');
+    expect(seen[0].url).toBe('http://d.local:8080/network/token');
+    expect(seen[0].init?.method).toBe('PUT');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({});
+    expect(JSON.parse(seen[1].init?.body as string)).toEqual({ token: 'sunday-race-7' });
   });
 
   it('getPublicHello GETs /public/hello, with a token only when one is held', async () => {

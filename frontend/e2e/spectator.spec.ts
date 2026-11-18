@@ -108,9 +108,9 @@ test.beforeAll(async () => {
   await command(heat('heat-1', 'Qualifying Heat 1', [ace, bee]));
   await command(heat('heat-2', 'Qualifying Heat 2', [bee]));
   const port = await freePort();
-  await direct('PUT', '/network', { enabled: true, port });
+  await direct('PUT', '/network/public', { enabled: true, port });
   await expect
-    .poll(async () => (await direct<{ state: string }>('GET', '/network')).state)
+    .poll(async () => (await direct<{ public: { state: string } }>('GET', '/network')).public.state)
     .toBe('On');
   address = `http://${lan}:${port}/`;
 });
@@ -283,7 +283,7 @@ test('a spectator watches a race from start to result without touching the page'
     expect(errors.filter((line) => !line.includes('404'))).toEqual([]);
 
     // ── Grid goes away: the phone says it is not connected, and keeps what it has ────────
-    await direct('PUT', '/network', { enabled: false });
+    await direct('PUT', '/network/public', { enabled: false });
     await expect(page.getByTestId('visitor-offline')).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId('visitor-event')).toBeVisible();
   } finally {

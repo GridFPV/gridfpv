@@ -93,5 +93,5 @@ Director (latest build, with the live RH connector):
 cd frontend && npm run build && cd ..
 cargo build -p gridfpv-app --features live
 GRIDFPV_ASSETS="$PWD/frontend/apps/rd-console/dist" GRIDFPV_DATA_DIR=~/gridfpv-data \
-  GRIDFPV_ADDR=0.0.0.0:8080 ./target/debug/gridfpv
+  ./target/debug/gridfpv
 ```

@@ -32,8 +32,9 @@
 //! If the fixed port is **taken** (another Director, a dev server), the app still comes up: it
 //! falls back to an ephemeral port and says so in the log, loudly, rather than refusing to
 //! start — a window with a one-off port beats no window. `GRIDFPV_ADDR` picks a different
-//! fixed port (or a LAN bind, for OBS on another machine — mind the auth model: off loopback,
-//! set `GRIDFPV_RD_TOKEN` to gate control).
+//! fixed port. It must be an address on this computer: the Director's own listener is never
+//! put on the network. Other devices come in by the Public and Remote RD doors, which the
+//! director switches on in the console (docs/primitives.md §11.10).
 //!
 //! Pointing the webview at the Director's HTTP origin (rather than loading the bundled
 //! assets over the `tauri://` protocol) is deliberate: the SPA makes **same-origin**
@@ -79,12 +80,20 @@ pub const DEFAULT_ADDR: SocketAddr =
 pub const ADDR_ENV: &str = "GRIDFPV_ADDR";
 
 /// Resolve the address to bind: `GRIDFPV_ADDR` when set and valid, else [`DEFAULT_ADDR`]. An
-/// unparsable value is reported and ignored rather than aborting the launch — the fixed
+/// unparsable value, or an address that is not on this computer, is reported and ignored rather than aborting the launch — the fixed
 /// default is always a usable answer.
 fn requested_addr() -> SocketAddr {
     match std::env::var(ADDR_ENV) {
         Ok(value) => match value.trim().parse::<SocketAddr>() {
-            Ok(addr) => addr,
+            Ok(addr) if addr.ip().to_canonical().is_loopback() => addr,
+            Ok(addr) => {
+                eprintln!(
+                    "gridfpv-desktop: {ADDR_ENV}={addr} is not an address on this computer. Grid \
+                     itself listens on this computer only — using {DEFAULT_ADDR}. Other devices \
+                     come in by Public or Remote RD, on the Network page."
+                );
+                DEFAULT_ADDR
+            }
             Err(err) => {
                 eprintln!(
                     "gridfpv-desktop: {ADDR_ENV}={value:?} is not a valid socket address ({err}) — \

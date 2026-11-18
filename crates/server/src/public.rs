@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::access::{Access, Origin, SESSION_COOKIE, cookie_token};
+use crate::access::{Access, Door, Origin, SESSION_COOKIE, cookie_token};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::events::EventRegistry;
 
@@ -40,12 +40,16 @@ pub struct PublicHello {
     /// The Grid build that is answering.
     pub version: String,
     pub caller: Caller,
+    /// The door the caller came in by (§11.10). Absent on the Grid computer's own address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub door: Option<Door>,
     /// The name of the event that is open, if one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub event: Option<String>,
-    /// Whether a director can sign in from another device at all: an access token is set
-    /// on this Director. With none set, the console is used on the Grid computer only.
+    /// Whether a director can sign in at this address. At the Remote RD door they can. At
+    /// the Public door they never can.
     pub director_sign_in: bool,
     /// The pilot this browser is signed in as, for the open event. Absent when it is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,11 +85,34 @@ pub async fn get_hello(
     access: Option<Extension<Access>>,
     headers: HeaderMap,
 ) -> Json<PublicHello> {
+    let access = access.map(|Extension(access)| access);
+    let caller = caller(access);
+    let door = access.and_then(|access| access.door);
+    let director_sign_in = match door {
+        Some(Door::Public) => false,
+        Some(Door::Remote) => registry.network().remote_open(),
+        None => registry.tokens().has_control_credential(),
+    };
+    // The Remote RD door is not for looking: until the token is shown it says nothing
+    // about the race, not even the event's name.
+    if door == Some(Door::Remote) && caller == Caller::Visitor {
+        return Json(PublicHello {
+            version: crate::BUILD_VERSION.to_string(),
+            caller,
+            door,
+            event: None,
+            director_sign_in,
+            pilot: None,
+            kiosk: false,
+            kiosk_name: None,
+        });
+    }
     Json(PublicHello {
         version: crate::BUILD_VERSION.to_string(),
-        caller: caller(access.map(|Extension(access)| access)),
+        caller,
+        door,
         event: registry.active().map(|event| event.name),
-        director_sign_in: registry.tokens().has_control_credential(),
+        director_sign_in,
         pilot: crate::pilot_access::signed_in_pilot(&registry, &headers),
         kiosk: crate::pilot_access::is_kiosk_device(&registry, &headers),
         kiosk_name: crate::pilot_access::kiosk_label(&registry, &headers),
@@ -126,14 +153,17 @@ pub async fn post_session(
     let Some(token) = bearer(&headers) else {
         return Err(wrong());
     };
+    let access = access.map(|Extension(access)| access);
+    // The access token, at the Remote RD door, or a token the Director was started with.
     // A browser sign-in cannot be used to make another one.
-    let known = tokens
-        .session(token)
-        .is_some_and(|session| session.role.can_control() && !session.browser);
+    let at_remote_door = access.is_some_and(|access| access.door == Some(Door::Remote));
+    let known = (at_remote_door && registry.network().is_token(token))
+        || tokens
+            .session(token)
+            .is_some_and(|session| session.role.can_control() && !session.browser);
     // For a visitor the gate has already checked the token, and counted a wrong one. Its
     // answer is the one that stands: an address that has guessed too often is refused even
     // when it finally sends the right token.
-    let access = access.map(|Extension(access)| access);
     // Say that it is a wait, and not that the token is wrong: a director with the right
     // token must not be told it is the wrong one.
     if access.is_some_and(|access| access.blocked) {
@@ -176,6 +206,7 @@ mod tests {
         let access = |origin, director| {
             Some(Access {
                 origin,
+                door: None,
                 director,
                 blocked: false,
             })

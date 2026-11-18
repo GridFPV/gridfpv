@@ -1287,3 +1287,51 @@ Check-in is for practice with no plan at all.
 **Not built:** counting a checked-in pilot in the heat's ranking; a pilot marking themselves
 "out" (a checked-in pilot drops the seat instead); check-in to a class roster (§4), which is
 a different thing with the same name.
+
+### 11.10 Three ways in: the Grid computer, Public and Remote RD (Built 2026-11-18)
+
+Grid is reached three ways. Each is a listener on its own port, and the way a request came
+in decides what it may do.
+
+| Way in | For | Port | Switch |
+|---|---|---|---|
+| **The Grid computer** | The director, sitting at it. No password | 8080, this computer only | Always on |
+| **Public** | Spectators, pilots, kiosks (§11.2 to §11.5) | 80, or 8081 when 80 cannot be used | **Enable Public** |
+| **Remote RD** | The director, on another device. The whole console | 8082 | **Enable Remote RD** |
+
+The rules:
+
+- **The Grid computer's own listener is never put on the network.** Whoever reaches it is
+  trusted as the director, so it only ever listens on this computer. There is no setting,
+  flag or start-up option that changes this. A Director on a machine with no screen is
+  reached through an SSH tunnel, which arrives as the machine itself.
+- **Nobody is the director at the Public door.** A token or a director's sign-in sent
+  there is not looked at, and the director's sign-in does not answer there. This holds even
+  for a browser that is signed in at the Remote RD door: a browser sends its cookies to
+  every port of an address, and at the Public door they count for nothing.
+- **The Remote RD door is not for looking.** Until the access token is shown it gives the
+  sign-in page and nothing about the race, not even the event's name.
+- **Nobody who comes in by a door is local,** even from the Grid computer itself.
+- **Both doors are off until switched on,** each by its own switch on the Network page.
+  Switching one off closes every connection it had open.
+- **Ports.** Each door has a usual port and the director can pick another. Public tries 80
+  first, so the address is short to type and to put in a QR code; where the computer does
+  not allow that, it uses 8081 and says so. The two doors and the Grid computer's own
+  listener never share a port.
+
+**The access token** is what the Remote RD door asks for.
+
+- Grid makes it the first time the door is opened: twelve letters and digits, in three
+  groups, with none that look alike. The director can type their own instead.
+- It is **shown on the Grid computer**, at any time. A device that signed in with it is
+  never told it, and cannot change it.
+- Changing it, or shutting the door, signs every other device out at once and closes what
+  they had open.
+- It is kept in `network.json`, which stays out of a copy made on the Data page.
+
+A kiosk, a pilot's QR code and the spectator's page all use the **Public** address.
+
+**Not built:** a name for the race network (so addresses and QR codes read `grid.race.lan`
+and not a number); serving over HTTPS (the director's own certificate first, then
+self-signed, then Certbot as an option, with 443 as Public's usual port); overlays for an
+OBS on a second computer.

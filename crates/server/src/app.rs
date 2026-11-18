@@ -154,11 +154,11 @@ pub fn router(registry: EventRegistry) -> Router {
             get(crate::video::get_settings).put(crate::video::put_settings),
         )
         // A copy of everything, to carry to another computer, and bringing one back in.
-        // Whether other devices can reach the Director (docs/primitives.md §11).
-        .route(
-            "/network",
-            get(crate::network::get_network).put(crate::network::put_network),
-        )
+        // How other devices reach the Director (docs/primitives.md §11.10): the two doors
+        // and the access token. The token route is listed first so it is not read as a door.
+        .route("/network", get(crate::network::get_network))
+        .route("/network/token", put(crate::network::put_token))
+        .route("/network/{door}", put(crate::network::put_door))
         // What a visitor on the network may ask for.
         .route("/public/hello", get(crate::public::get_hello))
         // A pilot's sign-in (docs/primitives.md §11.3): the director's side, and the pilot's.

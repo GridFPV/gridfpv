@@ -1062,7 +1062,14 @@ describe('Session', () => {
 });
 
 describe('other devices on the network', () => {
-  const VIEW = { enabled: true, port: 8081, state: 'Starting' as const, addresses: [] };
+  const DOOR = {
+    enabled: true,
+    port: 8081,
+    port_picked: false,
+    state: 'Starting' as const,
+    addresses: []
+  };
+  const VIEW = { public: DOOR, remote: { ...DOOR, enabled: false, state: 'Off' as const } };
   const HELLO = {
     version: '0.5.1',
     caller: 'Local' as const,
@@ -1138,50 +1145,65 @@ describe('other devices on the network', () => {
     expect(tokenProvider).not.toHaveBeenCalled();
   });
 
-  it('putNetwork goes through with no token on an open Director', async () => {
-    const putNetwork = vi.fn(async () => VIEW);
-    const session = new Session({ autoRestore: false, api: { putNetwork } });
-    expect(await session.putNetwork({ enabled: true })).toEqual(VIEW);
-    expect(putNetwork).toHaveBeenCalledOnce();
-    expect(putNetwork.mock.calls[0].slice(1, 3)).toEqual([{ enabled: true }, undefined]);
+  it('putDoor goes through with no token on an open Director', async () => {
+    const putDoor = vi.fn(async () => VIEW);
+    const session = new Session({ autoRestore: false, api: { putDoor } });
+    expect(await session.putDoor('Public', { enabled: true })).toEqual(VIEW);
+    expect(putDoor).toHaveBeenCalledOnce();
+    expect(putDoor.mock.calls[0].slice(1, 4)).toEqual(['Public', { enabled: true }, undefined]);
   });
 
-  it('putNetwork asks for the token when refused, and sends the change again with it', async () => {
+  it('putDoor asks for the token when refused, and sends the change again with it', async () => {
     let calls = 0;
-    const putNetwork = vi.fn(async () => {
+    const putDoor = vi.fn(async () => {
       calls += 1;
       if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
       return VIEW;
     });
-    const session = new Session({ autoRestore: false, api: { putNetwork } });
+    const session = new Session({ autoRestore: false, api: { putDoor } });
     session.setTokenProvider(async () => 'lazy-tok');
-    expect(await session.putNetwork({ enabled: true, port: 9000 })).toEqual(VIEW);
-    expect(putNetwork).toHaveBeenCalledTimes(2);
-    expect(putNetwork.mock.calls[1].slice(1, 3)).toEqual([
+    expect(await session.putDoor('Remote', { enabled: true, port: 9000 })).toEqual(VIEW);
+    expect(putDoor).toHaveBeenCalledTimes(2);
+    expect(putDoor.mock.calls[1].slice(1, 4)).toEqual([
+      'Remote',
       { enabled: true, port: 9000 },
       'lazy-tok'
     ]);
   });
 
-  it('putNetwork gives undefined when the token prompt is cancelled, and sends nothing more', async () => {
-    const putNetwork = vi.fn(async () => {
+  it('putDoor gives undefined when the token prompt is cancelled, and sends nothing more', async () => {
+    const putDoor = vi.fn(async () => {
       throw refusal(401, 'Control on this Director needs a token.');
     });
-    const session = new Session({ autoRestore: false, api: { putNetwork } });
+    const session = new Session({ autoRestore: false, api: { putDoor } });
     session.setTokenProvider(async () => undefined);
-    expect(await session.putNetwork({ enabled: true })).toBeUndefined();
-    expect(putNetwork).toHaveBeenCalledOnce();
+    expect(await session.putDoor('Public', { enabled: true })).toBeUndefined();
+    expect(putDoor).toHaveBeenCalledOnce();
   });
 
-  it("putNetwork passes on the Director's refusal of a bad port, with no prompt", async () => {
-    const putNetwork = vi.fn(async () => {
-      throw refusal(400, 'Pick a port from 1024 to 65535.');
+  it("putDoor passes on the Director's refusal of a port, with no prompt", async () => {
+    const putDoor = vi.fn(async () => {
+      throw refusal(400, 'Port 8082 is the one Remote RD uses. Pick another.');
     });
     const tokenProvider = vi.fn(async () => 'lazy-tok');
-    const session = new Session({ autoRestore: false, api: { putNetwork } });
+    const session = new Session({ autoRestore: false, api: { putDoor } });
     session.setTokenProvider(tokenProvider);
-    await expect(session.putNetwork({ enabled: true, port: 80 })).rejects.toThrow(/1024 to 65535/);
+    await expect(session.putDoor('Public', { enabled: true, port: 8082 })).rejects.toThrow(
+      /Remote RD uses/
+    );
     expect(tokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('putAccessToken sends the token typed, or nothing for a new one', async () => {
+    const putAccessToken = vi.fn(async () => ({ ...VIEW, token: 'K7QM-2XWD-9HRA' }));
+    const session = new Session({ autoRestore: false, api: { putAccessToken } });
+    expect((await session.putAccessToken())?.token).toBe('K7QM-2XWD-9HRA');
+    await session.putAccessToken('sunday-race-7');
+    expect(putAccessToken.mock.calls[0].slice(1, 3)).toEqual([{}, undefined]);
+    expect(putAccessToken.mock.calls[1].slice(1, 3)).toEqual([
+      { token: 'sunday-race-7' },
+      undefined
+    ]);
   });
 
   it('signing in sends the typed token and never keeps it; a refusal is passed on', async () => {
