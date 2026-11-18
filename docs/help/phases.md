@@ -45,7 +45,8 @@ and a bracket are phases. A phase can hold heats, and it can hold other phases.
 
   - **Round Robin**: rounds of heats where nobody goes out. Every pilot flies one heat in
     each round. Grid mixes the pilots between rounds so they meet different pilots. A pilot
-    keeps the same seat in every round, so they stay on one video channel. **Points by
+    changes seat (and video channel) only when the mixing needs it, so check your seat
+    before each round. **Points by
     place** is what each finishing place scores, first place first. Points from every heat
     are added up and the most points wins. Every heat can be flown from the start, in any
     order.
