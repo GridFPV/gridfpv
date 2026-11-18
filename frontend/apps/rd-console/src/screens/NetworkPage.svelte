@@ -224,79 +224,80 @@
       </DoorCard>
     </div>
 
-    <Card title="Kiosks" elevation="sm">
-      {#if kioskError}<Banner tone="danger">{kioskError}</Banner>{/if}
-      {#if reachable(view.public)}
-        <ol class="steps">
-          <li>
-            On the tablet, open
-            <a
-              href={kioskLink(view.public.addresses[0])}
-              target="_blank"
-              rel="noreferrer"
-              data-testid="kiosk-link">{hostOf(kioskLink(view.public.addresses[0]))}</a
-            >
-          </li>
-          <li>Make a kiosk code here and type it on the tablet. A code works once.</li>
-        </ol>
-      {:else}
-        <p class="muted">Enable Public first. A kiosk comes in that way.</p>
-      {/if}
-      <div class="row">
-        <Button
-          variant="primary"
-          disabled={kioskBusy}
-          onclick={() => kioskChange(() => session.newKioskCode())}>New kiosk code</Button
-        >
+    <Card elevation="sm">
+      <div class="kiosks" data-testid="kiosks">
+        <header>
+          <div class="title">
+            <h2>Kiosks</h2>
+            <p class="what">A tablet where pilots sign up</p>
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={kioskBusy}
+            onclick={() => kioskChange(() => session.newKioskCode())}>New kiosk code</Button
+          >
+        </header>
+        {#if kioskError}<Banner tone="danger">{kioskError}</Banner>{/if}
+        {#if reachable(view.public)}
+          <a
+            class="kiosk-address"
+            href={kioskLink(view.public.addresses[0])}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="kiosk-link">{hostOf(kioskLink(view.public.addresses[0]))}</a
+          >
+        {:else}
+          <p class="muted">Enable Public first.</p>
+        {/if}
+        {#if kiosks && kiosks.codes.length > 0}
+          <ul class="kiosk-list" aria-label="Kiosk codes waiting to be used">
+            {#each kiosks.codes as code (code)}
+              <li>
+                <span class="kiosk-code" data-testid="kiosk-code">{spellKioskCode(code)}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={kioskBusy}
+                  aria-label="Cancel kiosk code {spellKioskCode(code)}"
+                  onclick={() => kioskChange(() => session.cancelKioskCode(code))}>Cancel</Button
+                >
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if kiosks && kiosks.kiosks.length > 0}
+          <ul class="kiosk-list" aria-label="Kiosks set up">
+            {#each kiosks.kiosks as kiosk (kiosk.number)}
+              <li>
+                <span>
+                  Kiosk {kiosk.number}{#if kiosk.name}{': '}<strong data-testid="kiosk-name"
+                      >{kiosk.name}</strong
+                    >{/if}
+                </span>
+                <span class="muted">set up {setUpWords(kiosk.set_up_at)}</span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={kioskBusy}
+                  aria-label="Name kiosk {kiosk.number}"
+                  onclick={() => (naming = { number: kiosk.number, name: kiosk.name ?? '' })}
+                  >{kiosk.name ? 'Rename' : 'Name it'}</Button
+                >
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={kioskBusy}
+                  title="That tablet stops being a kiosk"
+                  aria-label="Remove kiosk {kiosk.number}"
+                  onclick={() => kioskChange(() => session.removeKiosk(kiosk.number))}
+                  >Remove</Button
+                >
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </div>
-      {#if kiosks && kiosks.codes.length > 0}
-        <h3>Codes waiting to be used</h3>
-        <ul class="kiosk-list" aria-label="Kiosk codes waiting to be used">
-          {#each kiosks.codes as code (code)}
-            <li>
-              <span class="kiosk-code" data-testid="kiosk-code">{spellKioskCode(code)}</span>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={kioskBusy}
-                aria-label="Cancel kiosk code {spellKioskCode(code)}"
-                onclick={() => kioskChange(() => session.cancelKioskCode(code))}>Cancel</Button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      {#if kiosks && kiosks.kiosks.length > 0}
-        <h3>Kiosks set up</h3>
-        <ul class="kiosk-list" aria-label="Kiosks set up">
-          {#each kiosks.kiosks as kiosk (kiosk.number)}
-            <li>
-              <span>
-                Kiosk {kiosk.number}{#if kiosk.name}{': '}<strong data-testid="kiosk-name"
-                    >{kiosk.name}</strong
-                  >{/if}
-              </span>
-              <span class="muted">set up {setUpWords(kiosk.set_up_at)}</span>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={kioskBusy}
-                aria-label="Name kiosk {kiosk.number}"
-                onclick={() => (naming = { number: kiosk.number, name: kiosk.name ?? '' })}
-                >{kiosk.name ? 'Rename' : 'Name it'}</Button
-              >
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={kioskBusy}
-                title="That tablet stops being a kiosk"
-                aria-label="Remove kiosk {kiosk.number}"
-                onclick={() => kioskChange(() => session.removeKiosk(kiosk.number))}>Remove</Button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
     </Card>
   {/if}
 </Page>
@@ -362,16 +363,49 @@
     margin: 0 0 var(--gf-space-3);
     max-width: 65ch;
   }
-  h3 {
-    margin: var(--gf-space-3) 0 var(--gf-space-2);
-    font-size: var(--gf-font-size-sm);
-  }
+  /* The two doors are always the same height, whatever each has to show. */
   .doors {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
     gap: var(--gf-space-4);
-    align-items: start;
+    align-items: stretch;
     margin-bottom: var(--gf-space-4);
+  }
+  .doors > :global(*) {
+    height: 100%;
+    box-sizing: border-box;
+  }
+  /* The kiosks card is laid out like a door's: a name, a few words, an address. */
+  .kiosks {
+    display: grid;
+    gap: var(--gf-space-3);
+  }
+  .kiosks header {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+  }
+  .kiosks .title {
+    flex: 1;
+    min-width: 0;
+  }
+  .kiosks h2 {
+    margin: 0;
+    font-size: var(--gf-font-size-lg);
+  }
+  .kiosks p {
+    margin: 0;
+  }
+  .what {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  .kiosk-address {
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-xl);
+    font-weight: var(--gf-font-weight-semibold);
+    overflow-wrap: anywhere;
+    justify-self: start;
   }
   .token {
     display: flex;
@@ -400,25 +434,9 @@
     flex-wrap: wrap;
     font-size: var(--gf-font-size-sm);
   }
-  .row {
-    display: flex;
-    gap: var(--gf-space-3);
-    align-items: center;
-    margin-bottom: var(--gf-space-3);
-  }
-  .steps {
-    margin: 0 0 var(--gf-space-3);
-    padding-left: var(--gf-space-5);
-    display: grid;
-    gap: var(--gf-space-1);
-  }
-  .steps a {
-    font-family: var(--gf-font-mono);
-    overflow-wrap: anywhere;
-  }
   .kiosk-list {
     list-style: none;
-    margin: 0 0 var(--gf-space-2);
+    margin: 0;
     padding: 0;
     display: grid;
     gap: var(--gf-space-1);

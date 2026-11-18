@@ -573,7 +573,7 @@ describe('NetworkPage: this device', () => {
     open({ public: SHUT_PUBLIC, remote: OPEN_REMOTE, token: TOKEN });
     await card('public');
     expect(screen.queryByTestId('kiosk-link')).toBeNull();
-    expect(screen.getByText(/Enable Public first\./)).toBeVisible();
+    expect(screen.getByText('Enable Public first.')).toBeVisible();
     cleanup();
     // On, but this computer has no address to give.
     open({ ...ON, public: { ...OPEN_PUBLIC, addresses: [] } });
@@ -592,9 +592,14 @@ describe('NetworkPage: kiosks', () => {
     ]
   };
 
-  it('starts with no codes and no kiosks', async () => {
+  it('starts with no codes and no kiosks, and says in a few words what a kiosk is', async () => {
     open(ON);
     await screen.findByTestId('kiosk-link');
+    const kiosksCard = screen.getByTestId('kiosks');
+    expect(kiosksCard).toHaveTextContent('A tablet where pilots sign up');
+    // No steps to read: the address, the button, and the codes when there are some.
+    expect(kiosksCard.querySelector('ol')).toBeNull();
+    expect(kiosksCard).not.toHaveTextContent('On the tablet, open');
     expect(codes()).toEqual([]);
     expect(screen.queryByRole('list', { name: 'Kiosks set up' })).toBeNull();
     expect(screen.queryByRole('list', { name: 'Kiosk codes waiting to be used' })).toBeNull();

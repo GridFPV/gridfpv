@@ -1331,7 +1331,21 @@ The rules:
 
 A kiosk, a pilot's QR code and the spectator's page all use the **Public** address.
 
-**Not built:** a name for the race network (so addresses and QR codes read `grid.race.lan`
-and not a number); serving over HTTPS (the director's own certificate first, then
-self-signed, then Certbot as an option, with 443 as Public's usual port); overlays for an
-OBS on a second computer.
+**Agreed, not built.** Each of these is decided (Ryan, 2026-11-18) and waits its turn.
+
+- **A QR code on the kiosk.** The kiosk's sign-in page shows a QR code that opens the
+  public pages on a pilot's own phone. It is drawn in the app's colours, not black and
+  white, with dark squares on a light ground so every phone camera reads it. Next in line.
+- **A name for the race network.** Where the field's network has DNS, the director types a
+  name such as `grid.race.lan` on the Network page. Every address Grid gives out, and every
+  QR code, then uses the name and not a number. Grid does not run DNS itself; it only uses
+  the name it is told.
+- **HTTPS.** Three ways, built in this order: the director's own key and certificate; a
+  certificate Grid signs itself (every phone warns about it, so it suits Remote RD more
+  than Public); and Certbot, as an option only, since it needs the internet and race day
+  must not (§11.1). With HTTPS on, Public's usual port is 443.
+- **Overlays for an OBS on a second computer.** Today the overlay pages are served by the
+  Grid computer's own listener, so OBS must run on the Grid computer. The plan is to serve
+  them at the Public door, since an overlay shows only what a spectator may see, and to
+  keep the overlay settings for the director. To check first: that the overlay pages read
+  nothing but the public routes.
