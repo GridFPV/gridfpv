@@ -515,10 +515,9 @@ heat (it used to put a one-heat round straight in the bracket). The Director kee
 bracket's rounds latest first, because the ranking stacks them in that order. The console
 shows them first round first, the order they are flown.
 
-**Open idea, not decided (2026-11-18):** Chase the Ace as several heats in a phase, one
-race each, in place of one heat raced several times. It would make each race a heat a
-pilot can see coming. It needs a phase that adds its next heat by itself until someone has
-two wins.
+**Decided 2026-11-18:** Chase the Ace stays one heat, raced until a pilot has two wins. It
+is not split into several heats in a phase. In a bracket that heat still sits in its own
+"Final" phase, like every other round, so the final is never a heat on its own.
 
 **Brackets** (Agreed). One generator covers every shape Ryan runs: single or double
 elimination, heats of 2 to 8 pilots, and any field from 3 pilots up. The director picks the
