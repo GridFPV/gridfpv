@@ -1214,7 +1214,7 @@ mod tests {
         // The final cannot start before the heats that feed it.
         assert!(matches!(
             director.send(Command::StartRace {
-                heat: pid("bracket/final")
+                heat: pid("bracket/final/heat-1")
             }),
             Err(Refusal::HeatWaiting { .. })
         ));
@@ -1229,10 +1229,10 @@ mod tests {
         );
         for heat in [
             "bracket/winners-1/heat-2",
-            "bracket/losers-1",
-            "bracket/winners-final",
-            "bracket/losers-final",
-            "bracket/final",
+            "bracket/losers-1/heat-1",
+            "bracket/winners-final/heat-1",
+            "bracket/losers-final/heat-1",
+            "bracket/final/heat-1",
         ] {
             fly(&mut director, heat);
         }
@@ -1555,7 +1555,7 @@ mod tests {
         );
         director
             .record(Event::PhaseRemoved {
-                phase: pid("bracket/final"),
+                phase: pid("bracket/final/heat-1"),
             })
             .unwrap();
     }
@@ -1986,7 +1986,10 @@ mod tests {
         let results = director.state.results();
         assert_eq!(
             director.state.queue(&results),
-            vec![pid("bracket/losers-1"), pid("bracket/winners-final")]
+            vec![
+                pid("bracket/losers-1/heat-1"),
+                pid("bracket/winners-final/heat-1")
+            ]
         );
     }
 
@@ -2270,7 +2273,7 @@ mod tests {
         // 0: p1 is seeded higher and keeps it. p4 and p3 both flew seat 1: p4 keeps it.
         // The two who had to move take the seats nobody asked for, in seed order.
         assert_eq!(
-            on("bracket/winners-final"),
+            on("bracket/winners-final/heat-1"),
             vec![
                 ("seat-0".to_owned(), "p1".to_owned()),
                 ("seat-1".to_owned(), "p4".to_owned()),
@@ -2280,7 +2283,7 @@ mod tests {
         );
         // The losers heat takes 3rd and 4th of each: p5 and p8 flew seats 2 and 3 in heat
         // 1 and are seeded above p6 and p7, so they keep them.
-        let losers = on("bracket/losers-1");
+        let losers = on("bracket/losers-1/heat-1");
         assert!(
             losers.contains(&("seat-2".to_owned(), "p5".to_owned())),
             "{losers:?}"
@@ -2291,14 +2294,14 @@ mod tests {
         );
         // The field (the seed order) is not changed by where pilots sit.
         assert_eq!(
-            results[&pid("bracket/winners-final")].field,
+            results[&pid("bracket/winners-final/heat-1")].field,
             vec![pilot("p1"), pilot("p2"), pilot("p4"), pilot("p3")]
         );
 
         // Once the heat has been flown its lineup stays as it was flown.
-        fly(&mut director, "bracket/winners-final");
+        fly(&mut director, "bracket/winners-final/heat-1");
         let results = director.state.results();
-        let after: Vec<String> = results[&pid("bracket/winners-final")]
+        let after: Vec<String> = results[&pid("bracket/winners-final/heat-1")]
             .lineup
             .iter()
             .map(|seat| match &seat.who {

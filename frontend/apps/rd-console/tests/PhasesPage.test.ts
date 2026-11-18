@@ -249,6 +249,26 @@ describe('Up next', () => {
     expectNoRawIds();
   });
 
+  it('says which phase a heat is in when its name does not', async () => {
+    await open(
+      eventView({
+        phases: [
+          group('sport', 'Sport'),
+          group('sport/semis', 'Semis', 'sport'),
+          heat('sport/semis/1', 'Semi 1', ['p-1a'], { parent: 'sport/semis' }),
+          group('practice', 'Practice'),
+          heat('practice/1', 'Practice Heat 1', ['p-2b'], { parent: 'practice' })
+        ],
+        queue: ['sport/semis/1', 'practice/1']
+      })
+    );
+    const items = within(screen.getByRole('list', { name: 'Up next' })).getAllByRole('listitem');
+    expect(items[0].querySelector('.within')).toHaveTextContent('Sport › Semis');
+    // "Practice Heat 1" already says Practice.
+    expect(items[1].querySelector('.within')).toBeNull();
+    expect(document.body.textContent).not.toContain('sport/');
+  });
+
   it('moving a heat sends the whole new order', async () => {
     const { session } = await open(view);
     expect(screen.getByRole('button', { name: 'Move Qualifying Heat 1 up' })).toBeDisabled();

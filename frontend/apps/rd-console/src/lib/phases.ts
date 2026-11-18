@@ -18,10 +18,17 @@ export interface PhaseRow {
   depth: number;
 }
 
+/** The display hints a bracket carries. Wire values, never shown. */
+const BRACKET_HINTS = new Set(['single-elimination', 'double-elimination']);
+
 /**
  * Lay the phases out as a tree, each parent followed by its children. The snapshot lists
  * phases in the order they were added, and that order is kept among siblings. A phase whose
  * parent is missing is shown at the top, so nothing is ever hidden.
+ *
+ * A bracket is the one exception to the order. The Director keeps a bracket's rounds latest
+ * first, because that is the order its ranking stacks them in. A person reads a bracket in
+ * the order it is flown, so its rounds are laid out first round first.
  */
 export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRow[] {
   if (root !== undefined) {
@@ -55,6 +62,11 @@ export function phaseTree(phases: readonly PhaseView[], root?: PhaseId): PhaseRo
       walk(phase.def.id, depth + 1);
     }
   };
+  for (const phase of phases) {
+    if (phase.def.display_hint !== undefined && BRACKET_HINTS.has(phase.def.display_hint)) {
+      children.get(phase.def.id)?.reverse();
+    }
+  }
   walk(undefined, 0);
   return rows;
 }
@@ -98,8 +110,21 @@ export function phaseStatus(phase: PhaseView, view: EventView): PhaseStatus {
   if (racing && isWithin(view.phases, racing.heat, phase.def.id)) return 'racing';
   if (phase.locked) return 'locked';
   if (phase.complete) return 'complete';
-  if (phase.waiting) return 'waiting';
-  return 'ready';
+  if (isHeat(phase.def)) return phase.waiting ? 'waiting' : 'ready';
+  // For a phase that holds things, the Director's "waiting" means its list of pilots is
+  // not settled yet, which is true of any finals until the last semi-final is flown. What
+  // the director asks is whether there is something to fly: one heat that can be, anywhere
+  // beneath it, makes it ready.
+  const heats = view.phases.filter(
+    (other) =>
+      isHeat(other.def) &&
+      other.def.id !== phase.def.id &&
+      isWithin(view.phases, other.def.id, phase.def.id)
+  );
+  if (heats.length === 0) return phase.waiting ? 'waiting' : 'ready';
+  return heats.some((heat) => !heat.waiting && !heat.complete && !heat.locked)
+    ? 'ready'
+    : 'waiting';
 }
 
 /** One phase that holds heats or phases, as the Phases page lists it: one line each. */

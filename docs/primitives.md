@@ -504,11 +504,21 @@ seat references and formats. The director can then edit any part by hand.
 | Time trial | Lineups from the roster; each heat ranked by best N consecutive; parent takes each pilot's best result |
 | Head-to-head round | Lineups from a seed; ranked by points or finish order |
 | Points heat | One heat, N races, points summed across them |
-| Bracket | A chain of rounds where each lineup refers to earlier heats (see below) |
+| Bracket | A chain of rounds where each lineup refers to earlier heats (see below). Every round is a phase that holds its heats, the final too, so each round opens the same way |
 | Mains | Brackets stacked with bump-ups (§6.1) |
 | Chase the Ace | One heat, raced until a pilot has two wins |
 | Single pilot | One heat with one pilot, done when the director says so, best 3 consecutive |
 | Season | A ranking rule over several events |
+
+**Built 2026-11-18:** a generated bracket makes every round a phase, even a round with one
+heat (it used to put a one-heat round straight in the bracket). The Director keeps a
+bracket's rounds latest first, because the ranking stacks them in that order. The console
+shows them first round first, the order they are flown.
+
+**Open idea, not decided (2026-11-18):** Chase the Ace as several heats in a phase, one
+race each, in place of one heat raced several times. It would make each race a heat a
+pilot can see coming. It needs a phase that adds its next heat by itself until someone has
+two wins.
 
 **Brackets** (Agreed). One generator covers every shape Ryan runs: single or double
 elimination, heats of 2 to 8 pilots, and any field from 3 pilots up. The director picks the

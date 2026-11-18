@@ -72,6 +72,100 @@ describe('phaseStatus', () => {
     expect(phaseStatus(finals, view)).toBe('racing');
     expect(phaseStatus(quali, view)).toBe('ready');
   });
+
+  it('calls a phase ready when any heat beneath it can be flown, whatever its field', () => {
+    // Finals the way a director builds them by hand: the Director says the phase is
+    // "waiting" because the final's seats are not decided, but the semi-finals can fly.
+    const finals = group('f', 'Finals', undefined, { waiting: true });
+    const semis = group('f/s', 'Semis', 'f');
+    const last = group('f/l', 'Last', 'f', { waiting: true });
+    const phases = (semiDone: boolean) => [
+      finals,
+      semis,
+      heat('f/s/1', 'Semi 1', ['a'], { parent: 'f/s', complete: semiDone }),
+      last,
+      heat('f/l/1', 'Final', [], { parent: 'f/l', waiting: true })
+    ];
+    const open = eventView({ phases: phases(false) });
+    expect(phaseStatus(finals, open)).toBe('ready');
+    expect(phaseStatus(semis, open)).toBe('ready');
+    // Nothing under the last round can fly yet.
+    expect(phaseStatus(last, open)).toBe('waiting');
+    // With the semi flown and the final still waiting, nothing is left to fly right now.
+    expect(phaseStatus(finals, eventView({ phases: phases(true) }))).toBe('waiting');
+  });
+
+  it('does not count a locked heat as one to fly', () => {
+    const holder = group('g', 'Group');
+    const view = eventView({
+      phases: [holder, heat('g/1', 'Heat', ['a'], { parent: 'g', locked: true })]
+    });
+    expect(phaseStatus(holder, view)).toBe('waiting');
+  });
+
+  it('with no heats beneath it, a phase is as the snapshot says', () => {
+    const view = eventView();
+    expect(phaseStatus(group('g', 'Group'), view)).toBe('ready');
+    expect(phaseStatus(group('g', 'Group', undefined, { waiting: true }), view)).toBe('waiting');
+  });
+});
+
+describe('a bracket in the tree', () => {
+  // The Director keeps a bracket's rounds latest first.
+  const bracket = (hint: string | undefined) => {
+    const top = group('b', 'Bracket');
+    top.def.display_hint = hint;
+    return [
+      group('q', 'Qualifying'),
+      top,
+      group('b/final', 'Final', 'b'),
+      heat('b/final/1', 'Final', [], { parent: 'b/final' }),
+      group('b/r2', 'Round 2', 'b'),
+      heat('b/r2/1', 'Round 2 Heat 1', [], { parent: 'b/r2' }),
+      heat('b/r2/2', 'Round 2 Heat 2', [], { parent: 'b/r2' }),
+      group('b/r1', 'Round 1', 'b'),
+      heat('b/r1/1', 'Round 1 Heat 1', [], { parent: 'b/r1' })
+    ];
+  };
+  const order = (hint: string | undefined) =>
+    phaseTree(bracket(hint)).map((row) => row.phase.def.id);
+
+  it('lays its rounds out in the order they are flown, first round first', () => {
+    for (const hint of ['single-elimination', 'double-elimination']) {
+      expect(order(hint)).toEqual([
+        'q',
+        'b',
+        'b/r1',
+        'b/r1/1',
+        'b/r2',
+        // The heats inside a round keep their order.
+        'b/r2/1',
+        'b/r2/2',
+        'b/final',
+        'b/final/1'
+      ]);
+    }
+  });
+
+  it('leaves any other phase in the order it was added', () => {
+    for (const hint of [undefined, 'mains']) {
+      expect(order(hint).slice(2, 4)).toEqual(['b/final', 'b/final/1']);
+    }
+  });
+
+  it('gives the phase list and the pickers the same order', () => {
+    const phases = bracket('double-elimination');
+    expect(
+      phaseSummaries(eventView({ phases }))
+        .filter((phase) => phase.parent === 'b')
+        .map((phase) => phase.name)
+    ).toEqual(['Round 1', 'Round 2', 'Final']);
+    expect(heatGroups(phases).map((entry) => entry.label)).toEqual([
+      'Bracket › Round 1',
+      'Bracket › Round 2',
+      'Bracket › Final'
+    ]);
+  });
 });
 
 describe('races and lineups', () => {

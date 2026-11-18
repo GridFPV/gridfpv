@@ -32,6 +32,8 @@ and a bracket are phases. A phase can hold heats, and it can hold other phases.
   the class gets a place. Then add heats with **+ Heat** on the phase's line.
 - **Add bracket**: every heat of an elimination bracket at once. Pick the pilots in seed
   order, how many fly in each heat, how many move on, and single or double elimination.
+  Each round of the bracket is a phase of its own that holds the round's heats. The final
+  is one too, even though it has one heat. The rounds are listed in the order you fly them.
 
 **Timed by** picks the timer. **Bench** is not a timer. On a Bench heat you log passes by
 hand on the Run page, which is handy for trying things with no hardware.
@@ -50,6 +52,13 @@ and on the phase's page each heat shows the format in force.
 **Up next** lists the heats that can be raced now, in a suggested order. The arrows move a
 heat up or down. The order is only a suggestion. Any heat in the list can be run at any
 time.
+
+Beside a heat's name, in small grey words, is the phase it is in, like "Sport Finals ›
+Semi-finals". That tells two heats with the same name apart. It is left out when the
+heat's name already says it, as in "Practice Heat 3".
+
+A phase reads **Ready** when at least one heat in it can be flown now. It reads
+**Waiting** when none can yet.
 
 ## A phase's page
 

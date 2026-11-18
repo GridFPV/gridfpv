@@ -748,7 +748,7 @@ mod tests {
         }
     }
 
-    /// Four pilots in one bracket with four seats: a single final heat, "finals/final".
+    /// Four pilots in one bracket with four seats: a single final heat, "finals/final/heat-1".
     fn bracket_request(staging_micros: i64) -> serde_json::Value {
         let pilots: Vec<PilotId> = ["ana", "ben", "cat", "dee"]
             .iter()
@@ -804,12 +804,13 @@ mod tests {
     #[tokio::test]
     async fn a_heat_is_raced_start_to_save_over_http_and_the_snapshot_shows_it() {
         let (registry, event) = with_bracket(0).await;
-        let heat = PhaseId("finals/final".into());
+        let heat = PhaseId("finals/final/heat-1".into());
         let before = state(&registry, &event).await;
-        assert_eq!(before.phases.len(), 2);
-        assert_eq!(before.phases[1].lineup.len(), 4);
+        // The bracket, its final (a phase), and the final's one heat.
+        assert_eq!(before.phases.len(), 3);
+        assert_eq!(before.phases[2].lineup.len(), 4);
         assert_eq!(
-            before.phases[1].lineup[0].who,
+            before.phases[2].lineup[0].who,
             SeatWhoView::Pilot(PilotId("ana".into()))
         );
         assert_eq!(before.current_race, None);
@@ -818,7 +819,7 @@ mod tests {
             command(&registry, &event, Command::StartRace { heat: heat.clone() }).await,
             StatusCode::OK
         );
-        let race = RaceId("finals/final#1".into());
+        let race = RaceId("finals/final/heat-1#1".into());
         // Dee (seat 3) flies the lap fastest; Ana never crosses.
         for (seat, at) in [("seat-1", 0), ("seat-2", 0), ("seat-3", 0)] {
             pass(&registry, &event, seat, at).await;
@@ -962,7 +963,7 @@ mod tests {
     async fn writes_need_the_rd_token_and_reads_do_not() {
         let (registry, event) = with_bracket(0).await;
         let token = registry.tokens().issue_rd_token();
-        let start = json!({ "StartRace": { "heat": "finals/final" } });
+        let start = json!({ "StartRace": { "heat": "finals/final/heat-1" } });
         let uri = format!("/events/{}/commands", event.0);
         let (status, _) = send(&registry, "POST", &uri, Some(start.clone()), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1018,7 +1019,7 @@ mod tests {
                 &registry,
                 &event,
                 Command::StartRace {
-                    heat: PhaseId("finals/final".into()),
+                    heat: PhaseId("finals/final/heat-1".into()),
                 },
             )
             .await;
@@ -1054,7 +1055,7 @@ mod tests {
             &registry,
             &event,
             Command::StartRace {
-                heat: PhaseId("finals/final".into()),
+                heat: PhaseId("finals/final/heat-1".into()),
             },
         )
         .await;
@@ -1074,7 +1075,7 @@ mod tests {
             &registry,
             &event,
             Command::StartRace {
-                heat: PhaseId("finals/final".into()),
+                heat: PhaseId("finals/final/heat-1".into()),
             },
         )
         .await;
@@ -1107,7 +1108,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_names_things_by_their_names_never_by_id() {
         let (registry, event) = with_bracket(0).await;
-        let heat = PhaseId("finals/final".into());
+        let heat = PhaseId("finals/final/heat-1".into());
         command(&registry, &event, Command::StartRace { heat: heat.clone() }).await;
         let refuse = |body: serde_json::Value| {
             let registry = registry.clone();
@@ -1121,10 +1122,10 @@ mod tests {
             }
         };
         // Saving a race that is still running.
-        let message = refuse(json!({ "SaveRace": { "race": "finals/final#1" } })).await;
+        let message = refuse(json!({ "SaveRace": { "race": "finals/final/heat-1#1" } })).await;
         assert_eq!(message, "cannot save race 1 of Final while it is Running");
         // Starting again while it runs.
-        let message = refuse(json!({ "StartRace": { "heat": "finals/final" } })).await;
+        let message = refuse(json!({ "StartRace": { "heat": "finals/final/heat-1" } })).await;
         assert!(message.contains("race 1 of Final"), "{message}");
         assert!(!message.contains("finals"), "{message}");
         assert!(!message.contains('#'), "{message}");
@@ -1134,7 +1135,7 @@ mod tests {
     async fn a_races_logged_signal_is_read_back_and_kept_apart_from_the_next_race() {
         use gridfpv_events::{SignalChunk, SignalThresholds, SignalUnit};
         let (registry, event) = with_bracket(0).await;
-        let heat = PhaseId("finals/final".into());
+        let heat = PhaseId("finals/final/heat-1".into());
         let chunk = |from: i64, level: i32| {
             Event::SignalChunk(SignalChunk {
                 adapter: AdapterId("oft".into()),
@@ -1170,7 +1171,7 @@ mod tests {
             // 100 ms are missing before this one.
             chunk(300_000, -900),
         ]);
-        let first = RaceId("finals/final#1".into());
+        let first = RaceId("finals/final/heat-1#1".into());
         command(
             &registry,
             &event,
@@ -1193,7 +1194,7 @@ mod tests {
             );
             async move { send(&registry, "GET", &uri, None, None).await }
         };
-        let (status, body) = read("finals/final#1").await;
+        let (status, body) = read("finals/final/heat-1#1").await;
         assert_eq!(status, StatusCode::OK);
         let signal: RaceSignal = serde_json::from_value(body).unwrap();
         // Four seats in the lineup; only seat 0 has signal.
@@ -1209,7 +1210,7 @@ mod tests {
         assert!(signal.seats[1].chunks.is_empty());
 
         // The second race has only its own signal.
-        let (_, body) = read("finals/final#2").await;
+        let (_, body) = read("finals/final/heat-1#2").await;
         let signal: RaceSignal = serde_json::from_value(body).unwrap();
         assert_eq!(signal.seats[0].chunks.len(), 1);
         assert_eq!(
