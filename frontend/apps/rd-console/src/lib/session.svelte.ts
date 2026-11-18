@@ -39,6 +39,8 @@ import {
   updateClass,
   deleteClass,
   setClassHidden,
+  getBuiltinClasses,
+  restoreBuiltinClasses,
   listTimers,
   listPublicChannels,
   listDiscoveredTimers,
@@ -224,6 +226,8 @@ const realApi = {
   updateClass,
   deleteClass,
   setClassHidden,
+  getBuiltinClasses,
+  restoreBuiltinClasses,
   listTimers,
   listPublicChannels,
   listDiscoveredTimers,
@@ -491,6 +495,19 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#api.setClassHidden(this.baseUrl, id, hidden, token)
     );
+  }
+
+  /** How many built-in classes have been removed, and could be put back. A plain read. */
+  async removedBuiltinClasses(): Promise<number> {
+    return (await this.#api.getBuiltinClasses(this.baseUrl)).removed;
+  }
+
+  /**
+   * Put back every built-in class that was removed. Returns the whole list of classes,
+   * `undefined` on a cancelled token prompt, or throws on any other failure.
+   */
+  restoreBuiltinClasses(): Promise<Class[] | undefined> {
+    return this.#privilegedWrite((token) => this.#api.restoreBuiltinClasses(this.baseUrl, token));
   }
 
   // ── Timer directory ────────────────────────────────────────────────────────

@@ -165,14 +165,14 @@ describe('TimerSeats', () => {
     expect(feed.opened).toEqual([ID]);
     expect(within(one).getByTestId('seat-live')).toHaveTextContent('Waiting for levels…');
 
-    // One trace for the seat that is on; none for the seat that is off.
-    const traces = screen.getByRole('list', { name: 'Signal' });
-    expect(within(traces).getAllByRole('listitem')).toHaveLength(1);
-    const trace = within(traces).getByRole('listitem', { name: 'Seat 1' });
-    expect(trace).toHaveTextContent('R1 · 5658 MHz');
+    // The seat that is on has its signal inside its own row. The seat that is off has none.
+    expect(screen.queryByRole('list', { name: 'Signal' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Signal' })).toBeNull();
+    expect(screen.getAllByTestId('seat-signal')).toHaveLength(1);
     expect(
-      within(trace).getByRole('img', { name: 'Signal on Seat 1 over the last 10 seconds' })
+      within(one).getByRole('img', { name: 'Signal on Seat 1 over the last 10 seconds' })
     ).toBeInTheDocument();
+    expect(within(seatRow('Seat 2')).queryByTestId('seat-signal')).toBeNull();
 
     feed.handlers!.onLevels(LEVELS);
     await waitFor(() => expect(within(one).getByTestId('seat-live')).toHaveTextContent('-77.3 dB'));
@@ -181,16 +181,17 @@ describe('TimerSeats', () => {
     expect(lamp).toHaveAttribute('data-crossing', 'true');
     expect(lamp).toHaveClass('lit');
 
-    // The same numbers beside the trace, with the enter and exit levels.
-    const numbers = within(trace).getByLabelText('Seat 1 levels');
-    expect(numbers).toHaveTextContent('Level -77.3 dB');
-    expect(numbers).toHaveTextContent('Noise floor -92.1 dB');
+    // Beside the trace: the enter and exit levels. The level and the noise floor are in the
+    // row above and are not said twice.
+    const numbers = within(one).getByLabelText('Seat 1 levels');
     expect(numbers).toHaveTextContent('Enter -77.1 dB');
     expect(numbers).toHaveTextContent('Exit -82.1 dB');
+    expect(numbers).not.toHaveTextContent('Noise floor');
 
     // A calibrated timer's chunks say dBm, and the page follows.
     feed.handlers!.onSignal(CHUNK);
-    await waitFor(() => expect(numbers).toHaveTextContent('Level -77.3 dBm'));
+    await waitFor(() => expect(numbers).toHaveTextContent('Enter -77.1 dBm'));
+    expect(within(one).getByTestId('seat-live')).toHaveTextContent('-77.3 dBm');
 
     // The crossing ends.
     feed.handlers!.onLevels([{ ...LEVELS[0], level: -900, crossing: false }, LEVELS[1]]);
@@ -245,9 +246,7 @@ describe('TimerSeats', () => {
     expect(await screen.findByText('This is what the timer is using.')).toBeVisible();
     expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(4);
     // Seat 2 is on now, so it has a trace.
-    expect(
-      within(screen.getByRole('list', { name: 'Signal' })).getAllByRole('listitem')
-    ).toHaveLength(2);
+    expect(screen.getAllByTestId('seat-signal')).toHaveLength(2);
   });
 
   it("shows the Director's sentence when the timer says no, and keeps the draft", async () => {
@@ -496,9 +495,8 @@ describe('TimerSeats', () => {
         LEVELS[0],
         { seat: '1', level: -880, floor: -915, enter: -600, exit: -660, crossing: false }
       ]);
-      const traces = screen.getByRole('list', { name: 'Signal' });
-      const one = within(traces).getByRole('listitem', { name: 'Seat 1' });
-      const two = within(traces).getByRole('listitem', { name: 'Seat 2' });
+      const one = seatRow('Seat 1');
+      const two = seatRow('Seat 2');
       await waitFor(() =>
         expect(within(two).getByLabelText('Seat 2 levels')).toHaveTextContent('Enter -60.0 dB')
       );

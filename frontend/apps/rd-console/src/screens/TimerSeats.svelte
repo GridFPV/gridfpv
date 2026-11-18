@@ -480,7 +480,57 @@
       </Card>
 
       <!-- ── Seats ─────────────────────────────────────────────────────── -->
-      <Card title="Seats" subtitle="The frequency each seat listens on, and whether it is on.">
+      <!-- ── Timer settings ────────────────────────────────────────────── -->
+      <Card
+        title="Timer settings"
+        subtitle={seatLevels
+          ? "When the timer counts a crossing. These levels are the timer's own. Every seat that has none of its own uses them."
+          : 'When the timer counts a crossing. These settings are for every seat on this timer.'}
+      >
+        <LevelsFields
+          bind:levels={draft.levels}
+          inUse={levelsInUse([...levels.values()], config)}
+          group="threshold-mode"
+          legend="Enter and exit levels"
+        >
+          {#if draft.exitHoldMs !== undefined}
+            <Field
+              label="Exit hold (milliseconds)"
+              hint="The signal must stay below the exit level this long before the crossing ends. A longer hold stops one pass from being split in two."
+            >
+              <Input
+                type="number"
+                inputmode="numeric"
+                min="0"
+                step="1"
+                aria-label="Exit hold, in milliseconds"
+                bind:value={draft.exitHoldMs}
+              />
+            </Field>
+          {/if}
+          {#if draft.lapCooldownS !== undefined}
+            <Field
+              label="Lap cooldown (seconds)"
+              hint="After a crossing, the timer reports no other on that seat for this long. It swallows the bounce of one pass. Keep it shorter than the event's minimum lap time, which is set on the event's Details page."
+            >
+              <Input
+                type="number"
+                inputmode="decimal"
+                min="0"
+                step="0.1"
+                aria-label="Lap cooldown, in seconds"
+                bind:value={draft.lapCooldownS}
+              />
+            </Field>
+          {/if}
+        </LevelsFields>
+      </Card>
+
+      <!-- ── Seats: each with its channel, its switch and its own signal ── -->
+      <Card
+        title="Seats"
+        subtitle="The frequency each seat listens on, whether it is on, and its signal over the last 10 seconds. A shaded band is a crossing."
+      >
         {#snippet actions()}
           <Button
             variant="secondary"
@@ -577,6 +627,29 @@
                     </span>
                   {/if}
                 </div>
+                <!-- The seat's own signal sits with its settings, so a change is seen where it
+                     is made. Only a seat that is on, on the timer, has one. -->
+                {#if onTimer?.enabled}
+                  <div class="signal" data-testid="seat-signal">
+                    <SignalTrace
+                      ring={ringFor(seat.seat)}
+                      {clock}
+                      levels={live}
+                      {unit}
+                      label="Signal on {label} over the last 10 seconds"
+                    />
+                    <dl class="summary" aria-label="{label} levels">
+                      <div>
+                        <dt class="enter">Enter</dt>
+                        <dd>{formatLevel(live?.enter, unit)}</dd>
+                      </div>
+                      <div>
+                        <dt class="exit">Exit</dt>
+                        <dd>{formatLevel(live?.exit, unit)}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                {/if}
                 {#if seatLevels}
                   <div class="own">
                     <div class="own-choice">
@@ -610,110 +683,6 @@
             {/each}
           </ul>
         {/if}
-      </Card>
-
-      <!-- ── Signal ────────────────────────────────────────────────────── -->
-      <Card
-        title="Signal"
-        subtitle="The last 10 seconds on each seat that is on. A shaded band is a crossing."
-      >
-        {@const shown = config.seats
-          .map((seat, position) => ({ seat, position }))
-          .filter(({ seat }) => seat.enabled)}
-        {#if shown.length === 0}
-          <p class="muted">No seat is on. Turn a seat on and apply to see its signal.</p>
-        {:else}
-          {#if !connected}
-            <p class="muted">No signal arrives while the timer is not connected.</p>
-          {/if}
-          <ul class="traces" aria-label="Signal">
-            {#each shown as { seat, position } (seat.seat)}
-              {@const label = seatName(seat.seat, position)}
-              {@const live = levels.get(seat.seat)}
-              <li class="trace-row" aria-label={label}>
-                <div class="trace-head">
-                  <span class="seat-name">{label}</span>
-                  <span class="muted">
-                    {channelLabel(seat.freq_mhz)
-                      ? `${channelLabel(seat.freq_mhz)} · ${seat.freq_mhz} MHz`
-                      : `${seat.freq_mhz} MHz`}
-                  </span>
-                </div>
-                <SignalTrace
-                  ring={ringFor(seat.seat)}
-                  {clock}
-                  levels={live}
-                  {unit}
-                  label="Signal on {label} over the last 10 seconds"
-                />
-                <dl class="summary" aria-label="{label} levels">
-                  <div>
-                    <dt>Level</dt>
-                    <dd>{formatLevel(live?.level, unit)}</dd>
-                  </div>
-                  <div>
-                    <dt>Noise floor</dt>
-                    <dd>{formatLevel(live?.floor, unit)}</dd>
-                  </div>
-                  <div>
-                    <dt class="enter">Enter</dt>
-                    <dd>{formatLevel(live?.enter, unit)}</dd>
-                  </div>
-                  <div>
-                    <dt class="exit">Exit</dt>
-                    <dd>{formatLevel(live?.exit, unit)}</dd>
-                  </div>
-                </dl>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </Card>
-
-      <!-- ── Timer settings ────────────────────────────────────────────── -->
-      <Card
-        title="Timer settings"
-        subtitle={seatLevels
-          ? "When the timer counts a crossing. These levels are the timer's own. Every seat that has none of its own uses them."
-          : 'When the timer counts a crossing. These settings are for every seat on this timer.'}
-      >
-        <LevelsFields
-          bind:levels={draft.levels}
-          inUse={levelsInUse([...levels.values()], config)}
-          group="threshold-mode"
-          legend="Enter and exit levels"
-        >
-          {#if draft.exitHoldMs !== undefined}
-            <Field
-              label="Exit hold (milliseconds)"
-              hint="The signal must stay below the exit level this long before the crossing ends. A longer hold stops one pass from being split in two."
-            >
-              <Input
-                type="number"
-                inputmode="numeric"
-                min="0"
-                step="1"
-                aria-label="Exit hold, in milliseconds"
-                bind:value={draft.exitHoldMs}
-              />
-            </Field>
-          {/if}
-          {#if draft.lapCooldownS !== undefined}
-            <Field
-              label="Lap cooldown (seconds)"
-              hint="After a crossing, the timer reports no other on that seat for this long. It swallows the bounce of one pass. Keep it shorter than the event's minimum lap time, which is set on the event's Details page."
-            >
-              <Input
-                type="number"
-                inputmode="decimal"
-                min="0"
-                step="0.1"
-                aria-label="Lap cooldown, in seconds"
-                bind:value={draft.lapCooldownS}
-              />
-            </Field>
-          {/if}
-        </LevelsFields>
       </Card>
 
       <!-- ── Apply ─────────────────────────────────────────────────────── -->
@@ -851,8 +820,7 @@
   }
 
   /* Seats */
-  .seats,
-  .traces {
+  .seats {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -973,26 +941,14 @@
   }
 
   /* Signal */
-  .traces {
-    gap: var(--gf-space-4);
-  }
-  .trace-row {
+  .signal {
+    grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 11rem;
-    grid-template-areas:
-      'head head'
-      'plot numbers';
+    grid-template-columns: minmax(0, 1fr) 9rem;
     gap: var(--gf-space-2) var(--gf-space-4);
     align-items: start;
   }
-  .trace-head {
-    grid-area: head;
-    display: flex;
-    align-items: baseline;
-    gap: var(--gf-space-3);
-  }
   .summary {
-    grid-area: numbers;
     margin: 0;
     display: flex;
     flex-direction: column;
@@ -1066,12 +1022,8 @@
     .frequency {
       flex-wrap: wrap;
     }
-    .trace-row {
+    .signal {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-areas:
-        'head'
-        'plot'
-        'numbers';
     }
   }
 </style>

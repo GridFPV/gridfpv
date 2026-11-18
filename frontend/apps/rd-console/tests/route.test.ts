@@ -42,7 +42,7 @@ describe('parseHash', () => {
 
   it('parses each page of the open event', () => {
     expect(parseHash('#/event')).toEqual(EVENT_PAGE);
-    const sections: EventSection[] = ['phases', 'results', 'overlays'];
+    const sections: EventSection[] = ['phases', 'results', 'recordings'];
     for (const section of sections) {
       expect(parseHash(`#/event/${section}`)).toEqual({ kind: 'event', section });
     }
@@ -111,7 +111,12 @@ describe('formatHash', () => {
     expect(formatHash(EVENT_PAGE)).toBe('#/event');
     expect(formatHash({ kind: 'event', section: 'phases' })).toBe('#/event/phases');
     expect(formatHash({ kind: 'event', section: 'results' })).toBe('#/event/results');
-    expect(formatHash({ kind: 'event', section: 'overlays' })).toBe('#/event/overlays');
+    expect(formatHash({ kind: 'event', section: 'recordings' })).toBe('#/event/recordings');
+    // Overlays is a Setup page: how they look is the same for every event.
+    expect(formatHash({ kind: 'page', page: 'overlays' })).toBe('#/overlays');
+    expect(parseHash('#/overlays')).toEqual({ kind: 'page', page: 'overlays' });
+    // Its old place among the event's pages is not a page any more.
+    expect(parseHash('#/event/overlays')).not.toEqual({ kind: 'page', page: 'overlays' });
   });
 });
 
@@ -125,7 +130,7 @@ describe('round-trip (format → parse)', () => {
     { kind: 'event', section: 'event' },
     { kind: 'event', section: 'phases' },
     { kind: 'event', section: 'results' },
-    { kind: 'event', section: 'overlays' },
+    { kind: 'event', section: 'recordings' },
     { kind: 'run' },
     { kind: 'run', heat: 'quali-ab12' },
     { kind: 'run', heat: 'finals/winners-1/heat-2' },
@@ -368,7 +373,7 @@ describe('inEvent', () => {
       { kind: 'event', section: 'event' },
       { kind: 'event', section: 'phases' },
       { kind: 'event', section: 'results' },
-      { kind: 'event', section: 'overlays' },
+      { kind: 'event', section: 'recordings' },
       { kind: 'run' },
       { kind: 'run', heat: 'h1' },
       { kind: 'marshal' },
@@ -398,14 +403,14 @@ describe('reconcileRoute', () => {
   });
 
   it('keeps every event page when an event is active', () => {
-    for (const section of ['event', 'phases', 'results', 'overlays'] satisfies EventSection[]) {
+    for (const section of ['event', 'phases', 'results', 'recordings'] satisfies EventSection[]) {
       const r: Route = { kind: 'event', section };
       expect(reconcileRoute(r, true)).toEqual(r);
     }
   });
 
   it('falls every event page back to the Events page when no event is active', () => {
-    for (const section of ['event', 'phases', 'results', 'overlays'] satisfies EventSection[]) {
+    for (const section of ['event', 'phases', 'results', 'recordings'] satisfies EventSection[]) {
       expect(reconcileRoute({ kind: 'event', section }, false)).toEqual(EVENTS_PAGE);
     }
   });
@@ -444,7 +449,7 @@ describe('resolveInitialRoute (the hash is authoritative)', () => {
       '#/event',
       '#/event/phases',
       '#/event/results',
-      '#/event/overlays',
+      '#/event/recordings',
       '#/event/run',
       '#/event/run/h1',
       '#/event/marshal',
@@ -510,7 +515,7 @@ describe('overlay routes', () => {
     for (const route of [
       DEFAULT_ROUTE,
       { kind: 'page', page: 'events' },
-      { kind: 'event', section: 'overlays' },
+      { kind: 'event', section: 'recordings' },
       { kind: 'run', heat: 'h1' },
       { kind: 'marshal' },
       { kind: 'seats', timer: 't1' },

@@ -234,7 +234,7 @@ test('the Overlays page lists the overlay with its URL and a live preview', asyn
   const eventId = await createEvent(page, name);
   try {
     expect((await page.request.put('/active-event', { data: { id: eventId } })).ok()).toBe(true);
-    await page.goto('/#/event/overlays');
+    await page.goto('/#/overlays');
     await expect(page.getByRole('heading', { name: 'Overlays', level: 1 })).toBeVisible({
       timeout: 15_000
     });

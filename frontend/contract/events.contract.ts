@@ -454,10 +454,11 @@ describe('seam 11: the application-level pilot directory (#74)', () => {
  *
  * guards:
  *  - `GET /classes` is an **open read** → `Class[]` carrying the 9 locked, fixed-id **built-in**
- *    classes (present on every Director, flagged `builtin`, carrying their real org as `source`).
+ *    classes (present on every Director, flagged `builtin`, carrying their org as `org`).
  *  - `POST /classes` is **RD-gated** (no/bad token → 401), requires a `name`, auto-generates an id,
- *    carries the `source`/`reference`/`description` metadata, and the new class appears in the listing.
- *  - `PUT/DELETE /classes/{id}` on a **built-in** id is rejected (read-only); user/Custom classes are
+ *    carries the `org`/`reference`/`description` metadata, and the new class appears in the listing.
+ *  - `PUT /classes/{id}` and `DELETE /classes/{id}` work on a **built-in** id as on any other.
+ *    `POST /classes/builtins` puts the removed ones back, as shipped; user/Custom classes are
  *    full CRUD (set / clear via wire-`null` — the `OptionalEdit` three-state).
  *  - `PUT /classes/{id}/hidden` hides or un-hides any class, built-ins included.
  */
@@ -512,33 +513,61 @@ describe('seam 12: the application-level class directory (#84)', () => {
       expect(cls, `built-in ${id} present`).toBeDefined();
       expect(cls?.builtin).toBe(true);
     }
-    // They carry their real org as the source (a badge), not Custom.
-    expect(byId.get('mgp-open')?.source).toBe('MultiGP');
-    expect(byId.get('five33-tiny-trainer')?.source).toBe('Five33');
-    expect(byId.get('freedom-spec')?.source).toBe('FreedomSpec');
-    expect(byId.get('street-league')?.source).toBe('StreetLeague');
-    expect(byId.get('udl-igniter')?.source).toBe('UDL');
+    // They carry the org that defines them, shown as a tag.
+    expect(byId.get('mgp-open')?.org).toBe('MultiGP');
+    expect(byId.get('five33-tiny-trainer')?.org).toBe('Five33');
+    expect(byId.get('freedom-spec')?.org).toBe('Freedom Spec');
+    expect(byId.get('street-league')?.org).toBe('Street League');
+    expect(byId.get('udl-igniter')?.org).toBe('UDL');
     for (const cls of classes) expect(wireShapeProblems(cls, 'Class')).toEqual([]);
   });
 
-  it('PUT/DELETE on a built-in class is rejected — built-ins are read-only', async () => {
+  it('a class that came with Grid is edited, removed and put back like any other', async () => {
+    const auth = { Authorization: `Bearer ${TOKEN}` };
     const put = await fetch(`${director.baseUrl}/classes/mgp-open`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ name: 'Hacked' })
     });
-    expect(put.status).toBe(400);
+    expect(put.status).toBe(200);
+    const edited = (await put.json()) as Class;
+    expect(edited.id).toBe('mgp-open');
+    expect(edited.name).toBe('Hacked');
+    expect(edited.builtin).toBe(true);
+    const before = await listClasses();
+    expect(before.find((c) => c.id === 'mgp-open')?.name).toBe('Hacked');
+    const removed = async (): Promise<unknown> =>
+      (await fetch(`${director.baseUrl}/classes/builtins`)).json();
+    expect(await removed()).toEqual({ removed: 0 });
 
+    // Removing needs the director.
+    expect((await fetch(`${director.baseUrl}/classes/mgp-open`, { method: 'DELETE' })).status).toBe(
+      401
+    );
     const del = await fetch(`${director.baseUrl}/classes/mgp-open`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${TOKEN}` }
+      headers: auth
     });
-    expect(del.status).toBe(400);
+    expect(del.status).toBe(200);
+    expect((await listClasses()).find((c) => c.id === 'mgp-open')).toBeUndefined();
+    expect(await removed()).toEqual({ removed: 1 });
 
-    // The built-in is untouched.
-    const stillThere = (await listClasses()).find((c) => c.id === 'mgp-open');
-    expect(stillThere?.name).toBe('Open Class');
-    expect(stillThere?.builtin).toBe(true);
+    // Putting the built-ins back needs the director, and answers the whole list.
+    expect((await fetch(`${director.baseUrl}/classes/builtins`, { method: 'POST' })).status).toBe(
+      401
+    );
+    const back = await fetch(`${director.baseUrl}/classes/builtins`, {
+      method: 'POST',
+      headers: auth
+    });
+    expect(back.status).toBe(200);
+    const list = (await back.json()) as Class[];
+    expect(list).toHaveLength(before.length);
+    const again = list.find((c) => c.id === 'mgp-open');
+    // Put back, it is the class as Grid ships it, not the edited one.
+    expect(again?.name).toBe('Open Class');
+    expect(again?.builtin).toBe(true);
+    expect(await removed()).toEqual({ removed: 0 });
   });
 
   it('POST /classes requires the RD token — no/bad token → 401', async () => {
@@ -554,19 +583,21 @@ describe('seam 12: the application-level class directory (#84)', () => {
   it('POST /classes creates a class (with metadata) and it appears in the listing', async () => {
     const created = (
       await createClass(
-        { name: 'Open', source: 'MultiGP', reference: 'mgp-open', description: 'The open class' },
+        { name: 'Open', org: 'My Club', reference: 'mgp-open', description: 'The open class' },
         TOKEN
       )
     ).body as Class;
     expect(created.id).toMatch(/^open-/);
     expect(created.name).toBe('Open');
-    expect(created.source).toBe('MultiGP');
+    expect(created.org).toBe('My Club');
     expect(created.reference).toBe('mgp-open');
     expect(created.description).toBe('The open class');
 
-    // The source defaults to "Custom" when omitted.
-    const custom = (await createClass({ name: 'Spec' }, TOKEN)).body as Class;
-    expect(custom.source).toBe('Custom');
+    // With no org given there is none: the field is left out, not filled in.
+    const bare = (await createClass({ name: 'Spec' }, TOKEN)).body as Class;
+    expect('org' in bare).toBe(false);
+    // An org too long to be a tag is refused.
+    expect((await createClass({ name: 'Long', org: 'x'.repeat(25) }, TOKEN)).status).toBe(400);
 
     const ids = (await listClasses()).map((c) => c.id);
     expect(ids).toContain(created.id);
@@ -588,11 +619,10 @@ describe('seam 12: the application-level class directory (#84)', () => {
       return { status: res.status, body: (await res.json().catch(() => undefined)) as unknown };
     };
 
-    // Set name + source, leave reference/description untouched (absent → unchanged).
-    const updated = (await put(created.id, { name: 'Renamed', source: 'Other' }, TOKEN))
-      .body as Class;
+    // Set name + org, leave reference/description untouched (absent → unchanged).
+    const updated = (await put(created.id, { name: 'Renamed', org: 'Other' }, TOKEN)).body as Class;
     expect(updated.name).toBe('Renamed');
-    expect(updated.source).toBe('Other');
+    expect(updated.org).toBe('Other');
     expect(updated.reference).toBe('ref-1'); // unchanged
     expect(updated.description).toBe('desc'); // unchanged
 

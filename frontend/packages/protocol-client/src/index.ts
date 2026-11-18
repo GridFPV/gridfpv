@@ -28,6 +28,8 @@ export {
   updateClass,
   deleteClass,
   setClassHidden,
+  getBuiltinClasses,
+  restoreBuiltinClasses,
   listTimers,
   listDiscoveredTimers,
   createTimer,

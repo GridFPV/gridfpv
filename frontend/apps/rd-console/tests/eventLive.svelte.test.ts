@@ -183,7 +183,7 @@ describe('EventLive', () => {
 
   it('reads the class directory on start and names classes from it', async () => {
     const { session } = fakeSession({
-      listClasses: vi.fn(async () => [{ id: 'cls-9k', name: 'Open', source: 'Custom' as const }])
+      listClasses: vi.fn(async () => [{ id: 'cls-9k', name: 'Open' }])
     });
     const live = new EventLive(session, 'evt');
     live.start();

@@ -24,27 +24,10 @@ settings. Save one for each place you fly.
 - **Save as new** stores what the timer has now under a new name.
 - **Rename** and **Delete** change only the saved copy. The timer is left as it is.
 
-## Seats
-
-Each seat has a channel, an on/off switch, and its live numbers.
-
-- Pick a channel from the box, or pick **Other frequency** and type the MHz.
-- Turn a seat **Off** when nobody flies on it. Fewer seats on one receiver means each seat
-  is checked more often, which makes lap times more exact.
-- **Level** is the signal right now. **Noise floor** is the signal with no quad near.
-- **Tune** opens the seat's own page, where you record its signal and set its levels on the
-  recording. See [Tune a seat](#/help/tune).
-- On a timer that can do it, **This seat's levels** gives one seat its own enter and exit
-  levels. Other seats use the timer's.
-
-## Signal
-
-The Signal card draws the last 10 seconds of each seat that is on. The solid line is the
-enter level and the dashed line is the exit level. A shaded band is a pass.
-
 ## Timer settings
 
-These belong to the timer, whatever is flown on it.
+These belong to the timer, whatever is flown on it. They are at the top of the page,
+above the seats, because every seat uses them unless it has levels of its own.
 
 - **Follow the noise floor**: the enter level sits a set number of dB above the noise
   floor and moves with it. This is the easy choice and works in most places.
@@ -54,6 +37,22 @@ These belong to the timer, whatever is flown on it.
 - **Lap cooldown**: after a pass, the timer reports no other pass on that seat for this
   long. It swallows the bounce of one pass. Two seconds is a good start. Keep it shorter
   than the event's minimum lap time, which is on the [Details](#/help/event) page.
+
+## Seats
+
+Each seat has a channel, an on/off switch, its live numbers, and its own signal.
+
+- Pick a channel from the box, or pick **Other frequency** and type the MHz.
+- Turn a seat **Off** when nobody flies on it. Fewer seats on one receiver means each seat
+  is checked more often, which makes lap times more exact.
+- **Level** is the signal right now. **Noise floor** is the signal with no quad near.
+- **Tune** opens the seat's own page, where you record its signal and set its levels on the
+  recording. See [Tune a seat](#/help/tune).
+- On a timer that can do it, **This seat's levels** gives one seat its own enter and exit
+  levels. Other seats use the timer's.
+- **The signal** is drawn under each seat that is on: the last 10 seconds. The solid line
+  is the enter level and the dashed line is the exit level. A shaded band is a pass. It is
+  right there with the seat's settings, so you see what a change does.
 
 ## Timers
 

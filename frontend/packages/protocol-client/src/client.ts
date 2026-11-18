@@ -12,6 +12,7 @@
  */
 
 import type {
+  BuiltinClasses,
   ActiveEvent,
   AdapterId,
   BracketRequest,
@@ -1387,8 +1388,8 @@ export async function updateClass(
 
 /**
  * Delete a class (`DELETE /classes/{id}`) — issue #84. RD-gated. An unknown id answers **404**.
- * A built-in class is read-only and answers **400**. Resolves once the delete succeeds, or rejects
- * on a non-2xx / transport failure.
+ * A built-in class can be removed too; {@link restoreBuiltinClasses} puts them back. Resolves
+ * once the delete succeeds, or rejects on a non-2xx / transport failure.
  */
 export async function deleteClass(
   baseUrl: string,
@@ -1426,6 +1427,31 @@ export async function setClassHidden(
     `/classes/${encodeURIComponent(id)}/hidden`,
     { method: 'PUT', body, token, fetch: options.fetch },
     'change the class visibility'
+  );
+}
+
+/** How many built-in classes the director has removed (`GET /classes/builtins`). Open. */
+export async function getBuiltinClasses(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<BuiltinClasses> {
+  return apiJson<BuiltinClasses>(baseUrl, '/classes/builtins', options, 'read the classes');
+}
+
+/**
+ * Put back every built-in class that was removed (`POST /classes/builtins`). RD-gated.
+ * Resolves to the whole list of classes.
+ */
+export async function restoreBuiltinClasses(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Class[]> {
+  return apiJson<Class[]>(
+    baseUrl,
+    '/classes/builtins',
+    { method: 'POST', token, fetch: options.fetch },
+    'put the built-in classes back'
   );
 }
 

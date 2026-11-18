@@ -1331,15 +1331,30 @@ The rules:
 
 A kiosk, a pilot's QR code and the spectator's page all use the **Public** address.
 
+**The kiosk's QR code** (built 2026-11-18). While a kiosk waits for a pilot it shows a QR
+code that opens the public pages on a pilot's own phone. It holds an address and nothing
+else. It is drawn in Grid's colours, not black and white: Grid's dark ground for the
+squares, a pale tint of Grid's green behind them. The squares are always the dark ones, so
+every phone camera reads it. The address is the one the kiosk itself opened Grid by.
+
 **Agreed, not built.** Each of these is decided (Ryan, 2026-11-18) and waits its turn.
 
-- **A QR code on the kiosk.** The kiosk's sign-in page shows a QR code that opens the
-  public pages on a pilot's own phone. It is drawn in the app's colours, not black and
-  white, with dark squares on a light ground so every phone camera reads it. Next in line.
-- **A name for the race network.** Where the field's network has DNS, the director types a
-  name such as `grid.race.lan` on the Network page. Every address Grid gives out, and every
-  QR code, then uses the name and not a number. Grid does not run DNS itself; it only uses
-  the name it is told.
+- **A public address.** The director types the address people should use to reach the
+  public pages, on the Network page. Every address Grid gives out for the public pages, and
+  every QR code (a pilot's, and the kiosk's), then uses it and not a number. It is a whole
+  address, with `http` or `https`, so it covers both cases:
+  - **A name on the race network**, where the field's network has DNS:
+    `http://grid.race.lan`.
+  - **An address on the internet.** The Director runs at the track on a hotspot or a
+    satellite link, and a tunnel (Cloudflare Tunnel, or the like) carries an internet
+    address such as `https://race.example.org` to the Public door. People then need not be
+    on the field's network at all, and the kiosk's QR code must point there.
+
+  Grid does not run DNS or a tunnel itself; it only uses the address it is told. Only the
+  **Public** door is ever put behind a tunnel: the Remote RD door and the Grid computer's
+  own listener stay on the field's network. Until this is built, the kiosk's QR code holds
+  the address the kiosk itself opened Grid by, so a kiosk opened by the internet address
+  already gives the right one, as long as that address is plain `http`.
 - **HTTPS.** Three ways, built in this order: the director's own key and certificate; a
   certificate Grid signs itself (every phone warns about it, so it suits Remote RD more
   than Public); and Certbot, as an option only, since it needs the internet and race day
@@ -1349,3 +1364,74 @@ A kiosk, a pilot's QR code and the spectator's page all use the **Public** addre
   them at the Public door, since an overlay shows only what a spectator may see, and to
   keep the overlay settings for the director. To check first: that the overlay pages read
   nothing but the public routes.
+
+## 12. Setup is set once (Agreed 2026-11-18)
+
+**The rule:** Setup is what a director sets before the event and then leaves alone. During
+an event the only Setup page they should need is a timer's seats. Anything that belongs to
+one event is on the event's side.
+
+What that changed (built 2026-11-18):
+
+- **Overlays** is a Setup page. What an overlay shows is the open event, but where it
+  sits, its logos and its URLs are the same for every event.
+- **Video** in Setup is only how OBS is set up. What was recorded, and the overlay runs,
+  are on the event's **Recordings** page.
+- **Seats** puts the timer's own settings first, and each seat's signal inside that seat's
+  row, with its settings.
+- **Formats** is laid out like Classes: one row each.
+- **Classes:** Grid still ships with the standard classes, and they are **not special**:
+  each can be edited, hidden or removed like a class the director made. The ones removed
+  can all be put back, as shipped. The tag beside a class is its **org**: free text, or
+  empty. There is no fixed list of orgs, no "Custom" tag and no "Built-in" mark.
+- **Data** is out of the menu. Grid is portable, so "where the data is" is not shown. The
+  page still works at its address, and the Director's routes are unchanged.
+
+### 12.1 More than one timer (Agreed in outline, not designed, not built)
+
+Today a heat's seats are on one timer, and the Seats page shows one timer at a time, with
+a picker when there are several. Two things are wanted, and they are different:
+
+- **Primary and backups.** Two or more timers at the **same gate**, the start/finish. One
+  is the primary. If it misses a pass, or fails, a backup's pass stands in.
+- **Splits.** Timers at **other gates** round the course. A pass there is not a lap. It
+  gives split times, and shows a pilot's progress during a lap.
+
+Open questions, to settle before any of it is built:
+
+1. **Which pass counts** when the primary and a backup both saw it, and when only the
+   backup did. How close in time two passes must be to be the same pass. Whether the
+   marshal sees the backup's passes and can take one by hand.
+2. **Failover.** Whether Grid switches to a backup by itself when the primary drops, or
+   the director does it.
+3. **What a split is** in the model: a pass (§2) that is not a lap. Where it is kept, how a
+   lap's splits are shown, and whether any ranking rule may use them.
+4. **Seats.** One seat is one pilot's channel. With several timers a seat is on each of
+   them. Whether the channel is set once and written to every timer, or per timer.
+5. **The Seats page** with several timers: one page per timer as now, or one row per seat
+   with a column per timer.
+
+### 12.2 Saved OBS profiles (Wanted, not designed)
+
+A named set of video settings the director can switch between, as a seat profile is for a
+timer. To decide: whether a profile holds only where OBS is (address and password), or also
+what records, the scenes and where the files go. The password is never shown again once
+stored (§ security), so a profile can be switched to but not read back.
+
+### 12.3 The Run page's seat cards with many laps (Agreed 2026-11-18, not built)
+
+A seat's card lists every lap, so in a long open practice it grows without end. It is to be
+done with the pass over the event's pages.
+
+- **The card shows the last 9 laps**, newest last. Its height is then fixed. With 9 laps or
+  fewer nothing is hidden, so a short race looks as it does now.
+- **The best lap is always on the card.** When it is older than the last 9 it is shown as
+  one more chip at the front, marked best. In a heat ranked on the best N laps in a row,
+  that run is kept on the card the same way.
+- **In open practice the laps are the current pilot's:** the last 9 of whoever holds the
+  seat now (§11.9), not the last 9 on the seat.
+- **"All laps", under the cards, shut until opened.** One table for every seat: lap, seat,
+  pilot, time, and in practice which stint. It can be narrowed by seat and by pilot, and
+  sorted by time.
+- **The Marshal page still shows every lap.** That is where laps are changed.
+

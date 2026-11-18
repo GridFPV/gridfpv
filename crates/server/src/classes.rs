@@ -10,9 +10,10 @@
 //! no data dir is configured). On top of those it always seeds **9 code-defined built-in
 //! classes** — the standard FPV classes (MultiGP / Five33 / FreedomSpec / Street League / UDL) —
 //! with **fixed ids**, identical on every Director, so cross-event / cross-Director standings
-//! aggregate with zero reconciliation. The built-ins are **read-only** (non-editable,
-//! non-deletable) and are **never** written to `classes.json` (re-seeded on every boot). Users
-//! only ever create [`Custom`](ClassSource::Custom) classes (full CRUD).
+//! aggregate with zero reconciliation. The built-ins are ordinary classes: they can be edited,
+//! hidden and removed. One still as shipped is not written to `classes.json` (it is seeded
+//! again at each start); an edited one is, and a removed one is remembered in its own file. Users
+//! create classes of their own (full CRUD), with an org tag if they type one.
 //!
 //! This is the directory of *which classes exist*. Which classes run at an event, and who races
 //! in each, belongs to the event and is built on the primitives (`docs/primitives.md` §5.3).
@@ -39,41 +40,22 @@ pub const CLASSES_FILE: &str = "classes.json";
 /// makes a hidden built-in (or custom class) survive a Director restart.
 pub const HIDDEN_CLASSES_FILE: &str = "hidden_classes.json";
 
-/// Where a [`Class`] came from (issue #84).
+/// The file name (under the data dir) the **removed built-ins** are kept in.
 ///
-/// A small closed enum the directory records so the RD can tell a canonical built-in class (e.g. a
-/// MultiGP spec class) from one they typed in themselves. Externally tagged (the default serde enum
-/// representation) so it maps to a TS string union (`"MultiGP" | "Five33" | … | "Custom" |
-/// "Other"`), exactly like [`VtxType`](crate::pilots::VtxType). The org variants name the standard
-/// FPV racing leagues / spec bodies the built-in classes carry as their provenance (shown as a
-/// badge). Defaults to [`Custom`](ClassSource::Custom) — a class the RD created by hand; users only
-/// ever create `Custom` classes. [`Other`](ClassSource::Other) is the catch-all for any provenance
-/// not enumerated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "bindings/")]
-pub enum ClassSource {
-    /// Imported from / aligned with **MultiGP** (a GQ / spec class).
-    MultiGP,
-    /// Aligned with **Five33** (flyfive33.com spec classes, e.g. Tiny Trainer).
-    Five33,
-    /// Aligned with the **Freedom Spec** open-spec class (freedomspec.com).
-    FreedomSpec,
-    /// Aligned with **Street League** (streetleague.io spec).
-    StreetLeague,
-    /// Aligned with the **Underground Drone League** (UDL, undergrounddroneleague.com).
-    UDL,
-    /// A **custom** class the RD created by hand (the default). The only source a user creates.
-    #[default]
-    Custom,
-    /// Any other provenance not enumerated above (catch-all).
-    Other,
-}
+/// Grid ships with the built-in classes, and a director may remove the ones their club never
+/// flies. The built-ins are seeded on every start and never written to `classes.json`, so the
+/// ones that were removed are remembered here and left out of the seed. Putting the built-ins
+/// back (`POST /classes/builtins`) empties it.
+pub const REMOVED_CLASSES_FILE: &str = "removed_classes.json";
+
+/// The most characters an org name may have. It is shown as a small tag beside the class.
+pub const ORG_MAX: usize = 24;
 
 /// One class in the application-level directory (issue #84).
 ///
 /// The wire shape `GET /classes` returns and the on-disk shape `classes.json` persists: a stable
-/// [`ClassId`] (auto-generated, never user-entered), a required `name`, a [`source`](Class::source)
-/// provenance, and a little optional metadata. The optional fields are omitted from the wire when
+/// [`ClassId`] (auto-generated, never user-entered), a required `name`, and a little optional
+/// metadata, the org among it. The optional fields are omitted from the wire when
 /// unset (`skip_serializing_if`). Derives serde (its JSON *is* both the wire and the persisted form)
 /// and `ts_rs::TS` so the frontend reads a generated `Class` type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -86,10 +68,12 @@ pub struct Class {
     /// The class's **name** — the required display label (e.g. `"Open"`, `"Spec 5\""`). The
     /// directory's one mandatory field; everything else is optional metadata.
     pub name: String,
-    /// Where this class came from (see [`ClassSource`]). Defaults to
-    /// [`Custom`](ClassSource::Custom).
-    #[serde(default)]
-    pub source: ClassSource,
+    /// The **org** whose class this is, such as `"MultiGP"` or a club's own name. Free text,
+    /// shown as a tag beside the class. A built-in carries the org that defines it; the
+    /// director types one, or none, for a class of their own. Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub org: Option<String>,
     /// An optional **reference** id/handle into the source system (e.g. a MultiGP class id), if
     /// recorded. Free-form. Omitted from the wire when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,10 +85,9 @@ pub struct Class {
     pub description: Option<String>,
     /// Whether this is a **code-defined built-in** class (issue #84) — one of the canonical
     /// standard FPV classes seeded into every directory with a fixed id, so cross-event /
-    /// cross-Director standings aggregate with zero reconciliation. Built-ins are **read-only**:
-    /// they cannot be edited or deleted, and are **not** persisted to `classes.json` (they are
-    /// re-seeded on every boot). A user-created [`Custom`](ClassSource::Custom) class is never a
-    /// built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
+    /// cross-Director standings aggregate with zero reconciliation. A built-in is like any other class: it can
+    /// be edited, hidden or removed. One still as shipped is **not** written to `classes.json`
+    /// (it is seeded again at each start); once edited it is. A class the director made is never a built-in. Defaults to `false` and is omitted from the wire / disk when false, so a custom
     /// class's JSON is unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub builtin: bool,
@@ -134,8 +117,8 @@ struct BuiltinClass {
     id: &'static str,
     /// The canonical display name.
     name: &'static str,
-    /// The real org this class belongs to (shown as a source badge).
-    source: ClassSource,
+    /// The org that defines this class (shown as a tag).
+    org: &'static str,
     /// A reference URL into the org's rules.
     reference: &'static str,
     /// A short canonical description.
@@ -144,83 +127,83 @@ struct BuiltinClass {
 
 /// The 9 standard FPV racing classes seeded into **every** directory with **fixed ids** (issue
 /// #84). Present on every Director identically so cross-event / cross-Director season standings
-/// aggregate without reconciliation; carry their real org as [`source`](Class::source) (a badge);
+/// aggregate without reconciliation; carry their org as [`org`](Class::org) (a tag);
 /// are read-only (non-editable, non-deletable); and are **not** persisted to `classes.json`.
 const BUILTIN_CLASSES: &[BuiltinClass] = &[
     BuiltinClass {
         id: "mgp-open",
         name: "Open Class",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/class-specifications/",
         description: "Open/unlimited 5–6\" class — no motor/prop/electronics limits.",
     },
     BuiltinClass {
         id: "mgp-pro-spec",
         name: "Pro Spec",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/prospec/",
         description: "MultiGP's official 7\" spec class (Pro Spec frame, spec motor).",
     },
     BuiltinClass {
         id: "mgp-whoop",
         name: "Whoop Class",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/class-specifications/",
         description: "1S indoor micro whoop (65mm ducted).",
     },
     BuiltinClass {
         id: "mgp-micro",
         name: "Micro Class",
-        source: ClassSource::MultiGP,
+        org: "MultiGP",
         reference: "https://www.multigp.com/class-specifications/microclass/",
         description: "3\" micro class (1404 motor, 3S).",
     },
     BuiltinClass {
         id: "five33-tiny-trainer",
         name: "Tiny Trainer",
-        source: ClassSource::Five33,
+        org: "Five33",
         reference: "https://flyfive33.com/pages/tt-spec",
         description: "Five33 3\" spec (Tiny Trainer frame, 1404, 3S).",
     },
     BuiltinClass {
         id: "freedom-spec",
         name: "Freedom Spec",
-        source: ClassSource::FreedomSpec,
+        org: "Freedom Spec",
         reference: "https://freedomspec.com/",
         description: "Open 5\" spec class with a standardized motor-RPM cap.",
     },
     BuiltinClass {
         id: "street-league",
         name: "Street League",
-        source: ClassSource::StreetLeague,
+        org: "Street League",
         reference: "https://streetleague.io/spec",
         description: "7\" spec on firmware that equalizes motors via an RPM limiter.",
     },
     BuiltinClass {
         id: "udl-igniter",
         name: "Igniter",
-        source: ClassSource::UDL,
+        org: "UDL",
         reference: "https://undergrounddroneleague.com/igniter-legal-parts",
         description: "Indoor 1S 75mm-ducted spec, approved-parts-only, RPM-limited.",
     },
     BuiltinClass {
         id: "udl-shrieker",
         name: "Shrieker",
-        source: ClassSource::UDL,
+        org: "UDL",
         reference: "https://undergrounddroneleague.com/drone-types",
         description: "Fast 1S 65mm micro, near-open ruleset.",
     },
 ];
 
 /// Build the 9 built-in [`Class`]es (issue #84) — the canonical, fixed-id, read-only classes seeded
-/// into every directory. Each carries `builtin = true` and its real org as the source.
+/// into every directory. Each carries `builtin = true` and its org.
 fn builtin_classes() -> Vec<Class> {
     BUILTIN_CLASSES
         .iter()
         .map(|b| Class {
             id: ClassId(b.id.to_string()),
             name: b.name.to_string(),
-            source: b.source,
+            org: Some(b.org.to_string()),
             reference: Some(b.reference.to_string()),
             description: Some(b.description.to_string()),
             builtin: true,
@@ -246,10 +229,10 @@ fn is_builtin_id(id: &ClassId) -> bool {
 pub struct CreateClassRequest {
     /// The required name for the new class.
     pub name: String,
-    /// The class's provenance, stored on [`Class::source`]. Defaults to
-    /// [`Custom`](ClassSource::Custom).
-    #[serde(default)]
-    pub source: ClassSource,
+    /// Optional org, stored on [`Class::org`]. At most [`ORG_MAX`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub org: Option<String>,
     /// Optional reference id, stored on [`Class::reference`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -264,7 +247,7 @@ pub struct CreateClassRequest {
 ///
 /// Every field is optional so a partial edit is a one-field body; the id is fixed (it is in the
 /// path). A present `name` replaces it (a blank one is ignored — the name is required and never
-/// cleared). A present `source` replaces the provenance. Each optional-metadata field is a
+/// cleared). Each optional-metadata field is a
 /// three-state [`OptionalEdit`]: **absent** leaves it unchanged ([`Keep`](OptionalEdit::Keep)),
 /// present **`null`** clears it ([`Clear`](OptionalEdit::Clear)), and present **with a value** sets
 /// it ([`Set`](OptionalEdit::Set)) — exactly the `UpdatePilotRequest` semantics.
@@ -275,10 +258,10 @@ pub struct UpdateClassRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub name: Option<String>,
-    /// A new provenance, or `None` to leave it unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub source: Option<ClassSource>,
+    /// A new org (set / clear / leave-unchanged, like [`reference`](Self::reference)).
+    #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
+    #[ts(optional = nullable)]
+    pub org: OptionalEdit<String>,
     /// A new reference id: present value → set, present `null` → clear, absent → leave unchanged.
     #[serde(default, skip_serializing_if = "OptionalEdit::is_keep")]
     #[ts(optional = nullable)]
@@ -324,6 +307,9 @@ struct Directory {
     /// `<data_dir>/hidden_classes.json` and applied **after** the boot re-seed, so a hidden built-in
     /// survives a restart. An id in here that no longer names a class is harmless (ignored on read).
     hidden: BTreeSet<ClassId>,
+    /// The built-in classes the director has removed. Kept in `removed_classes.json` and left
+    /// out when the built-ins are seeded, so a removed one stays removed across a restart.
+    removed: BTreeSet<ClassId>,
     /// Directory `classes.json` / `hidden_classes.json` are persisted under; `None` ⇒ in-memory
     /// only (no data dir).
     data_dir: Option<PathBuf>,
@@ -342,9 +328,18 @@ impl ClassDirectory {
     pub fn new(data_dir: Option<PathBuf>) -> Result<Self, ClassError> {
         let mut classes = BTreeMap::new();
 
-        // Always seed the code-defined built-ins first (they are never read from disk).
+        // The built-ins the director has removed. A bad or missing file means none.
+        let removed = data_dir
+            .as_deref()
+            .and_then(read_removed_classes)
+            .unwrap_or_default();
+
+        // Seed the code-defined built-ins first (they are never read from disk), but for the
+        // ones that were removed.
         for class in builtin_classes() {
-            classes.insert(class.id.clone(), class);
+            if !removed.contains(&class.id) {
+                classes.insert(class.id.clone(), class);
+            }
         }
 
         let mut hidden = BTreeSet::new();
@@ -354,12 +349,13 @@ impl ClassDirectory {
             })?;
             if let Some(restored) = read_persisted_classes(dir) {
                 for mut class in restored {
-                    // A persisted entry can never be a built-in (we never write them); ignore any
-                    // stale id collision and force the flag off for restored user classes.
-                    if is_builtin_id(&class.id) {
+                    // A class that came with Grid and was edited is kept here too, and takes
+                    // the place of the one seeded above. One that was removed stays removed.
+                    if removed.contains(&class.id) {
                         continue;
                     }
-                    class.builtin = false;
+                    // Whether a class came with Grid is told by its id, never by the file.
+                    class.builtin = is_builtin_id(&class.id);
                     // Hidden state lives in the sidecar, never on the class — clear any stray flag.
                     class.hidden = false;
                     classes.insert(class.id.clone(), class);
@@ -376,6 +372,7 @@ impl ClassDirectory {
             inner: Arc::new(RwLock::new(Directory {
                 classes,
                 hidden,
+                removed,
                 data_dir,
             })),
         })
@@ -405,7 +402,7 @@ impl ClassDirectory {
     /// hidden-set and return the updated [`Class`] (with its fresh `hidden` flag).
     ///
     /// Hiding is a **visibility preference**, not an edit — so it is allowed for **built-in**
-    /// classes too (it is *not* a [`ReadOnly`](ClassErrorKind::ReadOnly) violation): the whole
+    /// classes too (it is a preference, not an edit): the whole
     /// point is to let the RD tuck away the standard built-ins they don't run. An unknown id is a
     /// 404 ([`NotFound`](ClassErrorKind::NotFound)). The hidden-set is **persisted** on success, so
     /// the choice survives a restart — including the boot re-seed of the built-ins.
@@ -439,6 +436,8 @@ impl ClassDirectory {
         if name.is_empty() {
             return Err(ClassError::invalid("a class name is required"));
         }
+        let org = normalize_optional(&request.org);
+        check_org(org.as_deref())?;
         let mut dir = self.write();
         let id = loop {
             let candidate = ClassId(format!("{}-{}", slugify(name), short_suffix()));
@@ -449,7 +448,7 @@ impl ClassDirectory {
         let class = Class {
             id: id.clone(),
             name: name.to_string(),
-            source: request.source,
+            org,
             reference: normalize_optional(&request.reference),
             description: normalize_optional(&request.description),
             builtin: false,
@@ -469,11 +468,8 @@ impl ClassDirectory {
     /// cleared. A **built-in** class is read-only — editing one is rejected (issue #84). An unknown
     /// id is a [`ClassError`]. The directory is **persisted** on success.
     pub fn update(&self, id: &ClassId, request: &UpdateClassRequest) -> Result<Class, ClassError> {
-        if is_builtin_id(id) {
-            return Err(ClassError::read_only(format!(
-                "the built-in class {:?} is read-only and cannot be edited",
-                id.0
-            )));
+        if let OptionalEdit::Set(org) = &request.org {
+            check_org(Some(org.trim()))?;
         }
         let mut dir = self.write();
         let class = dir
@@ -486,9 +482,7 @@ impl ClassDirectory {
                 class.name = trimmed.to_string();
             }
         }
-        if let Some(source) = request.source {
-            class.source = source;
-        }
+        apply_string_edit(&mut class.org, &request.org);
         apply_string_edit(&mut class.reference, &request.reference);
         apply_string_edit(&mut class.description, &request.description);
         let updated = class.clone();
@@ -497,16 +491,14 @@ impl ClassDirectory {
         Ok(dir.view(&updated))
     }
 
-    /// Delete a class (issue #84). A **built-in** class is read-only and cannot be deleted (it is
-    /// always present); attempting to is rejected. An unknown id is a [`ClassError`]. The
-    /// directory is **persisted** on success.
+    /// Remove a class. An unknown id is a [`ClassError`]. The directory is **persisted** on
+    /// success.
+    ///
+    /// A **built-in** class can be removed too: Grid ships with them, and a director drops the
+    /// ones their club never flies. It still cannot be edited. A removed built-in is remembered
+    /// so it does not come back at the next start; [`restore_builtins`](Self::restore_builtins)
+    /// puts them all back.
     pub fn delete(&self, id: &ClassId) -> Result<(), ClassError> {
-        if is_builtin_id(id) {
-            return Err(ClassError::read_only(format!(
-                "the built-in class {:?} is read-only and cannot be deleted",
-                id.0
-            )));
-        }
         let mut dir = self.write();
         if dir.classes.remove(id).is_none() {
             return Err(ClassError::not_found(format!(
@@ -514,6 +506,11 @@ impl ClassDirectory {
                 id.0
             )));
         }
+        if is_builtin_id(id) {
+            dir.removed.insert(id.clone());
+            dir.persist_removed()?;
+        }
+        // Also for a class that came with Grid: an edited one is in the file, and must go.
         dir.persist()?;
         // A deleted class drops out of the hidden-set too (so a later recreate isn't silently
         // hidden by a stale id, and the sidecar doesn't accumulate dangling ids).
@@ -521,6 +518,27 @@ impl ClassDirectory {
             dir.persist_hidden()?;
         }
         Ok(())
+    }
+
+    /// How many built-in classes the director has removed.
+    pub fn removed_builtins(&self) -> usize {
+        self.read().removed.len()
+    }
+
+    /// Put back every built-in class that was removed. Answers the whole list, as
+    /// [`list`](Self::list) does. With none removed it changes nothing.
+    pub fn restore_builtins(&self) -> Result<Vec<Class>, ClassError> {
+        {
+            let mut dir = self.write();
+            if !dir.removed.is_empty() {
+                for class in builtin_classes() {
+                    dir.classes.entry(class.id.clone()).or_insert(class);
+                }
+                dir.removed.clear();
+                dir.persist_removed()?;
+            }
+        }
+        Ok(self.list())
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
@@ -553,12 +571,25 @@ impl Directory {
         let classes: Vec<&Class> = self
             .classes
             .values()
-            .filter(|c| !c.builtin && !is_builtin_id(&c.id))
+            .filter(|c| !is_as_shipped(c))
             .collect();
         let json = serde_json::to_string_pretty(&classes)
             .map_err(|e| ClassError::internal(format!("could not serialize classes: {e}")))?;
         std::fs::write(classes_path(dir), json)
             .map_err(|e| ClassError::internal(format!("could not persist classes: {e}")))
+    }
+
+    /// Keep the removed built-ins in `<data_dir>/removed_classes.json`. A no-op with no data dir.
+    fn persist_removed(&self) -> Result<(), ClassError> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(());
+        };
+        let ids: Vec<&ClassId> = self.removed.iter().collect();
+        let json = serde_json::to_string_pretty(&ids).map_err(|e| {
+            ClassError::internal(format!("could not serialize removed classes: {e}"))
+        })?;
+        std::fs::write(dir.join(REMOVED_CLASSES_FILE), json)
+            .map_err(|e| ClassError::internal(format!("could not persist removed classes: {e}")))
     }
 
     /// Persist the **hidden-set** to `<data_dir>/hidden_classes.json` (hide/archive classes), a
@@ -603,6 +634,13 @@ fn read_persisted_classes(dir: &Path) -> Option<Vec<Class>> {
     serde_json::from_str(&raw).ok()
 }
 
+/// Read the removed built-ins from `<dir>/removed_classes.json`. Only ids of built-ins count.
+fn read_removed_classes(dir: &Path) -> Option<BTreeSet<ClassId>> {
+    let raw = std::fs::read_to_string(dir.join(REMOVED_CLASSES_FILE)).ok()?;
+    let ids: BTreeSet<ClassId> = serde_json::from_str(&raw).ok()?;
+    Some(ids.into_iter().filter(is_builtin_id).collect())
+}
+
 /// The file the hidden-set is persisted to under `dir`: `<dir>/hidden_classes.json`.
 fn hidden_classes_path(dir: &Path) -> PathBuf {
     dir.join(HIDDEN_CLASSES_FILE)
@@ -631,8 +669,6 @@ pub struct ClassError {
 pub enum ClassErrorKind {
     /// A bad request value (missing name, …) → 400.
     Invalid,
-    /// An attempt to edit/delete a read-only **built-in** class → 400 (rejected).
-    ReadOnly,
     /// The addressed class id does not exist → 404.
     NotFound,
     /// A server-side persistence failure → 500.
@@ -644,14 +680,6 @@ impl ClassError {
     fn invalid(message: impl Into<String>) -> Self {
         Self {
             kind: ClassErrorKind::Invalid,
-            message: message.into(),
-        }
-    }
-
-    /// A read-only error: an attempt to edit/delete a built-in class (HTTP 400).
-    fn read_only(message: impl Into<String>) -> Self {
-        Self {
-            kind: ClassErrorKind::ReadOnly,
             message: message.into(),
         }
     }
@@ -713,6 +741,29 @@ fn slugify(name: &str) -> String {
     }
 }
 
+/// Whether `class` came with Grid and is still exactly as it shipped. Such a class is not
+/// written to `classes.json`: it is seeded again at each start, so a later Grid can improve
+/// it. Once the director edits it, it is written like any other.
+fn is_as_shipped(class: &Class) -> bool {
+    builtin_classes().into_iter().any(|shipped| {
+        shipped.id == class.id
+            && shipped.name == class.name
+            && shipped.org == class.org
+            && shipped.reference == class.reference
+            && shipped.description == class.description
+    })
+}
+
+/// Refuse an org name too long to be a tag.
+fn check_org(org: Option<&str>) -> Result<(), ClassError> {
+    match org {
+        Some(org) if org.chars().count() > ORG_MAX => Err(ClassError::invalid(format!(
+            "An org name can have {ORG_MAX} characters at most."
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// A short random lowercase-alphanumeric suffix making an auto-generated id unique (same source as
 /// the pilot/event registries — the OS CSPRNG).
 fn short_suffix() -> String {
@@ -764,7 +815,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {}", spec.id));
             assert!(got.builtin, "{} must be flagged built-in", spec.id);
             assert_eq!(got.name, spec.name);
-            assert_eq!(got.source, spec.source);
+            assert_eq!(got.org.as_deref(), Some(spec.org));
             assert_eq!(got.reference.as_deref(), Some(spec.reference));
             assert_eq!(got.description.as_deref(), Some(spec.description));
         }
@@ -783,59 +834,299 @@ mod tests {
         ] {
             assert!(ids.contains(expected), "missing built-in id {expected}");
         }
-        // The org sources are the expected spread.
-        assert_eq!(
-            dir.get(&ClassId("mgp-open".into())).unwrap().source,
-            ClassSource::MultiGP
-        );
-        assert_eq!(
-            dir.get(&ClassId("five33-tiny-trainer".into()))
-                .unwrap()
-                .source,
-            ClassSource::Five33
-        );
-        assert_eq!(
-            dir.get(&ClassId("freedom-spec".into())).unwrap().source,
-            ClassSource::FreedomSpec
-        );
-        assert_eq!(
-            dir.get(&ClassId("street-league".into())).unwrap().source,
-            ClassSource::StreetLeague
-        );
-        assert_eq!(
-            dir.get(&ClassId("udl-igniter".into())).unwrap().source,
-            ClassSource::UDL
-        );
+        // The orgs are the expected spread, spelled as they are shown.
+        let org = |id: &str| dir.get(&ClassId(id.into())).unwrap().org;
+        assert_eq!(org("mgp-open").as_deref(), Some("MultiGP"));
+        assert_eq!(org("five33-tiny-trainer").as_deref(), Some("Five33"));
+        assert_eq!(org("freedom-spec").as_deref(), Some("Freedom Spec"));
+        assert_eq!(org("street-league").as_deref(), Some("Street League"));
+        assert_eq!(org("udl-igniter").as_deref(), Some("UDL"));
     }
 
     #[test]
-    fn a_built_in_cannot_be_edited_or_deleted() {
-        let dir = ClassDirectory::new(None).unwrap();
+    fn a_class_that_came_with_grid_is_edited_like_any_other_and_the_edit_is_kept() {
+        let data = removal_dir("edited");
         let id = ClassId("mgp-open".into());
+        let whoop = ClassId("mgp-whoop".into());
+        {
+            let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+            let all = dir.list().len();
+            let edited = dir
+                .update(
+                    &id,
+                    &serde_json::from_str(
+                        r#"{"name":"Open 5 inch","org":"My Club","reference":null,"description":"Ours."}"#,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(edited.name, "Open 5 inch");
+            assert_eq!(edited.org.as_deref(), Some("My Club"));
+            assert_eq!(edited.reference, None);
+            assert_eq!(edited.description.as_deref(), Some("Ours."));
+            assert_eq!(
+                edited.id, id,
+                "its id is its own for good: events name it by that"
+            );
+            assert_eq!(dir.list().len(), all, "an edit makes no second class");
+            // Only what was changed is in the file. The ones still as shipped are not.
+            let raw = std::fs::read_to_string(classes_path(&data)).unwrap();
+            assert!(raw.contains("\"mgp-open\""), "{raw}");
+            assert!(!raw.contains("\"mgp-whoop\""), "{raw}");
+        }
+        // After a restart the edit stands, and the others are as shipped.
+        let again = ClassDirectory::new(Some(data.clone())).unwrap();
+        let open = again.get(&id).unwrap();
+        assert_eq!(open.name, "Open 5 inch");
+        assert_eq!(open.org.as_deref(), Some("My Club"));
+        assert_eq!(open.reference, None);
+        assert!(open.builtin, "it is still one that came with Grid");
+        assert_eq!(again.get(&whoop).unwrap().name, "Whoop Class");
+        assert_eq!(again.list().iter().filter(|c| c.id == id).count(), 1);
 
-        let edit = dir.update(
+        // Edited back to exactly as it shipped, it leaves the file again.
+        let shipped = builtin_classes().into_iter().find(|c| c.id == id).unwrap();
+        again
+            .update(
+                &id,
+                &UpdateClassRequest {
+                    name: Some(shipped.name.clone()),
+                    org: OptionalEdit::Set(shipped.org.clone().unwrap()),
+                    reference: OptionalEdit::Set(shipped.reference.clone().unwrap()),
+                    description: OptionalEdit::Set(shipped.description.clone().unwrap()),
+                },
+            )
+            .unwrap();
+        let raw = std::fs::read_to_string(classes_path(&data)).unwrap();
+        assert!(!raw.contains("\"mgp-open\""), "{raw}");
+        std::fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn an_edited_class_that_came_with_grid_can_be_removed_and_comes_back_as_shipped() {
+        let data = removal_dir("edited-removed");
+        let id = ClassId("mgp-open".into());
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        dir.update(
             &id,
             &UpdateClassRequest {
-                name: Some("Renamed".into()),
+                name: Some("Open 5 inch".into()),
                 ..Default::default()
             },
-        );
-        let err = edit.unwrap_err();
-        assert_eq!(err.kind, ClassErrorKind::ReadOnly);
-        // The built-in is untouched.
-        assert_eq!(dir.get(&id).unwrap().name, "Open Class");
+        )
+        .unwrap();
+        dir.delete(&id).unwrap();
+        assert!(!dir.exists(&id));
+        // The edit is gone from the file with it, and it stays gone after a restart.
+        let raw = std::fs::read_to_string(classes_path(&data)).unwrap();
+        assert!(!raw.contains("mgp-open"), "{raw}");
+        let again = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert!(!again.exists(&id));
+        // Put back, it is the one Grid ships, not the edited one.
+        again.restore_builtins().unwrap();
+        assert_eq!(again.get(&id).unwrap().name, "Open Class");
+        // A file from before, with the edit still in it beside the removal, changes nothing.
+        std::fs::write(
+            classes_path(&data),
+            r#"[{"id":"mgp-open","name":"Stale edit"}]"#,
+        )
+        .unwrap();
+        std::fs::write(data.join(REMOVED_CLASSES_FILE), r#"["mgp-open"]"#).unwrap();
+        let stale = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert!(!stale.exists(&id));
+        std::fs::remove_dir_all(data).ok();
+    }
 
-        let del = dir.delete(&id);
-        assert_eq!(del.unwrap_err().kind, ClassErrorKind::ReadOnly);
-        assert!(dir.exists(&id));
+    fn removal_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gridfpv-classes-{name}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
-    fn class_source_defaults_to_custom() {
-        assert_eq!(ClassSource::default(), ClassSource::Custom);
+    fn a_built_in_can_be_removed_and_stays_removed_after_a_restart() {
+        let data = removal_dir("removed");
+        let open = ClassId("mgp-open".into());
+        let whoop = ClassId("mgp-whoop".into());
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        let all = dir.list().len();
+        assert_eq!(dir.removed_builtins(), 0);
+        dir.set_hidden(&open, true).unwrap();
+
+        dir.delete(&open).unwrap();
+        assert!(!dir.exists(&open));
+        assert_eq!(dir.list().len(), all - 1);
+        assert_eq!(dir.removed_builtins(), 1);
+        // Removing it again is an unknown class, not a second removal.
+        assert_eq!(
+            dir.delete(&open).unwrap_err().kind,
+            ClassErrorKind::NotFound
+        );
+        assert_eq!(dir.removed_builtins(), 1);
+        // The other built-ins are untouched.
+        assert!(dir.exists(&whoop));
+
+        // The seed at the next start leaves it out.
+        let again = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert!(!again.exists(&open));
+        assert!(again.exists(&whoop));
+        assert_eq!(again.removed_builtins(), 1);
+        assert_eq!(again.list().len(), all - 1);
+        std::fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn putting_the_built_ins_back_brings_every_removed_one_back_and_keeps_the_rest() {
+        let data = removal_dir("restored");
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        let all = dir.list();
+        let mine = dir
+            .create(&CreateClassRequest {
+                name: "Club Spec".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let kept_hidden = ClassId("udl-igniter".into());
+        dir.set_hidden(&kept_hidden, true).unwrap();
+        for id in ["mgp-open", "mgp-whoop", "udl-shrieker"] {
+            dir.delete(&ClassId(id.into())).unwrap();
+        }
+        assert_eq!(dir.removed_builtins(), 3);
+
+        let back = dir.restore_builtins().unwrap();
+        assert_eq!(back.len(), all.len() + 1);
+        assert_eq!(dir.removed_builtins(), 0);
+        // Each comes back as it shipped: built-in, not hidden, with its own name.
+        let open = dir.get(&ClassId("mgp-open".into())).unwrap();
+        assert!(open.builtin);
+        assert!(!open.hidden);
+        assert_eq!(open.name, "Open Class");
+        // What the director made, and what they hid, is as it was.
+        assert!(dir.exists(&mine.id));
+        assert!(dir.get(&kept_hidden).unwrap().hidden);
+        // Asked again with none removed, nothing changes.
+        assert_eq!(dir.restore_builtins().unwrap().len(), all.len() + 1);
+
+        // And they are back after a restart too.
+        let again = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert_eq!(again.list().len(), all.len() + 1);
+        assert_eq!(again.removed_builtins(), 0);
+        std::fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn a_removed_list_that_is_broken_or_names_other_classes_removes_nothing_it_should_not() {
+        let data = removal_dir("odd");
+        let seeded = ClassDirectory::new(Some(data.clone())).unwrap();
+        let mine = seeded
+            .create(&CreateClassRequest {
+                name: "Club Spec".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let all = seeded.list().len();
+        for text in ["", "not json", "{}", "null", "[1,2]"] {
+            std::fs::write(data.join(REMOVED_CLASSES_FILE), text).unwrap();
+            let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+            assert_eq!(dir.list().len(), all, "{text}");
+            assert_eq!(dir.removed_builtins(), 0, "{text}");
+        }
+        // A name that is not a built-in's is ignored: it removes no class of the director's.
+        std::fs::write(
+            data.join(REMOVED_CLASSES_FILE),
+            serde_json::to_string(&[mine.id.0.as_str(), "no-such-class", "mgp-open"]).unwrap(),
+        )
+        .unwrap();
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert!(dir.exists(&mine.id));
+        assert!(!dir.exists(&ClassId("mgp-open".into())));
+        assert_eq!(dir.removed_builtins(), 1);
+        std::fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn a_class_made_with_no_org_has_none_and_says_nothing_of_it_on_the_wire() {
         let dir = ClassDirectory::new(None).unwrap();
         let class = dir.create(&req("Open")).unwrap();
-        assert_eq!(class.source, ClassSource::Custom);
+        assert_eq!(class.org, None);
+        let wire = serde_json::to_value(&class).unwrap();
+        assert!(wire.get("org").is_none(), "{wire}");
+        assert!(wire.get("source").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn an_org_is_free_text_trimmed_and_kept_short() {
+        let dir = ClassDirectory::new(None).unwrap();
+        let with = |org: &str| CreateClassRequest {
+            name: "Club Spec".into(),
+            org: Some(org.into()),
+            ..Default::default()
+        };
+        // Anything the director types, tidied of the spaces around it.
+        assert_eq!(
+            dir.create(&with("  Tri-County FPV  "))
+                .unwrap()
+                .org
+                .as_deref(),
+            Some("Tri-County FPV")
+        );
+        // Blank is none.
+        assert_eq!(dir.create(&with("   ")).unwrap().org, None);
+        // As long as it may be, and no longer.
+        let longest = "x".repeat(ORG_MAX);
+        assert_eq!(
+            dir.create(&with(&longest)).unwrap().org.as_deref(),
+            Some(longest.as_str())
+        );
+        let before = dir.list().len();
+        let err = dir.create(&with(&"x".repeat(ORG_MAX + 1))).unwrap_err();
+        assert_eq!(err.kind, ClassErrorKind::Invalid);
+        assert!(err.message.contains("24 characters"), "{}", err.message);
+        assert_eq!(dir.list().len(), before, "a refused class is not made");
+
+        // An edit can set it, change it, clear it, and leave it alone.
+        let class = dir.create(&req("House")).unwrap();
+        let edit = |body: &str| dir.update(&class.id, &serde_json::from_str(body).unwrap());
+        assert_eq!(
+            edit(r#"{"org":" MultiGP "}"#).unwrap().org.as_deref(),
+            Some("MultiGP")
+        );
+        assert_eq!(
+            edit(r#"{"name":"House 2"}"#).unwrap().org.as_deref(),
+            Some("MultiGP")
+        );
+        assert_eq!(
+            edit(r#"{"org":"Mine"}"#).unwrap().org.as_deref(),
+            Some("Mine")
+        );
+        let too_long = format!(r#"{{"org":"{}"}}"#, "y".repeat(ORG_MAX + 1));
+        assert_eq!(edit(&too_long).unwrap_err().kind, ClassErrorKind::Invalid);
+        assert_eq!(dir.get(&class.id).unwrap().org.as_deref(), Some("Mine"));
+        assert_eq!(edit(r#"{"org":null}"#).unwrap().org, None);
+    }
+
+    #[test]
+    fn a_class_saved_by_an_older_grid_with_a_source_still_loads() {
+        let data = removal_dir("old-source");
+        std::fs::write(
+            data.join(CLASSES_FILE),
+            r#"[{"id":"house-ab12","name":"House","source":"Custom"},
+                {"id":"club-cd34","name":"Club","source":"MultiGP","reference":"x"}]"#,
+        )
+        .unwrap();
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        let house = dir.get(&ClassId("house-ab12".into())).unwrap();
+        assert_eq!(house.name, "House");
+        assert_eq!(house.org, None);
+        // The old tag is not carried over; the class and the rest of it are.
+        let club = dir.get(&ClassId("club-cd34".into())).unwrap();
+        assert_eq!(club.org, None);
+        assert_eq!(club.reference.as_deref(), Some("x"));
+        std::fs::remove_dir_all(data).ok();
     }
 
     #[test]
@@ -864,12 +1155,12 @@ mod tests {
         let class = dir
             .create(&CreateClassRequest {
                 name: "Open".to_string(),
-                source: ClassSource::MultiGP,
+                org: Some("MultiGP".to_string()),
                 reference: Some("  mgp-open  ".to_string()), // trimmed
                 description: Some("  ".to_string()),         // blank → unset
             })
             .unwrap();
-        assert_eq!(class.source, ClassSource::MultiGP);
+        assert_eq!(class.org.as_deref(), Some("MultiGP"));
         assert_eq!(class.reference.as_deref(), Some("mgp-open"));
         assert_eq!(class.description, None);
     }
@@ -880,7 +1171,7 @@ mod tests {
         let created = dir
             .create(&CreateClassRequest {
                 name: "Old".to_string(),
-                source: ClassSource::Custom,
+                org: None,
                 reference: Some("ref-1".to_string()),
                 description: Some("desc".to_string()),
             })
@@ -892,14 +1183,14 @@ mod tests {
                 &created.id,
                 &UpdateClassRequest {
                     name: Some("New".to_string()),
-                    source: Some(ClassSource::MultiGP),
+                    org: OptionalEdit::Set("MultiGP".to_string()),
                     reference: OptionalEdit::Clear, // explicit clear
                     ..Default::default()
                 },
             )
             .unwrap();
         assert_eq!(updated.name, "New");
-        assert_eq!(updated.source, ClassSource::MultiGP);
+        assert_eq!(updated.org.as_deref(), Some("MultiGP"));
         assert_eq!(updated.reference, None);
         assert_eq!(updated.description.as_deref(), Some("desc")); // absent → unchanged
 
@@ -941,7 +1232,7 @@ mod tests {
             let created = dir
                 .create(&CreateClassRequest {
                     name: "Clearable".to_string(),
-                    source: ClassSource::Other,
+                    org: Some("Other".to_string()),
                     reference: Some("ref-x".to_string()),
                     description: Some("a description".to_string()),
                 })
@@ -956,14 +1247,14 @@ mod tests {
                 cleared.description, None,
                 "wire null must clear description"
             );
-            assert_eq!(cleared.source, ClassSource::Other); // absent → unchanged
+            assert_eq!(cleared.org.as_deref(), Some("Other")); // absent → unchanged
 
             // The clear survives a restart (it was persisted to classes.json, not just in mem).
             let reopened = ClassDirectory::new(Some(data_dir.clone())).unwrap();
             let got = reopened.get(&created.id).unwrap();
             assert_eq!(got.reference, None);
             assert_eq!(got.description, None);
-            assert_eq!(got.source, ClassSource::Other);
+            assert_eq!(got.org.as_deref(), Some("Other"));
         }
         std::fs::remove_dir_all(&data_dir).ok();
     }
@@ -1004,7 +1295,7 @@ mod tests {
             let created = dir
                 .create(&CreateClassRequest {
                     name: "Persisted".to_string(),
-                    source: ClassSource::MultiGP,
+                    org: Some("MultiGP".to_string()),
                     reference: Some("mgp-7".to_string()),
                     description: Some("the persisted class".to_string()),
                 })
@@ -1013,7 +1304,7 @@ mod tests {
             let reopened = ClassDirectory::new(Some(data_dir.clone())).unwrap();
             let got = reopened.get(&created.id).unwrap();
             assert_eq!(got.name, "Persisted");
-            assert_eq!(got.source, ClassSource::MultiGP);
+            assert_eq!(got.org.as_deref(), Some("MultiGP"));
             assert_eq!(got.reference.as_deref(), Some("mgp-7"));
             assert_eq!(got.description.as_deref(), Some("the persisted class"));
         }
@@ -1046,9 +1337,9 @@ mod tests {
                 })
                 .unwrap();
             assert!(!created.builtin);
-            assert_eq!(created.source, ClassSource::Custom);
+            assert_eq!(created.org, None);
 
-            // …but the on-disk file holds ONLY the user class — never a built-in.
+            // …but the on-disk file holds ONLY the user class: none that is still as shipped.
             let raw = std::fs::read_to_string(classes_path(&data_dir)).unwrap();
             let on_disk: Vec<Class> = serde_json::from_str(&raw).unwrap();
             assert_eq!(on_disk.len(), 1, "classes.json holds only the user class");
@@ -1103,29 +1394,26 @@ mod tests {
     }
 
     #[test]
-    fn hiding_a_class_is_not_a_read_only_edit_so_built_ins_can_be_hidden() {
+    fn hiding_and_editing_a_class_that_came_with_grid_do_not_undo_each_other() {
         let dir = ClassDirectory::new(None).unwrap();
         let id = ClassId("mgp-open".into());
-        // A built-in cannot be edited/deleted (ReadOnly), but it CAN be hidden — visibility is a
-        // preference, not an edit.
         let hidden = dir.set_hidden(&id, true).unwrap();
         assert!(hidden.hidden);
-        assert!(hidden.builtin, "still a built-in, just hidden");
         assert!(dir.get(&id).unwrap().hidden);
-        // Editing/deleting it is still rejected.
-        assert_eq!(
-            dir.update(
+        // An edit leaves it hidden, and says so in its answer.
+        let edited = dir
+            .update(
                 &id,
                 &UpdateClassRequest {
                     name: Some("X".into()),
                     ..Default::default()
-                }
+                },
             )
-            .unwrap_err()
-            .kind,
-            ClassErrorKind::ReadOnly
-        );
-        assert_eq!(dir.delete(&id).unwrap_err().kind, ClassErrorKind::ReadOnly);
+            .unwrap();
+        assert_eq!(edited.name, "X");
+        assert!(edited.hidden);
+        assert!(!dir.set_hidden(&id, false).unwrap().hidden);
+        assert_eq!(dir.get(&id).unwrap().name, "X");
     }
 
     #[test]

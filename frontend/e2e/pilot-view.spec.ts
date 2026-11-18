@@ -102,9 +102,7 @@ test.beforeAll(async () => {
   ace = (await direct<{ id: string }>('POST', '/pilots', { callsign: 'Ace' })).id;
   const bee = (await direct<{ id: string }>('POST', '/pilots', { callsign: 'Bee' })).id;
   const cat = (await direct<{ id: string }>('POST', '/pilots', { callsign: 'Cat' })).id;
-  const open = (
-    await direct<{ id: string }>('POST', '/classes', { name: 'Open', source: 'Custom' })
-  ).id;
+  const open = (await direct<{ id: string }>('POST', '/classes', { name: 'Open' })).id;
   const gate = (
     await direct<{ id: string }>('POST', '/timers', {
       name: 'Gate',

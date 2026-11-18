@@ -80,12 +80,12 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     await page.reload();
     await expect(minLap).toHaveValue(String(MIN_LAP_SECONDS), { timeout: 15_000 });
 
-    // ── Formats: a table, and an editor that says the format back in words ───────────────
+    // ── Formats: a list, and an editor that says the format back in words ───────────────
     await openPage(page, 'Formats');
-    const formats = page.getByRole('table', { name: 'Formats' });
-    await expect(formats.getByRole('row').filter({ hasText: 'Best 3 consecutive' })).toContainText(
-      'Ranked by fastest 3 laps in a row'
-    );
+    const formats = page.getByRole('list', { name: 'Formats' });
+    await expect(
+      formats.getByRole('listitem').filter({ hasText: 'Best 3 consecutive' })
+    ).toContainText('Ranked by fastest 3 laps in a row');
     await page.getByRole('button', { name: '+ New format' }).click();
     const editor = page.getByRole('form', { name: 'New format' });
     await editor.getByLabel('Format name').fill(FORMAT);
@@ -100,7 +100,7 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     );
     await page.getByRole('button', { name: 'Save format' }).click();
     await expect(editor).toBeHidden({ timeout: 15_000 });
-    const made = formats.getByRole('row').filter({ hasText: FORMAT });
+    const made = formats.getByRole('listitem').filter({ hasText: FORMAT });
     await expect(made).toContainText('First to 2 laps');
     await expect(made).toContainText('Starts at once');
     // The same name again is refused, in the Director's words, and the dialog stays open.

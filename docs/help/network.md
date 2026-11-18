@@ -155,6 +155,11 @@ tablet shows its name in the corner while it waits for a pilot.
 
 ### Using it
 
+While it waits for a pilot, the kiosk shows a **QR code**. A pilot with a phone can scan
+it to open Grid on the phone, and need not queue at the tablet.
+
+At the tablet:
+
 - With nobody at it, the kiosk shows a box for a code and nothing else.
 - A pilot types their **own code** and presses **Go**. The codes are on the event's Details
   page.

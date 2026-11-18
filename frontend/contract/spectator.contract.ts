@@ -81,7 +81,7 @@ describe('with an event open', () => {
       })
     ).id;
     await direct('POST', '/pilots', { callsign: 'Not In The Event' });
-    const open = (await direct<Class>('POST', '/classes', { name: 'Open', source: 'Custom' })).id;
+    const open = (await direct<Class>('POST', '/classes', { name: 'Open' })).id;
     event = (await direct<{ id: string }>('POST', '/events', { name: 'Contract Night' })).id;
     await direct('PUT', '/active-event', { id: event });
     const commands = `/events/${event}/commands`;

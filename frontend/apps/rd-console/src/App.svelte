@@ -54,6 +54,7 @@
   import NetworkPage from './screens/NetworkPage.svelte';
   import VisitorPage from './screens/VisitorPage.svelte';
   import VideoPage from './screens/VideoPage.svelte';
+  import RecordingsPage from './screens/RecordingsPage.svelte';
   import {
     parseHash,
     formatHash,
@@ -245,9 +246,11 @@
     {:else if route.page === 'formats'}
       <FormatsPage {session} />
     {:else if route.page === 'video'}
-      <VideoPage {session} {live} />
+      <VideoPage {session} />
     {:else if route.page === 'network'}
       <NetworkPage {session} />
+    {:else if route.page === 'overlays'}
+      <OverlaysPage {session} />
     {:else if route.page === 'data'}
       <DataPage {session} />
     {:else if route.page === 'timers'}
@@ -290,8 +293,8 @@
       <PhasesPage {live} onrun={putOnTimer} />
     {:else if route.kind === 'event' && route.section === 'results'}
       <ResultsPage {live} />
-    {:else if route.kind === 'event' && route.section === 'overlays'}
-      <OverlaysPage {session} />
+    {:else if route.kind === 'event' && route.section === 'recordings'}
+      <RecordingsPage {session} {live} />
     {:else}
       <EventPage {session} event={session.currentEvent} {live} />
     {/if}

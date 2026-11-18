@@ -40,8 +40,8 @@ const PILOTS: Pilot[] = [
   { id: 'p-3c', callsign: 'Cat', vtx_types: [] }
 ];
 const CLASSES: Class[] = [
-  { id: 'cls-open', name: 'Open', source: 'Custom' },
-  { id: 'cls-spec', name: 'Spec', source: 'Custom' }
+  { id: 'cls-open', name: 'Open' },
+  { id: 'cls-spec', name: 'Spec' }
 ];
 
 async function open(view: EventView, over: Partial<LiveSession> = {}) {

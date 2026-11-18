@@ -134,7 +134,7 @@ test('the switch moves between Setup and the event, and each side remembers its 
     'Run',
     'Marshal',
     'Results',
-    'Overlays',
+    'Recordings',
     'Help'
   ]);
 
@@ -148,8 +148,8 @@ test('the switch moves between Setup and the event, and each side remembers its 
     'Classes',
     'Formats',
     'Video',
+    'Overlays',
     'Network',
-    'Data',
     'Help'
   ]);
   await openPage(page, 'Formats');

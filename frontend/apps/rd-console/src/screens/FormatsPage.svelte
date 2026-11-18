@@ -118,53 +118,44 @@
         No format is saved. Add one to give a heat its rules.
       </p>
     {:else}
-      <div class="scroll">
-        <table aria-label="Formats">
-          <thead>
-            <tr>
-              <th scope="col">Format</th>
-              <th scope="col">One race</th>
-              <th scope="col">Start</th>
-              <th scope="col">Ranking</th>
-              <th scope="col">The heat</th>
-              <th scope="col"><span class="sr-only">Actions</span></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each formats as saved (saved.id)}
-              {@const format = saved.format}
-              <tr>
-                <th scope="row">{format.name}</th>
-                <td>{raceWords(format)}</td>
-                <td>{startWords(format)}</td>
-                <td>{rankingWords(format)}</td>
-                <td>{completionWords(format)}</td>
-                <td class="row-actions">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    aria-label="Edit {format.name}"
-                    onclick={() => openEdit(saved)}>Edit</Button
-                  >
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-label="Duplicate {format.name}"
-                    onclick={() => openDuplicate(saved)}>Duplicate</Button
-                  >
-                  <ConfirmButton
-                    size="sm"
-                    variant="danger"
-                    disabled={removing === saved.id}
-                    title="Delete {format.name}"
-                    onconfirm={() => remove(saved)}>Delete</ConfirmButton
-                  >
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      <!-- One row each, laid out like the Classes page: the name, then what it does in words. -->
+      <ul class="format-list" aria-label="Formats">
+        {#each formats as saved (saved.id)}
+          {@const format = saved.format}
+          <li class="format-row" aria-label={format.name}>
+            <div class="format-main">
+              <span class="format-name" data-testid="format-name">{format.name}</span>
+              <span class="facts">
+                <span class="fact">{raceWords(format)}</span>
+                <span class="fact">{startWords(format)}</span>
+                <span class="fact">{rankingWords(format)}</span>
+                <span class="fact">{completionWords(format)}</span>
+              </span>
+            </div>
+            <div class="row-actions">
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label="Edit {format.name}"
+                onclick={() => openEdit(saved)}>Edit</Button
+              >
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label="Duplicate {format.name}"
+                onclick={() => openDuplicate(saved)}>Duplicate</Button
+              >
+              <ConfirmButton
+                size="sm"
+                variant="danger"
+                disabled={removing === saved.id}
+                title="Delete {format.name}"
+                onconfirm={() => remove(saved)}>Delete</ConfirmButton
+              >
+            </div>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </Card>
 </Page>
@@ -186,53 +177,58 @@
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }
-  .scroll {
-    overflow-x: auto;
+  /* The same rows as the Classes page, so the two Setup lists read as one kind of thing. */
+  .format-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-3);
   }
-  table {
-    width: 100%;
-    border-collapse: collapse;
+  .format-row {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-4);
+    padding: var(--gf-space-3) var(--gf-space-4);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-lg);
+    background: var(--gf-surface);
+  }
+  .format-main {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+  }
+  .format-name {
+    font-size: var(--gf-font-size-md);
+    font-weight: var(--gf-font-weight-semibold);
+    letter-spacing: var(--gf-tracking-tight);
+  }
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: var(--gf-space-2);
+    color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }
-  th,
-  td {
-    padding: var(--gf-space-2) var(--gf-space-3);
-    text-align: left;
-    vertical-align: top;
-    border-bottom: 1px solid var(--gf-border-subtle);
-  }
-  thead th {
-    font-size: var(--gf-font-size-xs);
-    font-weight: var(--gf-font-weight-semibold);
-    text-transform: uppercase;
-    letter-spacing: var(--gf-tracking-caps);
-    color: var(--gf-text-muted);
-    white-space: nowrap;
-  }
-  tbody tr:last-child th,
-  tbody tr:last-child td {
-    border-bottom: none;
-  }
-  tbody th {
-    font-weight: var(--gf-font-weight-semibold);
-    font-size: var(--gf-font-size-md);
-    white-space: nowrap;
-  }
-  td {
-    color: var(--gf-text-secondary);
+  .fact + .fact::before {
+    content: '·';
+    margin-right: var(--gf-space-2);
+    color: var(--gf-text-faint);
   }
   .row-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-1);
     white-space: nowrap;
-    text-align: right;
   }
-  .row-actions :global(.gf-btn) {
-    margin-left: var(--gf-space-1);
-  }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
+  @media (max-width: 640px) {
+    .format-row {
+      flex-direction: column;
+      align-items: stretch;
+    }
   }
 </style>

@@ -206,7 +206,7 @@ pub fn class_for_visitors(class: Class) -> Class {
     let Class {
         id,
         name,
-        source,
+        org,
         reference: _,
         description: _,
         builtin,
@@ -215,7 +215,7 @@ pub fn class_for_visitors(class: Class) -> Class {
     Class {
         id,
         name,
-        source,
+        org,
         reference: None,
         description: None,
         builtin,
