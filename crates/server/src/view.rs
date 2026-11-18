@@ -480,6 +480,17 @@ pub struct RaceSeatView {
     pub start_at: Option<SourceTime>,
     /// Whether a false start is recorded against the pilot in this race.
     pub false_start: bool,
+    /// Whether the pilot is marked out of this race (crashed, not going to finish). The
+    /// race no longer waits for them.
+    pub out: bool,
+    /// Who has taken this open seat now (check-in). Absent when nobody has, and always
+    /// absent for a seat with a pilot named on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub holder: Option<PilotId>,
+    /// Every spell a pilot has had on this open seat, oldest first, with the laps that
+    /// are theirs. Empty for a seat nobody has taken.
+    pub stints: Vec<StintView>,
     /// The seat's place in the race so far, 1 first. Absent for an open seat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -499,6 +510,21 @@ pub struct RaceSeatView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub total_micros: Option<i64>,
+}
+
+/// One spell of one pilot on an open seat they took (check-in).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct StintView {
+    pub pilot: PilotId,
+    /// Whether the pilot still has the seat.
+    pub open: bool,
+    /// The laps that are the pilot's: from their first crossing after taking the seat,
+    /// until the stint ended.
+    pub laps: Vec<LapView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub best_lap_micros: Option<i64>,
 }
 
 /// One crossing: the log entry that made it, and when, on the timer's clock.
@@ -783,6 +809,28 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
                     .pilot
                     .as_ref()
                     .is_some_and(|pilot| state.rulings.has_false_start(id, pilot)),
+                out: entry
+                    .pilot
+                    .as_ref()
+                    .is_some_and(|pilot| state.rulings.is_out(id, pilot)),
+                holder: state
+                    .check_ins
+                    .holder(id, &entry.adapter, &entry.seat)
+                    .cloned(),
+                stints: state
+                    .check_ins
+                    .stints(id, &entry.adapter, &entry.seat)
+                    .iter()
+                    .map(|stint| {
+                        let theirs: Vec<_> = stint.laps(laps).collect();
+                        StintView {
+                            pilot: stint.pilot.clone(),
+                            open: stint.is_open(),
+                            best_lap_micros: theirs.iter().map(|lap| lap.micros()).min(),
+                            laps: theirs.into_iter().map(lap_view).collect(),
+                        }
+                    })
+                    .collect(),
                 finish: entry.pilot.as_ref().and_then(|pilot| {
                     finish
                         .iter()
@@ -792,18 +840,7 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
                 hole_shot: laps
                     .hole_shot
                     .map(|(crossing, at)| CrossingView { crossing, at }),
-                laps: laps
-                    .intervals
-                    .iter()
-                    .map(|lap| LapView {
-                        crossing: lap.end,
-                        started_at: lap.started_at,
-                        ended_at: lap.ended_at,
-                        micros: lap.micros(),
-                        restart: lap.kind == LapKind::Restart,
-                        timer_restarted: lap.kind == LapKind::TimerRestarted,
-                    })
-                    .collect(),
+                laps: laps.intervals.iter().map(lap_view).collect(),
                 uncounted: laps
                     .uncounted
                     .iter()
@@ -825,5 +862,17 @@ fn race_view(state: &EventState, race: &Race) -> RaceView {
                 total_micros: laps.total_micros(),
             })
             .collect(),
+    }
+}
+
+/// One interval of a seat, as the view shows it.
+fn lap_view(lap: &gridfpv_engine::laps::Lap) -> LapView {
+    LapView {
+        crossing: lap.end,
+        started_at: lap.started_at,
+        ended_at: lap.ended_at,
+        micros: lap.micros(),
+        restart: lap.kind == LapKind::Restart,
+        timer_restarted: lap.kind == LapKind::TimerRestarted,
     }
 }

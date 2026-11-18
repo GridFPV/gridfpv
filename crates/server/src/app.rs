@@ -203,6 +203,14 @@ pub fn router(registry: EventRegistry) -> Router {
             "/public/pilot/kiosk",
             post(crate::pilot_access::post_kiosk).delete(crate::pilot_access::delete_kiosk),
         )
+        .route(
+            "/public/pilot/checkin/take",
+            post(crate::checkin::post_take),
+        )
+        .route(
+            "/public/pilot/checkin/drop",
+            post(crate::checkin::post_drop),
+        )
         .route("/public/pilot/signup/take", post(crate::signup::post_take))
         .route("/public/pilot/signup/next", post(crate::signup::post_next))
         .route(

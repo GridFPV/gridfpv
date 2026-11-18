@@ -795,6 +795,7 @@ mod tests {
                 first_lap: FirstLap::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -1079,6 +1080,44 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.to_string().contains("at least one round"), "{body}");
         assert_eq!(state(&registry, &event).await.phases.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn a_pilot_marked_out_shows_on_the_race_and_can_be_put_back_in() {
+        let (registry, event) = with_bracket(0).await;
+        let uri = format!("/events/{}/commands", event.0);
+        let start = json!({ "StartRace": { "heat": "finals/final/heat-1" } });
+        let (status, _) = send(&registry, "POST", &uri, Some(start), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let race = state(&registry, &event).await.races[0].race.clone();
+        let out_of = |view: &EventView| -> Vec<(String, bool)> {
+            view.races[0]
+                .seats
+                .iter()
+                .map(|seat| (seat.pilot.clone().unwrap().0, seat.out))
+                .collect()
+        };
+
+        let mark = json!({ "Record": { "PilotOut": { "race": race.0, "pilot": "ben" } } });
+        let (status, _) = send(&registry, "POST", &uri, Some(mark.clone()), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view = state(&registry, &event).await;
+        assert!(out_of(&view).contains(&("ben".into(), true)));
+        assert_eq!(out_of(&view).iter().filter(|(_, out)| *out).count(), 1);
+
+        // Marking the same pilot out twice is refused, in a sentence.
+        let (status, body) = send(&registry, "POST", &uri, Some(mark), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.to_string().contains("already out"), "{body}");
+
+        let back = json!({ "Record": { "PilotBackIn": { "race": race.0, "pilot": "ben" } } });
+        let (status, _) = send(&registry, "POST", &uri, Some(back), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out_of(&state(&registry, &event).await)
+                .iter()
+                .all(|(_, out)| !out)
+        );
     }
 
     #[tokio::test]

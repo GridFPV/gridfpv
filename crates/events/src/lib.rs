@@ -445,6 +445,12 @@ pub struct RaceRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub stop_after_all_finish_micros: Option<i64>,
+    /// For a race with open seats that pilots check in to: drop a pilot from their seat
+    /// when it has gone this many microseconds with no crossing. `None`, the default,
+    /// never drops anyone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub drop_idle_seat_micros: Option<i64>,
     /// For a race that is not timed (first-to-N or open): the longest it may run, in
     /// microseconds from the start. The race stops by itself when it gets there, whoever
     /// has or has not finished. `None`, the default, sets no limit.
@@ -818,6 +824,21 @@ pub enum Event {
     PhaseDefined { def: PhaseDef },
     /// A phase was taken out of the tree.
     PhaseRemoved { phase: PhaseId },
+    /// A pilot took an open seat part-way through a race (check-in, for practice run as
+    /// one long heat). The laps on the seat are theirs from their next crossing, until
+    /// someone else takes the seat or they drop it.
+    SeatTaken {
+        race: RaceId,
+        adapter: AdapterId,
+        seat: SeatRef,
+        pilot: PilotId,
+    },
+    /// The pilot on a taken seat gave it up, or was dropped from it.
+    SeatDropped {
+        race: RaceId,
+        adapter: AdapterId,
+        seat: SeatRef,
+    },
     /// The director said a heat is done. Only this completes a "director decides" heat.
     HeatDone { heat: PhaseId },
     /// The director took that back.
@@ -827,6 +848,12 @@ pub enum Event {
     FalseStart { race: RaceId, pilot: PilotId },
     /// A false start was taken back.
     FalseStartCleared { race: RaceId, pilot: PilotId },
+    /// A pilot is out of a race: crashed, or otherwise not going to finish it. The rules
+    /// that end a race stop waiting for them. The laps they flew still count, and they are
+    /// ranked on them like anyone else.
+    PilotOut { race: RaceId, pilot: PilotId },
+    /// A pilot marked out is back in the race.
+    PilotBackIn { race: RaceId, pilot: PilotId },
     /// The director disqualified a pilot from a phase: they are dropped from its later
     /// lineups and ranked below everyone who kept racing.
     Disqualified {
@@ -1466,6 +1493,7 @@ mod tests {
                 first_lap: Default::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::AnyPilotReaches {
                 measure: Measure::Wins,

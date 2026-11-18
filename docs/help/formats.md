@@ -22,6 +22,9 @@ line at the bottom of the form says the format in plain words as you build it.
   you stop the race yourself. A wait gives you time to sort out laps on a hard track.
 - **Race time** and **Then to finish the lap**: for a timed race. When the time is up,
   pilots get this long to finish the lap they are on.
+- **Drop an idle seat after**: for practice with open seats that pilots check in to. A
+  pilot is dropped from their seat when it has had no pass for this many seconds. Leave it
+  empty and nobody is dropped.
 - **Time limit**: for a race that is not timed. The race stops here, whoever has finished.
 - **Countdown before the start tone**: 0 starts the race at once.
 - **Time lap 1 from the start tone**: left off, a pilot's first pass starts lap 1. That

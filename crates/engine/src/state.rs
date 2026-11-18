@@ -81,8 +81,16 @@ pub enum Refusal {
     PilotNotInRace { race: RaceId, pilot: PilotId },
     #[error("pilot {pilot:?} is not in {phase:?}")]
     PilotNotInPhase { phase: PhaseId, pilot: PilotId },
+    #[error("that seat in race {0:?} has a pilot named on it, so it cannot be taken")]
+    SeatNotOpen(RaceId),
+    #[error("pilot {pilot:?} already has a seat of their own in race {race:?}")]
+    AlreadyInRace { race: RaceId, pilot: PilotId },
+    #[error("pilot {pilot:?} already has that seat in race {race:?}")]
+    AlreadyOnSeat { race: RaceId, pilot: PilotId },
     #[error("a position starts at 1")]
     BadPosition,
+    #[error("pilot {pilot:?} is already out of race {race:?}")]
+    AlreadyOut { race: RaceId, pilot: PilotId },
     #[error("there is nothing to undo")]
     NothingToUndo,
     #[error("there is no open protest {0:?}")]
@@ -169,6 +177,8 @@ pub struct EventState {
     /// Where in the log each race begins: the offset of its first fact. A race's signal is
     /// logged from there on, so this is where to start reading for it.
     pub race_log_start: BTreeMap<RaceId, u64>,
+    /// Who has taken which open seat, and when (see [`crate::checkin`]).
+    pub check_ins: crate::checkin::CheckIns,
     /// What pilot sign-up keeps beside the heats' lineups (see [`crate::signup`]).
     pub signups: crate::signup::Signups,
     /// The heat the director last put on the timer, or last started. Read it through
@@ -195,6 +205,7 @@ impl EventState {
         self.races.apply(recorded_at, event);
         self.laps.apply(offset, event);
         self.rulings.apply(event);
+        self.check_ins.apply(offset, recorded_at, event);
         self.signups.apply(event);
         match event {
             Event::RosterSet { class, pilots } => {
@@ -292,13 +303,21 @@ impl EventState {
             Some(EndCondition::FirstToLaps(n)) => n as usize,
             _ => return,
         };
-        // Only named pilots count. An open seat has nobody to wait for.
-        let mut pilots = race
+        // Only named pilots count. An open seat has nobody to wait for. Nor has a pilot who
+        // is out of the race: when everyone still flying has finished, the race is over. If
+        // every pilot is out, there is nobody left to wait for either.
+        let named = race
             .setup
             .lineup
             .iter()
             .filter(|entry| entry.pilot.is_some());
-        let all = pilots.clone().next().is_some()
+        let mut pilots = named.clone().filter(|entry| {
+            entry
+                .pilot
+                .as_ref()
+                .is_some_and(|pilot| !self.rulings.is_out(&id, pilot))
+        });
+        let all = named.clone().next().is_some()
             && pilots.all(|entry| {
                 self.laps
                     .seat(
@@ -571,6 +590,19 @@ impl EventState {
                     let end = race
                         .started_at
                         .and_then(|started| self.runs_out(race, started));
+                    // A seat left idle is dropped, unless the race ended first.
+                    for (at, adapter, seat) in self.idle_seats(race) {
+                        if at <= now && end.is_none_or(|end| at < end) {
+                            out.push((
+                                at,
+                                Event::SeatDropped {
+                                    race: race.setup.race.clone(),
+                                    adapter,
+                                    seat,
+                                },
+                            ));
+                        }
+                    }
                     if let Some(end) = end.filter(|at| *at <= now) {
                         out.push((
                             end,
@@ -592,12 +624,37 @@ impl EventState {
             .iter()
             .filter_map(|race| match race.state {
                 RaceState::Staging => race.tone_at,
-                RaceState::Running => race
-                    .started_at
-                    .and_then(|started| self.runs_out(race, started)),
+                RaceState::Running => {
+                    let end = race
+                        .started_at
+                        .and_then(|started| self.runs_out(race, started));
+                    let idle = self.idle_seats(race).into_iter().map(|(at, _, _)| at).min();
+                    match (end, idle) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    }
+                }
                 _ => None,
             })
             .min()
+    }
+
+    /// The taken seats of a running race that its format drops when idle, each with the
+    /// moment it is dropped: the format's wait after the seat last showed life.
+    fn idle_seats(&self, race: &Race) -> Vec<(i64, AdapterId, gridfpv_events::SeatRef)> {
+        let Some(wait) = self
+            .tree
+            .format_for(&race.setup.heat)
+            .and_then(|format| format.race.drop_idle_seat_micros)
+        else {
+            return Vec::new();
+        };
+        self.check_ins
+            .held(&race.setup.race)
+            .filter_map(|(adapter, seat, stint)| {
+                Some((stint.active_at? + wait, adapter.clone(), seat.clone()))
+            })
+            .collect()
     }
 
     /// When a race that started at `started` stops by itself, if it does.
@@ -879,6 +936,62 @@ impl EventState {
                 }
                 Ok(())
             }
+            Event::SeatTaken {
+                race,
+                adapter,
+                seat,
+                pilot,
+            } => {
+                let found = self.open_race(race)?;
+                // A seat is taken in a race that is being flown. Before the start there is
+                // nothing to fly, and afterwards the laps are what they are.
+                if !matches!(found.state, RaceState::Staging | RaceState::Running) {
+                    return Err(Refusal::Race(RaceError::WrongState {
+                        race: race.clone(),
+                        state: found.state,
+                        wanted: "take a seat in",
+                    }));
+                }
+                let entry = found
+                    .setup
+                    .lineup
+                    .iter()
+                    .find(|entry| &entry.adapter == adapter && &entry.seat == seat)
+                    .ok_or_else(|| Refusal::SeatNotInRace(race.clone()))?;
+                // Only an open seat can be taken. A seat with a pilot named on it is theirs.
+                if entry.pilot.is_some() {
+                    return Err(Refusal::SeatNotOpen(race.clone()));
+                }
+                let named = found
+                    .setup
+                    .lineup
+                    .iter()
+                    .any(|entry| entry.pilot.as_ref() == Some(pilot));
+                if named {
+                    return Err(Refusal::AlreadyInRace {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                if self.check_ins.holder(race, adapter, seat) == Some(pilot) {
+                    return Err(Refusal::AlreadyOnSeat {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                Ok(())
+            }
+            Event::SeatDropped {
+                race,
+                adapter,
+                seat,
+            } => {
+                self.open_race(race)?;
+                if self.check_ins.holder(race, adapter, seat).is_none() {
+                    return Err(Refusal::NothingToUndo);
+                }
+                Ok(())
+            }
             Event::HeatDone { heat } | Event::HeatReopened { heat } => {
                 self.heat(heat)?;
                 self.unlocked(heat)
@@ -901,6 +1014,46 @@ impl EventState {
             Event::FalseStartCleared { race, pilot } => {
                 self.open_race(race)?;
                 if !self.rulings.has_false_start(race, pilot) {
+                    return Err(Refusal::NothingToUndo);
+                }
+                Ok(())
+            }
+            Event::PilotOut { race, pilot } => {
+                let found = self.open_race(race)?;
+                // A pilot goes out of a race that is being flown or has just been flown.
+                // Once it is saved or thrown out, the laps are what they are.
+                if !matches!(
+                    found.state,
+                    RaceState::Staging | RaceState::Running | RaceState::Stopped
+                ) {
+                    return Err(Refusal::Race(RaceError::WrongState {
+                        race: race.clone(),
+                        state: found.state,
+                        wanted: "mark a pilot out of",
+                    }));
+                }
+                let flying = found
+                    .setup
+                    .lineup
+                    .iter()
+                    .any(|entry| entry.pilot.as_ref() == Some(pilot));
+                if !flying {
+                    return Err(Refusal::PilotNotInRace {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                if self.rulings.is_out(race, pilot) {
+                    return Err(Refusal::AlreadyOut {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                Ok(())
+            }
+            Event::PilotBackIn { race, pilot } => {
+                self.open_race(race)?;
+                if !self.rulings.is_out(race, pilot) {
                     return Err(Refusal::NothingToUndo);
                 }
                 Ok(())
@@ -1089,6 +1242,7 @@ mod tests {
                 first_lap: FirstLap::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -1837,6 +1991,183 @@ mod tests {
         assert_eq!(director.replayed(), director.state);
     }
 
+    fn out(director: &mut Director, name: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::PilotOut {
+                race: rid("heat#1"),
+                pilot: pilot(name),
+            })
+            .map(|_| ())
+    }
+
+    fn back_in(director: &mut Director, name: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::PilotBackIn {
+                race: rid("heat#1"),
+                pilot: pilot(name),
+            })
+            .map(|_| ())
+    }
+
+    #[test]
+    fn a_race_does_not_wait_for_a_pilot_who_is_out() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        // Ana has finished; Ben is still flying. Nothing is due.
+        assert_eq!(director.state.next_due(), None);
+        // Ben crashes 20 s in. Everyone still flying has finished, as of now.
+        director.now = 20 * S;
+        out(&mut director, "ben").unwrap();
+        assert!(director.state.rulings.is_out(&rid("heat#1"), &pilot("ben")));
+        assert_eq!(director.state.next_due(), Some(80 * S));
+        director.now = 200 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Stopped);
+        assert_eq!(
+            director.state.races.get(&rid("heat#1")).unwrap().stopped_at,
+            Some(80 * S)
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn marking_a_pilot_out_before_the_others_finish_starts_the_wait_at_the_last_finish() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 5 * S;
+        out(&mut director, "ben").unwrap();
+        // Ana is still flying, so nothing is due yet.
+        assert_eq!(director.state.next_due(), None);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        assert_eq!(director.state.next_due(), Some(71 * S));
+    }
+
+    #[test]
+    fn a_pilot_back_in_is_waited_for_again() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        director.now = 20 * S;
+        out(&mut director, "ben").unwrap();
+        assert_eq!(director.state.next_due(), Some(80 * S));
+        // Ben was only stuck in a gate. He is flying again.
+        director.now = 25 * S;
+        back_in(&mut director, "ben").unwrap();
+        assert!(!director.state.rulings.is_out(&rid("heat#1"), &pilot("ben")));
+        assert_eq!(director.state.next_due(), None);
+        director.now = 500 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Running);
+        // He finishes, and the wait starts from then.
+        director.cross("seat-1", 40 * S);
+        assert_eq!(director.state.next_due(), Some(560 * S));
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn when_every_pilot_is_out_the_race_waits_for_nobody() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = 5 * S;
+        out(&mut director, "ana").unwrap();
+        assert_eq!(director.state.next_due(), None);
+        director.now = 8 * S;
+        out(&mut director, "ben").unwrap();
+        assert_eq!(director.state.next_due(), Some(68 * S));
+    }
+
+    #[test]
+    fn with_no_wait_set_a_pilot_out_changes_nothing_about_when_the_race_stops() {
+        let mut director = two_pilot_heat(None);
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        out(&mut director, "ben").unwrap();
+        // The director still stops this race.
+        assert_eq!(director.state.next_due(), None);
+    }
+
+    #[test]
+    fn a_pilot_who_is_out_keeps_the_laps_they_flew() {
+        let mut director = two_pilot_heat(None);
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-1", 10 * S);
+        out(&mut director, "ben").unwrap();
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        let laps = director.state.laps.seat(
+            &rid("heat#1"),
+            &oft(),
+            &SeatRef("seat-1".into()),
+            director.state.filters_for(race, &oft()),
+        );
+        assert_eq!(laps.lap_count(), 1);
+    }
+
+    #[test]
+    fn marking_out_is_refused_when_it_makes_no_sense() {
+        let mut director = two_pilot_heat(None);
+        // Not in the race.
+        assert!(matches!(
+            out(&mut director, "cat"),
+            Err(Refusal::PilotNotInRace { .. })
+        ));
+        // Not out, so nothing to take back.
+        assert!(matches!(
+            back_in(&mut director, "ben"),
+            Err(Refusal::NothingToUndo)
+        ));
+        out(&mut director, "ben").unwrap();
+        // Already out.
+        assert!(matches!(
+            out(&mut director, "ben"),
+            Err(Refusal::AlreadyOut { .. })
+        ));
+        // An unknown race.
+        assert!(
+            director
+                .record(Event::PilotOut {
+                    race: rid("nope#1"),
+                    pilot: pilot("ana"),
+                })
+                .is_err()
+        );
+        // A stopped race still takes the mark: the director may add it before saving.
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        out(&mut director, "ana").unwrap();
+        back_in(&mut director, "ana").unwrap();
+        // A saved race does not.
+        director
+            .send(Command::SaveRace {
+                race: rid("heat#1"),
+                needs_marshal: false,
+                note: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            out(&mut director, "ana"),
+            Err(Refusal::Race(RaceError::WrongState { .. }))
+        ));
+        // The mark made before the save stays on the record.
+        assert!(director.state.rulings.is_out(&rid("heat#1"), &pilot("ben")));
+    }
+
     #[test]
     fn removing_a_finishing_lap_during_the_wait_keeps_the_race_going() {
         let mut director = two_pilot_heat(Some(60 * S));
@@ -1864,6 +2195,276 @@ mod tests {
         // Ben really finishes; the wait starts from then.
         director.cross("seat-1", 40 * S);
         assert_eq!(director.state.next_due(), Some(560 * S));
+    }
+
+    // --- Check-in: taking an open seat part-way through a race ---------------------
+
+    /// Open practice as one long heat: two open seats and one with Cat named on it.
+    fn practice(idle: Option<i64>) -> Director {
+        let mut format = format(EndCondition::Open, 0);
+        format.race.drop_idle_seat_micros = idle;
+        format.ranking = None;
+        let mut director = Director::default();
+        let seat = |i: usize, source: SeatSource| HeatSeat {
+            adapter: oft(),
+            seat: SeatRef(format!("seat-{i}")),
+            source,
+        };
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("heat"),
+                    label: "Practice".into(),
+                    parent: None,
+                    kind: PhaseKind::Heat {
+                        lineup: vec![
+                            seat(0, SeatSource::Open),
+                            seat(1, SeatSource::Open),
+                            seat(2, SeatSource::Pilot(pilot("cat"))),
+                        ],
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        director
+    }
+
+    fn take(director: &mut Director, seat: &str, name: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::SeatTaken {
+                race: rid("heat#1"),
+                adapter: oft(),
+                seat: SeatRef(seat.into()),
+                pilot: pilot(name),
+            })
+            .map(|_| ())
+    }
+
+    fn drop_seat(director: &mut Director, seat: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::SeatDropped {
+                race: rid("heat#1"),
+                adapter: oft(),
+                seat: SeatRef(seat.into()),
+            })
+            .map(|_| ())
+    }
+
+    /// Each stint on a seat as (pilot, still open, its lap times in seconds).
+    fn stints_of(director: &Director, seat: &str) -> Vec<(String, bool, Vec<i64>)> {
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        let seat = SeatRef(seat.into());
+        let laps = director.state.laps.seat(
+            &rid("heat#1"),
+            &oft(),
+            &seat,
+            director.state.filters_for(race, &oft()),
+        );
+        director
+            .state
+            .check_ins
+            .stints(&rid("heat#1"), &oft(), &seat)
+            .iter()
+            .map(|stint| {
+                (
+                    stint.pilot.0.clone(),
+                    stint.is_open(),
+                    stint.laps(&laps).map(|lap| lap.micros() / S).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pilot_who_takes_a_seat_gets_the_laps_from_their_first_crossing_on() {
+        let mut director = practice(None);
+        // Somebody is already lapping on seat 0 with no name.
+        director.cross("seat-0", 0);
+        director.cross("seat-0", 20 * S);
+        take(&mut director, "seat-0", "ana").unwrap();
+        // The lap that was under way when Ana took the seat is not hers.
+        director.cross("seat-0", 45 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), true, vec![])]
+        );
+        // That crossing was her first, so it starts her first lap.
+        director.cross("seat-0", 60 * S);
+        director.cross("seat-0", 72 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), true, vec![15, 12])]
+        );
+        assert_eq!(
+            director
+                .state
+                .check_ins
+                .holder(&rid("heat#1"), &oft(), &SeatRef("seat-0".into())),
+            Some(&pilot("ana"))
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn a_stint_ends_when_someone_else_takes_the_seat_or_the_pilot_drops_it() {
+        let mut director = practice(None);
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.cross("seat-0", 0);
+        director.cross("seat-0", 10 * S);
+        // Ben takes the seat from Ana. Her lap stays hers.
+        take(&mut director, "seat-0", "ben").unwrap();
+        director.cross("seat-0", 30 * S);
+        director.cross("seat-0", 41 * S);
+        drop_seat(&mut director, "seat-0").unwrap();
+        // Nobody has the seat now, so this lap is nobody's.
+        director.cross("seat-0", 55 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![
+                ("ana".into(), false, vec![10]),
+                ("ben".into(), false, vec![11])
+            ]
+        );
+        assert_eq!(
+            director
+                .state
+                .check_ins
+                .holder(&rid("heat#1"), &oft(), &SeatRef("seat-0".into())),
+            None
+        );
+        // Ana comes back for a second go: a new stint, and the first is untouched.
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.cross("seat-0", 70 * S);
+        director.cross("seat-0", 79 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![
+                ("ana".into(), false, vec![10]),
+                ("ben".into(), false, vec![11]),
+                ("ana".into(), true, vec![9])
+            ]
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn a_pilot_who_takes_another_seat_leaves_the_one_they_had() {
+        let mut director = practice(None);
+        take(&mut director, "seat-0", "ana").unwrap();
+        take(&mut director, "seat-1", "ana").unwrap();
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), false, vec![])]
+        );
+        assert_eq!(
+            stints_of(&director, "seat-1"),
+            vec![("ana".into(), true, vec![])]
+        );
+        assert_eq!(
+            director
+                .state
+                .check_ins
+                .seat_of(&rid("heat#1"), &pilot("ana")),
+            Some((&oft(), &SeatRef("seat-1".into())))
+        );
+    }
+
+    #[test]
+    fn taking_or_dropping_a_seat_is_refused_when_it_makes_no_sense() {
+        let mut director = practice(None);
+        // Cat's seat has her name on it.
+        assert!(matches!(
+            take(&mut director, "seat-2", "ana"),
+            Err(Refusal::SeatNotOpen(_))
+        ));
+        // Cat has her own seat, so she cannot take another.
+        assert!(matches!(
+            take(&mut director, "seat-0", "cat"),
+            Err(Refusal::AlreadyInRace { .. })
+        ));
+        // No such seat in the race.
+        assert!(matches!(
+            take(&mut director, "seat-9", "ana"),
+            Err(Refusal::SeatNotInRace(_))
+        ));
+        // Nobody on the seat to drop.
+        assert!(matches!(
+            drop_seat(&mut director, "seat-0"),
+            Err(Refusal::NothingToUndo)
+        ));
+        take(&mut director, "seat-0", "ana").unwrap();
+        assert!(matches!(
+            take(&mut director, "seat-0", "ana"),
+            Err(Refusal::AlreadyOnSeat { .. })
+        ));
+        // Once the race has stopped, nobody new can take a seat.
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        assert!(matches!(
+            take(&mut director, "seat-1", "ben"),
+            Err(Refusal::Race(RaceError::WrongState { .. }))
+        ));
+    }
+
+    #[test]
+    fn an_idle_seat_is_dropped_after_the_formats_wait_and_a_crossing_starts_the_wait_again() {
+        let mut director = practice(Some(120 * S));
+        director.now = 10 * S;
+        take(&mut director, "seat-0", "ana").unwrap();
+        // Two minutes from when she took the seat.
+        assert_eq!(director.state.next_due(), Some(130 * S));
+        director.now = 100 * S;
+        director.cross("seat-0", 90 * S);
+        // Her crossing shows the seat is in use: two minutes from then.
+        assert_eq!(director.state.next_due(), Some(220 * S));
+        director.now = 219 * S;
+        director.catch_up();
+        assert!(stints_of(&director, "seat-0")[0].1);
+        director.now = 400 * S;
+        director.catch_up();
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), false, vec![])]
+        );
+        assert_eq!(director.state.next_due(), None);
+        // The race itself keeps running: only the seat was dropped.
+        assert_eq!(state_of(&director), RaceState::Running);
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn with_no_wait_set_nobody_is_ever_dropped_for_being_idle() {
+        let mut director = practice(None);
+        director.now = 10 * S;
+        take(&mut director, "seat-0", "ana").unwrap();
+        assert_eq!(director.state.next_due(), None);
+        director.now = 100_000 * S;
+        director.catch_up();
+        assert!(stints_of(&director, "seat-0")[0].1);
+    }
+
+    #[test]
+    fn each_idle_seat_is_dropped_at_its_own_time() {
+        let mut director = practice(Some(60 * S));
+        director.now = 10 * S;
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.now = 30 * S;
+        take(&mut director, "seat-1", "ben").unwrap();
+        assert_eq!(director.state.next_due(), Some(70 * S));
+        director.now = 75 * S;
+        director.catch_up();
+        assert!(!stints_of(&director, "seat-0")[0].1);
+        assert!(stints_of(&director, "seat-1")[0].1);
+        assert_eq!(director.state.next_due(), Some(90 * S));
     }
 
     #[test]

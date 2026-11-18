@@ -33,6 +33,8 @@
   import { currentRace } from '../lib/phases.js';
   import { signupPhases } from '../lib/signup.js';
   import { currentRaceView, missingNames, raceWord, upcomingHeats } from '../lib/spectator.js';
+  import { checkInRace, practiceRuns, type CheckinActions } from '../lib/checkin.js';
+  import OpenSeats from './OpenSeats.svelte';
   import PilotSignup, { type SignupActions } from './PilotSignup.svelte';
   import RaceLaps from './RaceLaps.svelte';
 
@@ -40,8 +42,11 @@
     live,
     pilot = undefined,
     buzz = (pattern) => navigator.vibrate?.(pattern),
-    signup = undefined
+    signup = undefined,
+    checkin = undefined
   }: {
+    /** What a signed-in pilot can ask for on an open seat (check-in). Left out: looking only. */
+    checkin?: CheckinActions | undefined;
     /** What a signed-in pilot can ask for on the sign-up sheet. Left out: looking only. */
     signup?: SignupActions | undefined;
     /** The pilot this phone is signed in as. Left out for a spectator. */
@@ -165,6 +170,10 @@
   // ── The pilot's own ────────────────────────────────────────────────────────
   const mine = $derived(pilot ? myHeats(view, names, pilot.id) : []);
   const flown = $derived(pilot ? myRaces(view, names, pilot.id) : []);
+  /** The race with open seats that a pilot can check in to right now, if there is one. */
+  const flyNow = $derived(checkInRace(view));
+  /** The pilot's own spells on open seats: practice laps, ranked or not. */
+  const practice = $derived(pilot ? practiceRuns(view, names, pilot.id) : []);
   const alert = $derived(pilotAlert(mine));
   // Buzz once each time the alert is about something new: closer, or another heat.
   let buzzed = $state<string | undefined>(undefined);
@@ -229,6 +238,16 @@
 
     {#if tab === 'me' && pilot}
       <section aria-label="Me">
+        {#if flyNow}
+          <h2 class="part">Fly now: {names.phase(flyNow.heat)}</h2>
+          <OpenSeats
+            race={flyNow}
+            {names}
+            {pilot}
+            actions={checkin}
+            channelOf={(seat) => names.channel(seat.adapter, seat.seat)}
+          />
+        {/if}
         <h2 class="part">My heats</h2>
         {#if mine.length === 0}
           <p class="empty" data-testid="no-heats">You are not in a heat that is coming up.</p>
@@ -262,6 +281,7 @@
                   {#if entry.place !== undefined}<Badge tone="accent">{ordinal(entry.place)}</Badge
                     >{/if}
                   {#if entry.falseStart}<Badge tone="danger">False start</Badge>{/if}
+                  {#if entry.out}<Badge tone="warn">Out</Badge>{/if}
                   <span class="open">
                     <Button
                       size="sm"
@@ -285,6 +305,37 @@
                   <p class="totals">
                     Best <span class="num">{time(entry.bestLapMicros)}</span> · Total
                     <span class="num">{time(entry.totalMicros)}</span>
+                  </p>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+
+        {#if practice.length > 0}
+          <h2 class="part">My practice</h2>
+          <ul class="flown" aria-label="My practice">
+            {#each practice as run (run.key)}
+              <li>
+                <div class="flown-head">
+                  <strong>{run.name}</strong>
+                  {#if run.open}<Badge tone="success" dot>Flying now</Badge>{/if}
+                </div>
+                {#if run.laps.length === 0}
+                  <p class="empty">No laps yet.</p>
+                {:else}
+                  <ol class="laps" aria-label="Laps of {run.name}">
+                    {#each run.laps as micros, index (index)}
+                      <li class:best={index === run.bestLapIndex}>
+                        <span class="lap-no">{index + 1}</span>
+                        <span class="num">{time(micros)}</span>
+                      </li>
+                    {/each}
+                  </ol>
+                  <p class="totals">
+                    Best <span class="num">{time(run.bestLapMicros)}</span> ·
+                    {run.laps.length}
+                    {run.laps.length === 1 ? 'lap' : 'laps'}
                   </p>
                 {/if}
               </li>
@@ -500,6 +551,7 @@
                         {#if isOut(race.view, row.key)}<Badge tone="danger">Disqualified</Badge
                           >{/if}
                         {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
+                        {#if row.out}<Badge tone="warn">Out</Badge>{/if}
                       </th>
                       <td class="num">{row.laps}</td>
                       {#if runOf}<td class="num">{time(row.bestRun?.totalMicros)}</td>{/if}

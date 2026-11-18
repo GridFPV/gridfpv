@@ -65,6 +65,34 @@ In a heat ranked on the fastest laps in a row, the card also shows **Best 3** fo
 race and **Heat best 3** for the whole heat. The laps that make up this race's best run
 are filled in.
 
+**Out** marks a pilot as out of the race. Use it when a pilot crashes or will not finish.
+
+- A race set to stop by itself stops waiting for that pilot. When every pilot still
+  flying has finished, the race ends as usual.
+- The laps the pilot flew still count. They are ranked on those laps like anyone else.
+- **Back in** takes it back if the pilot gets going again.
+- The button is there while a race is counting down, running or stopped. After you save
+  the race, the mark stays on it and shows on the results as **Out**.
+
+Grid still counts a lap if the quad is carried through the gate. Take that lap off on the
+[Marshal](#/help/marshal) page.
+
+### Open seats: checking a pilot in
+
+An open seat has no pilot named on it. This is how you run practice as one long heat:
+start the race and let pilots come and go.
+
+- **Check in…** on an open seat puts a pilot on it. Their first pass through the gate
+  starts their first lap. The card then shows that pilot and only their laps.
+- **Change pilot…** gives the seat to someone else. The first pilot keeps the laps they
+  flew.
+- **Drop** frees the seat.
+- Pilots can do the same for themselves from their phone or a kiosk, under **Fly now**.
+- A format can drop a seat by itself when nobody has flown it for a while. Set **Drop an
+  idle seat after** on the [format](#/help/formats).
+
+A pilot's practice laps show on their own page under **My practice**. They do not rank.
+
 **tune** opens the seat's tuning page. A **Bench** seat has a **Crossing** button, which
 logs a pass by hand.
 

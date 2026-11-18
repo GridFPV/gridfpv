@@ -48,6 +48,12 @@ export interface Names {
   /** Who is on a seat: a callsign, or where the pilot will come from. */
   who(who: SeatWhoView): string;
   /**
+   * Who is on a seat, for a place that knows which seat it is. The same as {@link who},
+   * except that an open seat is named by its number ("Seat 3"), so two open seats can be
+   * told apart (Ryan, 2026-11-18).
+   */
+  seatWho(who: SeatWhoView, adapter: AdapterId, seat: SeatRef, position?: number): string;
+  /**
    * A seat, with the video channel it is on when the timer has said it: "Seat 2 · R2".
    * The channel is what a pilot needs, so it goes wherever the seat is named. `position`
    * is the seat's place in its lineup, counted from 0, used only when the timer directory
@@ -164,5 +170,19 @@ export function buildNames(
   const timer = (adapter: AdapterId): string => timerName(timers, adapter);
   const colors = new Map(pilots.map((p) => [p.id, p.color]));
   const pilotColor = (id: PilotId): string | undefined => colors.get(id);
-  return { phase, within, pilot, klass, who, seat, seatPlain, channel, timer, pilotColor };
+  const seatWho = (on: SeatWhoView, adapter: AdapterId, ref: SeatRef, position?: number): string =>
+    on === 'Open' ? seatPlain(adapter, ref, position) : who(on);
+  return {
+    phase,
+    within,
+    pilot,
+    klass,
+    who,
+    seatWho,
+    seat,
+    seatPlain,
+    channel,
+    timer,
+    pilotColor
+  };
 }

@@ -68,8 +68,9 @@
           </span>
           <span class="lineup">
             {phase.lineup
-              .filter((seat) => seat.who !== 'Nobody')
-              .map((seat) => names.who(seat.who))
+              .map((seat, index) => ({ seat, index }))
+              .filter(({ seat }) => seat.who !== 'Nobody')
+              .map(({ seat, index }) => names.seatWho(seat.who, seat.adapter, seat.seat, index))
               .join(', ')}
           </span>
         </span>

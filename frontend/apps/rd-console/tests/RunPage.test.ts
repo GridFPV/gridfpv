@@ -213,6 +213,149 @@ describe('RunPage', () => {
     expectNoRawIds();
   });
 
+  describe('marking a pilot out', () => {
+    const running = (seats = [raceSeat(0, 'p-1a'), raceSeat(1, 'p-2b')]) =>
+      race(HEAT, 1, 'Running', { started_at: 0, seats });
+    const during = (current: ReturnType<typeof running>) =>
+      eventView({ phases: [quali()], races: [current], current_race: current.race });
+    const seatCard = (name: RegExp) => screen.getByRole('listitem', { name });
+
+    it('a seat in a running race has an Out button that records the pilot as out', async () => {
+      const current = running();
+      const { session } = await open(during(current));
+      await fireEvent.click(screen.getByRole('button', { name: 'Mark Bee out' }));
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: { PilotOut: { race: current.race, pilot: 'p-2b' } }
+      });
+      expectNoRawIds();
+    });
+
+    it('a pilot who is out is badged, is no longer "on course", and can be put back in', async () => {
+      const current = running([
+        raceSeat(0, 'p-1a', { hole_shot: { crossing: 5, at: 1 } }),
+        raceSeat(1, 'p-2b', { hole_shot: { crossing: 6, at: 2 }, out: true })
+      ]);
+      const { session } = await open(during(current));
+      const ace = seatCard(/Ace/);
+      const bee = seatCard(/Bee/);
+      expect(within(ace).getByText('On course')).toBeVisible();
+      expect(within(bee).queryByText('On course')).toBeNull();
+      expect(bee).toHaveClass('out');
+      expect(ace).not.toHaveClass('out');
+      expect(within(bee).queryByRole('button', { name: 'Mark Bee out' })).toBeNull();
+      await fireEvent.click(within(bee).getByRole('button', { name: 'Put Bee back in' }));
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: { PilotBackIn: { race: current.race, pilot: 'p-2b' } }
+      });
+    });
+
+    it('is offered while a race is staging, running or stopped, and not otherwise', async () => {
+      for (const state of ['Staging', 'Running', 'Stopped'] as const) {
+        const current = race(HEAT, 1, state, {
+          started_at: 0,
+          stopped_at: state === 'Stopped' ? 4 * S : undefined,
+          seats: [raceSeat(0, 'p-1a'), raceSeat(1, 'p-2b')]
+        });
+        const { unmount } = await open(during(current));
+        expect(screen.getByRole('button', { name: 'Mark Ace out' })).toBeVisible();
+        unmount();
+      }
+      // No race yet: nobody can be out of it.
+      await open(eventView({ phases: [quali()] }));
+      expect(screen.queryByRole('button', { name: /^Mark .* out$/ })).toBeNull();
+    });
+
+    it('an open seat has nobody to mark out', async () => {
+      const current = running([raceSeat(0, 'p-1a'), raceSeat(1)]);
+      await open(during(current));
+      expect(screen.getAllByRole('button', { name: /^Mark .* out$/ })).toHaveLength(1);
+    });
+
+    it("shows the Director's sentence when it refuses", async () => {
+      const SAID = 'pilot Bee is already out of the race';
+      const current = running();
+      await open(during(current), {
+        sendCommand: vi.fn(async () =>
+          Promise.reject(Object.assign(new Error(SAID), { status: 409, code: 'Refused' }))
+        )
+      });
+      await fireEvent.click(screen.getByRole('button', { name: 'Mark Bee out' }));
+      expect(await screen.findByText(SAID)).toBeVisible();
+    });
+  });
+
+  describe('checking a pilot in to an open seat', () => {
+    const practice = () => heat(HEAT, 'Open Practice', ['Open', 'p-2b']);
+    const flying = (seat = raceSeat(0)) =>
+      race(HEAT, 1, 'Running', { started_at: 0, seats: [seat, raceSeat(1, 'p-2b')] });
+    const during = (current: ReturnType<typeof flying>) =>
+      eventView({ phases: [practice()], races: [current], current_race: current.race });
+    const PEOPLE: Pilot[] = [...PILOTS, { id: 'p-3c', callsign: 'Cat', vtx_types: [] }];
+    const openWith = (current: ReturnType<typeof flying>, over: Partial<LiveSession> = {}) =>
+      open(during(current), { listPilots: vi.fn(async () => PEOPLE), ...over });
+
+    it('an open seat in a running race offers the pilots with no seat of their own', async () => {
+      const current = flying();
+      const { session } = await openWith(current);
+      const picker = (await screen.findByLabelText(
+        'Check a pilot in to Seat 1'
+      )) as HTMLSelectElement;
+      // Bee has a seat of her own in this race, so she is not offered.
+      await waitFor(() => expect(optionTexts(picker)).toEqual(['Check in…', 'Ace', 'Cat']));
+      // A seat with a pilot named on it has no picker.
+      expect(screen.queryByLabelText('Check a pilot in to Seat 2')).toBeNull();
+      await fireEvent.change(picker, { target: { value: 'p-3c' } });
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: {
+          SeatTaken: { race: current.race, adapter: 'bench', seat: 'seat-1', pilot: 'p-3c' }
+        }
+      });
+      expectNoRawIds();
+    });
+
+    it('a seat a pilot has taken shows that pilot and only their laps, and can be dropped', async () => {
+      const current = flying(
+        raceSeat(0, undefined, {
+          holder: 'p-1a',
+          laps: [lap(1, 20), lap(2, 15), lap(3, 12)],
+          best_lap_micros: 12 * S,
+          stints: [
+            { pilot: 'p-1a', open: true, laps: [lap(2, 15), lap(3, 12)], best_lap_micros: 12 * S }
+          ]
+        })
+      );
+      const { session } = await openWith(current);
+      const card = screen.getByRole('listitem', { name: /Seat 1, Ace/ });
+      // The 20 s lap was flown before Ace took the seat. It is not hers.
+      expect(card.querySelector('[data-stat="laps"]')).toHaveTextContent('2');
+      const picker = within(card).getByLabelText('Check a pilot in to Seat 1') as HTMLSelectElement;
+      await waitFor(() => expect(optionTexts(picker)).toEqual(['Change pilot…', 'Cat']));
+      // "Out" is for a pilot named on a seat. A pilot who checked in drops the seat.
+      expect(within(card).queryByRole('button', { name: /^Mark .* out$/ })).toBeNull();
+      await fireEvent.click(within(card).getByRole('button', { name: 'Drop Ace from Seat 1' }));
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: { SeatDropped: { race: current.race, adapter: 'bench', seat: 'seat-1' } }
+      });
+    });
+
+    it('is not offered before a race starts or once it has stopped', async () => {
+      const { unmount } = await open(eventView({ phases: [practice()] }));
+      expect(screen.queryByLabelText(/^Check a pilot in to/)).toBeNull();
+      unmount();
+      const stopped = race(HEAT, 1, 'Stopped', {
+        started_at: 0,
+        stopped_at: 4 * S,
+        seats: [raceSeat(0), raceSeat(1, 'p-2b')]
+      });
+      await openWith(stopped);
+      expect(screen.queryByLabelText(/^Check a pilot in to/)).toBeNull();
+    });
+  });
+
   it('discarding for a false start asks who, records it, then discards with the reason', async () => {
     const stopped = race(HEAT, 1, 'Stopped', {
       started_at: 0,

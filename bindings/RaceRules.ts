@@ -32,6 +32,12 @@ first_lap: FirstLap,
  */
 stop_after_all_finish_micros?: number, 
 /**
+ * For a race with open seats that pilots check in to: drop a pilot from their seat
+ * when it has gone this many microseconds with no crossing. `None`, the default,
+ * never drops anyone.
+ */
+drop_idle_seat_micros?: number, 
+/**
  * For a race that is not timed (first-to-N or open): the longest it may run, in
  * microseconds from the start. The race stops by itself when it gets there, whoever
  * has or has not finished. `None`, the default, sets no limit.

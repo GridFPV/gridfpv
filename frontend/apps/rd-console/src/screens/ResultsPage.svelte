@@ -158,6 +158,7 @@
                       <th scope="row">
                         {row.name}
                         {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
+                        {#if row.out}<Badge tone="warn">Out</Badge>{/if}
                       </th>
                       <td class="num">{row.laps}</td>
                       {#if openedRunLength !== undefined}

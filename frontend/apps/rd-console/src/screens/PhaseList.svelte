@@ -378,7 +378,7 @@
           {#each phase.lineup as seat, index (index)}
             <li class:pending={typeof seat.who === 'string' || 'Waiting' in seat.who}>
               <span class="seat">{names.seat(seat.adapter, seat.seat, index)}</span>
-              <span class="who">{names.who(seat.who)}</span>
+              <span class="who">{names.seatWho(seat.who, seat.adapter, seat.seat, index)}</span>
             </li>
           {/each}
         </ol>

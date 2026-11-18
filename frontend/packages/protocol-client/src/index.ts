@@ -74,6 +74,8 @@ export {
   takeSpot,
   takeNextSpot,
   leaveSpot,
+  takeSeat,
+  dropSeat,
   signOutPilot,
   getPublicEvent,
   getPublicEventState,

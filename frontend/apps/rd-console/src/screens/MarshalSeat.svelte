@@ -70,7 +70,11 @@
     onseek?: ((raceMicros: number) => void) | undefined;
   } = $props();
 
-  const who = $derived(seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot));
+  const who = $derived(
+    seat.pilot === undefined
+      ? names.seatWho('Open', seat.adapter, seat.seat, index)
+      : names.pilot(seat.pilot)
+  );
   const seatName = $derived(names.seat(seat.adapter, seat.seat, index));
   const timer = $derived(names.timer(seat.adapter));
   const rows = $derived(lapRows(seat));
@@ -215,6 +219,7 @@
       <span class="num">total {formatMicros(seat.total_micros)}</span>
     {/if}
     {#if seat.false_start}<Badge tone="danger">False start</Badge>{/if}
+    {#if seat.out}<Badge tone="warn">Out</Badge>{/if}
     {#if editable && seat.pilot !== undefined}
       {@const pilot = seat.pilot}
       <span class="head-action">
