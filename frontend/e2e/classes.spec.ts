@@ -25,13 +25,13 @@ test('Classes page lists the built-ins (org badges, not editable), full CRUD on 
   // ── Setup → Classes ────────────────────────────────────────────────────────────────────
   await gotoPage(page, 'Classes');
 
-  // ── The built-ins are present, org-badged, locked (no Remove) ──────────────────────────
+  // ── The built-ins are present and org-badged ─────────────────────────────────────────
   const list = page.getByRole('list', { name: 'Class directory' });
   const openBuiltin = list.getByRole('listitem').filter({ hasText: 'Open Class' });
   await expect(openBuiltin).toBeVisible({ timeout: 15_000 });
-  // It carries its real org as a badge + a built-in/lock indicator…
+  // It carries its real org as a badge, and no lock or "Built-in" label…
   await expect(openBuiltin.getByText('MultiGP', { exact: true })).toBeVisible();
-  await expect(openBuiltin.getByLabel('Built-in')).toBeVisible();
+  await expect(openBuiltin.getByText('Built-in')).toHaveCount(0);
   // …and cannot be edited. It can be removed, which is tried at the end of this test.
   await expect(openBuiltin.getByRole('button', { name: 'Edit' })).toHaveCount(0);
   await expect(openBuiltin.getByRole('button', { name: 'Remove' })).toBeVisible();
@@ -91,7 +91,7 @@ test('Classes page lists the built-ins (org badges, not editable), full CRUD on 
 
     await page.getByRole('button', { name: 'Put the built-in classes back' }).click();
     await expect(shrieker).toBeVisible({ timeout: 15_000 });
-    await expect(shrieker.getByLabel('Built-in')).toBeVisible();
+    await expect(shrieker.getByText('UDL', { exact: true })).toBeVisible();
     await expect(page.getByTestId('removed-builtins')).toHaveCount(0);
     expect(await ids()).toContain('udl-shrieker');
   } finally {

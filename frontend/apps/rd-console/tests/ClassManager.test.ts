@@ -40,7 +40,9 @@ describe('ClassManager (#84)', () => {
     expect(
       within(rows[0]).getByRole('link', { name: 'Reference for Open Class' })
     ).toBeInTheDocument();
-    expect(within(rows[0]).getByLabelText('Built-in')).toBeInTheDocument();
+    // The org badge says where it is from. There is no lock or "Built-in" label beside it.
+    expect(within(rows[0]).queryByLabelText('Built-in')).not.toBeInTheDocument();
+    expect(rows[0]).not.toHaveTextContent('Built-in');
     expect(within(rows[0]).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     expect(within(rows[0]).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
 

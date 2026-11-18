@@ -301,11 +301,6 @@
             <div class="class-head">
               <span class="class-name">{cls.name}</span>
               <Badge tone={sourceTone(cls.source)}>{cls.source}</Badge>
-              {#if isBuiltin(cls)}
-                <span class="builtin-lock" title="Built-in class — read-only" aria-label="Built-in">
-                  🔒 Built-in
-                </span>
-              {/if}
               {#if isHidden(cls)}
                 <Badge tone="neutral">Hidden</Badge>
               {/if}
@@ -560,12 +555,6 @@
   .class-name {
     font-size: var(--gf-font-size-md);
     font-weight: var(--gf-font-weight-semibold);
-    letter-spacing: var(--gf-tracking-tight);
-  }
-  .builtin-lock {
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
-    font-weight: var(--gf-font-weight-medium);
     letter-spacing: var(--gf-tracking-tight);
   }
   .custom-note {
