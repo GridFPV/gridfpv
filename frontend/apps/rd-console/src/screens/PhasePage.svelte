@@ -11,7 +11,13 @@
   import type { PhaseId } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { isHeat, PHASE_STATUS_LABELS, phaseStatus } from '../lib/phases.js';
+  import {
+    isHeat,
+    PHASE_STATUS_LABELS,
+    phaseStatus,
+    phaseSummaries,
+    type PhaseStatus
+  } from '../lib/phases.js';
   import { formatHash } from '../lib/route.js';
   import { signupPhases } from '../lib/signup.js';
   import AddHeatDialog from './AddHeatDialog.svelte';
@@ -35,6 +41,25 @@
   const phase = $derived(view?.phases.find((entry) => entry.def.id === phaseId));
   const sheet = $derived(signupPhases(view).find((entry) => entry.id === phaseId));
   const back = formatHash({ kind: 'event', section: 'phases' });
+  const hashOf = (id: PhaseId) => formatHash({ kind: 'event', section: 'phases', phase: id });
+  /** The phase that holds this one, when one does. */
+  const parent = $derived(
+    view?.phases.find((entry) => phase !== undefined && entry.def.id === phase.def.parent)
+  );
+  /** The phases directly inside this one. Each has its own page. */
+  const inside = $derived(
+    view ? phaseSummaries(view).filter((entry) => entry.parent === phaseId) : []
+  );
+
+  const TONES: Record<PhaseStatus, 'neutral' | 'accent' | 'success' | 'warn' | 'info'> = {
+    waiting: 'neutral',
+    ready: 'accent',
+    racing: 'warn',
+    complete: 'success',
+    locked: 'info'
+  };
+  const heatsWords = (heats: number, flown: number): string =>
+    heats === 0 ? 'No heats yet' : `${heats} ${heats === 1 ? 'heat' : 'heats'} · ${flown} flown`;
 
   /** The phase a heat is being added under. */
   let addingUnder = $state<PhaseId | undefined>(undefined);
@@ -49,11 +74,20 @@
   lede={phase
     ? isHeat(phase.def)
       ? 'One heat: its lineup, its ranking, and the rulings on it.'
-      : 'This phase: its heats and lineups, its ranking, and the rulings on it.'
+      : inside.length > 0
+        ? 'This phase: the phases inside it, its own heats, its ranking, and the rulings on it.'
+        : 'This phase: its heats and lineups, its ranking, and the rulings on it.'
     : ''}
 >
   {#snippet actions()}
-    <a class="back" href={back} data-testid="back-to-phases">← All phases</a>
+    <nav class="crumbs" aria-label="Where this phase is">
+      <a class="back" href={back} data-testid="back-to-phases">← All phases</a>
+      {#if parent}
+        <a class="back" href={hashOf(parent.def.id)} data-testid="back-to-parent">
+          ← {parent.def.label}
+        </a>
+      {/if}
+    </nav>
   {/snippet}
 
   {#if live.loadError}
@@ -70,7 +104,7 @@
       <a class="back" href={back}>← All phases</a>
     </Card>
   {:else}
-    <p class="where">
+    <p class="where" data-testid="phase-where">
       <Badge tone="neutral">{PHASE_STATUS_LABELS[phaseStatus(phase, view)]}</Badge>
       {#if phase.format}<span class="muted">{phase.format.name}</span>{/if}
     </p>
@@ -83,16 +117,47 @@
         onrules={() => (rulesFor = sheet.id)}
       />
     {/if}
+    {#if inside.length > 0}
+      <Card title="Phases in {phase.def.label}" elevation="sm">
+        <ul class="inside" aria-label="Phases in {phase.def.label}">
+          {#each inside as entry (entry.id)}
+            <li>
+              <a class="phase" href={hashOf(entry.id)} aria-label="Open {entry.name}">
+                <span class="name">{entry.name}</span>
+                <Badge tone={TONES[entry.status]} dot={entry.status === 'racing'}>
+                  {PHASE_STATUS_LABELS[entry.status]}
+                </Badge>
+                {#if entry.onTimer !== undefined}
+                  <Badge tone="accent">On the timer: {live.names.phase(entry.onTimer)}</Badge>
+                {/if}
+                {#if entry.needsDecision}<Badge tone="warn">Needs a decision</Badge>{/if}
+                <span class="facts">
+                  {#if entry.inside > 0}
+                    <span>{entry.inside} {entry.inside === 1 ? 'phase' : 'phases'} inside</span>
+                  {/if}
+                  <span>{heatsWords(entry.heats, entry.flown)}</span>
+                </span>
+                <span class="open" aria-hidden="true">→</span>
+              </a>
+            </li>
+          {/each}
+        </ul>
+      </Card>
+    {/if}
     <Card title={isHeat(phase.def) ? 'Heat' : 'Heats and ranking'} elevation="sm">
-      <PhaseList
-        {view}
-        names={live.names}
-        {live}
-        {onrun}
-        root={phaseId}
-        onaddheat={(under) => (addingUnder = under)}
-        onsignup={(target) => (rulesFor = target)}
-      />
+      {#if isHeat(phase.def)}
+        <PhaseList {view} names={live.names} {live} {onrun} root={phaseId} />
+      {:else}
+        <PhaseList
+          {view}
+          names={live.names}
+          {live}
+          {onrun}
+          heatsOf={phaseId}
+          onaddheat={(under) => (addingUnder = under)}
+          onsignup={(target) => (rulesFor = target)}
+        />
+      {/if}
     </Card>
   {/if}
 </Page>
@@ -116,6 +181,49 @@
   .back {
     font-size: var(--gf-font-size-sm);
     white-space: nowrap;
+  }
+  .crumbs {
+    display: flex;
+    gap: var(--gf-space-4);
+    flex-wrap: wrap;
+  }
+  .inside {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--gf-space-2);
+  }
+  /* The whole line opens the phase. */
+  .phase {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--gf-space-2) var(--gf-space-3);
+    padding: var(--gf-space-3);
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-md);
+    color: inherit;
+    text-decoration: none;
+  }
+  .phase:hover,
+  .phase:focus-visible {
+    border-color: var(--gf-accent);
+  }
+  .name {
+    font-weight: var(--gf-font-weight-semibold);
+    overflow-wrap: anywhere;
+  }
+  .facts {
+    display: flex;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+    margin-left: auto;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
+  .open {
+    color: var(--gf-text-muted);
   }
   .where {
     display: flex;

@@ -24,7 +24,14 @@
   import type { PhaseId } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
-  import { isHeat, PHASE_STATUS_LABELS, phaseSummaries, type PhaseStatus } from '../lib/phases.js';
+  import { toggleFold, unfolded } from '../lib/phaseFold.svelte.js';
+  import {
+    isHeat,
+    PHASE_STATUS_LABELS,
+    phaseSummaries,
+    shownSummaries,
+    type PhaseStatus
+  } from '../lib/phases.js';
   import { formatHash } from '../lib/route.js';
   import AddBracketDialog from './AddBracketDialog.svelte';
   import AddHeatDialog from './AddHeatDialog.svelte';
@@ -47,7 +54,11 @@
   );
   const close = () => (adding = undefined);
 
-  const phases = $derived(live.view ? phaseSummaries(live.view) : []);
+  const every = $derived(live.view ? phaseSummaries(live.view) : []);
+  /** The lines shown: a phase inside another only while the one above it is unfolded. */
+  const phases = $derived(shownSummaries(every, unfolded));
+  /** Whether any phase holds phases, so every line leaves room for the fold button. */
+  const anyInside = $derived(every.some((phase) => phase.inside > 0));
   /** Whether any heat stands alone at the top of the event. */
   const loneHeats = $derived(
     live.view?.phases.some((phase) => phase.def.parent === undefined && isHeat(phase.def)) ?? false
@@ -95,13 +106,26 @@
       <Card title="Phases" elevation="sm">
         <ul class="phases" aria-label="Phases of the event">
           {#each phases as phase (phase.id)}
-            <li>
+            <li style="--depth: {phase.depth}" data-depth={phase.depth}>
+              {#if phase.inside > 0}
+                <button
+                  type="button"
+                  class="fold"
+                  aria-expanded={unfolded.has(phase.id)}
+                  aria-label="{unfolded.has(phase.id) ? 'Hide' : 'Show'} the phases in {phase.name}"
+                  onclick={() => toggleFold(phase.id)}
+                >
+                  <span aria-hidden="true">{unfolded.has(phase.id) ? '▾' : '▸'}</span>
+                </button>
+              {:else if anyInside}
+                <span class="fold-gap" aria-hidden="true"></span>
+              {/if}
               <a
                 class="phase"
                 href={formatHash({ kind: 'event', section: 'phases', phase: phase.id })}
                 aria-label="Open {phase.name}"
               >
-                <span class="name">{phase.name}</span>
+                <span class="name" class:nested={phase.depth > 0}>{phase.name}</span>
                 <Badge tone={TONES[phase.status]} dot={phase.status === 'racing'}>
                   {PHASE_STATUS_LABELS[phase.status]}
                 </Badge>
@@ -115,7 +139,13 @@
                 {/if}
                 {#if phase.needsDecision}<Badge tone="warn">Needs a decision</Badge>{/if}
                 <span class="facts">
-                  {#if phase.format}<span>{phase.format}</span>{/if}
+                  {#if phase.format && phase.depth === 0}<span>{phase.format}</span>{/if}
+                  {#if phase.inside > 0}
+                    <span data-testid="phase-inside">
+                      {phase.inside}
+                      {phase.inside === 1 ? 'phase' : 'phases'} inside
+                    </span>
+                  {/if}
                   <span data-testid="phase-heats">{heatsWords(phase.heats, phase.flown)}</span>
                 </span>
                 <span class="open" aria-hidden="true">→</span>
@@ -169,6 +199,32 @@
     display: flex;
     align-items: center;
     gap: var(--gf-space-2);
+    margin-left: calc(var(--depth) * var(--gf-space-6));
+  }
+  .fold,
+  .fold-gap {
+    flex: none;
+    width: 2rem;
+    height: 2rem;
+  }
+  .fold {
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--gf-border-subtle);
+    border-radius: var(--gf-radius-sm);
+    background: none;
+    color: var(--gf-text-secondary);
+    font-size: var(--gf-font-size-lg);
+    cursor: pointer;
+  }
+  .fold:hover,
+  .fold:focus-visible {
+    border-color: var(--gf-accent);
+    color: var(--gf-text);
+  }
+  .name.nested {
+    font-size: var(--gf-font-size-md);
   }
   /* The whole line opens the phase. */
   .phase {

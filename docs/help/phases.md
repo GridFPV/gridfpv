@@ -13,6 +13,11 @@ It is a short page. From the top:
 A phase's heats, lineups, ranking and sign-up sheet are on the phase's own page.
 **← All phases** takes you back.
 
+A phase can hold other phases. A bracket holds its rounds, for one. Its line says
+"2 phases inside" and has a small arrow button on the left. Press the arrow to show the
+phases inside, each on a line of its own. Press it again to hide them. Click any line to
+open that phase.
+
 A **heat** is a lineup of pilots on seats. It can be raced once or many times. A **phase**
 is a part of the event that takes pilots in and gives a ranking out. Practice, Qualifying
 and a bracket are phases. A phase can hold heats, and it can hold other phases.
@@ -48,8 +53,16 @@ time.
 
 ## A phase's page
 
-Open a phase to see its heats. Each row shows a name and where it stands: Waiting, Ready,
-Racing, Complete or Locked. A heat also shows who is on each seat.
+Open a phase to see its heats. The page shows only the heats that are right in that
+phase. Each row shows a name and where it stands: Waiting, Ready, Racing, Complete or
+Locked. A heat also shows who is on each seat.
+
+If the phase holds other phases, they are in their own list at the top, **Phases in
+(the phase's name)**. Click one to open its page. From there, a second link at the top
+takes you back up to the phase that holds it.
+
+The buttons for the phase itself (**+ Heat**, **Sign-up**, **Lock**, **Remove**) and its
+**Ranking** are at the top of the heats.
 
 - **Run** opens the heat on the [Run](#/help/run) page.
 - **Ranking** opens the phase's order. For a heat you can **Set position** by hand, and
@@ -70,7 +83,7 @@ phones. Pilots need to be [signed in](#/help/event) and phones need to
 
 ### Turning it on
 
-Open the phase and press **Sign-up** on its row. Pick:
+Open the phase and press **Sign-up**, above its heats. Pick:
 
 - **Timed by** and the **seats** every heat has. A seat is the same channel in every heat.
 - **Heats open at once.** Grid keeps this many heats with room in them. Start with 3.

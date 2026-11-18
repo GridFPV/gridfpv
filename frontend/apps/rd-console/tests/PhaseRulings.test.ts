@@ -239,11 +239,13 @@ describe('heat and phase rulings', () => {
 });
 
 describe('removing a phase', () => {
+  /** A heat's row, or, for the phase the page is about, its own group of buttons. */
   const rowOf = (label: string): HTMLElement =>
-    within(screen.getByRole('list', { name: 'Phases' }))
+    screen.queryByRole('group', { name: `${label}: what you can do` }) ??
+    (within(screen.getByRole('list', { name: /^(Phases|Heats of .+)$/ }))
       .getAllByRole('listitem')
       .filter((item) => item.classList.contains('phase'))
-      .find((item) => item.querySelector('.label')?.textContent === label) as HTMLElement;
+      .find((item) => item.querySelector('.label')?.textContent === label) as HTMLElement);
 
   const view = () =>
     eventView({

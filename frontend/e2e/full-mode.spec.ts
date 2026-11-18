@@ -142,7 +142,7 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     // The heat itself is on the phase's own page.
     await line.click();
     await expect(page.getByRole('heading', { name: PHASE, level: 1 })).toBeVisible();
-    const tree = page.getByRole('list', { name: 'Phases' });
+    const tree = page.getByRole('list', { name: `Heats of ${PHASE}` });
     const heatRow = tree.locator('li.phase.heat').filter({ hasText: HEAT });
     await expect(heatRow).toContainText('Ready', { timeout: 15_000 });
     await expect(heatRow).toContainText(FORMAT);

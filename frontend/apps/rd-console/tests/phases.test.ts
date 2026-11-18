@@ -6,6 +6,7 @@ import {
   currentRace,
   defaultHeat,
   phaseSummaries,
+  shownSummaries,
   groupOfHeat,
   heatGroups,
   holderChoices,
@@ -344,7 +345,7 @@ describe('phaseSummaries', () => {
     expect(phaseSummaries(eventView({ phases: [heat('h', 'Heat', [])] }))).toEqual([]);
   });
 
-  it('lists the phases at the top in the order they were added, each with its heats counted', () => {
+  it('lists every phase that holds something, a phase inside another right after it, each with its heats counted', () => {
     const view = eventView({
       phases: [
         group('quali', 'Qualifying', undefined, { format: TWO_MINUTE }),
@@ -370,12 +371,43 @@ describe('phaseSummaries', () => {
     expect(found.map((phase) => [phase.name, phase.heats, phase.flown])).toEqual([
       ['Qualifying', 3, 2],
       ['Finals', 2, 0],
+      ['Winners', 1, 0],
       ['Empty', 0, 0]
     ]);
     expect(found[0].format).toBe(TWO_MINUTE.name);
     expect(found[1].format).toBeUndefined();
-    // A phase nested inside another is not a line of its own.
-    expect(found.some((phase) => phase.name === 'Winners')).toBe(false);
+    // How deep each sits, what holds it, and how many phases are directly inside.
+    expect(found.map((phase) => [phase.depth, phase.parent, phase.inside])).toEqual([
+      [0, undefined, 0],
+      [0, undefined, 1],
+      [1, 'finals', 0],
+      [0, undefined, 0]
+    ]);
+  });
+
+  it('lays a phase whose parent is gone at the top, with no parent', () => {
+    const found = phaseSummaries(eventView({ phases: [group('lost', 'Lost', 'gone')] }));
+    expect(found.map((phase) => [phase.depth, phase.parent])).toEqual([[0, undefined]]);
+  });
+
+  it('shows a phase inside another only while every phase above it is unfolded', () => {
+    const found = phaseSummaries(
+      eventView({
+        phases: [
+          group('a', 'A'),
+          group('a/b', 'B', 'a'),
+          group('a/b/c', 'C', 'a/b'),
+          group('d', 'D')
+        ]
+      })
+    );
+    const shown = (...open: string[]) =>
+      shownSummaries(found, new Set(open)).map((phase) => phase.name);
+    expect(shown()).toEqual(['A', 'D']);
+    expect(shown('a')).toEqual(['A', 'B', 'D']);
+    expect(shown('a', 'a/b')).toEqual(['A', 'B', 'C', 'D']);
+    // B is unfolded but A is not, so nothing under A shows.
+    expect(shown('a/b')).toEqual(['A', 'D']);
   });
 
   it('says where each phase stands', () => {
@@ -427,12 +459,13 @@ describe('phaseSummaries', () => {
     ];
     const at = (onTimer?: string) =>
       phaseSummaries(eventView({ phases, on_timer: onTimer })).map((phase) => phase.onTimer);
-    expect(at('finals/w/h1')).toEqual([undefined, 'finals/w/h1']);
-    expect(at('q-1')).toEqual(['q-1', undefined]);
+    // Qualifying, Finals, and Winners inside Finals.
+    expect(at('finals/w/h1')).toEqual([undefined, 'finals/w/h1', 'finals/w/h1']);
+    expect(at('q-1')).toEqual(['q-1', undefined, undefined]);
     // A heat on its own, a heat that is gone, and nothing at all.
-    expect(at('solo')).toEqual([undefined, undefined]);
-    expect(at('gone')).toEqual([undefined, undefined]);
-    expect(at()).toEqual([undefined, undefined]);
+    expect(at('solo')).toEqual([undefined, undefined, undefined]);
+    expect(at('gone')).toEqual([undefined, undefined, undefined]);
+    expect(at()).toEqual([undefined, undefined, undefined]);
   });
 
   it('flags a phase where a pilot waits on a decision, until they are disqualified', () => {

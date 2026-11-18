@@ -102,10 +102,16 @@ export function phaseStatus(phase: PhaseView, view: EventView): PhaseStatus {
   return 'ready';
 }
 
-/** One phase at the top of the event, as the Phases page lists it: one line each. */
+/** One phase that holds heats or phases, as the Phases page lists it: one line each. */
 export interface PhaseSummary {
   id: PhaseId;
   name: string;
+  /** 0 for a phase at the top of the event, 1 for a phase inside it, and so on. */
+  depth: number;
+  /** The phase that holds it, when one does. A wire handle, never shown. */
+  parent?: PhaseId;
+  /** How many phases sit directly inside it (a bracket's rounds). Heats are not counted. */
+  inside: number;
   status: PhaseStatus;
   /** The format's name, when the phase sets one. */
   format?: string;
@@ -122,8 +128,8 @@ export interface PhaseSummary {
 }
 
 /**
- * The phases at the top of the event that hold heats, in the order they were added. A heat
- * that stands alone, under no phase, is not one of them: it has no inside to open.
+ * Every phase that holds heats or phases, as a tree laid flat: each one is followed by the
+ * phases inside it, one deeper. A heat is never one of them: it has no inside to open.
  */
 export function phaseSummaries(view: EventView): PhaseSummary[] {
   const tree = phaseTree(view.phases);
@@ -132,17 +138,24 @@ export function phaseSummaries(view: EventView): PhaseSummary[] {
   );
   const summaries: PhaseSummary[] = [];
   tree.forEach((row, index) => {
-    if (row.depth !== 0 || isHeat(row.phase.def)) return;
-    const under: PhaseView[] = [];
+    if (isHeat(row.phase.def)) return;
+    const under: PhaseRow[] = [];
     for (const next of tree.slice(index + 1)) {
-      if (next.depth === 0) break;
-      under.push(next.phase);
+      if (next.depth <= row.depth) break;
+      under.push(next);
     }
-    const heats = under.filter((phase) => isHeat(phase.def));
-    const ids = new Set([row.phase.def.id, ...under.map((phase) => phase.def.id)]);
+    const heats = under.map((next) => next.phase).filter((phase) => isHeat(phase.def));
+    const ids = new Set([row.phase.def.id, ...under.map((next) => next.phase.def.id)]);
     summaries.push({
       id: row.phase.def.id,
       name: row.phase.def.label,
+      depth: row.depth,
+      // A phase whose parent is missing is laid out at the top, so it has none here.
+      ...(row.depth > 0 && row.phase.def.parent !== undefined
+        ? { parent: row.phase.def.parent }
+        : {}),
+      inside: under.filter((next) => next.depth === row.depth + 1 && !isHeat(next.phase.def))
+        .length,
       status: phaseStatus(row.phase, view),
       format: row.phase.format?.name,
       heats: heats.length,
@@ -160,6 +173,23 @@ export function phaseSummaries(view: EventView): PhaseSummary[] {
     });
   });
   return summaries;
+}
+
+/**
+ * The lines the Phases page shows: a phase at the top always, and a phase inside another
+ * only while every phase above it is unfolded.
+ */
+export function shownSummaries(
+  summaries: readonly PhaseSummary[],
+  unfolded: { has(id: PhaseId): boolean }
+): PhaseSummary[] {
+  const shown = new Set<PhaseId>();
+  return summaries.filter((phase) => {
+    const visible =
+      phase.parent === undefined || (shown.has(phase.parent) && unfolded.has(phase.parent));
+    if (visible) shown.add(phase.id);
+    return visible;
+  });
 }
 
 /** The heats that share a parent, as the Run and Marshal pickers offer them. */

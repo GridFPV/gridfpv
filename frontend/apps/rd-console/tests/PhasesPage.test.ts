@@ -3,12 +3,13 @@
  * heat, a phase and a bracket. Rendered against a stand-in live store. The rulings made in
  * the tree are in `PhaseRulings.test.ts`.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { BracketRequest, Class, Command, EventView, PhaseDef, Pilot } from '@gridfpv/types';
 import PhasePage from '../src/screens/PhasePage.svelte';
 import PhasesPage from '../src/screens/PhasesPage.svelte';
+import { unfolded } from '../src/lib/phaseFold.svelte.js';
 import type { LiveSession } from '../src/lib/eventLive.svelte.js';
 import {
   eventView,
@@ -72,7 +73,7 @@ const optionTexts = (select: HTMLElement) =>
   [...(select as HTMLSelectElement).options].map((option) => option.textContent?.trim());
 
 const phaseRows = (): HTMLElement[] =>
-  within(screen.getByRole('list', { name: 'Phases' }))
+  within(screen.getByRole('list', { name: /^(Phases|Heats of .+)$/ }))
     .getAllByRole('listitem')
     .filter((item) => item.classList.contains('phase'));
 
@@ -107,7 +108,7 @@ describe('PhasesPage', () => {
     expect(screen.queryByTestId('no-phases')).toBeNull();
   });
 
-  it('shows the tree with a status per phase and each heat lineup by name', async () => {
+  it("shows a phase's own heats with lineups by name, and the phases inside it as lines to open", async () => {
     const running = race('finals/w1/h1', 1, 'Running');
     const view = eventView({
       phases: [
@@ -128,25 +129,43 @@ describe('PhasesPage', () => {
       races: [running],
       current_race: running.race
     });
-    const { onrun } = await openPhase(view, 'finals');
-    const rows = phaseRows();
-    // The phase and everything beneath it, and nothing from beside it.
-    expect(rows.map((row) => row.style.getPropertyValue('--depth'))).toEqual(['0', '1', '2', '1']);
-    expect(rows[0]).toHaveTextContent('Finals');
-    expect(rows[0]).toHaveTextContent('Racing');
-    expect(rows[3]).toHaveTextContent('Waiting');
+    await openPhase(view, 'finals');
+    // Only the heats directly in Finals. The phase is not a row, and neither is the round
+    // inside it or that round's heat.
+    let rows = phaseRows();
+    expect(rows.map((row) => row.querySelector('.label')?.textContent)).toEqual(['Final']);
+    expect(rows[0]).toHaveTextContent('Waiting');
     expect(screen.queryByRole('list', { name: 'Lineup of Qualifying' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Lineup of Winners Round 1 Heat 1' })).toBeNull();
+    const final = screen.getByRole('list', { name: 'Lineup of Final' });
+    expect(final).toHaveTextContent('Winner of Winners Round 1 Heat 1');
+    expect(final).toHaveTextContent('2nd of Winners Round 1 Heat 1');
+    // A waiting heat cannot be run.
+    expect(screen.queryByRole('button', { name: 'Run Final' })).toBeNull();
 
+    // The round inside is a line in its own list, and it opens the round's page.
+    const inside = within(screen.getByRole('list', { name: 'Phases in Finals' }));
+    const line = inside.getByRole('link', { name: 'Open Winners Round 1' });
+    expect(line).toHaveAttribute('href', '#/event/phases/finals%2Fw1');
+    expect(line).toHaveTextContent('Racing');
+    expect(line).toHaveTextContent('1 heat · 0 flown');
+    expect(inside.getAllByRole('listitem')).toHaveLength(1);
+
+    // The round's page has its heat, and a way back to Finals.
+    cleanup();
+    const { onrun } = await openPhase(view, 'finals/w1');
+    rows = phaseRows();
+    expect(rows.map((row) => row.querySelector('.label')?.textContent)).toEqual([
+      'Winners Round 1 Heat 1'
+    ]);
+    expect(screen.queryByRole('list', { name: /^Phases in / })).toBeNull();
     const lineup = screen.getByRole('list', { name: 'Lineup of Winners Round 1 Heat 1' });
     expect(lineup).toHaveTextContent('Seat 1');
     expect(lineup).toHaveTextContent('Ace');
     expect(lineup).toHaveTextContent('Bee');
-    const final = screen.getByRole('list', { name: 'Lineup of Final' });
-    expect(final).toHaveTextContent('Winner of Winners Round 1 Heat 1');
-    expect(final).toHaveTextContent('2nd of Winners Round 1 Heat 1');
-
-    // A waiting heat cannot be run; a racing one can.
-    expect(screen.queryByRole('button', { name: 'Run Final' })).toBeNull();
+    expect(screen.getByTestId('back-to-parent')).toHaveAttribute('href', '#/event/phases/finals');
+    expect(screen.getByTestId('back-to-parent')).toHaveTextContent('Finals');
+    expect(screen.getByTestId('back-to-phases')).toHaveAttribute('href', '#/event/phases');
     await fireEvent.click(screen.getByRole('button', { name: 'Run Winners Round 1 Heat 1' }));
     expect(onrun).toHaveBeenCalledWith('finals/w1/h1');
 
@@ -156,7 +175,7 @@ describe('PhasesPage', () => {
     }
   });
 
-  it('names the format in force on each row, and says when it comes from the phase above', async () => {
+  it('names the format in force on each heat, and says when it comes from the phase above', async () => {
     const quali = group('quali', 'Qualifying', undefined, { format: TWO_MINUTE_QUALI });
     quali.def.format = TWO_MINUTE_QUALI;
     const own = heat('q-1', 'Qualifying Heat 1', ['p-1a'], { parent: 'quali', format: FIRST_TO_3 });
@@ -170,17 +189,19 @@ describe('PhasesPage', () => {
     });
     await openPhase(view, 'quali');
     const format = (row: HTMLElement) => row.querySelector('.format');
-    const [qualiRow, ownRow, followsRow] = phaseRows();
-    expect(format(qualiRow)).toHaveTextContent('2 minute qualifying');
-    expect(format(qualiRow)).not.toHaveAttribute('title');
+    const [ownRow, followsRow] = phaseRows();
+    // The phase's own format is under the page title, not on a row.
+    expect(screen.getByTestId('phase-where')).toHaveTextContent('2 minute qualifying');
     expect(format(ownRow)).toHaveTextContent('First to 3 laps');
     expect(format(ownRow)).not.toHaveAttribute('title');
     expect(format(followsRow)).toHaveTextContent('2 minute qualifying');
     expect(format(followsRow)).toHaveAttribute('title', 'From the phase above');
-    // A phase with no format in force names none.
+    // A phase with no format in force names none, and one with no heats says so.
     cleanup();
     await openPhase(view, 'finals');
-    expect(format(phaseRows()[0])).toBeNull();
+    expect(screen.getByTestId('phase-where')).toHaveTextContent(/^\s*Ready\s*$/);
+    expect(screen.getByTestId('no-heats')).toHaveTextContent('No heats in this phase yet.');
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0);
   });
 
   it("names a heat's seats from its timer in the phase list, even when it is not connected", async () => {
@@ -1014,6 +1035,87 @@ describe('the Phases page as a list', () => {
   });
 });
 
+describe('phases inside a phase, on the list', () => {
+  beforeEach(() => unfolded.clear());
+
+  const view = () =>
+    eventView({
+      phases: [
+        group('quali', 'Qualifying'),
+        heat('q-1', 'Qualifying Heat 1', ['p-1a'], { parent: 'quali' }),
+        group('finals', 'Finals', undefined, { format: FIRST_TO_3 }),
+        group('finals/semis', 'Semis', 'finals'),
+        heat('finals/semis/1', 'Semi 1', ['p-1a'], { parent: 'finals/semis' }),
+        heat('finals/semis/2', 'Semi 2', ['p-2b'], { parent: 'finals/semis' }),
+        group('finals/last', 'Last round', 'finals'),
+        group('finals/last/deep', 'Deep', 'finals/last'),
+        heat('finals/last/deep/1', 'Deep Heat', ['p-1a'], { parent: 'finals/last/deep' })
+      ]
+    });
+  const lines = () =>
+    within(screen.getByRole('list', { name: 'Phases of the event' }))
+      .getAllByRole('link')
+      .map((link) => link.getAttribute('aria-label'));
+
+  it('starts folded: only the phases at the top, and a count of what is inside', async () => {
+    await open(view());
+    expect(lines()).toEqual(['Open Qualifying', 'Open Finals']);
+    expect(screen.getByRole('link', { name: 'Open Finals' })).toHaveTextContent('2 phases inside');
+    expect(screen.getByRole('link', { name: 'Open Finals' })).toHaveTextContent(
+      '3 heats · 0 flown'
+    );
+    // Only a phase that holds phases can be unfolded.
+    expect(screen.getByRole('button', { name: 'Show the phases in Finals' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    );
+    expect(screen.queryByRole('button', { name: /the phases in Qualifying/ })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Open Qualifying' })).not.toHaveTextContent('inside');
+  });
+
+  it('unfolds one level at a time, each line opening that phase, and folds again', async () => {
+    await open(view());
+    await fireEvent.click(screen.getByRole('button', { name: 'Show the phases in Finals' }));
+    expect(lines()).toEqual(['Open Qualifying', 'Open Finals', 'Open Semis', 'Open Last round']);
+    const semis = screen.getByRole('link', { name: 'Open Semis' });
+    expect(semis).toHaveAttribute('href', '#/event/phases/finals%2Fsemis');
+    expect(semis).toHaveTextContent('2 heats · 0 flown');
+    expect(semis.closest('li')).toHaveAttribute('data-depth', '1');
+    expect(screen.getByRole('link', { name: 'Open Last round' })).toHaveTextContent(
+      '1 phase inside'
+    );
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Show the phases in Last round' }));
+    expect(lines()).toContain('Open Deep');
+    expect(screen.getByRole('link', { name: 'Open Deep' }).closest('li')).toHaveAttribute(
+      'data-depth',
+      '2'
+    );
+
+    // Folding Finals hides everything under it, however deep.
+    const hide = screen.getByRole('button', { name: 'Hide the phases in Finals' });
+    expect(hide).toHaveAttribute('aria-expanded', 'true');
+    await fireEvent.click(hide);
+    expect(lines()).toEqual(['Open Qualifying', 'Open Finals']);
+    expectNoRawIds();
+  });
+
+  it('stays unfolded when the page is left and opened again', async () => {
+    await open(view());
+    await fireEvent.click(screen.getByRole('button', { name: 'Show the phases in Finals' }));
+    cleanup();
+    await open(view());
+    expect(lines()).toContain('Open Semis');
+  });
+
+  it('adds a heat under a phase inside another from its line', async () => {
+    await open(view());
+    await fireEvent.click(screen.getByRole('button', { name: 'Show the phases in Finals' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Semis' }));
+    expect(within(screen.getByRole('dialog')).getByLabelText('Under')).toHaveValue('finals/semis');
+  });
+});
+
 describe("a phase's own page", () => {
   const view = () =>
     eventView({
@@ -1038,10 +1140,12 @@ describe("a phase's own page", () => {
     await openPhase(view(), 'quali');
     expect(screen.getByRole('list', { name: 'Lineup of Qualifying Heat 1' })).toBeVisible();
     expect(screen.queryByRole('list', { name: 'Lineup of A-Main' })).toBeNull();
+    // The phase is the page's title. It is not a row among its heats.
     expect(phaseRows().map((row) => row.querySelector('.label')?.textContent)).toEqual([
-      'Qualifying',
       'Qualifying Heat 1'
     ]);
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Qualifying');
+    expect(screen.queryByTestId('back-to-parent')).toBeNull();
   });
 
   it('has no run order and no add-phase buttons: those are on the list', async () => {
