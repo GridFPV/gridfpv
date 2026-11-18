@@ -151,10 +151,6 @@
           <Button disabled={busy} onclick={() => picker?.click()}>Choose a file</Button>
         </div>
       </Card>
-
-      <Card title="Where the data is" elevation="sm">
-        <p><code>{info.folder}</code></p>
-      </Card>
     {/if}
   {/if}
 </Page>

@@ -113,8 +113,13 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/pilots", get(list_pilots).post(create_pilot))
         .route("/pilots/{pilot_id}", put(update_pilot).delete(delete_pilot))
         // The app-level class directory: an open list; create/edit/delete are RD-gated. The
-        // built-in classes are read-only, but any class can be hidden.
+        // built-in classes cannot be edited, but any class can be hidden or removed, and the
+        // built-ins that were removed can be put back.
         .route("/classes", get(list_classes).post(create_class))
+        .route(
+            "/classes/builtins",
+            get(removed_builtins).post(restore_builtins),
+        )
         .route(
             "/classes/{class_id}",
             put(update_class).delete(delete_class),
@@ -493,6 +498,34 @@ async fn delete_class(
         .delete(&class_id)
         .map_err(class_error_to_protocol)?;
     Ok(StatusCode::OK)
+}
+
+/// `GET /classes/builtins`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct BuiltinClasses {
+    /// How many built-in classes the director has removed, and could put back.
+    pub removed: usize,
+}
+
+/// `GET /classes/builtins` — how many built-in classes have been removed. An **open read**.
+async fn removed_builtins(State(registry): State<EventRegistry>) -> Json<BuiltinClasses> {
+    Json(BuiltinClasses {
+        removed: registry.classes().removed_builtins(),
+    })
+}
+
+/// `POST /classes/builtins` — put back every built-in class that was removed, RD-gated.
+/// Answers the whole list of classes.
+async fn restore_builtins(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+) -> Result<Json<Vec<Class>>, ProtocolError> {
+    registry
+        .classes()
+        .restore_builtins()
+        .map(Json)
+        .map_err(class_error_to_protocol)
 }
 
 /// `PUT /classes/{class_id}/hidden` — hide or un-hide a class, RD-gated.
@@ -1288,8 +1321,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_built_in_class_cannot_be_deleted_but_can_be_hidden() {
+    async fn a_built_in_class_can_be_hidden_removed_and_put_back() {
         let registry = EventRegistry::new(None).unwrap();
+        let all = registry.classes().list().len();
         let built_in = registry
             .classes()
             .list()
@@ -1297,12 +1331,6 @@ mod tests {
             .next()
             .expect("the directory seeds built-in classes");
         let uri = format!("/classes/{}", built_in.id.0);
-
-        // Read-only: a delete is a 400, and the class is still there.
-        let (status, raw) = send(registry.clone(), "DELETE", &uri, None, None).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(error_of(&raw).code, ErrorCode::BadRequest);
-        assert!(registry.classes().exists(&built_in.id));
 
         // Hiding is a preference, not an edit, so it works on a built-in.
         let (status, raw) = send(
@@ -1316,6 +1344,48 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let hidden: Class = serde_json::from_slice(&raw).unwrap();
         assert!(hidden.hidden);
+
+        // Removing it takes it out of the list, and the count of removed built-ins says so.
+        let (status, raw) = send(registry.clone(), "GET", "/classes/builtins", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<BuiltinClasses>(&raw)
+                .unwrap()
+                .removed,
+            0
+        );
+        let (status, _) = send(registry.clone(), "DELETE", &uri, None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!registry.classes().exists(&built_in.id));
+        let (_, raw) = send(registry.clone(), "GET", "/classes/builtins", None, None).await;
+        assert_eq!(
+            serde_json::from_slice::<BuiltinClasses>(&raw)
+                .unwrap()
+                .removed,
+            1
+        );
+        // Removed twice is an unknown class.
+        let (status, _) = send(registry.clone(), "DELETE", &uri, None, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Putting the built-ins back answers the whole list, with it in it and not hidden.
+        let (status, raw) = send(registry.clone(), "POST", "/classes/builtins", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let back: Vec<Class> = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(back.len(), all);
+        let again = back.iter().find(|class| class.id == built_in.id).unwrap();
+        assert!(again.builtin && !again.hidden);
+        // It still cannot be edited.
+        let (status, raw) = send(
+            registry.clone(),
+            "PUT",
+            &uri,
+            Some(json!({ "name": "Renamed" })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_of(&raw).code, ErrorCode::BadRequest);
 
         // An unknown class is a 404.
         let (status, raw) = send(

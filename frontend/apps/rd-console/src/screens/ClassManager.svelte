@@ -80,6 +80,40 @@
     keepRow?: (cls: Class) => boolean;
   } = $props();
 
+  /**
+   * How many built-in classes have been removed and could be put back. Only looked up where
+   * classes are managed (the Classes page), and never allowed to fail the list.
+   */
+  let removedBuiltins = $state(0);
+  let restoring = $state(false);
+
+  async function countRemoved() {
+    if (!manageHidden) return;
+    try {
+      removedBuiltins = await session.removedBuiltinClasses();
+    } catch {
+      removedBuiltins = 0;
+    }
+  }
+
+  async function restoreBuiltins() {
+    if (restoring) return;
+    restoring = true;
+    try {
+      const back = await session.restoreBuiltinClasses();
+      if (back === undefined) {
+        toast.info('A control token is required to put the built-in classes back.');
+        return;
+      }
+      toast.success('The built-in classes are back.');
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      restoring = false;
+    }
+  }
+
   type LoadState =
     | { kind: 'loading' }
     | { kind: 'error'; message: string }
@@ -93,6 +127,7 @@
       const list = await session.listClasses();
       loadState = { kind: 'ready', classes: list };
       classes = list;
+      await countRemoved();
     } catch (e) {
       loadState = { kind: 'error', message: e instanceof Error ? e.message : String(e) };
     }
@@ -177,7 +212,6 @@
 
   function askRemove(cls: Class) {
     // Built-ins are read-only — they can't be removed (the UI offers no Remove on them).
-    if (isBuiltin(cls)) return;
     confirming = cls;
   }
 
@@ -302,6 +336,9 @@
             {/if}
             {#if !isBuiltin(cls)}
               <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
+            {/if}
+            <!-- A built-in can be removed where classes are managed. It cannot be edited. -->
+            {#if !isBuiltin(cls) || manageHidden}
               <Button
                 variant="danger"
                 size="sm"
@@ -316,6 +353,15 @@
       {/each}
     </ul>
     {@render listFooter?.()}
+  {/if}
+  {#if loadState.kind === 'ready' && removedBuiltins > 0}
+    <p class="removed-builtins" data-testid="removed-builtins">
+      {removedBuiltins}
+      built-in {removedBuiltins === 1 ? 'class has' : 'classes have'} been removed.
+      <Button variant="ghost" size="sm" loading={restoring} onclick={restoreBuiltins}>
+        Put the built-in classes back
+      </Button>
+    </p>
   {/if}
 </div>
 
@@ -370,6 +416,12 @@
     Remove <strong>{confirming?.name}</strong> from the directory? Any event that selected it keeps running;
     this only removes the directory entry.
   </p>
+  {#if confirming && isBuiltin(confirming)}
+    <p class="confirm-text">
+      It is a built-in class. You can put the built-in classes back at any time, from the bottom of
+      this page.
+    </p>
+  {/if}
   {#snippet footer()}
     <Button
       variant="ghost"
@@ -384,6 +436,15 @@
 </Dialog>
 
 <style>
+  .removed-builtins {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
   .class-manager {
     display: flex;
     flex-direction: column;

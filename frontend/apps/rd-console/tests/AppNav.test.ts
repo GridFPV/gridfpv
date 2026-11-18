@@ -44,7 +44,6 @@ const SETUP_ROW = [
   ['Formats', '#/formats'],
   ['Video', '#/video'],
   ['Network', '#/network'],
-  ['Data', '#/data'],
   ['Help', '#/help']
 ];
 
@@ -79,8 +78,7 @@ describe('AppNav: the two sides', () => {
     ['the Classes page', { kind: 'page', page: 'classes' }, 'Setup', 'Classes'],
     ['the Formats page', { kind: 'page', page: 'formats' }, 'Setup', 'Formats'],
     ['the Video page', { kind: 'page', page: 'video' }, 'Setup', 'Video'],
-    ['the Network page', { kind: 'page', page: 'network' }, 'Setup', 'Network'],
-    ['the Data page', { kind: 'page', page: 'data' }, 'Setup', 'Data']
+    ['the Network page', { kind: 'page', page: 'network' }, 'Setup', 'Network']
   ])('%s is on the %s side, under %s', (_where, route, sideName, label) => {
     render(AppNav, { route, eventName: 'Club Night' });
     expect(currentSide()).toEqual([sideName]);
@@ -88,6 +86,14 @@ describe('AppNav: the two sides', () => {
     for (const link of within(pages()).getAllByRole('link')) {
       expect(link.classList.contains('active')).toBe(link.textContent?.trim() === label);
     }
+  });
+
+  it('the Data page is not in the row, and opened by its address it is still on the Setup side', () => {
+    render(AppNav, { route: { kind: 'page', page: 'data' }, eventName: 'Club Night' });
+    expect(rowOf()).toEqual(SETUP_ROW);
+    expect(rowOf().map(([label]) => label)).not.toContain('Data');
+    expect(currentSide()).toEqual(['Setup']);
+    expect(currentEntries()).toEqual([]);
   });
 
   it('help is on both rows and leaves the side as it was', async () => {

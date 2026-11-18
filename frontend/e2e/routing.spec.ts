@@ -149,7 +149,6 @@ test('the switch moves between Setup and the event, and each side remembers its 
     'Formats',
     'Video',
     'Network',
-    'Data',
     'Help'
   ]);
   await openPage(page, 'Formats');

@@ -176,7 +176,7 @@ describe('ClassManager — hide / archive (manageHidden)', () => {
 
     await screen.findByText('Open Class');
     const list = screen.getByRole('list', { name: 'Class directory' });
-    // A built-in has no Edit/Remove, but DOES get a Hide button (visibility is not an edit).
+    // A built-in has no Edit, but DOES get a Hide button (visibility is not an edit).
     const builtinRow = within(list).getAllByRole('listitem')[0];
     expect(within(builtinRow).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
     await fireEvent.click(within(builtinRow).getByRole('button', { name: 'Hide' }));
@@ -229,5 +229,101 @@ describe('ClassManager — the hidden filter (filterHidden)', () => {
     await screen.findByText('House');
     // The already-selected hidden class is still offered (kept), even though it is hidden.
     expect(screen.getByText('Archived')).toBeInTheDocument();
+  });
+});
+
+describe('ClassManager — removing built-in classes (manageHidden)', () => {
+  it('a built-in can be removed after a confirm that says it can be put back, and never edited', async () => {
+    let calls = 0;
+    const listClassesImpl = vi.fn(async () => (calls++ === 0 ? [OPEN, HOUSE] : [HOUSE]));
+    const deleteClassImpl = vi.fn(async () => undefined as unknown as void);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl, deleteClassImpl });
+    const removed = vi.spyOn(session, 'removedBuiltinClasses');
+    removed.mockResolvedValueOnce(0).mockResolvedValue(1);
+    render(ClassManager, { session, manageHidden: true });
+
+    await screen.findByText('Open Class');
+    expect(screen.queryByTestId('removed-builtins')).toBeNull();
+    const builtinRow = within(screen.getByRole('list', { name: 'Class directory' })).getAllByRole(
+      'listitem'
+    )[0];
+    expect(within(builtinRow).queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    await fireEvent.click(within(builtinRow).getByRole('button', { name: 'Remove' }));
+
+    // Nothing is removed until the director says so.
+    await screen.findByText(/You can put the built-in classes back at any time/);
+    expect(deleteClassImpl).not.toHaveBeenCalled();
+    const buttons = screen.getAllByRole('button', { name: 'Remove' });
+    await fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() =>
+      expect(deleteClassImpl).toHaveBeenCalledWith('http://d.local', 'mgp-open', 'tok')
+    );
+
+    // It is gone from the list, and the page offers to put it back.
+    await waitFor(() => expect(screen.queryByText('Open Class')).toBeNull());
+    expect(await screen.findByTestId('removed-builtins')).toHaveTextContent(
+      '1 built-in class has been removed.'
+    );
+  });
+
+  it('a class of the director’s own gets no word about built-ins when it is removed', async () => {
+    const listClassesImpl = vi.fn(async () => [OPEN, HOUSE]);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl });
+    vi.spyOn(session, 'removedBuiltinClasses').mockResolvedValue(0);
+    render(ClassManager, { session, manageHidden: true });
+    await screen.findByText('House');
+    const houseRow = within(screen.getByRole('list', { name: 'Class directory' })).getAllByRole(
+      'listitem'
+    )[1];
+    await fireEvent.click(within(houseRow).getByRole('button', { name: 'Remove' }));
+    await screen.findByText(/Remove class/i);
+    expect(screen.queryByText(/It is a built-in class/)).toBeNull();
+  });
+
+  it('puts the built-in classes back, and the offer goes away', async () => {
+    let calls = 0;
+    const listClassesImpl = vi.fn(async () => (calls++ === 0 ? [HOUSE] : [OPEN, HOUSE]));
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl });
+    const removed = vi.spyOn(session, 'removedBuiltinClasses');
+    removed.mockResolvedValueOnce(3).mockResolvedValue(0);
+    const restore = vi.spyOn(session, 'restoreBuiltinClasses').mockResolvedValue([OPEN, HOUSE]);
+    render(ClassManager, { session, manageHidden: true });
+
+    expect(await screen.findByTestId('removed-builtins')).toHaveTextContent(
+      '3 built-in classes have been removed.'
+    );
+    expect(screen.queryByText('Open Class')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Put the built-in classes back' }));
+    await waitFor(() => expect(restore).toHaveBeenCalledOnce());
+    expect(await screen.findByText('Open Class')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId('removed-builtins')).toBeNull());
+  });
+
+  it('a cancelled token prompt puts nothing back and keeps the offer', async () => {
+    const listClassesImpl = vi.fn(async () => [HOUSE]);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl });
+    vi.spyOn(session, 'removedBuiltinClasses').mockResolvedValue(2);
+    const restore = vi.spyOn(session, 'restoreBuiltinClasses').mockResolvedValue(undefined);
+    render(ClassManager, { session, manageHidden: true });
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Put the built-in classes back' })
+    );
+    await waitFor(() => expect(restore).toHaveBeenCalledOnce());
+    expect(screen.getByTestId('removed-builtins')).toBeInTheDocument();
+    expect(listClassesImpl).toHaveBeenCalledOnce();
+  });
+
+  it('where classes are only picked, a built-in has no Remove and nothing is said of removed ones', async () => {
+    const listClassesImpl = vi.fn(async () => [OPEN, HOUSE]);
+    const { session } = makeTestSession({ noEnter: true, listClassesImpl });
+    const removed = vi.spyOn(session, 'removedBuiltinClasses').mockResolvedValue(4);
+    render(ClassManager, { session });
+    await screen.findByText('Open Class');
+    const builtinRow = within(screen.getByRole('list', { name: 'Class directory' })).getAllByRole(
+      'listitem'
+    )[0];
+    expect(within(builtinRow).queryByRole('button', { name: 'Remove' })).toBeNull();
+    expect(screen.queryByTestId('removed-builtins')).toBeNull();
+    expect(removed).not.toHaveBeenCalled();
   });
 });

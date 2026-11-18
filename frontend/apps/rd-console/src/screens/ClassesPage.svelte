@@ -25,7 +25,7 @@
 <Page
   title="Classes"
   help="pilots"
-  lede="The classes an event can race. The standard FPV classes are built in; add your own, which need only a name."
+  lede="The classes an event can race. The standard FPV classes come with Grid. Remove the ones you never fly, and add your own."
 >
   {#snippet actions()}
     <Button variant="primary" onclick={() => manager?.openAdd()}>+ Add class</Button>

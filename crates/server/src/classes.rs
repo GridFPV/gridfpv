@@ -39,6 +39,14 @@ pub const CLASSES_FILE: &str = "classes.json";
 /// makes a hidden built-in (or custom class) survive a Director restart.
 pub const HIDDEN_CLASSES_FILE: &str = "hidden_classes.json";
 
+/// The file name (under the data dir) the **removed built-ins** are kept in.
+///
+/// Grid ships with the built-in classes, and a director may remove the ones their club never
+/// flies. The built-ins are seeded on every start and never written to `classes.json`, so the
+/// ones that were removed are remembered here and left out of the seed. Putting the built-ins
+/// back (`POST /classes/builtins`) empties it.
+pub const REMOVED_CLASSES_FILE: &str = "removed_classes.json";
+
 /// Where a [`Class`] came from (issue #84).
 ///
 /// A small closed enum the directory records so the RD can tell a canonical built-in class (e.g. a
@@ -324,6 +332,9 @@ struct Directory {
     /// `<data_dir>/hidden_classes.json` and applied **after** the boot re-seed, so a hidden built-in
     /// survives a restart. An id in here that no longer names a class is harmless (ignored on read).
     hidden: BTreeSet<ClassId>,
+    /// The built-in classes the director has removed. Kept in `removed_classes.json` and left
+    /// out when the built-ins are seeded, so a removed one stays removed across a restart.
+    removed: BTreeSet<ClassId>,
     /// Directory `classes.json` / `hidden_classes.json` are persisted under; `None` ⇒ in-memory
     /// only (no data dir).
     data_dir: Option<PathBuf>,
@@ -342,9 +353,18 @@ impl ClassDirectory {
     pub fn new(data_dir: Option<PathBuf>) -> Result<Self, ClassError> {
         let mut classes = BTreeMap::new();
 
-        // Always seed the code-defined built-ins first (they are never read from disk).
+        // The built-ins the director has removed. A bad or missing file means none.
+        let removed = data_dir
+            .as_deref()
+            .and_then(read_removed_classes)
+            .unwrap_or_default();
+
+        // Seed the code-defined built-ins first (they are never read from disk), but for the
+        // ones that were removed.
         for class in builtin_classes() {
-            classes.insert(class.id.clone(), class);
+            if !removed.contains(&class.id) {
+                classes.insert(class.id.clone(), class);
+            }
         }
 
         let mut hidden = BTreeSet::new();
@@ -376,6 +396,7 @@ impl ClassDirectory {
             inner: Arc::new(RwLock::new(Directory {
                 classes,
                 hidden,
+                removed,
                 data_dir,
             })),
         })
@@ -497,16 +518,14 @@ impl ClassDirectory {
         Ok(dir.view(&updated))
     }
 
-    /// Delete a class (issue #84). A **built-in** class is read-only and cannot be deleted (it is
-    /// always present); attempting to is rejected. An unknown id is a [`ClassError`]. The
-    /// directory is **persisted** on success.
+    /// Remove a class. An unknown id is a [`ClassError`]. The directory is **persisted** on
+    /// success.
+    ///
+    /// A **built-in** class can be removed too: Grid ships with them, and a director drops the
+    /// ones their club never flies. It still cannot be edited. A removed built-in is remembered
+    /// so it does not come back at the next start; [`restore_builtins`](Self::restore_builtins)
+    /// puts them all back.
     pub fn delete(&self, id: &ClassId) -> Result<(), ClassError> {
-        if is_builtin_id(id) {
-            return Err(ClassError::read_only(format!(
-                "the built-in class {:?} is read-only and cannot be deleted",
-                id.0
-            )));
-        }
         let mut dir = self.write();
         if dir.classes.remove(id).is_none() {
             return Err(ClassError::not_found(format!(
@@ -514,13 +533,39 @@ impl ClassDirectory {
                 id.0
             )));
         }
-        dir.persist()?;
+        if is_builtin_id(id) {
+            dir.removed.insert(id.clone());
+            dir.persist_removed()?;
+        } else {
+            dir.persist()?;
+        }
         // A deleted class drops out of the hidden-set too (so a later recreate isn't silently
         // hidden by a stale id, and the sidecar doesn't accumulate dangling ids).
         if dir.hidden.remove(id) {
             dir.persist_hidden()?;
         }
         Ok(())
+    }
+
+    /// How many built-in classes the director has removed.
+    pub fn removed_builtins(&self) -> usize {
+        self.read().removed.len()
+    }
+
+    /// Put back every built-in class that was removed. Answers the whole list, as
+    /// [`list`](Self::list) does. With none removed it changes nothing.
+    pub fn restore_builtins(&self) -> Result<Vec<Class>, ClassError> {
+        {
+            let mut dir = self.write();
+            if !dir.removed.is_empty() {
+                for class in builtin_classes() {
+                    dir.classes.entry(class.id.clone()).or_insert(class);
+                }
+                dir.removed.clear();
+                dir.persist_removed()?;
+            }
+        }
+        Ok(self.list())
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Directory> {
@@ -559,6 +604,19 @@ impl Directory {
             .map_err(|e| ClassError::internal(format!("could not serialize classes: {e}")))?;
         std::fs::write(classes_path(dir), json)
             .map_err(|e| ClassError::internal(format!("could not persist classes: {e}")))
+    }
+
+    /// Keep the removed built-ins in `<data_dir>/removed_classes.json`. A no-op with no data dir.
+    fn persist_removed(&self) -> Result<(), ClassError> {
+        let Some(dir) = &self.data_dir else {
+            return Ok(());
+        };
+        let ids: Vec<&ClassId> = self.removed.iter().collect();
+        let json = serde_json::to_string_pretty(&ids).map_err(|e| {
+            ClassError::internal(format!("could not serialize removed classes: {e}"))
+        })?;
+        std::fs::write(dir.join(REMOVED_CLASSES_FILE), json)
+            .map_err(|e| ClassError::internal(format!("could not persist removed classes: {e}")))
     }
 
     /// Persist the **hidden-set** to `<data_dir>/hidden_classes.json` (hide/archive classes), a
@@ -601,6 +659,13 @@ fn classes_path(dir: &Path) -> PathBuf {
 fn read_persisted_classes(dir: &Path) -> Option<Vec<Class>> {
     let raw = std::fs::read_to_string(classes_path(dir)).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// Read the removed built-ins from `<dir>/removed_classes.json`. Only ids of built-ins count.
+fn read_removed_classes(dir: &Path) -> Option<BTreeSet<ClassId>> {
+    let raw = std::fs::read_to_string(dir.join(REMOVED_CLASSES_FILE)).ok()?;
+    let ids: BTreeSet<ClassId> = serde_json::from_str(&raw).ok()?;
+    Some(ids.into_iter().filter(is_builtin_id).collect())
 }
 
 /// The file the hidden-set is persisted to under `dir`: `<dir>/hidden_classes.json`.
@@ -809,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn a_built_in_cannot_be_edited_or_deleted() {
+    fn a_built_in_cannot_be_edited() {
         let dir = ClassDirectory::new(None).unwrap();
         let id = ClassId("mgp-open".into());
 
@@ -824,10 +889,117 @@ mod tests {
         assert_eq!(err.kind, ClassErrorKind::ReadOnly);
         // The built-in is untouched.
         assert_eq!(dir.get(&id).unwrap().name, "Open Class");
+    }
 
-        let del = dir.delete(&id);
-        assert_eq!(del.unwrap_err().kind, ClassErrorKind::ReadOnly);
-        assert!(dir.exists(&id));
+    fn removal_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gridfpv-classes-{name}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_built_in_can_be_removed_and_stays_removed_after_a_restart() {
+        let data = removal_dir("removed");
+        let open = ClassId("mgp-open".into());
+        let whoop = ClassId("mgp-whoop".into());
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        let all = dir.list().len();
+        assert_eq!(dir.removed_builtins(), 0);
+        dir.set_hidden(&open, true).unwrap();
+
+        dir.delete(&open).unwrap();
+        assert!(!dir.exists(&open));
+        assert_eq!(dir.list().len(), all - 1);
+        assert_eq!(dir.removed_builtins(), 1);
+        // Removing it again is an unknown class, not a second removal.
+        assert_eq!(
+            dir.delete(&open).unwrap_err().kind,
+            ClassErrorKind::NotFound
+        );
+        assert_eq!(dir.removed_builtins(), 1);
+        // The other built-ins are untouched.
+        assert!(dir.exists(&whoop));
+
+        // The seed at the next start leaves it out.
+        let again = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert!(!again.exists(&open));
+        assert!(again.exists(&whoop));
+        assert_eq!(again.removed_builtins(), 1);
+        assert_eq!(again.list().len(), all - 1);
+        std::fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn putting_the_built_ins_back_brings_every_removed_one_back_and_keeps_the_rest() {
+        let data = removal_dir("restored");
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        let all = dir.list();
+        let mine = dir
+            .create(&CreateClassRequest {
+                name: "Club Spec".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let kept_hidden = ClassId("udl-igniter".into());
+        dir.set_hidden(&kept_hidden, true).unwrap();
+        for id in ["mgp-open", "mgp-whoop", "udl-shrieker"] {
+            dir.delete(&ClassId(id.into())).unwrap();
+        }
+        assert_eq!(dir.removed_builtins(), 3);
+
+        let back = dir.restore_builtins().unwrap();
+        assert_eq!(back.len(), all.len() + 1);
+        assert_eq!(dir.removed_builtins(), 0);
+        // Each comes back as it shipped: built-in, not hidden, with its own name.
+        let open = dir.get(&ClassId("mgp-open".into())).unwrap();
+        assert!(open.builtin);
+        assert!(!open.hidden);
+        assert_eq!(open.name, "Open Class");
+        // What the director made, and what they hid, is as it was.
+        assert!(dir.exists(&mine.id));
+        assert!(dir.get(&kept_hidden).unwrap().hidden);
+        // Asked again with none removed, nothing changes.
+        assert_eq!(dir.restore_builtins().unwrap().len(), all.len() + 1);
+
+        // And they are back after a restart too.
+        let again = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert_eq!(again.list().len(), all.len() + 1);
+        assert_eq!(again.removed_builtins(), 0);
+        std::fs::remove_dir_all(data).ok();
+    }
+
+    #[test]
+    fn a_removed_list_that_is_broken_or_names_other_classes_removes_nothing_it_should_not() {
+        let data = removal_dir("odd");
+        let seeded = ClassDirectory::new(Some(data.clone())).unwrap();
+        let mine = seeded
+            .create(&CreateClassRequest {
+                name: "Club Spec".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let all = seeded.list().len();
+        for text in ["", "not json", "{}", "null", "[1,2]"] {
+            std::fs::write(data.join(REMOVED_CLASSES_FILE), text).unwrap();
+            let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+            assert_eq!(dir.list().len(), all, "{text}");
+            assert_eq!(dir.removed_builtins(), 0, "{text}");
+        }
+        // A name that is not a built-in's is ignored: it removes no class of the director's.
+        std::fs::write(
+            data.join(REMOVED_CLASSES_FILE),
+            serde_json::to_string(&[mine.id.0.as_str(), "no-such-class", "mgp-open"]).unwrap(),
+        )
+        .unwrap();
+        let dir = ClassDirectory::new(Some(data.clone())).unwrap();
+        assert!(dir.exists(&mine.id));
+        assert!(!dir.exists(&ClassId("mgp-open".into())));
+        assert_eq!(dir.removed_builtins(), 1);
+        std::fs::remove_dir_all(data).ok();
     }
 
     #[test]
@@ -1112,7 +1284,7 @@ mod tests {
         assert!(hidden.hidden);
         assert!(hidden.builtin, "still a built-in, just hidden");
         assert!(dir.get(&id).unwrap().hidden);
-        // Editing/deleting it is still rejected.
+        // Editing it is still rejected.
         assert_eq!(
             dir.update(
                 &id,
@@ -1125,7 +1297,6 @@ mod tests {
             .kind,
             ClassErrorKind::ReadOnly
         );
-        assert_eq!(dir.delete(&id).unwrap_err().kind, ClassErrorKind::ReadOnly);
     }
 
     #[test]

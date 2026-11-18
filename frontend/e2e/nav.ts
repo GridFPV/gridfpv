@@ -18,8 +18,7 @@ const SETUP_PAGES = [
   'Classes',
   'Formats',
   'Video',
-  'Network',
-  'Data'
+  'Network'
 ];
 
 /** The row of pages of the side that is showing. */
