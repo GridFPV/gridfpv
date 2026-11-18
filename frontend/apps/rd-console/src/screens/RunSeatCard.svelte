@@ -9,11 +9,16 @@
    * has an **Out** button: the pilot has crashed or will not finish. The race then stops
    * waiting for them. Their laps still count. **Back in** takes it back.
    *
+   * An **open seat** (no pilot named on it) can have a pilot checked in while the race is
+   * flown: pick them in "Check in". The laps on the seat are then theirs from their next
+   * pass, and the card shows that pilot and those laps. **Drop** frees the seat.
+   *
    * A bench seat has no timer behind it, so it also carries a "Crossing" button marked
    * "Bench" that logs a crossing by hand. A seat on a real timer never shows it.
    */
   import { Badge, Button, formatMicros } from '@gridfpv/components';
   import { inRun, type LapRun } from '../lib/overlay.js';
+  import type { PilotId } from '@gridfpv/types';
   import type { SeatRow } from '../lib/run.js';
 
   let {
@@ -24,7 +29,9 @@
     heatBestMicros,
     tuneHref,
     oncrossing,
-    onout
+    onout,
+    pilots = [],
+    oncheckin
   }: {
     row: SeatRow;
     /** Whether a race is running, so a crossing would count. */
@@ -44,6 +51,13 @@
      * is no race a pilot could be out of, and the button is then not shown.
      */
     onout?: (out: boolean) => void;
+    /** The pilots who can be checked in to an open seat, by callsign. */
+    pilots?: readonly { id: PilotId; callsign: string }[];
+    /**
+     * Check a pilot in to this open seat, or (`undefined`) drop whoever has it. Left out
+     * when there is no race a seat could be taken in.
+     */
+    oncheckin?: (pilot: PilotId | undefined) => void;
   } = $props();
 </script>
 
@@ -57,7 +71,34 @@
     {:else if row.onCourse && racing}
       <Badge tone="success" dot>On course</Badge>
     {/if}
-    {#if onout && row.pilot !== undefined}
+    {#if oncheckin && row.open}
+      <span class="checkin">
+        <select
+          aria-label="Check a pilot in to {row.seatName}"
+          value=""
+          onchange={(e) => {
+            const picked = e.currentTarget.value;
+            e.currentTarget.value = '';
+            if (picked) oncheckin(picked);
+          }}
+        >
+          <option value="">{row.pilot === undefined ? 'Check in…' : 'Change pilot…'}</option>
+          {#each pilots.filter((pilot) => pilot.id !== row.pilot) as pilot (pilot.id)}
+            <option value={pilot.id}>{pilot.callsign}</option>
+          {/each}
+        </select>
+        {#if row.pilot !== undefined}
+          <Button
+            size="sm"
+            variant="secondary"
+            title="Free this seat. The laps this pilot flew stay theirs."
+            aria-label="Drop {row.who} from {row.seatName}"
+            onclick={() => oncheckin(undefined)}>Drop</Button
+          >
+        {/if}
+      </span>
+    {/if}
+    {#if onout && row.pilot !== undefined && !row.open}
       <Button
         size="sm"
         variant="secondary"
@@ -161,6 +202,21 @@
     font-size: var(--gf-font-size-lg);
     font-weight: var(--gf-font-weight-bold);
     overflow-wrap: anywhere;
+  }
+  .checkin {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-1);
+  }
+  .checkin select {
+    font: inherit;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text);
+    background: var(--gf-surface);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    padding: 0.2em 0.4em;
+    max-width: 9rem;
   }
   .bench {
     margin-left: auto;

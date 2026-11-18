@@ -75,6 +75,9 @@ fn seat_for_visitors(seat: RaceSeatView) -> RaceSeatView {
         false_start,
         // A crash is seen by everyone at the track, so a visitor may see the mark too.
         out,
+        // Who is on a seat is called out at the track, so a visitor may see it too.
+        holder,
+        stints,
         finish,
         hole_shot,
         laps,
@@ -89,6 +92,8 @@ fn seat_for_visitors(seat: RaceSeatView) -> RaceSeatView {
         start_at,
         false_start,
         out,
+        holder,
+        stints,
         finish,
         hole_shot,
         laps,

@@ -208,6 +208,11 @@ export interface FormatDraft {
   autoStopSeconds: FieldValue;
   /** A race that is not timed: the longest it may run, in seconds. Empty: no limit. */
   limitSeconds: FieldValue;
+  /**
+   * A race with open seats that pilots check in to: drop a pilot from their seat when it
+   * has had no crossing for this many seconds. Empty: nobody is dropped.
+   */
+  idleSeatSeconds: FieldValue;
   done: DoneKey;
   /** How many races, or how many wins, end the heat. */
   doneCount: FieldValue;
@@ -236,6 +241,7 @@ export function blankDraft(): FormatDraft {
     fromTone: false,
     autoStopSeconds: '',
     limitSeconds: '',
+    idleSeatSeconds: '',
     done: 'Director',
     doneCount: 1,
     rank: 'consecutive',
@@ -265,6 +271,8 @@ export function draftFromFormat(format: Format): FormatDraft {
   draft.autoStopSeconds = wait === undefined ? '' : seconds(wait);
   const limit = format.race.max_micros;
   draft.limitSeconds = limit === undefined ? '' : seconds(limit);
+  const idle = format.race.drop_idle_seat_micros;
+  draft.idleSeatSeconds = idle === undefined ? '' : seconds(idle);
   const minLap = format.race.min_lap_micros;
   draft.minLapSeconds = minLap === undefined ? '' : seconds(minLap);
 
@@ -348,6 +356,15 @@ export function formatFromDraft(draft: FormatDraft): FormatResult {
       return problem('The time limit must be more than 0 seconds. Leave it empty for no limit.');
     }
     race.max_micros = limit;
+  }
+  if (!isEmpty(draft.idleSeatSeconds)) {
+    const idle = micros(draft.idleSeatSeconds);
+    if (idle === undefined || idle === 0) {
+      return problem(
+        'The wait before an idle seat is dropped must be more than 0 seconds. Leave it empty to drop nobody.'
+      );
+    }
+    race.drop_idle_seat_micros = idle;
   }
   if (!isEmpty(draft.minLapSeconds)) {
     const minLap = micros(draft.minLapSeconds);

@@ -1,5 +1,5 @@
 //! Check-in: a pilot takes an open seat for a while, part-way through a race
-//! (`docs/primitives.md` §11.6).
+//! (`docs/primitives.md` §11.9).
 //!
 //! This is for practice run as one long heat with open seats. The timer just runs. A pilot
 //! who wants to fly **takes** a seat, and the laps on that seat are theirs until someone

@@ -74,6 +74,7 @@
   import { StartCue, unlockAudio, type CuePhase } from '../lib/startTone.js';
   import { runVideo } from '../lib/video.js';
   import DiscardDialog from './DiscardDialog.svelte';
+  import { takesCheckIns } from '../lib/checkin.js';
   import RunSeatCard from './RunSeatCard.svelte';
 
   let {
@@ -428,6 +429,28 @@
     }
   }
 
+  /** Whether the race on screen is one a pilot can be checked in to an open seat of. */
+  const canCheckIn = $derived(race !== undefined && takesCheckIns(race));
+  /** The pilots who can be checked in: everyone at the event with no seat of their own here. */
+  const checkInPilots = $derived(
+    live.pilots
+      .filter((entry) => !race?.seats.some((seat) => seat.pilot === entry.id))
+      .map((entry) => ({ id: entry.id, callsign: entry.callsign }))
+  );
+
+  /** Check a pilot in to an open seat of the race on screen, or drop whoever has it. */
+  async function checkIn(row: SeatRow, pilot: PilotId | undefined) {
+    if (!race) return;
+    const seat = { race: race.race, adapter: row.adapter, seat: row.seat };
+    try {
+      await live.send({
+        Record: pilot === undefined ? { SeatDropped: seat } : { SeatTaken: { ...seat, pilot } }
+      });
+    } catch (e) {
+      error = toProtocolError(e);
+    }
+  }
+
   const STATE_TONES = {
     Staging: 'warn',
     Running: 'success',
@@ -703,6 +726,8 @@
               : undefined}
             oncrossing={() => crossing(row)}
             onout={canMarkOut ? (out) => markOut(row, out) : undefined}
+            pilots={checkInPilots}
+            oncheckin={canCheckIn ? (pilot) => checkIn(row, pilot) : undefined}
           />
         {/each}
       </ul>

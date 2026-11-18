@@ -77,6 +77,22 @@ are filled in.
 Grid still counts a lap if the quad is carried through the gate. Take that lap off on the
 [Marshal](#/help/marshal) page.
 
+### Open seats: checking a pilot in
+
+An open seat has no pilot named on it. This is how you run practice as one long heat:
+start the race and let pilots come and go.
+
+- **Check in…** on an open seat puts a pilot on it. Their first pass through the gate
+  starts their first lap. The card then shows that pilot and only their laps.
+- **Change pilot…** gives the seat to someone else. The first pilot keeps the laps they
+  flew.
+- **Drop** frees the seat.
+- Pilots can do the same for themselves from their phone or a kiosk, under **Fly now**.
+- A format can drop a seat by itself when nobody has flown it for a while. Set **Drop an
+  idle seat after** on the [format](#/help/formats).
+
+A pilot's practice laps show on their own page under **My practice**. They do not rank.
+
 **tune** opens the seat's tuning page. A **Bench** seat has a **Crossing** button, which
 logs a pass by hand.
 

@@ -29,6 +29,7 @@ pub mod access;
 pub mod app;
 pub mod auth;
 pub mod backup;
+pub mod checkin;
 pub mod classes;
 pub mod control;
 pub mod error;
