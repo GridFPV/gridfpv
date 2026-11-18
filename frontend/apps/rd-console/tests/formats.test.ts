@@ -256,6 +256,7 @@ describe('a blank draft', () => {
       fromTone: false,
       autoStopSeconds: '',
       limitSeconds: '',
+      idleSeatSeconds: '',
       done: 'Director',
       doneCount: 1,
       rank: 'consecutive',
@@ -334,6 +335,7 @@ describe('draftFromFormat', () => {
       fromTone: false,
       autoStopSeconds: '',
       limitSeconds: '',
+      idleSeatSeconds: '',
       minLapSeconds: ''
     });
   });
@@ -535,6 +537,28 @@ describe('formatFromDraft', () => {
     it('a ranking that is not on points saves no points table', () => {
       expect('points' in formatOf({ rank: 'finish', points: '10, 8, 6' })).toBe(false);
       expect('points' in formatOf({ rank: 'finish', points: 'rubbish' })).toBe(false);
+    });
+  });
+
+  describe('dropping an idle seat', () => {
+    it('is left out when the field is empty, so nobody is dropped', () => {
+      expect('drop_idle_seat_micros' in formatOf({ end: 'Open' }).race).toBe(false);
+      expect('drop_idle_seat_micros' in formatOf({ idleSeatSeconds: ' ' }).race).toBe(false);
+    });
+
+    it('is saved in seconds and read back', () => {
+      const format = formatOf({ end: 'Open', idleSeatSeconds: 240 });
+      expect(format.race.drop_idle_seat_micros).toBe(240 * S);
+      expect(draftFromFormat(format).idleSeatSeconds).toBe(240);
+    });
+
+    it('must be more than 0 seconds', () => {
+      const result = formatFromDraft(draft({ idleSeatSeconds: 0 }));
+      expect(result).toEqual({
+        ok: false,
+        problem:
+          'The wait before an idle seat is dropped must be more than 0 seconds. Leave it empty to drop nobody.'
+      });
     });
   });
 

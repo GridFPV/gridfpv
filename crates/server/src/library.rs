@@ -138,6 +138,7 @@ fn starting_formats() -> Vec<SavedFormat> {
         first_lap: FirstLap::HoleShot,
         stop_after_all_finish_micros: None,
         max_micros: None,
+        drop_idle_seat_micros: None,
     };
     let saved = |id: &str, format| SavedFormat {
         id: id.to_owned(),

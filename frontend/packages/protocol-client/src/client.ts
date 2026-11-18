@@ -67,7 +67,8 @@ import type {
   UpdatePilotRequest,
   VideoSettings,
   VideoSettingsRequest,
-  VideoStatus
+  VideoStatus,
+  SeatRef
 } from '@gridfpv/types';
 
 /** Minimal `fetch` surface this client needs (injectable for tests / Node). */
@@ -1075,6 +1076,44 @@ export async function leaveSpot(
     '/public/pilot/signup/leave',
     { method: 'POST', body: { heat }, fetch: options.fetch, kiosk: options.kiosk },
     'leave the heat'
+  );
+}
+
+/**
+ * The signed-in pilot takes an open seat in a race that is being flown
+ * (`POST /public/pilot/checkin/take`). The laps on the seat are theirs from their next
+ * crossing. Who the pilot is comes from their sign-in, never from here.
+ */
+export async function takeSeat(
+  baseUrl: string,
+  race: RaceId,
+  seat: { adapter: AdapterId; seat: SeatRef },
+  options: { fetch?: FetchLike; kiosk?: string } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/checkin/take',
+    {
+      method: 'POST',
+      body: { race, adapter: seat.adapter, seat: seat.seat },
+      fetch: options.fetch,
+      kiosk: options.kiosk
+    },
+    'take the seat'
+  );
+}
+
+/** The signed-in pilot gives up the seat they took (`POST /public/pilot/checkin/drop`). */
+export async function dropSeat(
+  baseUrl: string,
+  race: RaceId,
+  options: { fetch?: FetchLike; kiosk?: string } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/checkin/drop',
+    { method: 'POST', body: { race }, fetch: options.fetch, kiosk: options.kiosk },
+    'drop the seat'
   );
 }
 

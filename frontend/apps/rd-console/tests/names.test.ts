@@ -68,6 +68,10 @@ describe('buildNames', () => {
   it('says who is on a seat', () => {
     expect(names.who({ Pilot: 'p-1a' })).toBe('Ace');
     expect(names.who('Open')).toBe('Open seat');
+    // Where the seat is known, an open seat is named by its number, so two can be told apart.
+    expect(names.seatWho('Open', 'bench', 'seat-1', 0)).toBe('Seat 1');
+    expect(names.seatWho('Open', 'bench', 'seat-2', 1)).toBe('Seat 2');
+    expect(names.seatWho('Nobody', 'bench', 'seat-1', 0)).toBe(names.who('Nobody'));
     expect(names.who('Nobody')).toBe('Empty');
   });
 

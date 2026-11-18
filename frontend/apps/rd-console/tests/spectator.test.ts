@@ -142,7 +142,7 @@ describe('the heats coming up', () => {
     expect(found.map((entry) => entry.name)).toEqual(['Heat 3', 'Heat 1', 'Heat 2']);
     expect(found[2].seats.map((seat) => [seat.seatName, seat.who])).toEqual([
       ['Seat 1', 'Cat'],
-      ['Seat 2', 'Open seat']
+      ['Seat 2', 'Seat 2']
     ]);
   });
 
@@ -408,10 +408,18 @@ describe("the visitor's source", () => {
     await source.takeSpot('quali/heat-1', seat);
     await source.takeNextSpot('quali', seat);
     await source.leaveSpot('quali/heat-1');
+    await source.takeSeat('practice#1', seat);
+    await source.dropSeat('practice#1');
     expect(asked.map((call) => [call.method, call.url, JSON.parse(call.body ?? 'null')])).toEqual([
       ['POST', 'http://grid.local:8081/public/pilot/signup/take', { heat: 'quali/heat-1', seat }],
       ['POST', 'http://grid.local:8081/public/pilot/signup/next', { phase: 'quali', seat }],
-      ['POST', 'http://grid.local:8081/public/pilot/signup/leave', { heat: 'quali/heat-1' }]
+      ['POST', 'http://grid.local:8081/public/pilot/signup/leave', { heat: 'quali/heat-1' }],
+      [
+        'POST',
+        'http://grid.local:8081/public/pilot/checkin/take',
+        { race: 'practice#1', adapter: 'gate', seat: '0' }
+      ],
+      ['POST', 'http://grid.local:8081/public/pilot/checkin/drop', { race: 'practice#1' }]
     ]);
     for (const call of asked) expect(call.body).not.toContain('pilot');
   });

@@ -855,6 +855,67 @@ describe('SpectatorView: a signed-in pilot', () => {
     expect(second).toHaveTextContent('No laps.');
   });
 
+  describe('practice with open seats', () => {
+    const practice = (seats: Parameters<typeof race>[3]) =>
+      eventView({
+        phases: [heat('prac', 'Open Practice', ['Open', 'Open'])],
+        races: [race('prac', 1, 'Running', { started_at: 100 * S, ...seats })]
+      });
+    const mine = (open: boolean, seconds: number[]) => ({
+      pilot: 'p-ace',
+      open,
+      laps: seconds.map((s, index) => lap(index + 1, s)),
+      best_lap_micros: seconds.length > 0 ? Math.min(...seconds) * S : undefined
+    });
+
+    it('offers the open seats on the Me tab and takes one for the pilot', async () => {
+      const { live } = await openLive(practice({ seats: [raceSeat(0), raceSeat(1)] }), {
+        listPilots: vi.fn(async () => PILOTS)
+      });
+      const checkin = { take: vi.fn(async () => undefined), drop: vi.fn(async () => undefined) };
+      render(SpectatorView, { live, pilot: ACE, buzz: vi.fn(), checkin });
+      expect(screen.getByRole('heading', { name: 'Fly now: Open Practice' })).toBeVisible();
+      await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 1' }));
+      await waitFor(() => expect(checkin.take).toHaveBeenCalled());
+      expect(checkin.take).toHaveBeenCalledWith(
+        'prac#1',
+        expect.objectContaining({ adapter: 'bench', seat: 'seat-1' })
+      );
+    });
+
+    it("lists the pilot's practice laps, whether or not practice ranks anybody", async () => {
+      await openAs(
+        practice({
+          seats: [
+            raceSeat(0, undefined, {
+              holder: 'p-ace',
+              laps: [lap(1, 30), lap(2, 9), lap(3, 8)],
+              stints: [mine(true, [9, 8])]
+            }),
+            raceSeat(1)
+          ]
+        }),
+        ACE
+      );
+      const runs = within(screen.getByRole('list', { name: 'My practice' }));
+      // The seat is named as everywhere else, with its channel when the timer says.
+      expect(runs.getByText(/^Open Practice · Seat 1/)).toBeVisible();
+      expect(runs.getByText('Flying now')).toBeVisible();
+      const laps = within(runs.getByRole('list', { name: /^Laps of Open Practice · Seat 1/ }))
+        .getAllByRole('listitem')
+        .map((item) => item.textContent?.replace(/\s+/g, ' ').trim());
+      // The 30 s lap on the seat was not hers, so it is not listed.
+      expect(laps).toEqual(['1 9.000', '2 8.000']);
+      expect(screen.getByText(/^You have Seat 1/)).toBeVisible();
+    });
+
+    it('shows neither part when no race with open seats is on and nothing was flown', async () => {
+      await openAs(queued(), ACE);
+      expect(screen.queryByRole('heading', { name: /^Fly now/ })).toBeNull();
+      expect(screen.queryByRole('heading', { name: 'My practice' })).toBeNull();
+    });
+  });
+
   it("marks the pilot's own row in the race, in what is coming up, and in the results", async () => {
     const view = running();
     view.phases[0] = {

@@ -13,6 +13,7 @@ import {
   kioskDone,
   kioskIn,
   kioskSetUp,
+  dropSeat,
   leaveSpot,
   listPublicChannels,
   listPublicClasses,
@@ -20,6 +21,7 @@ import {
   listPublicTimers,
   subscribePublicChanges,
   takeNextSpot,
+  takeSeat,
   takeSpot
 } from '@gridfpv/protocol-client';
 import type {
@@ -33,7 +35,10 @@ import type {
   RaceView,
   SeatChannel,
   SignupSeat,
-  TimerView
+  TimerView,
+  RaceId,
+  SeatRef,
+  AdapterId
 } from '@gridfpv/types';
 import type { LiveSession } from './eventLive.svelte.js';
 import type { Names } from './names.js';
@@ -41,6 +46,12 @@ import { lastResult } from './overlay.js';
 import { currentRace, isHeat } from './phases.js';
 import { lineupSeatRows, type SeatRow } from './run.js';
 import { BENCH_ADAPTER } from './seats.js';
+
+/** A seat by its wire handles: the timer it is on, and which of that timer's seats. */
+export interface SeatHandle {
+  adapter: AdapterId;
+  seat: SeatRef;
+}
 
 /** What the spectator's page reads from: which event is open, and the live store's reads. */
 export interface PublicSource extends LiveSession {
@@ -57,6 +68,12 @@ export interface PublicSource extends LiveSession {
   takeSpot(heat: PhaseId, seat: SignupSeat, kiosk?: string): Promise<unknown>;
   takeNextSpot(phase: PhaseId, seat: SignupSeat, kiosk?: string): Promise<unknown>;
   leaveSpot(heat: PhaseId, kiosk?: string): Promise<unknown>;
+  /**
+   * Check-in (§11.9): the signed-in pilot takes an open seat in a race that is being
+   * flown, or gives up the one they took.
+   */
+  takeSeat(race: RaceId, seat: SeatHandle, kiosk?: string): Promise<unknown>;
+  dropSeat(race: RaceId, kiosk?: string): Promise<unknown>;
   /** Prove who a pilot is at a kiosk, with their code. Rejects when the code is wrong. */
   kioskIn(code: string): Promise<KioskPassView>;
   /** The pilot is done at the kiosk. */
@@ -80,6 +97,8 @@ export function publicSource(baseUrl: string): PublicSource {
     takeSpot: (heat, seat, kiosk) => takeSpot(baseUrl, heat, seat, { kiosk }),
     takeNextSpot: (phase, seat, kiosk) => takeNextSpot(baseUrl, phase, seat, { kiosk }),
     leaveSpot: (heat, kiosk) => leaveSpot(baseUrl, heat, { kiosk }),
+    takeSeat: (race, seat, kiosk) => takeSeat(baseUrl, race, seat, { kiosk }),
+    dropSeat: (race, kiosk) => dropSeat(baseUrl, race, { kiosk }),
     kioskIn: (code) => kioskIn(baseUrl, code),
     kioskDone: (pass) => kioskDone(baseUrl, pass),
     kioskSetUp: (code) => kioskSetUp(baseUrl, code),

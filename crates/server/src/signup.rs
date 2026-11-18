@@ -54,7 +54,7 @@ pub struct LeaveSpotRequest {
 }
 
 /// The pilot a request is signed in as, and the open event, or the reason there is none.
-fn acting(
+pub(crate) fn acting(
     registry: &EventRegistry,
     headers: &HeaderMap,
 ) -> Result<(EventId, PilotId), ProtocolError> {

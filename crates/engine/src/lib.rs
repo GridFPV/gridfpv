@@ -22,6 +22,7 @@
 //! Still to come: time and points penalties, class standings, and the run queue.
 #![forbid(unsafe_code)]
 
+pub mod checkin;
 pub mod heat;
 pub mod laps;
 pub mod phase;

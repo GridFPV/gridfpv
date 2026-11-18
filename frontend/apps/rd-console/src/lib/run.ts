@@ -78,18 +78,49 @@ export interface SeatRow {
   falseStart: boolean;
   /** Whether the pilot is marked out of the race (crashed, not going to finish). */
   out: boolean;
+  /**
+   * Whether this is an open seat: no pilot is named on it, so a pilot can be checked in
+   * to it while the race is flown. `pilot` and `who` are then whoever has it now.
+   */
+  open: boolean;
 }
 
 /** The rows for a race in progress: one per seat of its lineup, with the laps so far. */
 export function raceSeatRows(race: RaceView, names: Names): SeatRow[] {
   return race.seats.map((seat, index) => {
-    const laps = seat.laps.filter((lap) => !lap.restart && !lap.timer_restarted);
+    // An open seat a pilot has taken shows that pilot and the laps of their stint. With
+    // nobody on it, it shows every lap flown on the seat, as an open seat always has.
+    const stint = seat.holder === undefined ? undefined : seat.stints.at(-1);
+    const counted = (stint?.laps ?? seat.laps).filter(
+      (lap) => !lap.restart && !lap.timer_restarted
+    );
+    if (seat.pilot === undefined && stint !== undefined) {
+      return {
+        adapter: seat.adapter,
+        seat: seat.seat,
+        seatName: names.seat(seat.adapter, seat.seat, index),
+        bench: isBench(seat.adapter),
+        who: names.pilot(stint.pilot),
+        pilot: stint.pilot,
+        laps: counted,
+        lastLapMicros: counted.at(-1)?.micros,
+        bestLapMicros: stint.best_lap_micros,
+        onCourse: counted.length > 0,
+        falseStart: false,
+        out: false,
+        open: true
+      };
+    }
+    const laps = counted;
     return {
       adapter: seat.adapter,
       seat: seat.seat,
       seatName: names.seat(seat.adapter, seat.seat, index),
       bench: isBench(seat.adapter),
-      who: seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot),
+      who:
+        seat.pilot === undefined
+          ? names.seatWho('Open', seat.adapter, seat.seat, index)
+          : names.pilot(seat.pilot),
       pilot: seat.pilot,
       place: seat.finish,
       laps,
@@ -97,7 +128,8 @@ export function raceSeatRows(race: RaceView, names: Names): SeatRow[] {
       bestLapMicros: seat.best_lap_micros,
       onCourse: seat.hole_shot !== undefined || laps.length > 0,
       falseStart: seat.false_start,
-      out: seat.out
+      out: seat.out,
+      open: seat.pilot === undefined
     };
   });
 }
@@ -109,12 +141,13 @@ export function lineupSeatRows(phase: PhaseView, names: Names): SeatRow[] {
     seat: seat.seat,
     seatName: names.seat(seat.adapter, seat.seat, index),
     bench: isBench(seat.adapter),
-    who: names.who(seat.who),
+    who: names.seatWho(seat.who, seat.adapter, seat.seat, index),
     pilot: typeof seat.who === 'object' && 'Pilot' in seat.who ? seat.who.Pilot : undefined,
     laps: [],
     onCourse: false,
     falseStart: false,
-    out: false
+    out: false,
+    open: seat.who === 'Open'
   }));
 }
 

@@ -308,6 +308,10 @@
               next: (phase, seat) => source.takeNextSpot(phase, seat).then(() => live?.reload()),
               leave: (heat) => source.leaveSpot(heat).then(() => live?.reload())
             }}
+            checkin={pilot && {
+              take: (race, seat) => source.takeSeat(race, seat).then(() => live?.reload()),
+              drop: (race) => source.dropSeat(race).then(() => live?.reload())
+            }}
           />
         {/if}
       {:else}

@@ -70,7 +70,11 @@
     onseek?: ((raceMicros: number) => void) | undefined;
   } = $props();
 
-  const who = $derived(seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot));
+  const who = $derived(
+    seat.pilot === undefined
+      ? names.seatWho('Open', seat.adapter, seat.seat, index)
+      : names.pilot(seat.pilot)
+  );
   const seatName = $derived(names.seat(seat.adapter, seat.seat, index));
   const timer = $derived(names.timer(seat.adapter));
   const rows = $derived(lapRows(seat));

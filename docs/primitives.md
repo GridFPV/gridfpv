@@ -179,7 +179,8 @@ trace, and adjust the thresholds against it.
 
 A class simply has a roster (Agreed). There is no separate "entry" record.
 
-- **Check-in** comes later. When it does, a pilot joins a class roster at check-in.
+- **Check-in** to a class roster comes later. When it does, a pilot joins a class roster at
+  check-in. (Checking in to an open **seat** during practice is built: §11.9.)
 - **Pilots and spectators on their own phones**, and pilots signing up for heats, are in §11.
 - **Teams** may come later, and the design leaves room for them (Agreed): a team is a named
   group of pilots at an event. Lineups, passes and races stay about pilots. Team results are
@@ -1244,3 +1245,30 @@ same network, or the laptop is switched off.
 
 One thing to check in the code before sign-up is built: lap callouts for an open seat
 should say the seat or channel. Today a callout is written for a named pilot.
+
+### 11.9 Check-in to an open seat (Built 2026-11-18, #399)
+
+This is for practice run as **one long heat**. The heat has open seats (§5.4), the director
+starts its race, and the timer just runs. Sign-up (§11.5) is for practice planned as heats.
+Check-in is for practice with no plan at all.
+
+- **Taking a seat.** A pilot who wants to fly takes an open seat. Only a seat with no pilot
+  named on it can be taken, and only while the race is counting down or running.
+- **Whose laps.** The pilot's **first pass after taking the seat starts their first lap**.
+  The lap that was under way when they took it is not theirs. This is decided by the order
+  of the log, never by a clock.
+- **When it ends.** A pilot keeps the seat until someone else takes it, they drop it, or the
+  director drops them. Their laps stay theirs. One spell on a seat is a **stint**.
+- **One seat at a time.** A pilot who takes a second seat leaves the first.
+- **Idle drop.** A format can set "drop an idle seat after N seconds". A seat with no pass
+  for that long is dropped by the Director. The wait starts again at each pass. Left empty,
+  nobody is dropped.
+- **Practice laps are the pilot's, ranked or not.** They show on the pilot's own page under
+  "My practice", live while they fly. They do **not** enter the heat's ranking: an open
+  seat still ranks nobody.
+- **Three ways in,** like sign-up: the pilot's phone, the kiosk, and the director's Run
+  page. A pilot can only ever take or drop a seat for themselves.
+
+**Not built:** counting a checked-in pilot in the heat's ranking; a pilot marking themselves
+"out" (a checked-in pilot drops the seat instead); check-in to a class roster (§4), which is
+a different thing with the same name.

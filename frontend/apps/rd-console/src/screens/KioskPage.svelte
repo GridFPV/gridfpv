@@ -20,6 +20,8 @@
   import { codeProblem, tidyCode } from '../lib/pilotAccess.js';
   import { runsOf, signupPhases } from '../lib/signup.js';
   import type { PublicSource } from '../lib/spectator.js';
+  import { checkInRace } from '../lib/checkin.js';
+  import OpenSeats from './OpenSeats.svelte';
   import PilotSignup from './PilotSignup.svelte';
 
   let {
@@ -32,7 +34,14 @@
   }: {
     source: Pick<
       PublicSource,
-      'kioskSetUp' | 'kioskIn' | 'kioskDone' | 'takeSpot' | 'takeNextSpot' | 'leaveSpot'
+      | 'kioskSetUp'
+      | 'kioskIn'
+      | 'kioskDone'
+      | 'takeSpot'
+      | 'takeNextSpot'
+      | 'leaveSpot'
+      | 'takeSeat'
+      | 'dropSeat'
     >;
     /** Whether the Director said, when the page loaded, that this device is a kiosk. */
     isKiosk: boolean;
@@ -183,6 +192,8 @@
    * The sheets this pilot can use: the sign-up phases they are in. One is shown at a time,
    * with a picker when there are several, so the page is one grid and not a long scroll.
    */
+  /** The race with open seats that a pilot can check in to right now, if there is one. */
+  const flyNow = $derived(checkInRace(live?.view));
   const sheets = $derived(
     signupPhases(live?.view).filter(
       (sheet) => here !== undefined && runsOf(sheet.signup, here.pilot.id) !== undefined
@@ -282,6 +293,20 @@
     {#if !live?.view}
       <p class="muted" role="status">Loading…</p>
     {:else}
+      {#if flyNow}
+        <!-- Practice with open seats is on: a pilot can take a seat here too (§11.9). -->
+        <h2 class="fly-now">Fly now: {live.names.phase(flyNow.heat)}</h2>
+        <OpenSeats
+          race={flyNow}
+          names={live.names}
+          pilot={here.pilot}
+          actions={{
+            take: (race, seat) => act((pass) => source.takeSeat(race, seat, pass)),
+            drop: (race) => act((pass) => source.dropSeat(race, pass))
+          }}
+          channelOf={(seat) => live?.names.channel(seat.adapter, seat.seat)}
+        />
+      {/if}
       {#if sheets.length > 1}
         <label class="which">
           <span>Sign up for</span>
@@ -312,6 +337,10 @@
 </main>
 
 <style>
+  .fly-now {
+    margin: 0;
+    font-size: var(--gf-font-size-lg);
+  }
   /* Read from arm's length by someone standing, on a tablet on its side. */
   .kiosk {
     max-width: 76rem;

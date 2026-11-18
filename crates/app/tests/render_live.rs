@@ -134,6 +134,7 @@ async fn the_overlay_is_drawn_onto_a_clean_recording() {
                 first_lap: FirstLap::HoleShot,
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::DirectorDecides,
             ranking: None,

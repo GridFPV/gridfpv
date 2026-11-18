@@ -152,6 +152,7 @@ async fn a_grid_race_is_timed_by_a_stock_rotorhazard() {
                 first_lap: FirstLap::FromTone,
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::DirectorDecides,
             ranking: None,

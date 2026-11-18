@@ -38,7 +38,9 @@ function open(
     kioskDone: vi.fn(async (_pass: string) => {}),
     takeSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
     takeNextSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
-    leaveSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined)
+    leaveSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+    takeSeat: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+    dropSeat: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined)
   };
   const live = { view, names: signupNames(view), reload: vi.fn(async () => {}) };
   const props = {
@@ -166,7 +168,9 @@ describe('KioskPage: waiting for a pilot', () => {
         kioskDone: vi.fn(),
         takeSpot: vi.fn(),
         takeNextSpot: vi.fn(),
-        leaveSpot: vi.fn()
+        leaveSpot: vi.fn(),
+        takeSeat: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+        dropSeat: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined)
       },
       isKiosk: false,
       kioskName: 'Leftover',
@@ -457,7 +461,9 @@ describe('KioskPage: one sheet at a time', () => {
       kioskDone: vi.fn(async (_pass: string) => {}),
       takeSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
       takeNextSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
-      leaveSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined)
+      leaveSpot: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+      takeSeat: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
+      dropSeat: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined)
     };
     const live = { view, names: signupNames(view), reload: vi.fn(async () => {}) };
     render(KioskPage, { source, isKiosk: true, eventName: 'Friday Night Whoops', live });

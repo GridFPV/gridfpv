@@ -208,6 +208,7 @@ async fn races_are_timed_by_the_real_oft_daemon() {
                 first_lap: FirstLap::FromTone,
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::DirectorDecides,
             ranking: None,
