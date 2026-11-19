@@ -295,6 +295,49 @@
     </p>
   {/if}
 
+  <!-- Adding a lap sits right under the trace: that is where the marshal is looking. -->
+  {#if editable}
+    {#if base}
+      <form class="add" aria-label="Add a lap for {who}" onsubmit={addLap}>
+        <label class="add-label" for="add-{index}">
+          Add a lap: seconds {base.words}
+        </label>
+        <span class="add-input">
+          <Input
+            id="add-{index}"
+            bind:value={addText}
+            size="sm"
+            inputmode="decimal"
+            placeholder="e.g. 12.5"
+            autocomplete="off"
+            aria-label="Seconds {base.words}, for {who}"
+            oninput={typed}
+            onfocus={() => (typing = true)}
+            onblur={() => (typing = false)}
+            disabled={busy}
+          />
+        </span>
+        <Button size="sm" type="submit" disabled={busy || addText.trim() === ''}>
+          {pickedAt === undefined ? 'Add lap' : 'Add a lap here'}
+        </Button>
+        {#if hasTrace}
+          <span class="muted">
+            Or click an empty spot on the trace. Drag a crossing on the trace to move it.
+          </span>
+        {/if}
+        <span class="muted" data-testid="add-hint">
+          Missed the hole shot? Add it here. A crossing before the first one becomes the hole shot.
+        </span>
+        {#if addError}<span class="error" role="alert">{addError}</span>{/if}
+      </form>
+    {:else}
+      <p class="muted">
+        A lap cannot be added by time here: the race's start on {timer} is not known and the seat has
+        no crossing to count from.
+      </p>
+    {/if}
+  {/if}
+
   {#if rows.length === 0}
     <p class="muted">No laps.</p>
   {:else}
@@ -452,48 +495,6 @@
         {/each}
       </ul>
     </div>
-  {/if}
-
-  {#if editable}
-    {#if base}
-      <form class="add" aria-label="Add a lap for {who}" onsubmit={addLap}>
-        <label class="add-label" for="add-{index}">
-          Add a lap: seconds {base.words}
-        </label>
-        <span class="add-input">
-          <Input
-            id="add-{index}"
-            bind:value={addText}
-            size="sm"
-            inputmode="decimal"
-            placeholder="e.g. 12.5"
-            autocomplete="off"
-            aria-label="Seconds {base.words}, for {who}"
-            oninput={typed}
-            onfocus={() => (typing = true)}
-            onblur={() => (typing = false)}
-            disabled={busy}
-          />
-        </span>
-        <Button size="sm" type="submit" disabled={busy || addText.trim() === ''}>
-          {pickedAt === undefined ? 'Add lap' : 'Add a lap here'}
-        </Button>
-        {#if hasTrace}
-          <span class="muted">
-            Or click an empty spot on the trace. Drag a crossing on the trace to move it.
-          </span>
-        {/if}
-        <span class="muted" data-testid="add-hint">
-          Missed the hole shot? Add it here. A crossing before the first one becomes the hole shot.
-        </span>
-        {#if addError}<span class="error" role="alert">{addError}</span>{/if}
-      </form>
-    {:else}
-      <p class="muted">
-        A lap cannot be added by time here: the race's start on {timer} is not known and the seat has
-        no crossing to count from.
-      </p>
-    {/if}
   {/if}
 </li>
 

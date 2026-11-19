@@ -168,10 +168,16 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
 
     const ace = page.getByRole('listitem', { name: `Seat 1, ${ACE}` });
     const bee = page.getByRole('listitem', { name: `Seat 2, ${BEE}` });
+    // One seat is marshalled at a time, picked under the races. The first is shown.
+    const picks = page.getByRole('list', { name: 'Seat to marshal' });
+    const pick = (who: string) => picks.getByRole('button').filter({ hasText: who });
+    await expect(picks.getByRole('button')).toHaveCount(2);
+    await expect(pick(ACE)).toHaveAttribute('aria-pressed', 'true');
+    await expect(bee).toHaveCount(0);
     const ranking = page.getByRole('list', { name: 'Heat ranking' }).getByRole('listitem');
     await expect(ace).toContainText('Seat 1 · Bench');
     await expect(lapCount(ace)).toHaveText(/3\s+laps/);
-    await expect(lapCount(bee)).toHaveText(/3\s+laps/);
+    await expect(pick(BEE)).toContainText('Seat 2 · 3 laps');
     await expect(ace.locator('[data-stat="place"]')).toHaveText('1st');
     await expect(ranking.nth(0)).toContainText(ACE);
     await expect(ranking.nth(1)).toContainText(BEE);
@@ -200,8 +206,12 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     const uncounted = ace.getByRole('list', { name: `Crossings of ${ACE} that do not count` });
     await expect(uncounted).toContainText('Removed by a marshal: false detection.');
     // Ace no longer has 3 laps, so Bee wins the race and leads the heat.
-    await expect(bee.locator('[data-stat="place"]')).toHaveText('1st');
     await expect(ace.locator('[data-stat="place"]')).toHaveText('2nd');
+    await pick(BEE).click();
+    await expect(ace).toHaveCount(0);
+    await expect(bee.locator('[data-stat="place"]')).toHaveText('1st');
+    await pick(ACE).click();
+    await expect(pick(ACE)).toContainText('1 not counted');
     await expect(ranking.nth(0)).toContainText(BEE);
     await expect(ranking.nth(1)).toContainText(ACE);
 
