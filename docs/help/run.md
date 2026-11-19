@@ -59,7 +59,16 @@ Keys do nothing while you type in a field or a dialog is open.
 ## Seat cards
 
 One card for each seat in the heat. During a race it shows the pilot's place, lap count,
-last lap and best lap, and every lap in order. The fastest lap has a green border.
+last lap and best lap, and its latest laps in order. The fastest lap has a green border.
+
+A card lists the **last 9 laps** and no more, so it stays the same size in a long
+practice. The lap count and the best lap at the top are for the whole race. Beside the
+best lap is which lap it was, like **(lap 6)**, because that lap may have scrolled off.
+
+Every lap is in **All laps**, under the cards. Click it to open it. It lists each seat's
+laps with the pilot who flew them. Pick a seat or a pilot to see only theirs, and pick
+**Fastest first** to sort by time. The Marshal page also shows every lap, and is where a
+lap is changed.
 
 In a heat ranked on the fastest laps in a row, the card also shows **Best 3** for this
 race and **Heat best 3** for the whole heat. The laps that make up this race's best run

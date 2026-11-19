@@ -1440,21 +1440,22 @@ timer. To decide: whether a profile holds only where OBS is (address and passwor
 what records, the scenes and where the files go. The password is never shown again once
 stored (§ security), so a profile can be switched to but not read back.
 
-### 12.3 The Run page's seat cards with many laps (Agreed 2026-11-18, not built)
+### 12.3 The Run page's seat cards with many laps (Built 2026-11-19)
 
-A seat's card lists every lap, so in a long open practice it grows without end. It is to be
-done with the pass over the event's pages.
+A seat's card used to list every lap, so in a long open practice it grew without end.
 
 - **The card shows the last 9 laps**, newest last. Its height is then fixed. With 9 laps or
   fewer nothing is hidden, so a short race looks as it does now.
-- **The best lap is always on the card.** When it is older than the last 9 it is shown as
-  one more chip at the front, marked best. In a heat ranked on the best N laps in a row,
-  that run is kept on the card the same way.
+- **Nine is the most a card ever lists.** The best lap is not kept as an extra chip. The
+  card already shows the best time, so the lap's number goes beside it: "7.250 (lap 6)".
+  The best run of N says its laps the same way: "(laps 5 to 7)". (Changed 2026-11-19 after
+  flying: the extra chip made the card ten or more.)
 - **In open practice the laps are the current pilot's:** the last 9 of whoever holds the
   seat now (§11.9), not the last 9 on the seat.
-- **"All laps", under the cards, shut until opened.** One table for every seat: lap, seat,
-  pilot, time, and in practice which stint. It can be narrowed by seat and by pilot, and
-  sorted by time.
+- **"All laps", under the cards, shut until opened.** One table for every seat: seat,
+  pilot, lap and time. On an open seat a lap is shown under whoever held the seat, and a
+  lap flown with nobody on it is shown as nobody's. It can be narrowed by seat and by pilot,
+  and put fastest first.
 - **The Marshal page still shows every lap.** That is where laps are changed.
 
 
