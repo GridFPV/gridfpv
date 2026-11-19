@@ -519,6 +519,42 @@ call were put to him and are folded in above.
 
 ---
 
+### 5.11 Start sounds (Wanted 2026-11-19, not designed, not built)
+
+Notes from a night of flying. This also takes over from issue #193 (the sounds panel),
+which was closed in favour of this section.
+
+**Today.** The console plays three pips in the last three seconds and a long tone at the
+start. That is fixed in the code. The format holds a staging time and nothing else about
+the start. The random hold in §5.1 is not built. Laps are spoken. A hole shot makes no
+sound.
+
+**Wanted.**
+
+- **A tone on the hole shot.** Always wanted.
+- **A choice of start sounds**, because it changes from night to night:
+  - one tone, on go only;
+  - a tone every second, then go;
+  - a few pips, then go (what there is today).
+- **A spoken start with a random wait.** A voice says "Arm your quads. On the tone in less
+  than N." N is the longest wait of a random start between M and N seconds. Nothing sounds
+  during the wait. One tone sounds on go.
+- **A sounds panel** (from #193), one place to set sound up:
+  - a test tone, to check the speakers before a race;
+  - volume and mute;
+  - the start tone's sound;
+  - lap callouts on or off, and what they say.
+
+**To decide before building.**
+
+- Where the choice lives: on the format (it travels with the race rules), on the event, or
+  on the console as a setting. The random wait (M and N) changes when the race starts, so
+  it is a race rule. Which sounds play is closer to a console setting.
+- The random wait needs the Director to pick the time and keep it off every screen, so
+  nobody can see the tone coming. Today every console counts down to a tone time it is told.
+- Whether a tone sounds on every lap, or only on the hole shot.
+- What the voice says for a start with no random wait.
+
 ## 6. Presets
 
 A preset is a **generator**. It runs once, sized to the field, and writes plain phases, heats,
