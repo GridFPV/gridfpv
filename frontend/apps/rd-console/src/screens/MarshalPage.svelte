@@ -412,23 +412,22 @@
                 </span>
               </div>
               {#if race.note}<p class="race-note">Note: {race.note}</p>{/if}
-              <p class="muted" data-testid="review-status">
-                {#if race.locked}
-                  {lockPhase === undefined ? 'A phase above this race' : names.phase(lockPhase)} is locked,
-                  so this race is official and cannot be changed. Unlock it on the Phases page to make
-                  a ruling.
-                {:else if race.state === 'Discarded'}
-                  This race was discarded. Its laps do not count, so there is nothing to rule on.
-                {:else if race.state === 'Staging' || race.state === 'Running'}
-                  This race is still going. Rulings can be made once it is stopped.
-                {:else if race.state === 'Stopped'}
-                  This race is stopped and waits to be saved or discarded. Do that on the heat's Run
-                  page.
-                {:else}
-                  Removing a lap joins its time onto the lap after it. Marking a restart gives that
-                  lap no time and leaves the laps either side as they were.
-                {/if}
-              </p>
+              {#if race.locked || race.state !== 'Saved'}
+                <p class="muted" data-testid="review-status">
+                  {#if race.locked}
+                    {lockPhase === undefined ? 'A phase above this race' : names.phase(lockPhase)} is
+                    locked, so this race is official and cannot be changed. Unlock it on the Phases page
+                    to make a ruling.
+                  {:else if race.state === 'Discarded'}
+                    This race was discarded. Its laps do not count, so there is nothing to rule on.
+                  {:else if race.state === 'Staging' || race.state === 'Running'}
+                    This race is still going. Rulings can be made once it is stopped.
+                  {:else if race.state === 'Stopped'}
+                    This race is stopped and waits to be saved or discarded. Do that on the heat's
+                    Run page.
+                  {/if}
+                </p>
+              {/if}
             </Card>
 
             {#if race.video && videoUrl}
@@ -444,12 +443,6 @@
                   >
                     {showVideo ? 'Hide video' : 'Show video'}
                   </Button>
-                  {#if showVideo}
-                    <span class="muted video-hint">
-                      The line on each signal trace is where the video is. Click a trace, or a lap,
-                      to jump there.
-                    </span>
-                  {/if}
                 </div>
                 {#if showVideo}
                   {#key race.race}
@@ -808,8 +801,5 @@
   .video-title {
     margin: 0;
     font-size: var(--gf-font-size-md);
-  }
-  .video-hint {
-    margin: 0;
   }
 </style>

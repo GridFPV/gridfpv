@@ -678,6 +678,15 @@ describe('MarshalPage race review', () => {
       ]);
     });
 
+    it('a saved race that can be ruled on carries no sentences of advice', async () => {
+      await open(view(), RACE);
+      expect(screen.queryByTestId('review-status')).toBeNull();
+      expect(screen.queryByTestId('add-hint')).toBeNull();
+      expect(document.body.textContent).not.toMatch(
+        /Missed the hole shot|Removing a lap joins|Or click an empty spot/
+      );
+    });
+
     it('puts adding a lap above the lap list, under the trace', async () => {
       await open(view(), RACE);
       const seat = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
