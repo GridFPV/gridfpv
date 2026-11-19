@@ -14,6 +14,7 @@
   import ErrorBanner from '../lib/ErrorBanner.svelte';
   import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
   import {
+    holdsOnlyRounds,
     isHeat,
     PHASE_STATUS_LABELS,
     phaseRemovable,
@@ -54,6 +55,11 @@
   /** The phases directly inside this one. Each has its own page. */
   const inside = $derived(
     view ? phaseSummaries(view).filter((entry) => entry.parent === phaseId) : []
+  );
+
+  /** A bracket, mains or round robin: its heats are in its rounds, so none are added here. */
+  const roundsOnly = $derived(
+    phase !== undefined && view !== undefined && holdsOnlyRounds(phase, view.phases)
   );
 
   const TONES: Record<PhaseStatus, 'neutral' | 'accent' | 'success' | 'warn' | 'info'> = {
@@ -103,9 +109,11 @@
   lede={phase
     ? isHeat(phase.def)
       ? 'One heat: its lineup, its ranking, and the rulings on it.'
-      : inside.length > 0
-        ? 'This phase: the phases inside it, its own heats, its ranking, and the rulings on it.'
-        : 'This phase: its heats and lineups, its ranking, and the rulings on it.'
+      : roundsOnly
+        ? 'This phase: the rounds inside it, its ranking, and the rulings on it. Its heats are in the rounds.'
+        : inside.length > 0
+          ? 'This phase: the phases inside it, its own heats, its ranking, and the rulings on it.'
+          : 'This phase: its heats and lineups, its ranking, and the rulings on it.'
     : ''}
 >
   {#snippet actions()}
@@ -156,7 +164,7 @@
             onclick={() => (editing = own.def.id)}>Edit</Button
           >
         {/if}
-        {#if !heat && !own.locked && !own.signup}
+        {#if !heat && !roundsOnly && !own.locked && !own.signup}
           <Button
             size="sm"
             variant="secondary"
@@ -232,7 +240,10 @@
         </ul>
       </Card>
     {/if}
-    <Card title={isHeat(phase.def) ? 'Heat' : 'Heats and ranking'} elevation="sm">
+    <Card
+      title={isHeat(phase.def) ? 'Heat' : roundsOnly ? 'Ranking' : 'Heats and ranking'}
+      elevation="sm"
+    >
       {#if isHeat(phase.def)}
         <PhaseList
           {view}
@@ -251,9 +262,10 @@
           {onrun}
           heatsOf={phaseId}
           subject={phaseId}
-          onaddheat={(under) => (addingUnder = under)}
+          onaddheat={roundsOnly ? undefined : (under) => (addingUnder = under)}
           onedit={(target) => (editing = target)}
-          onsignup={(target) => (rulesFor = target)}
+          onsignup={roundsOnly ? undefined : (target) => (rulesFor = target)}
+          emptyNote={!roundsOnly}
         />
       {/if}
     </Card>

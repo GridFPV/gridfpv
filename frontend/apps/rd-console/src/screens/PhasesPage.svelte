@@ -190,12 +190,17 @@
                 </span>
                 <span class="open" aria-hidden="true">→</span>
               </a>
-              <Button
-                size="sm"
-                variant="secondary"
-                aria-label="Add a heat under {phase.name}"
-                onclick={() => (adding = { what: 'heat', under: phase.id })}>+ Heat</Button
-              >
+              {#if phase.roundsOnly}
+                <!-- A bracket's heats live in its rounds. The gap keeps the lines in step. -->
+                <span class="heat-gap" aria-hidden="true"></span>
+              {:else}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  aria-label="Add a heat under {phase.name}"
+                  onclick={() => (adding = { what: 'heat', under: phase.id })}>+ Heat</Button
+                >
+              {/if}
             </li>
           {/each}
         </ul>
@@ -260,6 +265,10 @@
     flex: none;
     width: 2rem;
     height: 2rem;
+  }
+  .heat-gap {
+    flex: none;
+    width: 3.9rem;
   }
   .fold {
     display: grid;

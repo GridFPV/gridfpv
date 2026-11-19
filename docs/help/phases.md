@@ -43,7 +43,8 @@ A heat always sits in a phase. So you add a phase first, then put heats in it.
     order, how many fly in each heat, how many move on, and single or double elimination.
     Each round of the bracket is a phase of its own that holds the round's heats. The
     final is one too, even though it has one heat. The rounds are listed in the order you
-    fly them.
+    fly them. In double elimination that is a winners round, then the losers rounds it
+    feeds, then the next winners round.
   - **Multi-Main**: mains stacked on each other (A-Main, B-Main and so on). Each main is a
     bracket. **Seeded from** is the phase whose ranking fills the mains, such as
     Qualifying. Say how many pilots start in each main and how many **bump up** from a
@@ -57,6 +58,9 @@ A heat always sits in a phase. So you add a phase first, then put heats in it.
     place** is what each finishing place scores, first place first. Points from every heat
     are added up and the most points wins. Every heat can be flown from the start, in any
     order.
+
+A bracket, a multi-main and a round robin keep their heats inside their rounds. So their
+own line and page have no **+ Heat**. Open a round to see or add its heats.
 
 A phase's own page has **+ Add phase** too. It adds the new phase inside that phase.
 
