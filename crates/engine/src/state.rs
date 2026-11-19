@@ -2952,6 +2952,7 @@ mod tests {
                     },
                     format: Some(format),
                     false_start_limit: None,
+                    class: None,
                     display_hint: None,
                 },
             })
