@@ -76,6 +76,7 @@
   import DiscardDialog from './DiscardDialog.svelte';
   import { takesCheckIns } from '../lib/checkin.js';
   import RunSeatCard from './RunSeatCard.svelte';
+  import RunAllLaps from './RunAllLaps.svelte';
 
   let {
     live,
@@ -731,6 +732,10 @@
           />
         {/each}
       </ul>
+
+      {#if race}
+        <RunAllLaps {race} {names} />
+      {/if}
 
       {#if showRanking}
         <Card title="Ranking" elevation="sm">

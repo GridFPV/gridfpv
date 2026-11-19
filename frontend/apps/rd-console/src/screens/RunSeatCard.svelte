@@ -17,9 +17,9 @@
    * "Bench" that logs a crossing by hand. A seat on a real timer never shows it.
    */
   import { Badge, Button, formatMicros } from '@gridfpv/components';
-  import { inRun, type LapRun } from '../lib/overlay.js';
+  import type { LapRun } from '../lib/overlay.js';
   import type { PilotId } from '@gridfpv/types';
-  import type { SeatRow } from '../lib/run.js';
+  import { cardLaps, type SeatRow } from '../lib/run.js';
 
   let {
     row,
@@ -59,6 +59,10 @@
      */
     oncheckin?: (pilot: PilotId | undefined) => void;
   } = $props();
+
+  // The latest laps only, so the card is one size however long the race runs. The best
+  // lap, and the best run of N, stay on it. Every lap is in the table under the cards.
+  const listed = $derived(cardLaps(row.laps, row.bestLapMicros, run));
 </script>
 
 <li class="seat" class:out={row.out} aria-label="{row.seatName}, {row.who}">
@@ -154,9 +158,15 @@
   </dl>
   {#if row.laps.length > 0}
     <ol class="laps" aria-label="Laps for {row.seatName}">
-      {#each row.laps as lap, index (lap.crossing)}
-        <li class:best={lap.micros === row.bestLapMicros} class:in-run={inRun(index, run)}>
-          <span class="n">{index + 1}</span>{formatMicros(lap.micros)}
+      {#each listed.laps as shown, at (shown.lap.crossing)}
+        <li
+          class:best={shown.best}
+          class:in-run={shown.inRun}
+          class:kept={shown.kept}
+          class:gap={!shown.kept && at > 0 && listed.laps[at - 1].kept}
+          data-lap={shown.number}
+        >
+          <span class="n">{shown.number}</span>{formatMicros(shown.lap.micros)}
         </li>
       {/each}
     </ol>
@@ -281,6 +291,10 @@
   .laps li.best {
     border-color: var(--gf-success);
     color: var(--gf-success);
+  }
+  /* The first of the latest laps, after an older lap that was kept: a little apart. */
+  .laps li.gap {
+    margin-left: var(--gf-space-3);
   }
   .laps .n {
     margin-right: 0.5em;

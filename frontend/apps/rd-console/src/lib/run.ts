@@ -188,3 +188,138 @@ export function finishOrder(race: RaceView): RaceSeatView[] {
     .filter((seat) => seat.finish !== undefined)
     .sort((a, b) => (a.finish ?? 0) - (b.finish ?? 0));
 }
+
+// ── A seat card's laps, and every lap of a race ─────────────────────────────
+
+/** How many of a seat's latest laps its card lists. The rest are in the All laps table. */
+export const CARD_LAPS = 9;
+
+/** One lap as a seat card lists it. */
+export interface CardLap {
+  lap: LapView;
+  /** The lap's number among the seat's counted laps, 1 first. */
+  number: number;
+  best: boolean;
+  /** Whether it is one of the best run of N laps in a row. */
+  inRun: boolean;
+  /**
+   * Whether it is older than the card's window and kept on the card all the same: the best
+   * lap, or one of the best run. It is listed before the window, apart from it.
+   */
+  kept: boolean;
+}
+
+/**
+ * The laps a seat card lists: the latest {@link CARD_LAPS}, newest last, so the card stays
+ * one size however long the race runs. The best lap is always among them, and so is the
+ * best run of N laps where the heat is ranked on one: any of those older than the window
+ * is kept and listed first. `hidden` is how many laps are not on the card.
+ *
+ * With {@link CARD_LAPS} laps or fewer nothing is hidden and nothing is kept.
+ */
+export function cardLaps(
+  laps: readonly LapView[],
+  bestLapMicros: number | undefined,
+  run?: { start: number; length: number },
+  window: number = CARD_LAPS
+): { laps: CardLap[]; hidden: number } {
+  const from = Math.max(0, laps.length - window);
+  const inRun = (index: number) =>
+    run !== undefined && index >= run.start && index < run.start + run.length;
+  // Only the first lap that ties for best is the best: one lap is marked, not several.
+  const bestAt =
+    bestLapMicros === undefined ? -1 : laps.findIndex((lap) => lap.micros === bestLapMicros);
+  const listed: CardLap[] = [];
+  laps.forEach((lap, index) => {
+    const best = index === bestAt;
+    const run_ = inRun(index);
+    if (index >= from || best || run_) {
+      listed.push({ lap, number: index + 1, best, inRun: run_, kept: index < from });
+    }
+  });
+  return { laps: listed, hidden: laps.length - listed.length };
+}
+
+/** One row of the All laps table. */
+export interface LapRow {
+  /** Unique in the table: the seat and the crossing that ended the lap. */
+  key: string;
+  seatKey: string;
+  seatName: string;
+  /** The pilot whose lap it is. Left out for a lap on an open seat nobody held. */
+  pilot?: PilotId;
+  /** A callsign, or "Nobody" for a lap on an open seat nobody held. */
+  who: string;
+  /** The lap's number for that pilot on that seat, 1 first. */
+  number: number;
+  micros: number;
+  /** Whether it is the fastest lap of its pilot on its seat. */
+  best: boolean;
+}
+
+/**
+ * Every counted lap of a race, seat by seat in flying order. On a named pilot's seat the
+ * laps are theirs. On an open seat each lap belongs to whoever held the seat when it was
+ * flown (their stint, docs/primitives.md §11.9); a lap flown with nobody on the seat is
+ * listed as nobody's, since it counts for nobody.
+ */
+export function allLapRows(race: RaceView, names: Names): LapRow[] {
+  const counts = (lap: LapView) => !lap.restart && !lap.timer_restarted;
+  const rows: LapRow[] = [];
+  race.seats.forEach((seat, index) => {
+    const seatKey = `${seat.adapter}/${seat.seat}`;
+    const seatName = names.seat(seat.adapter, seat.seat, index);
+    const push = (laps: LapView[], pilot: PilotId | undefined) => {
+      const flown = laps.filter(counts);
+      const fastest = Math.min(...flown.map((lap) => lap.micros));
+      flown.forEach((lap, at) =>
+        rows.push({
+          key: `${seatKey}/${lap.crossing}`,
+          seatKey,
+          seatName,
+          pilot,
+          who: pilot === undefined ? 'Nobody' : names.pilot(pilot),
+          number: at + 1,
+          micros: lap.micros,
+          best:
+            pilot !== undefined &&
+            lap.micros === fastest &&
+            at === flown.findIndex((l) => l.micros === fastest)
+        })
+      );
+    };
+    if (seat.pilot !== undefined) {
+      push(seat.laps, seat.pilot);
+      return;
+    }
+    // An open seat: each stint's laps are its pilot's, and what is left is nobody's.
+    const held = new Set(seat.stints.flatMap((stint) => stint.laps.map((lap) => lap.crossing)));
+    const byPilot = new Map<PilotId, LapView[]>();
+    for (const stint of seat.stints) {
+      byPilot.set(stint.pilot, [...(byPilot.get(stint.pilot) ?? []), ...stint.laps]);
+    }
+    for (const [pilot, laps] of byPilot) push(laps, pilot);
+    push(
+      seat.laps.filter((lap) => !held.has(lap.crossing)),
+      undefined
+    );
+  });
+  return rows;
+}
+
+/** How the All laps table is ordered. */
+export type LapOrder = 'flown' | 'fastest';
+
+/** Narrow the All laps rows to one seat and one pilot (either may be left out), and order them. */
+export function filterLapRows(
+  rows: readonly LapRow[],
+  filter: { seat?: string; pilot?: PilotId; order?: LapOrder }
+): LapRow[] {
+  const kept = rows.filter(
+    (row) =>
+      (filter.seat === undefined || row.seatKey === filter.seat) &&
+      (filter.pilot === undefined || row.pilot === filter.pilot)
+  );
+  // A stable sort: laps of the same time stay in flying order.
+  return filter.order === 'fastest' ? [...kept].sort((a, b) => a.micros - b.micros) : kept;
+}
