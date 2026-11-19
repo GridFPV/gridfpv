@@ -152,6 +152,7 @@ export type * from '@bindings/OverlayCorner';
 export type * from '@bindings/OverlayLook';
 export type * from '@bindings/OverlayPlacement';
 export type * from '@bindings/Caller';
+export type * from '@bindings/AddressRequest';
 export type * from '@bindings/BuiltinClasses';
 export type * from '@bindings/Door';
 export type * from '@bindings/DoorRequest';

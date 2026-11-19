@@ -182,6 +182,7 @@ let other devices in. Each is off until the director switches it on.
 |---|---|
 | `GET /network` | `{public, remote, token?}`. Each door is `{enabled, port, port_picked, state, addresses, problem?, note?}`. `state` is `Off`, `Starting`, `On` or `Failed`. `addresses` are the URLs to open on another device. `problem` says in words why the listener is not up. `note` says when Grid is on its second choice of port. `token` is the access token, and is in the answer **only on the Grid computer** |
 | `PUT /network/public`, `PUT /network/remote` | `{enabled, port?}`. Leave `port` out to keep it; `0` lets Grid pick again. A picked port must not be the Director's own or the other door's. Opening the Remote RD door with no token makes one. Shutting it signs every other device out. Answers the same shape as the `GET` |
+| `PUT /network/address` | `{address?}`. Sets the public address every public link and QR code uses: `http` or `https`, a name, and at most a port. Left out or empty clears it. `GET /network` answers it as `public_address`, and it is first in the Public door's `addresses` |
 | `PUT /network/token` | `{token?}`. Changes the access token to the one given (8 to 64 characters, no spaces), or to a new one Grid makes. Signs every other device out and closes what they had open. **Only the Grid computer may** (`403` otherwise) |
 
 When no port is picked, Public tries **80**, then **8081**; Remote RD uses **8082**.

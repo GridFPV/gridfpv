@@ -91,3 +91,27 @@ describe('a code in the page address', () => {
     }
   });
 });
+
+describe('the printed sheet of codes', () => {
+  it('offers four or six cards to a page', async () => {
+    const { PER_PAGE_CHOICES } = await import('../src/lib/pilotAccess.js');
+    expect([...PER_PAGE_CHOICES]).toEqual([4, 6]);
+  });
+
+  it('fills each page in order and puts what is left on the last', async () => {
+    const { sheetPages } = await import('../src/lib/pilotAccess.js');
+    const rows = Array.from({ length: 10 }, (_, n) => n + 1);
+    expect(sheetPages(rows, 4)).toEqual([
+      [1, 2, 3, 4],
+      [5, 6, 7, 8],
+      [9, 10]
+    ]);
+    expect(sheetPages(rows, 6)).toEqual([
+      [1, 2, 3, 4, 5, 6],
+      [7, 8, 9, 10]
+    ]);
+    expect(sheetPages(rows.slice(0, 6), 6)).toHaveLength(1);
+    expect(sheetPages(rows.slice(0, 4), 4)).toHaveLength(1);
+    expect(sheetPages([], 6)).toEqual([]);
+  });
+});

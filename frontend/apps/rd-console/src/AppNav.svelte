@@ -45,6 +45,7 @@
   /** The open event's pages, in the order a race day uses them. */
   const EVENT_PAGES: readonly Entry[] = [
     { key: 'event', label: 'Details', to: { kind: 'event', section: 'event' } },
+    { key: 'codes', label: 'Pilot codes', to: { kind: 'event', section: 'codes' } },
     { key: 'phases', label: 'Phases', to: { kind: 'event', section: 'phases' } },
     { key: 'run', label: 'Run', to: { kind: 'run' } },
     { key: 'marshal', label: 'Marshal', to: { kind: 'marshal' } },

@@ -18,11 +18,9 @@
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import { isHeat } from '../lib/phases.js';
-  import { formatHash } from '../lib/route.js';
   import type { Session } from '../lib/session.svelte.js';
   import ClassRosterDialog from './ClassRosterDialog.svelte';
   import EventClasses from './EventClasses.svelte';
-  import PilotSignIn from './PilotSignIn.svelte';
 
   let {
     session,
@@ -152,7 +150,7 @@
 <Page
   title={event.name}
   help="event"
-  lede="What this event is, the lap rules its races run under, and who is racing in it."
+  lede="What this event is, its lap rules, and who is racing in it."
 >
   {#snippet actions()}
     <Button variant="secondary" onclick={openEdit}>Edit</Button>
@@ -185,21 +183,12 @@
             </div>
           {/each}
         </dl>
-        <p class="muted">
-          Heats are added on the
-          <a href={formatHash({ kind: 'event', section: 'phases' })}>Phases page</a>. Pilots,
-          classes, formats and seat profiles are kept outside the event and carry over.
-        </p>
       {/if}
     </Card>
   </div>
 
   {#if view}
-    <Card
-      title="Lap rules"
-      subtitle="Set once for the whole event. They apply to every race in it, flown or still to fly."
-      elevation="sm"
-    >
+    <Card title="Lap rules" elevation="sm">
       <form
         class="rules"
         aria-label="Lap rules"
@@ -210,7 +199,7 @@
       >
         <Field
           label="Minimum lap time (seconds)"
-          hint="A crossing sooner than this after the pilot's last one is not counted as a lap. It stays in the race, and Marshal can count it. Empty or 0 means no minimum."
+          hint="A crossing sooner than this is not counted as a lap. Empty means no minimum."
         >
           <Input
             type="number"
@@ -227,7 +216,7 @@
         </Field>
         <Field
           label="Ignore crossings before (seconds)"
-          hint="Crossings in the first seconds after the start are not counted: a take-off right under the gate. Crossings before the start never count. Empty or 0 ignores nothing after it."
+          hint="Crossings this soon after the start are not counted. Empty ignores none."
         >
           <Input
             type="number"
@@ -254,11 +243,6 @@
           Saved. The Director has these rules.
         {/if}
       </p>
-      <p class="muted">
-        A timer also has a lap cooldown of its own, set on the
-        <a href={formatHash({ kind: 'seats' })}>Seats page</a>. It swallows the bounce of one pass
-        at the timer. Keep it shorter than the minimum lap time here.
-      </p>
     </Card>
 
     <Card title="Classes" elevation="sm">
@@ -269,8 +253,6 @@
       {/snippet}
       <EventClasses {live} />
     </Card>
-
-    <PilotSignIn {session} event={event.id} names={live.names} cursor={view.cursor} />
   {/if}
 </Page>
 
@@ -336,9 +318,6 @@
     margin: var(--gf-space-3) 0 0;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
-  }
-  .muted a {
-    color: var(--gf-accent);
   }
   .rules {
     display: grid;

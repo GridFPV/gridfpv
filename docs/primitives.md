@@ -1337,24 +1337,25 @@ else. It is drawn in Grid's colours, not black and white: Grid's dark ground for
 squares, a pale tint of Grid's green behind them. The squares are always the dark ones, so
 every phone camera reads it. The address is the one the kiosk itself opened Grid by.
 
+**The public address** (built 2026-11-18). The director types the address people should
+use to reach the public pages, on the Network page. Every address Grid gives out for the
+public pages, and every QR code (a pilot's, the printed sheet, the kiosk's), then uses it
+and not a number. It is a whole address, with `http` or `https`, and nothing but a name and
+a port: no path and nothing after `?` or `#`, so nothing can ride along in a QR code. It
+covers two cases:
+
+- **A name on the race network**, where the field's network has DNS: `http://grid.race.lan`.
+- **An address on the internet.** The Director runs at the track on a hotspot or a
+  satellite link, and a tunnel (Cloudflare Tunnel, or the like) carries an internet address
+  such as `https://race.example.org` to the Public door. People then need not be on the
+  field's network at all.
+
+Grid does not run DNS or a tunnel itself; it only uses the address it is told. Only the
+**Public** door is ever put behind a tunnel: the Remote RD door and the Grid computer's own
+listener stay on the field's network.
+
 **Agreed, not built.** Each of these is decided (Ryan, 2026-11-18) and waits its turn.
 
-- **A public address.** The director types the address people should use to reach the
-  public pages, on the Network page. Every address Grid gives out for the public pages, and
-  every QR code (a pilot's, and the kiosk's), then uses it and not a number. It is a whole
-  address, with `http` or `https`, so it covers both cases:
-  - **A name on the race network**, where the field's network has DNS:
-    `http://grid.race.lan`.
-  - **An address on the internet.** The Director runs at the track on a hotspot or a
-    satellite link, and a tunnel (Cloudflare Tunnel, or the like) carries an internet
-    address such as `https://race.example.org` to the Public door. People then need not be
-    on the field's network at all, and the kiosk's QR code must point there.
-
-  Grid does not run DNS or a tunnel itself; it only uses the address it is told. Only the
-  **Public** door is ever put behind a tunnel: the Remote RD door and the Grid computer's
-  own listener stay on the field's network. Until this is built, the kiosk's QR code holds
-  the address the kiosk itself opened Grid by, so a kiosk opened by the internet address
-  already gives the right one, as long as that address is plain `http`.
 - **HTTPS.** Three ways, built in this order: the director's own key and certificate; a
   certificate Grid signs itself (every phone warns about it, so it suits Remote RD more
   than Public); and Certbot, as an option only, since it needs the internet and race day
@@ -1386,6 +1387,14 @@ What that changed (built 2026-11-18):
   empty. There is no fixed list of orgs, no "Custom" tag and no "Built-in" mark.
 - **Data** is out of the menu. Grid is portable, so "where the data is" is not shown. The
   page still works at its address, and the Director's routes are unchanged.
+
+**The event's pages** got the same pass (built 2026-11-18):
+
+- **Details** says less. Each class is a block that is shut until opened; inside is its
+  roster, changed in place.
+- **Pilot codes** is a page of its own among the event's pages: the sign-in codes (§11.3),
+  and a sheet of them to print, four or six to a page, with each pilot's callsign, QR code
+  and code. The browser prints it, or saves it as a PDF.
 
 ### 12.1 More than one timer (Agreed in outline, not designed, not built)
 

@@ -11,11 +11,16 @@
    *
    * The codes are secrets between the director and each pilot, so the card is closed
    * until the director opens it: a screen left in view shows none.
+   *
+   * **Print** makes a sheet to cut up and hand out: one card for each pilot, with their
+   * callsign, their QR code and the code as letters, four or six to a page. It is printed
+   * by the browser, which can also save it as a PDF. Nothing is sent anywhere.
    */
-  import { Badge, Banner, Button, Card, Dialog } from '@gridfpv/components';
+  import { tick } from 'svelte';
+  import { Badge, Banner, Button, Card, Dialog, Select } from '@gridfpv/components';
   import type { EventId, PilotAccessView, PilotCodeView, PilotId } from '@gridfpv/types';
   import type { Names } from '../lib/names.js';
-  import { spellCode } from '../lib/pilotAccess.js';
+  import { PER_PAGE_CHOICES, sheetPages, spellCode, type PerPage } from '../lib/pilotAccess.js';
   import { formatHash } from '../lib/route.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -109,23 +114,81 @@
       drawn += 1;
     });
 
+  // ── The printed sheet ──────────────────────────────────────────────────────
+  /** How many cards go on a page. */
+  let perPage = $state<PerPage>(6);
+  /** Whether the sheet is in the page, ready for the printer. It is not there otherwise. */
+  let printing = $state(false);
+  let sheet = $state<HTMLElement | undefined>(undefined);
+  const pages = $derived(sheetPages(rows, perPage));
+
+  /**
+   * Print the sheet: read the codes, put the sheet in the page, wait until every QR
+   * picture has loaded (a printer would show an empty box otherwise), and hand over to
+   * the browser's own print box.
+   */
+  const print = () =>
+    act(async () => {
+      await load();
+      if (loadError) throw new Error(loadError);
+      if (!access?.address) {
+        throw new Error(
+          'Switch on Public, on the Network page, first: a QR code needs an address.'
+        );
+      }
+      if (rows.length === 0) throw new Error('No pilot is in this event yet.');
+      printing = true;
+      await tick();
+      const pictures = [...(sheet?.querySelectorAll('img') ?? [])];
+      await Promise.all(
+        pictures.map(
+          (img) =>
+            new Promise<void>((done) => {
+              if (img.complete) done();
+              else {
+                img.addEventListener('load', () => done(), { once: true });
+                img.addEventListener('error', () => done(), { once: true });
+              }
+            })
+        )
+      );
+      try {
+        window.print();
+      } finally {
+        printing = false;
+      }
+    });
+
   const signOut = (pilot: PilotId) =>
     act(async () => {
       if (await session.endPilotSession(event, pilot)) await load();
     });
 </script>
 
-<Card title="Pilot sign-in" elevation="sm">
+<Card title="Sign-in codes" elevation="sm">
   {#snippet actions()}
+    <span class="print">
+      <Select
+        size="sm"
+        aria-label="Cards on a page"
+        value={String(perPage)}
+        onchange={(e: Event) =>
+          (perPage = Number((e.currentTarget as HTMLSelectElement).value) as PerPage)}
+      >
+        {#each PER_PAGE_CHOICES as choice (choice)}
+          <option value={String(choice)}>{choice} to a page</option>
+        {/each}
+      </Select>
+      <Button size="sm" variant="ghost" disabled={busy} onclick={print}>Print</Button>
+    </span>
     <Button size="sm" variant="secondary" onclick={() => (shown = !shown)}>
       {shown ? 'Hide codes' : 'Show codes'}
     </Button>
   {/snippet}
 
-  <p class="muted">
-    A pilot signs in on their own phone with a code. Show them theirs, or let them scan it. It works
-    for this event, on one phone at a time.
-  </p>
+  {#if error && !shown}
+    <Banner tone="danger">{error}</Banner>
+  {/if}
 
   {#if shown}
     {#if loadError}
@@ -227,6 +290,30 @@
   </Dialog>
 {/if}
 
+<!-- The sheet for the printer. It is in the page only while printing, and the print styles
+     below hide everything else. Black on white: it is for paper. -->
+{#if printing && access?.address}
+  <div class="sheet" bind:this={sheet} data-testid="code-sheet" data-per-page={perPage}>
+    {#each pages as cards, index (index)}
+      <section class="sheet-page" aria-label="Page {index + 1}">
+        {#each cards as row (row.pilot)}
+          <article class="sheet-card" aria-label={row.callsign}>
+            <h2>{row.callsign}</h2>
+            <img
+              src={session.pilotQrUrl(event, row.pilot)}
+              alt="QR code that signs {row.callsign} in"
+              width="240"
+              height="240"
+            />
+            <p class="sheet-code">{spellCode(row.code)}</p>
+            <p class="sheet-how">Scan it, or open {access.address} and type the code.</p>
+          </article>
+        {/each}
+      </section>
+    {/each}
+  </div>
+{/if}
+
 {#if resettingRow}
   <Dialog
     open={true}
@@ -300,6 +387,92 @@
   .big-code {
     font-size: var(--gf-font-size-xl);
     font-weight: var(--gf-font-weight-bold);
+  }
+  .print {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-1);
+  }
+
+  /* The sheet is off the screen: it is for the printer only. */
+  .sheet {
+    position: absolute;
+    left: -200vw;
+    top: 0;
+    width: 190mm;
+    color: #000;
+    background: #fff;
+  }
+  .sheet-page {
+    display: grid;
+    gap: 6mm;
+    padding: 4mm;
+    break-after: page;
+  }
+  .sheet-page:last-child {
+    break-after: auto;
+  }
+  .sheet[data-per-page='4'] .sheet-page {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .sheet[data-per-page='6'] .sheet-page {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .sheet-card {
+    display: grid;
+    justify-items: center;
+    gap: 2mm;
+    padding: 4mm;
+    border: 0.3mm dashed #888;
+    border-radius: 2mm;
+    text-align: center;
+    break-inside: avoid;
+  }
+  .sheet-card h2 {
+    margin: 0;
+    font-size: 16pt;
+    overflow-wrap: anywhere;
+  }
+  .sheet-card img {
+    width: 100%;
+    max-width: 62mm;
+    height: auto;
+    image-rendering: pixelated;
+  }
+  .sheet[data-per-page='6'] .sheet-card h2 {
+    font-size: 12pt;
+  }
+  .sheet-card p {
+    margin: 0;
+    max-width: none;
+  }
+  .sheet-code {
+    font-family: var(--gf-font-mono);
+    font-size: 14pt;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+  .sheet-how {
+    font-size: 8pt;
+    color: #333;
+  }
+  @media print {
+    /* Only the sheet goes to the printer, on plain white. */
+    :global(html),
+    :global(body) {
+      background: #fff !important;
+    }
+    :global(body *) {
+      visibility: hidden;
+    }
+    .sheet,
+    .sheet :global(*) {
+      visibility: visible;
+    }
+    .sheet {
+      left: 0;
+      width: 100%;
+    }
   }
   .visually-hidden {
     position: absolute;

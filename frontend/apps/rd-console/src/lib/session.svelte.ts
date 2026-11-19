@@ -71,6 +71,7 @@ import {
   getNetwork,
   putDoor,
   putAccessToken,
+  putPublicAddress,
   getKiosks,
   newKioskCode,
   cancelKioskCode,
@@ -258,6 +259,7 @@ const realApi = {
   getNetwork,
   putDoor,
   putAccessToken,
+  putPublicAddress,
   getKiosks,
   newKioskCode,
   cancelKioskCode,
@@ -709,6 +711,18 @@ export class Session {
   putAccessToken(typed?: string): Promise<NetworkView | undefined> {
     const request = typed === undefined ? {} : { token: typed };
     return this.#privilegedWrite((token) => this.#api.putAccessToken(this.baseUrl, request, token));
+  }
+
+  /**
+   * Set the public address every public link and QR code uses, or clear it with an empty
+   * one. `undefined` on a cancelled prompt.
+   */
+  putPublicAddress(address: string): Promise<NetworkView | undefined> {
+    const typed = address.trim();
+    const request = typed === '' ? {} : { address: typed };
+    return this.#privilegedWrite((token) =>
+      this.#api.putPublicAddress(this.baseUrl, request, token)
+    );
   }
 
   /** The kiosk codes waiting to be used, and the kiosks set up. */

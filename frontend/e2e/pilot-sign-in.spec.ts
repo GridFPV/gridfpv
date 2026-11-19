@@ -98,10 +98,12 @@ test('the director shows a code, a pilot signs in on one device at a time, and a
     // ── The director's side: no code on the screen until it is asked for ────────────────
     await page.goto(director.baseUrl);
     await expect(pagesNav(page)).toBeVisible({ timeout: 15_000 });
+    // The codes are not on the Details page. They have a page of their own.
     await openPage(page, 'Details', 'Friday Night Whoops');
-    const card = page.locator('section').filter({ hasText: 'Pilot sign-in' }).last();
+    await expect(page.getByRole('button', { name: 'Show codes' })).toHaveCount(0);
+    await openPage(page, 'Pilot codes');
     await expect(page.getByRole('table', { name: 'Pilot sign-in codes' })).toHaveCount(0);
-    await card.getByRole('button', { name: 'Show codes' }).click();
+    await page.getByRole('button', { name: 'Show codes' }).click();
     const codes = page.getByRole('table', { name: 'Pilot sign-in codes' });
     const row = (name: string) => codes.locator('tbody tr').filter({ hasText: name });
     await expect(row('Ace')).toBeVisible();

@@ -130,6 +130,7 @@ test('the switch moves between Setup and the event, and each side remembers its 
   await openPage(page, 'Results');
   await expect(pagesNav(page).getByRole('link')).toHaveText([
     'Details',
+    'Pilot codes',
     'Phases',
     'Run',
     'Marshal',
