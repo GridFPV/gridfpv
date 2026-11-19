@@ -508,7 +508,8 @@ call were put to him and are folded in above.
 
 ### 5.11 Start sounds (Wanted 2026-11-19, not designed, not built)
 
-Notes from a night of flying. See also issue #193 (the sounds panel).
+Notes from a night of flying. This also takes over from issue #193 (the sounds panel),
+which was closed in favour of this section.
 
 **Today.** The console plays three pips in the last three seconds and a long tone at the
 start. That is fixed in the code. The format holds a staging time and nothing else about
@@ -525,6 +526,11 @@ sound.
 - **A spoken start with a random wait.** A voice says "Arm your quads. On the tone in less
   than N." N is the longest wait of a random start between M and N seconds. Nothing sounds
   during the wait. One tone sounds on go.
+- **A sounds panel** (from #193), one place to set sound up:
+  - a test tone, to check the speakers before a race;
+  - volume and mute;
+  - the start tone's sound;
+  - lap callouts on or off, and what they say.
 
 **To decide before building.**
 
