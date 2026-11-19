@@ -949,7 +949,7 @@ describe('Add a round robin', () => {
     });
     expect(within(form).getByLabelText('Points by place')).toHaveValue('2, 1');
     expect(within(form).getByTestId('round-robin-count')).toHaveTextContent(
-      'This makes 3 rounds of 2 heats, 6 heats in all.'
+      'This makes 3 rounds of 2 heats, 6 heats in all. Pilots are mixed each round, and change seat as little as that allows.'
     );
     expectNoRawIds();
   });

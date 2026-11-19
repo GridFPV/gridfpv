@@ -593,10 +593,16 @@ each round, each holding that round's heats. Rules it keeps:
 
 - A round has as few heats as hold the field, the same size or one apart. Round 1 spreads
   the seeds across the heats.
-- **A pilot keeps one seat for the whole round robin**, so they never change video channel.
-  The price: the pilots who share a seat never meet.
-- The later rounds are mixed so that pairs of pilots meet as evenly as they can. The deal is
-  worked out from fixed numbers, so the same request always gives the same heats.
+- **Seats are always mixed** (Ryan, 2026-11-18; the first build kept a pilot on one seat
+  all day, which meant pilots who shared a seat never met). Any two pilots can meet. The
+  later rounds are mixed so that pairs of pilots meet as evenly as they can. Where the
+  numbers allow a perfect mix, the deal finds it: 16 pilots in heats of four over five
+  rounds meet each other exactly once.
+- **Then seats are chosen for the fewest seat changes**, because a change of seat is a
+  change of video channel. Even meetings always win over fewer changes. In practice a pilot
+  changes seat about one round in four.
+- The deal is worked out from fixed numbers, so the same request always gives the same
+  heats and seats.
 - It ranks by the format's points summed across every heat, then wins, then best lap. Each
   round has its own table too.
 - Lineups are named pilots, or places of another phase's ranking, so every heat is ready as

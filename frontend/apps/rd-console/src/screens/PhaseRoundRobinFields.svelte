@@ -4,8 +4,8 @@
    * many fly in each heat, how many rounds, the format, and the points for each place.
    *
    * Every pilot flies one heat in each round. The Director mixes the pilots between rounds
-   * so they meet different pilots, and keeps each pilot on the same seat all the way
-   * through. The round robin ranks by points added up over every heat.
+   * so they meet different pilots, and moves a pilot to another seat only when it has to,
+   * since a change of seat is a change of video channel. The round robin ranks by points added up over every heat.
    *
    * The points table starts at one point for last place in a full heat and one more for each
    * place above it (4, 3, 2, 1 for heats of four). The director can type another. It is put
@@ -163,8 +163,10 @@
   <p class="makes" data-testid="round-robin-count" role="status">
     This makes {roundCount}
     {roundCount === 1 ? 'round' : 'rounds'} of {heatsEach}
-    {heatsEach === 1 ? 'heat' : 'heats'}, {roundCount * heatsEach} heats in all. Each pilot keeps the
-    same seat in every round.
+    {heatsEach === 1 ? 'heat' : 'heats'}, {roundCount * heatsEach} heats in all.
+    {heatsEach === 1
+      ? 'Each pilot keeps the same seat in every round.'
+      : 'Pilots are mixed each round, and change seat as little as that allows.'}
   </p>
 {/if}
 
