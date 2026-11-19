@@ -1491,8 +1491,6 @@ timer. To decide: whether a profile holds only where OBS is (address and passwor
 what records, the scenes and where the files go. The password is never shown again once
 stored (§ security), so a profile can be switched to but not read back.
 
-### 12.3 The Run page's seat cards with many laps (Built 2026-11-19)
-
 ### 12.2.1 Marshal one seat at a time, and a recording for each seat
 
 **Built 2026-11-19: one seat at a time.** The Marshal page showed every seat of the race,
@@ -1514,7 +1512,7 @@ whichever seat is picked.
   set (with the OBS profile of §12.2, most likely), and what a race with some seats
   recorded and some not looks like.
 
-### 12.3 The Run page's seat cards with many laps (Agreed 2026-11-18, not built)
+### 12.3 The Run page's seat cards with many laps (Built 2026-11-19)
 
 A seat's card used to list every lap, so in a long open practice it grew without end.
 
@@ -1531,31 +1529,6 @@ A seat's card used to list every lap, so in a long open practice it grew without
   lap flown with nobody on it is shown as nobody's. It can be narrowed by seat and by pilot,
   and put fastest first.
 - **The Marshal page still shows every lap.** That is where laps are changed.
-
-
-### 12.6 The pass window is an event lap rule (Agreed 2026-11-19, built)
-
-Some tracks fly close by the gate just before going through it. The timer sees two
-crossings. OFT spec v0.6 gives the Timer a **pass window** (`pass_window_ms`, 0 to 10000,
-0 is off): crossings that start within the window are one pass, and the strongest is
-reported.
-
-- **It is set on the event, and only there.** `LapRules.pass_window_micros`, beside the
-  minimum lap. The Seats page does not show it. A track needs it or does not, and the
-  track belongs to the event.
-- **The timer applies it.** Grid writes the open event's value to every connected timer
-  that says it has one (`capabilities.config.pass_window_ms`), and reads it back. It does
-  so when the lap rules change, a heat goes on the timer, a race starts, another event is
-  opened, and a timer connects.
-- **Nothing else on the timer is touched.** The write sends back what was read, with the
-  window changed. A settings write from the Seats page carries the timer's window over,
-  because a write without it would switch it off.
-- **A timer that cannot is said, not hidden.** With a window on the event, the Run page
-  says a timer with none does not have it in force. A write that fails shows the reason.
-- **It does not change laps already recorded.** Unlike the minimum lap, it works before
-  Grid sees the crossings.
-- **Later, not built:** Grid merging close crossings itself, so the window holds on every
-  kind of timer and can be changed after the race.
 
 ### 12.4 Editing a phase (Built 2026-11-19)
 
@@ -1593,3 +1566,26 @@ an event is allowed, and the Director takes one. **The console no longer makes o
 **Why:** a lone heat has no class, so it counts toward nothing (§5.3); it carries its own
 format; and every page had to treat it as a special case.
 
+### 12.6 The pass window is an event lap rule (Agreed 2026-11-19, built)
+
+Some tracks fly close by the gate just before going through it. The timer sees two
+crossings. OFT spec v0.6 gives the Timer a **pass window** (`pass_window_ms`, 0 to 10000,
+0 is off): crossings that start within the window are one pass, and the strongest is
+reported.
+
+- **It is set on the event, and only there.** `LapRules.pass_window_micros`, beside the
+  minimum lap. The Seats page does not show it. A track needs it or does not, and the
+  track belongs to the event.
+- **The timer applies it.** Grid writes the open event's value to every connected timer
+  that says it has one (`capabilities.config.pass_window_ms`), and reads it back. It does
+  so when the lap rules change, a heat goes on the timer, a race starts, another event is
+  opened, and a timer connects.
+- **Nothing else on the timer is touched.** The write sends back what was read, with the
+  window changed. A settings write from the Seats page carries the timer's window over,
+  because a write without it would switch it off.
+- **A timer that cannot is said, not hidden.** With a window on the event, the Run page
+  says a timer with none does not have it in force. A write that fails shows the reason.
+- **It does not change laps already recorded.** Unlike the minimum lap, it works before
+  Grid sees the crossings.
+- **Later, not built:** Grid merging close crossings itself, so the window holds on every
+  kind of timer and can be changed after the race.
