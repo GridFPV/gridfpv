@@ -468,3 +468,12 @@ export function moveChoices(phase: PhaseView, phases: readonly PhaseView[]): Hol
   };
   return holderChoices(phases).filter((holder) => !beneath(holder.id) && !holder.locked);
 }
+
+/** Whether a phase can be removed: nothing beneath it, nothing raced, not locked. */
+export function phaseRemovable(view: EventView, phase: PhaseView): boolean {
+  return (
+    !phase.locked &&
+    !view.phases.some((other) => other.def.parent === phase.def.id) &&
+    racesOfHeat(view, phase.def.id).length === 0
+  );
+}

@@ -8,12 +8,15 @@
    * phase pilots sign up for, the sheet.
    */
   import { Badge, Banner, Button, Card } from '@gridfpv/components';
-  import type { PhaseId } from '@gridfpv/types';
+  import type { Command, PhaseId, ProtocolError } from '@gridfpv/types';
   import Page from '../Page.svelte';
-  import type { EventLive } from '../lib/eventLive.svelte.js';
+  import ConfirmButton from '../lib/ConfirmButton.svelte';
+  import ErrorBanner from '../lib/ErrorBanner.svelte';
+  import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
   import {
     isHeat,
     PHASE_STATUS_LABELS,
+    phaseRemovable,
     phaseStatus,
     phaseSummaries,
     type PhaseStatus
@@ -64,6 +67,25 @@
     heats === 0 ? 'No heats yet' : `${heats} ${heats === 1 ? 'heat' : 'heats'} · ${flown} flown`;
 
   /** The phase a heat is being added under. */
+  // ── The phase's own buttons: Edit, Sign-up, Lock, Remove ────────────────────
+  // They are about the whole phase, so they sit at the top of the page beside where it
+  // stands, not in the box of its heats.
+  let busy = $state(false);
+  let error = $state<ProtocolError | undefined>(undefined);
+  /** Send one fact. A refusal is shown in the Director's words. */
+  async function act(command: Command) {
+    if (busy) return;
+    busy = true;
+    error = undefined;
+    try {
+      await live.send(command);
+    } catch (e) {
+      error = toProtocolError(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   let addingUnder = $state<PhaseId | undefined>(undefined);
   /** Whether a phase is being added inside this one. */
   let addingPhase = $state(false);
@@ -118,10 +140,62 @@
       <a class="back" href={back}>← All phases</a>
     </Card>
   {:else}
-    <p class="where" data-testid="phase-where">
-      <Badge tone="neutral">{PHASE_STATUS_LABELS[phaseStatus(phase, view)]}</Badge>
-      {#if phase.format}<span class="muted">{phase.format.name}</span>{/if}
-    </p>
+    {@const own = phase}
+    {@const heat = isHeat(own.def)}
+    <div class="bar">
+      <p class="where" data-testid="phase-where">
+        <Badge tone="neutral">{PHASE_STATUS_LABELS[phaseStatus(own, view)]}</Badge>
+        {#if own.format}<span class="muted">{own.format.name}</span>{/if}
+      </p>
+      <span class="bar-actions" role="group" aria-label="{own.def.label}: what you can do">
+        {#if !own.locked}
+          <Button
+            size="sm"
+            variant="secondary"
+            aria-label="Edit {own.def.label}"
+            onclick={() => (editing = own.def.id)}>Edit</Button
+          >
+        {/if}
+        {#if !heat && !own.locked && !own.signup}
+          <Button
+            size="sm"
+            variant="secondary"
+            title="Let pilots put themselves into heats of this phase"
+            aria-label="Set up pilot sign-up for {own.def.label}"
+            onclick={() => (rulesFor = own.def.id)}>Sign-up</Button
+          >
+        {/if}
+        {#if own.locked_here}
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={busy}
+            aria-label="Unlock {own.def.label}"
+            onclick={() => act({ Record: { PhaseUnlocked: { phase: own.def.id } } })}>Unlock</Button
+          >
+        {:else if !own.locked}
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={busy}
+            title="Make the results official. Rulings are refused until it is unlocked."
+            aria-label="Lock {own.def.label}"
+            onclick={() => act({ Record: { PhaseLocked: { phase: own.def.id } } })}>Lock</Button
+          >
+        {/if}
+        {#if phaseRemovable(view, own)}
+          <ConfirmButton
+            size="sm"
+            variant="danger"
+            disabled={busy}
+            title="Remove {own.def.label}"
+            onconfirm={() => act({ Record: { PhaseRemoved: { phase: own.def.id } } })}
+            >Remove</ConfirmButton
+          >
+        {/if}
+      </span>
+    </div>
+    <ErrorBanner {error} ondismiss={() => (error = undefined)} />
     {#if sheet}
       <SignupSheet
         phase={sheet}
@@ -166,6 +240,7 @@
           {live}
           {onrun}
           root={phaseId}
+          subject={phaseId}
           onedit={(target) => (editing = target)}
         />
       {:else}
@@ -175,6 +250,7 @@
           {live}
           {onrun}
           heatsOf={phaseId}
+          subject={phaseId}
           onaddheat={(under) => (addingUnder = under)}
           onedit={(target) => (editing = target)}
           onsignup={(target) => (rulesFor = target)}
@@ -256,6 +332,18 @@
   }
   .open {
     color: var(--gf-text-muted);
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gf-space-3);
+    flex-wrap: wrap;
+  }
+  .bar-actions {
+    display: flex;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
   }
   .where {
     display: flex;

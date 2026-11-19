@@ -1581,6 +1581,42 @@ describe("a phase's own page", () => {
     expect(await screen.findByTestId('no-such-phase')).toBeVisible();
   });
 
+  it("puts the phase's own buttons at the top of the page, not in the box of its heats", async () => {
+    await openPhase(view(), 'quali');
+    const bar = screen.getByRole('group', { name: 'Qualifying: what you can do' });
+    for (const name of [
+      'Edit Qualifying',
+      'Set up pilot sign-up for Qualifying',
+      'Lock Qualifying'
+    ]) {
+      const button = screen.getByRole('button', { name });
+      expect(bar).toContainElement(button);
+      // One of each: not again beside the heats.
+      expect(screen.getAllByRole('button', { name })).toHaveLength(1);
+    }
+    // The bar is beside where the phase stands, above every card.
+    expect(bar.parentElement).toContainElement(screen.getByTestId('phase-where'));
+    expect(bar.closest('.gf-card, section, article')).toBeNull();
+    // "+ Heat" is about the heats, so it stays with them.
+    const addHeat = screen.getByRole('button', { name: 'Add a heat under Qualifying' });
+    expect(bar).not.toContainElement(addHeat);
+    // A heat's row keeps its own buttons.
+    const heats = screen.getByRole('list', { name: 'Heats of Qualifying' });
+    expect(within(heats).getAllByRole('button', { name: /^Edit / }).length).toBeGreaterThan(0);
+    expect(within(heats).getAllByRole('button', { name: /^Lock / }).length).toBeGreaterThan(0);
+  });
+
+  it("a heat's own page has its Edit and Lock at the top too, and Run with the heat", async () => {
+    const start = view();
+    const heatId = start.phases.find((p) => p.def.parent === 'quali')!.def.id;
+    const label = start.phases.find((p) => p.def.id === heatId)!.def.label;
+    await openPhase(start, heatId);
+    const bar = screen.getByRole('group', { name: `${label}: what you can do` });
+    expect(screen.getAllByRole('button', { name: `Edit ${label}` })).toHaveLength(1);
+    expect(bar).toContainElement(screen.getByRole('button', { name: `Edit ${label}` }));
+    expect(bar).toContainElement(screen.getByRole('button', { name: `Lock ${label}` }));
+  });
+
   it('shows only the proposals about this phase', async () => {
     const withProposal = view();
     withProposal.proposed_disqualifications = [

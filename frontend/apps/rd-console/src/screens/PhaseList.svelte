@@ -40,6 +40,7 @@
     isHeat,
     PHASE_STATUS_LABELS,
     phaseStatus,
+    phaseRemovable,
     phaseTree,
     racesOfHeat,
     type PhaseStatus
@@ -55,7 +56,8 @@
     onsignup = undefined,
     root = undefined,
     heatsOf = undefined,
-    topHeats = false
+    topHeats = false,
+    subject = undefined
   }: {
     /**
      * Show one phase's own heats and nothing deeper. The phase itself is not a row: its
@@ -67,6 +69,11 @@
     root?: PhaseId | undefined;
     /** Show only the heats that stand alone at the top of the event, under no phase. */
     topHeats?: boolean;
+    /**
+     * The phase the page is about. Its Edit, Sign-up, Lock, Unlock and Remove are left out
+     * here, because the page shows them at the top.
+     */
+    subject?: PhaseId | undefined;
     view: EventView;
     names: Names;
     /** The live event, to send rulings through. */
@@ -81,11 +88,12 @@
     onsignup?: ((phase: PhaseId) => void) | undefined;
   } = $props();
 
-  /** Whether a phase can be removed: nothing beneath it, nothing raced, not locked. */
-  const removable = (phase: PhaseView): boolean =>
-    !phase.locked &&
-    !view.phases.some((other) => other.def.parent === phase.def.id) &&
-    racesOfHeat(view, phase.def.id).length === 0;
+  const removable = (phase: PhaseView): boolean => phaseRemovable(view, phase);
+  /**
+   * Whether this row's own buttons (Edit, Sign-up, Lock, Unlock, Remove) are drawn here.
+   * Not for the page's subject: its page draws them at the top, outside this box.
+   */
+  const ownsButtons = (phase: PhaseView): boolean => phase.def.id !== subject;
 
   const rows = $derived(
     topHeats
@@ -181,7 +189,7 @@
       onclick={() => onaddheat(phase.def.id)}>+ Heat</Button
     >
   {/if}
-  {#if !heat && onsignup && !phase.locked && !phase.signup}
+  {#if !heat && onsignup && !phase.locked && !phase.signup && ownsButtons(phase)}
     <Button
       size="sm"
       variant="ghost"
@@ -190,7 +198,7 @@
       onclick={() => onsignup(phase.def.id)}>Sign-up</Button
     >
   {/if}
-  {#if onedit && !phase.locked}
+  {#if onedit && !phase.locked && ownsButtons(phase)}
     <Button
       size="sm"
       variant="ghost"
@@ -198,7 +206,7 @@
       onclick={() => onedit(phase.def.id)}>Edit</Button
     >
   {/if}
-  {#if removable(phase)}
+  {#if removable(phase) && ownsButtons(phase)}
     <ConfirmButton
       size="sm"
       variant="danger"
@@ -208,7 +216,18 @@
       >Remove</ConfirmButton
     >
   {/if}
-  {#if phase.locked_here}
+  {#if !ownsButtons(phase)}
+    {#if heat && !phase.locked && phase.director_done}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        aria-label="Reopen {phase.def.label}"
+        onclick={() => act({ Record: { HeatReopened: { heat: phase.def.id } } })}
+        >Reopen heat</Button
+      >
+    {/if}
+  {:else if phase.locked_here}
     <Button
       size="sm"
       variant="ghost"
@@ -357,9 +376,11 @@
 
 {#if own}
   <div class="own">
-    <span class="action own-actions" role="group" aria-label="{own.def.label}: what you can do">
-      {@render buttons(own, phaseStatus(own, view), false)}
-    </span>
+    {#if ownsButtons(own) || (onaddheat && !own.locked)}
+      <span class="action own-actions" role="group" aria-label="{own.def.label}: heats">
+        {@render buttons(own, phaseStatus(own, view), false)}
+      </span>
+    {/if}
     {@render ranking(own, false)}
   </div>
   {#if rows.length === 0}
