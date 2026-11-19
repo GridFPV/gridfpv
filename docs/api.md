@@ -215,7 +215,7 @@ Director on a machine with no screen, open an SSH tunnel to it
 | `GET /classes/builtins`, `POST /classes/builtins` | `GET` answers `{removed}`: how many of the classes that come with Grid have been removed. `POST` puts them all back, as shipped, and answers the class list. A class that came with Grid (`builtin: true`) is edited and removed like any other |
 | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | The timer list, each with its live status |
 | `GET /timers/discovered` | OFT timers found on the network, each marked if it is already added (by its own id, or by its address) |
-| `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer: seats, frequencies, thresholds, the exit hold and the lap cooldown. A write that leaves the lap cooldown out keeps the timer's. A timer that can keep its settings across a restart (`keeps_settings` in its status) is asked to keep them after every write |
+| `GET /timers/{id}/config`, `PUT /timers/{id}/config` | A timer's settings, read from and written to the timer: seats, frequencies, thresholds, the exit hold and the lap cooldown. The pass window is not here: it is the event's lap rule, and a write keeps the one the timer has. A write that leaves the lap cooldown out keeps the timer's. A timer that can keep its settings across a restart (`keeps_settings` in its status) is asked to keep them after every write |
 | `GET /timers/{id}/live` | Live signal and levels for tuning (server-sent events) |
 | `GET /timers/{id}/profiles`, `POST /timers/{id}/profiles` | A timer's saved seat profiles and which one is active; save settings as a new one |
 | `PUT /timers/{id}/profiles/{pid}`, `DELETE /timers/{id}/profiles/{pid}` | Rename a profile or replace its settings; remove one. Neither writes to the timer |
@@ -343,7 +343,10 @@ event's log. The video setup, the log files and the recordings are not in it.
 - `lap_rules`: the event's minimum lap, and how long after the start crossings are
   ignored. Set with the fact `LapRulesSet`. They hold for every race of the event, flown or
   still to fly. A format may carry a minimum lap of its own, which then wins for the heats
-  under it.
+  under it. `pass_window_micros` is the pass window (10 seconds at most). The timer applies
+  it: the Director writes it to each connected timer that has one (`pass_window` in the
+  timer's status) and notes what the timer then has (`pass_window_ms`) or why it could not
+  be set (`pass_window_problem`).
 - `rosters`: each class in the event, its pilots, the phases that count toward its
   standings, and the standings from 1 to n.
 - `phases`: every phase with its format, its field, a heat's lineup, its ranking, and

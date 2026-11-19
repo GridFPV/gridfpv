@@ -371,6 +371,8 @@ async fn set_active_event(
     let meta = registry
         .set_active(&body.id)
         .map_err(registry_error_to_protocol)?;
+    // The pass window is the event's: another event may set another one.
+    crate::timers::spawn_pass_window_sync(&registry);
     Ok(Json(meta))
 }
 

@@ -240,6 +240,9 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
         clock_error_micros: _,
         seat_thresholds: _,
         keeps_settings: _,
+        pass_window: _,
+        pass_window_ms: _,
+        pass_window_problem: _,
     } = status;
     TimerView {
         timer: Timer {
@@ -257,6 +260,9 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
             clock_error_micros: None,
             seat_thresholds: false,
             keeps_settings: false,
+            pass_window: false,
+            pass_window_ms: None,
+            pass_window_problem: None,
         },
     }
 }

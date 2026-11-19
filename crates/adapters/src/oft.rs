@@ -109,6 +109,13 @@ pub struct OftConfig {
     /// so what was read is always sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_hold_ms: Option<u32>,
+    /// The pass window, in milliseconds (protocol v0.6, capability
+    /// `config.pass_window_ms`): crossings that start within this long of the first are one
+    /// pass, and the Timer reports only the strongest. `0` is off. Absent on a Timer that
+    /// does not have the setting. A `PUT` without it switches the window off, so what was
+    /// read is always sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_window_ms: Option<u32>,
 }
 
 /// The capabilities Grid reads from a Timer's `hello` (spec §6.2). An absent key means the
@@ -128,6 +135,9 @@ pub struct OftConfigCapability {
     /// Whether `/config/save` works: the Timer can keep its settings across a restart.
     #[serde(default)]
     pub persist: bool,
+    /// Whether the Timer has a pass window (spec v0.6).
+    #[serde(default)]
+    pub pass_window_ms: bool,
 }
 
 /// One message from a Timer's WebSocket. Fields Grid does not use are left out; unknown

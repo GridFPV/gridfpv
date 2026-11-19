@@ -56,6 +56,7 @@
   } from '../lib/phases.js';
   import { formatHash } from '../lib/route.js';
   import { isBench } from '../lib/seats.js';
+  import { passWindowTrouble } from '../lib/timers.js';
   import {
     DISCARD_ARM_MS,
     RUN_KEYS,
@@ -218,7 +219,14 @@
           detail: 'Its seats cannot be timed. Add the heat again on a timer that is in the list.'
         };
       }
-      if (found.status.connected) return { adapter, name };
+      if (found.status.connected) {
+        // Connected: the one thing left to say is that the event's pass window is not on it.
+        return {
+          adapter,
+          name,
+          ...passWindowTrouble(name, found.status, live.view?.lap_rules.pass_window_micros)
+        };
+      }
       return {
         adapter,
         name,

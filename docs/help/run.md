@@ -116,4 +116,5 @@ The line above the buttons says why. The heat may be waiting on another heat, co
 locked. Or another heat has a race that is not saved or discarded yet, and a button takes
 you to it.
 
-A banner at the top says so if the heat's timer is not connected.
+A banner at the top says so if the heat's timer is not connected. It also says so if the
+event has a pass window and the timer cannot use it.

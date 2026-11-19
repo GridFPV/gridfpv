@@ -26,6 +26,13 @@ races already flown. Each one saves when you leave its field.
   Leave it empty for no minimum.
 - **Ignore crossings before**: passes in the first seconds after the start are not counted.
   This is for a take-off right under the gate. Passes before the start never count.
+- **Pass window**: for a track that flies close by the gate just before going through it.
+  The timer can see that as two passes. With a pass window, passes this close together
+  are one pass, and the strongest one counts. Try 0.5 seconds. It can be 10 seconds at
+  most. Leave it empty for off.
+
+The timer does the pass window, so the timer needs to have one. Grid sets it on the timer
+for you. If the timer has no pass window, the [Run](#/help/run) page says so.
 
 A good minimum lap time is a little shorter than the fastest lap anyone could fly on the
 track.

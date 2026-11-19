@@ -127,6 +127,21 @@ pub struct TimerStatus {
     #[serde(default)]
     #[ts(as = "Option<bool>", optional)]
     pub keeps_settings: bool,
+    /// Whether the timer has a pass window: it can take several crossings close together
+    /// as one pass. The event's lap rules set it (`docs/primitives.md` §12.6).
+    #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
+    pub pass_window: bool,
+    /// The pass window the timer has, in milliseconds, as Grid last read it back. `0` is
+    /// off. Absent until Grid has read it, or on a timer with no pass window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pass_window_ms: Option<u32>,
+    /// Why the event's pass window could not be put on the timer, in words. Absent when it
+    /// was, or when nothing has been tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pass_window_problem: Option<String>,
 }
 
 /// A timer with its status (`GET /timers`).
@@ -258,6 +273,9 @@ impl TimerConfig {
             threshold: self.threshold.into(),
             min_lap_ms: self.lap_cooldown_ms.unwrap_or(now.min_lap_ms),
             exit_hold_ms: self.exit_hold_ms,
+            // The pass window is the event's to set, not this page's: what the Timer has
+            // is carried over. Left out, the Timer would switch it off.
+            pass_window_ms: now.pass_window_ms,
         })
     }
 }
@@ -1012,6 +1030,74 @@ pub async fn apply_config(
     Ok(written)
 }
 
+/// Put the event's pass window on every timer that can take one, and note on each what it
+/// then has (`docs/primitives.md` §12.6).
+///
+/// `window_ms` is the open event's lap rule, `0` for off. Each connected OFT timer that
+/// has a pass window is read; where it differs it is written and read back, as every
+/// write to a timer is. A timer that cannot be reached, or does not take the write, gets
+/// the reason on its status, where the Run page shows it. A timer with no pass window is
+/// left alone: its status already says it has none.
+///
+/// The Timer's other settings are never touched: the write sends back exactly what was
+/// read, with the window changed.
+pub async fn sync_pass_window(registry: &EventRegistry, window_ms: u32) {
+    for view in registry.timers().list() {
+        let TimerView { timer, status } = view;
+        if timer.kind != TimerKind::Oft || !status.connected || !status.pass_window {
+            continue;
+        }
+        let outcome = async {
+            let now = read_config(&timer).await?;
+            if now.pass_window_ms == Some(window_ms) {
+                return Ok(window_ms);
+            }
+            let wanted = OftConfig {
+                pass_window_ms: Some(window_ms),
+                ..now
+            };
+            let written = write_config(&timer, &wanted).await?;
+            Ok::<u32, TimerError>(written.pass_window_ms.unwrap_or(0))
+        }
+        .await;
+        registry
+            .timers()
+            .report(&timer.id, |status| match &outcome {
+                Ok(has) => {
+                    status.pass_window_ms = Some(*has);
+                    status.pass_window_problem = None;
+                }
+                Err(err) => {
+                    status.pass_window_problem = Some(ProtocolError::from(err.clone()).message);
+                }
+            });
+    }
+}
+
+/// The open event's pass window, in milliseconds: `0` when it sets none, or no event is open.
+pub fn open_events_pass_window(registry: &EventRegistry) -> u32 {
+    let Some(event) = registry.active() else {
+        return 0;
+    };
+    crate::control::with_event(registry, &event.id, |session| {
+        Ok(session.state().lap_rules.pass_window_micros)
+    })
+    .ok()
+    .flatten()
+    .map_or(0, |micros| u32::try_from(micros / 1000).unwrap_or(0))
+}
+
+/// Bring the timers into step with the open event's pass window, in the background. Called
+/// whenever either side may have changed: the lap rules were set, a heat went on the timer,
+/// a race was started, another event was opened, or a timer connected.
+pub fn spawn_pass_window_sync(registry: &EventRegistry) {
+    let registry = registry.clone();
+    tokio::spawn(async move {
+        let window_ms = open_events_pass_window(&registry);
+        sync_pass_window(&registry, window_ms).await;
+    });
+}
+
 /// `GET /timers/{timer_id}/live` — server-sent events for tuning. Open read.
 ///
 /// Sends `signal` events (a [`SignalChunk`] each) and `levels` events (a list of
@@ -1430,6 +1516,192 @@ mod tests {
             .timers()
             .report(&timer.id, |status| status.keeps_settings = can_keep);
         (registry, format!("/timers/{}/config", timer.id.0), asked)
+    }
+
+    /// A fake OFT timer that has a pass window. Gives its `host:port`, what it holds, and
+    /// how many times it was written to. `takes` says whether a write lands.
+    async fn fake_window_timer(
+        window_ms: u32,
+        takes: bool,
+    ) -> (
+        String,
+        Arc<Mutex<serde_json::Value>>,
+        Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let stored = Arc::new(Mutex::new(serde_json::json!({
+            "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true,
+                       "threshold": {"mode": "manual", "enter": -700, "exit": -760}}],
+            "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
+            "min_lap_ms": 2000,
+            "exit_hold_ms": 80,
+            "pass_window_ms": window_ms,
+        })));
+        let writes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let read = {
+            let stored = stored.clone();
+            move || {
+                let stored = stored.clone();
+                async move { Json(stored.lock().unwrap().clone()) }
+            }
+        };
+        let write = {
+            let stored = stored.clone();
+            let writes = writes.clone();
+            move |Json(body): Json<serde_json::Value>| {
+                let stored = stored.clone();
+                let writes = writes.clone();
+                async move {
+                    writes.fetch_add(1, Ordering::SeqCst);
+                    if takes {
+                        *stored.lock().unwrap() = body.clone();
+                    }
+                    Json(body)
+                }
+            }
+        };
+        let app = axum::Router::new().route("/oft/v1/config", axum::routing::get(read).put(write));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr.to_string(), stored, writes)
+    }
+
+    /// A registry with one connected timer at `address` that says it has a pass window.
+    fn with_window_timer(address: &str, has_window: bool) -> (EventRegistry, AdapterId) {
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry.timers().create(&request("Gate", address)).unwrap();
+        registry.timers().report(&timer.id, |status| {
+            status.connected = true;
+            status.pass_window = has_window;
+            status.seat_thresholds = true;
+        });
+        (registry, timer.id)
+    }
+
+    fn status_of(registry: &EventRegistry, timer: &AdapterId) -> TimerStatus {
+        registry
+            .timers()
+            .list()
+            .into_iter()
+            .find(|view| &view.timer.id == timer)
+            .unwrap()
+            .status
+    }
+
+    #[tokio::test]
+    async fn the_events_pass_window_is_put_on_the_timer_and_nothing_else_is_touched() {
+        use std::sync::atomic::Ordering;
+        let (address, stored, writes) = fake_window_timer(0, true).await;
+        let (registry, timer) = with_window_timer(&address, true);
+        let before = stored.lock().unwrap().clone();
+
+        sync_pass_window(&registry, 400).await;
+        let after = stored.lock().unwrap().clone();
+        assert_eq!(after["pass_window_ms"], 400);
+        // Every other setting is exactly as it was: the seat's own levels, the exit hold.
+        let mut expected = before.clone();
+        expected["pass_window_ms"] = serde_json::json!(400);
+        assert_eq!(after, expected);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_ms, Some(400));
+        assert_eq!(status.pass_window_problem, None);
+
+        // Already in step: it is read, and not written again.
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        // Off is a value like any other.
+        sync_pass_window(&registry, 0).await;
+        assert_eq!(stored.lock().unwrap()["pass_window_ms"], 0);
+        assert_eq!(status_of(&registry, &timer).pass_window_ms, Some(0));
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timer_that_does_not_take_the_window_says_so_and_keeps_what_it_had() {
+        let (address, stored, _) = fake_window_timer(0, false).await;
+        let (registry, timer) = with_window_timer(&address, true);
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(stored.lock().unwrap()["pass_window_ms"], 0);
+        let status = status_of(&registry, &timer);
+        assert!(status.pass_window_problem.is_some(), "{status:?}");
+        assert_eq!(status.pass_window_ms, None, "what it has was not confirmed");
+        // The next time it is in step, the problem is gone.
+        sync_pass_window(&registry, 0).await;
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_problem, None);
+        assert_eq!(status.pass_window_ms, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_timer_with_no_pass_window_or_not_connected_is_left_alone() {
+        use std::sync::atomic::Ordering;
+        let (address, stored, writes) = fake_window_timer(0, true).await;
+        // It does not say it has one.
+        let (registry, timer) = with_window_timer(&address, false);
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert_eq!(stored.lock().unwrap()["pass_window_ms"], 0);
+        assert_eq!(status_of(&registry, &timer).pass_window_ms, None);
+        // It has one, and is not connected.
+        registry.timers().report(&timer, |status| {
+            status.pass_window = true;
+            status.connected = false;
+        });
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        // A timer that cannot be reached at all gets the reason, and nothing hangs.
+        let (gone, lost) = with_window_timer("127.0.0.1:9", true);
+        sync_pass_window(&gone, 400).await;
+        assert!(status_of(&gone, &lost).pass_window_problem.is_some());
+    }
+
+    #[tokio::test]
+    async fn applying_seat_settings_keeps_the_pass_window_the_timer_has() {
+        // The Seats page does not know the pass window: it is the event's. A settings write
+        // from it must carry over what the timer has, or the timer would switch it off.
+        let (address, stored, _) = fake_window_timer(400, true).await;
+        let (registry, timer) = with_window_timer(&address, true);
+        let uri = format!("/timers/{}/config", timer.0);
+        let (status, written) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        let now = stored.lock().unwrap().clone();
+        assert_eq!(now["pass_window_ms"], 400);
+        assert_eq!(now["seats"][0]["freq_mhz"], 5658);
+        // And it is not one of the settings the Seats page is told or can send.
+        assert!(written.get("pass_window_ms").is_none(), "{written}");
+    }
+
+    #[tokio::test]
+    async fn the_open_events_pass_window_is_read_in_milliseconds_and_is_zero_with_none() {
+        use crate::events::CreateEventRequest;
+        let registry = EventRegistry::new(None).unwrap();
+        assert_eq!(open_events_pass_window(&registry), 0, "no event is open");
+        let event = registry
+            .create(&CreateEventRequest::named("Night"))
+            .unwrap();
+        registry.set_active(&event.id).unwrap();
+        assert_eq!(open_events_pass_window(&registry), 0, "it sets none");
+        crate::control::with_event(&registry, &event.id, |session| {
+            session.commands(vec![gridfpv_events::Command::Record(Box::new(
+                gridfpv_events::Event::LapRulesSet {
+                    rules: gridfpv_events::LapRules {
+                        min_lap_micros: None,
+                        ignore_before_micros: None,
+                        pass_window_micros: Some(1_500_000),
+                    },
+                },
+            ))])
+        })
+        .unwrap();
+        assert_eq!(open_events_pass_window(&registry), 1500);
+        // Another event that is not open does not count.
+        let other = registry
+            .create(&CreateEventRequest::named("Other"))
+            .unwrap();
+        registry.set_active(&other.id).unwrap();
+        assert_eq!(open_events_pass_window(&registry), 0);
     }
 
     #[tokio::test]

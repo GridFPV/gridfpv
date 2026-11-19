@@ -475,7 +475,17 @@ pub struct LapRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub ignore_before_micros: Option<i64>,
+    /// The pass window, in microseconds: crossings on a seat that start within this long of
+    /// the first one are one pass, and only the strongest counts. For a track that flies
+    /// close by the gate just before going through it. The timer applies it, so it holds
+    /// only on a timer that can (`docs/primitives.md` §12.6). `None` is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub pass_window_micros: Option<i64>,
 }
+
+/// The longest pass window a lap rule may set, in microseconds: ten seconds.
+pub const PASS_WINDOW_MAX_MICROS: i64 = 10_000_000;
 
 /// What starts a pilot's first lap in a race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, TS)]

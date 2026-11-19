@@ -73,6 +73,8 @@ pub enum Refusal {
     HasRaces(PhaseId),
     #[error("a phase cannot be its own parent, or sit beneath itself")]
     ParentLoop,
+    #[error("the pass window can be 10 seconds at most")]
+    PassWindowTooLong,
     #[error("that crossing is not part of race {0:?}")]
     NotACrossing(RaceId),
     #[error("that seat is not in the lineup of race {0:?}")]
@@ -1050,8 +1052,16 @@ impl EventState {
             Event::RosterSet { .. } | Event::RosterRemoved { .. } => Ok(()),
             Event::LapRulesSet { rules } => {
                 let negative = |value: Option<i64>| value.is_some_and(|micros| micros < 0);
-                if negative(rules.min_lap_micros) || negative(rules.ignore_before_micros) {
+                if negative(rules.min_lap_micros)
+                    || negative(rules.ignore_before_micros)
+                    || negative(rules.pass_window_micros)
+                {
                     Err(Refusal::NegativeLapRule)
+                } else if rules
+                    .pass_window_micros
+                    .is_some_and(|micros| micros > gridfpv_events::PASS_WINDOW_MAX_MICROS)
+                {
+                    Err(Refusal::PassWindowTooLong)
                 } else {
                     Ok(())
                 }
@@ -2079,6 +2089,7 @@ mod tests {
                 rules: LapRules {
                     min_lap_micros: Some(5 * S),
                     ignore_before_micros: Some(2 * S),
+                    pass_window_micros: Some(S),
                 },
             })
             .unwrap();
@@ -2090,10 +2101,29 @@ mod tests {
                 rules: LapRules {
                     min_lap_micros: Some(-1),
                     ignore_before_micros: None,
+                    pass_window_micros: None,
                 },
             }),
             Err(Refusal::NegativeLapRule)
         );
+        // So is a negative pass window, and one longer than a timer can be given.
+        let window = |micros: i64| Event::LapRulesSet {
+            rules: LapRules {
+                min_lap_micros: Some(5 * S),
+                ignore_before_micros: Some(2 * S),
+                pass_window_micros: Some(micros),
+            },
+        };
+        assert_eq!(director.record(window(-1)), Err(Refusal::NegativeLapRule));
+        assert_eq!(
+            director.record(window(10 * S + 1)),
+            Err(Refusal::PassWindowTooLong)
+        );
+        // The pass window is the timer's to apply: it changes no lap Grid has.
+        let before = times(&director);
+        director.record(window(10 * S)).unwrap();
+        assert_eq!(director.state.lap_rules.pass_window_micros, Some(10 * S));
+        assert_eq!(times(&director), before);
 
         // A format that carries its own minimum lap keeps it.
         let mut own = format(EndCondition::Open, 0);
