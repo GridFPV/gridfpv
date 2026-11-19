@@ -4,7 +4,7 @@
  * in the Director's words, the keyboard, the lap callouts, and no raw id on the screen.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { EventMeta, EventView, ObsStatus, Pilot, VideoRun } from '@gridfpv/types';
 import RunPage from '../src/screens/RunPage.svelte';
@@ -1084,6 +1084,44 @@ describe('RunPage: what times the heat', () => {
     expect(screen.queryByText('Bench')).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
     expect(document.body.textContent).not.toContain(GATE_ID);
+  });
+
+  it('says so when the event has a pass window and the timer has none', async () => {
+    await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {
+      listTimers: vi.fn(async () => [timerView(GATE_ID, 'Gate', 4)])
+    });
+    const warning = screen.getByRole('alert');
+    expect(warning).toHaveTextContent('Gate has no pass window.');
+    expect(warning).toHaveTextContent("The event's pass window of 0.4 s is not in force on it");
+    expect(document.body.textContent).not.toContain(GATE_ID);
+  });
+
+  it('says nothing of the pass window when the timer has one, or the event sets none', async () => {
+    // The timer has a pass window and took the event's.
+    await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { pass_window: true, pass_window_ms: 400 })
+      ])
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    cleanup();
+    // The event sets none: a timer with no pass window is missing nothing.
+    await open(eventView({ phases: [onGate()] }), {
+      listTimers: vi.fn(async () => [timerView(GATE_ID, 'Gate', 4)])
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("says why, in the Director's words, when the pass window could not be put on the timer", async () => {
+    const SAID = 'Gate refused the change: pass_window_ms out of range.';
+    await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { pass_window: true, pass_window_problem: SAID })
+      ])
+    });
+    const warning = screen.getByRole('alert');
+    expect(warning).toHaveTextContent('The pass window could not be set on Gate.');
+    expect(warning).toHaveTextContent(SAID);
   });
 
   it("warns in the Director's words when the heat's timer is not connected", async () => {

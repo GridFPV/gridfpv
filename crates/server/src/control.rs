@@ -285,10 +285,21 @@ pub async fn post_command(
     Path(event_id): Path<EventId>,
     Json(command): Json<Command>,
 ) -> Result<Json<CommandOutcome>, ProtocolError> {
-    with_event(&registry, &event_id, |session| {
+    // The event's pass window is the timer's to apply. Whenever it may have changed, or a
+    // race is about to be flown, the timers are brought into step with it.
+    let syncs = match &command {
+        Command::Record(fact) => matches!(**fact, Event::LapRulesSet { .. }),
+        Command::PutOnTimer { .. } | Command::StartRace { .. } => true,
+        _ => false,
+    };
+    let outcome = with_event(&registry, &event_id, |session| {
         session.commands(vec![command])?;
         Ok(Json(session.outcome()))
-    })
+    })?;
+    if syncs && registry.active().is_some_and(|open| open.id == event_id) {
+        crate::timers::spawn_pass_window_sync(&registry);
+    }
+    Ok(outcome)
 }
 
 /// A seat every heat of a generated bracket is flown on.

@@ -1444,3 +1444,27 @@ done with the pass over the event's pages.
   sorted by time.
 - **The Marshal page still shows every lap.** That is where laps are changed.
 
+
+### 12.6 The pass window is an event lap rule (Agreed 2026-11-19, built)
+
+Some tracks fly close by the gate just before going through it. The timer sees two
+crossings. OFT spec v0.6 gives the Timer a **pass window** (`pass_window_ms`, 0 to 10000,
+0 is off): crossings that start within the window are one pass, and the strongest is
+reported.
+
+- **It is set on the event, and only there.** `LapRules.pass_window_micros`, beside the
+  minimum lap. The Seats page does not show it. A track needs it or does not, and the
+  track belongs to the event.
+- **The timer applies it.** Grid writes the open event's value to every connected timer
+  that says it has one (`capabilities.config.pass_window_ms`), and reads it back. It does
+  so when the lap rules change, a heat goes on the timer, a race starts, another event is
+  opened, and a timer connects.
+- **Nothing else on the timer is touched.** The write sends back what was read, with the
+  window changed. A settings write from the Seats page carries the timer's window over,
+  because a write without it would switch it off.
+- **A timer that cannot is said, not hidden.** With a window on the event, the Run page
+  says a timer with none does not have it in force. A write that fails shows the reason.
+- **It does not change laps already recorded.** Unlike the minimum lap, it works before
+  Grid sees the crossings.
+- **Later, not built:** Grid merging close crossings itself, so the window holds on every
+  kind of timer and can be changed after the race.

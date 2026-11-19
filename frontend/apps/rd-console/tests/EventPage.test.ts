@@ -4,7 +4,7 @@
  * with their rosters and standings. Rendered against a stand-in live store.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { Class, Command, EventMeta, EventView, Pilot } from '@gridfpv/types';
 import EventPage from '../src/screens/EventPage.svelte';
@@ -254,6 +254,77 @@ describe('Lap rules', () => {
     // What is shown afterwards is what the Director has.
     expect(ignore()).toHaveValue(1.5);
     expect(minLap()).toHaveValue(2);
+  });
+
+  const passWindow = () => screen.getByLabelText('Pass window, in seconds') as HTMLInputElement;
+
+  it('shows the pass window beside the other two, empty when the event sets none', async () => {
+    await open(eventView({ lap_rules: { pass_window_micros: 400_000 } }));
+    expect(passWindow()).toHaveValue(0.4);
+    expect(minLap()).toHaveValue(null);
+    cleanup();
+    await open(eventView({ lap_rules: { min_lap_micros: 2_000_000 } }));
+    expect(passWindow()).toHaveValue(null);
+  });
+
+  it('sends the pass window with the other rules, and leaves them as they were', async () => {
+    const { first, over } = following({ min_lap_micros: 2_000_000 });
+    const { liveSession } = await open(first, over);
+    await fireEvent.input(passWindow(), { target: { value: '0.4' } });
+    await fireEvent.blur(passWindow());
+    await waitFor(() =>
+      expect(sent(liveSession)).toEqual([
+        {
+          Record: {
+            LapRulesSet: { rules: { min_lap_micros: 2_000_000, pass_window_micros: 400_000 } }
+          }
+        }
+      ])
+    );
+    await waitFor(() => expect(passWindow()).toHaveValue(0.4));
+    await waitFor(() => expect(state()).toHaveTextContent('Saved.'));
+    // Changing another rule afterwards keeps the window.
+    await fireEvent.input(minLap(), { target: { value: '3' } });
+    await fireEvent.blur(minLap());
+    await waitFor(() =>
+      expect(sent(liveSession)[1]).toEqual({
+        Record: {
+          LapRulesSet: { rules: { min_lap_micros: 3_000_000, pass_window_micros: 400_000 } }
+        }
+      })
+    );
+  });
+
+  it('emptied or set to 0, the pass window is off and is left out of what is sent', async () => {
+    for (const typed of ['', '0']) {
+      const { first, over } = following({ pass_window_micros: 400_000 });
+      const { liveSession } = await open(first, over);
+      await fireEvent.input(passWindow(), { target: { value: typed } });
+      await fireEvent.blur(passWindow());
+      await waitFor(() =>
+        expect(sent(liveSession)).toEqual([{ Record: { LapRulesSet: { rules: {} } } }])
+      );
+      cleanup();
+    }
+  });
+
+  it('refuses a pass window longer than a timer can be given, before sending anything', async () => {
+    const { first, over } = following({});
+    const { liveSession } = await open(first, over);
+    await fireEvent.input(passWindow(), { target: { value: '10.5' } });
+    await fireEvent.blur(passWindow());
+    await waitFor(() =>
+      expect(state()).toHaveTextContent('The pass window can be 10 seconds at most.')
+    );
+    expect(sent(liveSession)).toEqual([]);
+    // Ten exactly is taken.
+    await fireEvent.input(passWindow(), { target: { value: '10' } });
+    await fireEvent.blur(passWindow());
+    await waitFor(() =>
+      expect(sent(liveSession)).toEqual([
+        { Record: { LapRulesSet: { rules: { pass_window_micros: 10_000_000 } } } }
+      ])
+    );
   });
 
   it('saves on Enter as it does on leaving the field', async () => {

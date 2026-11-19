@@ -46,3 +46,44 @@ describe('notAddedYet', () => {
     expect(notAddedYet([])).toEqual([]);
   });
 });
+
+describe('the pass window on the Run page', () => {
+  const on = { connected: true, pass_window: true };
+  const none = { connected: true, pass_window: false };
+
+  it('says nothing when the event sets none, whatever the timer can do', async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    for (const window of [undefined, 0]) {
+      expect(passWindowTrouble('Gate', none, window)).toBeUndefined();
+      expect(passWindowTrouble('Gate', on, window)).toBeUndefined();
+    }
+  });
+
+  it('says a timer with none does not have the event’s window in force, in seconds', async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    expect(passWindowTrouble('Gate', none, 1_500_000)).toEqual({
+      trouble: 'Gate has no pass window.',
+      detail:
+        "The event's pass window of 1.5 s is not in force on it: every crossing it reports counts by itself."
+    });
+    expect(passWindowTrouble('Gate', on, 1_500_000)).toBeUndefined();
+  });
+
+  it("passes on the Director's reason when the window could not be set, even with none on the event", async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    const failed = { ...on, pass_window_problem: 'Could not reach Gate.' };
+    for (const window of [undefined, 400_000]) {
+      expect(passWindowTrouble('Gate', failed, window)).toEqual({
+        trouble: 'The pass window could not be set on Gate.',
+        detail: 'Could not reach Gate.'
+      });
+    }
+  });
+
+  it('leaves a timer that is not connected to the bigger warning', async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    expect(
+      passWindowTrouble('Gate', { connected: false, pass_window: false }, 400_000)
+    ).toBeUndefined();
+  });
+});

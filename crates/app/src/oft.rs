@@ -258,7 +258,14 @@ impl Link {
                                 status.seats = seats;
                                 status.seat_thresholds = capabilities.config.seat_thresholds;
                                 status.keeps_settings = capabilities.config.persist;
+                                status.pass_window = capabilities.config.pass_window_ms;
+                                // What it has is not known until it is read again.
+                                status.pass_window_ms = None;
+                                status.pass_window_problem = None;
                             });
+                            // A timer that has just connected (or restarted) may not have
+                            // the event's pass window: put it there.
+                            gridfpv_server::timers::spawn_pass_window_sync(&self.registry);
                         }
                         OftMessage::Pong { time_us } => {
                             if let Some(sent) = ping_sent.take() {

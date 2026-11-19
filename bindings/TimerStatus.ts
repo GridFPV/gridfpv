@@ -28,4 +28,19 @@ seat_thresholds?: boolean,
  * Whether the timer can keep its settings across a restart. Grid asks such a timer to
  * keep them after every change. A timer that cannot starts on its defaults.
  */
-keeps_settings?: boolean, };
+keeps_settings?: boolean, 
+/**
+ * Whether the timer has a pass window: it can take several crossings close together
+ * as one pass. The event's lap rules set it (`docs/primitives.md` §12.6).
+ */
+pass_window?: boolean, 
+/**
+ * The pass window the timer has, in milliseconds, as Grid last read it back. `0` is
+ * off. Absent until Grid has read it, or on a timer with no pass window.
+ */
+pass_window_ms?: number, 
+/**
+ * Why the event's pass window could not be put on the timer, in words. Absent when it
+ * was, or when nothing has been tried.
+ */
+pass_window_problem?: string, };

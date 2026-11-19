@@ -60,3 +60,34 @@ export function seatCountSentence(status: TimerStatus): string {
 export function notAddedYet(found: readonly DiscoveredTimer[]): DiscoveredTimer[] {
   return found.filter((timer) => !timer.added);
 }
+
+/**
+ * What to say on the Run page when the event's pass window is not in force on a timer
+ * (docs/primitives.md §12.6), or `undefined` when there is nothing to say.
+ *
+ * The timer applies the pass window, so it only holds on a timer that has one. With none
+ * set on the event there is nothing to miss. A timer that is not connected is said to be
+ * not connected, which is the bigger problem, so nothing is added here.
+ */
+export function passWindowTrouble(
+  name: string,
+  status: Pick<TimerStatus, 'connected' | 'pass_window' | 'pass_window_problem'>,
+  windowMicros: number | undefined
+): { trouble: string; detail: string } | undefined {
+  if (!status.connected) return undefined;
+  if (status.pass_window_problem !== undefined) {
+    return {
+      trouble: `The pass window could not be set on ${name}.`,
+      detail: status.pass_window_problem
+    };
+  }
+  if (windowMicros === undefined || windowMicros <= 0) return undefined;
+  if (!status.pass_window) {
+    const seconds = windowMicros / 1_000_000;
+    return {
+      trouble: `${name} has no pass window.`,
+      detail: `The event's pass window of ${seconds} s is not in force on it: every crossing it reports counts by itself.`
+    };
+  }
+  return undefined;
+}

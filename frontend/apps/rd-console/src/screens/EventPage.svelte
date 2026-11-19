@@ -59,7 +59,11 @@
   // Each field shows what the Director has until it is typed in. Leaving it sends the pair.
   // An emptied number field binds `null`; it is kept as `''` so it reads as "typed, and
   // empty" (no rule) rather than "not typed" (which would show the Director's value again).
-  let typed = $state<{ minLap?: number | string; ignore?: number | string }>({});
+  let typed = $state<{
+    minLap?: number | string;
+    ignore?: number | string;
+    window?: number | string;
+  }>({});
   let rulesBusy = $state(false);
   let rulesError = $state<string | undefined>(undefined);
   let rulesSaved = $state(false);
@@ -67,6 +71,9 @@
     micros === undefined ? '' : micros / SECOND;
   const minLap = $derived(typed.minLap ?? seconds(view?.lap_rules.min_lap_micros));
   const ignore = $derived(typed.ignore ?? seconds(view?.lap_rules.ignore_before_micros));
+  const passWindow = $derived(typed.window ?? seconds(view?.lap_rules.pass_window_micros));
+  /** The longest pass window a timer can be given, in seconds. */
+  const PASS_WINDOW_MAX = 10;
 
   /** Seconds from a field as microseconds. Empty or 0 is "none". `null` is not a time. */
   function micros(value: number | string): number | undefined | null {
@@ -80,19 +87,26 @@
     if (rulesBusy || !view) return;
     const min = micros(minLap);
     const ign = micros(ignore);
+    const win = micros(passWindow);
     rulesSaved = false;
-    if (min === null || ign === null) {
+    if (min === null || ign === null || win === null) {
       rulesError = 'A lap rule is a number of seconds, 0 or more.';
+      return;
+    }
+    if (win !== undefined && win > PASS_WINDOW_MAX * SECOND) {
+      rulesError = `The pass window can be ${PASS_WINDOW_MAX} seconds at most.`;
       return;
     }
     const rules: LapRules = {
       ...(min === undefined ? {} : { min_lap_micros: min }),
-      ...(ign === undefined ? {} : { ignore_before_micros: ign })
+      ...(ign === undefined ? {} : { ignore_before_micros: ign }),
+      ...(win === undefined ? {} : { pass_window_micros: win })
     };
     const now = view.lap_rules;
     if (
       rules.min_lap_micros === now.min_lap_micros &&
-      rules.ignore_before_micros === now.ignore_before_micros
+      rules.ignore_before_micros === now.ignore_before_micros &&
+      rules.pass_window_micros === now.pass_window_micros
     ) {
       typed = {};
       rulesError = undefined;
@@ -226,6 +240,24 @@
             aria-label="Ignore crossings before, in seconds"
             bind:value={
               () => ignore, (value) => ((typed.ignore = value ?? ''), (rulesSaved = false))
+            }
+            onblur={() => void saveRules()}
+            disabled={rulesBusy}
+          />
+        </Field>
+        <Field
+          label="Pass window (seconds)"
+          hint="Crossings this close together are one pass, and the strongest counts. For a track that flies by the gate just before going through it. Empty is off."
+        >
+          <Input
+            type="number"
+            inputmode="decimal"
+            min="0"
+            max={PASS_WINDOW_MAX}
+            step="0.1"
+            aria-label="Pass window, in seconds"
+            bind:value={
+              () => passWindow, (value) => ((typed.window = value ?? ''), (rulesSaved = false))
             }
             onblur={() => void saveRules()}
             disabled={rulesBusy}
