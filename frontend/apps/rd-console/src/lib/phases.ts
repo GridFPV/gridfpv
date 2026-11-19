@@ -389,3 +389,82 @@ export function newPhaseId(name: string, random: () => number = Math.random): Ph
   const slug = slugify(name);
   return slug ? `${slug}-${suffix}` : `phase-${suffix}`;
 }
+
+// ── Editing a phase ─────────────────────────────────────────────────────────
+
+/** What about a phase can be changed, and why not the rest. */
+export interface PhaseEditable {
+  /** Whether its format and where it sits can be changed. Its name always can. */
+  shape: boolean;
+  /** Why not, in words for the director. Left out when `shape` is true. */
+  why?: string;
+}
+
+/**
+ * What can be changed about a phase (docs/primitives.md §12.4). The Director decides in
+ * the end; this says the same thing first, so the dialog offers only what will be taken.
+ *
+ * - **Its name:** always.
+ * - **Its format and where it sits:** until a race that counts has been saved beneath it,
+ *   in a heat that is ranked. After that a change would alter results already flown.
+ * - A phase a generator made (a bracket, mains, a round robin), and everything inside
+ *   one, keeps the shape the generator gave it.
+ */
+export function phaseEditable(
+  phase: PhaseView,
+  phases: readonly PhaseView[],
+  races: readonly Pick<RaceView, 'heat' | 'state'>[]
+): PhaseEditable {
+  const byId = new Map(phases.map((each) => [each.def.id, each]));
+  const under = (id: PhaseId): boolean => {
+    let at: PhaseId | undefined = id;
+    for (let steps = 0; at !== undefined && steps <= phases.length; steps += 1) {
+      if (at === phase.def.id) return true;
+      at = byId.get(at)?.def.parent;
+    }
+    return false;
+  };
+  let at: PhaseView | undefined = phase;
+  for (let steps = 0; at !== undefined && steps <= phases.length; steps += 1) {
+    if (at.def.display_hint !== undefined) {
+      return {
+        shape: false,
+        why:
+          at === phase
+            ? 'Grid made this phase, so only its name can change.'
+            : `It is part of ${at.def.label}, which Grid made, so only its name can change.`
+      };
+    }
+    at = at.def.parent === undefined ? undefined : byId.get(at.def.parent);
+  }
+  const raced = races.some(
+    (race) =>
+      race.state === 'Saved' &&
+      under(race.heat) &&
+      byId.get(race.heat)?.format?.ranking !== undefined
+  );
+  if (raced) {
+    return {
+      shape: false,
+      why: 'A race here has been saved, so only its name can change. Changing its format or where it sits would change results already flown.'
+    };
+  }
+  return { shape: true };
+}
+
+/**
+ * The phases an edited phase could be moved under: every phase that holds phases, but for
+ * itself, anything beneath it, and anything locked.
+ */
+export function moveChoices(phase: PhaseView, phases: readonly PhaseView[]): HolderChoice[] {
+  const byId = new Map(phases.map((each) => [each.def.id, each]));
+  const beneath = (id: PhaseId): boolean => {
+    let at: PhaseId | undefined = id;
+    for (let steps = 0; at !== undefined && steps <= phases.length; steps += 1) {
+      if (at === phase.def.id) return true;
+      at = byId.get(at)?.def.parent;
+    }
+    return false;
+  };
+  return holderChoices(phases).filter((holder) => !beneath(holder.id) && !holder.locked);
+}

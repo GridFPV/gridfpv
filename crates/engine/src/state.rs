@@ -71,6 +71,10 @@ pub enum Refusal {
     HasChildren(PhaseId),
     #[error("{0:?} has races; a heat that was raced cannot be removed")]
     HasRaces(PhaseId),
+    #[error(
+        "{0:?} has a saved race, so only its name can change now; changing its format, its pilots or where it sits would change results already flown"
+    )]
+    Raced(PhaseId),
     #[error("a phase cannot be its own parent, or sit beneath itself")]
     ParentLoop,
     #[error("the pass window can be 10 seconds at most")]
@@ -871,6 +875,21 @@ impl EventState {
         }
     }
 
+    /// Whether a race that counts has been saved in `phase` or anywhere beneath it, in a
+    /// heat that is ranked. An unranked heat (practice) has no result to protect, so it
+    /// can be reshaped however often it was flown.
+    fn has_saved_ranked_race(&self, phase: &PhaseId) -> bool {
+        self.races.iter().any(|race| {
+            let heat = &race.setup.heat;
+            race.counts()
+                && (heat == phase || self.tree.is_under(heat, phase))
+                && self
+                    .tree
+                    .format_for(heat)
+                    .is_some_and(|format| format.ranking.is_some())
+        })
+    }
+
     fn unlocked(&self, phase: &PhaseId) -> Result<(), Refusal> {
         if self.tree.get(phase).is_none() {
             return Err(Refusal::UnknownPhase(phase.clone()));
@@ -1034,8 +1053,17 @@ impl EventState {
                         return Err(Refusal::Locked(parent.clone()));
                     }
                 }
-                if self.tree.get(&def.id).is_some() {
+                if let Some(now) = self.tree.get(&def.id) {
                     self.unlocked(&def.id)?;
+                    // A phase's name, its layout hint and its false start limit can change
+                    // at any time. Its shape (what kind it is, its pilots, its format and
+                    // where it sits) decides results, so it is fixed once a ranked race
+                    // beneath it has been saved.
+                    let reshaped =
+                        now.parent != def.parent || now.kind != def.kind || now.format != def.format;
+                    if reshaped && self.has_saved_ranked_race(&def.id) {
+                        return Err(Refusal::Raced(def.id.clone()));
+                    }
                 }
                 Ok(())
             }
@@ -2172,6 +2200,194 @@ mod tests {
             .send(Command::StartRace { heat: pid("heat") })
             .unwrap();
         director
+    }
+
+    /// A group "quali" holding one heat of ana and ben, first to one lap, under `format`.
+    fn phase_with_a_heat(format: Format) -> Director {
+        let mut director = Director::default();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("quali"),
+                    label: "Qualifying".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("quali/heat-1"),
+                    label: "Heat 1".into(),
+                    parent: Some(pid("quali")),
+                    kind: PhaseKind::Heat {
+                        lineup: ["ana", "ben"]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, name)| HeatSeat {
+                                adapter: oft(),
+                                seat: SeatRef(format!("seat-{i}")),
+                                source: SeatSource::Pilot(pilot(name)),
+                            })
+                            .collect(),
+                    },
+                    format: None,
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director
+    }
+
+    fn def_of(director: &Director, id: &str) -> PhaseDef {
+        director.state.tree.get(&pid(id)).unwrap().clone()
+    }
+
+    #[test]
+    fn a_phase_is_edited_freely_until_a_ranked_race_beneath_it_is_saved() {
+        let mut director = phase_with_a_heat(format(EndCondition::FirstToLaps(1), 0));
+        // Before anything is flown: the name, the format, the pilots, all of it.
+        let mut quali = def_of(&director, "quali");
+        quali.label = "Qualifying rounds".into();
+        quali.format = Some(format(EndCondition::FirstToLaps(3), 0));
+        director
+            .record(Event::PhaseDefined { def: quali.clone() })
+            .unwrap();
+        let mut heat = def_of(&director, "quali/heat-1");
+        if let PhaseKind::Heat { lineup } = &mut heat.kind {
+            lineup.pop();
+        }
+        director
+            .record(Event::PhaseDefined { def: heat.clone() })
+            .unwrap();
+        // A race that is flown and discarded protects nothing.
+        director
+            .send(Command::StartRace {
+                heat: pid("quali/heat-1"),
+            })
+            .unwrap();
+        let race = director.state.races.running().unwrap().setup.race.clone();
+        director
+            .send(Command::StopRace { race: race.clone() })
+            .unwrap();
+        director
+            .send(Command::DiscardRace {
+                race,
+                reason: None,
+                note: None,
+            })
+            .unwrap();
+        quali.format = Some(format(EndCondition::FirstToLaps(1), 0));
+        director.record(Event::PhaseDefined { def: quali }).unwrap();
+    }
+
+    #[test]
+    fn once_a_ranked_race_is_saved_only_the_name_of_the_phases_above_it_can_change() {
+        let mut director = phase_with_a_heat(format(EndCondition::FirstToLaps(1), 0));
+        fly(&mut director, "quali/heat-1");
+        let quali = def_of(&director, "quali");
+        let heat = def_of(&director, "quali/heat-1");
+
+        // The name, the layout hint and the false start limit: still free, on both.
+        for mut def in [quali.clone(), heat.clone()] {
+            def.label = format!("{} (renamed)", def.label);
+            def.display_hint = Some("anything".into());
+            def.false_start_limit = Some(2);
+            director.record(Event::PhaseDefined { def }).unwrap();
+        }
+        let quali = def_of(&director, "quali");
+        let heat = def_of(&director, "quali/heat-1");
+        assert_eq!(quali.label, "Qualifying (renamed)");
+
+        // The format, on the phase the heat takes it from.
+        let mut reformatted = quali.clone();
+        reformatted.format = Some(format(EndCondition::FirstToLaps(5), 0));
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: reformatted }),
+            Err(Refusal::Raced(pid("quali")))
+        );
+        // A format of its own on the heat.
+        let mut own = heat.clone();
+        own.format = Some(format(EndCondition::FirstToLaps(5), 0));
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: own }),
+            Err(Refusal::Raced(pid("quali/heat-1")))
+        );
+        // The pilots.
+        let mut fewer = heat.clone();
+        if let PhaseKind::Heat { lineup } = &mut fewer.kind {
+            lineup.pop();
+        }
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: fewer }),
+            Err(Refusal::Raced(pid("quali/heat-1")))
+        );
+        // How the phase combines its heats.
+        let mut combined = quali.clone();
+        combined.kind = PhaseKind::Group {
+            field: vec![FieldSlice::Pilot(pilot("ana"))],
+            combine: gridfpv_events::CombineRule::Stack,
+        };
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: combined }),
+            Err(Refusal::Raced(pid("quali")))
+        );
+        // Where it sits.
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("other"),
+                    label: "Other".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: None,
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        let mut moved = heat.clone();
+        moved.parent = Some(pid("other"));
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: moved }),
+            Err(Refusal::Raced(pid("quali/heat-1")))
+        );
+        // Nothing was changed by any refused edit, and the phase beside it is still free.
+        assert_eq!(def_of(&director, "quali"), quali);
+        assert_eq!(def_of(&director, "quali/heat-1"), heat);
+        let mut other = def_of(&director, "other");
+        other.format = Some(format(EndCondition::FirstToLaps(2), 0));
+        director.record(Event::PhaseDefined { def: other }).unwrap();
+        // The same definition sent again is no change, and is taken.
+        director.record(Event::PhaseDefined { def: quali }).unwrap();
+    }
+
+    #[test]
+    fn an_unranked_heat_can_be_reshaped_however_often_it_was_flown() {
+        // Practice has no result to protect: pilots come and go between races.
+        let mut practice = format(EndCondition::FirstToLaps(1), 0);
+        practice.ranking = None;
+        let mut director = phase_with_a_heat(practice);
+        fly(&mut director, "quali/heat-1");
+        let mut heat = def_of(&director, "quali/heat-1");
+        if let PhaseKind::Heat { lineup } = &mut heat.kind {
+            lineup.pop();
+        }
+        director.record(Event::PhaseDefined { def: heat }).unwrap();
+        let mut quali = def_of(&director, "quali");
+        quali.label = "Open practice".into();
+        director.record(Event::PhaseDefined { def: quali }).unwrap();
     }
 
     fn state_of(director: &Director) -> RaceState {

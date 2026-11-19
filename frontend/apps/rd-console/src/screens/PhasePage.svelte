@@ -22,6 +22,7 @@
   import { signupPhases } from '../lib/signup.js';
   import AddHeatDialog from './AddHeatDialog.svelte';
   import AddPhaseDialog from './AddPhaseDialog.svelte';
+  import EditPhaseDialog from './EditPhaseDialog.svelte';
   import PhaseList from './PhaseList.svelte';
   import SignupRulesDialog from './SignupRulesDialog.svelte';
   import SignupSheet from './SignupSheet.svelte';
@@ -66,6 +67,9 @@
   let addingUnder = $state<PhaseId | undefined>(undefined);
   /** Whether a phase is being added inside this one. */
   let addingPhase = $state(false);
+  /** The phase or heat being edited. The dialog is mounted only while it is open. */
+  let editing = $state<PhaseId | undefined>(undefined);
+  const editingPhase = $derived(view?.phases.find((entry) => entry.def.id === editing));
   /** The phase whose sign-up rules are being set. */
   let rulesFor = $state<PhaseId | undefined>(undefined);
   const rulesPhase = $derived(view?.phases.find((entry) => entry.def.id === rulesFor));
@@ -156,7 +160,14 @@
     {/if}
     <Card title={isHeat(phase.def) ? 'Heat' : 'Heats and ranking'} elevation="sm">
       {#if isHeat(phase.def)}
-        <PhaseList {view} names={live.names} {live} {onrun} root={phaseId} />
+        <PhaseList
+          {view}
+          names={live.names}
+          {live}
+          {onrun}
+          root={phaseId}
+          onedit={(target) => (editing = target)}
+        />
       {:else}
         <PhaseList
           {view}
@@ -165,6 +176,7 @@
           {onrun}
           heatsOf={phaseId}
           onaddheat={(under) => (addingUnder = under)}
+          onedit={(target) => (editing = target)}
           onsignup={(target) => (rulesFor = target)}
         />
       {/if}
@@ -181,6 +193,12 @@
     send={(command) => live.send(command)}
     onclose={() => (rulesFor = undefined)}
   />
+{/if}
+
+{#if editingPhase}
+  {#key editingPhase.def.id}
+    <EditPhaseDialog {live} phase={editingPhase} onclose={() => (editing = undefined)} />
+  {/key}
 {/if}
 
 {#if addingPhase}

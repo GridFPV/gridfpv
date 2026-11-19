@@ -35,6 +35,7 @@
   import { formatHash } from '../lib/route.js';
   import AddHeatDialog from './AddHeatDialog.svelte';
   import AddPhaseDialog from './AddPhaseDialog.svelte';
+  import EditPhaseDialog from './EditPhaseDialog.svelte';
   import PhaseList from './PhaseList.svelte';
   import RunQueue from './RunQueue.svelte';
 
@@ -50,6 +51,9 @@
   // Each dialog is mounted only while open, so a closed one never sits in the page.
   let adding = $state<{ what: 'phase' | 'heat'; under?: PhaseId } | undefined>(undefined);
   const close = () => (adding = undefined);
+  /** The heat being edited. The dialog is mounted only while it is open. */
+  let editing = $state<PhaseId | undefined>(undefined);
+  const editingPhase = $derived(live.view?.phases.find((entry) => entry.def.id === editing));
 
   const every = $derived(live.view ? phaseSummaries(live.view) : []);
   /** The lines shown: a phase inside another only while the one above it is unfolded. */
@@ -162,11 +166,24 @@
     {/if}
     {#if loneHeats}
       <Card title={phases.length > 0 ? 'Heats on their own' : 'Heats'} elevation="sm">
-        <PhaseList view={live.view} names={live.names} {live} {onrun} topHeats />
+        <PhaseList
+          view={live.view}
+          names={live.names}
+          {live}
+          {onrun}
+          topHeats
+          onedit={(target) => (editing = target)}
+        />
       </Card>
     {/if}
   {/if}
 </Page>
+
+{#if editingPhase}
+  {#key editingPhase.def.id}
+    <EditPhaseDialog {live} phase={editingPhase} onclose={() => (editing = undefined)} />
+  {/key}
+{/if}
 
 {#if adding?.what === 'phase'}
   <AddPhaseDialog {live} under={adding.under} onclose={close} />
