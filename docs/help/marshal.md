@@ -14,9 +14,18 @@ newest race.
   with the one being raced. The box above it picks another phase or all of them.
 - **Show discarded races** adds the races that were thrown away.
 
+## One seat at a time
+
+You marshal one pilot at a time. Under the races is **Seats**, with a button for each seat
+in the race. It shows the pilot, the seat, how many laps they have, and how many passes
+do not count. Click one to see that pilot's laps. Your pick stays when you open another
+race.
+
+The video is the same for every seat. It is one recording of the whole race.
+
 ## The trace
 
-Each seat has a picture of its signal for the whole race. The solid line is the enter
+The seat has a picture of its signal for the whole race. The solid line is the enter
 level and the dashed line is the exit level. Marks along the top show the start, the hole
 shot, and each lap.
 
@@ -59,7 +68,8 @@ line.
 - **Mark as restart** is for a pilot who crashed and started again. That lap gets no time,
   and the laps either side stay as they were. A "fastest laps in a row" run never crosses a
   restart.
-- **Add a lap** puts in a pass the gate missed. Type the seconds into the race.
+- **Add a lap** puts in a pass the gate missed. It is right under the trace. Type the
+  seconds into the race.
   If the gate missed the **hole shot**, add it the same way. A pass you add before the
   first one becomes the hole shot, and the old first pass becomes the end of lap 1.
 - **Move** a pass that was read at the wrong moment. Drag its mark along the trace, or

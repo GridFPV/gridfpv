@@ -137,6 +137,13 @@ function expectNoRawIds() {
 
 afterEach(() => vi.restoreAllMocks());
 
+/** The seat picker under the races. */
+const seatPicks = () => within(screen.getByRole('list', { name: 'Seat to marshal' }));
+/** Pick the seat of the pilot called `who` to marshal. */
+async function pickSeat(who: string) {
+  await fireEvent.click(seatPicks().getByRole('button', { name: new RegExp(`^${who}\\b`) }));
+}
+
 describe('MarshalPage lists', () => {
   it('lists what needs a look with why, and the other races by heat', async () => {
     const flagged = savedRace();
@@ -409,6 +416,7 @@ describe('MarshalPage race review', () => {
       expect(screen.queryByRole('group', { name: 'Why remove lap 2?' })).toBeNull()
     );
 
+    await pickSeat('Bee');
     await fireEvent.click(screen.getByRole('button', { name: 'Remove the hole shot of Bee' }));
     await clickWhenReady(screen.getByRole('button', { name: 'No reason' }));
     await waitFor(() =>
@@ -452,6 +460,7 @@ describe('MarshalPage race review', () => {
     );
 
     // A crossing before the start can be counted too.
+    await pickSeat('Bee');
     await clickWhenReady(screen.getByRole('button', { name: /^Count the crossing of Bee/ }));
     await waitFor(() =>
       expect(sent(session)[1]).toEqual({ Record: { LapCounted: { race: RACE, crossing: 19 } } })
@@ -482,6 +491,7 @@ describe('MarshalPage race review', () => {
     await clickWhenReady(screen.getByRole('button', { name: 'Mark lap 3 of Ace as a restart' }));
     await waitFor(() => expect(sent(session)).toHaveLength(2));
     // Bee's first lap is a marked restart: no number, no time, and it can be unmarked.
+    await pickSeat('Bee');
     const bee = screen.getByRole('listitem', { name: 'Seat 2, Bee' });
     expect(within(bee).getByText('No lap time')).toBeVisible();
     expect(within(bee).getByRole('button', { name: /^Lap 1$/ })).toBeVisible();
@@ -496,6 +506,7 @@ describe('MarshalPage race review', () => {
 
   it('adds a lap at a time typed as seconds into the race', async () => {
     const { session } = await open(view(), RACE);
+    await pickSeat('Bee');
     const box = screen.getByRole('textbox', { name: 'Seconds into the race, for Bee' });
     const form = screen.getByRole('form', { name: 'Add a lap for Bee' });
     await fireEvent.input(box, { target: { value: 'soon' } });
@@ -524,6 +535,7 @@ describe('MarshalPage race review', () => {
     const { session } = await open(eventView({ phases: tree(), races: [flagged] }), RACE);
     await fireEvent.click(screen.getByRole('button', { name: 'False start by Ace' }));
     await waitFor(() => expect(sent(session)).toHaveLength(1));
+    await pickSeat('Bee');
     await clickWhenReady(screen.getByRole('button', { name: 'Clear the false start for Bee' }));
     await waitFor(() => expect(sent(session)).toHaveLength(2));
     expect(sent(session)).toEqual([
@@ -622,6 +634,66 @@ describe('MarshalPage race review', () => {
     const { nav } = await open(view(), RACE);
     await fireEvent.click(screen.getByRole('button', { name: 'Run this heat' }));
     expect(nav.onrun).toHaveBeenCalledWith(HEAT);
+  });
+
+  describe('MarshalPage: one seat at a time', () => {
+    it('lists every seat of the race to pick from, and shows the first', async () => {
+      await open(view(), RACE);
+      const picks = seatPicks().getAllByRole('button');
+      expect(picks).toHaveLength(2);
+      expect(picks[0]).toHaveTextContent('Ace');
+      expect(picks[0]).toHaveTextContent('Seat 1');
+      expect(picks[1]).toHaveTextContent('Bee');
+      expect(picks[1]).toHaveTextContent('Seat 2');
+      expect(picks[0]).toHaveAttribute('aria-pressed', 'true');
+      expect(picks[1]).toHaveAttribute('aria-pressed', 'false');
+      // Only the picked seat's laps are on the page.
+      const shown = within(screen.getByRole('list', { name: 'Seats' })).getAllByRole('listitem', {
+        name: /^Seat \d, /
+      });
+      expect(shown).toHaveLength(1);
+      expect(shown[0]).toHaveAccessibleName('Seat 1, Ace');
+      // No raw id reaches the picker.
+      expect(screen.getByRole('list', { name: 'Seat to marshal' }).textContent).not.toMatch(
+        /p-\d|bench/
+      );
+    });
+
+    it('shows the seat that is picked, and only that one', async () => {
+      await open(view(), RACE);
+      await pickSeat('Bee');
+      expect(screen.getByRole('listitem', { name: 'Seat 2, Bee' })).toBeVisible();
+      expect(screen.queryByRole('listitem', { name: 'Seat 1, Ace' })).toBeNull();
+      const picks = seatPicks().getAllByRole('button');
+      expect(picks[1]).toHaveAttribute('aria-pressed', 'true');
+      expect(picks[0]).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('says how many laps each seat has, and how many crossings do not count', async () => {
+      await open(view(), RACE);
+      const picks = seatPicks().getAllByRole('button');
+      expect(picks.map((p) => p.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+        'Ace Seat 1 · 3 laps · 2 not counted',
+        'Bee Seat 2 · 1 lap'
+      ]);
+    });
+
+    it('a saved race that can be ruled on carries no sentences of advice', async () => {
+      await open(view(), RACE);
+      expect(screen.queryByTestId('review-status')).toBeNull();
+      expect(screen.queryByTestId('add-hint')).toBeNull();
+      expect(document.body.textContent).not.toMatch(
+        /Missed the hole shot|Removing a lap joins|Or click an empty spot/
+      );
+    });
+
+    it('puts adding a lap above the lap list, under the trace', async () => {
+      await open(view(), RACE);
+      const seat = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+      const form = within(seat).getByRole('form', { name: 'Add a lap for Ace' });
+      const laps = within(seat).getByRole('table', { name: 'Laps for Ace' });
+      expect(form.compareDocumentPosition(laps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
   });
 });
 
@@ -763,6 +835,7 @@ describe('MarshalPage trace', () => {
     expect(picture.querySelector('canvas')).not.toBeNull();
     expect(ace).toHaveTextContent('Seat 1 · Gate');
     // The other seat logged nothing: one plain sentence naming the timer.
+    await pickSeat('Bee');
     const bee = screen.getByRole('listitem', { name: 'Seat 2, Bee' });
     expect(within(bee).getByTestId('no-signal')).toHaveTextContent(
       'Gate logged no signal for this seat, so there is no trace.'

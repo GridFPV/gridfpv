@@ -1442,6 +1442,29 @@ stored (§ security), so a profile can be switched to but not read back.
 
 ### 12.3 The Run page's seat cards with many laps (Built 2026-11-19)
 
+### 12.2.1 Marshal one seat at a time, and a recording for each seat
+
+**Built 2026-11-19: one seat at a time.** The Marshal page showed every seat of the race,
+one under the other. Now a **Seats** card under the races lists each seat (pilot, seat,
+laps, crossings not counted) and the page shows the one that is picked. The pick stays
+from race to race, so a marshal can follow one seat through a heat. **Add a lap** sits
+right under the signal trace, above the lap list.
+
+The race's video is unchanged: one recording, taken to show every pilot, so it is the same
+whichever seat is picked.
+
+**Wanted, not designed, not built: a recording for each seat.**
+
+- The director picks an OBS scene for each seat, and each is recorded.
+- Or every seat shares one recording, when one scene shows all the pilots. That is what
+  there is today.
+- On the Marshal page, picking a seat would then show that seat's recording.
+- To decide: how several scenes are recorded at once in OBS, where the scene for a seat is
+  set (with the OBS profile of §12.2, most likely), and what a race with some seats
+  recorded and some not looks like.
+
+### 12.3 The Run page's seat cards with many laps (Agreed 2026-11-18, not built)
+
 A seat's card used to list every lap, so in a long open practice it grew without end.
 
 - **The card shows the last 9 laps**, newest last. Its height is then fixed. With 9 laps or
