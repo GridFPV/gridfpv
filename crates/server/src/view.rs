@@ -68,8 +68,22 @@ pub struct RosterView {
     pub pilots: Vec<PilotId>,
     /// The phases that count toward the class's standings, the deciding one first.
     pub counted_phases: Vec<PhaseId>,
+    /// Every phase the standings could come from: the ones that count first, in the order
+    /// they are read, then the ones the director said do not count. Worked out from the
+    /// event's phases; the director only reorders them or says one does not count.
+    #[serde(default)]
+    pub phases: Vec<ClassPhaseView>,
     /// Everyone on the roster, 1 to n.
     pub standings: Vec<ClassPlaceView>,
+}
+
+/// One phase a class's standings could come from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ClassPhaseView {
+    pub phase: PhaseId,
+    /// Whether it counts toward the standings.
+    pub counts: bool,
 }
 
 /// One pilot's place in a class.
@@ -674,7 +688,12 @@ impl EventView {
                 .map(|(class, pilots)| RosterView {
                     class: class.clone(),
                     pilots: pilots.clone(),
-                    counted_phases: state.class_phases.get(class).cloned().unwrap_or_default(),
+                    counted_phases: state.counted_phases(class),
+                    phases: state
+                        .class_phase_list(class)
+                        .into_iter()
+                        .map(|(phase, counts)| ClassPhaseView { phase, counts })
+                        .collect(),
                     standings: state
                         .class_standings(class, &results)
                         .into_iter()

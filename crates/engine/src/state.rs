@@ -13,11 +13,11 @@
 //!
 //! Like the rest of the crate this is pure: the clock comes in as an argument.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gridfpv_events::{
-    AdapterId, ClassId, Command, EndCondition, Event, Format, LapRules, LineupEntry, PhaseId,
-    PhaseKind, PilotId, ProtestId, RaceId, RaceSetup, SourceTime, StartOwner,
+    AdapterId, ClassId, Command, EndCondition, Event, FieldSlice, Format, LapRules, LineupEntry,
+    PhaseId, PhaseKind, PilotId, ProtestId, RaceId, RaceSetup, SeatSource, SourceTime, StartOwner,
 };
 use thiserror::Error;
 
@@ -165,8 +165,12 @@ pub struct EventState {
     /// For a running first-to-N race whose pilots have all finished: when the last of them
     /// did, on the Director's clock. Cleared if a ruling takes a finish away.
     pub all_finished_at: BTreeMap<RaceId, i64>,
-    /// The phases that count toward each class's standings, the deciding one first.
+    /// The order the director set for a class's phases in its standings, the deciding one
+    /// first. A class with none here uses the worked-out order. See
+    /// [`counted_phases`](Self::counted_phases).
     pub class_phases: BTreeMap<ClassId, Vec<PhaseId>>,
+    /// The phases the director said do not count toward their class's standings.
+    pub not_counted: BTreeSet<PhaseId>,
     /// The order the director set for the run queue. Heats not in it follow in the default
     /// order.
     pub queue_order: Vec<PhaseId>,
@@ -252,6 +256,13 @@ impl EventState {
             }
             Event::StandingsSet { class, phases } => {
                 self.class_phases.insert(class.clone(), phases.clone());
+            }
+            Event::PhaseCounts { phase, counts } => {
+                if *counts {
+                    self.not_counted.remove(phase);
+                } else {
+                    self.not_counted.insert(phase.clone());
+                }
             }
             Event::ClockOffset {
                 adapter,
@@ -340,6 +351,171 @@ impl EventState {
         }
     }
 
+    /// The class a phase is for, when it can be told (`docs/primitives.md` §5.3).
+    ///
+    /// A phase is for a class when the director said so, or its field is that class's
+    /// roster. Failing that, it is for the class of a phase it takes its pilots from (a bracket seeded from
+    /// qualifying). Failing that, it is for the class its own phases are for (a "Mains"
+    /// that only holds heats seeded from qualifying), and failing that for the class of
+    /// the phase that holds it. A phase that only names pilots, at the top of the event,
+    /// is for no class.
+    pub fn phase_class(&self, phase: &PhaseId) -> Option<ClassId> {
+        let mut at = Some(phase.clone());
+        // Up the tree: the phase itself, then each phase that holds it.
+        for _ in 0..=self.tree.iter().count() {
+            let id = at?;
+            if let Some(class) = self.own_class(&id, &mut Vec::new()) {
+                return Some(class);
+            }
+            at = self.tree.get(&id)?.parent.clone();
+        }
+        None
+    }
+
+    /// The class a phase is for by what it says itself, or by what the phases inside it
+    /// say: never by where it sits.
+    fn own_class(&self, phase: &PhaseId, seen: &mut Vec<PhaseId>) -> Option<ClassId> {
+        // A phase can be seeded from a phase seeded from it only by a mistake in the log.
+        if seen.contains(phase) {
+            return None;
+        }
+        seen.push(phase.clone());
+        let def = self.tree.get(phase)?;
+        // The director said so.
+        if let Some(class) = &def.class {
+            return Some(class.clone());
+        }
+        match &def.kind {
+            PhaseKind::Group { field, .. } => {
+                for slice in field {
+                    match slice {
+                        FieldSlice::Class(class) => return Some(class.clone()),
+                        FieldSlice::FromPhase { phase: from, .. } => {
+                            if let Some(class) = self.sourced_class(from, seen) {
+                                return Some(class);
+                            }
+                        }
+                        FieldSlice::Pilot(_) | FieldSlice::Imported(_) => {}
+                    }
+                }
+            }
+            PhaseKind::Heat { lineup } => {
+                for seat in lineup {
+                    if let SeatSource::FromPhase { phase: from, .. } = &seat.source
+                        && let Some(class) = self.sourced_class(from, seen)
+                    {
+                        return Some(class);
+                    }
+                }
+            }
+        }
+        // What it holds: the first phase inside it that is for a class.
+        let inside: Vec<PhaseId> = self
+            .tree
+            .children(phase)
+            .map(|def| def.id.clone())
+            .collect();
+        inside.iter().find_map(|child| self.own_class(child, seen))
+    }
+
+    /// The class of a phase another one takes its pilots from: its own, or failing that
+    /// the class of whatever holds it (a heat inside qualifying).
+    fn sourced_class(&self, phase: &PhaseId, seen: &mut Vec<PhaseId>) -> Option<ClassId> {
+        let mut at = Some(phase.clone());
+        for _ in 0..=self.tree.iter().count() {
+            let id = at?;
+            if let Some(class) = self.own_class(&id, seen) {
+                return Some(class);
+            }
+            at = self.tree.get(&id)?.parent.clone();
+        }
+        None
+    }
+
+    /// Whether a phase is ranked: it, or a heat anywhere beneath it, has a format that
+    /// ranks. Practice is not.
+    fn is_ranked(&self, phase: &PhaseId) -> bool {
+        self.tree.iter().any(|def| {
+            matches!(def.kind, PhaseKind::Heat { .. })
+                && (&def.id == phase || self.tree.is_under(&def.id, phase))
+                && self
+                    .tree
+                    .format_for(&def.id)
+                    .is_some_and(|format| format.ranking.is_some())
+        })
+    }
+
+    /// The phases that are a class's own, in the order they were added: each ranked phase
+    /// that is for the class and is not held by another phase of the class. Qualifying
+    /// with its heats is one phase here, and so is a bracket with its rounds.
+    fn own_phases(&self, class: &ClassId) -> Vec<PhaseId> {
+        self.tree
+            .iter()
+            .filter(|def| self.phase_class(&def.id).as_ref() == Some(class))
+            .filter(|def| {
+                def.parent
+                    .as_ref()
+                    .is_none_or(|parent| self.phase_class(parent).as_ref() != Some(class))
+            })
+            .filter(|def| self.is_ranked(&def.id))
+            .map(|def| def.id.clone())
+            .collect()
+    }
+
+    /// Every phase a class's standings could come from, each with whether it counts: the
+    /// ones that count first, in the order they are read, then the ones the director said
+    /// do not count.
+    ///
+    /// **Which:** the class's own ranked phases, and any phase the director listed for it
+    /// by hand.
+    ///
+    /// **In what order:** the latest phase first, so the last thing raced decides and the
+    /// phases before it place whoever it left out. Where the director set an order of
+    /// their own, that order stands, and a phase added since goes ahead of it.
+    pub fn class_phase_list(&self, class: &ClassId) -> Vec<(PhaseId, bool)> {
+        let listed: Vec<PhaseId> = self
+            .class_phases
+            .get(class)
+            .into_iter()
+            .flatten()
+            .filter(|phase| self.tree.get(phase).is_some())
+            .cloned()
+            .collect();
+        let mut order: Vec<PhaseId> = self
+            .own_phases(class)
+            .into_iter()
+            .rev()
+            .filter(|phase| !listed.contains(phase))
+            .collect();
+        for phase in listed {
+            if !order.contains(&phase) {
+                order.push(phase);
+            }
+        }
+        let counts = |phase: &PhaseId| !self.not_counted.contains(phase);
+        let mut out: Vec<(PhaseId, bool)> = order
+            .iter()
+            .filter(|phase| counts(phase))
+            .map(|phase| (phase.clone(), true))
+            .collect();
+        out.extend(
+            order
+                .iter()
+                .filter(|phase| !counts(phase))
+                .map(|phase| (phase.clone(), false)),
+        );
+        out
+    }
+
+    /// The phases that count toward a class's standings, the deciding one first.
+    pub fn counted_phases(&self, class: &ClassId) -> Vec<PhaseId> {
+        self.class_phase_list(class)
+            .into_iter()
+            .filter(|(_, counts)| *counts)
+            .map(|(phase, _)| phase)
+            .collect()
+    }
+
     /// A class's standings: everyone on its roster, 1 to n.
     ///
     /// The class's counted phases are read in order. The first one's ranking places the
@@ -353,8 +529,7 @@ impl EventState {
     ) -> Vec<ClassPlace> {
         let roster = self.rosters.get(class).cloned().unwrap_or_default();
         let mut out: Vec<ClassPlace> = Vec::new();
-        let phases = self.class_phases.get(class).map_or(&[][..], Vec::as_slice);
-        for phase in phases {
+        for phase in &self.counted_phases(class) {
             let Some(result) = results.get(phase) else {
                 continue;
             };
@@ -888,6 +1063,12 @@ impl EventState {
                 }
                 Ok(())
             }),
+            Event::PhaseCounts { phase, .. } => {
+                if self.tree.get(phase).is_none() {
+                    return Err(Refusal::UnknownPhase(phase.clone()));
+                }
+                Ok(())
+            }
 
             Event::LapRemoved { race, crossing, .. }
             | Event::LapRestored { race, crossing }
@@ -1454,6 +1635,7 @@ mod tests {
                     )),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1529,6 +1711,7 @@ mod tests {
                     )),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1680,6 +1863,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         assert_eq!(
             director.record(Event::PhaseDefined {
@@ -1737,6 +1921,7 @@ mod tests {
                     format: None,
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1774,6 +1959,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1948,6 +2134,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -2226,6 +2413,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -2507,6 +2695,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -2612,6 +2801,7 @@ mod tests {
             format: Some(format(EndCondition::FirstToLaps(1), 0)),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         for (id, who) in [("a1", "ana"), ("a2", "ana"), ("b1", "ben"), ("c1", "cat")] {
             director
@@ -2630,6 +2820,418 @@ mod tests {
             director.state.queue_spaced(&results),
             vec![pid("b1"), pid("c1"), pid("a2")]
         );
+    }
+
+    /// An event with one class, "open" (ana, ben, cat, dee), and the phases a director
+    /// would make for it: Qualifying (the class's roster) with one heat, then Finals (the
+    /// top two of Qualifying) with one heat, and a Practice heat that ranks nobody.
+    fn class_event() -> (Director, ClassId) {
+        let mut director = Director::default();
+        let open = ClassId("open".into());
+        director
+            .record(Event::RosterSet {
+                class: open.clone(),
+                pilots: ["ana", "ben", "cat", "dee"]
+                    .iter()
+                    .map(|n| pilot(n))
+                    .collect(),
+            })
+            .unwrap();
+        let ranked = format(EndCondition::FirstToLaps(1), 0);
+        let mut unranked = ranked.clone();
+        unranked.ranking = None;
+        let group = |id: &str, field: Vec<FieldSlice>, format: Format| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: None,
+            kind: PhaseKind::Group {
+                field,
+                combine: gridfpv_events::CombineRule::Stack,
+            },
+            format: Some(format),
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        let heat = |id: &str, parent: &str, sources: Vec<SeatSource>| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: Some(pid(parent)),
+            kind: PhaseKind::Heat {
+                lineup: sources
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, source)| HeatSeat {
+                        adapter: oft(),
+                        seat: SeatRef(format!("seat-{i}")),
+                        source,
+                    })
+                    .collect(),
+            },
+            format: None,
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        let named = |names: &[&str]| names.iter().map(|n| SeatSource::Pilot(pilot(n))).collect();
+        for def in [
+            group("practice", vec![], unranked),
+            heat("practice/heat", "practice", named(&["ana", "ben"])),
+            group(
+                "quali",
+                vec![FieldSlice::Class(open.clone())],
+                ranked.clone(),
+            ),
+            heat("quali/heat", "quali", named(&["dee", "cat", "ben", "ana"])),
+            group(
+                "finals",
+                vec![FieldSlice::FromPhase {
+                    phase: pid("quali"),
+                    from: 1,
+                    to: 2,
+                }],
+                ranked,
+            ),
+            heat(
+                "finals/heat",
+                "finals",
+                (1..=2)
+                    .map(|position| SeatSource::FromPhase {
+                        phase: pid("quali"),
+                        position,
+                    })
+                    .collect(),
+            ),
+        ] {
+            director.record(Event::PhaseDefined { def }).unwrap();
+        }
+        (director, open)
+    }
+
+    fn ids(phases: &[PhaseId]) -> Vec<&str> {
+        phases.iter().map(|phase| phase.0.as_str()).collect()
+    }
+
+    #[test]
+    fn a_phase_is_for_the_class_whose_roster_is_its_field_or_whose_phase_seeds_it() {
+        let (director, open) = class_event();
+        let class = |id: &str| director.state.phase_class(&pid(id));
+        // Its field is the class's roster.
+        assert_eq!(class("quali"), Some(open.clone()));
+        // It is held by a phase of the class.
+        assert_eq!(class("quali/heat"), Some(open.clone()));
+        // It takes its pilots from a phase of the class.
+        assert_eq!(class("finals"), Some(open.clone()));
+        assert_eq!(class("finals/heat"), Some(open.clone()));
+        // It only names pilots: it is for no class, though they are all in one.
+        assert_eq!(class("practice"), None);
+        assert_eq!(class("practice/heat"), None);
+        assert_eq!(class("nope"), None);
+    }
+
+    #[test]
+    fn with_nothing_set_a_class_counts_its_ranked_phases_latest_first() {
+        let (director, open) = class_event();
+        // Finals was added last, so it decides. Qualifying places whoever it leaves out.
+        // Each is one phase: its heats are not listed apart. Practice never counts.
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+        assert_eq!(
+            director.state.class_phase_list(&open),
+            vec![(pid("finals"), true), (pid("quali"), true)]
+        );
+        // Another class has none of them.
+        assert!(
+            director
+                .state
+                .counted_phases(&ClassId("spec".into()))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_standings_come_out_right_with_nothing_set_by_hand() {
+        let (mut director, open) = class_event();
+        // Seat order wins each heat: Dee, Cat, Ben, Ana in qualifying; then Dee and Cat
+        // meet in the finals, where the seats are qualifying's first and second.
+        fly(&mut director, "quali/heat");
+        fly(&mut director, "finals/heat");
+        let results = director.state.results();
+        let order: Vec<(String, Option<String>)> = director
+            .state
+            .class_standings(&open, &results)
+            .into_iter()
+            .map(|place| (place.pilot.0, place.placed_by.map(|phase| phase.0)))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("dee".into(), Some("finals".into())),
+                ("cat".into(), Some("finals".into())),
+                ("ben".into(), Some("quali".into())),
+                ("ana".into(), Some("quali".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_phase_the_director_says_does_not_count_is_left_out_until_they_say_it_does() {
+        let (mut director, open) = class_event();
+        assert_eq!(
+            director.record(Event::PhaseCounts {
+                phase: pid("nope"),
+                counts: false,
+            }),
+            Err(Refusal::UnknownPhase(pid("nope")))
+        );
+        director
+            .record(Event::PhaseCounts {
+                phase: pid("finals"),
+                counts: false,
+            })
+            .unwrap();
+        assert_eq!(ids(&director.state.counted_phases(&open)), ["quali"]);
+        // It is still listed, after the ones that count, so it can be counted again.
+        assert_eq!(
+            director.state.class_phase_list(&open),
+            vec![(pid("quali"), true), (pid("finals"), false)]
+        );
+        // The standings then come from qualifying alone.
+        fly(&mut director, "quali/heat");
+        fly(&mut director, "finals/heat");
+        let results = director.state.results();
+        let placed_by: Vec<Option<String>> = director
+            .state
+            .class_standings(&open, &results)
+            .into_iter()
+            .map(|place| place.placed_by.map(|phase| phase.0))
+            .collect();
+        assert!(placed_by.iter().all(|by| by.as_deref() == Some("quali")));
+        // Said twice, it is the same. Said to count again, it is back where it was.
+        for counts in [false, true, true] {
+            director
+                .record(Event::PhaseCounts {
+                    phase: pid("finals"),
+                    counts,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn an_order_the_director_set_stands_and_a_phase_added_since_goes_ahead_of_it() {
+        let (mut director, open) = class_event();
+        director
+            .record(Event::StandingsSet {
+                class: open.clone(),
+                phases: vec![pid("quali"), pid("finals")],
+            })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["quali", "finals"]
+        );
+        // A consolation race is added afterwards, seeded from qualifying.
+        let consolation = PhaseDef {
+            id: pid("consolation"),
+            label: "Consolation".into(),
+            parent: None,
+            kind: PhaseKind::Heat {
+                lineup: vec![HeatSeat {
+                    adapter: oft(),
+                    seat: SeatRef("seat-0".into()),
+                    source: SeatSource::FromPhase {
+                        phase: pid("quali"),
+                        position: 3,
+                    },
+                }],
+            },
+            format: Some(format(EndCondition::FirstToLaps(1), 0)),
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        director
+            .record(Event::PhaseDefined { def: consolation })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["consolation", "quali", "finals"]
+        );
+        // The order set again, with it in its place.
+        director
+            .record(Event::StandingsSet {
+                class: open.clone(),
+                phases: vec![pid("finals"), pid("quali"), pid("consolation")],
+            })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali", "consolation"]
+        );
+        // A phase that is removed drops out of the order without a word.
+        director
+            .record(Event::PhaseRemoved {
+                phase: pid("consolation"),
+            })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn a_class_phase_with_no_ranked_heat_yet_is_not_listed() {
+        let (mut director, open) = class_event();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("mains"),
+                    label: "Mains".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![FieldSlice::Class(open.clone())],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: Some(format(EndCondition::FirstToLaps(1), 0)),
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        // It holds no heat, so there is nothing in it to rank by.
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn a_phase_that_only_holds_heats_seeded_from_a_class_phase_is_one_phase_of_that_class() {
+        // "Mains" is made by hand: an empty phase with no class picked, and two heats in it
+        // whose seats come from qualifying. It is the class's, and it counts as one phase,
+        // not as two heats.
+        let (mut director, open) = class_event();
+        let ranked = format(EndCondition::FirstToLaps(1), 0);
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("mains"),
+                    label: "Mains".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: Some(ranked),
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        for (id, positions) in [("mains/a", [1, 2]), ("mains/b", [3, 4])] {
+            director
+                .record(Event::PhaseDefined {
+                    def: PhaseDef {
+                        id: pid(id),
+                        label: id.into(),
+                        parent: Some(pid("mains")),
+                        kind: PhaseKind::Heat {
+                            lineup: positions
+                                .iter()
+                                .enumerate()
+                                .map(|(i, position)| HeatSeat {
+                                    adapter: oft(),
+                                    seat: SeatRef(format!("seat-{i}")),
+                                    source: SeatSource::FromPhase {
+                                        // Seeded from a heat inside qualifying, not from
+                                        // qualifying itself: its class is found all the same.
+                                        phase: pid("quali/heat"),
+                                        position: *position,
+                                    },
+                                })
+                                .collect(),
+                        },
+                        format: None,
+                        false_start_limit: None,
+                        display_hint: None,
+                        class: None,
+                    },
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            director.state.phase_class(&pid("mains")),
+            Some(open.clone())
+        );
+        assert_eq!(
+            director.state.phase_class(&pid("mains/a")),
+            Some(open.clone())
+        );
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["mains", "finals", "quali"]
+        );
+        // Practice holds only heats that name pilots: still for no class.
+        assert_eq!(director.state.phase_class(&pid("practice")), None);
+        // Until the director says it is for one. Its name does not make it ranked, though:
+        // it still ranks nobody, so it still does not count.
+        let mut practice = director.state.tree.get(&pid("practice")).unwrap().clone();
+        practice.class = Some(open.clone());
+        director
+            .record(Event::PhaseDefined { def: practice })
+            .unwrap();
+        assert_eq!(
+            director.state.phase_class(&pid("practice")),
+            Some(open.clone())
+        );
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["mains", "finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn phases_seeded_from_each_other_do_not_hang_the_director() {
+        let mut director = Director::default();
+        let seeded = |id: &str, from: &str| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: None,
+            kind: PhaseKind::Group {
+                field: vec![FieldSlice::FromPhase {
+                    phase: pid(from),
+                    from: 1,
+                    to: 2,
+                }],
+                combine: gridfpv_events::CombineRule::Stack,
+            },
+            format: None,
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        director
+            .record(Event::PhaseDefined {
+                def: seeded("a", "b"),
+            })
+            .unwrap();
+        director
+            .record(Event::PhaseDefined {
+                def: seeded("b", "a"),
+            })
+            .unwrap();
+        assert_eq!(director.state.phase_class(&pid("a")), None);
+        assert_eq!(director.state.phase_class(&pid("b")), None);
     }
 
     #[test]
@@ -2664,6 +3266,7 @@ mod tests {
             format: Some(format(EndCondition::FirstToLaps(1), 0)),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         // Qualifying has four of the five; the final has the two who made it.
         director
@@ -2935,6 +3538,7 @@ mod tests {
             format: Some(format(EndCondition::FirstToLaps(1), 0)),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         director
             .record(Event::PhaseDefined {

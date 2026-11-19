@@ -47,11 +47,17 @@
     void live.reloadTimers();
   });
 
-  /** The classes at the event, as a shortcut for picking pilots. */
+  /** The classes at the event: the phase can be for one of them. */
   const rosters = $derived(live.view?.rosters ?? []);
-  /** Put a class's roster in the picker. The director can still change it. */
-  function fillFrom(classId: string) {
-    const roster = rosters.find((r) => r.class === classId);
+  /**
+   * The class the phase is for, or `''` for none. It stays the phase's class whatever
+   * pilots are picked in the end, so its results count toward that class's standings.
+   */
+  let classId = $state('');
+  /** Pick the class, and put its roster in the picker. The director can still change it. */
+  function fillFrom(picked: string) {
+    classId = picked;
+    const roster = rosters.find((r) => r.class === picked);
     if (roster) chosen = rosterPrefill(roster);
   }
 
@@ -88,6 +94,7 @@
       id: newPhaseId(label),
       label,
       ...(parent ? { parent } : {}),
+      ...(classId ? { class: classId } : {}),
       field: [{ Imported: chosen }],
       entrants: chosen.map((pilot) => ({ Pilot: pilot })),
       seats,
@@ -99,14 +106,17 @@
 </script>
 
 {#if rosters.length > 0}
-  <Field label="Start from a class" hint="Fills in the class's roster. You can still change it.">
+  <Field
+    label="Class"
+    hint="Fills in the class's roster, which you can still change. Its results then count toward that class's standings."
+  >
     <Select
-      value=""
-      aria-label="Start from a class"
+      value={classId}
+      aria-label="Class"
       disabled={busy}
       onchange={(e: Event) => fillFrom((e.currentTarget as HTMLSelectElement).value)}
     >
-      <option value="">Pick pilots one by one</option>
+      <option value="">No class: pick pilots one by one</option>
       {#each rosters as roster (roster.class)}
         <option value={roster.class}>{live.names.klass(roster.class)}</option>
       {/each}

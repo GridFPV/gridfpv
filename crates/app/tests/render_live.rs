@@ -142,6 +142,7 @@ async fn the_overlay_is_drawn_onto_a_clean_recording() {
         }),
         false_start_limit: None,
         display_hint: None,
+        class: None,
     };
     send(
         &registry,

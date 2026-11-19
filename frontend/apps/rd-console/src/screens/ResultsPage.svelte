@@ -312,7 +312,8 @@
       <Card title="{name} standings" elevation="sm">
         <p class="muted">
           {#if roster.counted_phases.length === 0}
-            No phase counts toward this class yet. Choose what counts on the
+            No phase counts toward this class yet. A ranked phase made for this class counts by
+            itself. See the class on the
             <a href={formatHash({ kind: 'event', section: 'event' })}>Details page</a>.
           {:else}
             From {roster.counted_phases.map((id) => names.phase(id)).join(', then ')}.

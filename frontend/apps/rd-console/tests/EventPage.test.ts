@@ -92,8 +92,20 @@ describe('EventPage details', () => {
         ],
         races: [race('q-1', 1, 'Saved'), race('q-1', 2, 'Discarded'), race('q-2', 1, 'Running')],
         rosters: [
-          { class: 'cls-open', pilots: ['p-1a', 'p-2b'], counted_phases: [], standings: [] },
-          { class: 'cls-spec', pilots: ['p-2b', 'p-3c'], counted_phases: [], standings: [] }
+          {
+            class: 'cls-open',
+            pilots: ['p-1a', 'p-2b'],
+            counted_phases: [],
+            phases: [],
+            standings: []
+          },
+          {
+            class: 'cls-spec',
+            pilots: ['p-2b', 'p-3c'],
+            counted_phases: [],
+            phases: [],
+            standings: []
+          }
         ]
       })
     );
@@ -347,6 +359,10 @@ describe('classes at the event', () => {
     class: 'cls-open',
     pilots: ['p-1a', 'p-2b'],
     counted_phases: ['finals'],
+    phases: [
+      { phase: 'finals', counts: true },
+      { phase: 'quali', counts: false }
+    ],
     standings: [
       { pilot: 'p-2b', position: 1, placed_by: 'finals' },
       { pilot: 'p-1a', position: 2 }
@@ -375,7 +391,7 @@ describe('classes at the event', () => {
     await open(
       eventView({
         phases,
-        rosters: [roster({ counted_phases: [], standings: [] })]
+        rosters: [roster({ counted_phases: [], phases: [], standings: [] })]
       })
     );
     const open_ = screen.getByRole('listitem', { name: 'Open' });
@@ -395,7 +411,7 @@ describe('classes at the event', () => {
     await open(
       eventView({
         phases,
-        rosters: [roster({ counted_phases: [], standings: [] })]
+        rosters: [roster({ counted_phases: [], phases: [], standings: [] })]
       })
     );
     const open_ = await openClass('Open');
@@ -416,7 +432,10 @@ describe('classes at the event', () => {
 
   it('a class with nobody in it says so in its line, and opens to an empty roster', async () => {
     await open(
-      eventView({ phases, rosters: [roster({ pilots: [], counted_phases: [], standings: [] })] })
+      eventView({
+        phases,
+        rosters: [roster({ pilots: [], counted_phases: [], phases: [], standings: [] })]
+      })
     );
     const open_ = await openClass('Open');
     expect(open_).toHaveTextContent('0 pilots');
@@ -513,21 +532,96 @@ describe('classes at the event', () => {
     expect(within(form).getByRole('button', { name: 'Save roster' })).toBeEnabled();
   });
 
-  it('chooses which phases count and in what order', async () => {
-    const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose what counts for Open' }));
-    const dialog = await screen.findByLabelText('What counts for Open');
-    expect(within(dialog).getByRole('list', { name: 'Phases that count' })).toHaveTextContent(
-      'Finals'
+  it('lists the phases the standings come from, worked out by Grid, with no dialog to pick them', async () => {
+    await open(eventView({ phases, rosters: [roster()] }));
+    expect(screen.queryByRole('button', { name: 'Choose what counts for Open' })).toBeNull();
+    const open_ = await openClass('Open');
+    const from = within(open_).getByRole('region', {
+      name: 'What the standings of Open come from'
+    });
+    const rows = within(within(from).getByRole('list', { name: 'Phases of Open' })).getAllByRole(
+      'listitem'
     );
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Qualifying' }));
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move Qualifying up' }));
-    // The Edit dialog of the page is closed, so this is the only Save on the screen.
-    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    // The one that counts, numbered; then the one that does not, struck through and unnumbered.
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual(['Finals', 'Qualifying']);
+    expect(rows[0]).toHaveTextContent(/^1\s*Finals/);
+    expect(within(rows[0]).getByRole('checkbox', { name: 'Finals counts' })).toBeChecked();
+    expect(rows[1]).toHaveClass('off');
+    expect(within(rows[1]).getByRole('checkbox', { name: 'Qualifying counts' })).not.toBeChecked();
+    // With one phase counting there is nothing to put in order.
+    expect(within(from).queryByRole('button', { name: /^Move / })).toBeNull();
+    expectNoRawIds();
+  });
+
+  it('says a phase does not count, or counts again, with one tick', async () => {
+    const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
+    const open_ = await openClass('Open');
+    await fireEvent.click(within(open_).getByRole('checkbox', { name: 'Finals counts' }));
+    await waitFor(() =>
+      expect(sent(liveSession)).toEqual([
+        { Record: { PhaseCounts: { phase: 'finals', counts: false } } }
+      ])
+    );
+    // The boxes are held while the first change is on its way.
+    const quali = within(open_).getByRole('checkbox', { name: 'Qualifying counts' });
+    await waitFor(() => expect(quali).toBeEnabled());
+    await fireEvent.click(quali);
+    await waitFor(() =>
+      expect(sent(liveSession)[1]).toEqual({
+        Record: { PhaseCounts: { phase: 'quali', counts: true } }
+      })
+    );
+  });
+
+  it('moves a phase up or down in the order the standings are read', async () => {
+    const two = roster({
+      counted_phases: ['finals', 'quali'],
+      phases: [
+        { phase: 'finals', counts: true },
+        { phase: 'quali', counts: true }
+      ]
+    });
+    const { liveSession } = await open(eventView({ phases, rosters: [two] }));
+    const open_ = await openClass('Open');
+    // The first one decides, and says so. It cannot go up; the last cannot go down.
+    const rows = within(within(open_).getByRole('list', { name: 'Phases of Open' })).getAllByRole(
+      'listitem'
+    );
+    expect(rows[0]).toHaveTextContent('decides');
+    expect(rows[1]).not.toHaveTextContent('decides');
+    expect(within(open_).getByRole('button', { name: 'Move Finals up' })).toBeDisabled();
+    expect(within(open_).getByRole('button', { name: 'Move Qualifying down' })).toBeDisabled();
+    await fireEvent.click(within(open_).getByRole('button', { name: 'Move Qualifying up' }));
     await waitFor(() =>
       expect(sent(liveSession)).toEqual([
         { Record: { StandingsSet: { class: 'cls-open', phases: ['quali', 'finals'] } } }
       ])
+    );
+  });
+
+  it('says where to make one when no ranked phase is for the class', async () => {
+    await open(
+      eventView({
+        phases,
+        rosters: [roster({ counted_phases: [], phases: [], standings: [] })]
+      })
+    );
+    const open_ = await openClass('Open');
+    expect(within(open_).getByTestId('no-class-phases')).toHaveTextContent(
+      'No ranked phase is for this class yet.'
+    );
+    expect(within(open_).queryByRole('list', { name: 'Phases of Open' })).toBeNull();
+  });
+
+  it("shows the Director's words when a change to the phases is refused", async () => {
+    const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
+    vi.mocked(liveSession.sendCommand).mockRejectedValueOnce(new Error('Finals is locked.'));
+    const open_ = await openClass('Open');
+    await fireEvent.click(within(open_).getByRole('checkbox', { name: 'Finals counts' }));
+    expect(await within(open_).findByText('Finals is locked.')).toBeVisible();
+    // The box goes back to what the Director has: it still counts.
+    await waitFor(() =>
+      expect(within(open_).getByRole('checkbox', { name: 'Finals counts' })).toBeChecked()
     );
   });
 });

@@ -275,11 +275,24 @@ Event
 - **A ranked phase serves exactly one class.** The same pilots are often in several classes,
   so results are kept apart by class. There is no combined qualifying.
 - Only an unranked phase can serve more than one class. Shared practice is the case.
-- **Class standings** (Agreed): each class lists the phases that count toward its result,
-  in order. The first one decides: for a class with mains, the Mains ranking is the class
-  standings. An earlier phase is only **reached back to** when the first leaves pilots
-  unplaced or level, for example pilots who never made a main are ordered by Qualifying.
-  Practice never counts. This is what gives every class a ranking from 1 to n.
+- **Class standings** (Agreed; worked out by Grid since 2026-11-19): each class has the
+  phases that count toward its result, in order. The first one decides: for a class with
+  mains, the Mains ranking is the class standings. An earlier phase is only **reached back
+  to** when the first leaves pilots unplaced or level, for example pilots who never made a
+  main are ordered by Qualifying. Practice never counts. This is what gives every class a
+  ranking from 1 to n.
+  - **Which phases:** the director does not pick them. A phase is **for a class** when, in
+    this order: the director said so when making it (a bracket or a round robin made from a
+    class's roster keeps the class even if the pilots are then changed by hand); its field
+    is that class's roster; it takes its pilots from a phase of that class; the phases
+    inside it are for that class (a "Mains" holding heats seeded from qualifying); or the
+    phase that holds it is. Every ranked phase that is for the class counts, as one unit:
+    Qualifying with its heats is one phase, a bracket with its rounds is one. A phase that
+    only names pilots, with no class said, is for no class.
+  - **In what order:** the latest phase first, so the last thing raced decides.
+  - **What the director can change:** the order (`StandingsSet`), and whether a phase counts
+    at all (`PhaseCounts`): a fun race or a warm-up can be left out. A phase added after the
+    order was set goes ahead of it.
 
 ### 5.4 Heat (Agreed)
 

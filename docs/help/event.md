@@ -42,13 +42,22 @@ A class is a name plus the pilots racing in it at this event.
 - Each class is one line: its name and how many pilots. **Click it to open it.** Inside is
   its roster. Press a pilot to add them, or the × beside one to take them out, then press
   **Save roster**. Nothing changes until you save.
-- **What counts** picks which phases decide the class's standings, in order. The first
-  phase decides. A later one is only used for pilots the first one did not place.
+- **Standings come from** lists the phases that decide the class's standings. You do not
+  pick them: every ranked phase made for the class is there by itself, the latest first.
+  - The **first** phase decides. A later one is only used for pilots the first one did
+    not place. So with qualifying and then mains, the mains decide, and qualifying orders
+    the pilots who never made a main.
+  - Press **↑** or **↓** to change the order.
+  - Clear **Counts** on a phase to leave it out: a fun race, a warm-up. Tick it to count
+    it again.
+  - A phase is "for a class" when you picked that class in **Add phase**, or it takes its
+    pilots from a phase of that class. Practice never counts. A phase where you picked no
+    class and named the pilots by hand is for no class.
 
 You do not need a class to race. A heat can name its pilots directly. Add a class when you
 want standings from first to last.
 
-Once a phase counts, the open class also shows its standings.
+Once a phase counts, the open class also shows its standings under that list.
 
 ## Pilot sign-in
 

@@ -528,7 +528,9 @@ describe('Add a phase', () => {
 
   it("with a ranked format, for a class: it ranks by the format's rule over the class's roster", async () => {
     const view = eventView({
-      rosters: [{ class: 'cls-open', pilots: ['p-1a'], counted_phases: [], standings: [] }]
+      rosters: [
+        { class: 'cls-open', pilots: ['p-1a'], counted_phases: [], phases: [], standings: [] }
+      ]
     });
     const { session } = await open(view);
     const form = await dialog();
@@ -1084,6 +1086,7 @@ describe('starting from a class', () => {
           class: 'cls-open',
           pilots: ['p-1a', 'p-2b'],
           counted_phases: [],
+          phases: [],
           standings: []
         }
       ]
@@ -1118,19 +1121,61 @@ describe('starting from a class', () => {
     ]);
   });
 
-  it('a new bracket can start from a class roster as its field', async () => {
+  it('a new bracket made for a class is seeded from its roster and carries the class', async () => {
     const createBracket = vi.fn<LiveSession['createBracket']>(async () => ({ cursor: 1 }));
     await open(view(), { createBracket });
     const form = await addPhaseOf('bracket');
     await fireEvent.input(within(form).getByLabelText('Phase name'), {
       target: { value: 'Open Finals' }
     });
-    await fireEvent.change(within(form).getByLabelText('Start from a class'), {
+    expect(optionTexts(within(form).getByLabelText('Class'))).toEqual([
+      'No class: pick pilots one by one',
+      'Open'
+    ]);
+    await fireEvent.change(within(form).getByLabelText('Class'), {
+      target: { value: 'cls-open' }
+    });
+    // The roster is a start: a pilot is added by hand, and the class is still the phase's.
+    await fireEvent.click(within(form).getByRole('button', { name: 'Cat' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    await waitFor(() => expect(createBracket).toHaveBeenCalled());
+    const request = createBracket.mock.calls[0][1];
+    expect(request.class).toBe('cls-open');
+    expect(request.field).toEqual([{ Imported: ['p-1a', 'p-2b', 'p-3c'] }]);
+  });
+
+  it('a new bracket with no class picked carries none, so it counts toward no class', async () => {
+    const createBracket = vi.fn<LiveSession['createBracket']>(async () => ({ cursor: 1 }));
+    await open(view(), { createBracket });
+    const form = await addPhaseOf('bracket');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Fun Finals' }
+    });
+    // Picked and then un-picked: the pilots stay, the class goes.
+    await fireEvent.change(within(form).getByLabelText('Class'), {
+      target: { value: 'cls-open' }
+    });
+    await fireEvent.change(within(form).getByLabelText('Class'), { target: { value: '' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
+    await waitFor(() => expect(createBracket).toHaveBeenCalled());
+    const request = createBracket.mock.calls[0][1];
+    expect('class' in request).toBe(false);
+    expect(request.field).toEqual([{ Imported: ['p-1a', 'p-2b'] }]);
+  });
+
+  it('a new round robin made for a class carries the class too', async () => {
+    const createRoundRobin = vi.fn<LiveSession['createRoundRobin']>(async () => ({ cursor: 1 }));
+    await open(view(), { createRoundRobin });
+    const form = await addPhaseOf('round-robin');
+    await fireEvent.input(within(form).getByLabelText('Phase name'), {
+      target: { value: 'Open Robin' }
+    });
+    await fireEvent.change(within(form).getByLabelText('Class'), {
       target: { value: 'cls-open' }
     });
     await fireEvent.click(screen.getByRole('button', { name: 'Add phase' }));
-    await waitFor(() => expect(createBracket).toHaveBeenCalled());
-    expect(createBracket.mock.calls[0][1].field).toEqual([{ Imported: ['p-1a', 'p-2b'] }]);
+    await waitFor(() => expect(createRoundRobin).toHaveBeenCalled());
+    expect(createRoundRobin.mock.calls[0][1].class).toBe('cls-open');
   });
 });
 

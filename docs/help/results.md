@@ -20,9 +20,10 @@ phase raced last.
 Under the phase results.
 
 Each class is listed from first to last, with the phase that placed each pilot. A class's
-standings come from the phases picked under **What counts** on the [Details](#/help/event)
-page. The first phase decides. A later one is only used for pilots the first one did not
-place.
+standings come from the ranked phases made for that class. Grid works out which, with the
+latest one first. The first phase decides. A later one is only used for pilots the first
+one did not place. To change the order, or to leave a phase out, open the class on the
+[Details](#/help/event) page.
 
 Until a phase counts for a class, its card says so and shows no table.
 

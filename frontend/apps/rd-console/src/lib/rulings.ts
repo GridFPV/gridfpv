@@ -13,7 +13,6 @@ import type {
   RosterView
 } from '@gridfpv/types';
 import type { Names } from './names.js';
-import { isHeat } from './phases.js';
 
 /**
  * A proposed disqualification, as the notice says it: "Ace has 2 false starts in Finals. The
@@ -73,14 +72,6 @@ export function standingRows(roster: RosterView, names: Names): StandingRow[] {
     callsign: names.pilot(place.pilot),
     placedBy: place.placed_by === undefined ? undefined : names.phase(place.placed_by)
   }));
-}
-
-/**
- * The phases a class's standings can count: every phase that is ranked. A heat under a
- * format with no ranking (practice) never counts, so it is not offered.
- */
-export function countablePhases(phases: readonly PhaseView[]): PhaseView[] {
-  return phases.filter((phase) => !isHeat(phase.def) || phase.format?.ranking !== undefined);
 }
 
 /** The classes of the directory that are not in the event yet and are not hidden. */

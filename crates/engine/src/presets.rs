@@ -97,6 +97,7 @@ fn heat(
         format,
         false_start_limit: None,
         display_hint: None,
+        class: None,
     }
 }
 
@@ -219,6 +220,7 @@ fn round(
         format,
         false_start_limit: None,
         display_hint: None,
+        class: None,
     };
     let mut heats = Vec::new();
     let mut sizes = Vec::new();
@@ -388,6 +390,7 @@ pub fn bracket(spec: Bracket) -> Result<Vec<PhaseDef>, PresetError> {
             }
             .to_owned(),
         ),
+        class: None,
     }];
     // Rounds are listed latest first: that is the order the bracket stacks them in.
     let rounds = last_heat
@@ -491,6 +494,7 @@ pub fn mains(spec: Mains) -> Result<Vec<PhaseDef>, PresetError> {
         format: None,
         false_start_limit: None,
         display_hint: Some(HINT_MAINS.to_owned()),
+        class: None,
     }];
     let main_id = |index: usize| child(&id, &format!("main-{}", index + 1));
     let mut top_final_format = top_final_format;
@@ -776,6 +780,7 @@ pub fn round_robin(spec: RoundRobin) -> Result<Vec<PhaseDef>, PresetError> {
         format: Some(format),
         false_start_limit: None,
         display_hint: Some(HINT_ROUND_ROBIN.to_owned()),
+        class: None,
     }];
     for (round, dealt) in (1..=rounds).zip(&dealt) {
         let round_id = child(&id, &format!("round-{round}"));
@@ -791,6 +796,7 @@ pub fn round_robin(spec: RoundRobin) -> Result<Vec<PhaseDef>, PresetError> {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         });
         for (index, pilots) in dealt.iter().enumerate() {
             // A round's only heat takes the round's name: "Round 1", not "Round 1 Heat 1".
@@ -1315,6 +1321,7 @@ mod tests {
             format: Some(one_race()),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         });
         // One heat that never needs flying keeps the group honest about being complete.
         tree.put(PhaseDef {
@@ -1331,6 +1338,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         });
         tree
     }
@@ -1373,6 +1381,7 @@ mod tests {
             format: Some(one_race()),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         });
         tree.put(PhaseDef {
             id: pid("seeding/done"),
@@ -1388,6 +1397,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         });
         tree.put(PhaseDef {
             id: pid("seeding/done-source"),
@@ -1403,6 +1413,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         });
         tree
     }
@@ -2064,6 +2075,7 @@ mod tests {
             format: Some(one_race()),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         });
         tree.put(heat(
             pid("quali/heat"),

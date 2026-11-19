@@ -1247,6 +1247,7 @@ mod playback_tests {
             }),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         with_event(&registry, &event, |session| {
             session.commands(vec![
