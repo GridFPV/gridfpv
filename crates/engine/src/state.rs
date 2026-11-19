@@ -2218,6 +2218,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -2241,6 +2242,7 @@ mod tests {
                     format: None,
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -2354,6 +2356,7 @@ mod tests {
                     format: None,
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
