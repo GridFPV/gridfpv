@@ -244,7 +244,9 @@ describe('asking for names again', () => {
       timers: false
     });
     const view = eventView({
-      rosters: [{ class: 'c-open', pilots: ['p-ace'], counted_phases: [], standings: [] }],
+      rosters: [
+        { class: 'c-open', pilots: ['p-ace'], counted_phases: [], phases: [], standings: [] }
+      ],
       phases: [heat('h1', 'Heat 1', ['p-ace'])],
       races: [race('h1', 1, 'Saved', { seats: [raceSeat(0, 'p-ace')] })]
     });
@@ -258,7 +260,7 @@ describe('asking for names again', () => {
   it('is needed for a pilot the page has no name for, wherever they appear', () => {
     const known = [pilot('p-ace', 'Ace')];
     const inRoster = eventView({
-      rosters: [{ class: 'c', pilots: ['p-new'], counted_phases: [], standings: [] }]
+      rosters: [{ class: 'c', pilots: ['p-new'], counted_phases: [], phases: [], standings: [] }]
     });
     const inField = eventView({ phases: [heat('h1', 'Heat 1', ['p-new'])] });
     const inRanking = eventView({
@@ -282,7 +284,7 @@ describe('asking for names again', () => {
 
   it('is needed for a class or a timer with no name, but never for the bench', () => {
     const view = eventView({
-      rosters: [{ class: 'c-new', pilots: [], counted_phases: [], standings: [] }],
+      rosters: [{ class: 'c-new', pilots: [], counted_phases: [], phases: [], standings: [] }],
       phases: [
         heat('h1', 'Heat 1', ['p-ace']),
         {

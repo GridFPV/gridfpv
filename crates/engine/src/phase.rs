@@ -849,6 +849,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         }
     }
 
@@ -866,6 +867,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         }
     }
 

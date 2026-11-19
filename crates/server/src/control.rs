@@ -327,6 +327,11 @@ pub struct BracketRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent: Option<PhaseId>,
+    /// The class the phase is for, when the director picked one. Its results then count
+    /// toward that class's standings, whatever pilots were picked in the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<gridfpv_events::ClassId>,
     /// The bracket's field, in seed order.
     pub field: Vec<FieldSlice>,
     /// Who starts on each seeded place, top seed first.
@@ -406,7 +411,8 @@ pub async fn post_bracket(
     Path(event_id): Path<EventId>,
     Json(body): Json<BracketRequest>,
 ) -> Result<Json<CommandOutcome>, ProtocolError> {
-    let defs = presets::bracket(Bracket {
+    let class = body.class.clone();
+    let mut defs = presets::bracket(Bracket {
         id: body.id,
         label: body.label,
         parent: body.parent,
@@ -419,6 +425,10 @@ pub async fn post_bracket(
         final_format: body.final_format,
     })
     .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    // The first phase made is the bracket itself: it carries the class.
+    if let Some(top) = defs.first_mut() {
+        top.class = class;
+    }
     with_event(&registry, &event_id, |session| {
         define(session, defs)?;
         Ok(Json(session.outcome()))
@@ -468,6 +478,11 @@ pub struct RoundRobinRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent: Option<PhaseId>,
+    /// The class the phase is for, when the director picked one. Its results then count
+    /// toward that class's standings, whatever pilots were picked in the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<gridfpv_events::ClassId>,
     /// The round robin's field, in seed order.
     pub field: Vec<FieldSlice>,
     /// Who flies, top seed first.
@@ -492,7 +507,8 @@ pub async fn post_round_robin(
     Path(event_id): Path<EventId>,
     Json(body): Json<RoundRobinRequest>,
 ) -> Result<Json<CommandOutcome>, ProtocolError> {
-    let defs = presets::round_robin(RoundRobin {
+    let class = body.class.clone();
+    let mut defs = presets::round_robin(RoundRobin {
         id: body.id,
         label: body.label,
         parent: body.parent,
@@ -506,6 +522,10 @@ pub async fn post_round_robin(
         }),
     })
     .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    // The first phase made is the round robin itself: it carries the class.
+    if let Some(top) = defs.first_mut() {
+        top.class = class;
+    }
     with_event(&registry, &event_id, |session| {
         define(session, defs)?;
         Ok(Json(session.outcome()))
@@ -815,6 +835,7 @@ mod tests {
             id: PhaseId("finals".into()),
             label: "Finals".into(),
             parent: None,
+            class: None,
             field: vec![FieldSlice::Imported(pilots.clone())],
             entrants: pilots.into_iter().map(SeatSource::Pilot).collect(),
             seats: (0..4)
@@ -943,6 +964,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bracket_made_for_a_class_counts_toward_that_class_by_itself() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = new_event(&registry);
+        let command = |body: serde_json::Value| {
+            let registry = registry.clone();
+            let event = event.clone();
+            async move {
+                let (status, raw) = send(
+                    &registry,
+                    "POST",
+                    &format!("/events/{}/commands", event.0),
+                    Some(body),
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{raw}");
+            }
+        };
+        command(json!({"Record": {"RosterSet": {
+            "class": "open", "pilots": ["ana", "ben", "cat", "dee"]
+        }}}))
+        .await;
+        // Nothing is for the class yet.
+        let view = state(&registry, &event).await;
+        assert!(view.rosters[0].phases.is_empty());
+        assert!(view.rosters[0].counted_phases.is_empty());
+
+        // A bracket of pilots picked by hand, said to be for the class.
+        let mut request = bracket_request(0);
+        request["class"] = json!("open");
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/presets/bracket", event.0),
+            Some(request),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let view = state(&registry, &event).await;
+        // The bracket carries the class; its rounds and heats do not need to.
+        let finals = view
+            .phases
+            .iter()
+            .find(|phase| phase.def.id.0 == "finals")
+            .unwrap();
+        assert_eq!(
+            finals.def.class.as_ref().map(|c| c.0.as_str()),
+            Some("open")
+        );
+        assert!(
+            view.phases
+                .iter()
+                .filter(|phase| phase.def.id.0 != "finals")
+                .all(|phase| phase.def.class.is_none())
+        );
+        // It counts, as one phase, with nothing set by hand.
+        let roster = &view.rosters[0];
+        assert_eq!(roster.counted_phases, vec![PhaseId("finals".into())]);
+        assert_eq!(roster.phases.len(), 1);
+        assert!(roster.phases[0].counts);
+
+        // The director says it does not count, and it is left out but still listed.
+        command(json!({"Record": {"PhaseCounts": {"phase": "finals", "counts": false}}})).await;
+        let view = state(&registry, &event).await;
+        assert!(view.rosters[0].counted_phases.is_empty());
+        assert_eq!(view.rosters[0].phases.len(), 1);
+        assert!(!view.rosters[0].phases[0].counts);
+        // A phase that is not there cannot be said to count or not.
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/commands", event.0),
+            Some(json!({"Record": {"PhaseCounts": {"phase": "nope", "counts": false}}})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // The same bracket with no class said is for no class: it names its pilots.
+        let other = EventRegistry::new(None).unwrap();
+        let other_event = new_event(&other);
+        let (status, _) = send(
+            &other,
+            "POST",
+            &format!("/events/{}/commands", other_event.0),
+            Some(json!({"Record": {"RosterSet": {"class": "open", "pilots": ["ana"]}}})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &other,
+            "POST",
+            &format!("/events/{}/presets/bracket", other_event.0),
+            Some(bracket_request(0)),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            state(&other, &other_event).await.rosters[0]
+                .phases
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn a_preset_is_all_or_nothing() {
         let registry = EventRegistry::new(None).unwrap();
         let event = new_event(&registry);
@@ -1028,6 +1157,7 @@ mod tests {
             id: PhaseId("robin".into()),
             label: "Round Robin".into(),
             parent: None,
+            class: None,
             field: vec![FieldSlice::Imported(pilots.clone())],
             entrants: pilots.into_iter().map(SeatSource::Pilot).collect(),
             seats: (0..3)

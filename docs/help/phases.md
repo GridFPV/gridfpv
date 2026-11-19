@@ -31,7 +31,9 @@ and a bracket are phases. A phase can hold heats, and it can hold other phases.
   - **Empty**: a phase with no heats yet. Pick its format once and every heat under it
     uses it. **For the class** makes the class's roster the phase's field, so every pilot
     in the class gets a place. Then add heats with **+ Heat** on the phase's line.
-  - **Bracket**: every heat of an elimination bracket at once. Pick the pilots in seed
+  - **Bracket**: every heat of an elimination bracket at once. **Class** fills in a
+    class's pilots and makes the bracket count toward that class's standings, even if
+    you then change the pilots. Pick the pilots in seed
     order, how many fly in each heat, how many move on, and single or double elimination.
     Each round of the bracket is a phase of its own that holds the round's heats. The
     final is one too, even though it has one heat. The rounds are listed in the order you

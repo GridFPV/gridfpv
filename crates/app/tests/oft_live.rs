@@ -216,6 +216,7 @@ async fn races_are_timed_by_the_real_oft_daemon() {
         }),
         false_start_limit: None,
         display_hint: None,
+        class: None,
     };
     with_event(&registry, &event, |session| {
         session.commands(vec![Command::Record(Box::new(Event::PhaseDefined {

@@ -322,6 +322,10 @@ describe('class standings', () => {
             class: 'cls-open',
             pilots: ['p-1a', 'p-2b', 'p-3c'],
             counted_phases: ['f-1', 'quali'],
+            phases: [
+              { phase: 'f-1', counts: true },
+              { phase: 'quali', counts: true }
+            ],
             standings: [
               { pilot: 'p-2b', position: 1, placed_by: 'f-1' },
               { pilot: 'p-1a', position: 2, placed_by: 'quali' },
@@ -345,7 +349,9 @@ describe('class standings', () => {
   it('says so when no phase counts toward a class, and points at the Details page', async () => {
     await open(
       eventView({
-        rosters: [{ class: 'cls-open', pilots: ['p-1a'], counted_phases: [], standings: [] }]
+        rosters: [
+          { class: 'cls-open', pilots: ['p-1a'], counted_phases: [], phases: [], standings: [] }
+        ]
       })
     );
     expect(screen.getByText(/No phase counts toward this class yet\./)).toBeVisible();
@@ -363,6 +369,7 @@ describe('class standings', () => {
             class: 'cls-open',
             pilots: ['p-1a', 'p-2b', 'p-3c'],
             counted_phases: [],
+            phases: [],
             standings: [
               { pilot: 'p-1a', position: 1 },
               { pilot: 'p-2b', position: 2 },
@@ -381,8 +388,8 @@ describe('class standings', () => {
     await open(
       raceDay({
         rosters: [
-          { class: 'cls-open', pilots: ['p-1a'], counted_phases: [], standings: [] },
-          { class: 'cls-spec', pilots: ['p-2b'], counted_phases: [], standings: [] }
+          { class: 'cls-open', pilots: ['p-1a'], counted_phases: [], phases: [], standings: [] },
+          { class: 'cls-spec', pilots: ['p-2b'], counted_phases: [], phases: [], standings: [] }
         ]
       })
     );

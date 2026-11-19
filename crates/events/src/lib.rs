@@ -654,6 +654,13 @@ pub struct PhaseDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub display_hint: Option<String>,
+    /// The class this phase is for, when the director said so. A phase whose pilots were
+    /// picked from a class's roster and then changed by hand keeps the class this way.
+    /// Left out, the class is worked out from the phase's field and from where it sits
+    /// (`docs/primitives.md` §5.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<ClassId>,
 }
 
 /// Identifies one protest.
@@ -895,13 +902,19 @@ pub enum Event {
     },
     /// The event dropped a class.
     RosterRemoved { class: ClassId },
-    /// The event set which phases count toward a class's standings, in order. The first
-    /// decides. A later one in the list is only reached back to for pilots the ones before
-    /// it leave unplaced (`docs/primitives.md` §5.3).
+    /// The director put a class's phases in an order of their own for its standings. The
+    /// first decides. A later one in the list is only reached back to for pilots the ones
+    /// before it leave unplaced (`docs/primitives.md` §5.3).
+    ///
+    /// With no such fact the order is worked out: the class's ranked phases, latest first.
+    /// A phase of the class that is not in the list (one added since) goes ahead of it.
     StandingsSet {
         class: ClassId,
         phases: Vec<PhaseId>,
     },
+    /// The director said whether a phase counts toward its class's standings. Every ranked
+    /// phase of a class counts until this says it does not: a fun race, a warm-up.
+    PhaseCounts { phase: PhaseId, counts: bool },
     /// The Director had a race recorded on video. `file` is the recording as the recorder
     /// named it (a path on the machine that recorded it). `first_frame_at` is the Director's
     /// clock, in epoch microseconds, at the first frame of the file, so any moment of the
@@ -1544,6 +1557,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         let group = PhaseDef {
             id: PhaseId("c-main".into()),
@@ -1567,6 +1581,7 @@ mod tests {
             format: None,
             false_start_limit: Some(2),
             display_hint: Some("double-elimination".into()),
+            class: None,
         };
         for def in [heat, group] {
             let json = serde_json::to_string(&def).unwrap();

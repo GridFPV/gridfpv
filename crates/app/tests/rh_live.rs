@@ -160,6 +160,7 @@ async fn a_grid_race_is_timed_by_a_stock_rotorhazard() {
         }),
         false_start_limit: None,
         display_hint: None,
+        class: None,
     };
     let send = |command: Command| {
         with_event(&registry, &event, |session| session.commands(vec![command])).unwrap();

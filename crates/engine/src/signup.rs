@@ -593,6 +593,7 @@ impl EventState {
                     format: None,
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
                 spots: HeatSpots {
                     heat: id,
@@ -1122,6 +1123,7 @@ mod tests {
                 format: Some(format()),
                 false_start_limit: None,
                 display_hint: None,
+                class: None,
             },
         })))
         .unwrap();
@@ -1447,6 +1449,7 @@ mod tests {
                 format: Some(format()),
                 false_start_limit: None,
                 display_hint: None,
+                class: None,
             },
         })))
         .unwrap();
@@ -1503,6 +1506,7 @@ mod tests {
                 format: Some(format()),
                 false_start_limit: None,
                 display_hint: None,
+                class: None,
             },
         })))
         .unwrap();
@@ -1660,6 +1664,7 @@ mod tests {
                 format: Some(format()),
                 false_start_limit: None,
                 display_hint: None,
+                class: None,
             },
         })))
         .unwrap();
@@ -2297,6 +2302,7 @@ mod tests {
                 format: Some(format()),
                 false_start_limit: None,
                 display_hint: None,
+                class: None,
             },
         })))
         .unwrap();
@@ -2384,6 +2390,7 @@ mod tests {
                 format: None,
                 false_start_limit: None,
                 display_hint: None,
+                class: None,
             },
         })))
         .unwrap();
@@ -2777,6 +2784,7 @@ mod tests {
                 format: Some(format()),
                 false_start_limit: None,
                 display_hint: None,
+                class: None,
             },
         })))
         .unwrap();

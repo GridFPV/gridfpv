@@ -390,6 +390,7 @@ mod tests {
             format: Some(one_race()),
             false_start_limit: limit,
             display_hint: None,
+            class: None,
         }
     }
 
@@ -412,6 +413,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         }
     }
 

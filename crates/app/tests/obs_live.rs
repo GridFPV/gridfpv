@@ -97,6 +97,7 @@ fn define_heat(registry: &EventRegistry, event: &EventId) {
         }),
         false_start_limit: None,
         display_hint: None,
+        class: None,
     };
     send(
         registry,

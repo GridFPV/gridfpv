@@ -201,6 +201,7 @@ fn event_with_heat(registry: &EventRegistry, timer: &AdapterId) -> EventId {
         }),
         false_start_limit: None,
         display_hint: None,
+        class: None,
     };
     with_event(registry, &event, |session| {
         session.commands(vec![Command::Record(Box::new(Event::PhaseDefined {
