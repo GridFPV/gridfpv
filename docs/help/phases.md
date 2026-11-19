@@ -95,8 +95,9 @@ If the phase holds other phases, they are in their own list at the top, **Phases
 (the phase's name)**. Click one to open its page. From there, a second link at the top
 takes you back up to the phase that holds it.
 
-The buttons for the phase itself (**+ Heat**, **Sign-up**, **Edit**, **Lock**, **Remove**) and its
-**Ranking** are at the top of the heats.
+The buttons for the phase itself (**Edit**, **Sign-up**, **Lock**, **Remove**) are at the
+top of the page, beside where the phase stands. **+ Heat** and the phase's **Ranking**
+are at the top of the heats.
 
 - **Run** opens the heat on the [Run](#/help/run) page.
 - **Ranking** opens the phase's order. For a heat you can **Set position** by hand, and
