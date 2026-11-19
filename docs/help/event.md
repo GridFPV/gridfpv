@@ -62,7 +62,7 @@ The codes are on the event's **Pilot codes** page, next to Details in the menu. 
 
 Press **Print** on the Pilot codes page to make a sheet to cut up and hand out. Each pilot
 gets a card with their callsign, their QR code, and the code as letters. Pick **4 to a
-page** for big cards or **9 to a page** to save paper.
+page** for big cards or **6 to a page** to save paper.
 
 Your browser's print box opens. Pick a printer, or pick "Save as PDF" to keep a file.
 

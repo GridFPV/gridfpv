@@ -13,7 +13,7 @@
    * until the director opens it: a screen left in view shows none.
    *
    * **Print** makes a sheet to cut up and hand out: one card for each pilot, with their
-   * callsign, their QR code and the code as letters, four or nine to a page. It is printed
+   * callsign, their QR code and the code as letters, four or six to a page. It is printed
    * by the browser, which can also save it as a PDF. Nothing is sent anywhere.
    */
   import { tick } from 'svelte';
@@ -116,7 +116,7 @@
 
   // ── The printed sheet ──────────────────────────────────────────────────────
   /** How many cards go on a page. */
-  let perPage = $state<PerPage>(9);
+  let perPage = $state<PerPage>(6);
   /** Whether the sheet is in the page, ready for the printer. It is not there otherwise. */
   let printing = $state(false);
   let sheet = $state<HTMLElement | undefined>(undefined);
@@ -415,7 +415,7 @@
   .sheet[data-per-page='4'] .sheet-page {
     grid-template-columns: repeat(2, 1fr);
   }
-  .sheet[data-per-page='9'] .sheet-page {
+  .sheet[data-per-page='6'] .sheet-page {
     grid-template-columns: repeat(3, 1fr);
   }
   .sheet-card {
@@ -439,7 +439,7 @@
     height: auto;
     image-rendering: pixelated;
   }
-  .sheet[data-per-page='9'] .sheet-card h2 {
+  .sheet[data-per-page='6'] .sheet-card h2 {
     font-size: 12pt;
   }
   .sheet-card p {

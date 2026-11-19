@@ -50,8 +50,11 @@ export function codeInHash(hash: string): string | undefined {
   return codeProblem(code) === undefined ? tidyCode(code) : undefined;
 }
 
-/** How many cards a printed page of sign-in codes may hold. */
-export const PER_PAGE_CHOICES = [4, 9] as const;
+/**
+ * How many cards a printed page of sign-in codes may hold. Six is three across and two
+ * down, which is as many as fit a page with a QR code big enough to scan.
+ */
+export const PER_PAGE_CHOICES = [4, 6] as const;
 export type PerPage = (typeof PER_PAGE_CHOICES)[number];
 
 /** Split `rows` into pages of `perPage`, in order. No rows is no pages. */

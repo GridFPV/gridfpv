@@ -1393,7 +1393,7 @@ What that changed (built 2026-11-18):
 - **Details** says less. Each class is a block that is shut until opened; inside is its
   roster, changed in place.
 - **Pilot codes** is a page of its own among the event's pages: the sign-in codes (§11.3),
-  and a sheet of them to print, four or nine to a page, with each pilot's callsign, QR code
+  and a sheet of them to print, four or six to a page, with each pilot's callsign, QR code
   and code. The browser prints it, or saves it as a PDF.
 
 ### 12.1 More than one timer (Agreed in outline, not designed, not built)

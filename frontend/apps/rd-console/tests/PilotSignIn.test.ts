@@ -258,7 +258,7 @@ describe('PilotSignIn: the printed sheet', () => {
     }))
   };
   /** Press Print, and answer what the sheet held at the moment the print box opened. */
-  async function printed(access: PilotAccessView, perPage?: '4' | '9') {
+  async function printed(access: PilotAccessView, perPage?: '4' | '6') {
     const opened = open(access);
     let sheet:
       | { pages: number; cards: string[]; perPage: string | undefined; src: string[] }
@@ -310,11 +310,19 @@ describe('PilotSignIn: the printed sheet', () => {
     expect(session.getPilotAccess).toHaveBeenCalled();
   });
 
-  it('puts nine to a page unless four is picked', async () => {
-    const nine = await printed(MANY);
-    expect(nine.sheet.perPage).toBe('9');
-    expect(nine.sheet.cards).toHaveLength(11);
-    expect(nine.sheet.pages).toBe(2);
+  it('puts six to a page unless four is picked', async () => {
+    // Nine did not fit a page, so it is not offered.
+    open(ACCESS);
+    expect(
+      within(screen.getByLabelText('Cards on a page'))
+        .getAllByRole('option')
+        .map((option) => option.textContent?.trim())
+    ).toEqual(['4 to a page', '6 to a page']);
+    cleanup();
+    const six = await printed(MANY);
+    expect(six.sheet.perPage).toBe('6');
+    expect(six.sheet.cards).toHaveLength(11);
+    expect(six.sheet.pages).toBe(2);
     cleanup();
     vi.restoreAllMocks();
     const four = await printed(MANY, '4');
