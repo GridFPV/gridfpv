@@ -6,7 +6,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { LapView } from '@gridfpv/types';
 import { buildNames } from '../src/lib/names.js';
-import { CARD_LAPS, allLapRows, cardLaps, filterLapRows, raceSeatRows } from '../src/lib/run.js';
+import {
+  CARD_LAPS,
+  allLapRows,
+  cardLaps,
+  filterLapRows,
+  raceSeatRows,
+  runLapsLabel
+} from '../src/lib/run.js';
 import RunAllLaps from '../src/screens/RunAllLaps.svelte';
 import RunSeatCard from '../src/screens/RunSeatCard.svelte';
 import { heat, lap, race, raceSeat } from './competition.js';
@@ -31,57 +38,60 @@ describe('the laps a seat card lists', () => {
     expect(CARD_LAPS).toBe(9);
   });
 
-  it('with nine laps or fewer lists them all, keeps none, and hides none', () => {
+  it('with nine laps or fewer lists them all and hides none', () => {
     for (const count of [0, 1, 8, 9]) {
       const listed = cardLaps(laps(count), 10);
       expect(numbers(listed)).toEqual(Array.from({ length: count }, (_, i) => i + 1));
       expect(listed.hidden).toBe(0);
-      expect(listed.laps.some((l) => l.kept)).toBe(false);
     }
   });
 
   it('past nine, lists the latest nine in order and says how many are not on the card', () => {
-    // The best lap is among the latest, so nothing older is kept.
     const listed = cardLaps(laps(30, { 25: 7 }), 7 * 1_000_000);
     expect(numbers(listed)).toEqual([22, 23, 24, 25, 26, 27, 28, 29, 30]);
     expect(listed.hidden).toBe(21);
     expect(listed.laps.filter((l) => l.best).map((l) => l.number)).toEqual([26]);
+    expect(listed.bestNumber).toBe(26);
   });
 
-  it('keeps the best lap on the card when it is older than the latest nine, listed first', () => {
+  it('never lists more than nine: an older best lap is named by number, not kept', () => {
     const listed = cardLaps(laps(30, { 3: 7 }), 7 * 1_000_000);
-    expect(numbers(listed)).toEqual([4, 22, 23, 24, 25, 26, 27, 28, 29, 30]);
-    expect(listed.laps[0]).toMatchObject({ number: 4, best: true, kept: true });
-    expect(listed.laps.slice(1).every((l) => !l.kept && !l.best)).toBe(true);
-    expect(listed.hidden).toBe(20);
+    expect(numbers(listed)).toEqual([22, 23, 24, 25, 26, 27, 28, 29, 30]);
+    expect(listed.laps.some((l) => l.best)).toBe(false);
+    expect(listed.bestNumber).toBe(4);
+    expect(listed.hidden).toBe(21);
   });
 
-  it('marks one lap as best when two tie, the first', () => {
+  it('names one lap as best when two tie, the first', () => {
     const listed = cardLaps(laps(12, { 1: 7, 10: 7 }), 7 * 1_000_000);
-    expect(listed.laps.filter((l) => l.best).map((l) => l.number)).toEqual([2]);
-    expect(numbers(listed)).toEqual([2, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(listed.bestNumber).toBe(2);
+    expect(listed.laps.some((l) => l.best)).toBe(false);
+    expect(numbers(listed)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 
-  it('keeps the best run of N on the card too, wherever it is', () => {
-    // The best three in a row are laps 5 to 7; the best single lap is lap 2.
-    const listed = cardLaps(laps(30, { 1: 6, 4: 8, 5: 8, 6: 8 }), 6 * 1_000_000, {
+  it('does not keep the best run of N either, and marks the part of it still listed', () => {
+    const old = cardLaps(laps(30, { 1: 6, 4: 8, 5: 8, 6: 8 }), 6 * 1_000_000, {
       start: 4,
       length: 3
     });
-    expect(numbers(listed)).toEqual([2, 5, 6, 7, 22, 23, 24, 25, 26, 27, 28, 29, 30]);
-    expect(listed.laps.filter((l) => l.inRun).map((l) => l.number)).toEqual([5, 6, 7]);
-    expect(listed.laps.filter((l) => l.kept).map((l) => l.number)).toEqual([2, 5, 6, 7]);
-    expect(listed.hidden).toBe(17);
-    // A run that straddles the window is whole, and only its older laps are "kept".
+    expect(numbers(old)).toEqual([22, 23, 24, 25, 26, 27, 28, 29, 30]);
+    expect(old.laps.some((l) => l.inRun)).toBe(false);
+    // A run that straddles the window: only its laps among the nine are marked.
     const straddling = cardLaps(laps(30), undefined, { start: 20, length: 3 });
-    expect(numbers(straddling)).toEqual([21, 22, 23, 24, 25, 26, 27, 28, 29, 30]);
-    expect(straddling.laps.filter((l) => l.kept).map((l) => l.number)).toEqual([21]);
+    expect(numbers(straddling)).toEqual([22, 23, 24, 25, 26, 27, 28, 29, 30]);
+    expect(straddling.laps.filter((l) => l.inRun).map((l) => l.number)).toEqual([22, 23]);
   });
 
-  it('with no best lap known keeps nothing', () => {
+  it('with no best lap known names none', () => {
     const listed = cardLaps(laps(20), undefined);
     expect(numbers(listed)).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20]);
     expect(listed.hidden).toBe(11);
+    expect(listed.bestNumber).toBeUndefined();
+  });
+
+  it('says which laps a run is', () => {
+    expect(runLapsLabel({ start: 4, length: 3 })).toBe('laps 5 to 7');
+    expect(runLapsLabel({ start: 0, length: 1 })).toBe('lap 1');
   });
 });
 
@@ -95,21 +105,16 @@ describe('RunSeatCard in a long race', () => {
     return within(screen.getByRole('list', { name: 'Laps for Seat 1' })).getAllByRole('listitem');
   }
 
-  it('shows every lap of a short race, as it always has', () => {
+  it('shows every lap of a short race, and says which lap was the best', () => {
     const items = card(5, { 2: 8 }, 8);
     expect(items.map((item) => item.dataset.lap)).toEqual(['1', '2', '3', '4', '5']);
     expect(items[2]).toHaveClass('best');
-    expect(items.some((item) => item.classList.contains('kept'))).toBe(false);
+    expect(document.querySelector('[data-stat="best"]')).toHaveTextContent('8.000 (lap 3)');
   });
 
-  it('shows the latest nine and the best lap, however many were flown, and the count is the whole race', () => {
+  it('shows only the latest nine however many were flown, with the best lap named by number', () => {
     const items = card(40, { 5: 7.25 }, 7.25);
-    expect(items).toHaveLength(10);
-    expect(items[0].dataset.lap).toBe('6');
-    expect(items[0]).toHaveClass('best');
-    expect(items[0]).toHaveClass('kept');
-    expect(items[0]).toHaveTextContent('7.250');
-    expect(items.slice(1).map((item) => item.dataset.lap)).toEqual([
+    expect(items.map((item) => item.dataset.lap)).toEqual([
       '32',
       '33',
       '34',
@@ -120,10 +125,17 @@ describe('RunSeatCard in a long race', () => {
       '39',
       '40'
     ]);
-    // The first of the latest laps stands a little apart from the kept one.
-    expect(items[1]).toHaveClass('gap');
+    expect(items.some((item) => item.classList.contains('best'))).toBe(false);
+    expect(document.querySelector('[data-stat="best"]')).toHaveTextContent('7.250 (lap 6)');
     // The stats are about the whole race, not the nine.
     expect(document.querySelector('[data-stat="laps"]')).toHaveTextContent('40');
+  });
+
+  it('says nothing in brackets before there is a lap', () => {
+    const on = race('q', 1, 'Running', { seats: [raceSeat(0, 'p1', { laps: [] })] });
+    const [row] = raceSeatRows(on, names);
+    render(RunSeatCard, { row, racing: true, oncrossing: () => {} });
+    expect(document.querySelector('[data-stat="best"]')?.textContent).not.toContain('(');
   });
 });
 

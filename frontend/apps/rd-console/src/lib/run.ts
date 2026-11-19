@@ -202,42 +202,45 @@ export interface CardLap {
   best: boolean;
   /** Whether it is one of the best run of N laps in a row. */
   inRun: boolean;
-  /**
-   * Whether it is older than the card's window and kept on the card all the same: the best
-   * lap, or one of the best run. It is listed before the window, apart from it.
-   */
-  kept: boolean;
 }
 
 /**
- * The laps a seat card lists: the latest {@link CARD_LAPS}, newest last, so the card stays
- * one size however long the race runs. The best lap is always among them, and so is the
- * best run of N laps where the heat is ranked on one: any of those older than the window
- * is kept and listed first. `hidden` is how many laps are not on the card.
- *
- * With {@link CARD_LAPS} laps or fewer nothing is hidden and nothing is kept.
+ * The laps a seat card lists: the latest {@link CARD_LAPS} and no others, newest last, so
+ * the card stays one size however long the race runs. `hidden` is how many laps are not on
+ * the card. `bestNumber` is the number of the best lap, for the card to say beside the
+ * best time, because the lap itself may be off the card.
  */
 export function cardLaps(
   laps: readonly LapView[],
   bestLapMicros: number | undefined,
   run?: { start: number; length: number },
   window: number = CARD_LAPS
-): { laps: CardLap[]; hidden: number } {
+): { laps: CardLap[]; hidden: number; bestNumber?: number } {
   const from = Math.max(0, laps.length - window);
-  const inRun = (index: number) =>
-    run !== undefined && index >= run.start && index < run.start + run.length;
   // Only the first lap that ties for best is the best: one lap is marked, not several.
   const bestAt =
     bestLapMicros === undefined ? -1 : laps.findIndex((lap) => lap.micros === bestLapMicros);
-  const listed: CardLap[] = [];
-  laps.forEach((lap, index) => {
-    const best = index === bestAt;
-    const run_ = inRun(index);
-    if (index >= from || best || run_) {
-      listed.push({ lap, number: index + 1, best, inRun: run_, kept: index < from });
-    }
+  const listed: CardLap[] = laps.slice(from).map((lap, offset) => {
+    const index = from + offset;
+    return {
+      lap,
+      number: index + 1,
+      best: index === bestAt,
+      inRun: run !== undefined && index >= run.start && index < run.start + run.length
+    };
   });
-  return { laps: listed, hidden: laps.length - listed.length };
+  return {
+    laps: listed,
+    hidden: from,
+    ...(bestAt < 0 ? {} : { bestNumber: bestAt + 1 })
+  };
+}
+
+/** Which laps a run of N in a row is, in words: "laps 5 to 7". */
+export function runLapsLabel(run: { start: number; length: number }): string {
+  return run.length === 1
+    ? `lap ${run.start + 1}`
+    : `laps ${run.start + 1} to ${run.start + run.length}`;
 }
 
 /** One row of the All laps table. */

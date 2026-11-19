@@ -19,7 +19,7 @@
   import { Badge, Button, formatMicros } from '@gridfpv/components';
   import type { LapRun } from '../lib/overlay.js';
   import type { PilotId } from '@gridfpv/types';
-  import { cardLaps, type SeatRow } from '../lib/run.js';
+  import { cardLaps, runLapsLabel, type SeatRow } from '../lib/run.js';
 
   let {
     row,
@@ -60,8 +60,8 @@
     oncheckin?: (pilot: PilotId | undefined) => void;
   } = $props();
 
-  // The latest laps only, so the card is one size however long the race runs. The best
-  // lap, and the best run of N, stay on it. Every lap is in the table under the cards.
+  // The latest laps only, so the card is one size however long the race runs. Which lap
+  // was the best is said beside the best time. Every lap is in the table under the cards.
   const listed = $derived(cardLaps(row.laps, row.bestLapMicros, run));
 </script>
 
@@ -143,12 +143,18 @@
     </div>
     <div class="stat">
       <dt>Best lap</dt>
-      <dd data-stat="best">{formatMicros(row.bestLapMicros)}</dd>
+      <dd data-stat="best">
+        {formatMicros(row.bestLapMicros)}{#if listed.bestNumber !== undefined}
+          <span class="which">{' '}(lap {listed.bestNumber})</span>{/if}
+      </dd>
     </div>
     {#if runLength !== undefined}
       <div class="stat">
         <dt>Best {runLength}</dt>
-        <dd data-stat="run">{formatMicros(run?.totalMicros)}</dd>
+        <dd data-stat="run">
+          {formatMicros(run?.totalMicros)}{#if run}
+            <span class="which">{' '}({runLapsLabel(run)})</span>{/if}
+        </dd>
       </div>
       <div class="stat">
         <dt>Heat best {runLength}</dt>
@@ -158,14 +164,8 @@
   </dl>
   {#if row.laps.length > 0}
     <ol class="laps" aria-label="Laps for {row.seatName}">
-      {#each listed.laps as shown, at (shown.lap.crossing)}
-        <li
-          class:best={shown.best}
-          class:in-run={shown.inRun}
-          class:kept={shown.kept}
-          class:gap={!shown.kept && at > 0 && listed.laps[at - 1].kept}
-          data-lap={shown.number}
-        >
+      {#each listed.laps as shown (shown.lap.crossing)}
+        <li class:best={shown.best} class:in-run={shown.inRun} data-lap={shown.number}>
           <span class="n">{shown.number}</span>{formatMicros(shown.lap.micros)}
         </li>
       {/each}
@@ -292,9 +292,12 @@
     border-color: var(--gf-success);
     color: var(--gf-success);
   }
-  /* The first of the latest laps, after an older lap that was kept: a little apart. */
-  .laps li.gap {
-    margin-left: var(--gf-space-3);
+  /* Which lap a best time was: small and quiet beside the time. */
+  .which {
+    font-size: var(--gf-font-size-sm);
+    font-weight: normal;
+    color: var(--gf-text-muted);
+    white-space: nowrap;
   }
   .laps .n {
     margin-right: 0.5em;
