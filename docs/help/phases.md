@@ -87,7 +87,7 @@ If the phase holds other phases, they are in their own list at the top, **Phases
 (the phase's name)**. Click one to open its page. From there, a second link at the top
 takes you back up to the phase that holds it.
 
-The buttons for the phase itself (**+ Heat**, **Sign-up**, **Lock**, **Remove**) and its
+The buttons for the phase itself (**+ Heat**, **Sign-up**, **Edit**, **Lock**, **Remove**) and its
 **Ranking** are at the top of the heats.
 
 - **Run** opens the heat on the [Run](#/help/run) page.
@@ -96,6 +96,14 @@ The buttons for the phase itself (**+ Heat**, **Sign-up**, **Lock**, **Remove**)
 - **Lock** makes a phase's results official. Nothing under it can be changed until
   **Unlock**. A phase cannot be locked while it has an open protest.
 - **Reopen heat** undoes calling a heat done.
+- **Edit** changes a phase or a heat:
+  - its **name**, at any time;
+  - its **format** and the phase it sits **under**, until a race in it has been saved.
+    After that Grid offers the name only, because changing the rest would change results
+    already flown. Practice is the exception: it ranks nobody, so it can always be changed.
+  - A bracket, a set of mains or a round robin that Grid made keeps its shape. Only its
+    name, and the names of the phases inside it, can change.
+  - A locked phase has no Edit. Unlock it first.
 - **Remove** takes out a phase that has no races and nothing under it.
 
 A seat that reads "Winner of Heat 3" is waiting for that heat. It fills in by itself when

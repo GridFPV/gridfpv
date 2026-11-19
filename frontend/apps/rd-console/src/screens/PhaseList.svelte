@@ -51,6 +51,7 @@
     live,
     onrun,
     onaddheat,
+    onedit = undefined,
     onsignup = undefined,
     root = undefined,
     heatsOf = undefined,
@@ -74,6 +75,8 @@
     onrun: (heat: PhaseView['def']['id']) => void;
     /** Add a heat under a phase. Left out, the rows offer no "+ Heat". */
     onaddheat?: (under: PhaseId) => void;
+    /** Edit a phase or a heat: its name, its format, where it sits. Left out, no "Edit". */
+    onedit?: ((phase: PhaseId) => void) | undefined;
     /** Set up pilot sign-up for a phase that holds heats. */
     onsignup?: ((phase: PhaseId) => void) | undefined;
   } = $props();
@@ -185,6 +188,14 @@
       title="Let pilots put themselves into heats of this phase"
       aria-label="Set up pilot sign-up for {phase.def.label}"
       onclick={() => onsignup(phase.def.id)}>Sign-up</Button
+    >
+  {/if}
+  {#if onedit && !phase.locked}
+    <Button
+      size="sm"
+      variant="ghost"
+      aria-label="Edit {phase.def.label}"
+      onclick={() => onedit(phase.def.id)}>Edit</Button
     >
   {/if}
   {#if removable(phase)}

@@ -1435,3 +1435,23 @@ done with the pass over the event's pages.
   sorted by time.
 - **The Marshal page still shows every lap.** That is where laps are changed.
 
+### 12.4 Editing a phase (Built 2026-11-19)
+
+A phase or a heat that is already in the event can be edited. A `PhaseDefined` fact for a
+phase that exists is the edit; there is no other fact for it.
+
+- **Its name** (and its layout hint and false start limit) can change at any time.
+- **Its shape** is what kind of phase it is, its pilots, its format and the phase it sits
+  under. The shape can change **until a race that counts has been saved** in it or anywhere
+  beneath it, in a heat that is ranked. After that the Director refuses the change: it
+  would alter results already flown. A race that was discarded protects nothing.
+- **Practice is free.** An unranked heat has no result to protect, so it can be reshaped
+  however often it was flown. Pilots come and go between races.
+- **A locked phase** takes no edit at all until it is unlocked (§5.8).
+- **Marshal's rulings** on a flown race are a separate thing and stay allowed.
+
+In the console, **Edit** offers the name, the format and "Under". For a phase a generator
+made (a bracket, mains, a round robin), and for everything inside one, it offers the name
+alone: the generator gave it its shape. That last rule is the console's; the Director
+would take any edit the rules above allow.
+
