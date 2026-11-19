@@ -76,7 +76,7 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     await expect(page.getByText('Nothing to race yet.')).toBeVisible();
 
     // ── Add a heat: Ace on Seat 1, Bee on Seat 2, first to 3 laps ────────────────────────
-    await page.getByRole('button', { name: '+ Add heat' }).click();
+    await page.getByRole('button', { name: 'Add a practice phase' }).click();
     const form = page.getByRole('form', { name: 'Add a heat' });
     await form.getByLabel('Heat name').fill(HEAT);
     await form.getByRole('button', { name: ACE, exact: true }).click();
@@ -84,10 +84,12 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     await form.getByLabel('Format').selectOption({ label: 'First to 3 laps' });
     await page.getByRole('button', { name: 'Add heat', exact: true }).click();
     await expect(form).toBeHidden({ timeout: 15_000 });
+    // A heat is always in a phase: this one is on the Practice phase's own page.
+    await page.getByRole('link', { name: 'Open Practice' }).click();
 
     // The heat is in the phase list, ready, with its lineup by seat and callsign.
     const phase = page
-      .getByRole('list', { name: 'Phases' })
+      .getByRole('list', { name: 'Heats of Practice' })
       .locator('li.phase')
       .filter({ hasText: HEAT });
     await expect(phase).toContainText('Ready', { timeout: 15_000 });
@@ -176,14 +178,20 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
 
     // ── No wire handle is on the page ────────────────────────────────────────────────────
     const state = (await (await page.request.get(`/events/${eventId}/state`)).json()) as {
-      phases: { def: { id: string }; complete: boolean; ranking: { pilot: string }[] }[];
+      phases: {
+        def: { id: string; parent?: string };
+        complete: boolean;
+        ranking: { pilot: string }[];
+      }[];
       races: { race: string; state: string }[];
     };
-    expect(state.phases).toHaveLength(1);
-    expect(state.phases[0].complete).toBe(true);
+    // The Practice phase, and the heat in it.
+    expect(state.phases).toHaveLength(2);
+    const flown = state.phases.find((phase) => phase.def.parent !== undefined)!;
+    expect(flown.complete).toBe(true);
     expect(state.races.map((race) => race.state)).toEqual(['Saved']);
-    const phaseId = state.phases[0].def.id;
-    const pilotIds = state.phases[0].ranking.map((placed) => placed.pilot);
+    const phaseId = flown.def.id;
+    const pilotIds = flown.ranking.map((placed) => placed.pilot);
     expect(pilotIds).toHaveLength(2);
     const raw = [phaseId, state.races[0].race, '#1', 'bench', 'seat-1', 'seat-2', ...pilotIds];
     const runText = await page.locator('body').innerText();
@@ -194,6 +202,7 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     await expect(heatOnTimer(page)).toContainText(HEAT, { timeout: 15_000 });
     await expect(ranking.nth(0)).toContainText(ACE);
     await openPage(page, 'Phases');
+    await page.getByRole('link', { name: 'Open Practice' }).click();
     await expect(phase).toContainText('Complete', { timeout: 15_000 });
 
     // ── And the Results page has the heat's ranking, in the same order ───────────────────

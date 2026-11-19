@@ -30,7 +30,8 @@
     PHASE_STATUS_LABELS,
     phaseSummaries,
     shownSummaries,
-    type PhaseStatus
+    type PhaseStatus,
+    newPhaseId
   } from '../lib/phases.js';
   import { formatHash } from '../lib/route.js';
   import AddHeatDialog from './AddHeatDialog.svelte';
@@ -38,6 +39,7 @@
   import EditPhaseDialog from './EditPhaseDialog.svelte';
   import PhaseList from './PhaseList.svelte';
   import RunQueue from './RunQueue.svelte';
+  import { isRanked } from '../lib/formats.js';
 
   let {
     live,
@@ -54,6 +56,40 @@
   /** The heat being edited. The dialog is mounted only while it is open. */
   let editing = $state<PhaseId | undefined>(undefined);
   const editingPhase = $derived(live.view?.phases.find((entry) => entry.def.id === editing));
+
+  // ── The quick start on an empty event ──────────────────────────────────────
+  let startBusy = $state(false);
+  let startError = $state<string | undefined>(undefined);
+  /**
+   * Make a phase called Practice and go straight on to its first heat. It takes the first
+   * saved format that ranks nobody, when there is one; with none, the heat picks its own.
+   */
+  async function startPractice() {
+    if (startBusy) return;
+    startBusy = true;
+    startError = undefined;
+    const format = live.formats.find((saved) => !isRanked(saved.format))?.format;
+    const id = newPhaseId('Practice');
+    try {
+      const made = await live.send({
+        Record: {
+          PhaseDefined: {
+            def: {
+              id,
+              label: 'Practice',
+              kind: { Group: { combine: 'Stack' } },
+              ...(format ? { format } : {})
+            }
+          }
+        }
+      });
+      if (made) adding = { what: 'heat', under: id };
+    } catch (err) {
+      startError = err instanceof Error ? err.message : String(err);
+    } finally {
+      startBusy = false;
+    }
+  }
 
   const every = $derived(live.view ? phaseSummaries(live.view) : []);
   /** The lines shown: a phase inside another only while the one above it is unfolded. */
@@ -82,8 +118,8 @@
   lede="What is raced at this event, in order. A phase holds heats and ranks the pilots in them. Open a phase for its heats."
 >
   {#snippet actions()}
-    <Button variant="secondary" onclick={() => (adding = { what: 'phase' })}>+ Add phase</Button>
-    <Button variant="primary" onclick={() => (adding = { what: 'heat' })}>+ Add heat</Button>
+    <!-- A heat always goes in a phase: it is added with "+ Heat" on the phase's line. -->
+    <Button variant="primary" onclick={() => (adding = { what: 'phase' })}>+ Add phase</Button>
   {/snippet}
 
   {#if live.loadError}
@@ -95,9 +131,15 @@
   {:else if live.view.phases.length === 0}
     <Card elevation="sm">
       <p class="muted" data-testid="no-phases">
-        Nothing to race yet. For one pilot flying laps, add a heat. For a race day, add a phase for
-        each part of it (Practice, Qualifying) and put heats under it.
+        Nothing to race yet. Add a phase for each part of the day (Practice, Qualifying), then put
+        heats in it.
       </p>
+      <div class="start">
+        <Button variant="secondary" disabled={startBusy} onclick={startPractice}>
+          Add a practice phase
+        </Button>
+      </div>
+      {#if startError}<Banner tone="danger">{startError}</Banner>{/if}
     </Card>
   {:else}
     {#if phases.length > 0}
@@ -192,6 +234,9 @@
 {/if}
 
 <style>
+  .start {
+    margin-top: var(--gf-space-3);
+  }
   .muted {
     margin: 0;
     color: var(--gf-text-muted);

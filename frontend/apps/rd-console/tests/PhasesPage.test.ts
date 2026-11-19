@@ -67,6 +67,9 @@ async function openPhase(view: EventView, phase: string, over: Partial<LiveSessi
   return { session, onrun };
 }
 
+/** A phase to put heats in: a heat is always in one. It sets no format of its own. */
+const RACES = group('races', 'Races');
+
 const sent = (session: LiveSession): Command[] =>
   vi.mocked(session.sendCommand).mock.calls.map((call) => call[1]);
 
@@ -95,12 +98,15 @@ function expectNoRawIds() {
 }
 
 describe('PhasesPage', () => {
-  it('says so when there is nothing to race yet, and still offers the three ways to add', async () => {
+  it('says so when there is nothing to race yet, and offers a phase and the quick practice phase', async () => {
     await open(eventView());
     expect(screen.getByTestId('no-phases')).toHaveTextContent(/^Nothing to race yet\./);
     expect(screen.queryByRole('list', { name: 'Phases' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Up next' })).toBeNull();
-    for (const name of ['+ Add heat', '+ Add phase']) {
+    // A heat is always in a phase, so there is no "+ Add heat" at the top: a phase comes
+    // first, and the quick way to one is offered right here.
+    expect(screen.queryByRole('button', { name: '+ Add heat' })).toBeNull();
+    for (const name of ['+ Add phase', 'Add a practice phase']) {
       expect(screen.getByRole('button', { name })).toBeEnabled();
     }
     expect(screen.getByRole('link', { name: 'Help for Phases' })).toHaveAttribute(
@@ -299,8 +305,8 @@ describe('Up next', () => {
 
 describe('Add a heat', () => {
   it('sends PhaseDefined with the pilots in seat order and the chosen saved format', async () => {
-    const { session } = await open(eventView());
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const { session } = await open(eventView({ phases: [RACES] }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     await fireEvent.input(within(form).getByLabelText('Heat name'), {
       target: { value: 'Qualifying Heat 1' }
@@ -321,8 +327,9 @@ describe('Add a heat', () => {
       'First to 3 laps · Ranked by finishing order · One race'
     );
     expect(form.textContent).not.toContain('fmt-');
-    // With no phase that holds phases there is nothing to put it under.
-    expect(within(form).queryByLabelText('Under')).toBeNull();
+    // It is in the phase it was added from, and "the top of the event" is not a choice.
+    expect(optionTexts(within(form).getByLabelText('Under'))).toEqual(['Races']);
+    expect(within(form).getByLabelText('Under')).toHaveValue('races');
     await fireEvent.click(screen.getByRole('button', { name: 'Add heat' }));
 
     await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
@@ -336,6 +343,7 @@ describe('Add a heat', () => {
           ]
         }
       },
+      parent: 'races',
       // A copy of the saved format, with no handle of the saved one.
       format: FIRST_TO_3
     });
@@ -343,9 +351,9 @@ describe('Add a heat', () => {
     await waitFor(() => expect(screen.queryByRole('form', { name: 'Add a heat' })).toBeNull());
   });
 
-  it('starts on the first saved format when the heat stands alone', async () => {
-    const { session } = await open(eventView());
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+  it('starts on the first saved format when its phase sets none', async () => {
+    const { session } = await open(eventView({ phases: [RACES] }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     expect(within(form).getByLabelText('Format')).toHaveValue('fmt-practice-9k2d');
     await fireEvent.input(within(form).getByLabelText('Heat name'), { target: { value: 'Fly' } });
@@ -356,8 +364,8 @@ describe('Add a heat', () => {
   });
 
   it('asks for a name and a pilot before sending anything', async () => {
-    const { session } = await open(eventView());
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const { session } = await open(eventView({ phases: [RACES] }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     await fireEvent.click(screen.getByRole('button', { name: 'Add heat' }));
     expect(await screen.findByText('Give the heat a name.')).toBeVisible();
@@ -368,8 +376,10 @@ describe('Add a heat', () => {
   });
 
   it('asks for a format when none is saved and no phase gives one', async () => {
-    const { session } = await open(eventView(), { listFormats: vi.fn(async () => []) });
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const { session } = await open(eventView({ phases: [RACES] }), {
+      listFormats: vi.fn(async () => [])
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     expect(within(form).getByTestId('format-reads')).toHaveTextContent('No saved format fits.');
     expect(within(form).getByRole('link', { name: 'Formats' })).toHaveAttribute(
@@ -385,12 +395,12 @@ describe('Add a heat', () => {
 
   it("shows the Director's sentence in the dialog when it says no, and keeps what was typed", async () => {
     const SAID = 'Ace is already flying in another heat.';
-    await open(eventView(), {
+    await open(eventView({ phases: [RACES] }), {
       sendCommand: vi.fn(async () =>
         Promise.reject(Object.assign(new Error(SAID), { status: 409, code: 'Refused' }))
       )
     });
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     await fireEvent.input(within(form).getByLabelText('Heat name'), { target: { value: 'H1' } });
     await fireEvent.click(within(form).getByRole('button', { name: 'Ace' }));
@@ -400,9 +410,9 @@ describe('Add a heat', () => {
   });
 
   it('reads the saved formats again when the dialog opens', async () => {
-    const { session } = await open(eventView());
+    const { session } = await open(eventView({ phases: [RACES] }));
     const before = vi.mocked(session.listFormats).mock.calls.length;
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     await screen.findByRole('form', { name: 'Add a heat' });
     await waitFor(() =>
       expect(vi.mocked(session.listFormats).mock.calls.length).toBeGreaterThan(before)
@@ -429,13 +439,9 @@ describe('Under a phase', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Qualifying' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     const under = within(form).getByLabelText('Under') as HTMLSelectElement;
-    expect(optionTexts(under)).toEqual([
-      'The top of the event',
-      'Qualifying',
-      'Mains',
-      'Mains › A-Main (locked)'
-    ]);
-    expect(under.options[3].disabled).toBe(true);
+    // Every phase it could go in, and never "the top of the event".
+    expect(optionTexts(under)).toEqual(['Qualifying', 'Mains', 'Mains › A-Main (locked)']);
+    expect(under.options[2].disabled).toBe(true);
     expect(under).toHaveValue('quali');
     // The first choice is the phase's own format, and it is the one picked.
     const format = within(form).getByLabelText('Format') as HTMLSelectElement;
@@ -461,14 +467,15 @@ describe('Under a phase', () => {
     });
   });
 
-  it('+ Add heat starts at the top of the event, and the director can put it under a phase', async () => {
+  it('a heat opened from one phase can be put in another, and never at the top', async () => {
     const { session } = await open(eventView({ phases: phases() }));
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    // There is no way to add a heat that is in no phase.
+    expect(screen.queryByRole('button', { name: '+ Add heat' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Qualifying' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
-    expect(within(form).getByLabelText('Under')).toHaveValue('');
-    // At the top there is no phase to follow: a saved format is picked.
-    expect(within(form).getByLabelText('Format')).toHaveValue('fmt-practice-9k2d');
+    expect(within(form).getByLabelText('Under')).toHaveValue('quali');
     await fireEvent.change(within(form).getByLabelText('Under'), { target: { value: 'mains' } });
+    // Mains sets no format, so a saved one is picked.
     await fireEvent.change(within(form).getByLabelText('Format'), {
       target: { value: 'fmt-first3-7q1x' }
     });
@@ -479,6 +486,68 @@ describe('Under a phase', () => {
     const def = definedPhase(sent(session)[0], 'b');
     expect(def.parent).toBe('mains');
     expect(def.format).toEqual(FIRST_TO_3);
+  });
+
+  it('on an empty event, "Add a practice phase" makes the phase and goes on to its first heat', async () => {
+    const made: PhaseDef[] = [];
+    const first = eventView();
+    let now = first;
+    const { session } = await open(first, {
+      getEventState: vi.fn(async () => now),
+      sendCommand: vi.fn(async (_id, command) => {
+        const def = (command as { Record: { PhaseDefined: { def: PhaseDef } } }).Record.PhaseDefined
+          .def;
+        made.push(def);
+        now = eventView({ phases: [...now.phases, { ...group(def.id, def.label), def }] });
+        return { cursor: made.length + 1 };
+      })
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a practice phase' }));
+    // The phase: called Practice, with the saved format that ranks nobody.
+    await waitFor(() => expect(made).toHaveLength(1));
+    expect(made[0].label).toBe('Practice');
+    expect(made[0].id).toMatch(/^practice-[0-9a-z]{4}$/);
+    expect(made[0].parent).toBeUndefined();
+    expect(made[0].kind).toEqual({ Group: { combine: 'Stack' } });
+    expect(made[0].format).toEqual(OPEN_PRACTICE);
+    // Then straight on to its first heat, already under it.
+    const form = await screen.findByRole('form', { name: 'Add a heat' });
+    expect(within(form).getByLabelText('Under')).toHaveValue(made[0].id);
+    await fireEvent.input(within(form).getByLabelText('Heat name'), {
+      target: { value: 'Heat 1' }
+    });
+    await fireEvent.click(within(form).getByRole('button', { name: 'Ace' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add heat' }));
+    await waitFor(() => expect(made).toHaveLength(2));
+    expect(made[1].parent).toBe(made[0].id);
+    expect(vi.mocked(session.sendCommand)).toHaveBeenCalledTimes(2);
+    // No id reaches the page.
+    expect(document.body.textContent).not.toMatch(/practice-[0-9a-z]{4}/);
+  });
+
+  it('with no unranked format saved, the practice phase sets none and the heat picks its own', async () => {
+    const made: PhaseDef[] = [];
+    await open(eventView(), {
+      listFormats: vi.fn(async () => SAVED_FORMATS.filter((saved) => saved.format.ranking)),
+      sendCommand: vi.fn(async (_id, command) => {
+        made.push(
+          (command as { Record: { PhaseDefined: { def: PhaseDef } } }).Record.PhaseDefined.def
+        );
+        return { cursor: 2 };
+      })
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a practice phase' }));
+    await waitFor(() => expect(made).toHaveLength(1));
+    expect('format' in made[0]).toBe(false);
+  });
+
+  it("shows the Director's words when the practice phase is refused, and opens no dialog", async () => {
+    await open(eventView(), {
+      sendCommand: vi.fn(async () => Promise.reject(new Error('The event is closed.')))
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a practice phase' }));
+    expect(await screen.findByText('The event is closed.')).toBeVisible();
+    expect(screen.queryByRole('form', { name: 'Add a heat' })).toBeNull();
   });
 });
 
@@ -984,8 +1053,8 @@ describe('Timed by', () => {
     within(form).getByLabelText('Timed by') as HTMLSelectElement;
 
   it('offers only the Bench, already chosen, when no timer is added', async () => {
-    await open(eventView());
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    await open(eventView({ phases: [RACES] }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     expect(optionTexts(timedBy(form))).toEqual(['Bench (no timer: crossings are logged by hand)']);
     expect(timedBy(form).value).toBe('bench');
@@ -993,8 +1062,10 @@ describe('Timed by', () => {
   });
 
   it('starts on the first connected timer and puts the lineup on its seats', async () => {
-    const { session } = await open(eventView(), { listTimers: vi.fn(async () => [OFF, GATE]) });
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const { session } = await open(eventView({ phases: [RACES] }), {
+      listTimers: vi.fn(async () => [OFF, GATE])
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     const select = timedBy(form);
     expect(optionTexts(select)).toEqual([
@@ -1033,8 +1104,10 @@ describe('Timed by', () => {
   });
 
   it('lets the director pick the Bench instead, and the seats follow', async () => {
-    const { session } = await open(eventView(), { listTimers: vi.fn(async () => [GATE]) });
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    const { session } = await open(eventView({ phases: [RACES] }), {
+      listTimers: vi.fn(async () => [GATE])
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Races' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     await fireEvent.change(timedBy(form), { target: { value: 'bench' } });
     expect(within(form).getByText(/Up to 8\./)).toBeVisible();
@@ -1091,7 +1164,7 @@ describe('starting from a class', () => {
 
   it('a new heat can start from a class roster, and the pilots can still be changed', async () => {
     const { session } = await open(view());
-    await fireEvent.click(screen.getByRole('button', { name: '+ Add heat' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a heat under Finals' }));
     const form = await screen.findByRole('form', { name: 'Add a heat' });
     await fireEvent.input(within(form).getByLabelText('Heat name'), {
       target: { value: 'Open 1' }

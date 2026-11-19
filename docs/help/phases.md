@@ -8,7 +8,9 @@ It is a short page. From the top:
   its heats are flown. Click a line to open that phase. The line also says which heat is
   **on the timer**, and whether pilots can sign up.
 - **Up next**: the order the heats will be run in.
-- **Heats on their own**: heats that are not under any phase.
+- **Heats on their own**: heats that are not in any phase. Grid no longer makes these: a
+  heat always goes in a phase. An event from before may still have some. Press **Edit** on
+  one to move it into a phase.
 
 A phase's heats, lineups, ranking and sign-up sheet are on the phase's own page.
 **← All phases** takes you back.
@@ -24,9 +26,13 @@ and a bracket are phases. A phase can hold heats, and it can hold other phases.
 
 ## Adding things
 
-- **Add heat**: one heat. Give it a name, pick what times it, pick the pilots in seat
-  order, and pick a format. The first pilot gets Seat 1. **Start from a class** fills in a
-  class's roster. A heat can sit at the top of the event or **under** a phase.
+A heat always sits in a phase. So you add a phase first, then put heats in it.
+
+- **Add a practice phase**: shown when the event has nothing in it yet. One press makes a
+  phase called Practice and opens the box for its first heat.
+- **+ Heat**, on a phase's line: one heat in that phase. Give it a name, pick what times
+  it, pick the pilots in seat order, and pick a format. The first pilot gets Seat 1.
+  **Start from a class** fills in a class's roster. **Under** moves it to another phase.
 - **Add phase**: a phase. **Kind** picks what you start with:
   - **Empty**: a phase with no heats yet. Pick its format once and every heat under it
     uses it. **For the class** makes the class's roster the phase's field, so every pilot

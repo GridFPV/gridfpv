@@ -143,7 +143,11 @@
       />
       <Field label="Under">
         <Select bind:value={parent} aria-label="Under" disabled={busy}>
-          <option value="">The top of the event</option>
+          <!-- A heat is always in a phase. One that stands alone from before can stay there
+               until it is moved, so opening this never moves it by itself. -->
+          {#if !isHeat(def) || def.parent === undefined}
+            <option value="">The top of the event</option>
+          {/if}
           {#each moves as holder (holder.id)}
             <option value={holder.id}>{holder.label}</option>
           {/each}
