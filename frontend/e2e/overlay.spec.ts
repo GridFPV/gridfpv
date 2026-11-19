@@ -93,7 +93,7 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
       timeout: 15_000
     });
     await expect(openEvent(page)).toContainText(EVENT);
-    await page.getByRole('button', { name: '+ Add heat' }).click();
+    await page.getByRole('button', { name: 'Add a practice phase' }).click();
     const form = page.getByRole('form', { name: 'Add a heat' });
     await form.getByLabel('Heat name').fill(HEAT);
     await form.getByRole('button', { name: ACE, exact: true }).click();
@@ -101,6 +101,8 @@ test('the overlay follows a heat as it is raced, then follows the Director to an
     await form.getByLabel('Format').selectOption({ label: 'First to 3 laps' });
     await page.getByRole('button', { name: 'Add heat', exact: true }).click();
     await expect(form).toBeHidden({ timeout: 15_000 });
+    // A heat is always in a phase: this one is on the Practice phase's own page.
+    await page.getByRole('link', { name: 'Open Practice' }).click();
     await page.getByRole('button', { name: `Run ${HEAT}`, exact: true }).click();
     await expect(heatOnTimer(page)).toHaveText(HEAT);
 

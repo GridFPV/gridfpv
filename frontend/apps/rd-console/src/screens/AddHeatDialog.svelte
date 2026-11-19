@@ -39,9 +39,15 @@
   let pickedSource = $state<AdapterId | undefined>(undefined);
   const source = $derived(chosenSource(live.seatSources, pickedSource));
   const seats = $derived(source.seats);
-  // svelte-ignore state_referenced_locally
-  let parent = $state(under ?? '');
   const holders = $derived(holderChoices(live.view?.phases ?? []));
+  /**
+   * The phase the heat goes in. A heat is always in one: opened from a phase it is that
+   * phase, and otherwise the first that is not locked.
+   */
+  // svelte-ignore state_referenced_locally
+  let parent = $state(
+    under ?? holderChoices(live.view?.phases ?? []).find((holder) => !holder.locked)?.id ?? ''
+  );
   /** The format a heat under the chosen phase gets without one of its own. */
   const inherited = $derived(holders.find((holder) => holder.id === parent)?.format);
   /** The saved format picked. `''` is "use the phase's" where there is one. */
@@ -84,6 +90,10 @@
       error = `${source.name} has ${seats.length} ${seats.length === 1 ? 'seat' : 'seats'}. Take out ${chosen.length - seats.length} of the pilots.`;
       return;
     }
+    if (!parent) {
+      error = 'A heat goes in a phase. Add a phase first, then add the heat to it.';
+      return;
+    }
     const format = live.formats.find((saved) => saved.id === formatValue)?.format;
     if (!format && !inherited) {
       error = 'Pick a format. It says how the race ends and how the heat is ranked.';
@@ -98,7 +108,7 @@
       id: newPhaseId(label),
       label,
       kind: { Heat: { lineup } },
-      ...(parent ? { parent } : {}),
+      parent,
       ...(format ? { format } : {})
     };
     busy = true;
@@ -124,9 +134,8 @@
       />
     </Field>
     {#if holders.length > 0}
-      <Field label="Under" hint="The phase it belongs to. Leave it at the top if it stands alone.">
+      <Field label="Under" hint="The phase it belongs to.">
         <Select bind:value={parent} aria-label="Under" disabled={busy}>
-          <option value="">The top of the event</option>
           {#each holders as holder (holder.id)}
             <option value={holder.id} disabled={holder.locked}>
               {holder.label}{holder.locked ? ' (locked)' : ''}

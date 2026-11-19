@@ -1502,3 +1502,19 @@ made (a bracket, mains, a round robin), and for everything inside one, it offers
 alone: the generator gave it its shape. That last rule is the console's; the Director
 would take any edit the rules above allow.
 
+### 12.5 A heat is always in a phase, in the console (Agreed and built 2026-11-19)
+
+In the model a heat is a small phase and nesting is free (§5.2), so a heat at the top of
+an event is allowed, and the Director takes one. **The console no longer makes one.**
+
+- There is no "+ Add heat" at the top of the Phases page. A heat is added with "+ Heat" on
+  a phase, and its "Under" has no "top of the event".
+- An event with nothing in it offers **Add a practice phase**: one press makes a phase
+  called Practice (with the first saved format that ranks nobody, when there is one) and
+  goes straight on to its first heat.
+- A heat that stands alone in an event from before still loads, shows and races. Edit
+  moves it into a phase; once it is in one, the top is no longer offered.
+
+**Why:** a lone heat has no class, so it counts toward nothing (§5.3); it carries its own
+format; and every page had to treat it as a special case.
+

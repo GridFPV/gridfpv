@@ -238,6 +238,32 @@ describe('EditPhaseDialog', () => {
     expect(defined(session)[0]).toEqual({ ...HEAT_2.def, label: 'Heat B' });
   });
 
+  it('a heat in a phase can be moved to another phase, and is never offered the top', async () => {
+    await open(view(), 'quali');
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit Heat 2' }));
+    const form = await dialog();
+    const under = within(form).getByLabelText('Under') as HTMLSelectElement;
+    expect(under.value).toBe('quali');
+    expect([...under.options].map((option) => option.textContent?.trim())).not.toContain(
+      'The top of the event'
+    );
+  });
+
+  it('a heat that stands alone from before can stay there, or be moved into a phase', async () => {
+    const lone = heat('lone', 'Lone Heat', ['p-1a'], { format: FIRST_TO_3 });
+    const loneGroup = group('holder', 'Holder');
+    const session = await open(eventView({ phases: [loneGroup, lone] }), 'lone');
+    await fireEvent.click(await screen.findByRole('button', { name: 'Edit Lone Heat' }));
+    const form = await dialog();
+    const under = within(form).getByLabelText('Under') as HTMLSelectElement;
+    // Opening the dialog does not move it by itself.
+    expect(under.value).toBe('');
+    await fireEvent.change(under, { target: { value: 'holder' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(defined(session)).toHaveLength(1));
+    expect(defined(session)[0].parent).toBe('holder');
+  });
+
   it("shows the Director's words when the edit is refused, and stays open with what was typed", async () => {
     const session = await open(view(), 'quali', {
       sendCommand: vi.fn(async () => {

@@ -142,7 +142,7 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
     expect(eventId).toBeTruthy();
 
     await openPage(page, 'Phases');
-    await page.getByRole('button', { name: '+ Add heat' }).click();
+    await page.getByRole('button', { name: 'Add a practice phase' }).click();
     const heatForm = page.getByRole('form', { name: 'Add a heat' });
     const timedBy = heatForm.getByLabel('Timed by');
     const offered = timedBy.locator('option', { hasText: TIMER });
