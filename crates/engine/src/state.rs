@@ -1391,9 +1391,45 @@ impl Inputs for EventState {
                         );
                         Some(RaceEntry { pilot, laps })
                     })
+                    // Then each pilot who took an open seat, with the laps of their stints.
+                    .chain(
+                        self.check_ins
+                            .pilots(&race.setup.race)
+                            .into_iter()
+                            .map(|pilot| {
+                                let stints = self.check_ins.stints_of(&race.setup.race, &pilot);
+                                let seats: Vec<_> = stints
+                                    .iter()
+                                    .map(|(adapter, seat, _)| {
+                                        self.laps.seat(
+                                            &race.setup.race,
+                                            adapter,
+                                            seat,
+                                            self.filters_for(race, adapter),
+                                        )
+                                    })
+                                    .collect();
+                                let laps = crate::checkin::laps_across(
+                                    stints.iter().map(|(_, _, stint)| *stint).zip(&seats),
+                                );
+                                RaceEntry { pilot, laps }
+                            }),
+                    )
                     .collect()
             })
             .collect()
+    }
+
+    fn checked_in(&self, heat: &PhaseId) -> Vec<PilotId> {
+        let mut pilots = Vec::new();
+        for race in self.races.of_heat(heat).filter(|race| race.counts()) {
+            for pilot in self.check_ins.pilots(&race.setup.race) {
+                if !pilots.contains(&pilot) {
+                    pilots.push(pilot);
+                }
+            }
+        }
+        pilots
     }
 
     fn director_done(&self, heat: &PhaseId) -> bool {
@@ -2887,6 +2923,187 @@ mod tests {
         director.now = 100_000 * S;
         director.catch_up();
         assert!(stints_of(&director, "seat-0")[0].1);
+    }
+
+    /// Open practice ranked on the fastest lap, flown and saved after `fly` has run.
+    fn ranked_practice(fly: impl FnOnce(&mut Director)) -> Director {
+        let mut director = Director::default();
+        let mut format = format(EndCondition::Open, 0);
+        format.ranking = Some(RankingRule {
+            sort: vec![Measure::BestLap],
+        });
+        let seat = |i: usize, source: SeatSource| HeatSeat {
+            adapter: oft(),
+            seat: SeatRef(format!("seat-{i}")),
+            source,
+        };
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("heat"),
+                    label: "Practice".into(),
+                    parent: None,
+                    kind: PhaseKind::Heat {
+                        lineup: vec![
+                            seat(0, SeatSource::Open),
+                            seat(1, SeatSource::Open),
+                            seat(2, SeatSource::Pilot(pilot("cat"))),
+                        ],
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        fly(&mut director);
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        director
+            .send(Command::SaveRace {
+                race: rid("heat#1"),
+                needs_marshal: false,
+                note: None,
+            })
+            .unwrap();
+        director
+    }
+
+    /// The heat's ranking as (pilot, flew, best lap in seconds).
+    fn practice_ranking(director: &Director) -> Vec<(String, bool, Option<i64>)> {
+        director.state.results()[&pid("heat")]
+            .ranking
+            .iter()
+            .map(|placed| {
+                (
+                    placed.pilot.0.clone(),
+                    placed.result.flew,
+                    placed.result.best_lap_micros.map(|micros| micros / S),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pilot_who_took_a_seat_is_ranked_on_the_laps_they_flew_while_they_had_it() {
+        let director = ranked_practice(|director| {
+            // Cat flies her own seat: laps of 14 and 13.
+            director.cross("seat-2", 0);
+            director.cross("seat-2", 14 * S);
+            director.cross("seat-2", 27 * S);
+            // Ana takes seat 0: laps of 15 and 12.
+            take(director, "seat-0", "ana").unwrap();
+            director.cross("seat-0", 30 * S);
+            director.cross("seat-0", 45 * S);
+            director.cross("seat-0", 57 * S);
+            // Ben takes it from her: one lap of 11.
+            take(director, "seat-0", "ben").unwrap();
+            director.cross("seat-0", 70 * S);
+            director.cross("seat-0", 81 * S);
+        });
+        assert_eq!(
+            practice_ranking(&director),
+            vec![
+                ("ben".into(), true, Some(11)),
+                ("ana".into(), true, Some(12)),
+                ("cat".into(), true, Some(13)),
+            ]
+        );
+        // The field is the named pilot, then the pilots who checked in, in that order.
+        assert_eq!(
+            director.state.results()[&pid("heat")].field,
+            vec![pilot("cat"), pilot("ana"), pilot("ben")]
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn laps_on_a_seat_nobody_had_rank_nobody() {
+        let director = ranked_practice(|director| {
+            // A fast lap of 5 on seat 0 before anyone took it.
+            director.cross("seat-0", 0);
+            director.cross("seat-0", 5 * S);
+            take(director, "seat-0", "ana").unwrap();
+            // The 6 second lap was under way when she took the seat: not hers either.
+            director.cross("seat-0", 11 * S);
+            director.cross("seat-0", 31 * S);
+            drop_seat(director, "seat-0").unwrap();
+            // And a lap of 4 after she dropped it.
+            director.cross("seat-0", 35 * S);
+        });
+        assert_eq!(
+            practice_ranking(&director),
+            // Cat never crossed, so she is below Ana, who flew.
+            vec![("ana".into(), true, Some(20)), ("cat".into(), false, None)]
+        );
+    }
+
+    #[test]
+    fn a_pilot_who_took_a_seat_and_never_crossed_is_in_the_field_and_did_not_fly() {
+        let director = ranked_practice(|director| {
+            take(director, "seat-0", "ana").unwrap();
+            director.cross("seat-2", 0);
+            director.cross("seat-2", 9 * S);
+        });
+        assert_eq!(
+            practice_ranking(&director),
+            vec![("cat".into(), true, Some(9)), ("ana".into(), false, None)]
+        );
+    }
+
+    #[test]
+    fn two_stints_by_one_pilot_are_ranked_together_and_no_lap_spans_the_gap() {
+        let director = ranked_practice(|director| {
+            // Ana on seat 0: one lap of 10.
+            take(director, "seat-0", "ana").unwrap();
+            director.cross("seat-0", 0);
+            director.cross("seat-0", 10 * S);
+            drop_seat(director, "seat-0").unwrap();
+            // Later she takes seat 1: laps of 12 and 9.
+            take(director, "seat-1", "ana").unwrap();
+            director.cross("seat-1", 100 * S);
+            director.cross("seat-1", 112 * S);
+            director.cross("seat-1", 121 * S);
+        });
+        let results = director.state.results();
+        let ana = results[&pid("heat")]
+            .ranking
+            .iter()
+            .find(|placed| placed.pilot == pilot("ana"))
+            .unwrap();
+        assert_eq!(ana.result.laps, 3);
+        assert_eq!(ana.result.best_lap_micros, Some(9 * S));
+        let laps = &ana.result.races[0];
+        // The 90 seconds between the stints is not a lap, and no run of laps crosses it.
+        assert_eq!(
+            laps.laps().map(|lap| lap.micros() / S).collect::<Vec<_>>(),
+            vec![10, 12, 9]
+        );
+        assert_eq!(laps.best_consecutive_micros(2), Some(21 * S));
+        assert_eq!(laps.best_consecutive_micros(3), None);
+    }
+
+    #[test]
+    fn a_practice_race_that_is_thrown_out_ranks_nobody_who_checked_in() {
+        let mut director = practice(None);
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.cross("seat-0", 0);
+        director.cross("seat-0", 10 * S);
+        director
+            .send(Command::DiscardRace {
+                race: rid("heat#1"),
+                reason: None,
+                note: None,
+            })
+            .unwrap();
+        let results = director.state.results();
+        assert_eq!(results[&pid("heat")].field, vec![pilot("cat")]);
     }
 
     #[test]

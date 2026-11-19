@@ -572,3 +572,61 @@ async fn only_a_signed_in_pilot_can_take_or_drop_and_only_for_themselves() {
     .await;
     assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn a_checked_in_pilot_is_ranked_on_their_own_laps_once_the_race_is_saved() {
+    let rig = rig().await;
+    let commands = format!("/events/{}/commands", rig.event);
+    // Rank this practice on the fastest lap.
+    let mut state = rig.state().await;
+    let mut def = state["phases"][0]["def"].take();
+    def["format"]["ranking"] = json!({"sort": ["BestLap"]});
+    let ace = rig.sign_in("Ace").await;
+    let bee = rig.sign_in("Bee").await;
+    // A fast lap on seat 1 before anyone took it: nobody's.
+    rig.cross(1, 0).await;
+    rig.cross(1, 5).await;
+    assert_eq!(rig.take(&ace, 1).await.status, StatusCode::OK);
+    rig.cross(1, 20).await;
+    rig.cross(1, 35).await;
+    rig.cross(1, 47).await;
+    assert_eq!(rig.take(&bee, 2).await.status, StatusCode::OK);
+    rig.cross(2, 50).await;
+    rig.cross(2, 61).await;
+    direct(
+        &rig.app,
+        Method::POST,
+        &commands,
+        json!({"StopRace": {"race": rig.race()}}),
+    )
+    .await;
+    direct(
+        &rig.app,
+        Method::POST,
+        &commands,
+        json!({"SaveRace": {"race": rig.race()}}),
+    )
+    .await;
+    direct(
+        &rig.app,
+        Method::POST,
+        &commands,
+        json!({"Record": {"PhaseDefined": {"def": def}}}),
+    )
+    .await;
+    let state = rig.state().await;
+    let ranking: Vec<(String, i64)> = state["phases"][0]["ranking"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|placed| placed["flew"] == true)
+        .map(|placed| {
+            (
+                rig.callsign(placed["pilot"].as_str().unwrap()),
+                placed["best_lap_micros"].as_i64().unwrap() / 1_000_000,
+            )
+        })
+        .collect();
+    // Bee's 11 beats Ace's 12. The 5 second lap flown before Ace took the seat is nobody's.
+    assert_eq!(ranking, [("Bee".to_string(), 11), ("Ace".to_string(), 12)]);
+}

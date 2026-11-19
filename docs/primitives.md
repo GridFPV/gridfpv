@@ -1339,12 +1339,16 @@ Check-in is for practice with no plan at all.
   for that long is dropped by the Director. The wait starts again at each pass. Left empty,
   nobody is dropped.
 - **Practice laps are the pilot's, ranked or not.** They show on the pilot's own page under
-  "My practice", live while they fly. They do **not** enter the heat's ranking: an open
-  seat still ranks nobody.
+  "My practice", live while they fly.
+- **Ranking** (Ryan, 2026-11-18). A pilot who took a seat is in the heat, after the pilots
+  its lineup names, and is ranked on **the laps they flew while they held a seat**. Laps
+  flown on a seat nobody held are nobody's and rank nobody. If the format ranks nobody
+  (open practice as it comes), nothing changes. Several stints by one pilot in a race are
+  ranked together, and no lap or run of laps spans the gap between two stints.
 - **Three ways in,** like sign-up: the pilot's phone, the kiosk, and the director's Run
   page. A pilot can only ever take or drop a seat for themselves.
 
-**Not built:** counting a checked-in pilot in the heat's ranking; a pilot marking themselves
+**Not built:** a pilot marking themselves
 "out" (a checked-in pilot drops the seat instead); check-in to a class roster (§4), which is
 a different thing with the same name.
 

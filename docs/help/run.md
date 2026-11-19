@@ -100,7 +100,10 @@ start the race and let pilots come and go.
 - A format can drop a seat by itself when nobody has flown it for a while. Set **Drop an
   idle seat after** on the [format](#/help/formats).
 
-A pilot's practice laps show on their own page under **My practice**. They do not rank.
+A pilot's practice laps show on their own page under **My practice**.
+
+If the heat's format ranks pilots (fastest lap, say), a pilot who checked in is ranked on
+the laps they flew while they had a seat. Laps flown on a seat nobody had count for nobody.
 
 **tune** opens the seat's tuning page. A **Bench** seat has a **Crossing** button, which
 logs a pass by hand.
