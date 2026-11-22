@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use gridfpv_adapters::Adapter;
-use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftMessage, SignalBuffer, seat_ref};
+use gridfpv_adapters::oft::{ClockFit, OftAdapter, OftInfo, OftMessage, SignalBuffer, seat_ref};
 use gridfpv_events::{AdapterId, Event, SeatRef, SignalThresholds, SignalUnit};
 use gridfpv_server::control::with_event;
 use gridfpv_server::events::{EventId, EventRegistry};
@@ -50,6 +50,12 @@ const OFFSET_MOVED: i64 = 500;
 /// How long a silent timer is waited on before the link is called dead. The timer answers
 /// every ping, so silence this long means the link is gone.
 const SILENCE: Duration = Duration::from_secs(8);
+/// How often the timer is asked again what its receivers are. Its `hello` lists them once,
+/// but one can report in later, or come back from a firmware update measuring its levels
+/// in another unit; a level logged under the wrong unit would mislead a marshal.
+const INFO_EVERY: Duration = Duration::from_secs(15);
+/// How soon it is asked when its status names a receiver the list does not have.
+const INFO_SOON: Duration = Duration::from_secs(1);
 
 /// Start keeping a connection to every timer in the directory. Runs until aborted. (Kept
 /// here under its first name; the work is in [`crate::links`].)
@@ -66,7 +72,6 @@ pub(crate) async fn hold(registry: EventRegistry, timer: Timer) {
         fit: ClockFit::new(),
         signal: SignalBuffer::new(),
         levels: BTreeMap::new(),
-        unit: SignalUnit::TenthsDb,
         levels_logged: BTreeMap::new(),
         boot_id: None,
         logged: None,
@@ -107,11 +112,10 @@ struct Link {
     id: AdapterId,
     fit: ClockFit,
     signal: SignalBuffer,
-    /// Each seat's enter and exit levels as the timer last reported them, and the unit.
-    levels: BTreeMap<SeatRef, (i32, i32)>,
-    unit: SignalUnit,
+    /// Each seat's enter and exit levels as the timer last reported them, and their unit.
+    levels: BTreeMap<SeatRef, (i32, i32, SignalUnit)>,
     /// The levels logged for the race that is on. Empty while no race is on.
-    levels_logged: BTreeMap<SeatRef, (i32, i32)>,
+    levels_logged: BTreeMap<SeatRef, (i32, i32, SignalUnit)>,
     /// The boot the clock fit belongs to. A new boot is a new clock.
     boot_id: Option<String>,
     /// The event the clock offset was last logged to, and the offset logged.
@@ -161,32 +165,35 @@ impl Link {
     }
 
     /// While a race is on, log the levels the timer detects against: once when the race
-    /// comes on, and again when they move by more than a dB (a timer that follows the noise
-    /// floor moves them by itself). They sit beside the race's signal for the marshal.
+    /// comes on, and again when they move by more than a dB, or by more than 10 mV on a
+    /// timer that measures millivolts (a timer that follows the noise floor moves them by
+    /// itself). They sit beside the race's signal for the marshal.
     fn log_levels(&mut self) {
         if !self.registry.race_on() {
             self.levels_logged.clear();
             return;
         }
-        let moved: Vec<(SeatRef, (i32, i32))> = self
+        let moved: Vec<(SeatRef, (i32, i32, SignalUnit))> = self
             .levels
             .iter()
             .filter(|(seat, now)| {
                 self.levels_logged.get(*seat).is_none_or(|logged| {
-                    (logged.0 - now.0).abs() > 10 || (logged.1 - now.1).abs() > 10
+                    logged.2 != now.2
+                        || (logged.0 - now.0).abs() > 10
+                        || (logged.1 - now.1).abs() > 10
                 })
             })
             .map(|(seat, now)| (seat.clone(), *now))
             .collect();
-        for (seat, (enter, exit)) in moved {
+        for (seat, (enter, exit, unit)) in moved {
             self.log(Event::SignalThresholds(SignalThresholds {
                 adapter: self.id.clone(),
                 seat: seat.clone(),
                 enter,
                 exit,
-                unit: self.unit,
+                unit,
             }));
-            self.levels_logged.insert(seat, (enter, exit));
+            self.levels_logged.insert(seat, (enter, exit, unit));
         }
     }
 
@@ -200,8 +207,30 @@ impl Link {
         let mut pings: u32 = 0;
         // When the ping in flight was sent, on the Director's clock.
         let mut ping_sent: Option<i64> = None;
+        // The timer's list of receivers is read again now and then, off this loop so a slow
+        // answer never holds up a crossing.
+        let (info_tx, mut info_rx) = tokio::sync::mpsc::channel::<OftInfo>(1);
+        let mut next_info = tokio::time::Instant::now() + INFO_EVERY;
         loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(next_info) => {
+                    next_info += INFO_EVERY;
+                    let (timer, tx) = (timer.clone(), info_tx.clone());
+                    tokio::spawn(async move {
+                        // A read that fails is tried again at the next turn; the link's
+                        // own health is the pings' business.
+                        if let Ok(info) = gridfpv_server::timers::read_info(&timer).await {
+                            let _ = tx.send(info).await;
+                        }
+                    });
+                }
+                Some(info) = info_rx.recv() => {
+                    adapter.learn_nodes(&info.nodes, info.calibrated);
+                    let unit = adapter.shared_unit();
+                    self.registry.timers().report(&self.id, |status| {
+                        status.level_unit = unit;
+                    });
+                }
                 _ = tokio::time::sleep_until(next_ping) => {
                     pings += 1;
                     next_ping += if pings < OPENING_PINGS {
@@ -229,23 +258,18 @@ impl Link {
                     let Ok(message) = OftMessage::parse(&text) else {
                         continue;
                     };
+                    let mut status_levels: Option<Vec<SeatLevels>> = None;
                     match &message {
                         OftMessage::Hello {
                             timer: own_id,
                             boot_id,
                             seats,
-                            calibrated,
                             capabilities,
                             ..
                         } => {
                             // The timer's own id is what lets it be followed to a new
                             // address later.
                             self.registry.timers().learn_own_id(&self.id, own_id);
-                            self.unit = if *calibrated {
-                                SignalUnit::TenthsDbm
-                            } else {
-                                SignalUnit::TenthsDb
-                            };
                             if self.boot_id.as_deref() != Some(boot_id.as_str()) {
                                 self.boot_id = Some(boot_id.clone());
                                 self.fit.reset();
@@ -283,26 +307,50 @@ impl Link {
                                 .iter()
                                 .map(|seat| SeatLevels {
                                     seat: seat_ref(seat.seat),
+                                    // Filled in below, from the adapter.
+                                    unit: SignalUnit::TenthsDb,
                                     level: seat.rssi,
                                     floor: seat.floor,
                                     enter: seat.enter,
                                     exit: seat.exit,
                                     crossing: seat.crossing,
                                 })
-                                .collect();
-                            self.registry
-                                .timers()
-                                .publish(&self.id, TimerLive::Levels(levels));
-                            self.levels = seats
-                                .iter()
-                                .map(|seat| (seat_ref(seat.seat), (seat.enter, seat.exit)))
-                                .collect();
-                            self.log_levels();
+                                .collect::<Vec<_>>();
+                            // Published and logged below, once the adapter has read which
+                            // receiver serves each seat and so knows each seat's unit.
+                            status_levels = Some(levels);
                         }
                         _ => {}
                     }
                     let is_hello = matches!(message, OftMessage::Hello { .. });
-                    for event in adapter.translate(message) {
+                    let translated = adapter.translate(message);
+                    if is_hello {
+                        let unit = adapter.shared_unit();
+                        self.registry.timers().report(&self.id, |status| {
+                            status.level_unit = unit;
+                        });
+                    }
+                    if let Some(mut levels) = status_levels.take() {
+                        for seat in &mut levels {
+                            if let Ok(index) = seat.seat.0.parse() {
+                                seat.unit = adapter.unit(index);
+                            }
+                        }
+                        self.levels = levels
+                            .iter()
+                            .map(|seat| (seat.seat.clone(), (seat.enter, seat.exit, seat.unit)))
+                            .collect();
+                        self.registry
+                            .timers()
+                            .publish(&self.id, TimerLive::Levels(levels));
+                        self.log_levels();
+                        if adapter.has_unlisted_node() {
+                            // A receiver the list does not have: ask soon, not at the
+                            // next slow turn.
+                            next_info = next_info.min(tokio::time::Instant::now() + INFO_SOON);
+                        }
+                    }
+                    for event in translated {
                         match event {
                             Event::SignalChunk(chunk) => {
                                 self.registry

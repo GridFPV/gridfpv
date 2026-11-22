@@ -139,6 +139,21 @@ pub enum SignalUnit {
     TenthsDb,
     /// Tenths of a dBm (a calibrated OFT Timer).
     TenthsDbm,
+    /// Millivolts on a receiver's signal-strength pin (an OFT Node built on an RX5808). It
+    /// rises with the signal, but not as a straight line in dB, so a difference is so many
+    /// millivolts and nothing more.
+    Millivolts,
+}
+
+impl SignalUnit {
+    /// How many of the unit's counts make one of what people read: 10 for tenths of a dB
+    /// (shown as dB with one decimal), 1 for the rest.
+    pub fn per_shown(self) -> i32 {
+        match self {
+            SignalUnit::TenthsDb | SignalUnit::TenthsDbm => 10,
+            SignalUnit::Counts | SignalUnit::Millivolts => 1,
+        }
+    }
 }
 
 /// A run of signal samples for one seat, captured from a timer that reports signal.

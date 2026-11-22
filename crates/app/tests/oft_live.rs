@@ -41,6 +41,10 @@ impl Daemon {
                 "--fake",
                 "--fake-lap-s",
                 "1.5",
+                // The fake pilot's laps vary by default (since OFT 0882057). This test
+                // checks lap times to 5 ms, so its pilot flies every lap the same.
+                "--fake-lap-jitter-s",
+                "0",
                 "--no-mdns",
                 "--listen",
                 addr,

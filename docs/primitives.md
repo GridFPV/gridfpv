@@ -148,9 +148,10 @@ trace, and adjust the thresholds against it.
 - A **pass** is one crossing on one seat at one gate. Its time is on the timer's own clock.
 - Lap times are differences between pass times on that one clock. The time a pass arrived at
   Grid never affects a lap time.
-- **Signal samples** are stored in the source's own units at the source's own resolution. OFT
-  reports tenths of a dB; RotorHazard reports counts. Each stream carries a unit tag. Nothing
-  is converted down.
+- **Signal samples** are stored in the source's own units at the source's own resolution. An
+  OFT receiver reports tenths of a dB, or millivolts if it reads a signal-strength pin;
+  RotorHazard reports counts. Each stream carries a unit tag. Nothing is converted down, and
+  nothing is converted from one unit to another.
 
 ### 3.4 Discovery (Agreed)
 
@@ -806,6 +807,22 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      decides how seats are spread over its receivers. Grid no longer reads, shows or sends
      it. A v0.4 timer, which needs the field in a write, refuses "Apply to timer" until its
      firmware is updated.
+   - **OFT spec v0.8 (2026-11-22): level units.** A receiver says what its level numbers
+     measure, and a timer passes that on for each receiver: tenths of a dB, or millivolts
+     for a receiver built on an RX5808. Grid used to call every OFT level tenths of a dB.
+     Now each seat's signal, its logged enter and exit levels and a crossing's peak carry
+     the unit of the receiver serving that seat. The Tune page shows and takes numbers in
+     the timer's unit (dB with one decimal, whole millivolts). A unit Grid does not know
+     is kept as plain counts, with no unit claimed. Grid reads the timer's receiver list
+     again every 15 seconds, since a receiver can report in, or come back from a firmware
+     update in another unit, after the timer's `hello`. A saved seat profile records its
+     unit and is refused on a timer that now measures in another: 150 is 15 dB on one
+     receiver and 150 mV on another.
+     - From v0.7 and v0.8 Grid does not use: the wiring pins (`/pins`), a receiver's chip
+       name, and `fw.update.node_image`. Those belong to the timer's own page.
+     - Not done: the Tune page shows one unit for a whole timer. A timer whose seats are
+       on receivers of different units shows each seat's live numbers in its own unit, but
+       the timer-wide levels fields in one.
    - **A timer that restarts mid-race:** its clock begins again. The laps either side are
      kept, and the stretch across the restart has no time.
    - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):

@@ -158,14 +158,17 @@ export interface Range {
 
 /** What a plot shows before any signal has arrived. */
 function restingRange(unit: SignalUnit): Range {
-  return unit === 'Counts' ? { min: 0, max: 250 } : { min: -1000, max: -300 };
+  if (unit === 'Counts') return { min: 0, max: 250 };
+  // An RX5808's signal-strength pin: about 380 mV with nothing on, about 900 mV in the gate.
+  if (unit === 'Millivolts') return { min: 300, max: 1000 };
+  return { min: -1000, max: -300 };
 }
 
 /**
  * The vertical range of a plot. Before any signal arrives it is fixed. After that it follows
  * what is on screen: the signal (`lo` to `hi`) and the `marks` (the enter, exit and noise
- * floor lines), with a little room, snapped outward to whole steps of 5 dB (or 10 counts) so
- * it does not twitch, and never less than 20 dB tall.
+ * floor lines), with a little room, snapped outward to whole steps of 5 dB (50 mV, or 10 counts)
+ * so it does not twitch, and never less than 20 dB (200 mV, 40 counts) tall.
  */
 export function verticalRange(
   unit: SignalUnit,

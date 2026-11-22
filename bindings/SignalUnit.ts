@@ -4,4 +4,4 @@
  * What a signal level's number means. A timer reports levels in its own unit, and Grid
  * keeps them exactly as reported: it never converts one unit to another.
  */
-export type SignalUnit = "Counts" | "TenthsDb" | "TenthsDbm";
+export type SignalUnit = "Counts" | "TenthsDb" | "TenthsDbm" | "Millivolts";

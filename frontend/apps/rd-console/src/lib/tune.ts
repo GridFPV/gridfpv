@@ -6,8 +6,10 @@
  * timer's settings into a draft, a draft back into settings (or a sentence saying what is
  * missing), and says whether the two differ.
  *
- * The wire holds thresholds in tenths of a dB. People read dB with one decimal, so the draft
- * holds that.
+ * The wire holds thresholds as whole numbers in the timer's own unit: tenths of a dB on most
+ * timers, millivolts on one whose receivers read a signal-strength pin. People read dB with
+ * one decimal and millivolts whole, so the draft holds what people read, and remembers which
+ * unit that is. Nothing here assumes dB.
  *
  * The timer's **lap cooldown** is one of its settings: after a crossing on a seat it reports
  * no other on that seat for that long, which swallows the bounce of one pass. It is not the
@@ -41,37 +43,64 @@ export function fieldNumber(value: FieldValue | null | undefined): number | unde
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/** The unit's short name: "dB", "dBm", or nothing for plain counts. */
+/** The unit's short name: "dB", "dBm", "mV", or nothing for plain counts. */
 export function unitLabel(unit: SignalUnit): string {
   if (unit === 'TenthsDbm') return 'dBm';
   if (unit === 'TenthsDb') return 'dB';
+  if (unit === 'Millivolts') return 'mV';
   return '';
 }
 
 /**
- * A signal level in words: "-77.3 dB", or "-77.3 dBm" when the timer is calibrated. Counts
- * are shown as they are. A level that is not known is a dash.
+ * The unit of a **difference** between two levels: the gap between two dBm levels is dB.
+ * Millivolts and counts stay what they are.
+ */
+export function gapLabel(unit: SignalUnit): string {
+  return unit === 'TenthsDbm' ? 'dB' : unitLabel(unit);
+}
+
+/**
+ * How many of the unit's wire counts make one of what people read: 10 for tenths of a dB
+ * (read as dB with one decimal), 1 for millivolts and plain counts.
+ */
+export function unitScale(unit: SignalUnit): number {
+  return unit === 'TenthsDb' || unit === 'TenthsDbm' ? 10 : 1;
+}
+
+/** A wire number in words, with the label given: "-77.3 dB", "742 mV", "120". */
+function inWords(value: number, unit: SignalUnit, label: string): string {
+  const scale = unitScale(unit);
+  const number = scale === 1 ? String(value) : (value / scale).toFixed(1);
+  return label ? `${number} ${label}` : number;
+}
+
+/**
+ * A signal level in words: "-77.3 dB", "-77.3 dBm" when the timer is calibrated, "742 mV"
+ * for a timer that measures millivolts. Counts are shown as they are. A level that is not
+ * known is a dash.
  */
 export function formatLevel(value: number | undefined, unit: SignalUnit): string {
   if (value === undefined) return NO_VALUE;
-  if (unit === 'Counts') return String(value);
-  return `${(value / 10).toFixed(1)} ${unitLabel(unit)}`;
+  return inWords(value, unit, unitLabel(unit));
 }
 
-/** A difference between two levels, from tenths of a dB: "15.0 dB". */
-export function formatDb(tenths: number): string {
-  return `${(tenths / 10).toFixed(1)} dB`;
+/** A difference between two levels, in words: "15.0 dB", "150 mV". */
+export function formatGap(value: number, unit: SignalUnit): string {
+  return inWords(value, unit, gapLabel(unit));
 }
 
-/** Tenths of a dB as the dB a field shows: -773 is -77.3. */
-export function tenthsToDb(tenths: number): number {
-  return tenths / 10;
+/** A wire level as the number a field shows: -773 tenths of a dB is -77.3; 742 mV is 742. */
+export function toShown(value: number, unit: SignalUnit): number {
+  return value / unitScale(unit);
 }
 
-/** The dB a field holds as tenths of a dB, or `undefined` when the field has no number. */
-export function dbToTenths(value: FieldValue | null | undefined): number | undefined {
-  const db = fieldNumber(value);
-  return db === undefined ? undefined : Math.round(db * 10);
+/** The number a field holds as a wire level, or `undefined` when the field has no number. */
+export function fromShown(
+  value: FieldValue | null | undefined,
+  unit: SignalUnit
+): number | undefined {
+  const shown = fieldNumber(value);
+  return shown === undefined ? undefined : Math.round(shown * unitScale(unit));
 }
 
 /** Milliseconds as the seconds a field shows: 2500 is 2.5. */
@@ -96,14 +125,19 @@ export type ThresholdMode = 'Auto' | 'Manual';
  */
 export interface LevelsDraft {
   mode: ThresholdMode;
-  /** Follow the noise floor: enter this many dB above the floor. */
-  aboveFloorDb: FieldValue;
-  /** Follow the noise floor: exit this many dB below enter. */
-  belowEnterDb: FieldValue;
-  /** Fixed levels: the enter level in dB. */
-  enterDb: FieldValue;
-  /** Fixed levels: the exit level in dB. */
-  exitDb: FieldValue;
+  /**
+   * The unit the four numbers below are read in. They are what people read (dB with a
+   * decimal, whole millivolts), never the wire's counts.
+   */
+  unit: SignalUnit;
+  /** Follow the noise floor: enter this far above the floor. */
+  aboveFloor: FieldValue;
+  /** Follow the noise floor: exit this far below enter. */
+  belowEnter: FieldValue;
+  /** Fixed levels: the enter level. */
+  enter: FieldValue;
+  /** Fixed levels: the exit level. */
+  exit: FieldValue;
 }
 
 /** One seat in the draft. */
@@ -119,6 +153,8 @@ export interface DraftSeat {
 
 /** The settings as the director is editing them. */
 export interface TuneDraft {
+  /** The unit every level in the draft is read in: the timer's. */
+  unit: SignalUnit;
   seats: DraftSeat[];
   /** The timer's levels: what every seat with none of its own uses. */
   levels: LevelsDraft;
@@ -142,37 +178,40 @@ export function thresholdMode(threshold: TimerThreshold): ThresholdMode {
  * Levels that say what a threshold says. The fields of the mode that is not in use start
  * empty: the timer holds no values for them.
  */
-export function levelsFrom(threshold: TimerThreshold): LevelsDraft {
+export function levelsFrom(threshold: TimerThreshold, unit: SignalUnit): LevelsDraft {
   const levels: LevelsDraft = {
     mode: thresholdMode(threshold),
-    aboveFloorDb: '',
-    belowEnterDb: '',
-    enterDb: '',
-    exitDb: ''
+    unit,
+    aboveFloor: '',
+    belowEnter: '',
+    enter: '',
+    exit: ''
   };
   if ('Auto' in threshold) {
-    levels.aboveFloorDb = tenthsToDb(threshold.Auto.snr_enter);
-    levels.belowEnterDb = tenthsToDb(threshold.Auto.hysteresis);
+    levels.aboveFloor = toShown(threshold.Auto.snr_enter, unit);
+    levels.belowEnter = toShown(threshold.Auto.hysteresis, unit);
   } else {
-    levels.enterDb = tenthsToDb(threshold.Manual.enter);
-    levels.exitDb = tenthsToDb(threshold.Manual.exit);
+    levels.enter = toShown(threshold.Manual.enter, unit);
+    levels.exit = toShown(threshold.Manual.exit, unit);
   }
   return levels;
 }
 
 /**
  * A draft that says what the timer's settings say. A seat has levels in the draft only when
- * it has its own on the timer.
+ * it has its own on the timer. `unit` is what the timer's levels measure: the settings are
+ * bare numbers, and only the timer says what they count.
  */
-export function draftFrom(config: TimerConfig): TuneDraft {
+export function draftFrom(config: TimerConfig, unit: SignalUnit): TuneDraft {
   return {
+    unit,
     seats: config.seats.map((seat) => ({
       seat: seat.seat,
       mhz: seat.freq_mhz,
       enabled: seat.enabled,
-      ...(seat.threshold ? { levels: levelsFrom(seat.threshold) } : {})
+      ...(seat.threshold ? { levels: levelsFrom(seat.threshold, unit) } : {})
     })),
-    levels: levelsFrom(config.threshold),
+    levels: levelsFrom(config.threshold, unit),
     ...(config.exit_hold_ms !== undefined ? { exitHoldMs: config.exit_hold_ms } : {}),
     ...(config.lap_cooldown_ms !== undefined
       ? { lapCooldownS: msToSeconds(config.lap_cooldown_ms) }
@@ -196,8 +235,8 @@ function thresholdFrom(
 ): { ok: true; threshold: TimerThreshold } | { ok: false; problem: string } {
   const missing = (sentence: string) => ({ ok: false as const, problem: sentence });
   if (levels.mode === 'Auto') {
-    const snrEnter = dbToTenths(levels.aboveFloorDb);
-    const hysteresis = dbToTenths(levels.belowEnterDb);
+    const snrEnter = fromShown(levels.aboveFloor, levels.unit);
+    const hysteresis = fromShown(levels.belowEnter, levels.unit);
     if (snrEnter === undefined) {
       return missing(
         who
@@ -212,8 +251,8 @@ function thresholdFrom(
     }
     return { ok: true, threshold: { Auto: { snr_enter: snrEnter, hysteresis } } };
   }
-  const enter = dbToTenths(levels.enterDb);
-  const exit = dbToTenths(levels.exitDb);
+  const enter = fromShown(levels.enter, levels.unit);
+  const exit = fromShown(levels.exit, levels.unit);
   if (enter === undefined) {
     return missing(who ? `${who} needs an enter level.` : 'Fixed levels need an enter level.');
   }
@@ -332,7 +371,7 @@ export function isDirty(draft: TuneDraft, config: TimerConfig, seatLevels = true
   return !result.ok || !sameConfig(result.config, config);
 }
 
-/** An enter and an exit level, in tenths of a dB. */
+/** An enter and an exit level, as the wire holds them (the timer's own unit). */
 export interface EnterExit {
   enter: number;
   exit: number;
@@ -374,8 +413,8 @@ export function withMode(
   if (mode === levels.mode) return levels;
   const next: LevelsDraft = { ...levels, mode };
   if (mode === 'Manual' && inUse) {
-    if (fieldNumber(next.enterDb) === undefined) next.enterDb = tenthsToDb(inUse.enter);
-    if (fieldNumber(next.exitDb) === undefined) next.exitDb = tenthsToDb(inUse.exit);
+    if (fieldNumber(next.enter) === undefined) next.enter = toShown(inUse.enter, next.unit);
+    if (fieldNumber(next.exit) === undefined) next.exit = toShown(inUse.exit, next.unit);
   }
   return next;
 }
@@ -389,7 +428,11 @@ export function withMode(
  */
 export function ownLevels(timer: LevelsDraft, inUse: EnterExit | undefined): LevelsDraft {
   if (!inUse) return { ...timer };
-  return { ...timer, enterDb: tenthsToDb(inUse.enter), exitDb: tenthsToDb(inUse.exit) };
+  return {
+    ...timer,
+    enter: toShown(inUse.enter, timer.unit),
+    exit: toShown(inUse.exit, timer.unit)
+  };
 }
 
 /**

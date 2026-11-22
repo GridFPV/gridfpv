@@ -243,6 +243,7 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
         pass_window: _,
         pass_window_ms: _,
         pass_window_problem: _,
+        level_unit: _,
     } = status;
     TimerView {
         timer: Timer {
@@ -263,6 +264,7 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
             pass_window: false,
             pass_window_ms: None,
             pass_window_problem: None,
+            level_unit: None,
         },
     }
 }

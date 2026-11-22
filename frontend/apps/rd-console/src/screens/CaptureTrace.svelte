@@ -31,7 +31,7 @@
     recording: Recording;
     /** Goes up each time the recording grows. The recording itself is not reactive. */
     version: number;
-    /** The enter level, in the timer's unit (tenths of a dB). */
+    /** The enter level, in the timer's unit. */
     enter: number;
     exit: number;
     /** The passes these levels make of the recording. */

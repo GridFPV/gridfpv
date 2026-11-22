@@ -9,6 +9,7 @@
  *
  * A recording lives in the page that made it. It is not sent to the Director or kept.
  */
+import type { SignalUnit } from '@gridfpv/types';
 import type { SampleSource } from './signal.js';
 
 /** The most a recording holds: five minutes at 1 kHz. Recording stops itself there. */
@@ -182,7 +183,7 @@ export function moveLevel(
     : { enter: Math.max(enter, value + gap), exit: value };
 }
 
-/** The least room kept between enter and exit: half a dB, or one count. */
-export function levelGap(unit: 'Counts' | 'TenthsDb' | 'TenthsDbm'): number {
+/** The least room kept between enter and exit: half a dB, 5 mV, or one count. */
+export function levelGap(unit: SignalUnit): number {
   return unit === 'Counts' ? 1 : 5;
 }

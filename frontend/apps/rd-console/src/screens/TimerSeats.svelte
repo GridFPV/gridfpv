@@ -118,7 +118,7 @@
       const fresh = await session.getTimerConfig(timer);
       if (read !== reads) return;
       config = fresh;
-      draft = draftFrom(fresh);
+      draft = draftFrom(fresh, unit);
       loadError = undefined;
     } catch (e) {
       if (read !== reads) return;
@@ -145,13 +145,29 @@
   const result = $derived(draft ? draftConfig(draft, seatName, seatLevels) : undefined);
   const dirty = $derived(draft && config ? isDirty(draft, config, seatLevels) : false);
 
+  // The draft holds numbers as people read them in one unit. If the timer turns out to
+  // measure in another (its receiver reported in late, or came back from an update), the
+  // draft is made again from what the timer has: its numbers would otherwise be read wrong.
+  $effect(() => {
+    const now = unit;
+    untrack(() => {
+      if (config && draft && draft.unit !== now) draft = draftFrom(config, now);
+    });
+  });
+
   // ── The live feed ──────────────────────────────────────────────────────────
   // Samples arrive hundreds of times a second, so they go into plain ring buffers the traces
   // read on each frame, never into reactive state. Levels arrive about once a second and are
   // shown as text, so they are state.
   const rings = new Map<SeatRef, SignalRing>();
   const clock = new TimerClock();
-  let unit = $state<SignalUnit>('TenthsDb');
+  /** The unit the signal last arrived in, for a timer that does not say its unit itself. */
+  let signalUnit = $state<SignalUnit>('TenthsDb');
+  /**
+   * What the timer's levels measure. The timer says (dB on most, millivolts on one whose
+   * receivers read a signal-strength pin); the settings are bare numbers in that unit.
+   */
+  const unit = $derived(view?.status.level_unit ?? signalUnit);
   let levels = $state.raw<ReadonlyMap<SeatRef, SeatLevels>>(new Map());
   let liveError = $state<string | undefined>(undefined);
 
@@ -172,7 +188,7 @@
         performance.now()
       );
     }
-    if (chunk.unit !== unit) unit = chunk.unit;
+    if (chunk.unit !== signalUnit) signalUnit = chunk.unit;
   }
 
   function onLevels(list: SeatLevels[]) {
@@ -237,7 +253,7 @@
       reads += 1; // an older read must not land on top of this
       loading = false;
       config = kept;
-      draft = draftFrom(kept);
+      draft = draftFrom(kept, unit);
       loadError = undefined;
       toast.success(`Applied to “${timerLabel}”.`);
     } catch (e) {
@@ -299,7 +315,7 @@
       reads += 1; // an older read must not land on top of this
       loading = false;
       config = kept;
-      draft = draftFrom(kept);
+      draft = draftFrom(kept, unit);
       loadError = undefined;
       toast.success(`“${picked.name}” is on ${timerLabel}.`);
       return kept;
@@ -365,7 +381,7 @@
 
   async function discard() {
     applyError = undefined;
-    if (config) draft = draftFrom(config);
+    if (config) draft = draftFrom(config, unit);
     await loadConfig();
   }
 </script>
@@ -615,11 +631,11 @@
                   {:else}
                     <span class="number">
                       <span class="muted">Level</span>
-                      <strong>{formatLevel(live.level, unit)}</strong>
+                      <strong>{formatLevel(live.level, live.unit)}</strong>
                     </span>
                     <span class="number">
                       <span class="muted">Noise floor</span>
-                      <strong>{formatLevel(live.floor, unit)}</strong>
+                      <strong>{formatLevel(live.floor, live.unit)}</strong>
                     </span>
                     <span class="lamp" class:lit={live.crossing} data-crossing={live.crossing}>
                       <span class="lamp-dot" aria-hidden="true"></span>
@@ -635,17 +651,17 @@
                       ring={ringFor(seat.seat)}
                       {clock}
                       levels={live}
-                      {unit}
+                      unit={live?.unit ?? unit}
                       label="Signal on {label} over the last 10 seconds"
                     />
                     <dl class="summary" aria-label="{label} levels">
                       <div>
                         <dt class="enter">Enter</dt>
-                        <dd>{formatLevel(live?.enter, unit)}</dd>
+                        <dd>{formatLevel(live?.enter, live?.unit ?? unit)}</dd>
                       </div>
                       <div>
                         <dt class="exit">Exit</dt>
-                        <dd>{formatLevel(live?.exit, unit)}</dd>
+                        <dd>{formatLevel(live?.exit, live?.unit ?? unit)}</dd>
                       </div>
                     </dl>
                   </div>
