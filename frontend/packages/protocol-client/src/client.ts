@@ -25,6 +25,7 @@ import type {
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
+  RenameTimerRequest,
   DataCopy,
   DataExport,
   DataInfo,
@@ -446,6 +447,26 @@ export async function createTimer(
     '/timers',
     { method: 'POST', body: request, token, fetch: options.fetch },
     'add the timer'
+  );
+}
+
+/**
+ * Give a timer another name (`PUT /timers/{id}`). RD-gated. Only the name people see changes;
+ * the timer itself is not told. A blank name is a **400** with a sentence for the director, an
+ * unknown id a **404**. Resolves to the {@link Timer} as it now is.
+ */
+export async function renameTimer(
+  baseUrl: string,
+  id: AdapterId,
+  name: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: { name } satisfies RenameTimerRequest, token, fetch: options.fetch },
+    'rename the timer'
   );
 }
 

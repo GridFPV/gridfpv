@@ -46,6 +46,7 @@ import {
   listDiscoveredTimers,
   createTimer,
   deleteTimer,
+  renameTimer,
   getTimerConfig,
   putTimerConfig,
   updateEvent,
@@ -234,6 +235,7 @@ const realApi = {
   listDiscoveredTimers,
   createTimer,
   deleteTimer,
+  renameTimer,
   getTimerConfig,
   putTimerConfig,
   updateEvent,
@@ -545,6 +547,14 @@ export class Session {
    */
   createTimer(request: CreateTimerRequest): Promise<Timer | undefined> {
     return this.#privilegedWrite((token) => this.#api.createTimer(this.baseUrl, request, token));
+  }
+
+  /**
+   * Give a timer another name (`PUT /timers/{id}`). Returns the {@link Timer} as it now is,
+   * `undefined` on a cancelled token prompt, or throws with the Director's sentence.
+   */
+  renameTimer(id: AdapterId, name: string): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#api.renameTimer(this.baseUrl, id, name, token));
   }
 
   /**

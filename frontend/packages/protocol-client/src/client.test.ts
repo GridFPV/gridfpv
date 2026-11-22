@@ -261,6 +261,23 @@ describe('the timer directory', () => {
     expect(err.status).toBe(400);
   });
 
+  it('renameTimer PUTs the new name to /timers/{id} and gives back the timer', async () => {
+    const seen: { url: string; init?: RequestInit }[] = [];
+    const renamed = { id: 'gate-x1y2', name: 'Start gate', kind: 'Oft', address: '10.0.0.5:7270' };
+    const fetch: FetchLike = async (input, init) => {
+      seen.push({ url: String(input), init });
+      return { ok: true, status: 200, json: async () => renamed } as unknown as Response;
+    };
+    const { renameTimer } = await import('./client.js');
+    await expect(
+      renameTimer(BASE, 'gate/x1 y2', 'Start gate', 'rd-tok', { fetch })
+    ).resolves.toEqual(renamed);
+    expect(seen[0].url).toBe(`${BASE}/timers/gate%2Fx1%20y2`);
+    expect(seen[0].init?.method).toBe('PUT');
+    expect(JSON.parse(String(seen[0].init?.body))).toEqual({ name: 'Start gate' });
+    expect(headersOf(seen[0].init).Authorization).toBe('Bearer rd-tok');
+  });
+
   it('deleteTimer DELETEs /timers/{id} with the id encoded, and reads no body', async () => {
     const seen: { url: string; init?: RequestInit }[] = [];
     const fetch: FetchLike = async (input, init) => {
@@ -374,6 +391,7 @@ describe("request failures carry the Director's words (#433)", () => {
       ['listDiscoveredTimers', (fetch) => c.listDiscoveredTimers(BASE, { fetch })],
       ['createTimer', (fetch) => c.createTimer(BASE, REQ, TOKEN, { fetch })],
       ['deleteTimer', (fetch) => c.deleteTimer(BASE, TIMER, TOKEN, { fetch })],
+      ['renameTimer', (fetch) => c.renameTimer(BASE, TIMER, 'Gate', TOKEN, { fetch })],
       ['getTimerConfig', (fetch) => c.getTimerConfig(BASE, TIMER, { fetch })],
       ['putTimerConfig', (fetch) => c.putTimerConfig(BASE, TIMER, REQ, TOKEN, { fetch })],
       ['updateEvent', (fetch) => c.updateEvent(BASE, EVT, REQ, TOKEN, { fetch })],

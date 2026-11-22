@@ -17,7 +17,7 @@
 //! | `POST /events/{id}/passes` | a gate crossing from outside (tools and tests) |
 //! | `GET /events/{id}/changes` | server-sent events: the log cursor, each time it moves |
 //! | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | the pilot directory |
-//! | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | the timer directory, with live status |
+//! | `GET /timers`, `POST /timers`, `PUT /timers/{id}`, `DELETE /timers/{id}` | the timer directory, with live status; `PUT` renames |
 //! | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | the class directory |
 //!
 //! Reads are open; every write demands [`ControlAuth`] first (open until an RD token is
@@ -132,7 +132,7 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/timers/discovered", get(crate::timers::list_discovered))
         .route(
             "/timers/{timer_id}",
-            axum::routing::delete(crate::timers::delete_timer),
+            put(crate::timers::rename_timer).delete(crate::timers::delete_timer),
         )
         .route(
             "/timers/{timer_id}/config",

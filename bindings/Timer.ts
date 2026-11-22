@@ -11,7 +11,8 @@ export type Timer = {
  */
 id: AdapterId, 
 /**
- * The name people see ("Gate").
+ * The name people see ("Gate"). A person chooses it and can change it. It is Grid's
+ * own: the timer is not told, and the name the timer gives itself is `own_id`.
  */
 name: string, kind: TimerKind, 
 /**

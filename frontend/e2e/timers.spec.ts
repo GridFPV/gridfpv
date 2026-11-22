@@ -5,8 +5,8 @@
  * listens on. The Director tries to reach it by itself and fails, so the timer is listed as not
  * connected, with the Director's own sentence for why. Its seats open from the row and
  * say the same, with the Director's sentence for why the settings could not be read. The
- * add-heat dialog then offers the
- * timer by name under "Timed by" but it **cannot be chosen** (it has reported no seats), and
+ * timer is then renamed, and the add-heat dialog offers the
+ * timer by its new name under "Timed by" but it **cannot be chosen** (it has reported no seats), and
  * the dialog stays on the Bench. Last, the timer is removed.
  *
  * Everything is the real path: real `POST /timers`, the Director's real connection attempt,
@@ -22,6 +22,8 @@ import { gotoEvents, gotoPage, openPage } from './nav.js';
 
 const STAMP = Date.now();
 const TIMER = `E2E Gate ${STAMP}`;
+/** The friendly name it is given part-way through. */
+const RENAMED = `E2E Start Gate ${STAMP}`;
 const EVENT = `Timer Night ${STAMP}`;
 /** The discard port on this machine: nothing listens there, so the connection is refused. */
 const ADDRESS = '127.0.0.1:9';
@@ -31,7 +33,7 @@ interface TimerRow {
   status: { connected: boolean; problem?: string; seats: string[] };
 }
 
-test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put a heat on it, and removes it', async ({
+test('RD adds a timer nothing answers at, sees why, opens its seats, renames it, cannot put a heat on it, and removes it', async ({
   page
 }) => {
   const before = (await (await page.request.get('/active-event')).json()) as {
@@ -40,7 +42,7 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
   let eventId: string | undefined;
   const ours = async (): Promise<TimerRow | undefined> =>
     ((await (await page.request.get('/timers')).json()) as TimerRow[]).find(
-      (row) => row.timer.name === TIMER
+      (row) => row.timer.name === TIMER || row.timer.name === RENAMED
     );
 
   try {
@@ -127,6 +129,34 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
     await expect(page).toHaveURL(/#\/timers$/);
     await expect(row).toBeVisible();
 
+    // ── Rename it: the new name is what every list shows from then on ────────────────────
+    await row.getByRole('button', { name: 'Rename' }).click();
+    const renameForm = page.getByRole('form', { name: 'Rename timer' });
+    await expect(renameForm.getByLabel('Name', { exact: true })).toHaveValue(TIMER);
+    // A blank name is refused in the Director's words, and the dialog stays open.
+    await renameForm.getByLabel('Name', { exact: true }).fill('   ');
+    await page.getByRole('button', { name: 'Save name' }).click();
+    await expect(renameForm.getByRole('alert')).toHaveText('A timer needs a name.');
+    expect((await ours())?.timer.name).toBe(TIMER);
+    await renameForm.getByLabel('Name', { exact: true }).fill(RENAMED);
+    await page.getByRole('button', { name: 'Save name' }).click();
+    await expect(renameForm).toBeHidden();
+    const renamed = page
+      .getByRole('list', { name: 'Timers' })
+      .getByRole('listitem', { name: RENAMED });
+    await expect(renamed).toBeVisible();
+    await expect(row).toHaveCount(0);
+    // It is the same timer: the same handle, at the same address.
+    const after = await ours();
+    expect(after?.timer.name).toBe(RENAMED);
+    expect(after?.timer.id).toBe(timerId);
+    await expect(renamed).toContainText(ADDRESS);
+    // Its own page carries the new name too.
+    await renamed.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.getByTestId('timer-name')).toHaveText(RENAMED);
+    await openPage(page, 'Timers');
+    await expect(renamed).toBeVisible();
+
     // ── The add-heat dialog offers it by name, but it cannot be chosen ───────────────────
     await gotoEvents(page);
     await page
@@ -145,8 +175,8 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
     await page.getByRole('button', { name: 'Add a practice phase' }).click();
     const heatForm = page.getByRole('form', { name: 'Add a heat' });
     const timedBy = heatForm.getByLabel('Timed by');
-    const offered = timedBy.locator('option', { hasText: TIMER });
-    await expect(offered).toHaveText(`${TIMER} (not connected)`);
+    const offered = timedBy.locator('option', { hasText: RENAMED });
+    await expect(offered).toHaveText(`${RENAMED} (not connected)`);
     await expect(offered).toBeDisabled();
     // With no timer that can be chosen, the heat is on the Bench and its eight seats.
     await expect(timedBy.locator('option:checked')).toContainText('Bench');
@@ -159,17 +189,17 @@ test('RD adds a timer nothing answers at, sees why, opens its seats, cannot put 
 
     // ── Remove it: one click arms the button, the second one removes ─────────────────────
     await openPage(page, 'Timers');
-    await expect(row).toBeVisible();
-    await row.getByRole('button', { name: 'Remove' }).click();
+    await expect(renamed).toBeVisible();
+    await renamed.getByRole('button', { name: 'Remove' }).click();
     expect(await ours()).toBeDefined();
-    await row.getByRole('button', { name: 'Confirm' }).click();
-    await expect(row).toHaveCount(0);
+    await renamed.getByRole('button', { name: 'Confirm' }).click();
+    await expect(renamed).toHaveCount(0);
     expect(await ours()).toBeUndefined();
   } finally {
     // ── Clean up: the event, the timer if it is still there, the active event as it was ──
     if (eventId) await page.request.delete(`/events/${eventId}`);
     const left = (await (await page.request.get('/timers')).json()) as TimerRow[];
-    for (const row of left.filter((r) => r.timer.name === TIMER)) {
+    for (const row of left.filter((r) => r.timer.name === TIMER || r.timer.name === RENAMED)) {
       await page.request.delete(`/timers/${encodeURIComponent(row.timer.id)}`);
     }
     if (before.event) {

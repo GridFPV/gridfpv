@@ -190,3 +190,4 @@ export type * from '@bindings/UncountedWhy';
 export type * from '@bindings/UpdateClassRequest';
 export type * from '@bindings/UpdatePilotRequest';
 export type * from '@bindings/VtxType';
+export type * from '@bindings/RenameTimerRequest';
