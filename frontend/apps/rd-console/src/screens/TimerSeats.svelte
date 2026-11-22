@@ -19,7 +19,10 @@
    *   whole of the settings. What comes back is what the timer is doing, and replaces the draft.
    *
    * The settings live on the timer. They are read from it when the page opens, after every
-   * apply and on "Discard changes". The live signal comes over the timer's live feed, which
+   * apply and on "Discard changes", and again whenever the timer says they changed (another
+   * program, or the timer's own page, can change them too). While another program has
+   * control of the timer, Grid cannot change it: the page says who has it and where to put
+   * that right, and offers nothing that writes to the timer. The live signal comes over the timer's live feed, which
    * stops when the page closes. The timer list (names and status) is the Seats page's and is
    * handed in.
    *
@@ -55,6 +58,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import { formatHash } from '../lib/route.js';
   import { SignalRing, TimerClock } from '../lib/signal.js';
+  import { controlTrouble } from '../lib/timers.js';
   import {
     addSeat,
     draftConfig,
@@ -68,6 +72,7 @@
     sameConfig,
     type TuneDraft
   } from '../lib/tune.js';
+  import ControlBanner from './ControlBanner.svelte';
   import LevelsFields from './LevelsFields.svelte';
   import SignalTrace from './SignalTrace.svelte';
 
@@ -99,6 +104,12 @@
   /** Whether this timer takes levels per seat. When it does not, none is offered or sent. */
   const seatLevels = $derived(view?.status.seat_thresholds ?? false);
   const seatName = (seat: SeatRef, position: number): string => names.seat(timer, seat, position);
+  /**
+   * Whether another program has control of the timer, so it refuses Grid's changes. The
+   * page still shows everything, and a draft can still be made; nothing is sent.
+   */
+  const locked = $derived(!!view && controlTrouble(view.timer, view.status) !== undefined);
+  const lockedTitle = $derived(locked ? 'Another program has control of this timer.' : undefined);
 
   // ── The settings: what the timer has, and the draft ────────────────────────
   /** What the timer reported last. `undefined` until the first read lands. */
@@ -140,6 +151,44 @@
     untrack(() => {
       if (!config && !loading) void loadConfig();
     });
+  });
+
+  // The timer counts every change to its settings, whoever made it, and its status carries
+  // the count. When it moves, the settings are read again. Grid's own applies move it too;
+  // the read then finds what the page already has and changes nothing.
+  /** Set when the timer's settings changed elsewhere while there was a draft here. */
+  let changedElsewhere = $state(false);
+  let reading = 0;
+
+  async function followConfig() {
+    const read = (reading += 1);
+    const before = reads;
+    let fresh: TimerConfig;
+    try {
+      fresh = await session.getTimerConfig(timer);
+    } catch {
+      // The settings on the page stay; a timer that cannot be read says so by itself.
+      return;
+    }
+    // An apply, a discard or a later change has been here since: theirs is newer.
+    if (read !== reading || before !== reads || !config || !draft) return;
+    if (sameConfig(fresh, config)) return;
+    const wasDirty = isDirty(draft, config, seatLevels);
+    config = fresh;
+    if (wasDirty) {
+      // The director's edits are theirs to keep or drop. They are told the timer moved.
+      changedElsewhere = true;
+    } else {
+      draft = draftFrom(fresh, unit);
+    }
+  }
+
+  let seenRev: number | undefined;
+  $effect(() => {
+    const rev = view?.status.config_rev;
+    const moved = rev !== undefined && seenRev !== undefined && rev !== seenRev;
+    if (rev !== undefined) seenRev = rev;
+    if (moved) untrack(() => void followConfig());
   });
 
   const result = $derived(draft ? draftConfig(draft, seatName, seatLevels) : undefined);
@@ -244,7 +293,7 @@
   let applyError = $state<string | undefined>(undefined);
 
   async function apply() {
-    if (applying || !result?.ok) return;
+    if (applying || locked || !result?.ok) return;
     applying = true;
     applyError = undefined;
     try {
@@ -254,6 +303,7 @@
       loading = false;
       config = kept;
       draft = draftFrom(kept, unit);
+      changedElsewhere = false;
       loadError = undefined;
       toast.success(`Applied to “${timerLabel}”.`);
     } catch (e) {
@@ -316,6 +366,7 @@
       loading = false;
       config = kept;
       draft = draftFrom(kept, unit);
+      changedElsewhere = false;
       loadError = undefined;
       toast.success(`“${picked.name}” is on ${timerLabel}.`);
       return kept;
@@ -381,6 +432,7 @@
 
   async function discard() {
     applyError = undefined;
+    changedElsewhere = false;
     if (config) draft = draftFrom(config, unit);
     await loadConfig();
   }
@@ -395,6 +447,7 @@
         </Banner>
       </div>
     {/if}
+    <ControlBanner {view} />
     {#if profileError}
       <div data-testid="profile-problem">
         <Banner
@@ -433,8 +486,8 @@
             <Select
               aria-label="Profile"
               value={profiles?.active ?? ''}
-              disabled={profileBusy || dirty || !profiles}
-              title={dirty ? 'Apply or discard the changes first.' : undefined}
+              disabled={profileBusy || dirty || locked || !profiles}
+              title={dirty ? 'Apply or discard the changes first.' : lockedTitle}
               onchange={async (e: Event) => {
                 const select = e.currentTarget as HTMLSelectElement;
                 await applyProfile(select.value);
@@ -712,6 +765,14 @@
             >
           </div>
         {/if}
+        {#if changedElsewhere && dirty}
+          <div data-testid="changed-elsewhere">
+            <Banner tone="warn" title="The timer's settings were changed somewhere else.">
+              Your changes here are not on the timer. “Apply to timer” puts all of these settings on
+              it, over what was changed there. “Discard changes” shows what the timer has now.
+            </Banner>
+          </div>
+        {/if}
         <div class="apply-row">
           <p class="apply-state" role="status">
             {#if dirty}
@@ -729,7 +790,8 @@
             </Button>
             <Button
               variant="primary"
-              disabled={!dirty || applying || !result?.ok}
+              disabled={!dirty || applying || locked || !result?.ok}
+              title={lockedTitle}
               onclick={() => void apply()}
             >
               {applying ? 'Applying…' : 'Apply to timer'}

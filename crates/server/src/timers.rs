@@ -158,6 +158,43 @@ pub struct TimerStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub level_unit: Option<SignalUnit>,
+    /// Who may change the timer's settings right now. An OFT timer lets one program at a
+    /// time change it (OFT spec §6.6); Grid asks to be that program when it connects, and
+    /// the first to ask is the one. Absent until the timer has said, on a timer that is
+    /// not connected, and on a timer that lets anyone write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control: Option<TimerControl>,
+    /// The name Grid asks for control under, as the timer's own page lists it ("GridFPV
+    /// race-laptop"). A person handing control to Grid on that page looks for this name.
+    /// Absent on a timer that lets anyone write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control_name: Option<String>,
+    /// A number the timer changes whenever its settings change, whoever changed them. A
+    /// console that shows the settings reads them again when it moves. It starts again
+    /// when the timer does. Absent on a timer that does not give one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub config_rev: Option<u32>,
+}
+
+/// Who may change a timer's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+#[serde(tag = "holder")]
+pub enum TimerControl {
+    /// No program has control, so any may write, Grid included.
+    Nobody,
+    /// Grid has control.
+    Grid,
+    /// Another program has control. Grid can read the timer and take its laps, but the
+    /// timer refuses Grid's changes until a person hands control over on the timer's own
+    /// page.
+    Other {
+        /// The name that program gave itself ("RotorHazard pi-timer").
+        name: String,
+    },
 }
 
 /// A timer with its status (`GET /timers`).
@@ -383,6 +420,24 @@ pub enum TimerError {
         "Changing a RotorHazard timer's settings from Grid is not built yet. Use its own Settings page for now."
     )]
     NotBuilt,
+    /// Another program has control of the timer (OFT spec §6.6), so it refuses Grid's
+    /// writes. The text names the timer and the program.
+    #[error("{0}")]
+    Controlled(String),
+}
+
+/// The sentence for a timer another program has control of.
+fn controlled(timer: &Timer, holder: &str) -> TimerError {
+    let holder = holder.trim();
+    let who = if holder.is_empty() {
+        "Another program has".to_owned()
+    } else {
+        format!("\u{201c}{holder}\u{201d} has")
+    };
+    TimerError::Controlled(format!(
+        "{who} control of {}, so Grid cannot change it. Open the timer's own page and give control to Grid.",
+        timer.name
+    ))
 }
 
 impl From<TimerError> for ProtocolError {
@@ -395,7 +450,8 @@ impl From<TimerError> for ProtocolError {
             TimerError::Unreachable(_)
             | TimerError::NotTaken
             | TimerError::NotKept
-            | TimerError::NotBuilt => ErrorCode::Refused,
+            | TimerError::NotBuilt
+            | TimerError::Controlled(_) => ErrorCode::Refused,
             TimerError::NotFound => ErrorCode::UnknownScope,
             TimerError::Io(_) => ErrorCode::Internal,
         };
@@ -412,6 +468,9 @@ struct Inner {
     discovered: BTreeMap<String, DiscoveredTimer>,
     /// Each timer's seat channels, as last read from it. See [`seat_channels`].
     channels: BTreeMap<AdapterId, KnownChannels>,
+    /// The key each timer gave Grid while Grid has control of it (OFT spec §6.6). Every
+    /// write to that timer carries it. Never saved and never sent to a console.
+    control_keys: BTreeMap<AdapterId, String>,
     data_dir: Option<PathBuf>,
 }
 
@@ -477,6 +536,7 @@ impl TimerDirectory {
                 live: BTreeMap::new(),
                 discovered: BTreeMap::new(),
                 channels: BTreeMap::new(),
+                control_keys: BTreeMap::new(),
                 data_dir,
             })),
             generation: watch::Sender::new(0),
@@ -589,6 +649,7 @@ impl TimerDirectory {
         }
         inner.status.remove(id);
         inner.channels.remove(id);
+        inner.control_keys.remove(id);
         // Dropping the sender ends every live feed of this timer.
         inner.live.remove(id);
         drop(inner);
@@ -677,7 +738,33 @@ impl TimerDirectory {
         }
     }
 
-    /// Make a timer's channels count as old, so the next asker goes to the timer. For tests.
+    /// Keep, or forget, the key a timer gave Grid for its writes. Called by whatever holds
+    /// the timer's connection, as the timer says who has control. A timer that has been
+    /// removed is ignored.
+    pub fn set_control_key(&self, id: &AdapterId, key: Option<String>) {
+        let mut inner = self.write();
+        match key {
+            Some(key) if inner.timers.contains_key(id) => {
+                inner.control_keys.insert(id.clone(), key);
+            }
+            _ => {
+                inner.control_keys.remove(id);
+            }
+        }
+    }
+
+    /// The key Grid's writes to a timer must carry, while Grid has control of it.
+    pub fn control_key(&self, id: &AdapterId) -> Option<String> {
+        self.read().control_keys.get(id).cloned()
+    }
+
+    /// One timer's status right now. A timer that has reported nothing has the default.
+    pub fn status(&self, id: &AdapterId) -> TimerStatus {
+        self.read().status.get(id).cloned().unwrap_or_default()
+    }
+
+    /// Make a timer's channels count as old, so the next asker goes to the timer: its
+    /// settings changed, or a test wants it asked.
     pub fn age_channels(&self, id: &AdapterId) {
         if let Some(known) = self.write().channels.get_mut(id) {
             known.asked_at = known
@@ -865,28 +952,106 @@ async fn read_config(timer: &Timer) -> Result<OftConfig, TimerError> {
         .map_err(unreachable)
 }
 
-/// Write a timer's settings, then read them back. The write only counts if the timer then
-/// reports exactly what was sent.
-async fn write_config(timer: &Timer, config: &OftConfig) -> Result<OftConfig, TimerError> {
-    let response = reqwest::Client::new()
-        .put(config_url(timer))
-        .timeout(TIMER_ANSWER)
-        .json(config)
-        .send()
+/// The header a write carries while a claim holds control of the timer (OFT spec §6.6).
+const CONTROL_HEADER: &str = "OFT-Control";
+
+/// How long a refused write waits for the timer to say that Grid has control after all.
+const CONTROL_SETTLES: Duration = Duration::from_secs(1);
+
+/// Send a write to an OFT timer, carrying Grid's key when Grid has control of the timer.
+/// With nobody in control the timer takes a write with or without a key.
+///
+/// Control comes to Grid a moment before Grid hears of it: the timer makes Grid's claim
+/// the holder, and the key follows on the stream. A write in that moment goes out with no
+/// key, or an old one, and is refused with a `423`. So after a `423` this waits a moment
+/// for a key the write did not carry, and sends the write once more with it. A `423`
+/// that stands is given back as the answer, for [`refusal`] to put into words.
+async fn send_write(
+    directory: &TimerDirectory,
+    timer: &Timer,
+    method: reqwest::Method,
+    url: String,
+    body: Option<&OftConfig>,
+) -> Result<reqwest::Response, TimerError> {
+    let send = |key: Option<String>| {
+        let mut request = reqwest::Client::new()
+            .request(method.clone(), url.clone())
+            .timeout(TIMER_ANSWER);
+        if let Some(key) = key {
+            request = request.header(CONTROL_HEADER, key);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        request.send()
+    };
+    let sent_with = directory.control_key(&timer.id);
+    let response = send(sent_with.clone())
         .await
         .map_err(|e| unreachable(timer, &e))?;
+    if response.status() != reqwest::StatusCode::LOCKED {
+        return Ok(response);
+    }
+    let waited = Instant::now();
+    loop {
+        let key = directory.control_key(&timer.id);
+        let ours = directory.status(&timer.id).control == Some(TimerControl::Grid);
+        if ours && key.is_some() && key != sent_with {
+            return send(key).await.map_err(|e| unreachable(timer, &e));
+        }
+        if waited.elapsed() >= CONTROL_SETTLES {
+            return Ok(response);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Stop a write the timer is known to refuse: another program has control of it. Saying so
+/// here names the program; the timer is still the judge of every write that is sent.
+fn may_write(directory: &TimerDirectory, timer: &Timer) -> Result<(), TimerError> {
+    match directory.status(&timer.id).control {
+        Some(TimerControl::Other { name }) => Err(controlled(timer, &name)),
+        _ => Ok(()),
+    }
+}
+
+/// Why a timer refused a write, from its answer. A `423` means another program has
+/// control (OFT spec §6.6); anything else is passed on with the timer's own reason.
+async fn refusal(timer: &Timer, response: reqwest::Response) -> TimerError {
+    let locked = response.status() == reqwest::StatusCode::LOCKED;
+    // The timer says why in `{"error": "..."}`.
+    let why = response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| body["error"].as_str().map(str::to_owned));
+    if locked {
+        // "controlled by RotorHazard".
+        let holder = why
+            .as_deref()
+            .and_then(|why| why.strip_prefix("controlled by "))
+            .unwrap_or("");
+        return controlled(timer, holder);
+    }
+    TimerError::Unreachable(format!(
+        "{} refused the change: {}.",
+        timer.name,
+        why.as_deref().unwrap_or("it gave no reason")
+    ))
+}
+
+/// Write a timer's settings, then read them back. The write only counts if the timer then
+/// reports exactly what was sent.
+async fn write_config(
+    directory: &TimerDirectory,
+    timer: &Timer,
+    config: &OftConfig,
+) -> Result<OftConfig, TimerError> {
+    may_write(directory, timer)?;
+    let url = config_url(timer);
+    let response = send_write(directory, timer, reqwest::Method::PUT, url, Some(config)).await?;
     if !response.status().is_success() {
-        // The timer says why in `{"error": "..."}`.
-        let why = response
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|body| body["error"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| "it gave no reason".to_owned());
-        return Err(TimerError::Unreachable(format!(
-            "{} refused the change: {why}.",
-            timer.name
-        )));
+        return Err(refusal(timer, response).await);
     }
     let now = read_config(timer).await?;
     if &now != config {
@@ -897,19 +1062,19 @@ async fn write_config(timer: &Timer, config: &OftConfig) -> Result<OftConfig, Ti
 
 /// Ask a timer to keep the settings it is using as its power-on settings (OFT
 /// `POST /config/save`). The write only counts if the timer then says they are kept.
-async fn keep_config(timer: &Timer) -> Result<(), TimerError> {
+async fn keep_config(directory: &TimerDirectory, timer: &Timer) -> Result<(), TimerError> {
     #[derive(Deserialize)]
     struct Kept {
         #[serde(default)]
         current_is_saved: bool,
     }
     let unreachable = |e: reqwest::Error| unreachable(timer, &e);
-    let kept: Kept = reqwest::Client::new()
-        .post(format!("{}/save", config_url(timer)))
-        .timeout(TIMER_ANSWER)
-        .send()
-        .await
-        .map_err(unreachable)?
+    let url = format!("{}/save", config_url(timer));
+    let response = send_write(directory, timer, reqwest::Method::POST, url, None).await?;
+    if response.status() == reqwest::StatusCode::LOCKED {
+        return Err(refusal(timer, response).await);
+    }
+    let kept: Kept = response
         .error_for_status()
         .map_err(unreachable)?
         .json()
@@ -1076,22 +1241,19 @@ pub async fn apply_config(
     }
     // A timer that has one threshold for every seat would drop a seat's own without a
     // word, and the write would then fail its readback with a vaguer message. Say it here.
-    let status = registry
-        .timers()
-        .list()
-        .into_iter()
-        .find(|view| &view.timer.id == timer_id)
-        .map(|view| view.status)
-        .unwrap_or_default();
+    let status = registry.timers().status(timer_id);
     if !status.seat_thresholds && body.seats.iter().any(|seat| seat.threshold.is_some()) {
         return Err(TimerError::OneThreshold.into());
     }
+    // Said before anything is read, so a director is not told about a typing mistake in a
+    // change the timer would refuse anyway.
+    may_write(&registry.timers(), &timer)?;
     let config = body.to_oft(&read_config(&timer).await?)?;
-    let written = write_config(&timer, &config).await?;
+    let written = write_config(&registry.timers(), &timer, &config).await?;
     // A timer that can keep its settings is asked to, every time: after "Apply" the timer
     // is set, and a power cycle at the field must not quietly put its defaults back.
     if status.keeps_settings {
-        keep_config(&timer).await?;
+        keep_config(&registry.timers(), &timer).await?;
     }
     let written: TimerConfig = written.into();
     registry
@@ -1106,8 +1268,9 @@ pub async fn apply_config(
 /// `window_ms` is the open event's lap rule, `0` for off. Each connected OFT timer that
 /// has a pass window is read; where it differs it is written and read back, as every
 /// write to a timer is. A timer that cannot be reached, or does not take the write, gets
-/// the reason on its status, where the Run page shows it. A timer with no pass window is
-/// left alone: its status already says it has none.
+/// the reason on its status, where the Run page shows it. So does a timer another program
+/// has control of, when its window is not the event's: Grid cannot put it right. A timer
+/// with no pass window is left alone: its status already says it has none.
 ///
 /// The Timer's other settings are never touched: the write sends back exactly what was
 /// read, with the window changed.
@@ -1126,7 +1289,7 @@ pub async fn sync_pass_window(registry: &EventRegistry, window_ms: u32) {
                 pass_window_ms: Some(window_ms),
                 ..now
             };
-            let written = write_config(&timer, &wanted).await?;
+            let written = write_config(&registry.timers(), &timer, &wanted).await?;
             Ok::<u32, TimerError>(written.pass_window_ms.unwrap_or(0))
         }
         .await;
@@ -2337,5 +2500,443 @@ mod tests {
         assert_eq!(directory.discovered()[1].address, "10.0.0.9:7270");
         directory.lost("a._oft._tcp.local.");
         assert_eq!(directory.discovered().len(), 1);
+    }
+
+    // ── Control: one writer at a time (OFT spec v0.9, §6.6) ────────────────
+
+    /// What a [`fake_guarded`] timer holds, and what it was asked.
+    #[derive(Clone)]
+    struct Guarded {
+        stored: Arc<Mutex<serde_json::Value>>,
+        /// The key of the claim that holds control. `None`: nobody does.
+        holder_key: Arc<Mutex<Option<String>>>,
+        /// Writes that got past the guard: settings, then "keep these".
+        writes: Arc<std::sync::atomic::AtomicU32>,
+        keeps: Arc<std::sync::atomic::AtomicU32>,
+        /// Writes the guard refused.
+        refused: Arc<std::sync::atomic::AtomicU32>,
+        /// The `OFT-Control` header of every write, as it arrived.
+        keys_seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    /// A fake OFT timer with control, as `oftd` does it: while a claim holds control, a
+    /// write without that claim's key is a `423` naming the holder, and changes nothing.
+    async fn fake_guarded(holder_key: Option<&str>) -> (String, Guarded) {
+        use axum::http::HeaderMap;
+        use std::sync::atomic::Ordering;
+        let fake = Guarded {
+            stored: Arc::new(Mutex::new(serde_json::json!({
+                "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true}],
+                "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
+                "min_lap_ms": 2000,
+                "exit_hold_ms": 30,
+                "pass_window_ms": 0,
+            }))),
+            holder_key: Arc::new(Mutex::new(holder_key.map(str::to_owned))),
+            writes: Arc::default(),
+            keeps: Arc::default(),
+            refused: Arc::default(),
+            keys_seen: Arc::default(),
+        };
+        // `Err` is the refusal a write without the holder's key gets.
+        fn guard(
+            fake: &Guarded,
+            headers: &HeaderMap,
+        ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+            let sent = headers
+                .get("OFT-Control")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            fake.keys_seen.lock().unwrap().push(sent.clone());
+            let holder = fake.holder_key.lock().unwrap().clone();
+            if holder.is_some() && sent != holder {
+                fake.refused.fetch_add(1, Ordering::SeqCst);
+                return Err((
+                    StatusCode::LOCKED,
+                    Json(serde_json::json!({"error": "controlled by RotorHazard pi-timer"})),
+                ));
+            }
+            Ok(())
+        }
+        let read = {
+            let fake = fake.clone();
+            move || {
+                let fake = fake.clone();
+                async move { Json(fake.stored.lock().unwrap().clone()) }
+            }
+        };
+        let write = {
+            let fake = fake.clone();
+            move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                let fake = fake.clone();
+                async move {
+                    guard(&fake, &headers)?;
+                    fake.writes.fetch_add(1, Ordering::SeqCst);
+                    *fake.stored.lock().unwrap() = body.clone();
+                    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(body))
+                }
+            }
+        };
+        let keep = {
+            let fake = fake.clone();
+            move |headers: HeaderMap| {
+                let fake = fake.clone();
+                async move {
+                    guard(&fake, &headers)?;
+                    fake.keeps.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+                        serde_json::json!({"saved": true, "current_is_saved": true}),
+                    ))
+                }
+            }
+        };
+        let app = axum::Router::new()
+            .route("/oft/v1/config", axum::routing::get(read).put(write))
+            .route("/oft/v1/config/save", axum::routing::post(keep));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr.to_string(), fake)
+    }
+
+    /// A registry with one connected timer at a [`fake_guarded`] that keeps settings and
+    /// has a pass window.
+    async fn with_guarded(holder_key: Option<&str>) -> (EventRegistry, AdapterId, String, Guarded) {
+        let (address, fake) = fake_guarded(holder_key).await;
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry
+            .timers()
+            .create(&request("Gate", &address))
+            .unwrap();
+        registry.timers().report(&timer.id, |status| {
+            status.connected = true;
+            status.keeps_settings = true;
+            status.pass_window = true;
+        });
+        let uri = format!("/timers/{}/config", timer.id.0);
+        (registry, timer.id, uri, fake)
+    }
+
+    fn other_holds(registry: &EventRegistry, timer: &AdapterId, name: &str) {
+        registry.timers().report(timer, |status| {
+            status.control = Some(TimerControl::Other {
+                name: name.to_owned(),
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn with_control_every_write_carries_grids_key() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, uri, fake) = with_guarded(Some("9f3a61c2")).await;
+        registry.timers().report(&timer, |status| {
+            status.control = Some(TimerControl::Grid);
+        });
+        registry
+            .timers()
+            .set_control_key(&timer, Some("9f3a61c2".into()));
+
+        let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["seats"][1]["freq_mhz"], 5917);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 1);
+        // Keeping the settings is a write too, and carried the key.
+        assert_eq!(fake.keeps.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.refused.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *fake.keys_seen.lock().unwrap(),
+            vec![Some("9f3a61c2".to_owned()), Some("9f3a61c2".to_owned())]
+        );
+        // So does the event's pass window.
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(fake.stored.lock().unwrap()["pass_window_ms"], 400);
+        assert_eq!(status_of(&registry, &timer).pass_window_problem, None);
+        assert_eq!(fake.refused.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn with_nobody_in_control_a_write_needs_no_key_and_a_key_does_no_harm() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, uri, fake) = with_guarded(None).await;
+        registry.timers().report(&timer, |status| {
+            status.control = Some(TimerControl::Nobody);
+        });
+        let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(fake.keys_seen.lock().unwrap()[0], None);
+        // A key left from before (the timer's page freed control) is sent and accepted.
+        registry
+            .timers()
+            .set_control_key(&timer, Some("0ld".into()));
+        let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timer_another_program_controls_is_not_written_to_and_the_answer_names_it() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, uri, fake) = with_guarded(Some("theirs")).await;
+        other_holds(&registry, &timer, "RotorHazard pi-timer");
+        let before = fake.stored.lock().unwrap().clone();
+
+        let (status, said) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert_eq!(said["code"], "Refused");
+        let message = said["message"].as_str().unwrap();
+        assert!(message.contains("RotorHazard pi-timer"), "{message}");
+        assert!(message.contains("Gate"), "{message}");
+        assert!(message.contains("timer's own page"), "{message}");
+        // Nothing was sent: Grid knew, and did not knock.
+        assert!(fake.keys_seen.lock().unwrap().is_empty());
+        assert_eq!(*fake.stored.lock().unwrap(), before);
+
+        // Even a change that is wrong in itself is answered with the real reason.
+        let mut bad = changed();
+        bad["seats"][0]["seat"] = serde_json::json!("not-a-seat");
+        let (status, said) = call(&registry, "PUT", &uri, Some(bad)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert!(said["message"].as_str().unwrap().contains("control"));
+
+        // Reading is open to everyone, whoever has control.
+        let (status, read) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["seats"][0]["freq_mhz"], 5800);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_423_from_the_timer_is_passed_on_naming_the_holder() {
+        use std::sync::atomic::Ordering;
+        // Grid has not heard yet that another program took control (or its key is old).
+        for (control, key) in [
+            (None, None),
+            (Some(TimerControl::Nobody), None),
+            (Some(TimerControl::Grid), Some("stale")),
+        ] {
+            let (registry, timer, uri, fake) = with_guarded(Some("theirs")).await;
+            registry
+                .timers()
+                .report(&timer, |status| status.control = control.clone());
+            registry
+                .timers()
+                .set_control_key(&timer, key.map(str::to_owned));
+            let before = fake.stored.lock().unwrap().clone();
+            let (status, said) = call(&registry, "PUT", &uri, Some(changed())).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{said}");
+            let message = said["message"].as_str().unwrap();
+            assert!(
+                message.contains("\u{201c}RotorHazard pi-timer\u{201d} has control of Gate"),
+                "{message}"
+            );
+            assert_eq!(fake.refused.load(Ordering::SeqCst), 1);
+            assert_eq!(fake.keeps.load(Ordering::SeqCst), 0);
+            assert_eq!(*fake.stored.lock().unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_keep_is_not_reported_as_kept() {
+        use std::sync::atomic::Ordering;
+        // Control moves between the write and the "keep these".
+        let (registry, timer, _, fake) = with_guarded(None).await;
+        let timer_record = registry.timers().get(&timer).unwrap();
+        *fake.holder_key.lock().unwrap() = Some("theirs".into());
+        let kept = keep_config(&registry.timers(), &timer_record).await;
+        let Err(TimerError::Controlled(message)) = kept else {
+            panic!("expected a refusal, got {kept:?}");
+        };
+        assert!(message.contains("RotorHazard pi-timer"), "{message}");
+        assert_eq!(fake.keeps.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_pass_window_on_a_timer_another_program_controls() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, _, fake) = with_guarded(Some("theirs")).await;
+        other_holds(&registry, &timer, "RotorHazard pi-timer");
+
+        // Already what the event wants: nothing to write, nothing to complain about.
+        sync_pass_window(&registry, 0).await;
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_ms, Some(0));
+        assert_eq!(status.pass_window_problem, None);
+
+        // Different: Grid cannot put it right, and says why on the timer's status.
+        sync_pass_window(&registry, 400).await;
+        let status = status_of(&registry, &timer);
+        let problem = status.pass_window_problem.expect("a problem is reported");
+        assert!(problem.contains("RotorHazard pi-timer"), "{problem}");
+        assert_eq!(fake.stored.lock().unwrap()["pass_window_ms"], 0);
+        assert!(fake.keys_seen.lock().unwrap().is_empty());
+
+        // Control comes to Grid: the same call now lands and the problem clears.
+        *fake.holder_key.lock().unwrap() = Some("ours".into());
+        registry.timers().report(&timer, |status| {
+            status.control = Some(TimerControl::Grid);
+        });
+        registry
+            .timers()
+            .set_control_key(&timer, Some("ours".into()));
+        sync_pass_window(&registry, 400).await;
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_ms, Some(400));
+        assert_eq!(status.pass_window_problem, None);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_profile_is_not_applied_to_a_timer_another_program_controls() {
+        let (registry, timer, _, fake) = with_guarded(Some("theirs")).await;
+        // Saved while Grid could still read the timer; saving writes nothing to it.
+        let profiles = format!("/timers/{}/profiles", timer.0);
+        let body = serde_json::json!({"name": "Field", "config": changed()});
+        let (status, saved) = call(&registry, "POST", &profiles, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let other = serde_json::json!({"name": "Garage", "config": changed()});
+        let (status, garage) = call(&registry, "POST", &profiles, Some(other)).await;
+        assert_eq!(status, StatusCode::OK, "{garage}");
+
+        other_holds(&registry, &timer, "RotorHazard pi-timer");
+        let apply = format!("{profiles}/{}/apply", saved["id"].as_str().unwrap());
+        let (status, said) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert!(
+            said["message"]
+                .as_str()
+                .unwrap()
+                .contains("RotorHazard pi-timer")
+        );
+        // The active profile is the one it was, and the timer was not touched.
+        let (_, listed) = call(&registry, "GET", &profiles, None).await;
+        assert_eq!(listed["active"], garage["id"]);
+        assert!(fake.keys_seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_control_key_is_kept_per_timer_and_goes_with_the_timer() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory.create(&request("Gate", "10.0.0.1:7270")).unwrap();
+        let split = directory
+            .create(&request("Split", "10.0.0.2:7270"))
+            .unwrap();
+        assert_eq!(directory.control_key(&gate.id), None);
+        directory.set_control_key(&gate.id, Some("aa".into()));
+        directory.set_control_key(&split.id, Some("bb".into()));
+        assert_eq!(directory.control_key(&gate.id).as_deref(), Some("aa"));
+        assert_eq!(directory.control_key(&split.id).as_deref(), Some("bb"));
+        directory.set_control_key(&gate.id, None);
+        assert_eq!(directory.control_key(&gate.id), None);
+        assert_eq!(directory.control_key(&split.id).as_deref(), Some("bb"));
+        directory.delete(&split.id).unwrap();
+        assert_eq!(directory.control_key(&split.id), None);
+        // A connection that outlives its timer cannot leave a key behind.
+        directory.set_control_key(&split.id, Some("cc".into()));
+        assert_eq!(directory.control_key(&split.id), None);
+    }
+
+    #[test]
+    fn the_key_never_reaches_a_console_and_control_is_said_in_the_status() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory.create(&request("Gate", "10.0.0.1:7270")).unwrap();
+        directory.set_control_key(&gate.id, Some("s3cr3t".into()));
+        directory.report(&gate.id, |status| {
+            status.control = Some(TimerControl::Other {
+                name: "RotorHazard".into(),
+            });
+            status.control_name = Some("GridFPV race-laptop".into());
+            status.config_rev = Some(7);
+        });
+        let listed = serde_json::to_value(directory.list()).unwrap();
+        assert!(!listed.to_string().contains("s3cr3t"), "{listed}");
+        assert_eq!(
+            listed[0]["status"]["control"],
+            serde_json::json!({"holder": "Other", "name": "RotorHazard"})
+        );
+        assert_eq!(listed[0]["status"]["control_name"], "GridFPV race-laptop");
+        assert_eq!(listed[0]["status"]["config_rev"], 7);
+        // A timer with no control says nothing about it.
+        let plain = directory
+            .create(&request("Plain", "10.0.0.3:7270"))
+            .unwrap();
+        directory.report(&plain.id, |status| status.connected = true);
+        let listed = serde_json::to_value(directory.list()).unwrap();
+        let plain = &listed[1]["status"];
+        assert!(plain.get("control").is_none(), "{plain}");
+        assert!(plain.get("config_rev").is_none(), "{plain}");
+        // A visitor is told none of it.
+        let view = directory.list().remove(0);
+        let visitor = serde_json::to_value(crate::spectate::timer_for_visitors(view)).unwrap();
+        assert!(visitor["status"].get("control").is_none(), "{visitor}");
+        assert!(visitor["status"].get("control_name").is_none(), "{visitor}");
+    }
+
+    #[tokio::test]
+    async fn a_write_sent_a_moment_before_grid_hears_it_has_control_is_sent_again_with_the_key() {
+        use std::sync::atomic::Ordering;
+        // The timer has made Grid's claim the holder; the key is still on its way.
+        for stale in [None, Some("from-before")] {
+            let (registry, timer, uri, fake) = with_guarded(Some("9f3a61c2")).await;
+            registry
+                .timers()
+                .set_control_key(&timer, stale.map(str::to_owned));
+            let arrives = {
+                let (registry, timer) = (registry.clone(), timer.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    registry
+                        .timers()
+                        .set_control_key(&timer, Some("9f3a61c2".into()));
+                    registry.timers().report(&timer, |status| {
+                        status.control = Some(TimerControl::Grid);
+                    });
+                })
+            };
+            let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+            arrives.await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{answer}");
+            assert_eq!(fake.stored.lock().unwrap()["seats"][1]["freq_mhz"], 5917);
+            // Refused once, sent again with the key, then kept with the key.
+            assert_eq!(fake.refused.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *fake.keys_seen.lock().unwrap(),
+                vec![
+                    stale.map(str::to_owned),
+                    Some("9f3a61c2".to_owned()),
+                    Some("9f3a61c2".to_owned())
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_is_sent_again_at_most_once() {
+        use std::sync::atomic::Ordering;
+        // Grid is told it has control, with a key the timer does not accept (control
+        // moved on again). One more try, then the refusal stands.
+        let (registry, timer, uri, fake) = with_guarded(Some("theirs")).await;
+        let arrives = {
+            let (registry, timer) = (registry.clone(), timer.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                registry
+                    .timers()
+                    .set_control_key(&timer, Some("wrong".into()));
+                registry.timers().report(&timer, |status| {
+                    status.control = Some(TimerControl::Grid);
+                });
+            })
+        };
+        let (status, said) = call(&registry, "PUT", &uri, Some(changed())).await;
+        arrives.await.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert!(
+            said["message"]
+                .as_str()
+                .unwrap()
+                .contains("RotorHazard pi-timer")
+        );
+        assert_eq!(fake.refused.load(Ordering::SeqCst), 2);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 0);
     }
 }

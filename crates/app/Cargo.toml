@@ -51,6 +51,8 @@ mime_guess = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 mdns-sd = "0.21.7"
+# This computer's name, for the name Grid asks an OFT timer for control under.
+gethostname = "1"
 # The password handshake of OBS's WebSocket server (obs-websocket 5) is two SHA-256 hashes,
 # each written as base64.
 sha2 = "0.10"

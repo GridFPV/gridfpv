@@ -229,6 +229,16 @@ is found on the network at another address, the record's address is changed and 
 connection is made again. The record's `id`, which heats and passes carry, never changes.
 Other kinds of timer have no id of their own and stay at the address they were given.
 
+**One program at a time changes an OFT timer.** A timer's status (`GET /timers`) carries
+`control`: `{"holder":"Nobody"}`, `{"holder":"Grid"}` or `{"holder":"Other","name":"…"}`.
+It is absent on a timer that lets anyone write, and while a timer is not connected.
+`control_name` is the name the Director asked for control under, as the timer's own page
+lists it. While another program has control, every write to that timer (`PUT
+/timers/{id}/config`, applying a profile) is `Refused` with a sentence naming the program,
+and nothing is sent to the timer. Control is moved on the timer's own page, never through
+this API. `config_rev` is a count the timer moves whenever its settings change, whoever
+changed them; read `GET /timers/{id}/config` again when it moves.
+
 **Timer settings live on the timer.** The Director keeps no copy. A write is followed by a
 read, and if the timer does not then report what was sent, the answer is `Refused`.
 
@@ -346,7 +356,9 @@ event's log. The video setup, the log files and the recordings are not in it.
   under it. `pass_window_micros` is the pass window (10 seconds at most). The timer applies
   it: the Director writes it to each connected timer that has one (`pass_window` in the
   timer's status) and notes what the timer then has (`pass_window_ms`) or why it could not
-  be set (`pass_window_problem`).
+  be set (`pass_window_problem`). A timer another program has control of (`control` in
+  the timer's status, below) cannot be written to; when its window is not the event's, the
+  problem says so.
 - `rosters`: each class in the event, its pilots, the phases that count toward its
   standings, and the standings from 1 to n.
 - `phases`: every phase with its format, its field, a heat's lineup, its ranking, and

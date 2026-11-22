@@ -116,6 +116,14 @@ Timers differ in who owns the start of a race. This is recorded on each race (§
 OFT is the model of a well-behaved timer: Grid updates its config and receives crossings and
 samples. Grid never tells it a race is starting or stopping.
 
+**One program at a time changes an OFT timer** (OFT spec v0.9; built 2026-11-22). A timer
+can be shared: Grid, RotorHazard through its plugin, and the timer's own page can all be
+connected to it. Every one of them reads and gets laps. Only the one that has **control**
+may change the timer's settings. Grid asks for control each time it connects, and the first
+program to ask has it. When another program has it, Grid says so by name, changes nothing,
+and points the director at the timer's own page, which is the one place control is moved.
+This keeps programs that mean well out of each other's way. It is not security.
+
 ### 3.2 Seat and Profile (Agreed)
 
 - A **seat** is one pilot's timing slot on a timer. It has a channel and thresholds (fixed
@@ -830,6 +838,35 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      - Not done: the Tune page shows one unit for a whole timer. A timer whose seats are
        on receivers of different units shows each seat's live numbers in its own unit, but
        the timer-wide levels fields in one.
+   - **OFT spec v0.9 (2026-11-22): control, and `config_rev`.** One program at a time may
+     change a timer (§3.1).
+     - Grid claims control on its stream when it connects, as "GridFPV" and the
+       computer's name, so two installations can be told apart on the timer's page. While
+       Grid has control, the key the timer gave it rides on every write (the settings, "keep
+       these", the pass window). The key never leaves the Director.
+     - `TimerStatus.control` says who has control: nobody, Grid, or another program by
+       name. `control_name` is the name Grid claimed under. A timer older than v0.9 has
+       neither, and is written to as before.
+     - When another program has control, Grid does not send the write at all, and the
+       answer names the program. A `423` from the timer is put into the same words. The
+       Timers, Seats and Tune pages show a notice with a link to the timer's own page;
+       "Apply to timer" and the profile box are off. The Run page's pass window warning
+       says the same when the timer's window is not the event's.
+     - After a dropped link Grid claims again with its key and gets its place back (the
+       timer holds it for ten seconds). A restarted timer is claimed afresh.
+     - Control reaches Grid a moment before Grid hears of it, so a write refused with a
+       `423` waits up to a second for a new key and is sent once more.
+     - When control comes to Grid, or to nobody, Grid checks the event's pass window on
+       the timer and puts it back. That is the only setting Grid sends again: the rest of
+       a timer's settings live on the timer, and Grid reads them from it.
+     - `config_rev` is a count the timer moves whenever its settings change, whoever
+       changed them. `TimerStatus.config_rev` carries it. When it moves, the Director reads
+       the seat channels again and checks the pass window, and the Seats and Tune pages
+       read the settings again. A draft the director was making is kept, with a notice
+       that the timer changed under it.
+     - Grid never sends `POST /control`. Only the timer's own page chooses the writer.
+     - Tested in CI against the fake timer, which keeps claims the way the spec says, and
+       against the real daemon (`oft_live.rs`) with a second program holding control.
    - **A timer that restarts mid-race:** its clock begins again. The laps either side are
      kept, and the stretch across the restart has no time.
    - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):

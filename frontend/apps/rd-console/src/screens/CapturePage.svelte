@@ -31,6 +31,7 @@
   import { formatHash } from '../lib/route.js';
   import type { Session } from '../lib/session.svelte.js';
   import { TIMER_POLL_MS } from '../lib/timers.js';
+  import ControlBanner from './ControlBanner.svelte';
   import { formatGap, formatLevel } from '../lib/tune.js';
   import CaptureTrace from './CaptureTrace.svelte';
 
@@ -78,6 +79,16 @@
   const names = $derived(buildNames([], [], timers ?? []));
   const view = $derived(timers?.find((candidate) => candidate.timer.id === timer));
   const connected = $derived(view?.status.connected ?? false);
+  // "Apply to timer" sends the whole of the settings with this seat's levels changed, so
+  // the settings it starts from must be the timer's own. The timer counts every change to
+  // them, whoever made it; when the count moves they are read again.
+  let seenRev: number | undefined;
+  $effect(() => {
+    const rev = view?.status.config_rev;
+    const moved = rev !== undefined && seenRev !== undefined && rev !== seenRev;
+    if (rev !== undefined) seenRev = rev;
+    if (moved) void loadConfig();
+  });
   /** Whether this timer takes levels for one seat. If not, the levels are for every seat. */
   const perSeat = $derived(view?.status.seat_thresholds ?? false);
   const position = $derived(config?.seats.findIndex((s) => s.seat === seat) ?? -1);
@@ -259,6 +270,7 @@
   {#if liveError}
     <Banner tone="danger" title="The live signal cannot be shown.">{liveError}</Banner>
   {/if}
+  <ControlBanner {view} />
   {#if view && !connected}
     <Banner tone="warn" title="{view.timer.name} is not connected.">
       {view.status.problem ?? 'The Director is still trying to reach it.'} Nothing can be recorded until
