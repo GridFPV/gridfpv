@@ -317,6 +317,52 @@ export interface OverlayRow {
    * lap 1 starts at that crossing and the pilot has made it. Shown as `HS` before lap 1.
    */
   holeShotMicros?: number;
+  /**
+   * What the one-pilot overlay lists, in the order flown: the hole shot, each counted lap,
+   * and each marked restart where it happened.
+   */
+  listed: OverlayLap[];
+}
+
+/** One line of the one-pilot overlay's lap list. */
+export interface OverlayLap {
+  /** Stable key for the list. Never shown. */
+  key: string;
+  /** `HS` for the hole shot, `RS` for a marked restart, else `L1`, `L2`, … */
+  label: string;
+  /**
+   * For a lap, its time. For the hole shot, the time from the start to the first crossing.
+   * For a restart, the time from the crossing before it to the crossing the pilot started
+   * again at: it is shown, and counts for nothing.
+   */
+  micros: number;
+  /** Where a lap sits among the counted laps, from 0. -1 for the hole shot and a restart. */
+  lap: number;
+}
+
+/**
+ * The one-pilot lap list for a seat. `laps` is the list as the snapshot gives it, marked
+ * restarts included. A stretch the timer restarted in has no known time, so it is left out.
+ */
+export function overlayLaps(
+  laps: readonly LapView[],
+  holeShotMicros: number | undefined
+): OverlayLap[] {
+  const listed: OverlayLap[] =
+    holeShotMicros === undefined
+      ? []
+      : [{ key: 'hs', label: 'HS', micros: holeShotMicros, lap: -1 }];
+  let counted = 0;
+  for (const lap of laps) {
+    if (lap.timer_restarted) continue;
+    if (lap.restart) {
+      listed.push({ key: `rs${lap.crossing}`, label: 'RS', micros: lap.micros, lap: -1 });
+      continue;
+    }
+    listed.push({ key: `l${counted}`, label: `L${counted + 1}`, micros: lap.micros, lap: counted });
+    counted += 1;
+  }
+  return listed;
 }
 
 /**
@@ -325,8 +371,11 @@ export interface OverlayRow {
  * heat ranked on best N consecutive (see {@link consecutiveLaps}); leave it out otherwise.
  */
 export function overlayRows(race: RaceView, names: Names, runLength?: number): OverlayRow[] {
-  const rows = raceSeatRows(race, names).map(
-    (row, index): OverlayRow => ({
+  const rows = raceSeatRows(race, names).map((row, index): OverlayRow => {
+    const seat = race.seats[index];
+    // The same laps the row counts: a taken open seat shows its holder's stint.
+    const stint = seat.holder === undefined ? undefined : seat.stints.at(-1);
+    return {
       key: `${row.adapter}\u0000${row.seat}`,
       name: row.pilot === undefined ? row.seatName : row.who,
       pilot: row.pilot,
@@ -337,9 +386,10 @@ export function overlayRows(race: RaceView, names: Names, runLength?: number): O
       bestLapMicros: row.bestLapMicros,
       bestRun: runLength === undefined ? undefined : bestLapRun(race.seats[index].laps, runLength),
       color: row.pilot === undefined ? undefined : names.pilotColor(row.pilot),
-      holeShotMicros: holeShot(race.seats[index])
-    })
-  );
+      holeShotMicros: holeShot(seat),
+      listed: overlayLaps(stint?.laps ?? seat.laps, holeShot(seat))
+    };
+  });
   // A stable sort: seats with no place yet keep their lineup order, after the placed ones.
   return rows
     .map((row, index) => ({ row, index }))

@@ -124,6 +124,33 @@ describe('ReplayOverlay', () => {
     expect(stat('laps')).toBe('0');
   });
 
+  it('lists a marked restart where it happened, once the video gets to it', async () => {
+    // The second crossing-to-crossing stretch was marked a restart: the pilot crashed.
+    const marked = view();
+    const seat = marked.races[0].seats[0];
+    seat.laps = [lap(11, 1, 11), { ...lap(12, 11, 20), restart: true }, lap(13, 20, 24)];
+    seat.best_lap_micros = 4 * S;
+    open({ view: marked });
+    await waitFor(() => expect(handle()).toBeDefined());
+    await handle()!.ready();
+    const listed = () =>
+      Array.from(document.querySelectorAll('.lap')).map((li) =>
+        li.textContent?.replace(/\s+/g, ' ').trim()
+      );
+    // 12 s into the race: lap 1 only. The restart has not happened yet.
+    const before = await handle()!.seek(17_000);
+    expect(listed()).toEqual(['HS 0:01.000', 'L1 0:10.000']);
+    // 21 s in: the restart is on the list with its time, and it is not a lap.
+    const after = await handle()!.seek(26_000);
+    expect(listed()).toEqual(['HS 0:01.000', 'L1 0:10.000', 'RS 0:09.000']);
+    expect(stat('laps')).toBe('1');
+    expect(after).not.toBe(before);
+    // 25 s in: the lap after it is lap 2.
+    await handle()!.seek(30_000);
+    expect(listed()).toEqual(['HS 0:01.000', 'L1 0:10.000', 'RS 0:09.000', 'L2 0:04.000']);
+    expect(stat('laps')).toBe('2');
+  });
+
   it('answers a seek with a key that changes only when the picture does', async () => {
     open();
     await waitFor(() => expect(handle()).toBeDefined());
