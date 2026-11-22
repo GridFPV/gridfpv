@@ -931,6 +931,120 @@ describe('MarshalPage trace', () => {
     expect(session.sendCommand).not.toHaveBeenCalled();
   });
 
+  // ── Moving along a zoomed-in trace ─────────────────────────────────────────
+  /** The stretch on screen, as the two times written under the plot. */
+  const showing = (seat: HTMLElement) =>
+    (within(seat).getByTestId('trace-window').textContent ?? '').match(/-?\d+\.\d+/g)!.map(Number);
+
+  /** Open the gate race with the trace zoomed in twice (a quarter of the race on screen). */
+  async function zoomedIn() {
+    layOut();
+    vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 1000,
+      bottom: 10,
+      width: 1000,
+      height: 10,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    });
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    expect(within(ace).queryByRole('scrollbar')).toBeNull();
+    const zoomIn = within(ace).getByRole('button', { name: 'Zoom in' });
+    await fireEvent.click(zoomIn);
+    await fireEvent.click(zoomIn);
+    return { ace, canvas, session, bar: within(ace).getByRole('scrollbar') };
+  }
+
+  it('zoomed in, a scroll bar shows which part is on screen and goes away at the whole race', async () => {
+    const { ace, bar } = await zoomedIn();
+    // Zooming with the buttons keeps the middle, so the plot is halfway along.
+    expect(bar).toHaveAttribute('aria-valuenow', '50');
+    expect(bar).toHaveAttribute('aria-orientation', 'horizontal');
+    expect(document.getElementById(bar.getAttribute('aria-controls')!)?.tagName).toBe('CANVAS');
+    const thumb = within(ace).getByTestId('trace-thumb');
+    expect(thumb.style.width).toBe('250px');
+    expect(thumb.style.left).toBe('375px');
+    await fireEvent.click(within(ace).getByRole('button', { name: 'Whole race' }));
+    expect(within(ace).queryByRole('scrollbar')).toBeNull();
+  });
+
+  it('dragging the scroll bar handle, or pressing beside it, slides the trace', async () => {
+    const { ace, bar, session } = await zoomedIn();
+    const [from, to] = showing(ace);
+    // Grab the handle (375–625 px) and take it 100 px right.
+    await fireEvent.mouseDown(bar, { clientX: 400, button: 0 });
+    expect(showing(ace)).toEqual([from, to]);
+    await fireEvent.mouseMove(document.body, { clientX: 500 });
+    await fireEvent.mouseUp(document.body, { clientX: 500, button: 0 });
+    const [later] = showing(ace);
+    expect(later).toBeGreaterThan(from);
+    expect(showing(ace)[1] - later).toBeCloseTo(to - from, 2);
+    expect(within(ace).getByTestId('trace-thumb').style.left).toBe('475px');
+    // Once let go, the mouse no longer moves it.
+    await fireEvent.mouseMove(document.body, { clientX: 900 });
+    expect(showing(ace)[0]).toBe(later);
+    // A press at the far left of the bar goes to the start of the race.
+    await fireEvent.mouseDown(bar, { clientX: 2, button: 0 });
+    await fireEvent.mouseUp(document.body, { clientX: 2, button: 0 });
+    expect(bar).toHaveAttribute('aria-valuenow', '0');
+    expect(within(ace).getByRole('button', { name: 'Earlier' })).toBeDisabled();
+    // A finger does the same.
+    await fireEvent.touchStart(bar, { touches: [{ clientX: 125 }] });
+    await fireEvent.touchMove(bar, { touches: [{ clientX: 875 }] });
+    await fireEvent.touchEnd(bar, { changedTouches: [{ clientX: 875 }] });
+    expect(bar).toHaveAttribute('aria-valuenow', '100');
+    expect(session.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('the scroll bar takes the arrow keys, Home and End', async () => {
+    const { ace, bar } = await zoomedIn();
+    const [from] = showing(ace);
+    await fireEvent.keyDown(bar, { key: 'ArrowRight' });
+    expect(showing(ace)[0]).toBeGreaterThan(from);
+    await fireEvent.keyDown(bar, { key: 'ArrowLeft' });
+    expect(showing(ace)[0]).toBeCloseTo(from, 2);
+    await fireEvent.keyDown(bar, { key: 'End' });
+    expect(bar).toHaveAttribute('aria-valuenow', '100');
+    expect(within(ace).getByRole('button', { name: 'Later' })).toBeDisabled();
+    await fireEvent.keyDown(bar, { key: 'Home' });
+    expect(bar).toHaveAttribute('aria-valuenow', '0');
+  });
+
+  it('a sideways scroll slides the trace, and an up-and-down one still zooms', async () => {
+    const { ace, canvas } = await zoomedIn();
+    const [from, to] = showing(ace);
+    // A trackpad swipe: 100 px across a 1000 px plot is a tenth of what is on screen.
+    await fireEvent.wheel(canvas, { deltaX: 100, deltaY: 3, clientX: 500 });
+    expect(showing(ace)[0]).toBeCloseTo(from + (to - from) / 10, 2);
+    expect(showing(ace)[1] - showing(ace)[0]).toBeCloseTo(to - from, 2);
+    // Shift and the wheel, on a browser that leaves it as up-and-down.
+    await fireEvent.wheel(canvas, { deltaY: -100, shiftKey: true, clientX: 500 });
+    expect(showing(ace)[0]).toBeCloseTo(from, 2);
+    // The plain wheel zooms, as before.
+    await fireEvent.wheel(canvas, { deltaY: -100, clientX: 500 });
+    expect(showing(ace)[1] - showing(ace)[0]).toBeLessThan(to - from);
+  });
+
+  it('a drag on an empty spot slides the trace, and carries on outside the plot', async () => {
+    const { ace, canvas, session } = await zoomedIn();
+    const [from, to] = showing(ace);
+    // Away from any crossing. The mouse leaves the canvas and the drag goes on.
+    await fireEvent.mouseDown(canvas, { clientX: 700, button: 0 });
+    await fireEvent.mouseLeave(canvas);
+    await fireEvent.mouseMove(document.body, { clientX: 500 });
+    await fireEvent.mouseUp(document.body, { clientX: 500, button: 0 });
+    // 200 px left on a 1000 px plot: a fifth of what is on screen, later.
+    expect(showing(ace)[0]).toBeCloseTo(from + (to - from) / 5, 2);
+    expect(within(ace).queryByRole('group', { name: /^Move .* of Ace$/ })).toBeNull();
+    expect(session.sendCommand).not.toHaveBeenCalled();
+  });
+
   it('a finger drags a crossing the same way', async () => {
     layOut();
     const { view, signal } = onGate();

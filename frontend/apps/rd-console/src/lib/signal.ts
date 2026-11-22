@@ -352,6 +352,42 @@ export function panWindow(window: TimeWindow, bounds: TimeWindow, micros: number
   return clampWindow({ from: window.from + micros, to: window.to + micros }, bounds);
 }
 
+/** The narrowest the scroll bar's handle is drawn, so it can always be grabbed. */
+export const MIN_THUMB_PX = 28;
+
+/** Where the scroll bar's handle sits on a bar `width` pixels wide, and how wide it is. */
+export function thumbOf(
+  window: TimeWindow,
+  bounds: TimeWindow,
+  width: number
+): { left: number; width: number } {
+  const full = bounds.to - bounds.from;
+  const span = window.to - window.from;
+  if (full <= 0 || width <= 0 || span >= full) return { left: 0, width: Math.max(0, width) };
+  const thumb = Math.min(width, Math.max(MIN_THUMB_PX, (span / full) * width));
+  const share = Math.min(1, Math.max(0, (window.from - bounds.from) / (full - span)));
+  return { left: share * (width - thumb), width: thumb };
+}
+
+/**
+ * The window shown when the scroll bar's handle has its left edge at `left` pixels: the
+ * opposite of {@link thumbOf}. The window keeps its length.
+ */
+export function windowAtThumb(
+  window: TimeWindow,
+  bounds: TimeWindow,
+  width: number,
+  left: number
+): TimeWindow {
+  const full = bounds.to - bounds.from;
+  const span = window.to - window.from;
+  const travel = width - thumbOf(window, bounds, width).width;
+  if (travel <= 0 || span >= full) return clampWindow(window, bounds);
+  const share = Math.min(1, Math.max(0, left / travel));
+  const from = bounds.from + share * (full - span);
+  return clampWindow({ from, to: from + span }, bounds);
+}
+
 /** The time under the pixel `x` of a plot `width` pixels wide, in whole microseconds. */
 export function timeAtX(window: TimeWindow, width: number, x: number): number {
   if (width <= 0) return Math.round(window.from);

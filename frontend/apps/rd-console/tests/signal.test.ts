@@ -6,6 +6,9 @@ import {
   MIN_WINDOW_MICROS,
   nearestMark,
   panWindow,
+  thumbOf,
+  windowAtThumb,
+  MIN_THUMB_PX,
   RaceTrace,
   SignalRing,
   thin,
@@ -305,6 +308,33 @@ describe('the race trace window', () => {
     expect(panWindow(window, bounds, 5_000_000)).toEqual({ from: 15_000_000, to: 25_000_000 });
     expect(panWindow(window, bounds, -50_000_000)).toEqual({ from: 0, to: 10_000_000 });
     expect(panWindow(window, bounds, 90_000_000)).toEqual({ from: 50_000_000, to: 60_000_000 });
+  });
+
+  it('draws the scroll bar handle as wide as the share on screen, where that share is', () => {
+    // A sixth of the race, starting a fifth of the way along its travel, on a 600 px bar.
+    expect(thumbOf({ from: 10_000_000, to: 20_000_000 }, bounds, 600)).toEqual({
+      left: 100,
+      width: 100
+    });
+    // The whole race on screen: the handle fills the bar.
+    expect(thumbOf(bounds, bounds, 600)).toEqual({ left: 0, width: 600 });
+    // Zoomed far in, the handle stays wide enough to grab and still reaches both ends.
+    const tiny = { from: 59_800_000, to: 60_000_000 };
+    expect(thumbOf(tiny, bounds, 600)).toEqual({ left: 600 - MIN_THUMB_PX, width: MIN_THUMB_PX });
+    expect(thumbOf({ from: 0, to: 200_000 }, bounds, 600).left).toBe(0);
+  });
+
+  it('slides the window to where the scroll bar handle is put, keeping its length', () => {
+    const window = { from: 10_000_000, to: 20_000_000 };
+    expect(windowAtThumb(window, bounds, 600, 250)).toEqual({ from: 25_000_000, to: 35_000_000 });
+    // Past either end of the bar stops at that end of the race.
+    expect(windowAtThumb(window, bounds, 600, -80)).toEqual({ from: 0, to: 10_000_000 });
+    expect(windowAtThumb(window, bounds, 600, 9000)).toEqual({ from: 50_000_000, to: 60_000_000 });
+    // It is the opposite of thumbOf, also for the narrowest handle.
+    const tiny = { from: 30_000_000, to: 30_200_000 };
+    const back = windowAtThumb(tiny, bounds, 600, thumbOf(tiny, bounds, 600).left);
+    expect(back.from).toBeCloseTo(tiny.from, 3);
+    expect(back.to - back.from).toBeCloseTo(200_000, 3);
   });
 
   it('clamps a window that is longer than the whole race to the whole race', () => {

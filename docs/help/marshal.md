@@ -29,7 +29,10 @@ The seat has a picture of its signal for the whole race. The solid line is the e
 level and the dashed line is the exit level. Marks along the top show the start, the hole
 shot, and each lap.
 
-- **+** and **−** zoom. The arrows move left and right. **Whole race** fits it all.
+- **+** and **−** zoom, and so does the mouse wheel. **Whole race** fits it all.
+- Zoomed in, a scroll bar shows under the trace. Drag it to move left and right. You can
+  also drag the trace itself, use the arrows, or scroll sideways (hold Shift and turn the
+  wheel).
 - Click a lap's name in the table to find it on the trace.
 - Click an empty spot on the trace to add a lap there.
 - Drag a lap's mark to move it. A finger works too: slide the trace, or drag a mark.

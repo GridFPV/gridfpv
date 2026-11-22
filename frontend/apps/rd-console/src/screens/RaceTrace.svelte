@@ -3,6 +3,8 @@
    * RaceTrace — one seat's logged signal over a whole race. It stands still (it is a record,
    * not a live feed) and can be zoomed and panned: the wheel zooms where the pointer is, a
    * drag slides it, and the buttons under it do the same for a keyboard or a touch screen.
+   * Zoomed in, a scroll bar under the plot shows which part of the race is on screen and
+   * slides it; a sideways scroll (a trackpad, or Shift and the wheel) slides it too.
    *
    * On it:
    *
@@ -37,9 +39,11 @@
     panWindow,
     RaceTrace,
     thin,
+    thumbOf,
     timeAtX,
     verticalRange,
     wholeWindow,
+    windowAtThumb,
     xAtTime,
     zoomWindow,
     type TimeWindow
@@ -101,6 +105,8 @@
   const zoomed = $derived(shown.to - shown.from < bounds.to - bounds.from);
 
   let canvas = $state<HTMLCanvasElement>();
+  /** Names the plot for the scroll bar that slides it. */
+  const plotId = $props.id();
   /** Bumped when the canvas changes size, so it is drawn again. */
   let resized = $state(0);
   /** How close to a mark a click must be to pick it, in pixels. */
@@ -168,14 +174,39 @@
     onseek?.(hit?.crossing !== undefined ? hit.at : at);
   }
 
+  /** True while the plot itself is being slid, to show the closed hand. */
+  let sliding = $state(false);
+
+  /**
+   * Follow the mouse over the whole window until the button comes up, so a drag that leaves
+   * the plot (or the bar) carries on instead of being dropped.
+   */
+  function follow(each: (clientX: number) => void, last: (clientX: number) => void) {
+    const moved = (event: MouseEvent) => each(event.clientX);
+    const done = (event: MouseEvent) => {
+      globalThis.removeEventListener('mousemove', moved);
+      globalThis.removeEventListener('mouseup', done);
+      last(event.clientX);
+    };
+    globalThis.addEventListener('mousemove', moved);
+    globalThis.addEventListener('mouseup', done);
+  }
+
   function onmousedown(event: MouseEvent) {
-    if (event.button === 0) down(event.clientX);
-  }
-  function onmousemove(event: MouseEvent) {
-    move(event.clientX);
-  }
-  function onmouseup(event: MouseEvent) {
-    up(event.clientX);
+    if (event.button !== 0) return;
+    // Keeps the drag from selecting the text around the plot.
+    event.preventDefault();
+    down(event.clientX);
+    follow(
+      (x) => {
+        move(x);
+        sliding = dragFrom?.moved === true && dragFrom.mark === undefined;
+      },
+      (x) => {
+        sliding = false;
+        up(x);
+      }
+    );
   }
   // One finger does what the mouse does. Two fingers are left to the browser.
   function ontouchstart(event: TouchEvent) {
@@ -208,6 +239,71 @@
   /** Where the video's line sits across the plot, as a share of its width. Off the plot: none. */
   const cursorShare = $derived(shareOf(cursor));
 
+  // ── The scroll bar ─────────────────────────────────────────────────────────
+  let bar = $state<HTMLElement>();
+  /** The bar's width, measured when it is laid out. */
+  let barWidth = $state(0);
+  const thumb = $derived(thumbOf(shown, bounds, barWidth));
+  /** How far along the race the plot is, 0 to 100, for a screen reader. */
+  const along = $derived.by(() => {
+    const room = bounds.to - bounds.from - (shown.to - shown.from);
+    return room <= 0 ? 0 : Math.round(((shown.from - bounds.from) / room) * 100);
+  });
+  /** Where on the handle it was grabbed, in pixels from its left edge. */
+  let grab: number | undefined;
+
+  function barDown(clientX: number) {
+    if (!bar) return;
+    const width = widthOf(bar);
+    const x = xIn(bar, clientX);
+    const at = thumbOf(shown, bounds, width);
+    // A press on the handle grabs it where it was pressed; a press beside it brings the
+    // middle of the handle there.
+    grab = x >= at.left && x <= at.left + at.width ? x - at.left : at.width / 2;
+    barMove(clientX);
+  }
+  function barMove(clientX: number) {
+    if (grab === undefined || !bar) return;
+    chosen = windowAtThumb(shown, bounds, widthOf(bar), xIn(bar, clientX) - grab);
+  }
+  function barMouseDown(event: MouseEvent) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    bar?.focus();
+    barDown(event.clientX);
+    follow(barMove, () => (grab = undefined));
+  }
+  function barTouchStart(event: TouchEvent) {
+    if (event.touches.length === 1) barDown(event.touches[0].clientX);
+  }
+  function barTouchMove(event: TouchEvent) {
+    if (event.touches.length === 1) barMove(event.touches[0].clientX);
+  }
+  function barKey(event: KeyboardEvent) {
+    const full = bounds.to - bounds.from;
+    const step: Record<string, number> = {
+      ArrowLeft: -0.1,
+      ArrowRight: 0.1,
+      PageUp: -1,
+      PageDown: 1
+    };
+    if (event.key in step) pan(step[event.key]);
+    else if (event.key === 'Home') chosen = panWindow(shown, bounds, -full);
+    else if (event.key === 'End') chosen = panWindow(shown, bounds, full);
+    else return;
+    event.preventDefault();
+  }
+
+  $effect(() => {
+    const element = bar;
+    if (!element) return;
+    barWidth = widthOf(element);
+    if (typeof ResizeObserver !== 'function') return;
+    const observer = new ResizeObserver(() => (barWidth = widthOf(element)));
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
+
   // The wheel must be able to stop the page from scrolling, so it is not a passive listener.
   $effect(() => {
     const element = canvas;
@@ -215,6 +311,18 @@
     const onwheel = (event: WheelEvent) => {
       event.preventDefault();
       const width = widthOf(element);
+      // A sideways scroll slides the plot: a trackpad, a tilt wheel, or Shift and the wheel
+      // (which some browsers hand over as sideways already, and some do not).
+      const sideways = Math.abs(event.deltaX) > Math.abs(event.deltaY);
+      if (sideways || event.shiftKey) {
+        const delta = sideways ? event.deltaX : event.deltaY;
+        // A wheel that counts in lines or pages moves a fixed share for each click.
+        const pixels = event.deltaMode === 0 ? delta : Math.sign(delta) * width * 0.1;
+        if (width > 0)
+          chosen = panWindow(shown, bounds, (pixels / width) * (shown.to - shown.from));
+        return;
+      }
+      if (event.deltaY === 0) return;
       const anchor = width > 0 ? timeAtX(shown, width, xIn(element, event.clientX)) : undefined;
       zoom(event.deltaY > 0 ? 1.25 : 0.8, anchor);
     };
@@ -417,17 +525,44 @@
     <canvas
       bind:this={canvas}
       aria-hidden="true"
+      id={plotId}
       class:can-add={onpick !== undefined}
+      class:sliding
       {onmousedown}
-      {onmousemove}
-      {onmouseup}
       {ontouchstart}
       {ontouchmove}
       {ontouchend}
       ontouchcancel={() => (dragFrom = undefined)}
-      onmouseleave={() => (dragFrom = undefined)}
     ></canvas>
   </div>
+  {#if zoomed}
+    <!-- Which part of the race is on screen. Drag the handle, or press beside it. -->
+    <div
+      bind:this={bar}
+      class="bar"
+      role="scrollbar"
+      tabindex="0"
+      aria-label="Slide the trace along the race"
+      aria-controls={plotId}
+      aria-orientation="horizontal"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={along}
+      onmousedown={barMouseDown}
+      ontouchstart={barTouchStart}
+      ontouchmove={barTouchMove}
+      ontouchend={() => (grab = undefined)}
+      ontouchcancel={() => (grab = undefined)}
+      onkeydown={barKey}
+    >
+      <span
+        class="thumb"
+        data-testid="trace-thumb"
+        style:left="{thumb.left}px"
+        style:width="{thumb.width}px"
+      ></span>
+    </div>
+  {/if}
   <div class="tools" role="group" aria-label="Move around the trace">
     <Button size="sm" variant="ghost" aria-label="Zoom in" onclick={() => zoom(0.5)}>+</Button>
     <Button
@@ -482,6 +617,36 @@
   }
   canvas.can-add {
     cursor: crosshair;
+  }
+  canvas.sliding {
+    cursor: grabbing;
+  }
+  /* The scroll bar: the track is the whole race, the handle is the part on screen. */
+  .bar {
+    position: relative;
+    height: 0.9rem;
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-surface-sunken);
+    border: 1px solid var(--gf-border);
+    cursor: pointer;
+    /* The bar takes a sideways finger itself. */
+    touch-action: none;
+  }
+  .bar:focus-visible {
+    outline: 2px solid var(--gf-accent);
+    outline-offset: 2px;
+  }
+  .thumb {
+    position: absolute;
+    top: 1px;
+    bottom: 1px;
+    border-radius: var(--gf-radius-sm);
+    background: var(--gf-text-muted);
+    cursor: grab;
+  }
+  .bar:hover .thumb,
+  .bar:focus-visible .thumb {
+    background: var(--gf-text);
   }
   .plot {
     position: relative;
