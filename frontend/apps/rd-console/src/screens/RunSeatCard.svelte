@@ -141,7 +141,7 @@
       <dt>Last lap</dt>
       <dd data-stat="last">{formatMicros(row.lastLapMicros)}</dd>
     </div>
-    <div class="stat">
+    <div class="stat wide">
       <dt>Best lap</dt>
       <dd data-stat="best">
         {formatMicros(row.bestLapMicros)}{#if listed.bestNumber !== undefined}
@@ -149,14 +149,14 @@
       </dd>
     </div>
     {#if runLength !== undefined}
-      <div class="stat">
+      <div class="stat wide">
         <dt>Best {runLength}</dt>
         <dd data-stat="run">
           {formatMicros(run?.totalMicros)}{#if run}
             <span class="which">{' '}({runLapsLabel(run)})</span>{/if}
         </dd>
       </div>
-      <div class="stat">
+      <div class="stat wide">
         <dt>Heat best {runLength}</dt>
         <dd data-stat="heat-run">{formatMicros(heatBestMicros)}</dd>
       </div>
@@ -237,13 +237,31 @@
   .stats {
     margin: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
+    /* Place, laps and last lap share the top row. A column never grows past its share, so
+       one long value cannot push into the next. */
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: end;
     gap: var(--gf-space-2);
   }
   .stat {
     display: flex;
     flex-direction: column-reverse;
     gap: 2px;
+  }
+  /* A best time has words after it ("lap 9", "laps 7 to 9"), so it gets a row of its own:
+     the name on the left, the time on the right. On a very narrow card the time drops
+     under the name instead of running over it. */
+  .stat.wide {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0 var(--gf-space-2);
+  }
+  .stat.wide dd {
+    margin-left: auto;
+    text-align: right;
   }
   .stat dt {
     font-size: var(--gf-font-size-xs);
