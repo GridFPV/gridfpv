@@ -164,6 +164,13 @@ trace, and adjust the thresholds against it.
   network at a new address (a new DHCP lease), Grid follows it there. It is still the same
   timer: its heats, its profiles and its laps are untouched. The id is an OFT thing; a kind
   of timer without one stays at the address it was given.
+- **A timer's name is Grid's own, and a person can change it** (Ryan, 2026-11-22; built). A
+  timer added from the network starts with the name it gives itself ("oft-3fa2"). **Rename**
+  on the Timers page gives it a friendly one ("Start gate"), and that name is what every
+  list, heat and page shows. The timer is not told. The name the timer gives itself is still
+  shown, as "Calls itself …", on the Timers page and on the timer's own settings page, so a
+  person can match a row to the box and to what the network shows. Renaming changes nothing
+  that was timed: passes carry Grid's handle for the timer, not its name.
 
 ---
 

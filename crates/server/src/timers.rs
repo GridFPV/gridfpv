@@ -69,7 +69,8 @@ pub enum TimerKind {
 pub struct Timer {
     /// The handle passes and seats carry. Made by the Director; never shown.
     pub id: AdapterId,
-    /// The name people see ("Gate").
+    /// The name people see ("Gate"). A person chooses it and can change it. It is Grid's
+    /// own: the timer is not told, and the name the timer gives itself is `own_id`.
     pub name: String,
     pub kind: TimerKind,
     /// Where it is on the network: `host:port`. For a timer with an id of its own this
@@ -98,6 +99,14 @@ pub struct CreateTimerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub own_id: Option<String>,
+}
+
+/// What `PUT /timers/{id}` takes: the name people see. Nothing else about a timer is
+/// changed this way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RenameTimerRequest {
+    pub name: String,
 }
 
 /// A timer's state right now.
@@ -549,6 +558,28 @@ impl TimerDirectory {
     }
 
     /// Remove a timer. Its passes stay in the logs of the events it timed.
+    /// Give a timer another name. Only the name people see changes: the handle, the
+    /// address and the connection stay as they are, and so does everything already timed.
+    pub fn rename(&self, id: &AdapterId, name: &str) -> Result<Timer, TimerError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(TimerError::NoName);
+        }
+        let mut inner = self.write();
+        let record = inner.timers.get_mut(id).ok_or(TimerError::NotFound)?;
+        let before = std::mem::replace(&mut record.name, name.to_owned());
+        let renamed = record.clone();
+        if let Err(e) = save(&inner) {
+            if let Some(record) = inner.timers.get_mut(id) {
+                record.name = before;
+            }
+            return Err(e);
+        }
+        drop(inner);
+        self.generation.send_modify(|g| *g += 1);
+        Ok(renamed)
+    }
+
     pub fn delete(&self, id: &AdapterId) -> Result<(), TimerError> {
         let mut inner = self.write();
         let removed = inner.timers.remove(id).ok_or(TimerError::NotFound)?;
@@ -953,6 +984,17 @@ pub async fn create_timer(
 }
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated.
+/// `PUT /timers/{timer_id}` — give a timer another name, RD-gated. Answers with the timer
+/// as it now is. A blank name is a **400**; an unknown timer a **404**.
+pub async fn rename_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<AdapterId>,
+    Json(body): Json<RenameTimerRequest>,
+) -> Result<Json<Timer>, ProtocolError> {
+    Ok(Json(registry.timers().rename(&timer_id, &body.name)?))
+}
+
 pub async fn delete_timer(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
@@ -1336,6 +1378,49 @@ mod tests {
         assert!(!directory.should_ask_channels(&gate, now));
         directory.age_channels(&gate);
         assert!(directory.should_ask_channels(&gate, now));
+    }
+
+    #[test]
+    fn a_timer_is_renamed_and_keeps_its_handle_address_and_own_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "gridfpv-timers-rename-{}-{}",
+            std::process::id(),
+            tail()
+        ));
+        let directory = TimerDirectory::new(Some(dir.clone()));
+        let timer = directory
+            .create(&CreateTimerRequest {
+                name: "oft-3fa2".into(),
+                kind: TimerKind::Oft,
+                address: "10.0.0.5:7270".into(),
+                own_id: Some("oft-3fa2".into()),
+            })
+            .unwrap();
+        let watch = directory.watch();
+        let before = *watch.borrow();
+        let renamed = directory.rename(&timer.id, "  Start gate ").unwrap();
+        assert_eq!(renamed.name, "Start gate");
+        // Only the name moved. The handle passes carry is the same, so nothing already
+        // timed loses its timer; the name the timer gives itself is kept beside it.
+        assert_eq!(
+            Timer {
+                name: timer.name.clone(),
+                ..renamed.clone()
+            },
+            timer
+        );
+        assert_eq!(renamed.own_id.as_deref(), Some("oft-3fa2"));
+        assert!(*watch.borrow() > before);
+        // It is kept across a restart.
+        let again = TimerDirectory::new(Some(dir.clone()));
+        assert_eq!(again.records(), vec![renamed]);
+        // A blank name and an unknown timer are refused, and nothing changes.
+        assert_eq!(directory.rename(&timer.id, "  "), Err(TimerError::NoName));
+        assert_eq!(
+            directory.rename(&AdapterId("nope".into()), "Gate"),
+            Err(TimerError::NotFound)
+        );
+        assert_eq!(directory.records()[0].name, "Start gate");
     }
 
     #[test]
@@ -1977,6 +2062,26 @@ mod tests {
             "threshold": {"Manual": {"enter": -700, "exit": -760}},
             "lap_cooldown_ms": 2000,
         })
+    }
+
+    #[tokio::test]
+    async fn a_timer_is_renamed_over_http() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let timer = uri.trim_end_matches("/config").to_owned();
+        let body = serde_json::json!({"name": " Start gate "});
+        let (status, renamed) = call(&registry, "PUT", &timer, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{renamed}");
+        assert_eq!(renamed["name"], "Start gate");
+        let (_, listed) = call(&registry, "GET", "/timers", None).await;
+        assert_eq!(listed[0]["timer"]["name"], "Start gate");
+        // A blank name is refused in words; an unknown timer is not found.
+        let blank = serde_json::json!({"name": "  "});
+        let (status, said) = call(&registry, "PUT", &timer, Some(blank)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(said["message"], "A timer needs a name.");
+        let body = serde_json::json!({"name": "Gate"});
+        let (status, _) = call(&registry, "PUT", "/timers/nope", Some(body)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

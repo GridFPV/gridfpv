@@ -34,6 +34,7 @@ export {
   listDiscoveredTimers,
   createTimer,
   deleteTimer,
+  renameTimer,
   getTimerConfig,
   putTimerConfig,
   updateEvent,
