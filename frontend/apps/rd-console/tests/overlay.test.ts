@@ -16,6 +16,7 @@ import {
   formatClockMs,
   formatLapMicros,
   overlayClock,
+  overlayLaps,
   overlayRows,
   overlayTitle,
   overlayStateWord,
@@ -301,6 +302,45 @@ describe('best N laps in a row', () => {
   });
 });
 
+describe('the one-pilot lap list', () => {
+  /** A lap, a marked restart or a timer restart that took `seconds` between its crossings. */
+  const flown = (
+    crossing: number,
+    seconds: number,
+    kind: 'lap' | 'restart' | 'timer' = 'lap'
+  ): LapView => ({ ...lap(crossing, seconds, kind), micros: seconds * S });
+
+  it('lists the hole shot, then each lap, with a marked restart where it happened', () => {
+    const laps = [flown(2, 10), flown(3, 31, 'restart'), flown(4, 9), flown(5, 8)];
+    expect(overlayLaps(laps, 1.5 * S)).toEqual([
+      { key: 'hs', label: 'HS', micros: 1.5 * S, lap: -1 },
+      { key: 'l0', label: 'L1', micros: 10 * S, lap: 0 },
+      // The time from the crossing before it to the crossing the pilot started again at.
+      { key: 'rs3', label: 'RS', micros: 31 * S, lap: -1 },
+      // The restart takes no lap number: the next lap is lap 2.
+      { key: 'l1', label: 'L2', micros: 9 * S, lap: 1 },
+      { key: 'l2', label: 'L3', micros: 8 * S, lap: 2 }
+    ]);
+  });
+
+  it('gives two restarts a key each, and leaves out a stretch the timer restarted in', () => {
+    const laps = [
+      flown(2, 20, 'restart'),
+      flown(3, 10),
+      flown(4, 15, 'timer'),
+      flown(5, 22, 'restart'),
+      flown(6, 9)
+    ];
+    const listed = overlayLaps(laps, undefined);
+    expect(listed.map((entry) => entry.label)).toEqual(['RS', 'L1', 'RS', 'L2']);
+    expect(new Set(listed.map((entry) => entry.key)).size).toBe(4);
+  });
+
+  it('is empty before the first crossing', () => {
+    expect(overlayLaps([], undefined)).toEqual([]);
+  });
+});
+
 describe('overlayRows', () => {
   const pilots = [
     { id: 'p-1a', callsign: 'Ace', vtx_types: [] },
@@ -328,6 +368,11 @@ describe('overlayRows', () => {
       laps: 2,
       lapMicros: [9.5 * S, 8.25 * S],
       lastLapMicros: 8.25 * S,
+      listed: [
+        { label: 'L1', micros: 9.5 * S, lap: 0 },
+        { label: 'RS', lap: -1 },
+        { label: 'L2', micros: 8.25 * S, lap: 1 }
+      ],
       bestLapMicros: 8.25 * S
     });
     expect(rows[1]).toMatchObject({ place: 2, laps: 1, lastLapMicros: 11 * S });

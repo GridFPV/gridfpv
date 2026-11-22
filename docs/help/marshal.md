@@ -67,7 +67,7 @@ line.
   and B was a false reading. Remove B and lap C now runs from the end of A.
 - **Mark as restart** is for a pilot who crashed and started again. That lap gets no time,
   and the laps either side stay as they were. A "fastest laps in a row" run never crosses a
-  restart.
+  restart. The one-pilot overlay lists it as `RS`.
 - **Add a lap** puts in a pass the gate missed. It is right under the trace. Type the
   seconds into the race.
   If the gate missed the **hole shot**, add it the same way. A pass you add before the
