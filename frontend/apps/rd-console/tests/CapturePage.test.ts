@@ -393,3 +393,35 @@ describe('CapturePage: when the seat cannot be tuned', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
+
+describe('a timer shared with another program', () => {
+  it('says who has control of the timer, and where to put that right', async () => {
+    const held = timerView(ID, 'Gate', 2, {
+      control: { holder: 'Other', name: 'RotorHazard pi-timer' },
+      control_name: 'GridFPV race-laptop'
+    });
+    open({}, held);
+    const banner = await screen.findByTestId('control-trouble');
+    expect(banner).toHaveTextContent('“RotorHazard pi-timer” has control of Gate.');
+    expect(within(banner).getByRole('link', { name: "Open the timer's page" })).toHaveAttribute(
+      'href',
+      'http://192.168.1.50:7270/'
+    );
+  });
+
+  it('reads the settings again when the timer says they changed', async () => {
+    vi.useFakeTimers();
+    let rev = 3;
+    const listTimersImpl = vi.fn(async () => [timerView(ID, 'Gate', 2, { config_rev: rev })]);
+    const { getTimerConfigImpl } = open({ listTimersImpl });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(4000);
+    // Polled twice more with the same count: the settings were read once.
+    expect(getTimerConfigImpl).toHaveBeenCalledTimes(1);
+    rev = 4;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(getTimerConfigImpl).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(getTimerConfigImpl).toHaveBeenCalledTimes(2);
+  });
+});

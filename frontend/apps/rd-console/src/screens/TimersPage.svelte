@@ -42,6 +42,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import {
     clockSentence,
+    controlTrouble,
     notAddedYet,
     seatCount,
     seatCountSentence,
@@ -240,6 +241,7 @@
           <ul class="timers" aria-label="Timers">
             {#each timers as view (view.timer.id)}
               {@const status = view.status}
+              {@const control = controlTrouble(view.timer, status)}
               <li class="timer" aria-label={view.timer.name}>
                 <div class="main">
                   <div class="headline">
@@ -258,6 +260,14 @@
                   {/if}
                   {#if !status.connected && status.problem}
                     <p class="problem" data-testid="timer-problem">{status.problem}</p>
+                  {/if}
+                  {#if control}
+                    <p class="problem" data-testid="timer-control">
+                      {control.trouble} Grid cannot change this timer.
+                      <a href={control.page} target="_blank" rel="noreferrer"
+                        >Open the timer's page</a
+                      > to give control to Grid.
+                    </p>
                   {/if}
                   <p class="facts">
                     <span data-fact="seats">{seatCountSentence(status)}</span>
@@ -480,6 +490,9 @@
     color: var(--gf-danger);
     font-size: var(--gf-font-size-sm);
     overflow-wrap: anywhere;
+  }
+  .problem a {
+    color: var(--gf-accent);
   }
   .facts {
     margin: 0;

@@ -125,6 +125,7 @@ export type * from '@bindings/StintView';
 export type * from '@bindings/TakeSeatRequest';
 export type * from '@bindings/Timer';
 export type * from '@bindings/TimerConfig';
+export type * from '@bindings/TimerControl';
 export type * from '@bindings/LapRules';
 export type * from '@bindings/SavedFormat';
 export type * from '@bindings/SeatProfile';

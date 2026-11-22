@@ -27,6 +27,10 @@
 //!
 //! `status` gives no events: its per-seat levels are for the Tune screen, live, and are
 //! never logged. [`OftConfig`] is the Timer's settings as `/config` reads and writes them.
+//!
+//! `control` gives no events either (spec v0.9, §6.6). One client at a time may change a
+//! Timer; the Timer says on every stream who that is. [`claim`] is what Grid sends to be
+//! that client, and [`ControlStanding`] is where a `control` message leaves Grid.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -181,6 +185,83 @@ pub struct OftConfig {
 pub struct OftCapabilities {
     #[serde(default)]
     pub config: OftConfigCapability,
+    /// Whether one client at a time may change the Timer (spec v0.9, §6.6). The key has no
+    /// values of its own: being there is the whole of it.
+    #[serde(default, deserialize_with = "present")]
+    pub control: bool,
+}
+
+/// A capability with nothing inside it: `true` when the key is there, whatever it holds.
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
+}
+
+/// A claim that holds control of a Timer, as a `control` message names it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OftHolder {
+    /// The claim's id. Not reused while the Timer runs.
+    pub id: u32,
+    /// The name the client claimed under, for people to read.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Who may change a Timer, as one `control` message leaves it for the stream it came on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlStanding {
+    /// Nobody holds control, so any client may write.
+    Nobody,
+    /// This stream's own claim holds control. Writes carry `key`.
+    Ours { key: String },
+    /// Another client holds control. Its name is for people to read.
+    Other { name: String },
+}
+
+impl ControlStanding {
+    /// Read a `control` message's fields. `holder` is the claim that holds control,
+    /// `claim` is this stream's own claim, and `key` is only sent to the holder.
+    pub fn read(holder: Option<&OftHolder>, claim: Option<u32>, key: Option<&str>) -> Self {
+        match (holder, key) {
+            (None, _) => Self::Nobody,
+            (Some(holder), Some(key)) if Some(holder.id) == claim => Self::Ours {
+                key: key.to_owned(),
+            },
+            (Some(holder), _) => Self::Other {
+                name: holder.name.clone(),
+            },
+        }
+    }
+}
+
+/// The longest name a claim can have (spec §6.6).
+pub const CLAIM_NAME_MAX: usize = 32;
+
+/// A name to claim control under: `wanted` with everything a Timer would drop taken out
+/// (anything but printable ASCII, and `"` and `\`), cut to [`CLAIM_NAME_MAX`]. Grid cleans
+/// the name itself so the name it shows people is the one the Timer lists.
+pub fn claim_name(wanted: &str) -> String {
+    let name: String = wanted
+        .trim()
+        .chars()
+        .filter(|c| (' '..='~').contains(c) && *c != '"' && *c != '\\')
+        .take(CLAIM_NAME_MAX)
+        .collect();
+    let name = name.trim_end();
+    if name.is_empty() {
+        "GridFPV".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
+/// The message that claims control of a Timer under `name` (spec §6.6). With the `key` of
+/// a claim Grid held before the link dropped, the Timer gives that claim back.
+pub fn claim(name: &str, key: Option<&str>) -> String {
+    let mut message = serde_json::json!({ "type": "control", "claim": claim_name(name) });
+    if let Some(key) = key {
+        message["key"] = key.into();
+    }
+    message.to_string()
 }
 
 /// What a Timer's `/config` accepts.
@@ -255,6 +336,22 @@ pub enum OftMessage {
     Status {
         #[serde(default)]
         seats: Vec<OftSeatStatus>,
+        /// A number that changes whenever the Timer's settings, or whether they are saved,
+        /// change (spec v0.9). It starts again when the Timer does. Absent on an older Timer.
+        #[serde(default)]
+        config_rev: Option<u32>,
+    },
+    /// Who may change the Timer (spec v0.9, §6.6). Sent after `hello` and whenever it
+    /// changes. See [`ControlStanding::read`].
+    Control {
+        #[serde(default)]
+        holder: Option<OftHolder>,
+        /// This stream's own claim.
+        #[serde(default)]
+        claim: Option<u32>,
+        /// What the holder's writes must carry. Only on the holder's stream.
+        #[serde(default)]
+        key: Option<String>,
     },
     /// The Timer acknowledged a subscription.
     Ack {},
@@ -471,7 +568,7 @@ impl Adapter for OftAdapter {
                 unit: self.unit(seat),
                 noise_floor: nf,
             })],
-            OftMessage::Status { seats } => {
+            OftMessage::Status { seats, .. } => {
                 // No events: only which Node serves each seat is kept, for its unit.
                 self.seat_nodes = seats
                     .into_iter()
@@ -482,6 +579,7 @@ impl Adapter for OftAdapter {
             OftMessage::Pong { .. }
             | OftMessage::Ack {}
             | OftMessage::Error { .. }
+            | OftMessage::Control { .. }
             | OftMessage::Unknown => Vec::new(),
         }
     }
@@ -1088,9 +1186,11 @@ mod tests {
             "drift_ppm":null,"node_connected":true,"clients":1,
             "seats":[{"seat":0,"node":"00aabbccddee","rate_hz":1000,"rssi":-880,
                       "floor":-900,"enter":-750,"exit":-800,"crossing":false}]}"#;
-        let OftMessage::Status { seats } = OftMessage::parse(frame).unwrap() else {
+        let OftMessage::Status { seats, config_rev } = OftMessage::parse(frame).unwrap() else {
             panic!("expected a status");
         };
+        // A Timer older than v0.9 has no `config_rev`.
+        assert_eq!(config_rev, None);
         assert_eq!(
             seats,
             vec![OftSeatStatus {
@@ -1219,6 +1319,108 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&config).unwrap(),
             serde_json::from_str::<serde_json::Value>(body).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_v0_9_timer_says_it_has_control_and_its_status_carries_config_rev() {
+        // `oftd` sends the capability as an empty object.
+        let hello = HELLO.replace(
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 }"#,
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 }, "control": {}"#,
+        );
+        let OftMessage::Hello { capabilities, .. } = OftMessage::parse(&hello).unwrap() else {
+            panic!("expected a hello");
+        };
+        assert!(capabilities.control);
+        // An older Timer has no such key.
+        let OftMessage::Hello { capabilities, .. } = OftMessage::parse(HELLO).unwrap() else {
+            panic!("expected a hello");
+        };
+        assert!(!capabilities.control);
+
+        let frame = r#"{"type":"status","seats":[],"clients":2,"config_rev":7,
+            "control":{"id":3,"name":"RotorHazard"}}"#;
+        let OftMessage::Status { config_rev, .. } = OftMessage::parse(frame).unwrap() else {
+            panic!("expected a status");
+        };
+        assert_eq!(config_rev, Some(7));
+    }
+
+    /// Where a `control` frame leaves the stream it came on.
+    fn standing(frame: &str) -> ControlStanding {
+        let OftMessage::Control { holder, claim, key } = OftMessage::parse(frame).unwrap() else {
+            panic!("expected a control message: {frame}");
+        };
+        ControlStanding::read(holder.as_ref(), claim, key.as_deref())
+    }
+
+    #[test]
+    fn a_control_message_says_who_may_write() {
+        // The three examples from the spec, §6.6.
+        assert_eq!(
+            standing(r#"{"type":"control","holder":{"id":3,"name":"RotorHazard"},"claim":5}"#),
+            ControlStanding::Other {
+                name: "RotorHazard".into()
+            }
+        );
+        assert_eq!(
+            standing(
+                r#"{"type":"control","holder":{"id":3,"name":"RotorHazard"},"claim":3,"key":"9f3a61c2"}"#
+            ),
+            ControlStanding::Ours {
+                key: "9f3a61c2".into()
+            }
+        );
+        assert_eq!(
+            standing(r#"{"type":"control","holder":null,"claim":null}"#),
+            ControlStanding::Nobody
+        );
+        // Straight after `hello`, before this stream has claimed: another holds control.
+        assert_eq!(
+            standing(r#"{"type":"control","holder":{"id":3,"name":"Timer page"},"claim":null}"#),
+            ControlStanding::Other {
+                name: "Timer page".into()
+            }
+        );
+        // Nobody holds control though this stream has a claim (the Timer's page freed it).
+        assert_eq!(
+            standing(r#"{"type":"control","holder":null,"claim":5}"#),
+            ControlStanding::Nobody
+        );
+        // A key is never trusted without the claim it belongs to.
+        assert_eq!(
+            standing(r#"{"type":"control","holder":{"id":3,"name":"X"},"claim":5,"key":"k"}"#),
+            ControlStanding::Other { name: "X".into() }
+        );
+        // A control message gives no events.
+        let message =
+            OftMessage::parse(r#"{"type":"control","holder":null,"claim":null}"#).unwrap();
+        assert!(adapter().translate(message).is_empty());
+    }
+
+    #[test]
+    fn a_claim_carries_a_clean_name_and_the_key_only_when_there_is_one() {
+        let sent: serde_json::Value =
+            serde_json::from_str(&claim("GridFPV race-laptop", None)).unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({"type": "control", "claim": "GridFPV race-laptop"})
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(&claim("GridFPV race-laptop", Some("9f3a61c2"))).unwrap();
+        assert_eq!(sent["key"], "9f3a61c2");
+
+        // What a Timer would drop is dropped here, so the name shown is the name listed.
+        assert_eq!(claim_name("  Grid \"FPV\" \\ caf\u{e9}\n"), "Grid FPV  caf");
+        assert_eq!(claim_name("\u{1f3c1}"), "GridFPV");
+        assert_eq!(claim_name(""), "GridFPV");
+        let long = claim_name(&"a".repeat(40));
+        assert_eq!(long.len(), CLAIM_NAME_MAX);
+        // Cut at 32, a name does not end in a space.
+        assert_eq!(
+            claim_name(&format!("{} tail", "b".repeat(31))),
+            "b".repeat(31)
         );
     }
 }

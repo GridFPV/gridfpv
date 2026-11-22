@@ -244,6 +244,10 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
         pass_window_ms: _,
         pass_window_problem: _,
         level_unit: _,
+        // Which programs are on the director's network is not a visitor's business.
+        control: _,
+        control_name: _,
+        config_rev: _,
     } = status;
     TimerView {
         timer: Timer {
@@ -265,6 +269,9 @@ pub fn timer_for_visitors(view: TimerView) -> TimerView {
             pass_window_ms: None,
             pass_window_problem: None,
             level_unit: None,
+            control: None,
+            control_name: None,
+            config_rev: None,
         },
     }
 }

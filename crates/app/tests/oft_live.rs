@@ -529,3 +529,257 @@ async fn races_are_timed_by_the_real_oft_daemon() {
     daemon.stop();
     links.abort();
 }
+
+// ── Control: one writer at a time (OFT spec v0.9, §6.6) ────────────────────────
+
+/// One plain HTTP request straight to the daemon, as a program that is not Grid would send
+/// it. Gives the status and the JSON body.
+async fn direct(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<serde_json::Value>,
+) -> (u16, serde_json::Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = body.map(|json| json.to_string()).unwrap_or_default();
+    let mut request = format!(
+        "{method} /oft/v1{path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if !body.is_empty() {
+        request.push_str("Content-Type: application/json\r\n");
+    }
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(&body);
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+    socket.write_all(request.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    socket.read_to_end(&mut answer).await.unwrap();
+    let answer = String::from_utf8_lossy(&answer).into_owned();
+    let status = answer
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status in: {answer}"));
+    let json = answer
+        .find('{')
+        .and_then(|at| serde_json::from_str(answer[at..].trim_end_matches(['\r', '\n', '0'])).ok())
+        .unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// The timer's own page handing control to a claim, or to nobody: `POST /control` with the
+/// `Origin` a browser on that page would send.
+async fn page_grants(addr: &str, grant: Option<u64>) {
+    let origin = format!("http://{addr}");
+    let (status, answer) = direct(
+        addr,
+        "POST",
+        "/control",
+        &[("Origin", &origin)],
+        Some(json!({ "grant": grant })),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+}
+
+fn control_of(registry: &EventRegistry) -> Option<gridfpv_server::timers::TimerControl> {
+    registry.timers().list().remove(0).status.control
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the OFT daemon: set GRIDFPV_OFTD_BIN"]
+async fn control_is_shared_with_another_program_on_the_real_oft_daemon() {
+    use futures_util::{SinkExt, StreamExt};
+    use gridfpv_server::timers::TimerControl;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let mut daemon = Daemon::start(&addr);
+
+    // Another program connects first and claims control, as RotorHazard's plugin would.
+    let mut theirs = eventually("the daemon to listen", 10, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                tokio_tungstenite::connect_async(format!("ws://{addr}/oft/v1/stream"))
+                    .await
+                    .ok()
+            })
+        })
+    })
+    .await
+    .0;
+    theirs
+        .send(Message::text(
+            r#"{"type":"control","claim":"RotorHazard test"}"#,
+        ))
+        .await
+        .unwrap();
+    // Keep its stream read, so the daemon is never blocked on it.
+    let (mut their_sink, mut their_stream) = theirs.split();
+    let their_reader = tokio::spawn(async move { while their_stream.next().await.is_some() {} });
+
+    let registry = EventRegistry::new(None).unwrap();
+    let timer = registry
+        .timers()
+        .create(&CreateTimerRequest {
+            name: "Gate".into(),
+            kind: TimerKind::Oft,
+            address: addr.clone(),
+            own_id: None,
+        })
+        .unwrap()
+        .id;
+    let links = gridfpv_app::oft::spawn(registry.clone());
+    let config_uri = format!("/timers/{}/config", timer.0);
+
+    // Grid sees who has control, and stands in line behind it.
+    eventually("Grid to see the other program in control", 10, || {
+        (control_of(&registry)
+            == Some(TimerControl::Other {
+                name: "RotorHazard test".into(),
+            }))
+        .then_some(())
+    })
+    .await;
+    let grid_name = registry.timers().list()[0]
+        .status
+        .control_name
+        .clone()
+        .expect("Grid says the name it claimed under");
+    let grid_claim = eventually("Grid's claim to stand on the timer", 10, || {
+        let (_, listed) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(direct(&addr, "GET", "/control", &[], None))
+        });
+        listed["claims"]
+            .as_array()?
+            .iter()
+            .find(|claim| claim["name"] == grid_name.as_str())
+            .and_then(|claim| claim["id"].as_u64())
+    })
+    .await;
+
+    // A change from Grid is refused, naming the program, and the timer is untouched.
+    let (_, before) = direct(&addr, "GET", "/config", &[], None).await;
+    let (status, read) = call(&registry, "GET", &config_uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    let mut wanted = read.clone();
+    wanted["seats"][0]["freq_mhz"] = json!(5917);
+    let (status, said) = call(&registry, "PUT", &config_uri, Some(wanted.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+    assert!(
+        said["message"]
+            .as_str()
+            .unwrap()
+            .contains("RotorHazard test"),
+        "{said}"
+    );
+    assert_eq!(direct(&addr, "GET", "/config", &[], None).await.1, before);
+
+    // The person at the timer's own page hands control to Grid.
+    page_grants(&addr, Some(grid_claim)).await;
+    eventually("control to come to Grid", 10, || {
+        (control_of(&registry) == Some(TimerControl::Grid)).then_some(())
+    })
+    .await;
+    let rev = registry.timers().list()[0].status.config_rev;
+    let (status, written) = call(&registry, "PUT", &config_uri, Some(wanted.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    let (_, now) = direct(&addr, "GET", "/config", &[], None).await;
+    assert_eq!(now["seats"][0]["freq_mhz"], 5917);
+    // The timer counted the change, and Grid's status carries the new number.
+    eventually("config_rev to move", 10, || {
+        let now = registry.timers().list()[0].status.config_rev;
+        (now.is_some() && now != rev).then_some(())
+    })
+    .await;
+
+    // The real guard: a write with no key, or a wrong one, is a 423 while Grid has control.
+    let (status, refused) = direct(&addr, "PUT", "/config", &[], Some(before.clone())).await;
+    assert_eq!(status, 423, "{refused}");
+    assert_eq!(refused["error"], format!("controlled by {grid_name}"));
+    let (status, _) = direct(
+        &addr,
+        "PUT",
+        "/config",
+        &[("OFT-Control", "00000000")],
+        Some(before.clone()),
+    )
+    .await;
+    assert_eq!(status, 423);
+    assert_eq!(direct(&addr, "GET", "/config", &[], None).await.1, now);
+    // And only the timer's own page chooses the writer: a program cannot grant itself.
+    let (status, _) = direct(&addr, "POST", "/control", &[], Some(json!({"grant": null}))).await;
+    assert_eq!(status, 403);
+
+    // The page frees control: nobody has it, and both programs may write.
+    page_grants(&addr, None).await;
+    eventually("nobody to be in control", 10, || {
+        (control_of(&registry) == Some(TimerControl::Nobody)).then_some(())
+    })
+    .await;
+    wanted["seats"][0]["freq_mhz"] = json!(5732);
+    let (status, written) = call(&registry, "PUT", &config_uri, Some(wanted.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    let (status, _) = direct(&addr, "PUT", "/config", &[], Some(before.clone())).await;
+    assert_eq!(status, 200);
+    // Grid notices the other program's change and reads the settings fresh.
+    let (_, read) = call(&registry, "GET", &config_uri, None).await;
+    assert_eq!(read["seats"][0]["freq_mhz"], before["seats"][0]["freq_mhz"]);
+
+    // The other program takes control back at the page, then goes away for good: its
+    // stream closes, so its claim ends after the ten seconds a holder is given, and Grid,
+    // next in line, has control without anyone doing anything.
+    let (_, listed) = direct(&addr, "GET", "/control", &[], None).await;
+    let their_claim = listed["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|claim| claim["name"] == "RotorHazard test")
+        .and_then(|claim| claim["id"].as_u64())
+        .unwrap();
+    page_grants(&addr, Some(their_claim)).await;
+    eventually("the other program to be in control again", 10, || {
+        matches!(control_of(&registry), Some(TimerControl::Other { .. })).then_some(())
+    })
+    .await;
+    their_sink.close().await.ok();
+    their_reader.abort();
+    eventually("control to pass to Grid", 20, || {
+        (control_of(&registry) == Some(TimerControl::Grid)).then_some(())
+    })
+    .await;
+    let (status, written) = call(&registry, "PUT", &config_uri, Some(wanted.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+
+    // The timer restarts. Grid claims afresh on the new boot and is the writer again.
+    daemon.stop();
+    eventually("the link to drop", 15, || {
+        (!registry.timers().list()[0].status.connected).then_some(())
+    })
+    .await;
+    daemon = Daemon::start(&addr);
+    eventually("Grid to have control after the restart", 20, || {
+        let status = registry.timers().list().remove(0).status;
+        (status.connected && status.control == Some(TimerControl::Grid)).then_some(())
+    })
+    .await;
+    let (_, read) = call(&registry, "GET", &config_uri, None).await;
+    let mut wanted = read.clone();
+    wanted["seats"][0]["freq_mhz"] = json!(5658);
+    let (status, written) = call(&registry, "PUT", &config_uri, Some(wanted)).await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(
+        direct(&addr, "GET", "/config", &[], None).await.1["seats"][0]["freq_mhz"],
+        5658
+    );
+
+    links.abort();
+    daemon.stop();
+}

@@ -13,6 +13,29 @@ you press **Apply to timer**. Grid then sends the settings, reads them back from
 and shows what the timer says. If the timer did not take a change, Grid tells you and the
 timer stays as it was. **Discard changes** throws the draft away.
 
+If the timer's settings are changed somewhere else, such as on the timer's own page, Grid
+reads them again and shows them. If you had a draft, Grid keeps it and tells you the timer
+changed.
+
+## When another program has control
+
+A timer lets one program at a time change its settings. That stops two programs from
+undoing each other's work. The first program to ask gets control. Grid asks every time it
+connects to a timer.
+
+If another program asked first, such as RotorHazard, Grid tells you its name at the top of
+the page. Grid still shows the timer's settings and still times laps on it. It cannot
+change the timer, so **Apply to timer** and the profile box are off.
+
+To give control to Grid:
+
+1. Press **Open the timer's page** in the notice.
+2. On the timer's page, find the list of programs that asked for control.
+3. Pick the one whose name starts with **GridFPV**. The notice in Grid says the exact name.
+
+Grid can change the timer again right away. This is not a lock against other people. It
+only keeps well-behaved programs out of each other's way.
+
 ## Profiles
 
 A profile is a saved copy of a timer's settings: the channels, the levels and the timer

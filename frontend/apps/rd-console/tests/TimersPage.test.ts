@@ -437,4 +437,37 @@ describe('TimersPage', () => {
       expect(screen.getByRole('listitem', { name: 'Gate' })).toBeVisible();
     });
   });
+
+  it('says which program has control of a timer, with a link to the timer’s own page', async () => {
+    const held: TimerView = {
+      timer: { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' },
+      status: {
+        connected: true,
+        seats: ['0'],
+        control: { holder: 'Other', name: 'RotorHazard pi-timer' },
+        control_name: 'GridFPV race-laptop'
+      }
+    };
+    const ours: TimerView = {
+      timer: { id: 'split-a1b2', name: 'Split', kind: 'Oft', address: '10.0.0.6:7270' },
+      status: { connected: true, seats: ['0'], control: { holder: 'Grid' } }
+    };
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [held, ours])
+    });
+    render(TimersPage, { session });
+    const row = await screen.findByRole('listitem', { name: 'Gate' });
+    const said = within(row).getByTestId('timer-control');
+    expect(said).toHaveTextContent(
+      "“RotorHazard pi-timer” has control of Gate. Grid cannot change this timer. Open the timer's page to give control to Grid."
+    );
+    expect(within(said).getByRole('link', { name: "Open the timer's page" })).toHaveAttribute(
+      'href',
+      'http://10.0.0.5:7270/'
+    );
+    // A timer Grid controls says nothing about it.
+    const other = screen.getByRole('listitem', { name: 'Split' });
+    expect(within(other).queryByTestId('timer-control')).toBeNull();
+  });
 });

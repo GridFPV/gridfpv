@@ -87,3 +87,59 @@ describe('the pass window on the Run page', () => {
     ).toBeUndefined();
   });
 });
+
+describe('controlTrouble', () => {
+  const gate = { name: 'Gate', address: '192.168.1.50:7270' };
+
+  it('says nothing when Grid may change the timer', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    // A timer with no control at all, one nobody controls, and one Grid controls.
+    expect(controlTrouble(gate, { connected: true })).toBeUndefined();
+    expect(
+      controlTrouble(gate, { connected: true, control: { holder: 'Nobody' } })
+    ).toBeUndefined();
+    expect(
+      controlTrouble(gate, {
+        connected: true,
+        control: { holder: 'Grid' },
+        control_name: 'GridFPV race-laptop'
+      })
+    ).toBeUndefined();
+  });
+
+  it('names the program that has control, the name Grid is listed under, and the timer’s page', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    expect(
+      controlTrouble(gate, {
+        connected: true,
+        control: { holder: 'Other', name: 'RotorHazard pi-timer' },
+        control_name: 'GridFPV race-laptop'
+      })
+    ).toEqual({
+      trouble: '“RotorHazard pi-timer” has control of Gate.',
+      detail:
+        "Grid still shows its settings and takes its laps, but cannot change it. To change it from here, open the timer's own page and give control to “GridFPV race-laptop”.",
+      page: 'http://192.168.1.50:7270/'
+    });
+  });
+
+  it('still makes sense with no name for the program or for Grid', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    const said = controlTrouble(gate, {
+      connected: true,
+      control: { holder: 'Other', name: '  ' }
+    });
+    expect(said?.trouble).toBe('Another program has control of Gate.');
+    expect(said?.detail).toContain('give control to Grid.');
+  });
+
+  it('leaves a timer that is not connected to the bigger warning', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    expect(
+      controlTrouble(gate, {
+        connected: false,
+        control: { holder: 'Other', name: 'RotorHazard' }
+      })
+    ).toBeUndefined();
+  });
+});
