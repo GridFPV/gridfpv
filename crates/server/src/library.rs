@@ -28,6 +28,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use gridfpv_events::{
     AdapterId, CompletionRule, EndCondition, FirstLap, Format, Measure, RaceRules, RankingRule,
+    SignalUnit,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -59,6 +60,14 @@ pub struct SeatProfile {
     pub id: String,
     pub name: String,
     pub config: TimerConfig,
+    /// What the timer's levels measured when the profile was saved. Its thresholds are
+    /// numbers in that unit, so the profile is only applied while the timer still measures
+    /// in it: 150 is 15 dB on one receiver and 150 mV on another. Absent when the timer
+    /// had not said, and on a profile saved before units were kept; such a profile is
+    /// applied as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub level_unit: Option<SignalUnit>,
 }
 
 /// What a profile is saved from: its name and the settings.
@@ -95,6 +104,13 @@ pub enum LibraryError {
     NoProfile,
     #[error("There is no such timer.")]
     NoTimer,
+    #[error(
+        "This profile was saved when the timer measured its levels in {saved}. It now measures in {now}, so the profile's levels would mean something else. Set the levels again and save a new profile."
+    )]
+    OtherUnit {
+        saved: &'static str,
+        now: &'static str,
+    },
     #[error("Could not save it: {0}")]
     Io(String),
 }
@@ -103,7 +119,7 @@ impl From<LibraryError> for ProtocolError {
     fn from(error: LibraryError) -> Self {
         let code = match error {
             LibraryError::NoName => ErrorCode::BadRequest,
-            LibraryError::NameTaken(_) => ErrorCode::Refused,
+            LibraryError::NameTaken(_) | LibraryError::OtherUnit { .. } => ErrorCode::Refused,
             LibraryError::NoFormat | LibraryError::NoProfile | LibraryError::NoTimer => {
                 ErrorCode::UnknownScope
             }
@@ -354,6 +370,7 @@ impl Library {
         &self,
         timer: &AdapterId,
         request: SeatProfileRequest,
+        level_unit: Option<SignalUnit>,
     ) -> Result<SeatProfile, LibraryError> {
         self.change_profiles(|all| {
             let of_timer = all.entry(timer.clone()).or_default();
@@ -362,6 +379,7 @@ impl Library {
                 id: format!("profile-{}", tail()),
                 name,
                 config: request.config,
+                level_unit,
             };
             of_timer.profiles.push(profile.clone());
             of_timer.profiles.sort_by_key(|p| p.name.to_lowercase());
@@ -376,6 +394,7 @@ impl Library {
         timer: &AdapterId,
         id: &str,
         request: SeatProfileRequest,
+        level_unit: Option<SignalUnit>,
     ) -> Result<SeatProfile, LibraryError> {
         self.change_profiles(|all| {
             let of_timer = all.get_mut(timer).ok_or(LibraryError::NoProfile)?;
@@ -387,6 +406,7 @@ impl Library {
                 .ok_or(LibraryError::NoProfile)?;
             profile.name = name;
             profile.config = request.config;
+            profile.level_unit = level_unit;
             let out = profile.clone();
             of_timer.profiles.sort_by_key(|p| p.name.to_lowercase());
             Ok(out)
@@ -504,6 +524,38 @@ pub async fn delete_format(
     Ok(StatusCode::OK)
 }
 
+/// What a timer's levels measure right now, when it has said and its seats agree.
+fn level_unit(registry: &EventRegistry, timer: &AdapterId) -> Option<SignalUnit> {
+    registry
+        .timers()
+        .list()
+        .into_iter()
+        .find(|view| &view.timer.id == timer)
+        .and_then(|view| view.status.level_unit)
+}
+
+/// A unit's name in a sentence.
+fn unit_words(unit: SignalUnit) -> &'static str {
+    match unit {
+        SignalUnit::Counts => "its own counts",
+        SignalUnit::TenthsDb => "dB",
+        SignalUnit::TenthsDbm => "dBm",
+        SignalUnit::Millivolts => "millivolts",
+    }
+}
+
+/// Whether a profile's levels still mean on the timer what they meant when it was saved.
+/// Only a known difference refuses: a profile or a timer with no unit on record passes.
+fn same_unit(saved: Option<SignalUnit>, now: Option<SignalUnit>) -> Result<(), LibraryError> {
+    match (saved, now) {
+        (Some(saved), Some(now)) if saved != now => Err(LibraryError::OtherUnit {
+            saved: unit_words(saved),
+            now: unit_words(now),
+        }),
+        _ => Ok(()),
+    }
+}
+
 fn known_timer(registry: &EventRegistry, timer: &AdapterId) -> Result<(), LibraryError> {
     registry
         .timers()
@@ -530,7 +582,10 @@ pub async fn create_profile(
     Json(body): Json<SeatProfileRequest>,
 ) -> Result<Json<SeatProfile>, ProtocolError> {
     known_timer(&registry, &timer_id)?;
-    Ok(Json(registry.library().create_profile(&timer_id, body)?))
+    let unit = level_unit(&registry, &timer_id);
+    Ok(Json(
+        registry.library().create_profile(&timer_id, body, unit)?,
+    ))
 }
 
 /// `PUT /timers/{timer_id}/profiles/{profile_id}` — rename a profile or replace its
@@ -546,6 +601,7 @@ pub async fn update_profile(
         &timer_id,
         &profile_id,
         body,
+        level_unit(&registry, &timer_id),
     )?))
 }
 
@@ -578,6 +634,7 @@ pub async fn apply_profile(
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or(LibraryError::NoProfile)?;
+    same_unit(profile.level_unit, level_unit(&registry, &timer_id))?;
     let written = crate::timers::apply_config(&registry, &timer_id, &profile.config).await?;
     registry.library().set_active(&timer_id, &profile_id)?;
     Ok(Json(written))
@@ -675,6 +732,7 @@ mod tests {
                     name: "Garage".into(),
                     config: config(5658),
                 },
+                None,
             )
             .unwrap();
         let again = Library::new(Some(dir.clone()));
@@ -697,18 +755,18 @@ mod tests {
             config: config(freq),
         };
         let garage = library
-            .create_profile(&gate(), request("Garage", 5658))
+            .create_profile(&gate(), request("Garage", 5658), None)
             .unwrap();
         assert_eq!(
-            library.create_profile(&gate(), request("garage", 5800)),
+            library.create_profile(&gate(), request("garage", 5800), None),
             Err(LibraryError::NameTaken("garage".into()))
         );
         // Another timer may use the name.
         library
-            .create_profile(&AdapterId("other".into()), request("Garage", 5800))
+            .create_profile(&AdapterId("other".into()), request("Garage", 5800), None)
             .unwrap();
         let field = library
-            .create_profile(&gate(), request("Field", 5800))
+            .create_profile(&gate(), request("Field", 5800), None)
             .unwrap();
         let profiles = library.profiles(&gate());
         // In name order; the one saved last is active.
@@ -728,7 +786,7 @@ mod tests {
         );
         // Renaming keeps the id; deleting the active one leaves none active.
         let renamed = library
-            .update_profile(&gate(), &garage.id, request("Home", 5732))
+            .update_profile(&gate(), &garage.id, request("Home", 5732), None)
             .unwrap();
         assert_eq!(
             (renamed.id.as_str(), renamed.config.seats[0].freq_mhz),

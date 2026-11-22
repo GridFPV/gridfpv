@@ -150,8 +150,16 @@ describe("a timer's live feed", () => {
     noise_floor: -920
   };
   const LEVELS: SeatLevels[] = [
-    { seat: '0', level: -640, floor: -920, enter: -770, exit: -820, crossing: true },
-    { seat: '1', enter: -770, exit: -820, crossing: false }
+    {
+      seat: '0',
+      unit: 'TenthsDb',
+      level: -640,
+      floor: -920,
+      enter: -770,
+      exit: -820,
+      crossing: true
+    },
+    { seat: '1', unit: 'TenthsDb', enter: -770, exit: -820, crossing: false }
   ];
 
   function listen(onError?: () => void) {

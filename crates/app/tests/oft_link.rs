@@ -32,6 +32,17 @@ struct Fake {
     subscriptions: Arc<Mutex<Vec<Option<u64>>>>,
     /// Set to make the fake drop the connection once, to force a reconnect.
     hang_up: Arc<Mutex<bool>>,
+    /// The receivers the timer lists, in its `hello` and at `/info`. Empty: none yet.
+    nodes: Arc<Mutex<serde_json::Value>>,
+    /// The receiver its `status` says serves every seat. `None`: it sends no `status`.
+    status_node: Arc<Mutex<Option<String>>>,
+}
+
+async fn info(State(fake): State<Fake>) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "id": "oft-fake", "boot_id": "b001", "proto": 1, "calibrated": false,
+        "nodes": fake.nodes.lock().unwrap().clone(),
+    }))
 }
 
 async fn stream(State(fake): State<Fake>, upgrade: WebSocketUpgrade) -> Response {
@@ -43,6 +54,7 @@ async fn serve(fake: Fake, mut socket: WebSocket) {
         "type": "hello", "proto": 1, "timer": "oft-fake", "boot_id": "b001",
         "time_us": fake.booted.elapsed().as_micros() as u64,
         "seats": [{"seat": 0, "node": 0, "rate_hz": 500}, {"seat": 1, "node": 0, "rate_hz": 500}],
+        "nodes": fake.nodes.lock().unwrap().clone(),
     });
     if socket.send(Message::text(hello.to_string())).await.is_err() {
         return;
@@ -63,6 +75,17 @@ async fn serve(fake: Fake, mut socket: WebSocket) {
                 }
                 if !subscribed {
                     continue;
+                }
+                let status_node = fake.status_node.lock().unwrap().clone();
+                if let Some(node) = status_node {
+                    let status = serde_json::json!({
+                        "type": "status", "uptime_s": 1,
+                        "seats": [{"seat": 0, "node": node, "rate_hz": 500, "rssi": 410,
+                                   "floor": 400, "enter": 600, "exit": 550, "crossing": false}],
+                    });
+                    if socket.send(Message::text(status.to_string())).await.is_err() {
+                        return;
+                    }
                 }
                 if samples {
                     let batch = serde_json::json!({
@@ -131,9 +154,12 @@ async fn fake_timer() -> (Fake, SocketAddr) {
         crossings: Arc::default(),
         subscriptions: Arc::default(),
         hang_up: Arc::default(),
+        nodes: Arc::new(Mutex::new(serde_json::json!([]))),
+        status_node: Arc::default(),
     };
     let app = Router::new()
         .route("/oft/v1/stream", get(stream))
+        .route("/oft/v1/info", get(info))
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -379,4 +405,99 @@ async fn a_timer_that_cannot_be_reached_says_why_and_is_dropped_when_removed() {
     registry.timers().delete(&timer.id).unwrap();
     assert!(registry.timers().list().is_empty());
     links.abort();
+}
+
+/// Spec v0.8: a receiver says what its levels measure. One built on an RX5808 reports
+/// millivolts, and it can report in after the timer's `hello` has gone out. Grid must not
+/// log its levels as tenths of a dB.
+#[tokio::test]
+async fn a_receiver_that_reports_millivolts_after_the_hello_is_logged_in_millivolts() {
+    use gridfpv_events::SignalUnit;
+
+    let (fake, addr) = fake_timer().await;
+    let registry = EventRegistry::new(None).unwrap();
+    let timer_id = registry
+        .timers()
+        .create(&CreateTimerRequest {
+            name: "Gate".into(),
+            kind: TimerKind::Oft,
+            address: addr.to_string(),
+            own_id: None,
+        })
+        .unwrap()
+        .id;
+    let event = event_with_heat(&registry, &timer_id);
+    let _links = gridfpv_app::oft::spawn(registry.clone());
+
+    // No receiver listed yet: tenths of a dB, as the spec says.
+    eventually("the timer to connect", || {
+        registry.timers().list()[0].status.connected.then_some(())
+    })
+    .await;
+    assert_eq!(
+        registry.timers().list()[0].status.level_unit,
+        Some(SignalUnit::TenthsDb)
+    );
+
+    // The receiver reports in. The timer's status names it, and `/info` now lists it.
+    *fake.nodes.lock().unwrap() = serde_json::json!([{
+        "id": "0011223344ff", "chip": "stm32f1-rx5808", "fw": "0.2.0",
+        "range_mhz": [5645, 5945], "max_seats": 8,
+        "level": {"unit": "mV", "scale": 1}, "link": "uart",
+    }]);
+    *fake.status_node.lock().unwrap() = Some("0011223344ff".into());
+    eventually("the timer's unit to become millivolts", || {
+        (registry.timers().list()[0].status.level_unit == Some(SignalUnit::Millivolts))
+            .then_some(())
+    })
+    .await;
+
+    // A race: its signal, its levels and its crossing's peak are all in millivolts.
+    with_event(&registry, &event, |session| {
+        session.commands(vec![Command::StartRace {
+            heat: PhaseId("heat".into()),
+        }])
+    })
+    .unwrap();
+    fake.crossings.lock().unwrap().push((1, 0, 20_000_000));
+    let pass = eventually("the crossing to be logged", || {
+        events(&registry, &event).into_iter().find_map(|e| match e {
+            Event::Pass(pass) => Some(pass),
+            _ => None,
+        })
+    })
+    .await;
+    // The fake's peak is -235: as millivolts it is not divided by ten.
+    assert_eq!(pass.signal.unwrap().rssi_peak, Some(-235.0));
+    let thresholds = eventually("the race's levels to be logged", || {
+        events(&registry, &event).into_iter().find_map(|e| match e {
+            Event::SignalThresholds(thresholds) => Some(thresholds),
+            _ => None,
+        })
+    })
+    .await;
+    assert_eq!(
+        (thresholds.enter, thresholds.exit, thresholds.unit),
+        (600, 550, SignalUnit::Millivolts)
+    );
+    with_event(&registry, &event, |session| {
+        session.commands(vec![Command::StopRace {
+            race: RaceId("heat#1".into()),
+        }])
+    })
+    .ok();
+    // (Signal from the second before the receiver's unit was read is the race's lead-in,
+    // and keeps the unit it arrived under; everything since is in millivolts.)
+    let chunk = eventually("the race's signal to be logged", || {
+        events(&registry, &event)
+            .into_iter()
+            .rev()
+            .find_map(|e| match e {
+                Event::SignalChunk(chunk) => Some(chunk),
+                _ => None,
+            })
+            .filter(|chunk| chunk.unit == SignalUnit::Millivolts)
+    })
+    .await;
+    assert_eq!(&chunk.levels[..3], [-900, -900, -880]);
 }

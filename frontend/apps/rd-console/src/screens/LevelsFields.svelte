@@ -1,7 +1,8 @@
 <script lang="ts">
   /**
    * LevelsFields — how one set of enter and exit levels is set: following the noise floor (two
-   * distances in dB) or fixed (an enter and an exit level in dB).
+   * distances) or fixed (an enter and an exit level). The numbers are in the unit the draft
+   * carries (`levels.unit`): dB on most timers, millivolts on some.
    *
    * The Tune page uses it twice: once for the timer's levels, and once for each seat that has
    * its own. It edits the draft it is bound to and sends nothing.
@@ -11,7 +12,15 @@
    */
   import type { Snippet } from 'svelte';
   import { Field, Input } from '@gridfpv/components';
-  import { withMode, type EnterExit, type LevelsDraft, type ThresholdMode } from '../lib/tune.js';
+  import {
+    gapLabel,
+    unitLabel,
+    unitScale,
+    withMode,
+    type EnterExit,
+    type LevelsDraft,
+    type ThresholdMode
+  } from '../lib/tune.js';
 
   let {
     levels = $bindable(),
@@ -38,6 +47,15 @@
   /** A field's name for a screen reader: the seat first, when the levels are one seat's. */
   const named = (words: string): string =>
     who ? `${who} ${words.charAt(0).toLowerCase()}${words.slice(1)}` : words;
+
+  // The unit after a label ("Enter level (dB)") and in a screen reader's name (", in dB").
+  // Plain counts have no name, so nothing is added.
+  const levelUnit = $derived(unitLabel(levels.unit));
+  const gapUnit = $derived(gapLabel(levels.unit));
+  const after = (unit: string): string => (unit ? ` (${unit})` : '');
+  const spoken = (unit: string): string => (unit ? `, in ${unit}` : '');
+  /** One click of a field's arrows: half a dB, or one millivolt or count. */
+  const step = $derived(unitScale(levels.unit) === 1 ? '1' : '0.5');
 
   function setMode(mode: ThresholdMode) {
     levels = withMode(levels, mode, inUse);
@@ -70,49 +88,49 @@
   <div class="fields">
     {#if levels.mode === 'Auto'}
       <Field
-        label="Enter this far above the floor (dB)"
+        label="Enter this far above the floor{after(gapUnit)}"
         hint="A crossing starts when the signal rises this far above the noise floor."
       >
         <Input
           type="number"
           inputmode="decimal"
-          step="0.5"
-          aria-label={named('Enter this far above the floor, in dB')}
-          bind:value={levels.aboveFloorDb}
+          {step}
+          aria-label={named(`Enter this far above the floor${spoken(gapUnit)}`)}
+          bind:value={levels.aboveFloor}
         />
       </Field>
       <Field
-        label="Exit this far below enter (dB)"
+        label="Exit this far below enter{after(gapUnit)}"
         hint="The crossing ends when the signal falls this far below the enter level."
       >
         <Input
           type="number"
           inputmode="decimal"
-          step="0.5"
-          aria-label={named('Exit this far below enter, in dB')}
-          bind:value={levels.belowEnterDb}
+          {step}
+          aria-label={named(`Exit this far below enter${spoken(gapUnit)}`)}
+          bind:value={levels.belowEnter}
         />
       </Field>
     {:else}
-      <Field label="Enter level (dB)" hint="A crossing starts at this signal level.">
+      <Field label="Enter level{after(levelUnit)}" hint="A crossing starts at this signal level.">
         <Input
           type="number"
           inputmode="decimal"
-          step="0.5"
-          aria-label={named('Enter level, in dB')}
-          bind:value={levels.enterDb}
+          {step}
+          aria-label={named(`Enter level${spoken(levelUnit)}`)}
+          bind:value={levels.enter}
         />
       </Field>
       <Field
-        label="Exit level (dB)"
+        label="Exit level{after(levelUnit)}"
         hint="The crossing ends when the signal falls below this level."
       >
         <Input
           type="number"
           inputmode="decimal"
-          step="0.5"
-          aria-label={named('Exit level, in dB')}
-          bind:value={levels.exitDb}
+          {step}
+          aria-label={named(`Exit level${spoken(levelUnit)}`)}
+          bind:value={levels.exit}
         />
       </Field>
     {/if}

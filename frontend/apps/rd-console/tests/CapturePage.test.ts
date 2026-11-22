@@ -30,8 +30,16 @@ const CONFIG: TimerConfig = {
 
 /** What the timer reports for the seat: enter 15 dB over a floor of -92.1, exit 5 dB lower. */
 const LEVELS: SeatLevels[] = [
-  { seat: '0', level: -773, floor: -921, enter: -771, exit: -821, crossing: false },
-  { seat: '1', enter: -771, exit: -821, crossing: false }
+  {
+    seat: '0',
+    unit: 'TenthsDb',
+    level: -773,
+    floor: -921,
+    enter: -771,
+    exit: -821,
+    crossing: false
+  },
+  { seat: '1', unit: 'TenthsDb', enter: -771, exit: -821, crossing: false }
 ];
 
 /**

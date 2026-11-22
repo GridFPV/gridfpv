@@ -39,8 +39,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream::{self, Stream};
-use gridfpv_adapters::oft::{OftConfig, OftSeatConfig, OftThreshold};
-use gridfpv_events::{AdapterId, SeatRef, SignalChunk};
+use gridfpv_adapters::oft::{OftConfig, OftInfo, OftSeatConfig, OftThreshold};
+use gridfpv_events::{AdapterId, SeatRef, SignalChunk, SignalUnit};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::watch;
@@ -142,6 +142,13 @@ pub struct TimerStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pass_window_problem: Option<String>,
+    /// What the timer's level numbers measure, when every seat reports in the same unit. A
+    /// console shows the timer's levels and thresholds in it. Absent until the timer has
+    /// connected, and on a timer whose seats do not share one unit: each seat's live levels
+    /// then say their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub level_unit: Option<SignalUnit>,
 }
 
 /// A timer with its status (`GET /timers`).
@@ -198,7 +205,8 @@ impl From<TimerThreshold> for OftThreshold {
     }
 }
 
-/// How a timer sets the levels it detects crossings against. Values are tenths of a dB.
+/// How a timer sets the levels it detects crossings against. Values are in the timer's own
+/// level unit ([`TimerStatus::level_unit`]): tenths of a dB on most, millivolts on some.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum TimerThreshold {
@@ -280,11 +288,13 @@ impl TimerConfig {
     }
 }
 
-/// One seat's levels right now, in tenths of a dB.
+/// One seat's levels right now, in `unit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SeatLevels {
     pub seat: SeatRef,
+    /// What the numbers measure: the unit of the receiver serving this seat.
+    pub unit: SignalUnit,
     /// The latest signal level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -791,6 +801,24 @@ fn unreachable(timer: &Timer, cause: &reqwest::Error) -> TimerError {
 }
 
 /// Read a timer's settings from the timer.
+/// Read what an OFT timer says about its receivers (`GET /oft/v1/info`). A timer's `hello`
+/// carries the same list, but only once per connection, and a receiver can report in, or
+/// come back from a firmware update measuring in another unit, after that.
+pub async fn read_info(timer: &Timer) -> Result<OftInfo, TimerError> {
+    let unreachable = |e: reqwest::Error| unreachable(timer, &e);
+    reqwest::Client::new()
+        .get(format!("http://{}/oft/v1/info", timer.address))
+        .timeout(TIMER_ANSWER)
+        .send()
+        .await
+        .map_err(unreachable)?
+        .error_for_status()
+        .map_err(unreachable)?
+        .json()
+        .await
+        .map_err(unreachable)
+}
+
 async fn read_config(timer: &Timer) -> Result<OftConfig, TimerError> {
     let unreachable = |e: reqwest::Error| unreachable(timer, &e);
     reqwest::Client::new()
@@ -1766,6 +1794,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_profile_saved_in_one_unit_is_not_applied_once_the_timer_measures_in_another() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let timer = registry.timers().records()[0].id.clone();
+        let profiles = uri.replace("/config", "/profiles");
+        // Saved while the timer's receiver reported tenths of a dB.
+        registry.timers().report(&timer, |status| {
+            status.level_unit = Some(SignalUnit::TenthsDb);
+        });
+        let (_, at_first) = call(&registry, "GET", &uri, None).await;
+        let body = serde_json::json!({"name": "Garage", "config": at_first});
+        let (_, saved) = call(&registry, "POST", &profiles, Some(body)).await;
+        assert_eq!(saved["level_unit"], "TenthsDb", "{saved}");
+        let apply = format!("{profiles}/{}/apply", saved["id"].as_str().unwrap());
+        // The receiver comes back measuring millivolts. The profile's 150 would now mean
+        // 150 mV, not 15 dB: it is refused, in words, and the timer is not written to.
+        registry.timers().report(&timer, |status| {
+            status.level_unit = Some(SignalUnit::Millivolts);
+        });
+        let (status, _) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, before) = call(&registry, "GET", &uri, None).await;
+        let (status, refused) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        let message = refused["message"].as_str().unwrap();
+        assert!(
+            message.contains("dB") && message.contains("millivolts"),
+            "{message}"
+        );
+        let (_, after) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(after, before);
+        // Back in dB, it applies.
+        registry.timers().report(&timer, |status| {
+            status.level_unit = Some(SignalUnit::TenthsDb);
+        });
+        let (status, applied) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::OK, "{applied}");
+        assert_eq!(applied, at_first);
+    }
+
+    #[tokio::test]
     async fn a_profile_the_timer_did_not_take_is_refused_and_does_not_become_active() {
         let (registry, uri) = with_timer(Fake::Forgetful).await;
         let profiles = uri.replace("/config", "/profiles");
@@ -2013,6 +2081,7 @@ mod tests {
         let mut listener = directory.listen(&timer.id).unwrap();
         let levels = TimerLive::Levels(vec![SeatLevels {
             seat: SeatRef("0".into()),
+            unit: SignalUnit::TenthsDb,
             level: Some(-880),
             floor: Some(-900),
             enter: -750,

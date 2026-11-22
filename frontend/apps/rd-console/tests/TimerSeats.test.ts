@@ -45,8 +45,16 @@ const CONFIG: TimerConfig = {
 };
 
 const LEVELS: SeatLevels[] = [
-  { seat: '0', level: -773, floor: -921, enter: -771, exit: -821, crossing: true },
-  { seat: '1', enter: -771, exit: -821, crossing: false }
+  {
+    seat: '0',
+    unit: 'TenthsDbm',
+    level: -773,
+    floor: -921,
+    enter: -771,
+    exit: -821,
+    crossing: true
+  },
+  { seat: '1', unit: 'TenthsDbm', enter: -771, exit: -821, crossing: false }
 ];
 
 const CHUNK: SignalChunk = {
@@ -197,6 +205,45 @@ describe('TimerSeats', () => {
     feed.handlers!.onLevels([{ ...LEVELS[0], level: -900, crossing: false }, LEVELS[1]]);
     const dark = await within(one).findByText('No crossing');
     expect(dark).not.toHaveClass('lit');
+  });
+
+  it('shows and sends millivolts on a timer that measures millivolts', async () => {
+    // An OFT timer whose receiver reads a signal-strength pin (spec v0.8). Its settings are
+    // the same bare numbers; the timer says they are millivolts.
+    const mv = timerView(ID, 'Gate', 2, { level_unit: 'Millivolts' });
+    const config: TimerConfig = { ...CONFIG, threshold: { Manual: { enter: 850, exit: 810 } } };
+    const { feed, putTimerConfigImpl } = open(
+      { getTimerConfigImpl: vi.fn(async () => structuredClone(config)) },
+      mv
+    );
+    const one = await waitFor(() => seatRow('Seat 1'));
+    // 850 is 850 mV. Read as tenths of a dB it would have shown 85.
+    const enter = screen.getByLabelText('Enter level, in mV');
+    expect(enter).toHaveValue(850);
+    expect(screen.getByLabelText('Exit level, in mV')).toHaveValue(810);
+    expect(screen.queryByLabelText('Enter level, in dB')).toBeNull();
+
+    feed.handlers!.onLevels([
+      {
+        seat: '0',
+        unit: 'Millivolts',
+        level: 742,
+        floor: 380,
+        enter: 850,
+        exit: 810,
+        crossing: false
+      }
+    ]);
+    await waitFor(() => expect(within(one).getByTestId('seat-live')).toHaveTextContent('742 mV'));
+    expect(within(one).getByLabelText('Seat 1 levels')).toHaveTextContent('Enter 850 mV');
+
+    // A typed level goes to the timer as millivolts, not ten times it.
+    await fireEvent.input(enter, { target: { value: '900' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+    await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalled());
+    expect(putTimerConfigImpl.mock.calls[0][2].threshold).toEqual({
+      Manual: { enter: 900, exit: 810 }
+    });
   });
 
   it('keeps edits as a draft, then applies the whole settings and takes what came back', async () => {
@@ -493,7 +540,15 @@ describe('TimerSeats', () => {
       await waitFor(() => seatRow('Seat 1'));
       feed.handlers!.onLevels([
         LEVELS[0],
-        { seat: '1', level: -880, floor: -915, enter: -600, exit: -660, crossing: false }
+        {
+          seat: '1',
+          unit: 'TenthsDbm',
+          level: -880,
+          floor: -915,
+          enter: -600,
+          exit: -660,
+          crossing: false
+        }
       ]);
       const one = seatRow('Seat 1');
       const two = seatRow('Seat 2');
