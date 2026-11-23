@@ -8,6 +8,7 @@ import {
   formatRaceMoment,
   raceMicrosAt,
   startInVideoMicros,
+  stepOneFrame,
   videoChoices,
   videoSecondsAt
 } from '../src/lib/marshalVideo.js';
@@ -96,5 +97,68 @@ describe('lining the video up with the race', () => {
     expect(formatRaceMoment(10.5 * S)).toBe('10.500 s');
     expect(formatRaceMoment(0)).toBe('0.000 s');
     expect(formatRaceMoment(-1.2 * S)).toBe('-1.200 s');
+  });
+});
+
+describe('stepOneFrame', () => {
+  /** A paused player of `fps` video, `seconds` long: it shows the frame a time falls in. */
+  function film(fps: number, seconds = 10) {
+    const asked: number[] = [];
+    const show = (at: number): Promise<number | undefined> => {
+      asked.push(at);
+      const last = Math.round(seconds * fps) - 1;
+      return Promise.resolve(Math.min(last, Math.floor(at * fps + 1e-9)) / fps);
+    };
+    return { asked, show };
+  }
+  const GUESS = 1 / 60;
+
+  it.each([24, 25, 30, 50, 60])('moves one picture per press on %i fps video', async (fps) => {
+    const { show } = film(fps);
+    let at = 2;
+    for (let press = 1; press <= 5; press++) {
+      at = (await stepOneFrame(1, at, GUESS, 10, show))!;
+      expect(at).toBeCloseTo(2 + press / fps, 9);
+    }
+    for (let press = 4; press >= 0; press--) {
+      at = (await stepOneFrame(-1, at, GUESS, 10, show))!;
+      expect(at).toBeCloseTo(2 + press / fps, 9);
+    }
+  });
+
+  it('looks a second time when the first look is still the same picture', async () => {
+    // The fault this cures: 1/60 s into a 30 fps frame is the same frame.
+    const { asked, show } = film(30);
+    expect(await stepOneFrame(1, 2, GUESS, 10, show)).toBeCloseTo(2 + 1 / 30, 9);
+    expect(asked).toHaveLength(2);
+  });
+
+  it('moves in one look once the frame length is known', async () => {
+    const { asked, show } = film(30);
+    expect(await stepOneFrame(1, 2, 1 / 30, 10, show)).toBeCloseTo(2 + 1 / 30, 9);
+    expect(await stepOneFrame(-1, 2, 1 / 30, 10, show)).toBeCloseTo(2 - 1 / 30, 9);
+    expect(asked).toHaveLength(2);
+  });
+
+  it('stays on the first and the last picture', async () => {
+    const { asked, show } = film(30, 1);
+    expect(await stepOneFrame(-1, 0, GUESS, 1, show)).toBe(0);
+    expect(await stepOneFrame(1, 29 / 30, GUESS, 1, show)).toBeCloseTo(29 / 30, 9);
+    expect(Math.min(...asked)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...asked)).toBeLessThanOrEqual(1);
+  });
+
+  it('gives up on a video whose picture never changes', async () => {
+    let looks = 0;
+    const stuck = (): Promise<number> => Promise.resolve(((looks += 1), 2));
+    expect(await stepOneFrame(1, 2, GUESS, Number.NaN, stuck)).toBe(2);
+    expect(looks).toBe(12);
+  });
+
+  it('stops when the player does not answer', async () => {
+    let looks = 0;
+    const silent = (): Promise<undefined> => Promise.resolve(((looks += 1), undefined));
+    expect(await stepOneFrame(1, 2, GUESS, 10, silent)).toBeUndefined();
+    expect(looks).toBe(1);
   });
 });
