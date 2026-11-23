@@ -87,5 +87,48 @@ export function formatRaceMoment(raceMicros: number): string {
 
 /** The speeds the player offers, slowest first. */
 export const SPEEDS: readonly number[] = [0.25, 0.5, 1];
-/** One step of the frame buttons, in seconds: a frame of 60 fps video. */
+/**
+ * The frame length the frame buttons start from, in seconds: a frame of 60 fps video. It is
+ * only a first guess. The player learns the real length from the video itself.
+ */
 export const FRAME_SECONDS = 1 / 60;
+/** How many times one press of a frame button looks further on before it gives up. */
+const FRAME_TRIES = 12;
+
+/**
+ * Move a paused video one picture forward (`dir` 1) or back (`dir` -1), whatever its frame
+ * rate is. Resolves with the time of the picture it ends on, or `undefined` when the player
+ * showed nothing.
+ *
+ * A video's frame rate cannot be asked for, and a step of a fixed length is wrong for most
+ * files: on 30 fps video, 1/60 s is half a frame, so every other press lands on the picture
+ * already showing. So this looks instead. It goes on by `frame` seconds, asks which picture
+ * the player then shows, and goes on again until that picture is a new one.
+ *
+ * - `from`: the time of the picture showing now.
+ * - `frame`: how long a frame is thought to be. Too short costs a second look. Too long
+ *   skips a picture, so a guess must be short.
+ * - `duration`: the video's length in seconds, when it is known.
+ * - `show`: move the player to a time, and resolve with the time of the picture it shows.
+ *
+ * Each look aims a quarter of a frame past where the picture should begin, so rounding in
+ * either number cannot put it one picture out.
+ */
+export async function stepOneFrame(
+  dir: 1 | -1,
+  from: number,
+  frame: number,
+  duration: number,
+  show: (seconds: number) => Promise<number | undefined>
+): Promise<number | undefined> {
+  const end = Number.isFinite(duration) ? duration : Infinity;
+  let shown: number | undefined;
+  for (let tries = 1; tries <= FRAME_TRIES; tries++) {
+    const target = Math.min(end, Math.max(0, from + dir * tries * frame + frame / 4));
+    shown = await show(target);
+    if (shown === undefined || shown !== from) return shown;
+    // The first or last picture: there is nothing further on to look for.
+    if (target <= 0 || target >= end) return shown;
+  }
+  return shown;
+}

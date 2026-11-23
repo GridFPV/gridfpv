@@ -25,6 +25,7 @@
     formatRaceMoment,
     raceMicrosAt,
     startInVideoMicros,
+    stepOneFrame,
     videoChoices,
     videoSecondsAt,
     type WhichVideo
@@ -67,11 +68,118 @@
     read();
   }
 
+  // ── One frame at a time ────────────────────────────────────────────────────
+  // The player is asked which picture it shows, so a press moves exactly one picture at any
+  // frame rate (see `stepOneFrame`). Nothing here is reactive: it is the player's own state.
+  /** The time of the picture on screen, in seconds into the video, once the player said. */
+  let shown: number | undefined;
+  /** How long one frame of this video is, once a step has measured it. */
+  let frameSeconds: number | undefined;
+  /** Presses not yet carried out: forward counts up, back counts down. */
+  let owed = 0;
+  let stepping = false;
+
+  /** Whether a player can say which picture it shows. An old browser's cannot. */
+  function seesFrames(video: HTMLVideoElement): boolean {
+    return typeof (video as Partial<HTMLVideoElement>).requestVideoFrameCallback === 'function';
+  }
+
+  // Each video is its own player. It tells of every picture it shows, playing or not.
+  $effect(() => {
+    const video = player;
+    shown = undefined;
+    frameSeconds = undefined;
+    owed = 0;
+    if (!video || !seesFrames(video)) return;
+    let live = true;
+    let call = video.requestVideoFrameCallback(function saw(_now, frame) {
+      if (!live) return;
+      shown = frame.mediaTime;
+      call = video.requestVideoFrameCallback(saw);
+    });
+    return () => {
+      live = false;
+      video.cancelVideoFrameCallback(call);
+    };
+  });
+
+  /**
+   * Move a player to a time, and say which picture it shows once it is there. `undefined`
+   * when the player never answers (its file went away): the buttons must not hang on it.
+   */
+  function show(video: HTMLVideoElement, seconds: number): Promise<number | undefined> {
+    return new Promise((resolve) => {
+      let there = false;
+      let seen: number | undefined;
+      let waiting = true;
+      const giveUp = setTimeout(() => finish(undefined), 1000);
+      function finish(at: number | undefined): void {
+        waiting = false;
+        clearTimeout(giveUp);
+        video.removeEventListener('seeked', arrived);
+        resolve(at);
+      }
+      // Both are waited for: the player has arrived, and it has drawn a picture since.
+      function check(): void {
+        if (waiting && there && seen !== undefined) finish(seen);
+      }
+      function arrived(): void {
+        there = true;
+        check();
+      }
+      video.requestVideoFrameCallback(function saw(_now, frame) {
+        if (!waiting) return;
+        seen = frame.mediaTime;
+        check();
+        if (waiting) video.requestVideoFrameCallback(saw);
+      });
+      video.addEventListener('seeked', arrived);
+      video.currentTime = seconds;
+    });
+  }
+
+  async function carryOut(video: HTMLVideoElement): Promise<void> {
+    stepping = true;
+    try {
+      while (owed !== 0 && player === video) {
+        const dir = owed > 0 ? 1 : -1;
+        owed -= dir;
+        const from = shown;
+        if (from === undefined) {
+          // No picture has been shown yet, so there is none to compare with.
+          video.currentTime = Math.max(0, video.currentTime + dir * FRAME_SECONDS);
+          continue;
+        }
+        const to = await stepOneFrame(
+          dir,
+          from,
+          frameSeconds ?? FRAME_SECONDS,
+          video.duration,
+          (s) => show(video, s)
+        );
+        // The first step measures the frame. A shorter one seen later is nearer the truth.
+        if (to !== undefined) shown = to;
+        if (to !== undefined && to !== from) {
+          frameSeconds = Math.min(frameSeconds ?? Infinity, Math.abs(to - from));
+        }
+      }
+    } finally {
+      stepping = false;
+      read();
+    }
+  }
+
   function step(frames: number): void {
     if (!player) return;
     player.pause();
-    player.currentTime = Math.max(0, player.currentTime + frames * FRAME_SECONDS);
-    read();
+    if (!seesFrames(player)) {
+      // A player that cannot say which picture it shows: a fixed step is the best there is.
+      player.currentTime = Math.max(0, player.currentTime + frames * FRAME_SECONDS);
+      read();
+      return;
+    }
+    owed += frames;
+    if (!stepping) void carryOut(player);
   }
 
   function setSpeed(next: number): void {
