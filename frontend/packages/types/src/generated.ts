@@ -219,3 +219,4 @@ export type * from '@bindings/MyAccount';
 export type * from '@bindings/MyClub';
 export type * from '@bindings/MySignIn';
 export type * from '@bindings/RoleChange';
+export type * from '@bindings/SignInProvider';

@@ -15,6 +15,7 @@ use crate::page::Page;
 use crate::people;
 use crate::push;
 use crate::read;
+use crate::signin::{self, Provider};
 use crate::store::Store;
 
 /// The largest request body taken. A batch of log entries with signal in them is the big
@@ -31,6 +32,8 @@ pub struct AppState {
     /// it is set (`GRIDFPV_SERVER_PUBLIC_URL`). Sign-in needs it; a link printed on the
     /// command line uses it.
     pub public_url: Option<String>,
+    /// The providers people can sign in with here (`signin`).
+    pub providers: Arc<Vec<Provider>>,
 }
 
 impl AppState {
@@ -43,6 +46,13 @@ impl AppState {
         self
     }
 
+    /// Say which providers people can sign in with.
+    #[must_use]
+    pub fn with_providers(mut self, providers: Vec<Provider>) -> Self {
+        self.providers = Arc::new(providers);
+        self
+    }
+
     /// The server's state over a data folder, made ready if the folder is new.
     pub fn open(dir: &Path) -> Result<Self, BookError> {
         let accounts =
@@ -52,6 +62,7 @@ impl AppState {
             store: Store::new(dir),
             accounts: Arc::new(accounts),
             public_url: None,
+            providers: Arc::default(),
         })
     }
 }
@@ -82,7 +93,7 @@ async fn nothing_here() -> push::ApiError {
 /// The first parts of an address that belong to the API. An address under one of these that
 /// matches no route is a mistake to say so, and never the page: a program asking for JSON
 /// must not be handed HTML.
-const API_ROOTS: [&str; 3] = ["/api", "/push", "/public"];
+const API_ROOTS: [&str; 4] = ["/api", "/push", "/public", "/auth"];
 
 fn is_api_path(path: &str) -> bool {
     API_ROOTS.iter().any(|root| {
@@ -140,6 +151,9 @@ pub fn router(state: AppState) -> Router {
                 .route("/event/timers", get(read::get_timers))
                 .route("/event/channels", get(read::get_channels)),
         )
+        .route("/api/sign-in/providers", get(signin::get_providers))
+        .route("/auth/{provider}/start", get(signin::get_start))
+        .route("/auth/{provider}/callback", get(signin::get_callback))
         .route("/api/me", get(people::get_me).patch(people::patch_me))
         .route(
             "/api/me/sign-ins/{provider}/{subject}",

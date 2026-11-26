@@ -3,7 +3,7 @@
 
 use gridfpv_serverd::accounts::{
     AccountError, AccountId, Accounts, Act, INVITE_PREFIX, Invite, InviteKind, NewInvite,
-    NewSignIn, Role, SESSION_MS, Standing,
+    NewSignIn, PENDING_MS, PendingSignIn, Role, SESSION_MS, Standing,
 };
 use gridfpv_serverd::book::ClubId;
 
@@ -1078,4 +1078,106 @@ fn members_are_listed_by_name_whatever_the_case() {
         .map(|(a, _)| a.name)
         .collect();
     assert_eq!(names, ["Alpha", "bravo", "charlie"]);
+}
+
+// ── A sign-in that is under way ─────────────────────────────────────────────
+
+fn pending(provider: &str) -> PendingSignIn {
+    PendingSignIn {
+        provider: provider.into(),
+        verifier: "the-verifier".into(),
+        invite: Some("gfi_abc".into()),
+        add_to: None,
+    }
+}
+
+#[test]
+fn a_sign_in_under_way_is_given_back_once_and_only_for_its_own_state() {
+    let accounts = Accounts::in_memory().unwrap();
+    accounts
+        .start_sign_in("state-one", &pending("discord"), NOW)
+        .unwrap();
+    accounts
+        .start_sign_in("state-two", &pending("google"), NOW)
+        .unwrap();
+    for wrong in ["", "state-on", "state-onex", "STATE-ONE"] {
+        assert!(
+            accounts.take_sign_in(wrong, NOW).unwrap().is_none(),
+            "{wrong:?}"
+        );
+    }
+    assert_eq!(
+        accounts.take_sign_in("state-one", NOW).unwrap(),
+        Some(pending("discord"))
+    );
+    assert!(
+        accounts.take_sign_in("state-one", NOW).unwrap().is_none(),
+        "given once"
+    );
+    assert_eq!(
+        accounts
+            .take_sign_in("state-two", NOW)
+            .unwrap()
+            .unwrap()
+            .provider,
+        "google"
+    );
+}
+
+#[test]
+fn a_sign_in_under_way_runs_out_after_ten_minutes() {
+    let accounts = Accounts::in_memory().unwrap();
+    accounts
+        .start_sign_in("fresh", &pending("discord"), NOW)
+        .unwrap();
+    accounts
+        .start_sign_in("late", &pending("discord"), NOW)
+        .unwrap();
+    assert!(
+        accounts
+            .take_sign_in("fresh", NOW + PENDING_MS - 1)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        accounts
+            .take_sign_in("late", NOW + PENDING_MS)
+            .unwrap()
+            .is_none()
+    );
+    // Looked at too late, it is gone all the same.
+    assert!(accounts.take_sign_in("late", NOW).unwrap().is_none());
+}
+
+#[test]
+fn a_sign_in_under_way_keeps_who_is_adding_it_and_its_state_is_not_kept_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let accounts = Accounts::open(dir.path()).unwrap();
+    let ace = join(
+        &accounts,
+        personal("north", Role::Pilot),
+        &discord("1"),
+        "Ace",
+    );
+    let adding = PendingSignIn {
+        add_to: Some(ace.clone()),
+        invite: None,
+        ..pending("google")
+    };
+    accounts
+        .start_sign_in("the-state-value", &adding, NOW)
+        .unwrap();
+    let bytes: Vec<u8> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flat_map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .collect();
+    assert!(!String::from_utf8_lossy(&bytes).contains("the-state-value"));
+    assert_eq!(
+        accounts
+            .take_sign_in("the-state-value", NOW)
+            .unwrap()
+            .unwrap()
+            .add_to,
+        Some(ace)
+    );
 }

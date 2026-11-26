@@ -5,6 +5,7 @@
 #   gridfpv-serverctl token list
 #   gridfpv-serverctl token revoke <id>
 #   gridfpv-serverctl club name "Recon FPV"
+#   gridfpv-serverctl owner invite
 #
 # It is the same as running gridfpv-server yourself, with the data folder and the user the
 # service uses. Running it as another user would leave files the service cannot change.
@@ -13,14 +14,22 @@ set -eu
 DATA=/var/lib/gridfpv-server
 USER_NAME=gridfpv
 
+# The server's own address, so a link it prints is one people can open. Only that one
+# setting is read from the file: the rest of it is secrets this command has no use for.
+ENV_FILE=/etc/gridfpv-server.env
+PUBLIC_URL=
+if [ -r "$ENV_FILE" ]; then
+    PUBLIC_URL=$(sed -n 's/^GRIDFPV_SERVER_PUBLIC_URL=//p' "$ENV_FILE" | tail -n 1)
+fi
+
 if [ "$#" -eq 0 ]; then
-    echo "usage: gridfpv-serverctl token new <label> | token list | token revoke <id> | club name <name>" >&2
+    echo "usage: gridfpv-serverctl token new <label> | token list | token revoke <id> | club name <name> | owner invite" >&2
     exit 2
 fi
 if [ "$(id -un)" = "$USER_NAME" ]; then
-    GRIDFPV_SERVER_DATA_DIR="$DATA" exec /usr/local/bin/gridfpv-server "$@"
+    GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_PUBLIC_URL="$PUBLIC_URL" exec /usr/local/bin/gridfpv-server "$@"
 fi
 if command -v runuser >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
-    exec runuser -u "$USER_NAME" -- env GRIDFPV_SERVER_DATA_DIR="$DATA" /usr/local/bin/gridfpv-server "$@"
+    exec runuser -u "$USER_NAME" -- env GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_PUBLIC_URL="$PUBLIC_URL" /usr/local/bin/gridfpv-server "$@"
 fi
-exec sudo -u "$USER_NAME" env GRIDFPV_SERVER_DATA_DIR="$DATA" /usr/local/bin/gridfpv-server "$@"
+exec sudo -u "$USER_NAME" env GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_PUBLIC_URL="$PUBLIC_URL" /usr/local/bin/gridfpv-server "$@"
