@@ -6,6 +6,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
 import type { PushClub, ServerEvent } from '@gridfpv/types';
 import ServerHome from '../src/screens/ServerHome.svelte';
 import { eventView, heat, race, raceSeat } from './competition.js';
+import { fakePeople, fakeServer } from './serverPeopleFake.js';
 import { fakeLiveSession } from './support.js';
 
 beforeEach(() => {
@@ -57,7 +58,12 @@ function open(
       subscribeChanges: vi.fn(() => stop)
     })
   );
-  render(ServerHome, { baseUrl: 'https://grid.example.org', load, sourceFor });
+  render(ServerHome, {
+    baseUrl: 'https://grid.example.org',
+    load,
+    sourceFor,
+    people: fakePeople(fakeServer({ providers: [] }))
+  });
   return { load, sourceFor, stop };
 }
 
@@ -202,6 +208,7 @@ describe('ServerHome', () => {
     render(ServerHome, {
       baseUrl: 'https://grid.example.org',
       load,
+      people: fakePeople(fakeServer({ providers: [] })),
       sourceFor: () => fakeLiveSession(racing(), { subscribeChanges: vi.fn(() => stop) })
     });
     await waitFor(() => expect(screen.getByTestId('server-offline')).toBeVisible());

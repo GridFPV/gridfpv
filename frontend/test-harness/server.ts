@@ -28,6 +28,8 @@ export interface RemoteServer {
   club: string;
   /** Everything it has printed. */
   readLogs(): string;
+  /** Run one of the server's commands on its data (`token new x`), and give what it printed. */
+  run(args: string[]): string;
   /** Stop it and remove its data. */
   stop(): Promise<void>;
 }
@@ -48,7 +50,12 @@ function freePort(): Promise<number> {
  * `assets` is the folder with the built console, which the server shows as its own page.
  * Left out, the server takes pushes and answers the API and has no page.
  */
-export async function startServer(club = 'E2E Club', assets?: string): Promise<RemoteServer> {
+export async function startServer(
+  club = 'E2E Club',
+  assets?: string,
+  /** More settings for the server, as its environment: sign-in, say. */
+  settings: (baseUrl: string) => Record<string, string> = () => ({})
+): Promise<RemoteServer> {
   if (!existsSync(SERVER_BIN)) {
     const built = spawnSync('cargo', ['build', '-p', 'gridfpv-serverd'], {
       cwd: repoRoot,
@@ -60,8 +67,9 @@ export async function startServer(club = 'E2E Club', assets?: string): Promise<R
   }
   const data = mkdtempSync(join(tmpdir(), 'gridfpv-server-e2e-'));
   const port = await freePort();
-  const env = {
+  const env: Record<string, string | undefined> = {
     ...process.env,
+    ...settings(`http://127.0.0.1:${port}`),
     GRIDFPV_SERVER_DATA_DIR: data,
     GRIDFPV_SERVER_ADDR: `127.0.0.1:${port}`,
     // A folder with no page in it, when none is given: never the checkout's own by chance.
@@ -115,5 +123,5 @@ export async function startServer(club = 'E2E Club', assets?: string): Promise<R
     }
     await new Promise((wait) => setTimeout(wait, 100));
   }
-  return { baseUrl, token, club, readLogs: () => logs, stop };
+  return { baseUrl, token, club, readLogs: () => logs, stop, run: cli };
 }

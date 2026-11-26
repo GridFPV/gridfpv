@@ -374,6 +374,78 @@ async fn the_real_providers_are_asked_at_their_documented_addresses_for_no_more_
     assert_eq!(google.subject_field, "sub", "never the email");
 }
 
+#[test]
+fn providers_are_read_from_settings_and_one_with_a_setting_missing_is_left_off() {
+    let settings = |pairs: &[(&str, &str)]| -> Vec<Provider> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (format!("GRIDFPV_SERVER_{k}"), (*v).to_owned()))
+            .collect();
+        Provider::from_settings(|key| map.get(key).cloned())
+    };
+    let ids = |found: &[Provider]| -> Vec<String> { found.iter().map(|p| p.id.clone()).collect() };
+
+    assert!(settings(&[]).is_empty());
+    // Half a provider is no provider: an id with no secret, a secret that is only spaces.
+    assert!(settings(&[("DISCORD_CLIENT_ID", "abc")]).is_empty());
+    assert!(
+        settings(&[
+            ("DISCORD_CLIENT_ID", "abc"),
+            ("DISCORD_CLIENT_SECRET", "   ")
+        ])
+        .is_empty()
+    );
+    let both = settings(&[
+        ("DISCORD_CLIENT_ID", " abc "),
+        ("DISCORD_CLIENT_SECRET", "s1"),
+        ("GOOGLE_CLIENT_ID", "def"),
+        ("GOOGLE_CLIENT_SECRET", "s2"),
+    ]);
+    assert_eq!(ids(&both), ["discord", "google"]);
+    assert_eq!(
+        both[0].client_id, "abc",
+        "spaces around a value are dropped"
+    );
+
+    // A sign-in service of the owner's own.
+    let own = [
+        ("OIDC_NAME", "Club login"),
+        ("OIDC_AUTHORIZE_URL", "https://id.club.example/authorize"),
+        ("OIDC_TOKEN_URL", "https://id.club.example/token"),
+        ("OIDC_USERINFO_URL", "https://id.club.example/userinfo"),
+        ("OIDC_CLIENT_ID", "grid"),
+        ("OIDC_CLIENT_SECRET", "s3"),
+    ];
+    let found = settings(&own);
+    assert_eq!(ids(&found), ["oidc"]);
+    assert_eq!(found[0].name, "Club login");
+    assert_eq!(found[0].scope, "openid profile");
+    assert_eq!(found[0].subject_field, "sub");
+    assert_eq!(found[0].user_url, "https://id.club.example/userinfo");
+    // Any one of its settings missing leaves it off.
+    for missing in 0..own.len() {
+        let mut less = own.to_vec();
+        less.remove(missing);
+        assert!(settings(&less).is_empty(), "without {}", own[missing].0);
+    }
+    // Its addresses must be HTTPS, or this same computer.
+    for (bad, ok) in [
+        ("http://id.club.example/token", false),
+        ("ftp://id.club.example/token", false),
+        ("id.club.example/token", false),
+        ("javascript:alert(1)", false),
+        ("http://127.0.0.1:9000/token", true),
+        ("http://localhost:9000/token", true),
+    ] {
+        let mut changed = own.to_vec();
+        changed[2] = ("OIDC_TOKEN_URL", bad);
+        assert_eq!(!settings(&changed).is_empty(), ok, "{bad}");
+    }
+    let mut scoped = own.to_vec();
+    scoped.push(("OIDC_SCOPE", "openid"));
+    assert_eq!(settings(&scoped)[0].scope, "openid");
+}
+
 #[tokio::test]
 async fn the_page_is_told_which_providers_are_set_up_and_none_when_the_server_has_no_address() {
     let rig = rig().await;

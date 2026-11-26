@@ -191,7 +191,7 @@ A token that is taken back stops working straight away.
 People can have an account on your server. They sign in with Discord or Google. Grid never
 sees a password. Nobody can make an account without an invite.
 
-This part is being built. Signing in works, and the pages for it are not there yet.
+The server's page has **Sign in** at the top once a provider is set up.
 
 ### 1. Tell the server its own address
 
@@ -233,6 +233,13 @@ The redirect must match exactly, down to the `https` and no slash on the end.
 Grid asks a provider only who the person is: an id and a name. It does not ask for their
 email.
 
+**Your own sign-in service**
+
+A club that runs its own sign-in service (anything that speaks OpenID Connect) can use it
+too. Give the server its name for the button, its three addresses, and the app's id and
+secret. They are in `gridfpv-server.env`, under `OIDC`. Its redirect is
+`https://grid.example.org/auth/oidc/callback`.
+
 ### 3. Give the server the two values
 
 - **Without Docker:** put them in `/etc/gridfpv-server.env`, then run
@@ -256,6 +263,22 @@ gridfpv-serverctl owner invite
 
 It prints a link. Open it and sign in. Whoever does becomes an owner of the server. The
 link works once, and for one day.
+
+### 5. Invite your club
+
+Open the server's page, sign in, and open your account from the top corner. An owner sees
+**Members and invites** for each club. From there:
+
+- **One person:** make an invite for someone, pick what they join as, and send them the
+  link. It works once. Make your club's directors this way.
+- **Anyone with the link:** one link to post where your club talks. You set how many
+  people may use it and how many days it lasts. Everyone who uses it joins as a pilot.
+
+A link is shown once, when you make it. If you lose it, take the invite back and make
+another.
+
+Directors can invite to their own club and change the roles of its members. They cannot
+touch another club. A club always keeps at least one director.
 
 ## What is kept
 
@@ -283,6 +306,7 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
 
 ## What it does not do yet
 
-- Accounts are being built. Anyone can look. Only a director with a token can send.
+- An account does not do much yet: results are not tied to accounts, and a director still
+  sends events with a link token. Anyone can look.
 - There is one club on a server.
 - Videos are not stored.
