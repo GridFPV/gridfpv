@@ -6,12 +6,15 @@
 //! gridfpv-server token list            the tokens that were made
 //! gridfpv-server token revoke <id>     take a token back
 //! gridfpv-server club name <name>      name the club
+//! gridfpv-server owner invite          make a link that makes whoever opens it an owner
 //! ```
 //!
 //! Set from the environment:
 //!
 //! - `GRIDFPV_SERVER_DATA_DIR`: where everything is kept. Default `./gridfpv-server-data`.
 //! - `GRIDFPV_SERVER_ADDR`: the address to listen on. Default `127.0.0.1:8470`.
+//! - `GRIDFPV_SERVER_PUBLIC_URL`: the address people open, such as
+//!   `https://grid.example.org`. Signing in needs it.
 //! - `GRIDFPV_SERVER_ASSETS`: a folder with the web page (the built console). Not needed in
 //!   a build with the page inside it (`embed-page`). With no page, the server still takes
 //!   pushes and answers the API.
@@ -37,7 +40,8 @@ const USAGE: &str = "usage:
   gridfpv-server token new <label>     make a link token for a Director
   gridfpv-server token list            list the tokens
   gridfpv-server token revoke <id>     take a token back
-  gridfpv-server club name <name>      name the club";
+  gridfpv-server club name <name>      name the club
+  gridfpv-server owner invite          make a link that makes its user an owner";
 
 fn data_dir() -> PathBuf {
     std::env::var_os("GRIDFPV_SERVER_DATA_DIR")
@@ -55,6 +59,7 @@ fn main() -> ExitCode {
         ["token", "list"] => token_list(),
         ["token", "revoke", id] => token_revoke(id),
         ["club", "name", name] => club_name(name),
+        ["owner", "invite"] => owner_invite(),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -80,7 +85,7 @@ fn serve() -> Done {
         .parse()
         .map_err(|e| format!("GRIDFPV_SERVER_ADDR is not an address like {DEFAULT_ADDR}: {e}"))?;
     let dir = data_dir();
-    let state = AppState::open(&dir)?;
+    let state = AppState::open(&dir)?.at(public_url());
     let asked = std::env::var_os("GRIDFPV_SERVER_ASSETS")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from);
@@ -169,6 +174,38 @@ fn token_revoke(id: &str) -> Done {
     } else {
         Err(format!("there is no token in use with the id {id:?}").into())
     }
+}
+
+fn public_url() -> Option<String> {
+    std::env::var("GRIDFPV_SERVER_PUBLIC_URL").ok()
+}
+
+/// A link that makes whoever opens it and signs in an owner of this server. It works once
+/// and for a day. This is how the first owner is made (§13.8), and how another is added.
+fn owner_invite() -> Done {
+    use gridfpv_serverd::accounts::{Accounts, InviteKind, NewInvite};
+    let accounts = Accounts::open(&data_dir())?;
+    let now = gridfpv_serverd::people::now_ms();
+    let (_, secret) = accounts.new_invite(
+        NewInvite {
+            kind: InviteKind::Owner,
+            label: "Owner setup".to_owned(),
+            max_uses: 1,
+            expires_at: Some(now + 24 * 60 * 60 * 1000),
+        },
+        None,
+        now,
+    )?;
+    let base = public_url()
+        .map(|url| url.trim().trim_end_matches('/').to_owned())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| "https://<your server>".to_owned());
+    println!("Open this link and sign in. Whoever does becomes an owner of this server:");
+    println!();
+    println!("  {base}/#/invite/{secret}");
+    println!();
+    println!("It works once, and for one day. It is not kept here and cannot be shown again.");
+    Ok(())
 }
 
 fn club_name(name: &str) -> Done {

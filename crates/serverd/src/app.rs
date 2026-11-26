@@ -9,8 +9,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
+use crate::accounts::Accounts;
 use crate::book::{Book, BookError};
 use crate::page::Page;
+use crate::people;
 use crate::push;
 use crate::read;
 use crate::store::Store;
@@ -24,14 +26,32 @@ const BODY_MAX: usize = 32 * 1024 * 1024;
 pub struct AppState {
     pub book: Arc<Book>,
     pub store: Store,
+    pub accounts: Arc<Accounts>,
+    /// The address people reach this server at, such as `https://grid.example.org`, when
+    /// it is set (`GRIDFPV_SERVER_PUBLIC_URL`). Sign-in needs it; a link printed on the
+    /// command line uses it.
+    pub public_url: Option<String>,
 }
 
 impl AppState {
+    /// Say where people reach this server. A slash on the end is dropped.
+    #[must_use]
+    pub fn at(mut self, public_url: Option<String>) -> Self {
+        self.public_url = public_url
+            .map(|url| url.trim().trim_end_matches('/').to_owned())
+            .filter(|url| !url.is_empty());
+        self
+    }
+
     /// The server's state over a data folder, made ready if the folder is new.
     pub fn open(dir: &Path) -> Result<Self, BookError> {
+        let accounts =
+            Accounts::open(dir).map_err(|e| BookError::Io(std::io::Error::other(e.to_string())))?;
         Ok(Self {
             book: Arc::new(Book::open(dir)?),
             store: Store::new(dir),
+            accounts: Arc::new(accounts),
+            public_url: None,
         })
     }
 }
@@ -120,6 +140,34 @@ pub fn router(state: AppState) -> Router {
                 .route("/event/timers", get(read::get_timers))
                 .route("/event/channels", get(read::get_channels)),
         )
+        .route("/api/me", get(people::get_me).patch(people::patch_me))
+        .route(
+            "/api/me/sign-ins/{provider}/{subject}",
+            axum::routing::delete(people::delete_my_sign_in),
+        )
+        .route("/api/sign-out", axum::routing::post(people::post_sign_out))
+        .route("/api/invites/{secret}", get(people::get_invite))
+        .route(
+            "/api/invites/{secret}/accept",
+            axum::routing::post(people::post_accept_invite),
+        )
+        .route(
+            "/api/clubs/{club}/invites",
+            get(people::get_club_invites).post(people::post_club_invite),
+        )
+        .route(
+            "/api/clubs/{club}/invites/{id}",
+            axum::routing::delete(people::delete_club_invite),
+        )
+        .route("/api/clubs/{club}/members", get(people::get_members))
+        .route(
+            "/api/clubs/{club}/members/{account}",
+            axum::routing::put(people::put_member).delete(people::delete_member),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            people::same_site,
+        ))
         .layer(DefaultBodyLimit::max(BODY_MAX))
         .with_state(state)
 }

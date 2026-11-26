@@ -6,6 +6,8 @@
 //! - [`book`]: the clubs on this server, and the link tokens Directors push with.
 //! - [`store`]: the server's copy of each event's log.
 //! - [`page`]: the web page the server shows, from a folder or from inside the program.
+//! - [`accounts`]: accounts, how they sign in, their roles, and invites.
+//! - [`people`]: those over HTTP: who is signed in, invites, a club's members.
 //! - [`push`]: the routes a Director pushes to.
 //! - [`read`]: the routes anyone may read: an event, as a visitor may see it.
 //! - [`app`]: the one router.
@@ -18,6 +20,7 @@ pub mod accounts;
 pub mod app;
 pub mod book;
 pub mod page;
+pub mod people;
 pub mod push;
 pub mod read;
 pub mod store;
