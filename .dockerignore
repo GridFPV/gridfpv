@@ -1,0 +1,9 @@
+# Keep the build context small, and keep a host's build output and data out of an image.
+target
+**/node_modules
+**/dist
+frontend/test-results
+frontend/e2e-artifacts
+src-tauri/target
+.gridfpv-*
+gridfpv-server-data

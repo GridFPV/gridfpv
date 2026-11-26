@@ -1,0 +1,10 @@
+# Caddy gets a certificate for this name from Let's Encrypt and keeps it fresh.
+{$GRID_DOMAIN} {
+	encode zstd gzip
+
+	# The page that follows an event holds one request open for as long as it is watched.
+	# Nothing is buffered on its way to the browser.
+	reverse_proxy server:8470 {
+		flush_interval -1
+	}
+}
