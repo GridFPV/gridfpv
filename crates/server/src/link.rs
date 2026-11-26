@@ -438,9 +438,8 @@ impl From<LinkError> for ProtocolError {
 ///
 /// **The lists hold only what a visitor at the race may see.** They are the same lists the
 /// Public door gives (`spectate`): a callsign and a colour, not a real name; a timer's name
-/// and seats, not its address. Of the event's own details, its name, date and place are
-/// sent, and the director's description and organizer notes are not. The log itself is sent
-/// whole (§13.3).
+/// and seats, not its address. The event's own details all go: its name, date, place,
+/// description and organizer. The log itself is sent whole (§13.3).
 pub async fn header(
     registry: &EventRegistry,
     id: &EventId,
@@ -453,17 +452,17 @@ pub async fn header(
         )
     })?;
     // Every field is named, so one added later is not sent until someone decides here.
+    // All of an event's own details go up: what a server shows an event by (Ryan,
+    // 2026-11-27).
     let crate::events::EventMeta {
         id: meta_id,
         name,
         created_at,
         persistent,
-        // The date and the place are what a list of events shows an event by.
         date,
         location,
-        // The director's own notes about the event stay on the Director.
-        description: _,
-        organizer: _,
+        description,
+        organizer,
     } = meta;
     let meta = crate::events::EventMeta {
         id: meta_id,
@@ -472,8 +471,8 @@ pub async fn header(
         persistent,
         date,
         location,
-        description: None,
-        organizer: None,
+        description,
+        organizer,
     };
     let view = crate::control::with_event(registry, id, |session| {
         Ok(crate::view::EventView::build(session.state(), session.now))

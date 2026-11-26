@@ -240,8 +240,8 @@ async fn event(d: &Director, name: &str) -> String {
                 "name": name,
                 "date": "2026-11-27",
                 "location": "Main field",
-                "description": format!("{MARK}-eventnote"),
-                "organizer": format!("{MARK}-organizer")
+                "description": "Whoops only. Bring spare props.",
+                "organizer": "Recon FPV"
             }),
         )
         .await,
@@ -406,9 +406,12 @@ async fn what_the_director_keeps_from_visitors_does_not_leave_in_the_header() {
     assert_eq!(header["classes"].as_array().unwrap().len(), 1);
     assert_eq!(header["meta"]["name"], "Friday");
     assert_eq!(header["meta"]["location"], "Main field");
-    assert!(
-        header["meta"].get("description").is_none() && header["meta"].get("organizer").is_none()
+    // The event's own details all go up.
+    assert_eq!(
+        header["meta"]["description"],
+        "Whoops only. Bring spare props."
     );
+    assert_eq!(header["meta"]["organizer"], "Recon FPV");
 }
 
 #[tokio::test]

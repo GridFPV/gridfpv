@@ -125,6 +125,8 @@ pub async fn get_events(
             name: meta.name,
             date: meta.date,
             location: meta.location,
+            description: meta.description,
+            organizer: meta.organizer,
             created_at: meta.created_at,
         });
     }

@@ -114,6 +114,37 @@ describe('ServerHome', () => {
     expect(screen.queryByTestId('server-event-link')).toBeNull();
   });
 
+  it('shows who runs the event and what the director wrote about it, when given', async () => {
+    location.hash = '#/e/club/friday-night-764c5x';
+    open({
+      club: [
+        { ...FRIDAY, organizer: ' Recon FPV ', description: 'Whoops only.\nBring spare props.' },
+        SUNDAY
+      ]
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('server-event-organizer')).toHaveTextContent('Run by Recon FPV')
+    );
+    expect(screen.getByTestId('server-event-description').textContent?.trim()).toBe(
+      'Whoops only.\nBring spare props.'
+    );
+    // An event with neither has neither line.
+    go('#/e/club/sunday-cup-11aa22');
+    await waitFor(() => expect(screen.getByTestId('server-event')).toHaveTextContent('Sunday Cup'));
+    expect(screen.queryByTestId('server-event-organizer')).toBeNull();
+    expect(screen.queryByTestId('server-event-description')).toBeNull();
+  });
+
+  it('shows a description as text, whatever is in it', async () => {
+    location.hash = '#/e/club/friday-night-764c5x';
+    open({ club: [{ ...FRIDAY, description: '<img src=x onerror=alert(1)>', organizer: '   ' }] });
+    await waitFor(() =>
+      expect(screen.getByTestId('server-event-description').textContent).toContain('<img src=x')
+    );
+    expect(document.querySelector('img')).toBeNull();
+    expect(screen.queryByTestId('server-event-organizer')).toBeNull();
+  });
+
   it('goes from the list to an event and back, and stops reading the event it left', async () => {
     const { sourceFor, stop } = open();
     await waitFor(() => expect(links()).toHaveLength(2));

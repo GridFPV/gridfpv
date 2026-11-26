@@ -1851,17 +1851,22 @@ entry). The server takes a batch only when it continues the copy it holds. So:
 reads, and the server gives a page that time, so a countdown on a remote page is right
 even when the two clocks differ.
 
-**Choices made while building, for Ryan to confirm or change:**
+**Choices made while building.** Ryan agreed to 1 and 2, changed 3, and said 4 and 7 are
+fine for now (2026-11-27). 5 and 6 are not confirmed.
 
 1. **Every event is sent** once a server is linked. There is no switch for one event, and
    no "unlisted" yet (§13.9).
 2. **Pilots, classes and timers go up as a visitor may see them:** a callsign and a
    colour, not a real name. The log itself goes up whole, as agreed (§13.3), and the
    server leaves out of every answer what the Director's Public door leaves out.
-3. **An event's name, date and place are sent.** Its description and organizer are not.
+3. **An event's own details are all sent:** name, date, place, description and organizer.
+   (Ryan, 2026-11-27. The first build held the last two back.)
 4. **"Allow self-signed" is done by pasting the certificate** on the Server page. There
    is no step where Grid shows the certificate and the director accepts it (§13.5).
+   **Fine for now, not for a release** (Ryan, 2026-11-27): the show-and-accept step is
+   owed before this ships.
 5. **Plain HTTP is allowed to a server on the same computer** (`http://localhost`), and
    nowhere else. It is how a server is tried out.
 6. **Removing an event on the Director does not remove it from the server.**
-7. **Link tokens are made on the server's command line.** There is no page for the owner.
+7. **Link tokens are made on the server's command line.** There is no page for the owner
+   yet.

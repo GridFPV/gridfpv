@@ -10,6 +10,14 @@ export type ServerEvent = { id: EventId, name: string,
  */
 date?: string, location?: string, 
 /**
+ * What the director wrote about the event.
+ */
+description?: string, 
+/**
+ * Who runs it, as the director wrote it.
+ */
+organizer?: string, 
+/**
  * When the Director made the event, in milliseconds since 1970.
  */
 created_at: number, };
