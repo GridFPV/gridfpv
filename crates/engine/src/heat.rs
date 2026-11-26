@@ -339,6 +339,7 @@ mod tests {
                 first_lap: Default::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion,
             ranking: Some(RankingRule {

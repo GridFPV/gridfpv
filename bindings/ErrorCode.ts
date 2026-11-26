@@ -9,4 +9,4 @@
  * understand a new code treats it as it would [`ErrorCode::Internal`] — an error it
  * surfaces but cannot specifically branch on.
  */
-export type ErrorCode = "Unauthorized" | "UnknownScope" | "StaleCursor" | "VersionMismatch" | "BadRequest" | "Refused" | "Internal";
+export type ErrorCode = "Unauthorized" | "UnknownScope" | "StaleCursor" | "VersionMismatch" | "Forbidden" | "TooManyRequests" | "BadRequest" | "Refused" | "Internal";

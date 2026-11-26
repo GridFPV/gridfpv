@@ -4,7 +4,7 @@
  * in the Director's words, the keyboard, the lap callouts, and no raw id on the screen.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { EventMeta, EventView, ObsStatus, Pilot, VideoRun } from '@gridfpv/types';
 import RunPage from '../src/screens/RunPage.svelte';
@@ -211,6 +211,149 @@ describe('RunPage', () => {
       { DiscardRace: { race: saved.race, reason: 'FalseStart' } }
     ]);
     expectNoRawIds();
+  });
+
+  describe('marking a pilot out', () => {
+    const running = (seats = [raceSeat(0, 'p-1a'), raceSeat(1, 'p-2b')]) =>
+      race(HEAT, 1, 'Running', { started_at: 0, seats });
+    const during = (current: ReturnType<typeof running>) =>
+      eventView({ phases: [quali()], races: [current], current_race: current.race });
+    const seatCard = (name: RegExp) => screen.getByRole('listitem', { name });
+
+    it('a seat in a running race has an Out button that records the pilot as out', async () => {
+      const current = running();
+      const { session } = await open(during(current));
+      await fireEvent.click(screen.getByRole('button', { name: 'Mark Bee out' }));
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: { PilotOut: { race: current.race, pilot: 'p-2b' } }
+      });
+      expectNoRawIds();
+    });
+
+    it('a pilot who is out is badged, is no longer "on course", and can be put back in', async () => {
+      const current = running([
+        raceSeat(0, 'p-1a', { hole_shot: { crossing: 5, at: 1 } }),
+        raceSeat(1, 'p-2b', { hole_shot: { crossing: 6, at: 2 }, out: true })
+      ]);
+      const { session } = await open(during(current));
+      const ace = seatCard(/Ace/);
+      const bee = seatCard(/Bee/);
+      expect(within(ace).getByText('On course')).toBeVisible();
+      expect(within(bee).queryByText('On course')).toBeNull();
+      expect(bee).toHaveClass('out');
+      expect(ace).not.toHaveClass('out');
+      expect(within(bee).queryByRole('button', { name: 'Mark Bee out' })).toBeNull();
+      await fireEvent.click(within(bee).getByRole('button', { name: 'Put Bee back in' }));
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: { PilotBackIn: { race: current.race, pilot: 'p-2b' } }
+      });
+    });
+
+    it('is offered while a race is staging, running or stopped, and not otherwise', async () => {
+      for (const state of ['Staging', 'Running', 'Stopped'] as const) {
+        const current = race(HEAT, 1, state, {
+          started_at: 0,
+          stopped_at: state === 'Stopped' ? 4 * S : undefined,
+          seats: [raceSeat(0, 'p-1a'), raceSeat(1, 'p-2b')]
+        });
+        const { unmount } = await open(during(current));
+        expect(screen.getByRole('button', { name: 'Mark Ace out' })).toBeVisible();
+        unmount();
+      }
+      // No race yet: nobody can be out of it.
+      await open(eventView({ phases: [quali()] }));
+      expect(screen.queryByRole('button', { name: /^Mark .* out$/ })).toBeNull();
+    });
+
+    it('an open seat has nobody to mark out', async () => {
+      const current = running([raceSeat(0, 'p-1a'), raceSeat(1)]);
+      await open(during(current));
+      expect(screen.getAllByRole('button', { name: /^Mark .* out$/ })).toHaveLength(1);
+    });
+
+    it("shows the Director's sentence when it refuses", async () => {
+      const SAID = 'pilot Bee is already out of the race';
+      const current = running();
+      await open(during(current), {
+        sendCommand: vi.fn(async () =>
+          Promise.reject(Object.assign(new Error(SAID), { status: 409, code: 'Refused' }))
+        )
+      });
+      await fireEvent.click(screen.getByRole('button', { name: 'Mark Bee out' }));
+      expect(await screen.findByText(SAID)).toBeVisible();
+    });
+  });
+
+  describe('checking a pilot in to an open seat', () => {
+    const practice = () => heat(HEAT, 'Open Practice', ['Open', 'p-2b']);
+    const flying = (seat = raceSeat(0)) =>
+      race(HEAT, 1, 'Running', { started_at: 0, seats: [seat, raceSeat(1, 'p-2b')] });
+    const during = (current: ReturnType<typeof flying>) =>
+      eventView({ phases: [practice()], races: [current], current_race: current.race });
+    const PEOPLE: Pilot[] = [...PILOTS, { id: 'p-3c', callsign: 'Cat', vtx_types: [] }];
+    const openWith = (current: ReturnType<typeof flying>, over: Partial<LiveSession> = {}) =>
+      open(during(current), { listPilots: vi.fn(async () => PEOPLE), ...over });
+
+    it('an open seat in a running race offers the pilots with no seat of their own', async () => {
+      const current = flying();
+      const { session } = await openWith(current);
+      const picker = (await screen.findByLabelText(
+        'Check a pilot in to Seat 1'
+      )) as HTMLSelectElement;
+      // Bee has a seat of her own in this race, so she is not offered.
+      await waitFor(() => expect(optionTexts(picker)).toEqual(['Check in…', 'Ace', 'Cat']));
+      // A seat with a pilot named on it has no picker.
+      expect(screen.queryByLabelText('Check a pilot in to Seat 2')).toBeNull();
+      await fireEvent.change(picker, { target: { value: 'p-3c' } });
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: {
+          SeatTaken: { race: current.race, adapter: 'bench', seat: 'seat-1', pilot: 'p-3c' }
+        }
+      });
+      expectNoRawIds();
+    });
+
+    it('a seat a pilot has taken shows that pilot and only their laps, and can be dropped', async () => {
+      const current = flying(
+        raceSeat(0, undefined, {
+          holder: 'p-1a',
+          laps: [lap(1, 20), lap(2, 15), lap(3, 12)],
+          best_lap_micros: 12 * S,
+          stints: [
+            { pilot: 'p-1a', open: true, laps: [lap(2, 15), lap(3, 12)], best_lap_micros: 12 * S }
+          ]
+        })
+      );
+      const { session } = await openWith(current);
+      const card = screen.getByRole('listitem', { name: /Seat 1, Ace/ });
+      // The 20 s lap was flown before Ace took the seat. It is not hers.
+      expect(card.querySelector('[data-stat="laps"]')).toHaveTextContent('2');
+      const picker = within(card).getByLabelText('Check a pilot in to Seat 1') as HTMLSelectElement;
+      await waitFor(() => expect(optionTexts(picker)).toEqual(['Change pilot…', 'Cat']));
+      // "Out" is for a pilot named on a seat. A pilot who checked in drops the seat.
+      expect(within(card).queryByRole('button', { name: /^Mark .* out$/ })).toBeNull();
+      await fireEvent.click(within(card).getByRole('button', { name: 'Drop Ace from Seat 1' }));
+      await waitFor(() => expect(session.sendCommand).toHaveBeenCalled());
+      expect(vi.mocked(session.sendCommand).mock.calls[0][1]).toEqual({
+        Record: { SeatDropped: { race: current.race, adapter: 'bench', seat: 'seat-1' } }
+      });
+    });
+
+    it('is not offered before a race starts or once it has stopped', async () => {
+      const { unmount } = await open(eventView({ phases: [practice()] }));
+      expect(screen.queryByLabelText(/^Check a pilot in to/)).toBeNull();
+      unmount();
+      const stopped = race(HEAT, 1, 'Stopped', {
+        started_at: 0,
+        stopped_at: 4 * S,
+        seats: [raceSeat(0), raceSeat(1, 'p-2b')]
+      });
+      await openWith(stopped);
+      expect(screen.queryByLabelText(/^Check a pilot in to/)).toBeNull();
+    });
   });
 
   it('discarding for a false start asks who, records it, then discards with the reason', async () => {
@@ -943,6 +1086,44 @@ describe('RunPage: what times the heat', () => {
     expect(document.body.textContent).not.toContain(GATE_ID);
   });
 
+  it('says so when the event has a pass window and the timer has none', async () => {
+    await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {
+      listTimers: vi.fn(async () => [timerView(GATE_ID, 'Gate', 4)])
+    });
+    const warning = screen.getByRole('alert');
+    expect(warning).toHaveTextContent('Gate has no pass window.');
+    expect(warning).toHaveTextContent("The event's pass window of 0.4 s is not in force on it");
+    expect(document.body.textContent).not.toContain(GATE_ID);
+  });
+
+  it('says nothing of the pass window when the timer has one, or the event sets none', async () => {
+    // The timer has a pass window and took the event's.
+    await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { pass_window: true, pass_window_ms: 400 })
+      ])
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    cleanup();
+    // The event sets none: a timer with no pass window is missing nothing.
+    await open(eventView({ phases: [onGate()] }), {
+      listTimers: vi.fn(async () => [timerView(GATE_ID, 'Gate', 4)])
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it("says why, in the Director's words, when the pass window could not be put on the timer", async () => {
+    const SAID = 'Gate refused the change: pass_window_ms out of range.';
+    await open(eventView({ phases: [onGate()], lap_rules: { pass_window_micros: 400_000 } }), {
+      listTimers: vi.fn(async () => [
+        timerView(GATE_ID, 'Gate', 4, { pass_window: true, pass_window_problem: SAID })
+      ])
+    });
+    const warning = screen.getByRole('alert');
+    expect(warning).toHaveTextContent('The pass window could not be set on Gate.');
+    expect(warning).toHaveTextContent(SAID);
+  });
+
   it("warns in the Director's words when the heat's timer is not connected", async () => {
     const SAID = 'Nothing answered at 10.0.0.9:7270.';
     await open(eventView({ phases: [onGate()] }), {
@@ -991,5 +1172,190 @@ describe('RunPage: what times the heat', () => {
 
     await open(eventView({ phases: [quali()] }), {}, HEAT, { ontune: vi.fn() });
     expect(screen.queryByRole('link', { name: /^Tune/ })).toBeNull();
+  });
+});
+
+describe("RunPage: the heat on the timer is the Director's", () => {
+  const H2 = 'quali-b2c3';
+  const two = (over: Partial<EventView> = {}) =>
+    eventView({
+      phases: [quali(), heat(H2, 'Qualifying Heat 2', ['p-2b'])],
+      queue: [HEAT, H2],
+      ...over
+    });
+  const sent = (session: LiveSession) =>
+    vi.mocked(session.sendCommand).mock.calls.map((call) => call[1]);
+
+  it('shows the heat the Director says is on the timer, whatever the run order', async () => {
+    await open(two({ on_timer: H2 }), {}, null);
+    expect(heatPicker().selectedOptions[0].textContent).toContain('Qualifying Heat 2');
+  });
+
+  it('follows another console that puts a different heat on the timer', async () => {
+    const view = two({ on_timer: HEAT });
+    const { live } = await open(view, {}, null);
+    expect(heatPicker().selectedOptions[0].textContent).toContain('Qualifying Heat 1');
+    live.view = { ...view, cursor: 2, on_timer: H2 };
+    await waitFor(() =>
+      expect(heatPicker().selectedOptions[0].textContent).toContain('Qualifying Heat 2')
+    );
+  });
+
+  it('with nothing on the timer yet, tells the Director which heat it is showing, once', async () => {
+    const view = two();
+    const { session, live } = await open(view, {}, null);
+    await waitFor(() => expect(sent(session)).toEqual([{ PutOnTimer: { heat: HEAT } }]));
+    // More snapshots with nothing on the timer do not make it say so again.
+    live.view = { ...view, cursor: 2 };
+    live.view = { ...view, cursor: 3 };
+    await new Promise((done) => setTimeout(done, 20));
+    expect(sent(session)).toHaveLength(1);
+  });
+
+  it('says nothing when the Director already has a heat on the timer', async () => {
+    const { session } = await open(two({ on_timer: H2 }), {}, null);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(sent(session)).toEqual([]);
+  });
+
+  it('says nothing when there is no heat to show', async () => {
+    const { session } = await open(eventView(), {}, null);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(sent(session)).toEqual([]);
+  });
+
+  it('picking another heat asks for it to go on the timer, and does not write it itself', async () => {
+    const { session, nav } = await open(two({ on_timer: HEAT }), {}, null);
+    await fireEvent.change(heatPicker(), { target: { value: H2 } });
+    expect(nav.onrun).toHaveBeenCalledWith(H2);
+    expect(sent(session)).toEqual([]);
+  });
+
+  it('offers the next heat once this one is complete, by name, and not before', async () => {
+    const { nav } = await open(two({ on_timer: HEAT }), {}, null);
+    expect(screen.queryByTestId('next-heat')).toBeNull();
+    const done = two({
+      on_timer: HEAT,
+      queue: [H2],
+      phases: [quali({ complete: true }), heat(H2, 'Qualifying Heat 2', ['p-2b'])],
+      races: [race(HEAT, 1, 'Saved')]
+    });
+    const flown = await open(done, {}, null);
+    const next = within(flown.container).getByTestId('next-heat');
+    expect(next).toHaveTextContent('Next: Qualifying Heat 2');
+    await fireEvent.click(next);
+    expect(flown.nav.onrun).toHaveBeenCalledWith(H2);
+    expect(nav.onrun).not.toHaveBeenCalled();
+    expectNoRawIds();
+  });
+
+  it('offers no next heat when nothing else is lined up, or while a race is on', async () => {
+    const last = await open(
+      two({
+        on_timer: HEAT,
+        queue: [],
+        phases: [quali({ complete: true })],
+        races: [race(HEAT, 1, 'Saved')]
+      }),
+      {},
+      null
+    );
+    expect(within(last.container).queryByTestId('next-heat')).toBeNull();
+    const on = race(HEAT, 2, 'Running', { started_at: 1 });
+    const racing = await open(
+      two({
+        on_timer: HEAT,
+        queue: [H2],
+        phases: [quali({ complete: true }), heat(H2, 'Qualifying Heat 2', ['p-2b'])],
+        races: [on],
+        current_race: on.race
+      }),
+      {},
+      null
+    );
+    expect(within(racing.container).queryByTestId('next-heat')).toBeNull();
+  });
+});
+
+describe('RunPage: a finished heat shows how it ended', () => {
+  /** The seat cards. A card lists its laps too, and those are not cards. */
+  const seats = () =>
+    within(screen.getByRole('list', { name: 'Seats' }))
+      .getAllByRole('listitem')
+      .filter((item) => item.getAttribute('aria-label')?.startsWith('Seat'));
+  const flownRace = (number: number, state: 'Saved' | 'Discarded', aceLaps: number[]) =>
+    race(HEAT, number, state, {
+      started_at: 1,
+      stopped_at: 60 * S,
+      seats: [
+        raceSeat(0, 'p-1a', {
+          finish: 1,
+          laps: aceLaps.map((seconds, i) => lap(i + 1, seconds)),
+          best_lap_micros: Math.min(...aceLaps) * S
+        }),
+        raceSeat(1, 'p-2b', { finish: 2, laps: [lap(9, 20)], best_lap_micros: 20 * S })
+      ]
+    });
+
+  it('a complete heat shows its last saved race on the seat cards, not empty ones', async () => {
+    await open(
+      eventView({
+        phases: [quali({ complete: true })],
+        races: [flownRace(1, 'Saved', [11, 10.5, 12])]
+      })
+    );
+    const [ace, bee] = seats();
+    expect(ace).toHaveTextContent('Place P1');
+    expect(ace).toHaveTextContent('Laps 3');
+    expect(ace).toHaveTextContent('10.500');
+    expect(bee).toHaveTextContent('Place P2');
+    expect(bee).toHaveTextContent('20.000');
+  });
+
+  it('shows the last race that counts: a later one that was thrown out is passed over', async () => {
+    await open(
+      eventView({
+        phases: [quali({ complete: true })],
+        races: [flownRace(1, 'Saved', [11, 10.5]), flownRace(2, 'Discarded', [5, 5, 5, 5])]
+      })
+    );
+    expect(seats()[0]).toHaveTextContent('10.500');
+    expect(seats()[0]).not.toHaveTextContent('5.000');
+  });
+
+  it('a heat with races still to fly shows its lineup, ready, not the last race', async () => {
+    await open(
+      eventView({
+        phases: [quali()],
+        races: [flownRace(1, 'Saved', [11, 10.5, 12])]
+      })
+    );
+    expect(seats()[0]).not.toHaveTextContent('P1');
+    expect(seats()[0]).not.toHaveTextContent('10.500');
+    expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled();
+  });
+
+  it('a race that is on is always what the cards show', async () => {
+    const on = race(HEAT, 2, 'Running', {
+      started_at: 1,
+      seats: [raceSeat(0, 'p-1a', { laps: [lap(1, 7)] }), raceSeat(1, 'p-2b')]
+    });
+    await open(
+      eventView({
+        phases: [quali({ complete: true })],
+        races: [flownRace(1, 'Saved', [11, 10.5, 12]), on],
+        current_race: on.race
+      })
+    );
+    expect(seats()[0]).toHaveTextContent('7.000');
+    expect(seats()[0]).not.toHaveTextContent('10.500');
+  });
+
+  it('a complete heat with no saved race shows its lineup', async () => {
+    await open(eventView({ phases: [quali({ complete: true })] }));
+    expect(seats().map((seat) => seat.getAttribute('aria-label'))).toEqual([
+      'Seat 1, Ace',
+      'Seat 2, Bee'
+    ]);
   });
 });

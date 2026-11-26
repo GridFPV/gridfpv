@@ -28,7 +28,7 @@ const PILOTS: Pilot[] = [
   { id: 'p-2b', callsign: 'Bee', vtx_types: [] },
   { id: 'p-3c', callsign: 'Cat', vtx_types: [] }
 ];
-const CLASSES: Class[] = [{ id: 'cls-open', name: 'Open', source: 'Custom' }];
+const CLASSES: Class[] = [{ id: 'cls-open', name: 'Open' }];
 
 async function open(view: EventView, over: Partial<LiveSession> = {}) {
   const { live } = await openLive(view, {
@@ -322,6 +322,10 @@ describe('class standings', () => {
             class: 'cls-open',
             pilots: ['p-1a', 'p-2b', 'p-3c'],
             counted_phases: ['f-1', 'quali'],
+            phases: [
+              { phase: 'f-1', counts: true },
+              { phase: 'quali', counts: true }
+            ],
             standings: [
               { pilot: 'p-2b', position: 1, placed_by: 'f-1' },
               { pilot: 'p-1a', position: 2, placed_by: 'quali' },
@@ -345,11 +349,53 @@ describe('class standings', () => {
   it('says so when no phase counts toward a class, and points at the Details page', async () => {
     await open(
       eventView({
-        rosters: [{ class: 'cls-open', pilots: ['p-1a'], counted_phases: [], standings: [] }]
+        rosters: [
+          { class: 'cls-open', pilots: ['p-1a'], counted_phases: [], phases: [], standings: [] }
+        ]
       })
     );
     expect(screen.getByText(/No phase counts toward this class yet\./)).toBeVisible();
     expect(screen.getByRole('link', { name: 'Details page' })).toHaveAttribute('href', '#/event');
     expect(screen.queryByRole('table', { name: 'Standings of Open' })).toBeNull();
+  });
+
+  it('with nothing counting, shows no table of blanks even when the Director sends the roster in order', async () => {
+    // The Director lists every pilot of the class with a position and no phase. That is the
+    // roster again, not a result, and it used to push the real results off the screen.
+    await open(
+      raceDay({
+        rosters: [
+          {
+            class: 'cls-open',
+            pilots: ['p-1a', 'p-2b', 'p-3c'],
+            counted_phases: [],
+            phases: [],
+            standings: [
+              { pilot: 'p-1a', position: 1 },
+              { pilot: 'p-2b', position: 2 },
+              { pilot: 'p-3c', position: 3 }
+            ]
+          }
+        ]
+      })
+    );
+    expect(screen.getByRole('heading', { name: 'Open standings' })).toBeVisible();
+    expect(screen.queryByRole('table', { name: 'Standings of Open' })).toBeNull();
+    expect(document.body.textContent).not.toContain('Not placed yet');
+  });
+
+  it('comes after the phase results, which are what the page is opened for', async () => {
+    await open(
+      raceDay({
+        rosters: [
+          { class: 'cls-open', pilots: ['p-1a'], counted_phases: [], phases: [], standings: [] },
+          { class: 'cls-spec', pilots: ['p-2b'], counted_phases: [], phases: [], standings: [] }
+        ]
+      })
+    );
+    const titles = [...document.querySelectorAll('.gf-card-title')].map((t) => t.textContent);
+    expect(titles[0]).toBe('Phase results');
+    expect(titles.slice(1)).toHaveLength(2);
+    expect(titles.slice(1).every((title) => title?.endsWith(' standings'))).toBe(true);
   });
 });

@@ -36,6 +36,12 @@ pub trait Inputs {
     fn saved_races(&self, heat: &PhaseId) -> Vec<Vec<RaceEntry>>;
     /// Whether the director has said this heat is done.
     fn director_done(&self, heat: &PhaseId) -> bool;
+    /// The pilots who took an open seat in one of a heat's saved races (check-in), in the
+    /// order they first did. They have entries in [`Inputs::saved_races`] and join the
+    /// heat's field after the pilots named in its lineup.
+    fn checked_in(&self, _heat: &PhaseId) -> Vec<PilotId> {
+        Vec::new()
+    }
     /// The pilots the director has disqualified from exactly this phase. A disqualification
     /// also covers every phase beneath it.
     fn disqualified(&self, _phase: &PhaseId) -> Vec<PilotId> {
@@ -146,6 +152,7 @@ fn no_format() -> Format {
             first_lap: FirstLap::default(),
             stop_after_all_finish_micros: None,
             max_micros: None,
+            drop_idle_seat_micros: None,
         },
         completion: CompletionRule::DirectorDecides,
         ranking: None,
@@ -354,6 +361,14 @@ impl Eval<'_> {
 
         if !out.waiting {
             self.keep_seats(seats, &mut out.lineup);
+        }
+        // A pilot who took an open seat and flew is in the heat too, after the pilots its
+        // lineup names: the laps they flew while they had the seat are ranked. Laps flown
+        // on a seat nobody had are nobody's and rank nobody.
+        for pilot in self.inputs.checked_in(&def.id) {
+            if !out.field.contains(&pilot) {
+                out.field.push(pilot);
+            }
         }
 
         let fallback = no_format();
@@ -808,6 +823,7 @@ mod tests {
                 first_lap: Default::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -847,6 +863,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         }
     }
 
@@ -864,6 +881,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         }
     }
 
@@ -1114,6 +1132,7 @@ mod tests {
                 first_lap: Default::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(best3.clone()),

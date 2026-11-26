@@ -16,11 +16,13 @@ import type {
   PhaseView,
   Pilot,
   PilotId,
+  SeatChannel,
   SeatRef,
   SeatWhoView,
   TimerView
 } from '@gridfpv/types';
-import { seatLabel, timerName } from './seats.js';
+import { channelLabel, formatMhz, frequencyLabel } from './channels.js';
+import { seatLabel, timerName, isBench } from './seats.js';
 
 /** Shown for a pilot who is no longer in the pilot directory. */
 export const UNKNOWN_PILOT = 'Unknown pilot';
@@ -32,6 +34,13 @@ export const UNKNOWN_PHASE = 'Unknown phase';
 export interface Names {
   /** A phase's label, e.g. "Winners Round 1 Heat 2". */
   phase(id: PhaseId): string;
+  /**
+   * The phases that hold a phase, outermost first: "Sport Finals › Semi-finals". It says
+   * which "Semi-final 1" this is when two classes each have one. A phase above whose name
+   * the phase's own name already starts with is left out ("Practice Heat 3" needs no
+   * "Practice"). `undefined` when nothing is left to say.
+   */
+  within(id: PhaseId): string | undefined;
   /** A pilot's callsign. */
   pilot(id: PilotId): string;
   /** A class's name, e.g. "Open". */
@@ -39,10 +48,22 @@ export interface Names {
   /** Who is on a seat: a callsign, or where the pilot will come from. */
   who(who: SeatWhoView): string;
   /**
-   * A seat: "Seat 2". `position` is the seat's place in its lineup, counted from 0, used
-   * only when the timer directory cannot say (the timer was removed).
+   * Who is on a seat, for a place that knows which seat it is. The same as {@link who},
+   * except that an open seat is named by its number ("Seat 3"), so two open seats can be
+   * told apart (Ryan, 2026-11-18).
+   */
+  seatWho(who: SeatWhoView, adapter: AdapterId, seat: SeatRef, position?: number): string;
+  /**
+   * A seat, with the video channel it is on when the timer has said it: "Seat 2 · R2".
+   * The channel is what a pilot needs, so it goes wherever the seat is named. `position`
+   * is the seat's place in its lineup, counted from 0, used only when the timer directory
+   * cannot say (the timer was removed).
    */
   seat(adapter: AdapterId, seat: SeatRef, position?: number): string;
+  /** A seat with no channel: "Seat 2". For a place that shows the channel in full beside it. */
+  seatPlain(adapter: AdapterId, seat: SeatRef, position?: number): string;
+  /** A seat's channel in full: "R2 · 5695 MHz". `undefined` until the timer has said it. */
+  channel(adapter: AdapterId, seat: SeatRef): string | undefined;
   /** What times a seat: the timer's name, "Bench", or "Unknown timer". */
   timer(adapter: AdapterId): string;
   /** The pilot's own colour (`#RRGGBB`), when they have one. For a dot beside the name. */
@@ -83,12 +104,28 @@ export function buildNames(
   phases: readonly PhaseView[],
   pilots: readonly Pilot[],
   timers: readonly TimerView[] = [],
-  classes: readonly Class[] = []
+  classes: readonly Class[] = [],
+  channels: readonly SeatChannel[] = []
 ): Names {
   const phaseLabels = new Map(phases.map((phase) => [phase.def.id, phase.def.label]));
   const callsigns = new Map(pilots.map((pilot) => [pilot.id, pilot.callsign]));
 
   const phase = (id: PhaseId): string => phaseLabels.get(id) ?? UNKNOWN_PHASE;
+  const parents = new Map(phases.map((entry) => [entry.def.id, entry.def.parent]));
+  const within = (id: PhaseId): string | undefined => {
+    const own = phaseLabels.get(id);
+    if (own === undefined) return undefined;
+    const above: string[] = [];
+    let at = parents.get(id);
+    // Bounded by the number of phases, so a loop in a bad snapshot cannot hang the page.
+    for (let steps = 0; at !== undefined && steps <= phases.length; steps += 1) {
+      const label = phaseLabels.get(at);
+      if (label === undefined) break;
+      if (!own.startsWith(label)) above.unshift(label);
+      at = parents.get(at);
+    }
+    return above.length > 0 ? above.join(' › ') : undefined;
+  };
   const classNames = new Map(classes.map((c) => [c.id, c.name]));
   const pilot = (id: PilotId): string => callsigns.get(id) ?? UNKNOWN_PILOT;
   const klass = (id: ClassId): string => classNames.get(id) ?? UNKNOWN_CLASS;
@@ -98,10 +135,54 @@ export function buildNames(
     if ('Pilot' in seat) return pilot(seat.Pilot);
     return placeOf(seat.Waiting.position, phase(seat.Waiting.phase));
   };
-  const seat = (adapter: AdapterId, ref: SeatRef, position?: number): string =>
-    seatLabel(timers, adapter, ref, position);
+  const frequency = new Map(
+    channels.map((entry) => [`${entry.adapter}\u0000${entry.seat}`, entry.freq_mhz])
+  );
+  // A heat can have seats on more than one timer: four one-seat gates, say. "Seat 1" would
+  // then name every one of them. A timer that shares a lineup with another timer has its
+  // seats named by the timer instead, which is also what the director sees on the gate.
+  const shared = new Set<AdapterId>();
+  for (const entry of phases) {
+    // A lineup lists only the seats that are filled. A sign-up phase's rules list every
+    // seat its heats have, so a gate with nobody on it yet is still known to be shared.
+    for (const seats of [entry.lineup, entry.signup?.rules.seats ?? []]) {
+      const used = new Set(seats.map((seat) => seat.adapter));
+      if (used.size > 1) for (const adapter of used) shared.add(adapter);
+    }
+  }
+  const seatPlain = (adapter: AdapterId, ref: SeatRef, position?: number): string => {
+    const plain = seatLabel(timers, adapter, ref, position);
+    const known = timers.find((candidate) => candidate.timer.id === adapter);
+    if (!shared.has(adapter) || isBench(adapter) || !known) return plain;
+    // A timer with one seat is that seat: its name says it all.
+    return known.status.seats.length > 1 ? `${known.timer.name} ${plain}` : known.timer.name;
+  };
+  const seat = (adapter: AdapterId, ref: SeatRef, position?: number): string => {
+    const mhz = frequency.get(`${adapter}\u0000${ref}`);
+    const plain = seatPlain(adapter, ref, position);
+    // "R2" when the frequency is a named channel, else the frequency itself.
+    return mhz === undefined ? plain : `${plain} · ${channelLabel(mhz) ?? formatMhz(mhz)}`;
+  };
+  const channel = (adapter: AdapterId, ref: SeatRef): string | undefined => {
+    const mhz = frequency.get(`${adapter}\u0000${ref}`);
+    return mhz === undefined ? undefined : frequencyLabel(mhz);
+  };
   const timer = (adapter: AdapterId): string => timerName(timers, adapter);
   const colors = new Map(pilots.map((p) => [p.id, p.color]));
   const pilotColor = (id: PilotId): string | undefined => colors.get(id);
-  return { phase, pilot, klass, who, seat, timer, pilotColor };
+  const seatWho = (on: SeatWhoView, adapter: AdapterId, ref: SeatRef, position?: number): string =>
+    on === 'Open' ? seatPlain(adapter, ref, position) : who(on);
+  return {
+    phase,
+    within,
+    pilot,
+    klass,
+    who,
+    seatWho,
+    seat,
+    seatPlain,
+    channel,
+    timer,
+    pilotColor
+  };
 }

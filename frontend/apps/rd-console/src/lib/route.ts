@@ -16,19 +16,24 @@
  *   - `#/` (or empty)   → the open event's page
  *   - `#/events`        → the Events page: open, add or delete an event
  *   - `#/event`         → the open event's page (details, lap rules, classes)
- *   - `#/event/phases`  → the Phases page: the competition as a tree, where heats are added
+ *   - `#/event/phases`  → the Phases page: the event's phases and the heat order
+ *   - `#/event/phases/‹phase›` → one phase's page: its heats, ranking and sign-up
  *   - `#/event/run`     → the Run page, on the heat the Director is racing or would race next,
  *     and `#/event/run/‹heat›` → the Run page for one heat. `‹heat›` is the heat's id,
  *     percent-encoded (a heat id can hold slashes).
  *   - `#/event/marshal` → the Marshal page, and `#/event/marshal/‹race›` → the same page with
  *     one race open. `‹race›` is the race's id, percent-encoded.
  *   - `#/event/results` → the Results page
- *   - `#/event/overlays` → the Overlays page: the URLs that go into OBS
+ *   - `#/event/codes`   → the Pilot codes page: sign-in codes, and a sheet of them to print
+ *   - `#/event/recordings` → the Recordings page: the event's recorded races
+ *   - `#/overlays`      → the Overlays page, in Setup: the URLs that go into OBS and how the
+ *     overlay looks. (`#/overlay/‹name›`, with no `s`, is an overlay itself.)
  *   - `#/seats`         → the Seats page for the first timer, and `#/seats/‹timer›` → for one
  *     timer. `#/seats/‹timer›/‹seat›` → that seat's Tune page (record, then set levels).
  *   - `#/timers`        → the Timers page: add, find and remove timers
  *   - `#/pilots`, `#/classes`, `#/formats` → the lists that outlive events
  *   - `#/video`         → the Video page: OBS, and the recording of each race
+ *   - `#/network`       → the Network page: whether other devices can open Grid
  *   - `#/data`          → the Data page: a copy of everything, to move to another computer
  *   - `#/help`          → the help index, and `#/help/‹page›` → one help page
  *   - `#/overlay/race`  → the race overlay, a page for an OBS browser source: light text, for
@@ -49,10 +54,19 @@
 import type { AdapterId, EventId, PhaseId, RaceId, SeatRef } from '@gridfpv/types';
 
 /** The pages that need no open event. */
-export type AppPage = 'events' | 'pilots' | 'classes' | 'timers' | 'formats' | 'video' | 'data';
+export type AppPage =
+  | 'events'
+  | 'pilots'
+  | 'classes'
+  | 'timers'
+  | 'formats'
+  | 'video'
+  | 'network'
+  | 'overlays'
+  | 'data';
 
 /** The pages of the open event that take no further argument. */
-export type EventSection = 'event' | 'phases' | 'results' | 'overlays';
+export type EventSection = 'event' | 'codes' | 'phases' | 'results' | 'recordings';
 
 /**
  * A parsed route. This is the pure view-intent the hash encodes; reconciliation against the
@@ -64,7 +78,11 @@ export type Route =
   | { kind: 'seats'; timer?: AdapterId }
   /** One seat's Tune page: record its signal, then set its levels on the recording. */
   | { kind: 'capture'; timer: AdapterId; seat: SeatRef }
-  | { kind: 'event'; section: EventSection }
+  /**
+   * A page of the open event. `phase` is for the Phases section only: one phase's own
+   * page, with its heats, ranking and sign-up.
+   */
+  | { kind: 'event'; section: EventSection; phase?: PhaseId }
   /** The Run page. With no heat named it opens on the heat being raced, or the next one. */
   | { kind: 'run'; heat?: PhaseId }
   | { kind: 'marshal'; race?: RaceId }
@@ -108,9 +126,17 @@ const APP_PAGES: readonly AppPage[] = [
   'timers',
   'formats',
   'video',
+  'network',
+  'overlays',
   'data'
 ];
-const EVENT_SECTIONS: readonly EventSection[] = ['event', 'phases', 'results', 'overlays'];
+const EVENT_SECTIONS: readonly EventSection[] = [
+  'event',
+  'codes',
+  'phases',
+  'results',
+  'recordings'
+];
 
 /** The route shown when the hash is empty or unrecognised: the open event's page. */
 export const DEFAULT_ROUTE: Route = { kind: 'event', section: 'event' };
@@ -168,6 +194,11 @@ export function parseHash(hash: string): Route {
       const race = decodeSegment(segments[2]);
       return race ? { kind: 'marshal', race } : { kind: 'marshal' };
     }
+    // `event/phases/‹phase›`: one phase's own page. A broken segment opens the list.
+    if (section === 'phases' && segments.length === 3) {
+      const phase = decodeSegment(segments[2]);
+      return phase ? { kind: 'event', section: 'phases', phase } : { kind: 'event', section };
+    }
     if (segments.length === 2 && (EVENT_SECTIONS as readonly string[]).includes(section ?? '')) {
       return { kind: 'event', section: section as EventSection };
     }
@@ -208,6 +239,9 @@ export function formatHash(route: Route): string {
         route.theme === 'light' ? '/light' : ''
       }`;
     case 'event':
+      if (route.section === 'phases' && route.phase !== undefined) {
+        return `#/event/phases/${part(route.phase)}`;
+      }
       return route.section === 'event' ? '#/event' : `#/event/${route.section}`;
     case 'run':
       return route.heat === undefined ? '#/event/run' : `#/event/run/${part(route.heat)}`;

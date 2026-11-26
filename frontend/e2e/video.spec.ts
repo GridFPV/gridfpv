@@ -24,7 +24,8 @@ test('RD switches video on with no OBS there, is told so on the Video and Run pa
     const form = page.getByRole('form', { name: 'Video settings' });
     const record = form.getByRole('checkbox', { name: 'Record every race' });
     await expect(record).not.toBeChecked();
-    await expect(page.getByTestId('no-runs')).toContainText('Video is off.');
+    // The setup only: what was recorded is on the event's Recordings page.
+    await expect(page.getByRole('heading', { name: 'Runs' })).toHaveCount(0);
     const save = page.getByRole('button', { name: 'Save', exact: true });
     await expect(save).toBeDisabled();
 

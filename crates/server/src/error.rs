@@ -39,6 +39,11 @@ pub enum ErrorCode {
     /// the server serves (protocol.html §7) — the "too old / too new, please refresh"
     /// signal as an error on a path that cannot carry a [`ServerHello`](crate::ServerHello).
     VersionMismatch,
+    /// The request was understood and the caller is known, but it is not allowed: it came
+    /// from another website (see `access`).
+    Forbidden,
+    /// Too many wrong access tokens from one device. It may try again after a wait.
+    TooManyRequests,
     /// The request was malformed or not allowed — a blank required field, an edit to a
     /// read-only built-in.
     BadRequest,

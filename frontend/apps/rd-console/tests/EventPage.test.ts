@@ -4,7 +4,7 @@
  * with their rosters and standings. Rendered against a stand-in live store.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/svelte';
+import { cleanup, render, screen, within } from '@testing-library/svelte';
 import { fireEvent, waitFor } from '@testing-library/dom';
 import type { Class, Command, EventMeta, EventView, Pilot } from '@gridfpv/types';
 import EventPage from '../src/screens/EventPage.svelte';
@@ -26,9 +26,9 @@ const PILOTS: Pilot[] = [
   { id: 'p-3c', callsign: 'Cat', vtx_types: [] }
 ];
 const CLASSES: Class[] = [
-  { id: 'cls-open', name: 'Open', source: 'Custom' },
-  { id: 'cls-spec', name: 'Spec', source: 'Custom' },
-  { id: 'cls-old', name: 'Old', source: 'Custom', hidden: true }
+  { id: 'cls-open', name: 'Open' },
+  { id: 'cls-spec', name: 'Spec' },
+  { id: 'cls-old', name: 'Old', hidden: true }
 ];
 
 async function open(
@@ -92,8 +92,20 @@ describe('EventPage details', () => {
         ],
         races: [race('q-1', 1, 'Saved'), race('q-1', 2, 'Discarded'), race('q-2', 1, 'Running')],
         rosters: [
-          { class: 'cls-open', pilots: ['p-1a', 'p-2b'], counted_phases: [], standings: [] },
-          { class: 'cls-spec', pilots: ['p-2b', 'p-3c'], counted_phases: [], standings: [] }
+          {
+            class: 'cls-open',
+            pilots: ['p-1a', 'p-2b'],
+            counted_phases: [],
+            phases: [],
+            standings: []
+          },
+          {
+            class: 'cls-spec',
+            pilots: ['p-2b', 'p-3c'],
+            counted_phases: [],
+            phases: [],
+            standings: []
+          }
         ]
       })
     );
@@ -102,10 +114,8 @@ describe('EventPage details', () => {
     );
     // Bee is in both classes and is counted once. A group is not a heat. Only saved races count.
     expect(rows).toEqual(['Classes 2', 'Pilots in them 3', 'Heats 2', 'Saved races 1']);
-    expect(screen.getByRole('link', { name: 'Phases page' })).toHaveAttribute(
-      'href',
-      '#/event/phases'
-    );
+    // The card is the numbers and no more: nothing sends the director off to another page.
+    expect(screen.queryByRole('link', { name: 'Phases page' })).toBeNull();
   });
 
   it('no longer holds the phases, the run queue or the buttons that add a heat', async () => {
@@ -258,6 +268,77 @@ describe('Lap rules', () => {
     expect(minLap()).toHaveValue(2);
   });
 
+  const passWindow = () => screen.getByLabelText('Pass window, in seconds') as HTMLInputElement;
+
+  it('shows the pass window beside the other two, empty when the event sets none', async () => {
+    await open(eventView({ lap_rules: { pass_window_micros: 400_000 } }));
+    expect(passWindow()).toHaveValue(0.4);
+    expect(minLap()).toHaveValue(null);
+    cleanup();
+    await open(eventView({ lap_rules: { min_lap_micros: 2_000_000 } }));
+    expect(passWindow()).toHaveValue(null);
+  });
+
+  it('sends the pass window with the other rules, and leaves them as they were', async () => {
+    const { first, over } = following({ min_lap_micros: 2_000_000 });
+    const { liveSession } = await open(first, over);
+    await fireEvent.input(passWindow(), { target: { value: '0.4' } });
+    await fireEvent.blur(passWindow());
+    await waitFor(() =>
+      expect(sent(liveSession)).toEqual([
+        {
+          Record: {
+            LapRulesSet: { rules: { min_lap_micros: 2_000_000, pass_window_micros: 400_000 } }
+          }
+        }
+      ])
+    );
+    await waitFor(() => expect(passWindow()).toHaveValue(0.4));
+    await waitFor(() => expect(state()).toHaveTextContent('Saved.'));
+    // Changing another rule afterwards keeps the window.
+    await fireEvent.input(minLap(), { target: { value: '3' } });
+    await fireEvent.blur(minLap());
+    await waitFor(() =>
+      expect(sent(liveSession)[1]).toEqual({
+        Record: {
+          LapRulesSet: { rules: { min_lap_micros: 3_000_000, pass_window_micros: 400_000 } }
+        }
+      })
+    );
+  });
+
+  it('emptied or set to 0, the pass window is off and is left out of what is sent', async () => {
+    for (const typed of ['', '0']) {
+      const { first, over } = following({ pass_window_micros: 400_000 });
+      const { liveSession } = await open(first, over);
+      await fireEvent.input(passWindow(), { target: { value: typed } });
+      await fireEvent.blur(passWindow());
+      await waitFor(() =>
+        expect(sent(liveSession)).toEqual([{ Record: { LapRulesSet: { rules: {} } } }])
+      );
+      cleanup();
+    }
+  });
+
+  it('refuses a pass window longer than a timer can be given, before sending anything', async () => {
+    const { first, over } = following({});
+    const { liveSession } = await open(first, over);
+    await fireEvent.input(passWindow(), { target: { value: '10.5' } });
+    await fireEvent.blur(passWindow());
+    await waitFor(() =>
+      expect(state()).toHaveTextContent('The pass window can be 10 seconds at most.')
+    );
+    expect(sent(liveSession)).toEqual([]);
+    // Ten exactly is taken.
+    await fireEvent.input(passWindow(), { target: { value: '10' } });
+    await fireEvent.blur(passWindow());
+    await waitFor(() =>
+      expect(sent(liveSession)).toEqual([
+        { Record: { LapRulesSet: { rules: { pass_window_micros: 10_000_000 } } } }
+      ])
+    );
+  });
+
   it('saves on Enter as it does on leaving the field', async () => {
     const { first, over } = following({});
     const { liveSession } = await open(first, over);
@@ -327,9 +408,20 @@ describe('Lap rules', () => {
     expect(minLap()).toHaveValue(4);
   });
 
-  it('points at the Seats page for the timer own lap cooldown', async () => {
+  it('says each lap rule in one short line, and nothing about the timer or other pages', async () => {
     await open(eventView());
-    expect(screen.getByRole('link', { name: 'Seats page' })).toHaveAttribute('href', '#/seats');
+    const rules = screen.getByRole('form', { name: 'Lap rules' });
+    expect(rules).toHaveTextContent('A crossing sooner than this is not counted as a lap.');
+    expect(rules).toHaveTextContent('Crossings this soon after the start are not counted.');
+    expect(screen.queryByRole('link', { name: 'Seats page' })).toBeNull();
+    expect(document.body.textContent).not.toMatch(/lap cooldown/i);
+  });
+
+  it('has no pilot sign-in: the codes are on their own page', async () => {
+    await open(eventView());
+    expect(screen.queryByRole('button', { name: 'Show codes' })).toBeNull();
+    expect(screen.queryByText('Pilot sign-in')).toBeNull();
+    expect(screen.queryByText('Sign-in codes')).toBeNull();
   });
 });
 
@@ -338,6 +430,10 @@ describe('classes at the event', () => {
     class: 'cls-open',
     pilots: ['p-1a', 'p-2b'],
     counted_phases: ['finals'],
+    phases: [
+      { phase: 'finals', counts: true },
+      { phase: 'quali', counts: false }
+    ],
     standings: [
       { pilot: 'p-2b', position: 1, placed_by: 'finals' },
       { pilot: 'p-1a', position: 2 }
@@ -355,11 +451,77 @@ describe('classes at the event', () => {
     expect(screen.getByText(/No class is in this event yet\./)).toBeVisible();
   });
 
+  /** Open a class's block. Every class starts shut. */
+  const openClass = async (name: string) => {
+    const item = screen.getByRole('listitem', { name });
+    await fireEvent.click(within(item).getByRole('button', { name: new RegExp(`^${name}`) }));
+    return item;
+  };
+
+  it('each class starts shut: its name, how many pilots, and nothing of who they are', async () => {
+    await open(
+      eventView({
+        phases,
+        rosters: [roster({ counted_phases: [], phases: [], standings: [] })]
+      })
+    );
+    const open_ = screen.getByRole('listitem', { name: 'Open' });
+    const toggle = within(open_).getByRole('button', { name: /^Open/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(toggle).toHaveTextContent('2 pilots');
+    // Nothing counts yet, so nothing is said of standings, and there are no chips of pilots.
+    expect(within(open_).getByTestId('counted')).toHaveTextContent('');
+    expect(within(open_).queryByRole('list')).toBeNull();
+    expect(within(open_).queryByRole('form')).toBeNull();
+    expect(within(open_).queryByRole('table')).toBeNull();
+    expect(document.body.textContent).not.toContain('Not placed yet');
+    expect(document.body.textContent).not.toContain('p-1a');
+  });
+
+  it('opened, a class is its roster to change in place, in roster order by callsign', async () => {
+    await open(
+      eventView({
+        phases,
+        rosters: [roster({ counted_phases: [], phases: [], standings: [] })]
+      })
+    );
+    const open_ = await openClass('Open');
+    expect(within(open_).getByRole('button', { name: /^Open/ })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
+    const form = within(open_).getByRole('form', { name: 'Roster of Open' });
+    // The pilots in it can be taken out, and the one who is not can be put in.
+    expect(within(form).getByRole('button', { name: 'Remove Ace' })).toBeVisible();
+    expect(within(form).getByRole('button', { name: 'Remove Bee' })).toBeVisible();
+    expect(within(form).getByRole('button', { name: 'Cat' })).toBeVisible();
+    // Nothing to save until something is changed.
+    expect(within(form).queryByRole('button', { name: 'Save roster' })).toBeNull();
+    expect(within(open_).queryByRole('table')).toBeNull();
+    expect(document.body.textContent).not.toContain('p-1a');
+  });
+
+  it('a class with nobody in it says so in its line, and opens to an empty roster', async () => {
+    await open(
+      eventView({
+        phases,
+        rosters: [roster({ pilots: [], counted_phases: [], phases: [], standings: [] })]
+      })
+    );
+    const open_ = await openClass('Open');
+    expect(open_).toHaveTextContent('0 pilots');
+    expect(within(open_).queryByRole('table')).toBeNull();
+    expect(within(open_).queryByRole('button', { name: /^Remove / })).toBeNull();
+  });
+
   it('shows each class by name with its standings and what placed each pilot', async () => {
     await open(eventView({ phases, rosters: [roster()] }));
-    const open_ = screen.getByRole('listitem', { name: 'Open' });
+    // Shut, the line already says where the standings come from.
+    expect(
+      within(screen.getByRole('listitem', { name: 'Open' })).getByTestId('counted')
+    ).toHaveTextContent('Standings from Finals');
+    const open_ = await openClass('Open');
     expect(open_).toHaveTextContent('2 pilots');
-    expect(within(open_).getByTestId('counted')).toHaveTextContent('Standings come from Finals.');
     const rows = within(within(open_).getByRole('table', { name: 'Standings of Open' }))
       .getAllByRole('row')
       .map((row) =>
@@ -393,33 +555,144 @@ describe('classes at the event', () => {
 
   it('edits a roster, starting from the pilots in it', async () => {
     const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Edit the roster of Open' }));
-    const form = await screen.findByRole('form', { name: 'Roster of Open' });
+    const open_ = await openClass('Open');
+    const form = within(open_).getByRole('form', { name: 'Roster of Open' });
     await fireEvent.click(within(form).getByRole('button', { name: 'Remove Ace' }));
+    // Nothing is sent as the roster is changed: only Save sends it, all at once.
+    expect(sent(liveSession)).toEqual([]);
     await fireEvent.click(within(form).getByRole('button', { name: 'Cat' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Save roster' }));
+    await fireEvent.click(within(form).getByRole('button', { name: 'Save roster' }));
     await waitFor(() =>
       expect(sent(liveSession)).toEqual([
         { Record: { RosterSet: { class: 'cls-open', pilots: ['p-2b', 'p-3c'] } } }
       ])
     );
+    // Sent, there is nothing left to save.
+    await waitFor(() =>
+      expect(within(form).queryByRole('button', { name: 'Save roster' })).toBeNull()
+    );
   });
 
-  it('chooses which phases count and in what order', async () => {
+  it('Discard puts a changed roster back, and a roster changed back by hand has nothing to save', async () => {
     const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Choose what counts for Open' }));
-    const dialog = await screen.findByLabelText('What counts for Open');
-    expect(within(dialog).getByRole('list', { name: 'Phases that count' })).toHaveTextContent(
-      'Finals'
+    const open_ = await openClass('Open');
+    const form = within(open_).getByRole('form', { name: 'Roster of Open' });
+    await fireEvent.click(within(form).getByRole('button', { name: 'Remove Ace' }));
+    await fireEvent.click(within(form).getByRole('button', { name: 'Discard' }));
+    expect(within(form).getByRole('button', { name: 'Remove Ace' })).toBeVisible();
+    expect(within(form).queryByRole('button', { name: 'Save roster' })).toBeNull();
+    // Added and taken out again: the same roster as the Director has.
+    await fireEvent.click(within(form).getByRole('button', { name: 'Cat' }));
+    expect(within(form).getByRole('button', { name: 'Save roster' })).toBeVisible();
+    await fireEvent.click(within(form).getByRole('button', { name: 'Remove Cat' }));
+    expect(within(form).queryByRole('button', { name: 'Save roster' })).toBeNull();
+    expect(sent(liveSession)).toEqual([]);
+  });
+
+  it("shows the Director's words when a roster is refused, and keeps what was picked", async () => {
+    const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
+    vi.mocked(liveSession.sendCommand).mockRejectedValueOnce(
+      new Error('Ace is in a heat that has been raced.')
     );
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Qualifying' }));
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move Qualifying up' }));
-    // The Edit dialog of the page is closed, so this is the only Save on the screen.
-    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    const open_ = await openClass('Open');
+    const form = within(open_).getByRole('form', { name: 'Roster of Open' });
+    await fireEvent.click(within(form).getByRole('button', { name: 'Remove Ace' }));
+    await fireEvent.click(within(form).getByRole('button', { name: 'Save roster' }));
+    expect(await within(form).findByText('Ace is in a heat that has been raced.')).toBeVisible();
+    expect(within(form).queryByRole('button', { name: 'Remove Ace' })).toBeNull();
+    expect(within(form).getByRole('button', { name: 'Save roster' })).toBeEnabled();
+  });
+
+  it('lists the phases the standings come from, worked out by Grid, with no dialog to pick them', async () => {
+    await open(eventView({ phases, rosters: [roster()] }));
+    expect(screen.queryByRole('button', { name: 'Choose what counts for Open' })).toBeNull();
+    const open_ = await openClass('Open');
+    const from = within(open_).getByRole('region', {
+      name: 'What the standings of Open come from'
+    });
+    const rows = within(within(from).getByRole('list', { name: 'Phases of Open' })).getAllByRole(
+      'listitem'
+    );
+    // The one that counts, numbered; then the one that does not, struck through and unnumbered.
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual(['Finals', 'Qualifying']);
+    expect(rows[0]).toHaveTextContent(/^1\s*Finals/);
+    expect(within(rows[0]).getByRole('checkbox', { name: 'Finals counts' })).toBeChecked();
+    expect(rows[1]).toHaveClass('off');
+    expect(within(rows[1]).getByRole('checkbox', { name: 'Qualifying counts' })).not.toBeChecked();
+    // With one phase counting there is nothing to put in order.
+    expect(within(from).queryByRole('button', { name: /^Move / })).toBeNull();
+    expectNoRawIds();
+  });
+
+  it('says a phase does not count, or counts again, with one tick', async () => {
+    const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
+    const open_ = await openClass('Open');
+    await fireEvent.click(within(open_).getByRole('checkbox', { name: 'Finals counts' }));
+    await waitFor(() =>
+      expect(sent(liveSession)).toEqual([
+        { Record: { PhaseCounts: { phase: 'finals', counts: false } } }
+      ])
+    );
+    // The boxes are held while the first change is on its way.
+    const quali = within(open_).getByRole('checkbox', { name: 'Qualifying counts' });
+    await waitFor(() => expect(quali).toBeEnabled());
+    await fireEvent.click(quali);
+    await waitFor(() =>
+      expect(sent(liveSession)[1]).toEqual({
+        Record: { PhaseCounts: { phase: 'quali', counts: true } }
+      })
+    );
+  });
+
+  it('moves a phase up or down in the order the standings are read', async () => {
+    const two = roster({
+      counted_phases: ['finals', 'quali'],
+      phases: [
+        { phase: 'finals', counts: true },
+        { phase: 'quali', counts: true }
+      ]
+    });
+    const { liveSession } = await open(eventView({ phases, rosters: [two] }));
+    const open_ = await openClass('Open');
+    // The first one decides, and says so. It cannot go up; the last cannot go down.
+    const rows = within(within(open_).getByRole('list', { name: 'Phases of Open' })).getAllByRole(
+      'listitem'
+    );
+    expect(rows[0]).toHaveTextContent('decides');
+    expect(rows[1]).not.toHaveTextContent('decides');
+    expect(within(open_).getByRole('button', { name: 'Move Finals up' })).toBeDisabled();
+    expect(within(open_).getByRole('button', { name: 'Move Qualifying down' })).toBeDisabled();
+    await fireEvent.click(within(open_).getByRole('button', { name: 'Move Qualifying up' }));
     await waitFor(() =>
       expect(sent(liveSession)).toEqual([
         { Record: { StandingsSet: { class: 'cls-open', phases: ['quali', 'finals'] } } }
       ])
+    );
+  });
+
+  it('says where to make one when no ranked phase is for the class', async () => {
+    await open(
+      eventView({
+        phases,
+        rosters: [roster({ counted_phases: [], phases: [], standings: [] })]
+      })
+    );
+    const open_ = await openClass('Open');
+    expect(within(open_).getByTestId('no-class-phases')).toHaveTextContent(
+      'No ranked phase is for this class yet.'
+    );
+    expect(within(open_).queryByRole('list', { name: 'Phases of Open' })).toBeNull();
+  });
+
+  it("shows the Director's words when a change to the phases is refused", async () => {
+    const { liveSession } = await open(eventView({ phases, rosters: [roster()] }));
+    vi.mocked(liveSession.sendCommand).mockRejectedValueOnce(new Error('Finals is locked.'));
+    const open_ = await openClass('Open');
+    await fireEvent.click(within(open_).getByRole('checkbox', { name: 'Finals counts' }));
+    expect(await within(open_).findByText('Finals is locked.')).toBeVisible();
+    // The box goes back to what the Director has: it still counts.
+    await waitFor(() =>
+      expect(within(open_).getByRole('checkbox', { name: 'Finals counts' })).toBeChecked()
     );
   });
 });

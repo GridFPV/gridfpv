@@ -258,6 +258,57 @@ export function lapRows(seat: RaceSeatView): LapRow[] {
   return rows;
 }
 
+/** A row in words, for a sentence: "lap 3", "the hole shot". */
+export function rowWords(row: LapRow): string {
+  return row.kind === 'holeshot'
+    ? 'the hole shot'
+    : row.kind === 'restart'
+      ? 'the restart'
+      : row.kind === 'timerRestart'
+        ? 'the crossing after the timer restarted'
+        : `lap ${row.number}`;
+}
+
+/** What moving a crossing would do, shown before the marshal confirms it. */
+export interface MovePreview {
+  /** The row being moved, in words. */
+  name: string;
+  /** Where the crossing is now, on the timer's clock. */
+  from: SourceTime;
+  /**
+   * The lap times that change: the lap this crossing ends, and the lap after it. Empty when
+   * the move carries the crossing past one of its neighbours, because then the order of the
+   * laps changes and only the Director can say what they become.
+   */
+  laps: { name: string; micros: number }[];
+}
+
+/**
+ * A preview of moving one of a seat's crossings to `at`. This is a guide only: the times
+ * shown after the move are the Director's. `undefined` when the crossing is not one of the
+ * seat's rows.
+ */
+export function movePreview(
+  seat: RaceSeatView,
+  crossing: LogRef,
+  at: SourceTime
+): MovePreview | undefined {
+  const rows = lapRows(seat);
+  const index = rows.findIndex((row) => row.crossing === crossing);
+  if (index < 0) return undefined;
+  const row = rows[index];
+  const before = rows[index - 1];
+  const after = rows[index + 1];
+  const laps: MovePreview['laps'] = [];
+  const inOrder =
+    (before === undefined || at > before.at) && (after === undefined || at < after.at);
+  if (inOrder) {
+    if (row.kind === 'lap' && before) laps.push({ name: rowWords(row), micros: at - before.at });
+    if (after?.kind === 'lap') laps.push({ name: rowWords(after), micros: after.at - at });
+  }
+  return { name: rowWords(row), from: row.at, laps };
+}
+
 /** How many laps of a seat count. */
 export function countedLaps(seat: RaceSeatView): number {
   return seat.laps.filter((lap) => !lap.restart && !lap.timer_restarted).length;

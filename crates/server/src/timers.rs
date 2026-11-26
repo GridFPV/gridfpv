@@ -32,15 +32,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use std::convert::Infallible;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream::{self, Stream};
-use gridfpv_adapters::oft::{OftConfig, OftSeatConfig, OftThreshold};
-use gridfpv_events::{AdapterId, SeatRef, SignalChunk};
+use gridfpv_adapters::oft::{OftConfig, OftInfo, OftSeatConfig, OftThreshold};
+use gridfpv_events::{AdapterId, SeatRef, SignalChunk, SignalUnit};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::watch;
@@ -69,7 +69,8 @@ pub enum TimerKind {
 pub struct Timer {
     /// The handle passes and seats carry. Made by the Director; never shown.
     pub id: AdapterId,
-    /// The name people see ("Gate").
+    /// The name people see ("Gate"). A person chooses it and can change it. It is Grid's
+    /// own: the timer is not told, and the name the timer gives itself is `own_id`.
     pub name: String,
     pub kind: TimerKind,
     /// Where it is on the network: `host:port`. For a timer with an id of its own this
@@ -100,6 +101,14 @@ pub struct CreateTimerRequest {
     pub own_id: Option<String>,
 }
 
+/// What `PUT /timers/{id}` takes: the name people see. Nothing else about a timer is
+/// changed this way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RenameTimerRequest {
+    pub name: String,
+}
+
 /// A timer's state right now.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
@@ -127,6 +136,65 @@ pub struct TimerStatus {
     #[serde(default)]
     #[ts(as = "Option<bool>", optional)]
     pub keeps_settings: bool,
+    /// Whether the timer has a pass window: it can take several crossings close together
+    /// as one pass. The event's lap rules set it (`docs/primitives.md` §12.6).
+    #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
+    pub pass_window: bool,
+    /// The pass window the timer has, in milliseconds, as Grid last read it back. `0` is
+    /// off. Absent until Grid has read it, or on a timer with no pass window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pass_window_ms: Option<u32>,
+    /// Why the event's pass window could not be put on the timer, in words. Absent when it
+    /// was, or when nothing has been tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pass_window_problem: Option<String>,
+    /// What the timer's level numbers measure, when every seat reports in the same unit. A
+    /// console shows the timer's levels and thresholds in it. Absent until the timer has
+    /// connected, and on a timer whose seats do not share one unit: each seat's live levels
+    /// then say their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub level_unit: Option<SignalUnit>,
+    /// Who may change the timer's settings right now. An OFT timer lets one program at a
+    /// time change it (OFT spec §6.6); Grid asks to be that program when it connects, and
+    /// the first to ask is the one. Absent until the timer has said, on a timer that is
+    /// not connected, and on a timer that lets anyone write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control: Option<TimerControl>,
+    /// The name Grid asks for control under, as the timer's own page lists it ("GridFPV
+    /// race-laptop"). A person handing control to Grid on that page looks for this name.
+    /// Absent on a timer that lets anyone write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control_name: Option<String>,
+    /// A number the timer changes whenever its settings change, whoever changed them. A
+    /// console that shows the settings reads them again when it moves. It starts again
+    /// when the timer does. Absent on a timer that does not give one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub config_rev: Option<u32>,
+}
+
+/// Who may change a timer's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+#[serde(tag = "holder")]
+pub enum TimerControl {
+    /// No program has control, so any may write, Grid included.
+    Nobody,
+    /// Grid has control.
+    Grid,
+    /// Another program has control. Grid can read the timer and take its laps, but the
+    /// timer refuses Grid's changes until a person hands control over on the timer's own
+    /// page.
+    Other {
+        /// The name that program gave itself ("RotorHazard pi-timer").
+        name: String,
+    },
 }
 
 /// A timer with its status (`GET /timers`).
@@ -183,7 +251,8 @@ impl From<TimerThreshold> for OftThreshold {
     }
 }
 
-/// How a timer sets the levels it detects crossings against. Values are tenths of a dB.
+/// How a timer sets the levels it detects crossings against. Values are in the timer's own
+/// level unit ([`TimerStatus::level_unit`]): tenths of a dB on most, millivolts on some.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum TimerThreshold {
@@ -258,15 +327,20 @@ impl TimerConfig {
             threshold: self.threshold.into(),
             min_lap_ms: self.lap_cooldown_ms.unwrap_or(now.min_lap_ms),
             exit_hold_ms: self.exit_hold_ms,
+            // The pass window is the event's to set, not this page's: what the Timer has
+            // is carried over. Left out, the Timer would switch it off.
+            pass_window_ms: now.pass_window_ms,
         })
     }
 }
 
-/// One seat's levels right now, in tenths of a dB.
+/// One seat's levels right now, in `unit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub struct SeatLevels {
     pub seat: SeatRef,
+    /// What the numbers measure: the unit of the receiver serving this seat.
+    pub unit: SignalUnit,
     /// The latest signal level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -346,6 +420,24 @@ pub enum TimerError {
         "Changing a RotorHazard timer's settings from Grid is not built yet. Use its own Settings page for now."
     )]
     NotBuilt,
+    /// Another program has control of the timer (OFT spec §6.6), so it refuses Grid's
+    /// writes. The text names the timer and the program.
+    #[error("{0}")]
+    Controlled(String),
+}
+
+/// The sentence for a timer another program has control of.
+fn controlled(timer: &Timer, holder: &str) -> TimerError {
+    let holder = holder.trim();
+    let who = if holder.is_empty() {
+        "Another program has".to_owned()
+    } else {
+        format!("\u{201c}{holder}\u{201d} has")
+    };
+    TimerError::Controlled(format!(
+        "{who} control of {}, so Grid cannot change it. Open the timer's own page and give control to Grid.",
+        timer.name
+    ))
 }
 
 impl From<TimerError> for ProtocolError {
@@ -358,7 +450,8 @@ impl From<TimerError> for ProtocolError {
             TimerError::Unreachable(_)
             | TimerError::NotTaken
             | TimerError::NotKept
-            | TimerError::NotBuilt => ErrorCode::Refused,
+            | TimerError::NotBuilt
+            | TimerError::Controlled(_) => ErrorCode::Refused,
             TimerError::NotFound => ErrorCode::UnknownScope,
             TimerError::Io(_) => ErrorCode::Internal,
         };
@@ -373,7 +466,37 @@ struct Inner {
     live: BTreeMap<AdapterId, broadcast::Sender<TimerLive>>,
     /// Timers found on the network, by the full name they advertise under.
     discovered: BTreeMap<String, DiscoveredTimer>,
+    /// Each timer's seat channels, as last read from it. See [`seat_channels`].
+    channels: BTreeMap<AdapterId, KnownChannels>,
+    /// The key each timer gave Grid while Grid has control of it (OFT spec §6.6). Every
+    /// write to that timer carries it. Never saved and never sent to a console.
+    control_keys: BTreeMap<AdapterId, String>,
     data_dir: Option<PathBuf>,
+}
+
+/// A timer's seat channels as last read, and when the Director last looked.
+#[derive(Debug, Clone)]
+struct KnownChannels {
+    /// The switched-on seats and their frequencies, from the last read that worked.
+    seats: Vec<(SeatRef, u32)>,
+    /// When the Director last asked the timer, whether or not it answered.
+    asked_at: Instant,
+    /// Whether someone is asking right now, so two askers do not both go to the timer.
+    asking: bool,
+}
+
+/// How long a timer's seat channels are taken as read before the Director asks it again.
+/// However many phones are watching, a timer is asked at most once in this long.
+pub const CHANNELS_MAX_AGE: Duration = Duration::from_secs(15);
+
+/// The video channel of one seat: which frequency a pilot on that seat flies on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SeatChannel {
+    pub adapter: AdapterId,
+    pub seat: SeatRef,
+    /// In MHz, such as 5658.
+    pub freq_mhz: u32,
 }
 
 /// The shared timer directory. Cloning shares the one directory.
@@ -412,6 +535,8 @@ impl TimerDirectory {
                 status: BTreeMap::new(),
                 live: BTreeMap::new(),
                 discovered: BTreeMap::new(),
+                channels: BTreeMap::new(),
+                control_keys: BTreeMap::new(),
                 data_dir,
             })),
             generation: watch::Sender::new(0),
@@ -493,6 +618,28 @@ impl TimerDirectory {
     }
 
     /// Remove a timer. Its passes stay in the logs of the events it timed.
+    /// Give a timer another name. Only the name people see changes: the handle, the
+    /// address and the connection stay as they are, and so does everything already timed.
+    pub fn rename(&self, id: &AdapterId, name: &str) -> Result<Timer, TimerError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(TimerError::NoName);
+        }
+        let mut inner = self.write();
+        let record = inner.timers.get_mut(id).ok_or(TimerError::NotFound)?;
+        let before = std::mem::replace(&mut record.name, name.to_owned());
+        let renamed = record.clone();
+        if let Err(e) = save(&inner) {
+            if let Some(record) = inner.timers.get_mut(id) {
+                record.name = before;
+            }
+            return Err(e);
+        }
+        drop(inner);
+        self.generation.send_modify(|g| *g += 1);
+        Ok(renamed)
+    }
+
     pub fn delete(&self, id: &AdapterId) -> Result<(), TimerError> {
         let mut inner = self.write();
         let removed = inner.timers.remove(id).ok_or(TimerError::NotFound)?;
@@ -501,11 +648,130 @@ impl TimerDirectory {
             return Err(e);
         }
         inner.status.remove(id);
+        inner.channels.remove(id);
+        inner.control_keys.remove(id);
         // Dropping the sender ends every live feed of this timer.
         inner.live.remove(id);
         drop(inner);
         self.generation.send_modify(|g| *g += 1);
         Ok(())
+    }
+
+    /// Remember a timer's seat channels from settings that were just read from it or
+    /// written to it. Seats that are switched off have no channel to fly on.
+    pub fn note_channels(&self, id: &AdapterId, config: &TimerConfig, now: Instant) {
+        let mut inner = self.write();
+        if !inner.timers.contains_key(id) {
+            return;
+        }
+        inner.channels.insert(
+            id.clone(),
+            KnownChannels {
+                seats: config
+                    .seats
+                    .iter()
+                    .filter(|seat| seat.enabled)
+                    .map(|seat| (seat.seat.clone(), seat.freq_mhz))
+                    .collect(),
+                asked_at: now,
+                asking: false,
+            },
+        );
+    }
+
+    /// A timer's seat channels as last read. Empty when it has never answered.
+    pub fn known_channels(&self, id: &AdapterId) -> Vec<SeatChannel> {
+        self.read()
+            .channels
+            .get(id)
+            .map(|known| {
+                known
+                    .seats
+                    .iter()
+                    .map(|(seat, freq_mhz)| SeatChannel {
+                        adapter: id.clone(),
+                        seat: seat.clone(),
+                        freq_mhz: *freq_mhz,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the caller should ask the timer for its channels now: nobody else is
+    /// asking, and it has not been asked within [`CHANNELS_MAX_AGE`]. A `true` answer marks
+    /// the timer as being asked; the caller must end with [`note_channels`](Self::note_channels)
+    /// or [`channels_not_read`](Self::channels_not_read).
+    pub fn should_ask_channels(&self, id: &AdapterId, now: Instant) -> bool {
+        let mut inner = self.write();
+        if !inner.timers.contains_key(id) {
+            return false;
+        }
+        match inner.channels.get_mut(id) {
+            Some(known) if known.asking => false,
+            Some(known) if now.duration_since(known.asked_at) < CHANNELS_MAX_AGE => false,
+            Some(known) => {
+                known.asking = true;
+                true
+            }
+            None => {
+                inner.channels.insert(
+                    id.clone(),
+                    KnownChannels {
+                        seats: Vec::new(),
+                        asked_at: now,
+                        asking: true,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    /// The timer did not answer. What was known before is kept, and the timer is not asked
+    /// again until [`CHANNELS_MAX_AGE`] has passed: a timer that is switched off must not be
+    /// asked on every request.
+    pub fn channels_not_read(&self, id: &AdapterId, now: Instant) {
+        if let Some(known) = self.write().channels.get_mut(id) {
+            known.asked_at = now;
+            known.asking = false;
+        }
+    }
+
+    /// Keep, or forget, the key a timer gave Grid for its writes. Called by whatever holds
+    /// the timer's connection, as the timer says who has control. A timer that has been
+    /// removed is ignored.
+    pub fn set_control_key(&self, id: &AdapterId, key: Option<String>) {
+        let mut inner = self.write();
+        match key {
+            Some(key) if inner.timers.contains_key(id) => {
+                inner.control_keys.insert(id.clone(), key);
+            }
+            _ => {
+                inner.control_keys.remove(id);
+            }
+        }
+    }
+
+    /// The key Grid's writes to a timer must carry, while Grid has control of it.
+    pub fn control_key(&self, id: &AdapterId) -> Option<String> {
+        self.read().control_keys.get(id).cloned()
+    }
+
+    /// One timer's status right now. A timer that has reported nothing has the default.
+    pub fn status(&self, id: &AdapterId) -> TimerStatus {
+        self.read().status.get(id).cloned().unwrap_or_default()
+    }
+
+    /// Make a timer's channels count as old, so the next asker goes to the timer: its
+    /// settings changed, or a test wants it asked.
+    pub fn age_channels(&self, id: &AdapterId) {
+        if let Some(known) = self.write().channels.get_mut(id) {
+            known.asked_at = known
+                .asked_at
+                .checked_sub(CHANNELS_MAX_AGE * 2)
+                .unwrap_or(known.asked_at);
+        }
     }
 
     /// Change a timer's status. Called by whatever holds its connection. A timer that has
@@ -653,6 +919,24 @@ fn unreachable(timer: &Timer, cause: &reqwest::Error) -> TimerError {
 }
 
 /// Read a timer's settings from the timer.
+/// Read what an OFT timer says about its receivers (`GET /oft/v1/info`). A timer's `hello`
+/// carries the same list, but only once per connection, and a receiver can report in, or
+/// come back from a firmware update measuring in another unit, after that.
+pub async fn read_info(timer: &Timer) -> Result<OftInfo, TimerError> {
+    let unreachable = |e: reqwest::Error| unreachable(timer, &e);
+    reqwest::Client::new()
+        .get(format!("http://{}/oft/v1/info", timer.address))
+        .timeout(TIMER_ANSWER)
+        .send()
+        .await
+        .map_err(unreachable)?
+        .error_for_status()
+        .map_err(unreachable)?
+        .json()
+        .await
+        .map_err(unreachable)
+}
+
 async fn read_config(timer: &Timer) -> Result<OftConfig, TimerError> {
     let unreachable = |e: reqwest::Error| unreachable(timer, &e);
     reqwest::Client::new()
@@ -668,28 +952,106 @@ async fn read_config(timer: &Timer) -> Result<OftConfig, TimerError> {
         .map_err(unreachable)
 }
 
-/// Write a timer's settings, then read them back. The write only counts if the timer then
-/// reports exactly what was sent.
-async fn write_config(timer: &Timer, config: &OftConfig) -> Result<OftConfig, TimerError> {
-    let response = reqwest::Client::new()
-        .put(config_url(timer))
-        .timeout(TIMER_ANSWER)
-        .json(config)
-        .send()
+/// The header a write carries while a claim holds control of the timer (OFT spec §6.6).
+const CONTROL_HEADER: &str = "OFT-Control";
+
+/// How long a refused write waits for the timer to say that Grid has control after all.
+const CONTROL_SETTLES: Duration = Duration::from_secs(1);
+
+/// Send a write to an OFT timer, carrying Grid's key when Grid has control of the timer.
+/// With nobody in control the timer takes a write with or without a key.
+///
+/// Control comes to Grid a moment before Grid hears of it: the timer makes Grid's claim
+/// the holder, and the key follows on the stream. A write in that moment goes out with no
+/// key, or an old one, and is refused with a `423`. So after a `423` this waits a moment
+/// for a key the write did not carry, and sends the write once more with it. A `423`
+/// that stands is given back as the answer, for [`refusal`] to put into words.
+async fn send_write(
+    directory: &TimerDirectory,
+    timer: &Timer,
+    method: reqwest::Method,
+    url: String,
+    body: Option<&OftConfig>,
+) -> Result<reqwest::Response, TimerError> {
+    let send = |key: Option<String>| {
+        let mut request = reqwest::Client::new()
+            .request(method.clone(), url.clone())
+            .timeout(TIMER_ANSWER);
+        if let Some(key) = key {
+            request = request.header(CONTROL_HEADER, key);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        request.send()
+    };
+    let sent_with = directory.control_key(&timer.id);
+    let response = send(sent_with.clone())
         .await
         .map_err(|e| unreachable(timer, &e))?;
+    if response.status() != reqwest::StatusCode::LOCKED {
+        return Ok(response);
+    }
+    let waited = Instant::now();
+    loop {
+        let key = directory.control_key(&timer.id);
+        let ours = directory.status(&timer.id).control == Some(TimerControl::Grid);
+        if ours && key.is_some() && key != sent_with {
+            return send(key).await.map_err(|e| unreachable(timer, &e));
+        }
+        if waited.elapsed() >= CONTROL_SETTLES {
+            return Ok(response);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Stop a write the timer is known to refuse: another program has control of it. Saying so
+/// here names the program; the timer is still the judge of every write that is sent.
+fn may_write(directory: &TimerDirectory, timer: &Timer) -> Result<(), TimerError> {
+    match directory.status(&timer.id).control {
+        Some(TimerControl::Other { name }) => Err(controlled(timer, &name)),
+        _ => Ok(()),
+    }
+}
+
+/// Why a timer refused a write, from its answer. A `423` means another program has
+/// control (OFT spec §6.6); anything else is passed on with the timer's own reason.
+async fn refusal(timer: &Timer, response: reqwest::Response) -> TimerError {
+    let locked = response.status() == reqwest::StatusCode::LOCKED;
+    // The timer says why in `{"error": "..."}`.
+    let why = response
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| body["error"].as_str().map(str::to_owned));
+    if locked {
+        // "controlled by RotorHazard".
+        let holder = why
+            .as_deref()
+            .and_then(|why| why.strip_prefix("controlled by "))
+            .unwrap_or("");
+        return controlled(timer, holder);
+    }
+    TimerError::Unreachable(format!(
+        "{} refused the change: {}.",
+        timer.name,
+        why.as_deref().unwrap_or("it gave no reason")
+    ))
+}
+
+/// Write a timer's settings, then read them back. The write only counts if the timer then
+/// reports exactly what was sent.
+async fn write_config(
+    directory: &TimerDirectory,
+    timer: &Timer,
+    config: &OftConfig,
+) -> Result<OftConfig, TimerError> {
+    may_write(directory, timer)?;
+    let url = config_url(timer);
+    let response = send_write(directory, timer, reqwest::Method::PUT, url, Some(config)).await?;
     if !response.status().is_success() {
-        // The timer says why in `{"error": "..."}`.
-        let why = response
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|body| body["error"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| "it gave no reason".to_owned());
-        return Err(TimerError::Unreachable(format!(
-            "{} refused the change: {why}.",
-            timer.name
-        )));
+        return Err(refusal(timer, response).await);
     }
     let now = read_config(timer).await?;
     if &now != config {
@@ -700,19 +1062,19 @@ async fn write_config(timer: &Timer, config: &OftConfig) -> Result<OftConfig, Ti
 
 /// Ask a timer to keep the settings it is using as its power-on settings (OFT
 /// `POST /config/save`). The write only counts if the timer then says they are kept.
-async fn keep_config(timer: &Timer) -> Result<(), TimerError> {
+async fn keep_config(directory: &TimerDirectory, timer: &Timer) -> Result<(), TimerError> {
     #[derive(Deserialize)]
     struct Kept {
         #[serde(default)]
         current_is_saved: bool,
     }
     let unreachable = |e: reqwest::Error| unreachable(timer, &e);
-    let kept: Kept = reqwest::Client::new()
-        .post(format!("{}/save", config_url(timer)))
-        .timeout(TIMER_ANSWER)
-        .send()
-        .await
-        .map_err(unreachable)?
+    let url = format!("{}/save", config_url(timer));
+    let response = send_write(directory, timer, reqwest::Method::POST, url, None).await?;
+    if response.status() == reqwest::StatusCode::LOCKED {
+        return Err(refusal(timer, response).await);
+    }
+    let kept: Kept = response
         .error_for_status()
         .map_err(unreachable)?
         .json()
@@ -787,6 +1149,17 @@ pub async fn create_timer(
 }
 
 /// `DELETE /timers/{timer_id}` — remove a timer, RD-gated.
+/// `PUT /timers/{timer_id}` — give a timer another name, RD-gated. Answers with the timer
+/// as it now is. A blank name is a **400**; an unknown timer a **404**.
+pub async fn rename_timer(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(timer_id): Path<AdapterId>,
+    Json(body): Json<RenameTimerRequest>,
+) -> Result<Json<Timer>, ProtocolError> {
+    Ok(Json(registry.timers().rename(&timer_id, &body.name)?))
+}
+
 pub async fn delete_timer(
     _auth: ControlAuth,
     State(registry): State<EventRegistry>,
@@ -813,7 +1186,31 @@ pub async fn get_timer_config(
     if timer.kind != TimerKind::Oft {
         return Err(TimerError::NotBuilt.into());
     }
-    Ok(Json(read_config(&timer).await?.into()))
+    let config: TimerConfig = read_config(&timer).await?.into();
+    registry
+        .timers()
+        .note_channels(&timer_id, &config, Instant::now());
+    Ok(Json(config))
+}
+
+/// A timer's seat channels: which frequency each switched-on seat is on.
+///
+/// The answer comes from what the Director last read from the timer. The timer itself is
+/// asked at most once in [`CHANNELS_MAX_AGE`], whoever is asking and however often, so a
+/// field full of phones costs the timer nothing. A timer that does not answer keeps the
+/// channels it last gave. Only an OFT timer says its channels.
+pub async fn seat_channels(registry: &EventRegistry, timer_id: &AdapterId) -> Vec<SeatChannel> {
+    let directory = registry.timers();
+    let Some(timer) = directory.get(timer_id) else {
+        return Vec::new();
+    };
+    if timer.kind == TimerKind::Oft && directory.should_ask_channels(timer_id, Instant::now()) {
+        match read_config(&timer).await {
+            Ok(config) => directory.note_channels(timer_id, &config.into(), Instant::now()),
+            Err(_) => directory.channels_not_read(timer_id, Instant::now()),
+        }
+    }
+    directory.known_channels(timer_id)
 }
 
 /// `PUT /timers/{timer_id}/config` — change the timer's settings, RD-gated. Answers with
@@ -844,24 +1241,94 @@ pub async fn apply_config(
     }
     // A timer that has one threshold for every seat would drop a seat's own without a
     // word, and the write would then fail its readback with a vaguer message. Say it here.
-    let status = registry
-        .timers()
-        .list()
-        .into_iter()
-        .find(|view| &view.timer.id == timer_id)
-        .map(|view| view.status)
-        .unwrap_or_default();
+    let status = registry.timers().status(timer_id);
     if !status.seat_thresholds && body.seats.iter().any(|seat| seat.threshold.is_some()) {
         return Err(TimerError::OneThreshold.into());
     }
+    // Said before anything is read, so a director is not told about a typing mistake in a
+    // change the timer would refuse anyway.
+    may_write(&registry.timers(), &timer)?;
     let config = body.to_oft(&read_config(&timer).await?)?;
-    let written = write_config(&timer, &config).await?;
+    let written = write_config(&registry.timers(), &timer, &config).await?;
     // A timer that can keep its settings is asked to, every time: after "Apply" the timer
     // is set, and a power cycle at the field must not quietly put its defaults back.
     if status.keeps_settings {
-        keep_config(&timer).await?;
+        keep_config(&registry.timers(), &timer).await?;
     }
-    Ok(written.into())
+    let written: TimerConfig = written.into();
+    registry
+        .timers()
+        .note_channels(timer_id, &written, Instant::now());
+    Ok(written)
+}
+
+/// Put the event's pass window on every timer that can take one, and note on each what it
+/// then has (`docs/primitives.md` §12.6).
+///
+/// `window_ms` is the open event's lap rule, `0` for off. Each connected OFT timer that
+/// has a pass window is read; where it differs it is written and read back, as every
+/// write to a timer is. A timer that cannot be reached, or does not take the write, gets
+/// the reason on its status, where the Run page shows it. So does a timer another program
+/// has control of, when its window is not the event's: Grid cannot put it right. A timer
+/// with no pass window is left alone: its status already says it has none.
+///
+/// The Timer's other settings are never touched: the write sends back exactly what was
+/// read, with the window changed.
+pub async fn sync_pass_window(registry: &EventRegistry, window_ms: u32) {
+    for view in registry.timers().list() {
+        let TimerView { timer, status } = view;
+        if timer.kind != TimerKind::Oft || !status.connected || !status.pass_window {
+            continue;
+        }
+        let outcome = async {
+            let now = read_config(&timer).await?;
+            if now.pass_window_ms == Some(window_ms) {
+                return Ok(window_ms);
+            }
+            let wanted = OftConfig {
+                pass_window_ms: Some(window_ms),
+                ..now
+            };
+            let written = write_config(&registry.timers(), &timer, &wanted).await?;
+            Ok::<u32, TimerError>(written.pass_window_ms.unwrap_or(0))
+        }
+        .await;
+        registry
+            .timers()
+            .report(&timer.id, |status| match &outcome {
+                Ok(has) => {
+                    status.pass_window_ms = Some(*has);
+                    status.pass_window_problem = None;
+                }
+                Err(err) => {
+                    status.pass_window_problem = Some(ProtocolError::from(err.clone()).message);
+                }
+            });
+    }
+}
+
+/// The open event's pass window, in milliseconds: `0` when it sets none, or no event is open.
+pub fn open_events_pass_window(registry: &EventRegistry) -> u32 {
+    let Some(event) = registry.active() else {
+        return 0;
+    };
+    crate::control::with_event(registry, &event.id, |session| {
+        Ok(session.state().lap_rules.pass_window_micros)
+    })
+    .ok()
+    .flatten()
+    .map_or(0, |micros| u32::try_from(micros / 1000).unwrap_or(0))
+}
+
+/// Bring the timers into step with the open event's pass window, in the background. Called
+/// whenever either side may have changed: the lap rules were set, a heat went on the timer,
+/// a race was started, another event was opened, or a timer connected.
+pub fn spawn_pass_window_sync(registry: &EventRegistry) {
+    let registry = registry.clone();
+    tokio::spawn(async move {
+        let window_ms = open_events_pass_window(&registry);
+        sync_pass_window(&registry, window_ms).await;
+    });
 }
 
 /// `GET /timers/{timer_id}/live` — server-sent events for tuning. Open read.
@@ -910,6 +1377,213 @@ mod tests {
             address: address.into(),
             own_id: None,
         }
+    }
+
+    /// Settings with seats on these frequencies; `None` is a seat that is switched off.
+    fn settings(seats: &[Option<u32>]) -> TimerConfig {
+        TimerConfig {
+            seats: seats
+                .iter()
+                .enumerate()
+                .map(|(index, freq)| TimerSeatConfig {
+                    seat: SeatRef(index.to_string()),
+                    freq_mhz: freq.unwrap_or(5800),
+                    enabled: freq.is_some(),
+                    threshold: None,
+                })
+                .collect(),
+            threshold: TimerThreshold::Auto {
+                snr_enter: 10,
+                hysteresis: 3,
+            },
+            lap_cooldown_ms: Some(2000),
+            exit_hold_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_timers_seat_channels_are_remembered_and_only_for_seats_that_are_on() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        assert!(
+            directory.known_channels(&gate).is_empty(),
+            "nothing is known at first"
+        );
+        directory.note_channels(
+            &gate,
+            &settings(&[Some(5658), None, Some(5732)]),
+            Instant::now(),
+        );
+        assert_eq!(
+            directory.known_channels(&gate),
+            [
+                SeatChannel {
+                    adapter: gate.clone(),
+                    seat: SeatRef("0".into()),
+                    freq_mhz: 5658
+                },
+                SeatChannel {
+                    adapter: gate.clone(),
+                    seat: SeatRef("2".into()),
+                    freq_mhz: 5732
+                }
+            ]
+        );
+        // Newer settings replace the old ones whole.
+        directory.note_channels(&gate, &settings(&[Some(5800)]), Instant::now());
+        assert_eq!(directory.known_channels(&gate).len(), 1);
+        assert_eq!(directory.known_channels(&gate)[0].freq_mhz, 5800);
+    }
+
+    #[test]
+    fn a_timer_is_asked_for_its_channels_once_and_then_not_again_for_a_while() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let start = Instant::now();
+        assert!(
+            directory.should_ask_channels(&gate, start),
+            "never asked: ask"
+        );
+        // While that asker is at it, nobody else goes to the timer.
+        for _ in 0..50 {
+            assert!(!directory.should_ask_channels(&gate, start));
+        }
+        directory.note_channels(&gate, &settings(&[Some(5658)]), start);
+        // Fresh: not asked again, right up to the limit.
+        assert!(!directory.should_ask_channels(&gate, start));
+        let nearly = start + CHANNELS_MAX_AGE - Duration::from_millis(1);
+        assert!(!directory.should_ask_channels(&gate, nearly));
+        // Old: one asker goes, and only one.
+        let later = start + CHANNELS_MAX_AGE;
+        assert!(directory.should_ask_channels(&gate, later));
+        assert!(!directory.should_ask_channels(&gate, later));
+    }
+
+    #[test]
+    fn a_timer_that_does_not_answer_keeps_its_last_channels_and_is_left_alone_for_a_while() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let start = Instant::now();
+        directory.note_channels(&gate, &settings(&[Some(5658)]), start);
+        let later = start + CHANNELS_MAX_AGE;
+        assert!(directory.should_ask_channels(&gate, later));
+        directory.channels_not_read(&gate, later);
+        assert_eq!(
+            directory.known_channels(&gate)[0].freq_mhz,
+            5658,
+            "the old answer stands"
+        );
+        assert!(
+            !directory.should_ask_channels(&gate, later),
+            "not asked again at once"
+        );
+        assert!(directory.should_ask_channels(&gate, later + CHANNELS_MAX_AGE));
+        // A timer that has never answered: nothing known, and the same patience.
+        let dead = directory
+            .create(&request("Dead", "10.0.0.6:7270"))
+            .unwrap()
+            .id;
+        assert!(directory.should_ask_channels(&dead, start));
+        directory.channels_not_read(&dead, start);
+        assert!(directory.known_channels(&dead).is_empty());
+        assert!(!directory.should_ask_channels(&dead, start));
+    }
+
+    #[test]
+    fn channels_are_per_timer_and_go_when_the_timer_does() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let other = directory
+            .create(&request("Other", "10.0.0.6:7270"))
+            .unwrap()
+            .id;
+        let now = Instant::now();
+        directory.note_channels(&gate, &settings(&[Some(5658)]), now);
+        assert!(directory.known_channels(&other).is_empty());
+        assert!(
+            directory.should_ask_channels(&other, now),
+            "the other timer is its own"
+        );
+        directory.delete(&gate).unwrap();
+        assert!(directory.known_channels(&gate).is_empty());
+        // A timer that is not in the directory is never asked and never remembered.
+        assert!(!directory.should_ask_channels(&gate, now));
+        directory.note_channels(&gate, &settings(&[Some(5658)]), now);
+        assert!(directory.known_channels(&gate).is_empty());
+        let unknown = AdapterId("no-such-timer".into());
+        assert!(!directory.should_ask_channels(&unknown, now));
+        assert!(directory.known_channels(&unknown).is_empty());
+        directory.channels_not_read(&unknown, now);
+        directory.age_channels(&unknown);
+    }
+
+    #[test]
+    fn channels_made_old_are_asked_for_again() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory
+            .create(&request("Gate", "10.0.0.5:7270"))
+            .unwrap()
+            .id;
+        let now = Instant::now();
+        directory.note_channels(&gate, &settings(&[Some(5658)]), now);
+        assert!(!directory.should_ask_channels(&gate, now));
+        directory.age_channels(&gate);
+        assert!(directory.should_ask_channels(&gate, now));
+    }
+
+    #[test]
+    fn a_timer_is_renamed_and_keeps_its_handle_address_and_own_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "gridfpv-timers-rename-{}-{}",
+            std::process::id(),
+            tail()
+        ));
+        let directory = TimerDirectory::new(Some(dir.clone()));
+        let timer = directory
+            .create(&CreateTimerRequest {
+                name: "oft-3fa2".into(),
+                kind: TimerKind::Oft,
+                address: "10.0.0.5:7270".into(),
+                own_id: Some("oft-3fa2".into()),
+            })
+            .unwrap();
+        let watch = directory.watch();
+        let before = *watch.borrow();
+        let renamed = directory.rename(&timer.id, "  Start gate ").unwrap();
+        assert_eq!(renamed.name, "Start gate");
+        // Only the name moved. The handle passes carry is the same, so nothing already
+        // timed loses its timer; the name the timer gives itself is kept beside it.
+        assert_eq!(
+            Timer {
+                name: timer.name.clone(),
+                ..renamed.clone()
+            },
+            timer
+        );
+        assert_eq!(renamed.own_id.as_deref(), Some("oft-3fa2"));
+        assert!(*watch.borrow() > before);
+        // It is kept across a restart.
+        let again = TimerDirectory::new(Some(dir.clone()));
+        assert_eq!(again.records(), vec![renamed]);
+        // A blank name and an unknown timer are refused, and nothing changes.
+        assert_eq!(directory.rename(&timer.id, "  "), Err(TimerError::NoName));
+        assert_eq!(
+            directory.rename(&AdapterId("nope".into()), "Gate"),
+            Err(TimerError::NotFound)
+        );
+        assert_eq!(directory.records()[0].name, "Start gate");
     }
 
     #[test]
@@ -1120,6 +1794,192 @@ mod tests {
         (registry, format!("/timers/{}/config", timer.id.0), asked)
     }
 
+    /// A fake OFT timer that has a pass window. Gives its `host:port`, what it holds, and
+    /// how many times it was written to. `takes` says whether a write lands.
+    async fn fake_window_timer(
+        window_ms: u32,
+        takes: bool,
+    ) -> (
+        String,
+        Arc<Mutex<serde_json::Value>>,
+        Arc<std::sync::atomic::AtomicU32>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let stored = Arc::new(Mutex::new(serde_json::json!({
+            "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true,
+                       "threshold": {"mode": "manual", "enter": -700, "exit": -760}}],
+            "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
+            "min_lap_ms": 2000,
+            "exit_hold_ms": 80,
+            "pass_window_ms": window_ms,
+        })));
+        let writes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let read = {
+            let stored = stored.clone();
+            move || {
+                let stored = stored.clone();
+                async move { Json(stored.lock().unwrap().clone()) }
+            }
+        };
+        let write = {
+            let stored = stored.clone();
+            let writes = writes.clone();
+            move |Json(body): Json<serde_json::Value>| {
+                let stored = stored.clone();
+                let writes = writes.clone();
+                async move {
+                    writes.fetch_add(1, Ordering::SeqCst);
+                    if takes {
+                        *stored.lock().unwrap() = body.clone();
+                    }
+                    Json(body)
+                }
+            }
+        };
+        let app = axum::Router::new().route("/oft/v1/config", axum::routing::get(read).put(write));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr.to_string(), stored, writes)
+    }
+
+    /// A registry with one connected timer at `address` that says it has a pass window.
+    fn with_window_timer(address: &str, has_window: bool) -> (EventRegistry, AdapterId) {
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry.timers().create(&request("Gate", address)).unwrap();
+        registry.timers().report(&timer.id, |status| {
+            status.connected = true;
+            status.pass_window = has_window;
+            status.seat_thresholds = true;
+        });
+        (registry, timer.id)
+    }
+
+    fn status_of(registry: &EventRegistry, timer: &AdapterId) -> TimerStatus {
+        registry
+            .timers()
+            .list()
+            .into_iter()
+            .find(|view| &view.timer.id == timer)
+            .unwrap()
+            .status
+    }
+
+    #[tokio::test]
+    async fn the_events_pass_window_is_put_on_the_timer_and_nothing_else_is_touched() {
+        use std::sync::atomic::Ordering;
+        let (address, stored, writes) = fake_window_timer(0, true).await;
+        let (registry, timer) = with_window_timer(&address, true);
+        let before = stored.lock().unwrap().clone();
+
+        sync_pass_window(&registry, 400).await;
+        let after = stored.lock().unwrap().clone();
+        assert_eq!(after["pass_window_ms"], 400);
+        // Every other setting is exactly as it was: the seat's own levels, the exit hold.
+        let mut expected = before.clone();
+        expected["pass_window_ms"] = serde_json::json!(400);
+        assert_eq!(after, expected);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_ms, Some(400));
+        assert_eq!(status.pass_window_problem, None);
+
+        // Already in step: it is read, and not written again.
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        // Off is a value like any other.
+        sync_pass_window(&registry, 0).await;
+        assert_eq!(stored.lock().unwrap()["pass_window_ms"], 0);
+        assert_eq!(status_of(&registry, &timer).pass_window_ms, Some(0));
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timer_that_does_not_take_the_window_says_so_and_keeps_what_it_had() {
+        let (address, stored, _) = fake_window_timer(0, false).await;
+        let (registry, timer) = with_window_timer(&address, true);
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(stored.lock().unwrap()["pass_window_ms"], 0);
+        let status = status_of(&registry, &timer);
+        assert!(status.pass_window_problem.is_some(), "{status:?}");
+        assert_eq!(status.pass_window_ms, None, "what it has was not confirmed");
+        // The next time it is in step, the problem is gone.
+        sync_pass_window(&registry, 0).await;
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_problem, None);
+        assert_eq!(status.pass_window_ms, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_timer_with_no_pass_window_or_not_connected_is_left_alone() {
+        use std::sync::atomic::Ordering;
+        let (address, stored, writes) = fake_window_timer(0, true).await;
+        // It does not say it has one.
+        let (registry, timer) = with_window_timer(&address, false);
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert_eq!(stored.lock().unwrap()["pass_window_ms"], 0);
+        assert_eq!(status_of(&registry, &timer).pass_window_ms, None);
+        // It has one, and is not connected.
+        registry.timers().report(&timer, |status| {
+            status.pass_window = true;
+            status.connected = false;
+        });
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        // A timer that cannot be reached at all gets the reason, and nothing hangs.
+        let (gone, lost) = with_window_timer("127.0.0.1:9", true);
+        sync_pass_window(&gone, 400).await;
+        assert!(status_of(&gone, &lost).pass_window_problem.is_some());
+    }
+
+    #[tokio::test]
+    async fn applying_seat_settings_keeps_the_pass_window_the_timer_has() {
+        // The Seats page does not know the pass window: it is the event's. A settings write
+        // from it must carry over what the timer has, or the timer would switch it off.
+        let (address, stored, _) = fake_window_timer(400, true).await;
+        let (registry, timer) = with_window_timer(&address, true);
+        let uri = format!("/timers/{}/config", timer.0);
+        let (status, written) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+        let now = stored.lock().unwrap().clone();
+        assert_eq!(now["pass_window_ms"], 400);
+        assert_eq!(now["seats"][0]["freq_mhz"], 5658);
+        // And it is not one of the settings the Seats page is told or can send.
+        assert!(written.get("pass_window_ms").is_none(), "{written}");
+    }
+
+    #[tokio::test]
+    async fn the_open_events_pass_window_is_read_in_milliseconds_and_is_zero_with_none() {
+        use crate::events::CreateEventRequest;
+        let registry = EventRegistry::new(None).unwrap();
+        assert_eq!(open_events_pass_window(&registry), 0, "no event is open");
+        let event = registry
+            .create(&CreateEventRequest::named("Night"))
+            .unwrap();
+        registry.set_active(&event.id).unwrap();
+        assert_eq!(open_events_pass_window(&registry), 0, "it sets none");
+        crate::control::with_event(&registry, &event.id, |session| {
+            session.commands(vec![gridfpv_events::Command::Record(Box::new(
+                gridfpv_events::Event::LapRulesSet {
+                    rules: gridfpv_events::LapRules {
+                        min_lap_micros: None,
+                        ignore_before_micros: None,
+                        pass_window_micros: Some(1_500_000),
+                    },
+                },
+            ))])
+        })
+        .unwrap();
+        assert_eq!(open_events_pass_window(&registry), 1500);
+        // Another event that is not open does not count.
+        let other = registry
+            .create(&CreateEventRequest::named("Other"))
+            .unwrap();
+        registry.set_active(&other.id).unwrap();
+        assert_eq!(open_events_pass_window(&registry), 0);
+    }
+
     #[tokio::test]
     async fn the_lap_cooldown_is_written_and_a_write_without_it_keeps_the_timers() {
         let (registry, uri) = with_timer(Fake::Honest).await;
@@ -1179,6 +2039,46 @@ mod tests {
         let (status, _) = call(&registry, "DELETE", &format!("/timers/{}", timer.0), None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(registry.library().profiles(&timer).profiles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_profile_saved_in_one_unit_is_not_applied_once_the_timer_measures_in_another() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let timer = registry.timers().records()[0].id.clone();
+        let profiles = uri.replace("/config", "/profiles");
+        // Saved while the timer's receiver reported tenths of a dB.
+        registry.timers().report(&timer, |status| {
+            status.level_unit = Some(SignalUnit::TenthsDb);
+        });
+        let (_, at_first) = call(&registry, "GET", &uri, None).await;
+        let body = serde_json::json!({"name": "Garage", "config": at_first});
+        let (_, saved) = call(&registry, "POST", &profiles, Some(body)).await;
+        assert_eq!(saved["level_unit"], "TenthsDb", "{saved}");
+        let apply = format!("{profiles}/{}/apply", saved["id"].as_str().unwrap());
+        // The receiver comes back measuring millivolts. The profile's 150 would now mean
+        // 150 mV, not 15 dB: it is refused, in words, and the timer is not written to.
+        registry.timers().report(&timer, |status| {
+            status.level_unit = Some(SignalUnit::Millivolts);
+        });
+        let (status, _) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, before) = call(&registry, "GET", &uri, None).await;
+        let (status, refused) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        let message = refused["message"].as_str().unwrap();
+        assert!(
+            message.contains("dB") && message.contains("millivolts"),
+            "{message}"
+        );
+        let (_, after) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(after, before);
+        // Back in dB, it applies.
+        registry.timers().report(&timer, |status| {
+            status.level_unit = Some(SignalUnit::TenthsDb);
+        });
+        let (status, applied) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::OK, "{applied}");
+        assert_eq!(applied, at_first);
     }
 
     #[tokio::test]
@@ -1328,6 +2228,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_timer_is_renamed_over_http() {
+        let (registry, uri) = with_timer(Fake::Honest).await;
+        let timer = uri.trim_end_matches("/config").to_owned();
+        let body = serde_json::json!({"name": " Start gate "});
+        let (status, renamed) = call(&registry, "PUT", &timer, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{renamed}");
+        assert_eq!(renamed["name"], "Start gate");
+        let (_, listed) = call(&registry, "GET", "/timers", None).await;
+        assert_eq!(listed[0]["timer"]["name"], "Start gate");
+        // A blank name is refused in words; an unknown timer is not found.
+        let blank = serde_json::json!({"name": "  "});
+        let (status, said) = call(&registry, "PUT", &timer, Some(blank)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(said["message"], "A timer needs a name.");
+        let body = serde_json::json!({"name": "Gate"});
+        let (status, _) = call(&registry, "PUT", "/timers/nope", Some(body)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn settings_are_read_from_the_timer() {
         let (registry, uri) = with_timer(Fake::Honest).await;
         let (status, body) = call(&registry, "GET", &uri, None).await;
@@ -1429,6 +2349,7 @@ mod tests {
         let mut listener = directory.listen(&timer.id).unwrap();
         let levels = TimerLive::Levels(vec![SeatLevels {
             seat: SeatRef("0".into()),
+            unit: SignalUnit::TenthsDb,
             level: Some(-880),
             floor: Some(-900),
             enter: -750,
@@ -1579,5 +2500,443 @@ mod tests {
         assert_eq!(directory.discovered()[1].address, "10.0.0.9:7270");
         directory.lost("a._oft._tcp.local.");
         assert_eq!(directory.discovered().len(), 1);
+    }
+
+    // ── Control: one writer at a time (OFT spec v0.9, §6.6) ────────────────
+
+    /// What a [`fake_guarded`] timer holds, and what it was asked.
+    #[derive(Clone)]
+    struct Guarded {
+        stored: Arc<Mutex<serde_json::Value>>,
+        /// The key of the claim that holds control. `None`: nobody does.
+        holder_key: Arc<Mutex<Option<String>>>,
+        /// Writes that got past the guard: settings, then "keep these".
+        writes: Arc<std::sync::atomic::AtomicU32>,
+        keeps: Arc<std::sync::atomic::AtomicU32>,
+        /// Writes the guard refused.
+        refused: Arc<std::sync::atomic::AtomicU32>,
+        /// The `OFT-Control` header of every write, as it arrived.
+        keys_seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    /// A fake OFT timer with control, as `oftd` does it: while a claim holds control, a
+    /// write without that claim's key is a `423` naming the holder, and changes nothing.
+    async fn fake_guarded(holder_key: Option<&str>) -> (String, Guarded) {
+        use axum::http::HeaderMap;
+        use std::sync::atomic::Ordering;
+        let fake = Guarded {
+            stored: Arc::new(Mutex::new(serde_json::json!({
+                "seats": [{"seat": 0, "freq_mhz": 5800, "enabled": true}],
+                "threshold": {"mode": "auto", "snr_enter": 150, "hysteresis": 50},
+                "min_lap_ms": 2000,
+                "exit_hold_ms": 30,
+                "pass_window_ms": 0,
+            }))),
+            holder_key: Arc::new(Mutex::new(holder_key.map(str::to_owned))),
+            writes: Arc::default(),
+            keeps: Arc::default(),
+            refused: Arc::default(),
+            keys_seen: Arc::default(),
+        };
+        // `Err` is the refusal a write without the holder's key gets.
+        fn guard(
+            fake: &Guarded,
+            headers: &HeaderMap,
+        ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+            let sent = headers
+                .get("OFT-Control")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            fake.keys_seen.lock().unwrap().push(sent.clone());
+            let holder = fake.holder_key.lock().unwrap().clone();
+            if holder.is_some() && sent != holder {
+                fake.refused.fetch_add(1, Ordering::SeqCst);
+                return Err((
+                    StatusCode::LOCKED,
+                    Json(serde_json::json!({"error": "controlled by RotorHazard pi-timer"})),
+                ));
+            }
+            Ok(())
+        }
+        let read = {
+            let fake = fake.clone();
+            move || {
+                let fake = fake.clone();
+                async move { Json(fake.stored.lock().unwrap().clone()) }
+            }
+        };
+        let write = {
+            let fake = fake.clone();
+            move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                let fake = fake.clone();
+                async move {
+                    guard(&fake, &headers)?;
+                    fake.writes.fetch_add(1, Ordering::SeqCst);
+                    *fake.stored.lock().unwrap() = body.clone();
+                    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(body))
+                }
+            }
+        };
+        let keep = {
+            let fake = fake.clone();
+            move |headers: HeaderMap| {
+                let fake = fake.clone();
+                async move {
+                    guard(&fake, &headers)?;
+                    fake.keeps.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, (StatusCode, Json<serde_json::Value>)>(Json(
+                        serde_json::json!({"saved": true, "current_is_saved": true}),
+                    ))
+                }
+            }
+        };
+        let app = axum::Router::new()
+            .route("/oft/v1/config", axum::routing::get(read).put(write))
+            .route("/oft/v1/config/save", axum::routing::post(keep));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr.to_string(), fake)
+    }
+
+    /// A registry with one connected timer at a [`fake_guarded`] that keeps settings and
+    /// has a pass window.
+    async fn with_guarded(holder_key: Option<&str>) -> (EventRegistry, AdapterId, String, Guarded) {
+        let (address, fake) = fake_guarded(holder_key).await;
+        let registry = EventRegistry::new(None).unwrap();
+        let timer = registry
+            .timers()
+            .create(&request("Gate", &address))
+            .unwrap();
+        registry.timers().report(&timer.id, |status| {
+            status.connected = true;
+            status.keeps_settings = true;
+            status.pass_window = true;
+        });
+        let uri = format!("/timers/{}/config", timer.id.0);
+        (registry, timer.id, uri, fake)
+    }
+
+    fn other_holds(registry: &EventRegistry, timer: &AdapterId, name: &str) {
+        registry.timers().report(timer, |status| {
+            status.control = Some(TimerControl::Other {
+                name: name.to_owned(),
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn with_control_every_write_carries_grids_key() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, uri, fake) = with_guarded(Some("9f3a61c2")).await;
+        registry.timers().report(&timer, |status| {
+            status.control = Some(TimerControl::Grid);
+        });
+        registry
+            .timers()
+            .set_control_key(&timer, Some("9f3a61c2".into()));
+
+        let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["seats"][1]["freq_mhz"], 5917);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 1);
+        // Keeping the settings is a write too, and carried the key.
+        assert_eq!(fake.keeps.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.refused.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *fake.keys_seen.lock().unwrap(),
+            vec![Some("9f3a61c2".to_owned()), Some("9f3a61c2".to_owned())]
+        );
+        // So does the event's pass window.
+        sync_pass_window(&registry, 400).await;
+        assert_eq!(fake.stored.lock().unwrap()["pass_window_ms"], 400);
+        assert_eq!(status_of(&registry, &timer).pass_window_problem, None);
+        assert_eq!(fake.refused.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn with_nobody_in_control_a_write_needs_no_key_and_a_key_does_no_harm() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, uri, fake) = with_guarded(None).await;
+        registry.timers().report(&timer, |status| {
+            status.control = Some(TimerControl::Nobody);
+        });
+        let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(fake.keys_seen.lock().unwrap()[0], None);
+        // A key left from before (the timer's page freed control) is sent and accepted.
+        registry
+            .timers()
+            .set_control_key(&timer, Some("0ld".into()));
+        let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_timer_another_program_controls_is_not_written_to_and_the_answer_names_it() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, uri, fake) = with_guarded(Some("theirs")).await;
+        other_holds(&registry, &timer, "RotorHazard pi-timer");
+        let before = fake.stored.lock().unwrap().clone();
+
+        let (status, said) = call(&registry, "PUT", &uri, Some(changed())).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert_eq!(said["code"], "Refused");
+        let message = said["message"].as_str().unwrap();
+        assert!(message.contains("RotorHazard pi-timer"), "{message}");
+        assert!(message.contains("Gate"), "{message}");
+        assert!(message.contains("timer's own page"), "{message}");
+        // Nothing was sent: Grid knew, and did not knock.
+        assert!(fake.keys_seen.lock().unwrap().is_empty());
+        assert_eq!(*fake.stored.lock().unwrap(), before);
+
+        // Even a change that is wrong in itself is answered with the real reason.
+        let mut bad = changed();
+        bad["seats"][0]["seat"] = serde_json::json!("not-a-seat");
+        let (status, said) = call(&registry, "PUT", &uri, Some(bad)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert!(said["message"].as_str().unwrap().contains("control"));
+
+        // Reading is open to everyone, whoever has control.
+        let (status, read) = call(&registry, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["seats"][0]["freq_mhz"], 5800);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_423_from_the_timer_is_passed_on_naming_the_holder() {
+        use std::sync::atomic::Ordering;
+        // Grid has not heard yet that another program took control (or its key is old).
+        for (control, key) in [
+            (None, None),
+            (Some(TimerControl::Nobody), None),
+            (Some(TimerControl::Grid), Some("stale")),
+        ] {
+            let (registry, timer, uri, fake) = with_guarded(Some("theirs")).await;
+            registry
+                .timers()
+                .report(&timer, |status| status.control = control.clone());
+            registry
+                .timers()
+                .set_control_key(&timer, key.map(str::to_owned));
+            let before = fake.stored.lock().unwrap().clone();
+            let (status, said) = call(&registry, "PUT", &uri, Some(changed())).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{said}");
+            let message = said["message"].as_str().unwrap();
+            assert!(
+                message.contains("\u{201c}RotorHazard pi-timer\u{201d} has control of Gate"),
+                "{message}"
+            );
+            assert_eq!(fake.refused.load(Ordering::SeqCst), 1);
+            assert_eq!(fake.keeps.load(Ordering::SeqCst), 0);
+            assert_eq!(*fake.stored.lock().unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_keep_is_not_reported_as_kept() {
+        use std::sync::atomic::Ordering;
+        // Control moves between the write and the "keep these".
+        let (registry, timer, _, fake) = with_guarded(None).await;
+        let timer_record = registry.timers().get(&timer).unwrap();
+        *fake.holder_key.lock().unwrap() = Some("theirs".into());
+        let kept = keep_config(&registry.timers(), &timer_record).await;
+        let Err(TimerError::Controlled(message)) = kept else {
+            panic!("expected a refusal, got {kept:?}");
+        };
+        assert!(message.contains("RotorHazard pi-timer"), "{message}");
+        assert_eq!(fake.keeps.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_pass_window_on_a_timer_another_program_controls() {
+        use std::sync::atomic::Ordering;
+        let (registry, timer, _, fake) = with_guarded(Some("theirs")).await;
+        other_holds(&registry, &timer, "RotorHazard pi-timer");
+
+        // Already what the event wants: nothing to write, nothing to complain about.
+        sync_pass_window(&registry, 0).await;
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_ms, Some(0));
+        assert_eq!(status.pass_window_problem, None);
+
+        // Different: Grid cannot put it right, and says why on the timer's status.
+        sync_pass_window(&registry, 400).await;
+        let status = status_of(&registry, &timer);
+        let problem = status.pass_window_problem.expect("a problem is reported");
+        assert!(problem.contains("RotorHazard pi-timer"), "{problem}");
+        assert_eq!(fake.stored.lock().unwrap()["pass_window_ms"], 0);
+        assert!(fake.keys_seen.lock().unwrap().is_empty());
+
+        // Control comes to Grid: the same call now lands and the problem clears.
+        *fake.holder_key.lock().unwrap() = Some("ours".into());
+        registry.timers().report(&timer, |status| {
+            status.control = Some(TimerControl::Grid);
+        });
+        registry
+            .timers()
+            .set_control_key(&timer, Some("ours".into()));
+        sync_pass_window(&registry, 400).await;
+        let status = status_of(&registry, &timer);
+        assert_eq!(status.pass_window_ms, Some(400));
+        assert_eq!(status.pass_window_problem, None);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_profile_is_not_applied_to_a_timer_another_program_controls() {
+        let (registry, timer, _, fake) = with_guarded(Some("theirs")).await;
+        // Saved while Grid could still read the timer; saving writes nothing to it.
+        let profiles = format!("/timers/{}/profiles", timer.0);
+        let body = serde_json::json!({"name": "Field", "config": changed()});
+        let (status, saved) = call(&registry, "POST", &profiles, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        let other = serde_json::json!({"name": "Garage", "config": changed()});
+        let (status, garage) = call(&registry, "POST", &profiles, Some(other)).await;
+        assert_eq!(status, StatusCode::OK, "{garage}");
+
+        other_holds(&registry, &timer, "RotorHazard pi-timer");
+        let apply = format!("{profiles}/{}/apply", saved["id"].as_str().unwrap());
+        let (status, said) = call(&registry, "POST", &apply, None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert!(
+            said["message"]
+                .as_str()
+                .unwrap()
+                .contains("RotorHazard pi-timer")
+        );
+        // The active profile is the one it was, and the timer was not touched.
+        let (_, listed) = call(&registry, "GET", &profiles, None).await;
+        assert_eq!(listed["active"], garage["id"]);
+        assert!(fake.keys_seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_control_key_is_kept_per_timer_and_goes_with_the_timer() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory.create(&request("Gate", "10.0.0.1:7270")).unwrap();
+        let split = directory
+            .create(&request("Split", "10.0.0.2:7270"))
+            .unwrap();
+        assert_eq!(directory.control_key(&gate.id), None);
+        directory.set_control_key(&gate.id, Some("aa".into()));
+        directory.set_control_key(&split.id, Some("bb".into()));
+        assert_eq!(directory.control_key(&gate.id).as_deref(), Some("aa"));
+        assert_eq!(directory.control_key(&split.id).as_deref(), Some("bb"));
+        directory.set_control_key(&gate.id, None);
+        assert_eq!(directory.control_key(&gate.id), None);
+        assert_eq!(directory.control_key(&split.id).as_deref(), Some("bb"));
+        directory.delete(&split.id).unwrap();
+        assert_eq!(directory.control_key(&split.id), None);
+        // A connection that outlives its timer cannot leave a key behind.
+        directory.set_control_key(&split.id, Some("cc".into()));
+        assert_eq!(directory.control_key(&split.id), None);
+    }
+
+    #[test]
+    fn the_key_never_reaches_a_console_and_control_is_said_in_the_status() {
+        let directory = TimerDirectory::new(None);
+        let gate = directory.create(&request("Gate", "10.0.0.1:7270")).unwrap();
+        directory.set_control_key(&gate.id, Some("s3cr3t".into()));
+        directory.report(&gate.id, |status| {
+            status.control = Some(TimerControl::Other {
+                name: "RotorHazard".into(),
+            });
+            status.control_name = Some("GridFPV race-laptop".into());
+            status.config_rev = Some(7);
+        });
+        let listed = serde_json::to_value(directory.list()).unwrap();
+        assert!(!listed.to_string().contains("s3cr3t"), "{listed}");
+        assert_eq!(
+            listed[0]["status"]["control"],
+            serde_json::json!({"holder": "Other", "name": "RotorHazard"})
+        );
+        assert_eq!(listed[0]["status"]["control_name"], "GridFPV race-laptop");
+        assert_eq!(listed[0]["status"]["config_rev"], 7);
+        // A timer with no control says nothing about it.
+        let plain = directory
+            .create(&request("Plain", "10.0.0.3:7270"))
+            .unwrap();
+        directory.report(&plain.id, |status| status.connected = true);
+        let listed = serde_json::to_value(directory.list()).unwrap();
+        let plain = &listed[1]["status"];
+        assert!(plain.get("control").is_none(), "{plain}");
+        assert!(plain.get("config_rev").is_none(), "{plain}");
+        // A visitor is told none of it.
+        let view = directory.list().remove(0);
+        let visitor = serde_json::to_value(crate::spectate::timer_for_visitors(view)).unwrap();
+        assert!(visitor["status"].get("control").is_none(), "{visitor}");
+        assert!(visitor["status"].get("control_name").is_none(), "{visitor}");
+    }
+
+    #[tokio::test]
+    async fn a_write_sent_a_moment_before_grid_hears_it_has_control_is_sent_again_with_the_key() {
+        use std::sync::atomic::Ordering;
+        // The timer has made Grid's claim the holder; the key is still on its way.
+        for stale in [None, Some("from-before")] {
+            let (registry, timer, uri, fake) = with_guarded(Some("9f3a61c2")).await;
+            registry
+                .timers()
+                .set_control_key(&timer, stale.map(str::to_owned));
+            let arrives = {
+                let (registry, timer) = (registry.clone(), timer.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    registry
+                        .timers()
+                        .set_control_key(&timer, Some("9f3a61c2".into()));
+                    registry.timers().report(&timer, |status| {
+                        status.control = Some(TimerControl::Grid);
+                    });
+                })
+            };
+            let (status, answer) = call(&registry, "PUT", &uri, Some(changed())).await;
+            arrives.await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{answer}");
+            assert_eq!(fake.stored.lock().unwrap()["seats"][1]["freq_mhz"], 5917);
+            // Refused once, sent again with the key, then kept with the key.
+            assert_eq!(fake.refused.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                *fake.keys_seen.lock().unwrap(),
+                vec![
+                    stale.map(str::to_owned),
+                    Some("9f3a61c2".to_owned()),
+                    Some("9f3a61c2".to_owned())
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_is_sent_again_at_most_once() {
+        use std::sync::atomic::Ordering;
+        // Grid is told it has control, with a key the timer does not accept (control
+        // moved on again). One more try, then the refusal stands.
+        let (registry, timer, uri, fake) = with_guarded(Some("theirs")).await;
+        let arrives = {
+            let (registry, timer) = (registry.clone(), timer.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                registry
+                    .timers()
+                    .set_control_key(&timer, Some("wrong".into()));
+                registry.timers().report(&timer, |status| {
+                    status.control = Some(TimerControl::Grid);
+                });
+            })
+        };
+        let (status, said) = call(&registry, "PUT", &uri, Some(changed())).await;
+        arrives.await.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "{said}");
+        assert!(
+            said["message"]
+                .as_str()
+                .unwrap()
+                .contains("RotorHazard pi-timer")
+        );
+        assert_eq!(fake.refused.load(Ordering::SeqCst), 2);
+        assert_eq!(fake.writes.load(Ordering::SeqCst), 0);
     }
 }

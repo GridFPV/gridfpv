@@ -335,6 +335,7 @@ impl Link {
                     .iter()
                     .enumerate()
                     .map(|(node, level)| SeatLevels {
+                        unit: gridfpv_events::SignalUnit::Counts,
                         seat: seat_ref(node),
                         level: Some(*level),
                         floor: None,

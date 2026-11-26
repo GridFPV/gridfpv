@@ -39,10 +39,14 @@ import {
   updateClass,
   deleteClass,
   setClassHidden,
+  getBuiltinClasses,
+  restoreBuiltinClasses,
   listTimers,
+  listPublicChannels,
   listDiscoveredTimers,
   createTimer,
   deleteTimer,
+  renameTimer,
   getTimerConfig,
   putTimerConfig,
   updateEvent,
@@ -65,6 +69,24 @@ import {
   dataExportUrl,
   postDataImport,
   deleteDataImport,
+  getNetwork,
+  putDoor,
+  putAccessToken,
+  putPublicAddress,
+  getKiosks,
+  newKioskCode,
+  cancelKioskCode,
+  removeKiosk,
+  renameKiosk,
+  getPublicHello,
+  getPilotAccess,
+  resetPilotCode,
+  endPilotSession,
+  pilotQrUrl,
+  signInPilot,
+  signOutPilot,
+  signInDirector,
+  signOutDirector,
   getOverlayLook,
   putOverlayLook,
   overlayLogoUrl,
@@ -74,6 +96,8 @@ import {
   getEventState,
   sendCommand,
   createBracket,
+  createMains,
+  createRoundRobin,
   postPass,
   getRaceSignal,
   subscribeChanges,
@@ -84,6 +108,8 @@ import type { TimerLiveHandlers } from '@gridfpv/protocol-client';
 import type {
   AdapterId,
   BracketRequest,
+  MainsRequest,
+  RoundRobinRequest,
   Class,
   ClassId,
   Command,
@@ -92,16 +118,31 @@ import type {
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
+  DataCopy,
+  DataExport,
+  DataInfo,
   DiscoveredTimer,
   EventMeta,
   EventView,
   Format,
+  KioskView,
+  Door,
+  DoorRequest,
+  NetworkView,
+  OverlayLook,
+  OverlayPlacement,
   PassRequest,
   Pilot,
+  PilotAccessView,
+  PilotCodeView,
   PilotId,
+  PublicHello,
+  PublicPilot,
   RaceId,
   RaceSignal,
+  RenderRequest,
   SavedFormat,
+  SeatChannel,
   SeatProfile,
   SeatProfileRequest,
   Timer,
@@ -109,16 +150,10 @@ import type {
   TimerProfiles,
   TimerView,
   UpdateClassRequest,
-  RenderRequest,
+  UpdatePilotRequest,
   VideoSettings,
   VideoSettingsRequest,
-  VideoStatus,
-  DataCopy,
-  DataExport,
-  DataInfo,
-  OverlayLook,
-  OverlayPlacement,
-  UpdatePilotRequest
+  VideoStatus
 } from '@gridfpv/types';
 
 const TOKEN_STORAGE_KEY = 'gridfpv.rd.token';
@@ -193,10 +228,14 @@ const realApi = {
   updateClass,
   deleteClass,
   setClassHidden,
+  getBuiltinClasses,
+  restoreBuiltinClasses,
   listTimers,
+  listPublicChannels,
   listDiscoveredTimers,
   createTimer,
   deleteTimer,
+  renameTimer,
   getTimerConfig,
   putTimerConfig,
   updateEvent,
@@ -219,6 +258,24 @@ const realApi = {
   dataExportUrl,
   postDataImport,
   deleteDataImport,
+  getNetwork,
+  putDoor,
+  putAccessToken,
+  putPublicAddress,
+  getKiosks,
+  newKioskCode,
+  cancelKioskCode,
+  removeKiosk,
+  renameKiosk,
+  getPublicHello,
+  getPilotAccess,
+  resetPilotCode,
+  endPilotSession,
+  pilotQrUrl,
+  signInPilot,
+  signOutPilot,
+  signInDirector,
+  signOutDirector,
   getOverlayLook,
   putOverlayLook,
   overlayLogoUrl,
@@ -228,6 +285,8 @@ const realApi = {
   getEventState,
   sendCommand,
   createBracket,
+  createMains,
+  createRoundRobin,
   postPass,
   getRaceSignal,
   subscribeChanges,
@@ -442,10 +501,28 @@ export class Session {
     );
   }
 
+  /** How many built-in classes have been removed, and could be put back. A plain read. */
+  async removedBuiltinClasses(): Promise<number> {
+    return (await this.#api.getBuiltinClasses(this.baseUrl)).removed;
+  }
+
+  /**
+   * Put back every built-in class that was removed. Returns the whole list of classes,
+   * `undefined` on a cancelled token prompt, or throws on any other failure.
+   */
+  restoreBuiltinClasses(): Promise<Class[] | undefined> {
+    return this.#privilegedWrite((token) => this.#api.restoreBuiltinClasses(this.baseUrl, token));
+  }
+
   // ── Timer directory ────────────────────────────────────────────────────────
   //
   // Timers are application-level, like pilots and classes: an open read, gated writes on the
   // same token path. The Director holds the connection to each timer; this only keeps the list.
+
+  /** Which video channel each seat of the open event is on, as the timers say. */
+  listChannels(): Promise<SeatChannel[]> {
+    return this.#api.listPublicChannels(this.baseUrl);
+  }
 
   /**
    * List every timer with its status right now (`GET /timers`, open, no token). There is no
@@ -470,6 +547,14 @@ export class Session {
    */
   createTimer(request: CreateTimerRequest): Promise<Timer | undefined> {
     return this.#privilegedWrite((token) => this.#api.createTimer(this.baseUrl, request, token));
+  }
+
+  /**
+   * Give a timer another name (`PUT /timers/{id}`). Returns the {@link Timer} as it now is,
+   * `undefined` on a cancelled token prompt, or throws with the Director's sentence.
+   */
+  renameTimer(id: AdapterId, name: string): Promise<Timer | undefined> {
+    return this.#privilegedWrite((token) => this.#api.renameTimer(this.baseUrl, id, name, token));
   }
 
   /**
@@ -578,6 +663,120 @@ export class Session {
   }
 
   // ── The race overlay's look ────────────────────────────────────────────────
+
+  /** Who the Director takes this browser for, and which event is open. Open to anyone. */
+  hello(): Promise<PublicHello> {
+    return this.#api.getPublicHello(this.baseUrl, { token: this.#token });
+  }
+
+  /** Every pilot in an event with their sign-in code. For the director. */
+  getPilotAccess(event: EventMeta['id']): Promise<PilotAccessView> {
+    return this.#api.getPilotAccess(this.baseUrl, event, { token: this.#token });
+  }
+
+  /** Give a pilot a new sign-in code. `undefined` on a cancelled prompt. */
+  resetPilotCode(event: EventMeta['id'], pilot: PilotId): Promise<PilotCodeView | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.resetPilotCode(this.baseUrl, event, pilot, token)
+    );
+  }
+
+  /** Sign a pilot's device out. `true` when done, `undefined` on a cancelled prompt. */
+  endPilotSession(event: EventMeta['id'], pilot: PilotId): Promise<true | undefined> {
+    return this.#privilegedWrite(async (token) => {
+      await this.#api.endPilotSession(this.baseUrl, event, pilot, token);
+      return true as const;
+    });
+  }
+
+  /** Where a pilot's QR code picture is served from. */
+  pilotQrUrl(event: EventMeta['id'], pilot: PilotId): string {
+    return this.#api.pilotQrUrl(this.baseUrl, event, pilot);
+  }
+
+  /** Sign this browser in as a pilot, with their code. Rejects with the Director's words. */
+  signInPilot(code: string): Promise<PublicPilot> {
+    return this.#api.signInPilot(this.baseUrl, code);
+  }
+
+  /** Sign this browser out as a pilot. */
+  signOutPilot(): Promise<void> {
+    return this.#api.signOutPilot(this.baseUrl);
+  }
+
+  /** The two doors other devices come in by, and where their listeners stand. */
+  getNetwork(): Promise<NetworkView> {
+    return this.#api.getNetwork(this.baseUrl, { token: this.#token });
+  }
+
+  /** Open or shut a door, or change its port. `undefined` on a cancelled prompt. */
+  putDoor(door: Door, request: DoorRequest): Promise<NetworkView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.putDoor(this.baseUrl, door, request, token));
+  }
+
+  /**
+   * Change the access token of the Remote RD door: to `typed`, or to a new one Grid makes.
+   * `undefined` on a cancelled prompt.
+   */
+  putAccessToken(typed?: string): Promise<NetworkView | undefined> {
+    const request = typed === undefined ? {} : { token: typed };
+    return this.#privilegedWrite((token) => this.#api.putAccessToken(this.baseUrl, request, token));
+  }
+
+  /**
+   * Set the public address every public link and QR code uses, or clear it with an empty
+   * one. `undefined` on a cancelled prompt.
+   */
+  putPublicAddress(address: string): Promise<NetworkView | undefined> {
+    const typed = address.trim();
+    const request = typed === '' ? {} : { address: typed };
+    return this.#privilegedWrite((token) =>
+      this.#api.putPublicAddress(this.baseUrl, request, token)
+    );
+  }
+
+  /** The kiosk codes waiting to be used, and the kiosks set up. */
+  getKiosks(): Promise<KioskView> {
+    return this.#api.getKiosks(this.baseUrl, { token: this.#token });
+  }
+
+  /** Make one more kiosk code. `undefined` on a cancelled prompt. */
+  newKioskCode(): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.newKioskCode(this.baseUrl, token));
+  }
+
+  /** Cancel a kiosk code that has not been used. */
+  cancelKioskCode(code: string): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.cancelKioskCode(this.baseUrl, code, token));
+  }
+
+  /** Name a kiosk, so two tablets can be told apart. An empty name takes it away. */
+  renameKiosk(number: number, name: string): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.renameKiosk(this.baseUrl, number, name, token)
+    );
+  }
+
+  /** Remove a kiosk: its tablet stops being one. */
+  removeKiosk(number: number): Promise<KioskView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.removeKiosk(this.baseUrl, number, token));
+  }
+
+  /** Sign in as the director from another device. Rejects with the Director's words. */
+  async signInDirector(token: string): Promise<void> {
+    await this.#api.signInDirector(this.baseUrl, token);
+    // Signed in, the cookie does the work. The typed token is not kept, and neither is
+    // one this tab was still holding from an earlier run: it would go out with every
+    // request the console makes next, and it may no longer be right.
+    this.clearToken();
+  }
+
+  /** Sign this browser out as the director. */
+  async signOutDirector(): Promise<void> {
+    await this.#api.signOutDirector(this.baseUrl);
+    // Signed out means signed out: the tab forgets the token too.
+    this.clearToken();
+  }
 
   /** Where the race overlay sits and which logos it has (`GET /overlay/look`, open). */
   getOverlayLook(): Promise<OverlayLook> {
@@ -746,6 +945,23 @@ export class Session {
   createBracket(id: EventMeta['id'], request: BracketRequest): Promise<CommandOutcome | undefined> {
     return this.#privilegedWrite((token) =>
       this.#api.createBracket(this.baseUrl, id, request, token)
+    );
+  }
+
+  /** Generate stacked mains. Same answers as {@link sendCommand}. */
+  createMains(id: EventMeta['id'], request: MainsRequest): Promise<CommandOutcome | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.createMains(this.baseUrl, id, request, token)
+    );
+  }
+
+  /** Generate a round robin. Same answers as {@link sendCommand}. */
+  createRoundRobin(
+    id: EventMeta['id'],
+    request: RoundRobinRequest
+  ): Promise<CommandOutcome | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.createRoundRobin(this.baseUrl, id, request, token)
     );
   }
 

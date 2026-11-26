@@ -13,11 +13,11 @@
 //!
 //! Like the rest of the crate this is pure: the clock comes in as an argument.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gridfpv_events::{
-    AdapterId, ClassId, Command, EndCondition, Event, Format, LapRules, LineupEntry, PhaseId,
-    PhaseKind, PilotId, ProtestId, RaceId, RaceSetup, SourceTime, StartOwner,
+    AdapterId, ClassId, Command, EndCondition, Event, FieldSlice, Format, LapRules, LineupEntry,
+    PhaseId, PhaseKind, PilotId, ProtestId, RaceId, RaceSetup, SeatSource, SourceTime, StartOwner,
 };
 use thiserror::Error;
 
@@ -71,8 +71,14 @@ pub enum Refusal {
     HasChildren(PhaseId),
     #[error("{0:?} has races; a heat that was raced cannot be removed")]
     HasRaces(PhaseId),
+    #[error(
+        "{0:?} has a saved race, so only its name can change now; changing its format, its pilots or where it sits would change results already flown"
+    )]
+    Raced(PhaseId),
     #[error("a phase cannot be its own parent, or sit beneath itself")]
     ParentLoop,
+    #[error("the pass window can be 10 seconds at most")]
+    PassWindowTooLong,
     #[error("that crossing is not part of race {0:?}")]
     NotACrossing(RaceId),
     #[error("that seat is not in the lineup of race {0:?}")]
@@ -81,8 +87,16 @@ pub enum Refusal {
     PilotNotInRace { race: RaceId, pilot: PilotId },
     #[error("pilot {pilot:?} is not in {phase:?}")]
     PilotNotInPhase { phase: PhaseId, pilot: PilotId },
+    #[error("that seat in race {0:?} has a pilot named on it, so it cannot be taken")]
+    SeatNotOpen(RaceId),
+    #[error("pilot {pilot:?} already has a seat of their own in race {race:?}")]
+    AlreadyInRace { race: RaceId, pilot: PilotId },
+    #[error("pilot {pilot:?} already has that seat in race {race:?}")]
+    AlreadyOnSeat { race: RaceId, pilot: PilotId },
     #[error("a position starts at 1")]
     BadPosition,
+    #[error("pilot {pilot:?} is already out of race {race:?}")]
+    AlreadyOut { race: RaceId, pilot: PilotId },
     #[error("there is nothing to undo")]
     NothingToUndo,
     #[error("there is no open protest {0:?}")]
@@ -91,6 +105,41 @@ pub enum Refusal {
     NotLocked(PhaseId),
     #[error("only a timer or the Director can log that")]
     NotACommand,
+    // --- pilot sign-up (docs/primitives.md §11.5) ---
+    #[error("{0:?} is not set up for pilots to sign up")]
+    NoSignup(PhaseId),
+    #[error("pilots sign up for a phase that holds heats, and {0:?} is a heat")]
+    NotAGroup(PhaseId),
+    #[error("{0}")]
+    BadSignupRules(&'static str),
+    #[error("sign-up for {0:?} is not open")]
+    SignupClosed(PhaseId),
+    #[error("{0:?} is closed to changes from a phone. Ask the director")]
+    HeatClosedToPilots(PhaseId),
+    #[error("{0:?} has started or been flown, so who is in it cannot change")]
+    HeatAlreadyRaced(PhaseId),
+    #[error("{0:?} has a race that is not saved or thrown out yet. Decide it first")]
+    RaceStillOn(PhaseId),
+    #[error("that seat is not one of the seats of {0:?}")]
+    NotASignupSeat(PhaseId),
+    #[error("that seat in {0:?} is already taken")]
+    SeatTaken(PhaseId),
+    #[error("{pilot:?} is already in {heat:?}")]
+    AlreadyInHeat { heat: PhaseId, pilot: PilotId },
+    #[error("{pilot:?} is not in {heat:?}")]
+    PilotNotInHeat { heat: PhaseId, pilot: PilotId },
+    #[error("{pilot:?} already holds {limit} spots, which is the most at once")]
+    HoldingTooMany { pilot: PilotId, limit: u32 },
+    #[error("{pilot:?} has no runs left. The limit is {allowed}")]
+    NoRunsLeft { pilot: PilotId, allowed: u32 },
+    #[error("{pilot:?} has a heat too close to that one. Heats to sit out in between: {rest}")]
+    NeedsRest { pilot: PilotId, rest: u32 },
+    #[error("there is no free spot on that seat in {0:?} right now. One opens when a heat fills")]
+    NoFreeSpot(PhaseId),
+    #[error("a pilot can only be pulled forward, into an earlier heat")]
+    PullNotForward,
+    #[error("those two heats are not in the same sign-up phase")]
+    NotSameSignup,
 }
 
 /// One pilot's place in a class.
@@ -122,8 +171,12 @@ pub struct EventState {
     /// For a running first-to-N race whose pilots have all finished: when the last of them
     /// did, on the Director's clock. Cleared if a ruling takes a finish away.
     pub all_finished_at: BTreeMap<RaceId, i64>,
-    /// The phases that count toward each class's standings, the deciding one first.
+    /// The order the director set for a class's phases in its standings, the deciding one
+    /// first. A class with none here uses the worked-out order. See
+    /// [`counted_phases`](Self::counted_phases).
     pub class_phases: BTreeMap<ClassId, Vec<PhaseId>>,
+    /// The phases the director said do not count toward their class's standings.
+    pub not_counted: BTreeSet<PhaseId>,
     /// The order the director set for the run queue. Heats not in it follow in the default
     /// order.
     pub queue_order: Vec<PhaseId>,
@@ -134,6 +187,14 @@ pub struct EventState {
     /// Where in the log each race begins: the offset of its first fact. A race's signal is
     /// logged from there on, so this is where to start reading for it.
     pub race_log_start: BTreeMap<RaceId, u64>,
+    /// Who has taken which open seat, and when (see [`crate::checkin`]).
+    pub check_ins: crate::checkin::CheckIns,
+    /// What pilot sign-up keeps beside the heats' lineups (see [`crate::signup`]).
+    pub signups: crate::signup::Signups,
+    /// The heat the director last put on the timer, or last started. Read it through
+    /// [`EventState::on_timer`], which also knows about a race that is on and a heat that
+    /// has since been removed.
+    pub put_on_timer: Option<PhaseId>,
     /// How many log entries have been applied: the offset the next one will have.
     pub applied: u64,
 }
@@ -154,6 +215,8 @@ impl EventState {
         self.races.apply(recorded_at, event);
         self.laps.apply(offset, event);
         self.rulings.apply(event);
+        self.check_ins.apply(offset, recorded_at, event);
+        self.signups.apply(event);
         match event {
             Event::RosterSet { class, pilots } => {
                 self.rosters.insert(class.clone(), pilots.clone());
@@ -200,6 +263,13 @@ impl EventState {
             Event::StandingsSet { class, phases } => {
                 self.class_phases.insert(class.clone(), phases.clone());
             }
+            Event::PhaseCounts { phase, counts } => {
+                if *counts {
+                    self.not_counted.remove(phase);
+                } else {
+                    self.not_counted.insert(phase.clone());
+                }
+            }
             Event::ClockOffset {
                 adapter,
                 offset_micros,
@@ -215,12 +285,18 @@ impl EventState {
                 // clock that no longer exists. It must not place a start until measured.
                 self.clock_offsets.remove(adapter);
             }
+            Event::HeatOnTimer { heat } => {
+                self.put_on_timer = Some(heat.clone());
+            }
             Event::RaceStarting { setup, .. } => {
+                // A heat whose race starts is on the timer, whatever was there before.
+                self.put_on_timer = Some(setup.heat.clone());
                 self.race_log_start
                     .entry(setup.race.clone())
                     .or_insert(offset);
             }
             Event::RaceStarted { setup } => {
+                self.put_on_timer = Some(setup.heat.clone());
                 self.race_log_start
                     .entry(setup.race.clone())
                     .or_insert(offset);
@@ -244,13 +320,21 @@ impl EventState {
             Some(EndCondition::FirstToLaps(n)) => n as usize,
             _ => return,
         };
-        // Only named pilots count. An open seat has nobody to wait for.
-        let mut pilots = race
+        // Only named pilots count. An open seat has nobody to wait for. Nor has a pilot who
+        // is out of the race: when everyone still flying has finished, the race is over. If
+        // every pilot is out, there is nobody left to wait for either.
+        let named = race
             .setup
             .lineup
             .iter()
             .filter(|entry| entry.pilot.is_some());
-        let all = pilots.clone().next().is_some()
+        let mut pilots = named.clone().filter(|entry| {
+            entry
+                .pilot
+                .as_ref()
+                .is_some_and(|pilot| !self.rulings.is_out(&id, pilot))
+        });
+        let all = named.clone().next().is_some()
             && pilots.all(|entry| {
                 self.laps
                     .seat(
@@ -273,6 +357,171 @@ impl EventState {
         }
     }
 
+    /// The class a phase is for, when it can be told (`docs/primitives.md` §5.3).
+    ///
+    /// A phase is for a class when the director said so, or its field is that class's
+    /// roster. Failing that, it is for the class of a phase it takes its pilots from (a bracket seeded from
+    /// qualifying). Failing that, it is for the class its own phases are for (a "Mains"
+    /// that only holds heats seeded from qualifying), and failing that for the class of
+    /// the phase that holds it. A phase that only names pilots, at the top of the event,
+    /// is for no class.
+    pub fn phase_class(&self, phase: &PhaseId) -> Option<ClassId> {
+        let mut at = Some(phase.clone());
+        // Up the tree: the phase itself, then each phase that holds it.
+        for _ in 0..=self.tree.iter().count() {
+            let id = at?;
+            if let Some(class) = self.own_class(&id, &mut Vec::new()) {
+                return Some(class);
+            }
+            at = self.tree.get(&id)?.parent.clone();
+        }
+        None
+    }
+
+    /// The class a phase is for by what it says itself, or by what the phases inside it
+    /// say: never by where it sits.
+    fn own_class(&self, phase: &PhaseId, seen: &mut Vec<PhaseId>) -> Option<ClassId> {
+        // A phase can be seeded from a phase seeded from it only by a mistake in the log.
+        if seen.contains(phase) {
+            return None;
+        }
+        seen.push(phase.clone());
+        let def = self.tree.get(phase)?;
+        // The director said so.
+        if let Some(class) = &def.class {
+            return Some(class.clone());
+        }
+        match &def.kind {
+            PhaseKind::Group { field, .. } => {
+                for slice in field {
+                    match slice {
+                        FieldSlice::Class(class) => return Some(class.clone()),
+                        FieldSlice::FromPhase { phase: from, .. } => {
+                            if let Some(class) = self.sourced_class(from, seen) {
+                                return Some(class);
+                            }
+                        }
+                        FieldSlice::Pilot(_) | FieldSlice::Imported(_) => {}
+                    }
+                }
+            }
+            PhaseKind::Heat { lineup } => {
+                for seat in lineup {
+                    if let SeatSource::FromPhase { phase: from, .. } = &seat.source
+                        && let Some(class) = self.sourced_class(from, seen)
+                    {
+                        return Some(class);
+                    }
+                }
+            }
+        }
+        // What it holds: the first phase inside it that is for a class.
+        let inside: Vec<PhaseId> = self
+            .tree
+            .children(phase)
+            .map(|def| def.id.clone())
+            .collect();
+        inside.iter().find_map(|child| self.own_class(child, seen))
+    }
+
+    /// The class of a phase another one takes its pilots from: its own, or failing that
+    /// the class of whatever holds it (a heat inside qualifying).
+    fn sourced_class(&self, phase: &PhaseId, seen: &mut Vec<PhaseId>) -> Option<ClassId> {
+        let mut at = Some(phase.clone());
+        for _ in 0..=self.tree.iter().count() {
+            let id = at?;
+            if let Some(class) = self.own_class(&id, seen) {
+                return Some(class);
+            }
+            at = self.tree.get(&id)?.parent.clone();
+        }
+        None
+    }
+
+    /// Whether a phase is ranked: it, or a heat anywhere beneath it, has a format that
+    /// ranks. Practice is not.
+    fn is_ranked(&self, phase: &PhaseId) -> bool {
+        self.tree.iter().any(|def| {
+            matches!(def.kind, PhaseKind::Heat { .. })
+                && (&def.id == phase || self.tree.is_under(&def.id, phase))
+                && self
+                    .tree
+                    .format_for(&def.id)
+                    .is_some_and(|format| format.ranking.is_some())
+        })
+    }
+
+    /// The phases that are a class's own, in the order they were added: each ranked phase
+    /// that is for the class and is not held by another phase of the class. Qualifying
+    /// with its heats is one phase here, and so is a bracket with its rounds.
+    fn own_phases(&self, class: &ClassId) -> Vec<PhaseId> {
+        self.tree
+            .iter()
+            .filter(|def| self.phase_class(&def.id).as_ref() == Some(class))
+            .filter(|def| {
+                def.parent
+                    .as_ref()
+                    .is_none_or(|parent| self.phase_class(parent).as_ref() != Some(class))
+            })
+            .filter(|def| self.is_ranked(&def.id))
+            .map(|def| def.id.clone())
+            .collect()
+    }
+
+    /// Every phase a class's standings could come from, each with whether it counts: the
+    /// ones that count first, in the order they are read, then the ones the director said
+    /// do not count.
+    ///
+    /// **Which:** the class's own ranked phases, and any phase the director listed for it
+    /// by hand.
+    ///
+    /// **In what order:** the latest phase first, so the last thing raced decides and the
+    /// phases before it place whoever it left out. Where the director set an order of
+    /// their own, that order stands, and a phase added since goes ahead of it.
+    pub fn class_phase_list(&self, class: &ClassId) -> Vec<(PhaseId, bool)> {
+        let listed: Vec<PhaseId> = self
+            .class_phases
+            .get(class)
+            .into_iter()
+            .flatten()
+            .filter(|phase| self.tree.get(phase).is_some())
+            .cloned()
+            .collect();
+        let mut order: Vec<PhaseId> = self
+            .own_phases(class)
+            .into_iter()
+            .rev()
+            .filter(|phase| !listed.contains(phase))
+            .collect();
+        for phase in listed {
+            if !order.contains(&phase) {
+                order.push(phase);
+            }
+        }
+        let counts = |phase: &PhaseId| !self.not_counted.contains(phase);
+        let mut out: Vec<(PhaseId, bool)> = order
+            .iter()
+            .filter(|phase| counts(phase))
+            .map(|phase| (phase.clone(), true))
+            .collect();
+        out.extend(
+            order
+                .iter()
+                .filter(|phase| !counts(phase))
+                .map(|phase| (phase.clone(), false)),
+        );
+        out
+    }
+
+    /// The phases that count toward a class's standings, the deciding one first.
+    pub fn counted_phases(&self, class: &ClassId) -> Vec<PhaseId> {
+        self.class_phase_list(class)
+            .into_iter()
+            .filter(|(_, counts)| *counts)
+            .map(|(phase, _)| phase)
+            .collect()
+    }
+
     /// A class's standings: everyone on its roster, 1 to n.
     ///
     /// The class's counted phases are read in order. The first one's ranking places the
@@ -286,8 +535,7 @@ impl EventState {
     ) -> Vec<ClassPlace> {
         let roster = self.rosters.get(class).cloned().unwrap_or_default();
         let mut out: Vec<ClassPlace> = Vec::new();
-        let phases = self.class_phases.get(class).map_or(&[][..], Vec::as_slice);
-        for phase in phases {
+        for phase in &self.counted_phases(class) {
             let Some(result) = results.get(phase) else {
                 continue;
             };
@@ -523,6 +771,19 @@ impl EventState {
                     let end = race
                         .started_at
                         .and_then(|started| self.runs_out(race, started));
+                    // A seat left idle is dropped, unless the race ended first.
+                    for (at, adapter, seat) in self.idle_seats(race) {
+                        if at <= now && end.is_none_or(|end| at < end) {
+                            out.push((
+                                at,
+                                Event::SeatDropped {
+                                    race: race.setup.race.clone(),
+                                    adapter,
+                                    seat,
+                                },
+                            ));
+                        }
+                    }
                     if let Some(end) = end.filter(|at| *at <= now) {
                         out.push((
                             end,
@@ -544,12 +805,37 @@ impl EventState {
             .iter()
             .filter_map(|race| match race.state {
                 RaceState::Staging => race.tone_at,
-                RaceState::Running => race
-                    .started_at
-                    .and_then(|started| self.runs_out(race, started)),
+                RaceState::Running => {
+                    let end = race
+                        .started_at
+                        .and_then(|started| self.runs_out(race, started));
+                    let idle = self.idle_seats(race).into_iter().map(|(at, _, _)| at).min();
+                    match (end, idle) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    }
+                }
                 _ => None,
             })
             .min()
+    }
+
+    /// The taken seats of a running race that its format drops when idle, each with the
+    /// moment it is dropped: the format's wait after the seat last showed life.
+    fn idle_seats(&self, race: &Race) -> Vec<(i64, AdapterId, gridfpv_events::SeatRef)> {
+        let Some(wait) = self
+            .tree
+            .format_for(&race.setup.heat)
+            .and_then(|format| format.race.drop_idle_seat_micros)
+        else {
+            return Vec::new();
+        };
+        self.check_ins
+            .held(&race.setup.race)
+            .filter_map(|(adapter, seat, stint)| {
+                Some((stint.active_at? + wait, adapter.clone(), seat.clone()))
+            })
+            .collect()
     }
 
     /// When a race that started at `started` stops by itself, if it does.
@@ -587,6 +873,21 @@ impl EventState {
             Some(PhaseKind::Group { .. }) => Err(Refusal::NotAHeat(id.clone())),
             Some(PhaseKind::Heat { .. }) => Ok(()),
         }
+    }
+
+    /// Whether a race that counts has been saved in `phase` or anywhere beneath it, in a
+    /// heat that is ranked. An unranked heat (practice) has no result to protect, so it
+    /// can be reshaped however often it was flown.
+    fn has_saved_ranked_race(&self, phase: &PhaseId) -> bool {
+        self.races.iter().any(|race| {
+            let heat = &race.setup.heat;
+            race.counts()
+                && (heat == phase || self.tree.is_under(heat, phase))
+                && self
+                    .tree
+                    .format_for(heat)
+                    .is_some_and(|format| format.ranking.is_some())
+        })
     }
 
     fn unlocked(&self, phase: &PhaseId) -> Result<(), Refusal> {
@@ -646,7 +947,36 @@ impl EventState {
                 self.check_fact(&fact)?;
                 Ok(vec![*fact])
             }
+            Command::Signup(command) => self.signup(command),
+            Command::PutOnTimer { heat } => {
+                self.heat(&heat)?;
+                if let Some(on) = self.races.undecided()
+                    && on.setup.heat != heat
+                {
+                    return Err(Refusal::RaceStillOn(on.setup.heat.clone()));
+                }
+                if self.on_timer().as_ref() == Some(&heat) {
+                    return Ok(Vec::new());
+                }
+                let mut facts = vec![Event::HeatOnTimer { heat: heat.clone() }];
+                // A sign-up heat on the timer is closed to pilots, so the next may open.
+                facts.extend(self.signup_after_on_timer(&heat));
+                Ok(facts)
+            }
         }
+    }
+
+    /// The heat that is **on the timer**: the one being run now. A race that is counting
+    /// down, running or stopped decides it. Otherwise it is the heat the director last put
+    /// there or last started, as long as it is still a heat of the event. `None` before
+    /// the director has put anything on the timer.
+    pub fn on_timer(&self) -> Option<PhaseId> {
+        if let Some(on) = self.races.undecided() {
+            return Some(on.setup.heat.clone());
+        }
+        self.put_on_timer
+            .clone()
+            .filter(|heat| self.heat(heat).is_ok())
     }
 
     fn start(&self, heat: PhaseId, now: i64) -> Result<Vec<Event>, Refusal> {
@@ -694,14 +1024,18 @@ impl EventState {
             lineup,
             owner: StartOwner::Grid,
         };
-        Ok(self.races.check(if staging > 0 {
+        let starting = setup.heat.clone();
+        let mut facts = self.races.check(if staging > 0 {
             RaceCommand::Stage {
                 setup,
                 tone_at: now + staging,
             }
         } else {
             RaceCommand::Start { setup }
-        })?)
+        })?;
+        // A sign-up heat that starts is no longer open to pilots, so the next one may open.
+        facts.extend(self.signup_after_start(&starting));
+        Ok(facts)
     }
 
     /// Whether a setup fact or ruling may be recorded as it stands.
@@ -719,8 +1053,17 @@ impl EventState {
                         return Err(Refusal::Locked(parent.clone()));
                     }
                 }
-                if self.tree.get(&def.id).is_some() {
+                if let Some(now) = self.tree.get(&def.id) {
                     self.unlocked(&def.id)?;
+                    // A phase's name, its layout hint and its false start limit can change
+                    // at any time. Its shape (what kind it is, its pilots, its format and
+                    // where it sits) decides results, so it is fixed once a ranked race
+                    // beneath it has been saved.
+                    let reshaped =
+                        now.parent != def.parent || now.kind != def.kind || now.format != def.format;
+                    if reshaped && self.has_saved_ranked_race(&def.id) {
+                        return Err(Refusal::Raced(def.id.clone()));
+                    }
                 }
                 Ok(())
             }
@@ -737,8 +1080,16 @@ impl EventState {
             Event::RosterSet { .. } | Event::RosterRemoved { .. } => Ok(()),
             Event::LapRulesSet { rules } => {
                 let negative = |value: Option<i64>| value.is_some_and(|micros| micros < 0);
-                if negative(rules.min_lap_micros) || negative(rules.ignore_before_micros) {
+                if negative(rules.min_lap_micros)
+                    || negative(rules.ignore_before_micros)
+                    || negative(rules.pass_window_micros)
+                {
                     Err(Refusal::NegativeLapRule)
+                } else if rules
+                    .pass_window_micros
+                    .is_some_and(|micros| micros > gridfpv_events::PASS_WINDOW_MAX_MICROS)
+                {
+                    Err(Refusal::PassWindowTooLong)
                 } else {
                     Ok(())
                 }
@@ -750,6 +1101,12 @@ impl EventState {
                 }
                 Ok(())
             }),
+            Event::PhaseCounts { phase, .. } => {
+                if self.tree.get(phase).is_none() {
+                    return Err(Refusal::UnknownPhase(phase.clone()));
+                }
+                Ok(())
+            }
 
             Event::LapRemoved { race, crossing, .. }
             | Event::LapRestored { race, crossing }
@@ -798,6 +1155,62 @@ impl EventState {
                 }
                 Ok(())
             }
+            Event::SeatTaken {
+                race,
+                adapter,
+                seat,
+                pilot,
+            } => {
+                let found = self.open_race(race)?;
+                // A seat is taken in a race that is being flown. Before the start there is
+                // nothing to fly, and afterwards the laps are what they are.
+                if !matches!(found.state, RaceState::Staging | RaceState::Running) {
+                    return Err(Refusal::Race(RaceError::WrongState {
+                        race: race.clone(),
+                        state: found.state,
+                        wanted: "take a seat in",
+                    }));
+                }
+                let entry = found
+                    .setup
+                    .lineup
+                    .iter()
+                    .find(|entry| &entry.adapter == adapter && &entry.seat == seat)
+                    .ok_or_else(|| Refusal::SeatNotInRace(race.clone()))?;
+                // Only an open seat can be taken. A seat with a pilot named on it is theirs.
+                if entry.pilot.is_some() {
+                    return Err(Refusal::SeatNotOpen(race.clone()));
+                }
+                let named = found
+                    .setup
+                    .lineup
+                    .iter()
+                    .any(|entry| entry.pilot.as_ref() == Some(pilot));
+                if named {
+                    return Err(Refusal::AlreadyInRace {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                if self.check_ins.holder(race, adapter, seat) == Some(pilot) {
+                    return Err(Refusal::AlreadyOnSeat {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                Ok(())
+            }
+            Event::SeatDropped {
+                race,
+                adapter,
+                seat,
+            } => {
+                self.open_race(race)?;
+                if self.check_ins.holder(race, adapter, seat).is_none() {
+                    return Err(Refusal::NothingToUndo);
+                }
+                Ok(())
+            }
             Event::HeatDone { heat } | Event::HeatReopened { heat } => {
                 self.heat(heat)?;
                 self.unlocked(heat)
@@ -820,6 +1233,46 @@ impl EventState {
             Event::FalseStartCleared { race, pilot } => {
                 self.open_race(race)?;
                 if !self.rulings.has_false_start(race, pilot) {
+                    return Err(Refusal::NothingToUndo);
+                }
+                Ok(())
+            }
+            Event::PilotOut { race, pilot } => {
+                let found = self.open_race(race)?;
+                // A pilot goes out of a race that is being flown or has just been flown.
+                // Once it is saved or thrown out, the laps are what they are.
+                if !matches!(
+                    found.state,
+                    RaceState::Staging | RaceState::Running | RaceState::Stopped
+                ) {
+                    return Err(Refusal::Race(RaceError::WrongState {
+                        race: race.clone(),
+                        state: found.state,
+                        wanted: "mark a pilot out of",
+                    }));
+                }
+                let flying = found
+                    .setup
+                    .lineup
+                    .iter()
+                    .any(|entry| entry.pilot.as_ref() == Some(pilot));
+                if !flying {
+                    return Err(Refusal::PilotNotInRace {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                if self.rulings.is_out(race, pilot) {
+                    return Err(Refusal::AlreadyOut {
+                        race: race.clone(),
+                        pilot: pilot.clone(),
+                    });
+                }
+                Ok(())
+            }
+            Event::PilotBackIn { race, pilot } => {
+                self.open_race(race)?;
+                if !self.rulings.is_out(race, pilot) {
                     return Err(Refusal::NothingToUndo);
                 }
                 Ok(())
@@ -903,7 +1356,14 @@ impl EventState {
             | Event::RaceStarted { .. }
             | Event::RaceStopped { .. }
             | Event::RaceSaved { .. }
-            | Event::RaceDiscarded { .. } => Err(Refusal::NotACommand),
+            | Event::RaceDiscarded { .. }
+            // Sign-up facts come from sign-up commands, which check the rules first.
+            | Event::SignupSet { .. }
+            | Event::SignupRunsSet { .. }
+            | Event::SignupCharged { .. }
+            | Event::SignupHeatClosed { .. }
+            // Putting a heat on the timer is a command of its own, which checks the race.
+            | Event::HeatOnTimer { .. } => Err(Refusal::NotACommand),
         }
     }
 }
@@ -931,9 +1391,45 @@ impl Inputs for EventState {
                         );
                         Some(RaceEntry { pilot, laps })
                     })
+                    // Then each pilot who took an open seat, with the laps of their stints.
+                    .chain(
+                        self.check_ins
+                            .pilots(&race.setup.race)
+                            .into_iter()
+                            .map(|pilot| {
+                                let stints = self.check_ins.stints_of(&race.setup.race, &pilot);
+                                let seats: Vec<_> = stints
+                                    .iter()
+                                    .map(|(adapter, seat, _)| {
+                                        self.laps.seat(
+                                            &race.setup.race,
+                                            adapter,
+                                            seat,
+                                            self.filters_for(race, adapter),
+                                        )
+                                    })
+                                    .collect();
+                                let laps = crate::checkin::laps_across(
+                                    stints.iter().map(|(_, _, stint)| *stint).zip(&seats),
+                                );
+                                RaceEntry { pilot, laps }
+                            }),
+                    )
                     .collect()
             })
             .collect()
+    }
+
+    fn checked_in(&self, heat: &PhaseId) -> Vec<PilotId> {
+        let mut pilots = Vec::new();
+        for race in self.races.of_heat(heat).filter(|race| race.counts()) {
+            for pilot in self.check_ins.pilots(&race.setup.race) {
+                if !pilots.contains(&pilot) {
+                    pilots.push(pilot);
+                }
+            }
+        }
+        pilots
     }
 
     fn director_done(&self, heat: &PhaseId) -> bool {
@@ -1001,6 +1497,7 @@ mod tests {
                 first_lap: FirstLap::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -1126,7 +1623,7 @@ mod tests {
         // The final cannot start before the heats that feed it.
         assert!(matches!(
             director.send(Command::StartRace {
-                heat: pid("bracket/final")
+                heat: pid("bracket/final/heat-1")
             }),
             Err(Refusal::HeatWaiting { .. })
         ));
@@ -1141,10 +1638,10 @@ mod tests {
         );
         for heat in [
             "bracket/winners-1/heat-2",
-            "bracket/losers-1",
-            "bracket/winners-final",
-            "bracket/losers-final",
-            "bracket/final",
+            "bracket/losers-1/heat-1",
+            "bracket/winners-final/heat-1",
+            "bracket/losers-final/heat-1",
+            "bracket/final/heat-1",
         ] {
             fly(&mut director, heat);
         }
@@ -1212,6 +1709,7 @@ mod tests {
                     )),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1287,6 +1785,7 @@ mod tests {
                     )),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1438,6 +1937,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         assert_eq!(
             director.record(Event::PhaseDefined {
@@ -1467,7 +1967,7 @@ mod tests {
         );
         director
             .record(Event::PhaseRemoved {
-                phase: pid("bracket/final"),
+                phase: pid("bracket/final/heat-1"),
             })
             .unwrap();
     }
@@ -1495,6 +1995,7 @@ mod tests {
                     format: None,
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1532,6 +2033,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1651,6 +2153,7 @@ mod tests {
                 rules: LapRules {
                     min_lap_micros: Some(5 * S),
                     ignore_before_micros: Some(2 * S),
+                    pass_window_micros: Some(S),
                 },
             })
             .unwrap();
@@ -1662,10 +2165,29 @@ mod tests {
                 rules: LapRules {
                     min_lap_micros: Some(-1),
                     ignore_before_micros: None,
+                    pass_window_micros: None,
                 },
             }),
             Err(Refusal::NegativeLapRule)
         );
+        // So is a negative pass window, and one longer than a timer can be given.
+        let window = |micros: i64| Event::LapRulesSet {
+            rules: LapRules {
+                min_lap_micros: Some(5 * S),
+                ignore_before_micros: Some(2 * S),
+                pass_window_micros: Some(micros),
+            },
+        };
+        assert_eq!(director.record(window(-1)), Err(Refusal::NegativeLapRule));
+        assert_eq!(
+            director.record(window(10 * S + 1)),
+            Err(Refusal::PassWindowTooLong)
+        );
+        // The pass window is the timer's to apply: it changes no lap Grid has.
+        let before = times(&director);
+        director.record(window(10 * S)).unwrap();
+        assert_eq!(director.state.lap_rules.pass_window_micros, Some(10 * S));
+        assert_eq!(times(&director), before);
 
         // A format that carries its own minimum lap keeps it.
         let mut own = format(EndCondition::Open, 0);
@@ -1706,6 +2228,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1713,6 +2236,197 @@ mod tests {
             .send(Command::StartRace { heat: pid("heat") })
             .unwrap();
         director
+    }
+
+    /// A group "quali" holding one heat of ana and ben, first to one lap, under `format`.
+    fn phase_with_a_heat(format: Format) -> Director {
+        let mut director = Director::default();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("quali"),
+                    label: "Qualifying".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("quali/heat-1"),
+                    label: "Heat 1".into(),
+                    parent: Some(pid("quali")),
+                    kind: PhaseKind::Heat {
+                        lineup: ["ana", "ben"]
+                            .iter()
+                            .enumerate()
+                            .map(|(i, name)| HeatSeat {
+                                adapter: oft(),
+                                seat: SeatRef(format!("seat-{i}")),
+                                source: SeatSource::Pilot(pilot(name)),
+                            })
+                            .collect(),
+                    },
+                    format: None,
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        director
+    }
+
+    fn def_of(director: &Director, id: &str) -> PhaseDef {
+        director.state.tree.get(&pid(id)).unwrap().clone()
+    }
+
+    #[test]
+    fn a_phase_is_edited_freely_until_a_ranked_race_beneath_it_is_saved() {
+        let mut director = phase_with_a_heat(format(EndCondition::FirstToLaps(1), 0));
+        // Before anything is flown: the name, the format, the pilots, all of it.
+        let mut quali = def_of(&director, "quali");
+        quali.label = "Qualifying rounds".into();
+        quali.format = Some(format(EndCondition::FirstToLaps(3), 0));
+        director
+            .record(Event::PhaseDefined { def: quali.clone() })
+            .unwrap();
+        let mut heat = def_of(&director, "quali/heat-1");
+        if let PhaseKind::Heat { lineup } = &mut heat.kind {
+            lineup.pop();
+        }
+        director
+            .record(Event::PhaseDefined { def: heat.clone() })
+            .unwrap();
+        // A race that is flown and discarded protects nothing.
+        director
+            .send(Command::StartRace {
+                heat: pid("quali/heat-1"),
+            })
+            .unwrap();
+        let race = director.state.races.running().unwrap().setup.race.clone();
+        director
+            .send(Command::StopRace { race: race.clone() })
+            .unwrap();
+        director
+            .send(Command::DiscardRace {
+                race,
+                reason: None,
+                note: None,
+            })
+            .unwrap();
+        quali.format = Some(format(EndCondition::FirstToLaps(1), 0));
+        director.record(Event::PhaseDefined { def: quali }).unwrap();
+    }
+
+    #[test]
+    fn once_a_ranked_race_is_saved_only_the_name_of_the_phases_above_it_can_change() {
+        let mut director = phase_with_a_heat(format(EndCondition::FirstToLaps(1), 0));
+        fly(&mut director, "quali/heat-1");
+        let quali = def_of(&director, "quali");
+        let heat = def_of(&director, "quali/heat-1");
+
+        // The name, the layout hint and the false start limit: still free, on both.
+        for mut def in [quali.clone(), heat.clone()] {
+            def.label = format!("{} (renamed)", def.label);
+            def.display_hint = Some("anything".into());
+            def.false_start_limit = Some(2);
+            director.record(Event::PhaseDefined { def }).unwrap();
+        }
+        let quali = def_of(&director, "quali");
+        let heat = def_of(&director, "quali/heat-1");
+        assert_eq!(quali.label, "Qualifying (renamed)");
+
+        // The format, on the phase the heat takes it from.
+        let mut reformatted = quali.clone();
+        reformatted.format = Some(format(EndCondition::FirstToLaps(5), 0));
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: reformatted }),
+            Err(Refusal::Raced(pid("quali")))
+        );
+        // A format of its own on the heat.
+        let mut own = heat.clone();
+        own.format = Some(format(EndCondition::FirstToLaps(5), 0));
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: own }),
+            Err(Refusal::Raced(pid("quali/heat-1")))
+        );
+        // The pilots.
+        let mut fewer = heat.clone();
+        if let PhaseKind::Heat { lineup } = &mut fewer.kind {
+            lineup.pop();
+        }
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: fewer }),
+            Err(Refusal::Raced(pid("quali/heat-1")))
+        );
+        // How the phase combines its heats.
+        let mut combined = quali.clone();
+        combined.kind = PhaseKind::Group {
+            field: vec![FieldSlice::Pilot(pilot("ana"))],
+            combine: gridfpv_events::CombineRule::Stack,
+        };
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: combined }),
+            Err(Refusal::Raced(pid("quali")))
+        );
+        // Where it sits.
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("other"),
+                    label: "Other".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: None,
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        let mut moved = heat.clone();
+        moved.parent = Some(pid("other"));
+        assert_eq!(
+            director.record(Event::PhaseDefined { def: moved }),
+            Err(Refusal::Raced(pid("quali/heat-1")))
+        );
+        // Nothing was changed by any refused edit, and the phase beside it is still free.
+        assert_eq!(def_of(&director, "quali"), quali);
+        assert_eq!(def_of(&director, "quali/heat-1"), heat);
+        let mut other = def_of(&director, "other");
+        other.format = Some(format(EndCondition::FirstToLaps(2), 0));
+        director.record(Event::PhaseDefined { def: other }).unwrap();
+        // The same definition sent again is no change, and is taken.
+        director.record(Event::PhaseDefined { def: quali }).unwrap();
+    }
+
+    #[test]
+    fn an_unranked_heat_can_be_reshaped_however_often_it_was_flown() {
+        // Practice has no result to protect: pilots come and go between races.
+        let mut practice = format(EndCondition::FirstToLaps(1), 0);
+        practice.ranking = None;
+        let mut director = phase_with_a_heat(practice);
+        fly(&mut director, "quali/heat-1");
+        let mut heat = def_of(&director, "quali/heat-1");
+        if let PhaseKind::Heat { lineup } = &mut heat.kind {
+            lineup.pop();
+        }
+        director.record(Event::PhaseDefined { def: heat }).unwrap();
+        let mut quali = def_of(&director, "quali");
+        quali.label = "Open practice".into();
+        director.record(Event::PhaseDefined { def: quali }).unwrap();
     }
 
     fn state_of(director: &Director) -> RaceState {
@@ -1749,6 +2463,183 @@ mod tests {
         assert_eq!(director.replayed(), director.state);
     }
 
+    fn out(director: &mut Director, name: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::PilotOut {
+                race: rid("heat#1"),
+                pilot: pilot(name),
+            })
+            .map(|_| ())
+    }
+
+    fn back_in(director: &mut Director, name: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::PilotBackIn {
+                race: rid("heat#1"),
+                pilot: pilot(name),
+            })
+            .map(|_| ())
+    }
+
+    #[test]
+    fn a_race_does_not_wait_for_a_pilot_who_is_out() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        // Ana has finished; Ben is still flying. Nothing is due.
+        assert_eq!(director.state.next_due(), None);
+        // Ben crashes 20 s in. Everyone still flying has finished, as of now.
+        director.now = 20 * S;
+        out(&mut director, "ben").unwrap();
+        assert!(director.state.rulings.is_out(&rid("heat#1"), &pilot("ben")));
+        assert_eq!(director.state.next_due(), Some(80 * S));
+        director.now = 200 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Stopped);
+        assert_eq!(
+            director.state.races.get(&rid("heat#1")).unwrap().stopped_at,
+            Some(80 * S)
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn marking_a_pilot_out_before_the_others_finish_starts_the_wait_at_the_last_finish() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 5 * S;
+        out(&mut director, "ben").unwrap();
+        // Ana is still flying, so nothing is due yet.
+        assert_eq!(director.state.next_due(), None);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        assert_eq!(director.state.next_due(), Some(71 * S));
+    }
+
+    #[test]
+    fn a_pilot_back_in_is_waited_for_again() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        director.now = 20 * S;
+        out(&mut director, "ben").unwrap();
+        assert_eq!(director.state.next_due(), Some(80 * S));
+        // Ben was only stuck in a gate. He is flying again.
+        director.now = 25 * S;
+        back_in(&mut director, "ben").unwrap();
+        assert!(!director.state.rulings.is_out(&rid("heat#1"), &pilot("ben")));
+        assert_eq!(director.state.next_due(), None);
+        director.now = 500 * S;
+        director.catch_up();
+        assert_eq!(state_of(&director), RaceState::Running);
+        // He finishes, and the wait starts from then.
+        director.cross("seat-1", 40 * S);
+        assert_eq!(director.state.next_due(), Some(560 * S));
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn when_every_pilot_is_out_the_race_waits_for_nobody() {
+        let mut director = two_pilot_heat(Some(60 * S));
+        director.now = 5 * S;
+        out(&mut director, "ana").unwrap();
+        assert_eq!(director.state.next_due(), None);
+        director.now = 8 * S;
+        out(&mut director, "ben").unwrap();
+        assert_eq!(director.state.next_due(), Some(68 * S));
+    }
+
+    #[test]
+    fn with_no_wait_set_a_pilot_out_changes_nothing_about_when_the_race_stops() {
+        let mut director = two_pilot_heat(None);
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.now = 11 * S;
+        director.cross("seat-0", 10 * S);
+        out(&mut director, "ben").unwrap();
+        // The director still stops this race.
+        assert_eq!(director.state.next_due(), None);
+    }
+
+    #[test]
+    fn a_pilot_who_is_out_keeps_the_laps_they_flew() {
+        let mut director = two_pilot_heat(None);
+        director.now = S;
+        director.cross("seat-0", 0);
+        director.cross("seat-1", 0);
+        director.now = 11 * S;
+        director.cross("seat-1", 10 * S);
+        out(&mut director, "ben").unwrap();
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        let laps = director.state.laps.seat(
+            &rid("heat#1"),
+            &oft(),
+            &SeatRef("seat-1".into()),
+            director.state.filters_for(race, &oft()),
+        );
+        assert_eq!(laps.lap_count(), 1);
+    }
+
+    #[test]
+    fn marking_out_is_refused_when_it_makes_no_sense() {
+        let mut director = two_pilot_heat(None);
+        // Not in the race.
+        assert!(matches!(
+            out(&mut director, "cat"),
+            Err(Refusal::PilotNotInRace { .. })
+        ));
+        // Not out, so nothing to take back.
+        assert!(matches!(
+            back_in(&mut director, "ben"),
+            Err(Refusal::NothingToUndo)
+        ));
+        out(&mut director, "ben").unwrap();
+        // Already out.
+        assert!(matches!(
+            out(&mut director, "ben"),
+            Err(Refusal::AlreadyOut { .. })
+        ));
+        // An unknown race.
+        assert!(
+            director
+                .record(Event::PilotOut {
+                    race: rid("nope#1"),
+                    pilot: pilot("ana"),
+                })
+                .is_err()
+        );
+        // A stopped race still takes the mark: the director may add it before saving.
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        out(&mut director, "ana").unwrap();
+        back_in(&mut director, "ana").unwrap();
+        // A saved race does not.
+        director
+            .send(Command::SaveRace {
+                race: rid("heat#1"),
+                needs_marshal: false,
+                note: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            out(&mut director, "ana"),
+            Err(Refusal::Race(RaceError::WrongState { .. }))
+        ));
+        // The mark made before the save stays on the record.
+        assert!(director.state.rulings.is_out(&rid("heat#1"), &pilot("ben")));
+    }
+
     #[test]
     fn removing_a_finishing_lap_during_the_wait_keeps_the_race_going() {
         let mut director = two_pilot_heat(Some(60 * S));
@@ -1776,6 +2667,459 @@ mod tests {
         // Ben really finishes; the wait starts from then.
         director.cross("seat-1", 40 * S);
         assert_eq!(director.state.next_due(), Some(560 * S));
+    }
+
+    // --- Check-in: taking an open seat part-way through a race ---------------------
+
+    /// Open practice as one long heat: two open seats and one with Cat named on it.
+    fn practice(idle: Option<i64>) -> Director {
+        let mut format = format(EndCondition::Open, 0);
+        format.race.drop_idle_seat_micros = idle;
+        format.ranking = None;
+        let mut director = Director::default();
+        let seat = |i: usize, source: SeatSource| HeatSeat {
+            adapter: oft(),
+            seat: SeatRef(format!("seat-{i}")),
+            source,
+        };
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("heat"),
+                    label: "Practice".into(),
+                    parent: None,
+                    kind: PhaseKind::Heat {
+                        lineup: vec![
+                            seat(0, SeatSource::Open),
+                            seat(1, SeatSource::Open),
+                            seat(2, SeatSource::Pilot(pilot("cat"))),
+                        ],
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        director
+    }
+
+    fn take(director: &mut Director, seat: &str, name: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::SeatTaken {
+                race: rid("heat#1"),
+                adapter: oft(),
+                seat: SeatRef(seat.into()),
+                pilot: pilot(name),
+            })
+            .map(|_| ())
+    }
+
+    fn drop_seat(director: &mut Director, seat: &str) -> Result<(), Refusal> {
+        director
+            .record(Event::SeatDropped {
+                race: rid("heat#1"),
+                adapter: oft(),
+                seat: SeatRef(seat.into()),
+            })
+            .map(|_| ())
+    }
+
+    /// Each stint on a seat as (pilot, still open, its lap times in seconds).
+    fn stints_of(director: &Director, seat: &str) -> Vec<(String, bool, Vec<i64>)> {
+        let race = director.state.races.get(&rid("heat#1")).unwrap();
+        let seat = SeatRef(seat.into());
+        let laps = director.state.laps.seat(
+            &rid("heat#1"),
+            &oft(),
+            &seat,
+            director.state.filters_for(race, &oft()),
+        );
+        director
+            .state
+            .check_ins
+            .stints(&rid("heat#1"), &oft(), &seat)
+            .iter()
+            .map(|stint| {
+                (
+                    stint.pilot.0.clone(),
+                    stint.is_open(),
+                    stint.laps(&laps).map(|lap| lap.micros() / S).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pilot_who_takes_a_seat_gets_the_laps_from_their_first_crossing_on() {
+        let mut director = practice(None);
+        // Somebody is already lapping on seat 0 with no name.
+        director.cross("seat-0", 0);
+        director.cross("seat-0", 20 * S);
+        take(&mut director, "seat-0", "ana").unwrap();
+        // The lap that was under way when Ana took the seat is not hers.
+        director.cross("seat-0", 45 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), true, vec![])]
+        );
+        // That crossing was her first, so it starts her first lap.
+        director.cross("seat-0", 60 * S);
+        director.cross("seat-0", 72 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), true, vec![15, 12])]
+        );
+        assert_eq!(
+            director
+                .state
+                .check_ins
+                .holder(&rid("heat#1"), &oft(), &SeatRef("seat-0".into())),
+            Some(&pilot("ana"))
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn a_stint_ends_when_someone_else_takes_the_seat_or_the_pilot_drops_it() {
+        let mut director = practice(None);
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.cross("seat-0", 0);
+        director.cross("seat-0", 10 * S);
+        // Ben takes the seat from Ana. Her lap stays hers.
+        take(&mut director, "seat-0", "ben").unwrap();
+        director.cross("seat-0", 30 * S);
+        director.cross("seat-0", 41 * S);
+        drop_seat(&mut director, "seat-0").unwrap();
+        // Nobody has the seat now, so this lap is nobody's.
+        director.cross("seat-0", 55 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![
+                ("ana".into(), false, vec![10]),
+                ("ben".into(), false, vec![11])
+            ]
+        );
+        assert_eq!(
+            director
+                .state
+                .check_ins
+                .holder(&rid("heat#1"), &oft(), &SeatRef("seat-0".into())),
+            None
+        );
+        // Ana comes back for a second go: a new stint, and the first is untouched.
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.cross("seat-0", 70 * S);
+        director.cross("seat-0", 79 * S);
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![
+                ("ana".into(), false, vec![10]),
+                ("ben".into(), false, vec![11]),
+                ("ana".into(), true, vec![9])
+            ]
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn a_pilot_who_takes_another_seat_leaves_the_one_they_had() {
+        let mut director = practice(None);
+        take(&mut director, "seat-0", "ana").unwrap();
+        take(&mut director, "seat-1", "ana").unwrap();
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), false, vec![])]
+        );
+        assert_eq!(
+            stints_of(&director, "seat-1"),
+            vec![("ana".into(), true, vec![])]
+        );
+        assert_eq!(
+            director
+                .state
+                .check_ins
+                .seat_of(&rid("heat#1"), &pilot("ana")),
+            Some((&oft(), &SeatRef("seat-1".into())))
+        );
+    }
+
+    #[test]
+    fn taking_or_dropping_a_seat_is_refused_when_it_makes_no_sense() {
+        let mut director = practice(None);
+        // Cat's seat has her name on it.
+        assert!(matches!(
+            take(&mut director, "seat-2", "ana"),
+            Err(Refusal::SeatNotOpen(_))
+        ));
+        // Cat has her own seat, so she cannot take another.
+        assert!(matches!(
+            take(&mut director, "seat-0", "cat"),
+            Err(Refusal::AlreadyInRace { .. })
+        ));
+        // No such seat in the race.
+        assert!(matches!(
+            take(&mut director, "seat-9", "ana"),
+            Err(Refusal::SeatNotInRace(_))
+        ));
+        // Nobody on the seat to drop.
+        assert!(matches!(
+            drop_seat(&mut director, "seat-0"),
+            Err(Refusal::NothingToUndo)
+        ));
+        take(&mut director, "seat-0", "ana").unwrap();
+        assert!(matches!(
+            take(&mut director, "seat-0", "ana"),
+            Err(Refusal::AlreadyOnSeat { .. })
+        ));
+        // Once the race has stopped, nobody new can take a seat.
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        assert!(matches!(
+            take(&mut director, "seat-1", "ben"),
+            Err(Refusal::Race(RaceError::WrongState { .. }))
+        ));
+    }
+
+    #[test]
+    fn an_idle_seat_is_dropped_after_the_formats_wait_and_a_crossing_starts_the_wait_again() {
+        let mut director = practice(Some(120 * S));
+        director.now = 10 * S;
+        take(&mut director, "seat-0", "ana").unwrap();
+        // Two minutes from when she took the seat.
+        assert_eq!(director.state.next_due(), Some(130 * S));
+        director.now = 100 * S;
+        director.cross("seat-0", 90 * S);
+        // Her crossing shows the seat is in use: two minutes from then.
+        assert_eq!(director.state.next_due(), Some(220 * S));
+        director.now = 219 * S;
+        director.catch_up();
+        assert!(stints_of(&director, "seat-0")[0].1);
+        director.now = 400 * S;
+        director.catch_up();
+        assert_eq!(
+            stints_of(&director, "seat-0"),
+            vec![("ana".into(), false, vec![])]
+        );
+        assert_eq!(director.state.next_due(), None);
+        // The race itself keeps running: only the seat was dropped.
+        assert_eq!(state_of(&director), RaceState::Running);
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn with_no_wait_set_nobody_is_ever_dropped_for_being_idle() {
+        let mut director = practice(None);
+        director.now = 10 * S;
+        take(&mut director, "seat-0", "ana").unwrap();
+        assert_eq!(director.state.next_due(), None);
+        director.now = 100_000 * S;
+        director.catch_up();
+        assert!(stints_of(&director, "seat-0")[0].1);
+    }
+
+    /// Open practice ranked on the fastest lap, flown and saved after `fly` has run.
+    fn ranked_practice(fly: impl FnOnce(&mut Director)) -> Director {
+        let mut director = Director::default();
+        let mut format = format(EndCondition::Open, 0);
+        format.ranking = Some(RankingRule {
+            sort: vec![Measure::BestLap],
+        });
+        let seat = |i: usize, source: SeatSource| HeatSeat {
+            adapter: oft(),
+            seat: SeatRef(format!("seat-{i}")),
+            source,
+        };
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("heat"),
+                    label: "Practice".into(),
+                    parent: None,
+                    kind: PhaseKind::Heat {
+                        lineup: vec![
+                            seat(0, SeatSource::Open),
+                            seat(1, SeatSource::Open),
+                            seat(2, SeatSource::Pilot(pilot("cat"))),
+                        ],
+                    },
+                    format: Some(format),
+                    false_start_limit: None,
+                    class: None,
+                    display_hint: None,
+                },
+            })
+            .unwrap();
+        director
+            .send(Command::StartRace { heat: pid("heat") })
+            .unwrap();
+        fly(&mut director);
+        director
+            .send(Command::StopRace {
+                race: rid("heat#1"),
+            })
+            .unwrap();
+        director
+            .send(Command::SaveRace {
+                race: rid("heat#1"),
+                needs_marshal: false,
+                note: None,
+            })
+            .unwrap();
+        director
+    }
+
+    /// The heat's ranking as (pilot, flew, best lap in seconds).
+    fn practice_ranking(director: &Director) -> Vec<(String, bool, Option<i64>)> {
+        director.state.results()[&pid("heat")]
+            .ranking
+            .iter()
+            .map(|placed| {
+                (
+                    placed.pilot.0.clone(),
+                    placed.result.flew,
+                    placed.result.best_lap_micros.map(|micros| micros / S),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pilot_who_took_a_seat_is_ranked_on_the_laps_they_flew_while_they_had_it() {
+        let director = ranked_practice(|director| {
+            // Cat flies her own seat: laps of 14 and 13.
+            director.cross("seat-2", 0);
+            director.cross("seat-2", 14 * S);
+            director.cross("seat-2", 27 * S);
+            // Ana takes seat 0: laps of 15 and 12.
+            take(director, "seat-0", "ana").unwrap();
+            director.cross("seat-0", 30 * S);
+            director.cross("seat-0", 45 * S);
+            director.cross("seat-0", 57 * S);
+            // Ben takes it from her: one lap of 11.
+            take(director, "seat-0", "ben").unwrap();
+            director.cross("seat-0", 70 * S);
+            director.cross("seat-0", 81 * S);
+        });
+        assert_eq!(
+            practice_ranking(&director),
+            vec![
+                ("ben".into(), true, Some(11)),
+                ("ana".into(), true, Some(12)),
+                ("cat".into(), true, Some(13)),
+            ]
+        );
+        // The field is the named pilot, then the pilots who checked in, in that order.
+        assert_eq!(
+            director.state.results()[&pid("heat")].field,
+            vec![pilot("cat"), pilot("ana"), pilot("ben")]
+        );
+        assert_eq!(director.replayed(), director.state);
+    }
+
+    #[test]
+    fn laps_on_a_seat_nobody_had_rank_nobody() {
+        let director = ranked_practice(|director| {
+            // A fast lap of 5 on seat 0 before anyone took it.
+            director.cross("seat-0", 0);
+            director.cross("seat-0", 5 * S);
+            take(director, "seat-0", "ana").unwrap();
+            // The 6 second lap was under way when she took the seat: not hers either.
+            director.cross("seat-0", 11 * S);
+            director.cross("seat-0", 31 * S);
+            drop_seat(director, "seat-0").unwrap();
+            // And a lap of 4 after she dropped it.
+            director.cross("seat-0", 35 * S);
+        });
+        assert_eq!(
+            practice_ranking(&director),
+            // Cat never crossed, so she is below Ana, who flew.
+            vec![("ana".into(), true, Some(20)), ("cat".into(), false, None)]
+        );
+    }
+
+    #[test]
+    fn a_pilot_who_took_a_seat_and_never_crossed_is_in_the_field_and_did_not_fly() {
+        let director = ranked_practice(|director| {
+            take(director, "seat-0", "ana").unwrap();
+            director.cross("seat-2", 0);
+            director.cross("seat-2", 9 * S);
+        });
+        assert_eq!(
+            practice_ranking(&director),
+            vec![("cat".into(), true, Some(9)), ("ana".into(), false, None)]
+        );
+    }
+
+    #[test]
+    fn two_stints_by_one_pilot_are_ranked_together_and_no_lap_spans_the_gap() {
+        let director = ranked_practice(|director| {
+            // Ana on seat 0: one lap of 10.
+            take(director, "seat-0", "ana").unwrap();
+            director.cross("seat-0", 0);
+            director.cross("seat-0", 10 * S);
+            drop_seat(director, "seat-0").unwrap();
+            // Later she takes seat 1: laps of 12 and 9.
+            take(director, "seat-1", "ana").unwrap();
+            director.cross("seat-1", 100 * S);
+            director.cross("seat-1", 112 * S);
+            director.cross("seat-1", 121 * S);
+        });
+        let results = director.state.results();
+        let ana = results[&pid("heat")]
+            .ranking
+            .iter()
+            .find(|placed| placed.pilot == pilot("ana"))
+            .unwrap();
+        assert_eq!(ana.result.laps, 3);
+        assert_eq!(ana.result.best_lap_micros, Some(9 * S));
+        let laps = &ana.result.races[0];
+        // The 90 seconds between the stints is not a lap, and no run of laps crosses it.
+        assert_eq!(
+            laps.laps().map(|lap| lap.micros() / S).collect::<Vec<_>>(),
+            vec![10, 12, 9]
+        );
+        assert_eq!(laps.best_consecutive_micros(2), Some(21 * S));
+        assert_eq!(laps.best_consecutive_micros(3), None);
+    }
+
+    #[test]
+    fn a_practice_race_that_is_thrown_out_ranks_nobody_who_checked_in() {
+        let mut director = practice(None);
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.cross("seat-0", 0);
+        director.cross("seat-0", 10 * S);
+        director
+            .send(Command::DiscardRace {
+                race: rid("heat#1"),
+                reason: None,
+                note: None,
+            })
+            .unwrap();
+        let results = director.state.results();
+        assert_eq!(results[&pid("heat")].field, vec![pilot("cat")]);
+    }
+
+    #[test]
+    fn each_idle_seat_is_dropped_at_its_own_time() {
+        let mut director = practice(Some(60 * S));
+        director.now = 10 * S;
+        take(&mut director, "seat-0", "ana").unwrap();
+        director.now = 30 * S;
+        take(&mut director, "seat-1", "ben").unwrap();
+        assert_eq!(director.state.next_due(), Some(70 * S));
+        director.now = 75 * S;
+        director.catch_up();
+        assert!(!stints_of(&director, "seat-0")[0].1);
+        assert!(stints_of(&director, "seat-1")[0].1);
+        assert_eq!(director.state.next_due(), Some(90 * S));
     }
 
     #[test]
@@ -1818,6 +3162,7 @@ mod tests {
                     format: Some(format),
                     false_start_limit: None,
                     display_hint: None,
+                    class: None,
                 },
             })
             .unwrap();
@@ -1898,7 +3243,10 @@ mod tests {
         let results = director.state.results();
         assert_eq!(
             director.state.queue(&results),
-            vec![pid("bracket/losers-1"), pid("bracket/winners-final")]
+            vec![
+                pid("bracket/losers-1/heat-1"),
+                pid("bracket/winners-final/heat-1")
+            ]
         );
     }
 
@@ -1920,6 +3268,7 @@ mod tests {
             format: Some(format(EndCondition::FirstToLaps(1), 0)),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         for (id, who) in [("a1", "ana"), ("a2", "ana"), ("b1", "ben"), ("c1", "cat")] {
             director
@@ -1938,6 +3287,418 @@ mod tests {
             director.state.queue_spaced(&results),
             vec![pid("b1"), pid("c1"), pid("a2")]
         );
+    }
+
+    /// An event with one class, "open" (ana, ben, cat, dee), and the phases a director
+    /// would make for it: Qualifying (the class's roster) with one heat, then Finals (the
+    /// top two of Qualifying) with one heat, and a Practice heat that ranks nobody.
+    fn class_event() -> (Director, ClassId) {
+        let mut director = Director::default();
+        let open = ClassId("open".into());
+        director
+            .record(Event::RosterSet {
+                class: open.clone(),
+                pilots: ["ana", "ben", "cat", "dee"]
+                    .iter()
+                    .map(|n| pilot(n))
+                    .collect(),
+            })
+            .unwrap();
+        let ranked = format(EndCondition::FirstToLaps(1), 0);
+        let mut unranked = ranked.clone();
+        unranked.ranking = None;
+        let group = |id: &str, field: Vec<FieldSlice>, format: Format| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: None,
+            kind: PhaseKind::Group {
+                field,
+                combine: gridfpv_events::CombineRule::Stack,
+            },
+            format: Some(format),
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        let heat = |id: &str, parent: &str, sources: Vec<SeatSource>| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: Some(pid(parent)),
+            kind: PhaseKind::Heat {
+                lineup: sources
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, source)| HeatSeat {
+                        adapter: oft(),
+                        seat: SeatRef(format!("seat-{i}")),
+                        source,
+                    })
+                    .collect(),
+            },
+            format: None,
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        let named = |names: &[&str]| names.iter().map(|n| SeatSource::Pilot(pilot(n))).collect();
+        for def in [
+            group("practice", vec![], unranked),
+            heat("practice/heat", "practice", named(&["ana", "ben"])),
+            group(
+                "quali",
+                vec![FieldSlice::Class(open.clone())],
+                ranked.clone(),
+            ),
+            heat("quali/heat", "quali", named(&["dee", "cat", "ben", "ana"])),
+            group(
+                "finals",
+                vec![FieldSlice::FromPhase {
+                    phase: pid("quali"),
+                    from: 1,
+                    to: 2,
+                }],
+                ranked,
+            ),
+            heat(
+                "finals/heat",
+                "finals",
+                (1..=2)
+                    .map(|position| SeatSource::FromPhase {
+                        phase: pid("quali"),
+                        position,
+                    })
+                    .collect(),
+            ),
+        ] {
+            director.record(Event::PhaseDefined { def }).unwrap();
+        }
+        (director, open)
+    }
+
+    fn ids(phases: &[PhaseId]) -> Vec<&str> {
+        phases.iter().map(|phase| phase.0.as_str()).collect()
+    }
+
+    #[test]
+    fn a_phase_is_for_the_class_whose_roster_is_its_field_or_whose_phase_seeds_it() {
+        let (director, open) = class_event();
+        let class = |id: &str| director.state.phase_class(&pid(id));
+        // Its field is the class's roster.
+        assert_eq!(class("quali"), Some(open.clone()));
+        // It is held by a phase of the class.
+        assert_eq!(class("quali/heat"), Some(open.clone()));
+        // It takes its pilots from a phase of the class.
+        assert_eq!(class("finals"), Some(open.clone()));
+        assert_eq!(class("finals/heat"), Some(open.clone()));
+        // It only names pilots: it is for no class, though they are all in one.
+        assert_eq!(class("practice"), None);
+        assert_eq!(class("practice/heat"), None);
+        assert_eq!(class("nope"), None);
+    }
+
+    #[test]
+    fn with_nothing_set_a_class_counts_its_ranked_phases_latest_first() {
+        let (director, open) = class_event();
+        // Finals was added last, so it decides. Qualifying places whoever it leaves out.
+        // Each is one phase: its heats are not listed apart. Practice never counts.
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+        assert_eq!(
+            director.state.class_phase_list(&open),
+            vec![(pid("finals"), true), (pid("quali"), true)]
+        );
+        // Another class has none of them.
+        assert!(
+            director
+                .state
+                .counted_phases(&ClassId("spec".into()))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_standings_come_out_right_with_nothing_set_by_hand() {
+        let (mut director, open) = class_event();
+        // Seat order wins each heat: Dee, Cat, Ben, Ana in qualifying; then Dee and Cat
+        // meet in the finals, where the seats are qualifying's first and second.
+        fly(&mut director, "quali/heat");
+        fly(&mut director, "finals/heat");
+        let results = director.state.results();
+        let order: Vec<(String, Option<String>)> = director
+            .state
+            .class_standings(&open, &results)
+            .into_iter()
+            .map(|place| (place.pilot.0, place.placed_by.map(|phase| phase.0)))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("dee".into(), Some("finals".into())),
+                ("cat".into(), Some("finals".into())),
+                ("ben".into(), Some("quali".into())),
+                ("ana".into(), Some("quali".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_phase_the_director_says_does_not_count_is_left_out_until_they_say_it_does() {
+        let (mut director, open) = class_event();
+        assert_eq!(
+            director.record(Event::PhaseCounts {
+                phase: pid("nope"),
+                counts: false,
+            }),
+            Err(Refusal::UnknownPhase(pid("nope")))
+        );
+        director
+            .record(Event::PhaseCounts {
+                phase: pid("finals"),
+                counts: false,
+            })
+            .unwrap();
+        assert_eq!(ids(&director.state.counted_phases(&open)), ["quali"]);
+        // It is still listed, after the ones that count, so it can be counted again.
+        assert_eq!(
+            director.state.class_phase_list(&open),
+            vec![(pid("quali"), true), (pid("finals"), false)]
+        );
+        // The standings then come from qualifying alone.
+        fly(&mut director, "quali/heat");
+        fly(&mut director, "finals/heat");
+        let results = director.state.results();
+        let placed_by: Vec<Option<String>> = director
+            .state
+            .class_standings(&open, &results)
+            .into_iter()
+            .map(|place| place.placed_by.map(|phase| phase.0))
+            .collect();
+        assert!(placed_by.iter().all(|by| by.as_deref() == Some("quali")));
+        // Said twice, it is the same. Said to count again, it is back where it was.
+        for counts in [false, true, true] {
+            director
+                .record(Event::PhaseCounts {
+                    phase: pid("finals"),
+                    counts,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn an_order_the_director_set_stands_and_a_phase_added_since_goes_ahead_of_it() {
+        let (mut director, open) = class_event();
+        director
+            .record(Event::StandingsSet {
+                class: open.clone(),
+                phases: vec![pid("quali"), pid("finals")],
+            })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["quali", "finals"]
+        );
+        // A consolation race is added afterwards, seeded from qualifying.
+        let consolation = PhaseDef {
+            id: pid("consolation"),
+            label: "Consolation".into(),
+            parent: None,
+            kind: PhaseKind::Heat {
+                lineup: vec![HeatSeat {
+                    adapter: oft(),
+                    seat: SeatRef("seat-0".into()),
+                    source: SeatSource::FromPhase {
+                        phase: pid("quali"),
+                        position: 3,
+                    },
+                }],
+            },
+            format: Some(format(EndCondition::FirstToLaps(1), 0)),
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        director
+            .record(Event::PhaseDefined { def: consolation })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["consolation", "quali", "finals"]
+        );
+        // The order set again, with it in its place.
+        director
+            .record(Event::StandingsSet {
+                class: open.clone(),
+                phases: vec![pid("finals"), pid("quali"), pid("consolation")],
+            })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali", "consolation"]
+        );
+        // A phase that is removed drops out of the order without a word.
+        director
+            .record(Event::PhaseRemoved {
+                phase: pid("consolation"),
+            })
+            .unwrap();
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn a_class_phase_with_no_ranked_heat_yet_is_not_listed() {
+        let (mut director, open) = class_event();
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("mains"),
+                    label: "Mains".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![FieldSlice::Class(open.clone())],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: Some(format(EndCondition::FirstToLaps(1), 0)),
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        // It holds no heat, so there is nothing in it to rank by.
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn a_phase_that_only_holds_heats_seeded_from_a_class_phase_is_one_phase_of_that_class() {
+        // "Mains" is made by hand: an empty phase with no class picked, and two heats in it
+        // whose seats come from qualifying. It is the class's, and it counts as one phase,
+        // not as two heats.
+        let (mut director, open) = class_event();
+        let ranked = format(EndCondition::FirstToLaps(1), 0);
+        director
+            .record(Event::PhaseDefined {
+                def: PhaseDef {
+                    id: pid("mains"),
+                    label: "Mains".into(),
+                    parent: None,
+                    kind: PhaseKind::Group {
+                        field: vec![],
+                        combine: gridfpv_events::CombineRule::Stack,
+                    },
+                    format: Some(ranked),
+                    false_start_limit: None,
+                    display_hint: None,
+                    class: None,
+                },
+            })
+            .unwrap();
+        for (id, positions) in [("mains/a", [1, 2]), ("mains/b", [3, 4])] {
+            director
+                .record(Event::PhaseDefined {
+                    def: PhaseDef {
+                        id: pid(id),
+                        label: id.into(),
+                        parent: Some(pid("mains")),
+                        kind: PhaseKind::Heat {
+                            lineup: positions
+                                .iter()
+                                .enumerate()
+                                .map(|(i, position)| HeatSeat {
+                                    adapter: oft(),
+                                    seat: SeatRef(format!("seat-{i}")),
+                                    source: SeatSource::FromPhase {
+                                        // Seeded from a heat inside qualifying, not from
+                                        // qualifying itself: its class is found all the same.
+                                        phase: pid("quali/heat"),
+                                        position: *position,
+                                    },
+                                })
+                                .collect(),
+                        },
+                        format: None,
+                        false_start_limit: None,
+                        display_hint: None,
+                        class: None,
+                    },
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            director.state.phase_class(&pid("mains")),
+            Some(open.clone())
+        );
+        assert_eq!(
+            director.state.phase_class(&pid("mains/a")),
+            Some(open.clone())
+        );
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["mains", "finals", "quali"]
+        );
+        // Practice holds only heats that name pilots: still for no class.
+        assert_eq!(director.state.phase_class(&pid("practice")), None);
+        // Until the director says it is for one. Its name does not make it ranked, though:
+        // it still ranks nobody, so it still does not count.
+        let mut practice = director.state.tree.get(&pid("practice")).unwrap().clone();
+        practice.class = Some(open.clone());
+        director
+            .record(Event::PhaseDefined { def: practice })
+            .unwrap();
+        assert_eq!(
+            director.state.phase_class(&pid("practice")),
+            Some(open.clone())
+        );
+        assert_eq!(
+            ids(&director.state.counted_phases(&open)),
+            ["mains", "finals", "quali"]
+        );
+    }
+
+    #[test]
+    fn phases_seeded_from_each_other_do_not_hang_the_director() {
+        let mut director = Director::default();
+        let seeded = |id: &str, from: &str| PhaseDef {
+            id: pid(id),
+            label: id.into(),
+            parent: None,
+            kind: PhaseKind::Group {
+                field: vec![FieldSlice::FromPhase {
+                    phase: pid(from),
+                    from: 1,
+                    to: 2,
+                }],
+                combine: gridfpv_events::CombineRule::Stack,
+            },
+            format: None,
+            false_start_limit: None,
+            display_hint: None,
+            class: None,
+        };
+        director
+            .record(Event::PhaseDefined {
+                def: seeded("a", "b"),
+            })
+            .unwrap();
+        director
+            .record(Event::PhaseDefined {
+                def: seeded("b", "a"),
+            })
+            .unwrap();
+        assert_eq!(director.state.phase_class(&pid("a")), None);
+        assert_eq!(director.state.phase_class(&pid("b")), None);
     }
 
     #[test]
@@ -1972,6 +3733,7 @@ mod tests {
             format: Some(format(EndCondition::FirstToLaps(1), 0)),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         // Qualifying has four of the five; the final has the two who made it.
         director
@@ -2182,7 +3944,7 @@ mod tests {
         // 0: p1 is seeded higher and keeps it. p4 and p3 both flew seat 1: p4 keeps it.
         // The two who had to move take the seats nobody asked for, in seed order.
         assert_eq!(
-            on("bracket/winners-final"),
+            on("bracket/winners-final/heat-1"),
             vec![
                 ("seat-0".to_owned(), "p1".to_owned()),
                 ("seat-1".to_owned(), "p4".to_owned()),
@@ -2192,7 +3954,7 @@ mod tests {
         );
         // The losers heat takes 3rd and 4th of each: p5 and p8 flew seats 2 and 3 in heat
         // 1 and are seeded above p6 and p7, so they keep them.
-        let losers = on("bracket/losers-1");
+        let losers = on("bracket/losers-1/heat-1");
         assert!(
             losers.contains(&("seat-2".to_owned(), "p5".to_owned())),
             "{losers:?}"
@@ -2203,14 +3965,14 @@ mod tests {
         );
         // The field (the seed order) is not changed by where pilots sit.
         assert_eq!(
-            results[&pid("bracket/winners-final")].field,
+            results[&pid("bracket/winners-final/heat-1")].field,
             vec![pilot("p1"), pilot("p2"), pilot("p4"), pilot("p3")]
         );
 
         // Once the heat has been flown its lineup stays as it was flown.
-        fly(&mut director, "bracket/winners-final");
+        fly(&mut director, "bracket/winners-final/heat-1");
         let results = director.state.results();
-        let after: Vec<String> = results[&pid("bracket/winners-final")]
+        let after: Vec<String> = results[&pid("bracket/winners-final/heat-1")]
             .lineup
             .iter()
             .map(|seat| match &seat.who {
@@ -2243,6 +4005,7 @@ mod tests {
             format: Some(format(EndCondition::FirstToLaps(1), 0)),
             false_start_limit: None,
             display_hint: None,
+            class: None,
         };
         director
             .record(Event::PhaseDefined {

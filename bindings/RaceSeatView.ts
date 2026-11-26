@@ -5,6 +5,7 @@ import type { LapView } from "./LapView";
 import type { PilotId } from "./PilotId";
 import type { SeatRef } from "./SeatRef";
 import type { SourceTime } from "./SourceTime";
+import type { StintView } from "./StintView";
 import type { UncountedView } from "./UncountedView";
 
 /**
@@ -25,6 +26,21 @@ start_at?: SourceTime,
  * Whether a false start is recorded against the pilot in this race.
  */
 false_start: boolean, 
+/**
+ * Whether the pilot is marked out of this race (crashed, not going to finish). The
+ * race no longer waits for them.
+ */
+out: boolean, 
+/**
+ * Who has taken this open seat now (check-in). Absent when nobody has, and always
+ * absent for a seat with a pilot named on it.
+ */
+holder?: PilotId, 
+/**
+ * Every spell a pilot has had on this open seat, oldest first, with the laps that
+ * are theirs. Empty for a seat nobody has taken.
+ */
+stints: Array<StintView>, 
 /**
  * The seat's place in the race so far, 1 first. Absent for an open seat.
  */

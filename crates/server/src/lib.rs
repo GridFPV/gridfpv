@@ -25,16 +25,23 @@
 //! all `.ts` files land in `<repo>/bindings/`; `cargo xtask ci` drift-checks them.
 #![forbid(unsafe_code)]
 
+pub mod access;
 pub mod app;
 pub mod auth;
 pub mod backup;
+pub mod checkin;
 pub mod classes;
 pub mod control;
 pub mod error;
 pub mod events;
 pub mod library;
+pub mod network;
 pub mod overlay;
+pub mod pilot_access;
 pub mod pilots;
+pub mod public;
+pub mod signup;
+pub mod spectate;
 pub mod timers;
 pub mod video;
 pub mod view;

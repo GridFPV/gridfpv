@@ -19,7 +19,10 @@
    *   whole of the settings. What comes back is what the timer is doing, and replaces the draft.
    *
    * The settings live on the timer. They are read from it when the page opens, after every
-   * apply and on "Discard changes". The live signal comes over the timer's live feed, which
+   * apply and on "Discard changes", and again whenever the timer says they changed (another
+   * program, or the timer's own page, can change them too). While another program has
+   * control of the timer, Grid cannot change it: the page says who has it and where to put
+   * that right, and offers nothing that writes to the timer. The live signal comes over the timer's live feed, which
    * stops when the page closes. The timer list (names and status) is the Seats page's and is
    * handed in.
    *
@@ -55,6 +58,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import { formatHash } from '../lib/route.js';
   import { SignalRing, TimerClock } from '../lib/signal.js';
+  import { controlTrouble } from '../lib/timers.js';
   import {
     addSeat,
     draftConfig,
@@ -68,6 +72,7 @@
     sameConfig,
     type TuneDraft
   } from '../lib/tune.js';
+  import ControlBanner from './ControlBanner.svelte';
   import LevelsFields from './LevelsFields.svelte';
   import SignalTrace from './SignalTrace.svelte';
 
@@ -99,6 +104,12 @@
   /** Whether this timer takes levels per seat. When it does not, none is offered or sent. */
   const seatLevels = $derived(view?.status.seat_thresholds ?? false);
   const seatName = (seat: SeatRef, position: number): string => names.seat(timer, seat, position);
+  /**
+   * Whether another program has control of the timer, so it refuses Grid's changes. The
+   * page still shows everything, and a draft can still be made; nothing is sent.
+   */
+  const locked = $derived(!!view && controlTrouble(view.timer, view.status) !== undefined);
+  const lockedTitle = $derived(locked ? 'Another program has control of this timer.' : undefined);
 
   // ── The settings: what the timer has, and the draft ────────────────────────
   /** What the timer reported last. `undefined` until the first read lands. */
@@ -118,7 +129,7 @@
       const fresh = await session.getTimerConfig(timer);
       if (read !== reads) return;
       config = fresh;
-      draft = draftFrom(fresh);
+      draft = draftFrom(fresh, unit);
       loadError = undefined;
     } catch (e) {
       if (read !== reads) return;
@@ -142,8 +153,56 @@
     });
   });
 
+  // The timer counts every change to its settings, whoever made it, and its status carries
+  // the count. When it moves, the settings are read again. Grid's own applies move it too;
+  // the read then finds what the page already has and changes nothing.
+  /** Set when the timer's settings changed elsewhere while there was a draft here. */
+  let changedElsewhere = $state(false);
+  let reading = 0;
+
+  async function followConfig() {
+    const read = (reading += 1);
+    const before = reads;
+    let fresh: TimerConfig;
+    try {
+      fresh = await session.getTimerConfig(timer);
+    } catch {
+      // The settings on the page stay; a timer that cannot be read says so by itself.
+      return;
+    }
+    // An apply, a discard or a later change has been here since: theirs is newer.
+    if (read !== reading || before !== reads || !config || !draft) return;
+    if (sameConfig(fresh, config)) return;
+    const wasDirty = isDirty(draft, config, seatLevels);
+    config = fresh;
+    if (wasDirty) {
+      // The director's edits are theirs to keep or drop. They are told the timer moved.
+      changedElsewhere = true;
+    } else {
+      draft = draftFrom(fresh, unit);
+    }
+  }
+
+  let seenRev: number | undefined;
+  $effect(() => {
+    const rev = view?.status.config_rev;
+    const moved = rev !== undefined && seenRev !== undefined && rev !== seenRev;
+    if (rev !== undefined) seenRev = rev;
+    if (moved) untrack(() => void followConfig());
+  });
+
   const result = $derived(draft ? draftConfig(draft, seatName, seatLevels) : undefined);
   const dirty = $derived(draft && config ? isDirty(draft, config, seatLevels) : false);
+
+  // The draft holds numbers as people read them in one unit. If the timer turns out to
+  // measure in another (its receiver reported in late, or came back from an update), the
+  // draft is made again from what the timer has: its numbers would otherwise be read wrong.
+  $effect(() => {
+    const now = unit;
+    untrack(() => {
+      if (config && draft && draft.unit !== now) draft = draftFrom(config, now);
+    });
+  });
 
   // ── The live feed ──────────────────────────────────────────────────────────
   // Samples arrive hundreds of times a second, so they go into plain ring buffers the traces
@@ -151,7 +210,13 @@
   // shown as text, so they are state.
   const rings = new Map<SeatRef, SignalRing>();
   const clock = new TimerClock();
-  let unit = $state<SignalUnit>('TenthsDb');
+  /** The unit the signal last arrived in, for a timer that does not say its unit itself. */
+  let signalUnit = $state<SignalUnit>('TenthsDb');
+  /**
+   * What the timer's levels measure. The timer says (dB on most, millivolts on one whose
+   * receivers read a signal-strength pin); the settings are bare numbers in that unit.
+   */
+  const unit = $derived(view?.status.level_unit ?? signalUnit);
   let levels = $state.raw<ReadonlyMap<SeatRef, SeatLevels>>(new Map());
   let liveError = $state<string | undefined>(undefined);
 
@@ -172,7 +237,7 @@
         performance.now()
       );
     }
-    if (chunk.unit !== unit) unit = chunk.unit;
+    if (chunk.unit !== signalUnit) signalUnit = chunk.unit;
   }
 
   function onLevels(list: SeatLevels[]) {
@@ -228,7 +293,7 @@
   let applyError = $state<string | undefined>(undefined);
 
   async function apply() {
-    if (applying || !result?.ok) return;
+    if (applying || locked || !result?.ok) return;
     applying = true;
     applyError = undefined;
     try {
@@ -237,7 +302,8 @@
       reads += 1; // an older read must not land on top of this
       loading = false;
       config = kept;
-      draft = draftFrom(kept);
+      draft = draftFrom(kept, unit);
+      changedElsewhere = false;
       loadError = undefined;
       toast.success(`Applied to “${timerLabel}”.`);
     } catch (e) {
@@ -299,7 +365,8 @@
       reads += 1; // an older read must not land on top of this
       loading = false;
       config = kept;
-      draft = draftFrom(kept);
+      draft = draftFrom(kept, unit);
+      changedElsewhere = false;
       loadError = undefined;
       toast.success(`“${picked.name}” is on ${timerLabel}.`);
       return kept;
@@ -365,7 +432,8 @@
 
   async function discard() {
     applyError = undefined;
-    if (config) draft = draftFrom(config);
+    changedElsewhere = false;
+    if (config) draft = draftFrom(config, unit);
     await loadConfig();
   }
 </script>
@@ -379,6 +447,7 @@
         </Banner>
       </div>
     {/if}
+    <ControlBanner {view} />
     {#if profileError}
       <div data-testid="profile-problem">
         <Banner
@@ -417,8 +486,8 @@
             <Select
               aria-label="Profile"
               value={profiles?.active ?? ''}
-              disabled={profileBusy || dirty || !profiles}
-              title={dirty ? 'Apply or discard the changes first.' : undefined}
+              disabled={profileBusy || dirty || locked || !profiles}
+              title={dirty ? 'Apply or discard the changes first.' : lockedTitle}
               onchange={async (e: Event) => {
                 const select = e.currentTarget as HTMLSelectElement;
                 await applyProfile(select.value);
@@ -480,7 +549,57 @@
       </Card>
 
       <!-- ── Seats ─────────────────────────────────────────────────────── -->
-      <Card title="Seats" subtitle="The frequency each seat listens on, and whether it is on.">
+      <!-- ── Timer settings ────────────────────────────────────────────── -->
+      <Card
+        title="Timer settings"
+        subtitle={seatLevels
+          ? "When the timer counts a crossing. These levels are the timer's own. Every seat that has none of its own uses them."
+          : 'When the timer counts a crossing. These settings are for every seat on this timer.'}
+      >
+        <LevelsFields
+          bind:levels={draft.levels}
+          inUse={levelsInUse([...levels.values()], config)}
+          group="threshold-mode"
+          legend="Enter and exit levels"
+        >
+          {#if draft.exitHoldMs !== undefined}
+            <Field
+              label="Exit hold (milliseconds)"
+              hint="The signal must stay below the exit level this long before the crossing ends. A longer hold stops one pass from being split in two."
+            >
+              <Input
+                type="number"
+                inputmode="numeric"
+                min="0"
+                step="1"
+                aria-label="Exit hold, in milliseconds"
+                bind:value={draft.exitHoldMs}
+              />
+            </Field>
+          {/if}
+          {#if draft.lapCooldownS !== undefined}
+            <Field
+              label="Lap cooldown (seconds)"
+              hint="After a crossing, the timer reports no other on that seat for this long. It swallows the bounce of one pass. Keep it shorter than the event's minimum lap time, which is set on the event's Details page."
+            >
+              <Input
+                type="number"
+                inputmode="decimal"
+                min="0"
+                step="0.1"
+                aria-label="Lap cooldown, in seconds"
+                bind:value={draft.lapCooldownS}
+              />
+            </Field>
+          {/if}
+        </LevelsFields>
+      </Card>
+
+      <!-- ── Seats: each with its channel, its switch and its own signal ── -->
+      <Card
+        title="Seats"
+        subtitle="The frequency each seat listens on, whether it is on, and its signal over the last 10 seconds. A shaded band is a crossing."
+      >
         {#snippet actions()}
           <Button
             variant="secondary"
@@ -565,11 +684,11 @@
                   {:else}
                     <span class="number">
                       <span class="muted">Level</span>
-                      <strong>{formatLevel(live.level, unit)}</strong>
+                      <strong>{formatLevel(live.level, live.unit)}</strong>
                     </span>
                     <span class="number">
                       <span class="muted">Noise floor</span>
-                      <strong>{formatLevel(live.floor, unit)}</strong>
+                      <strong>{formatLevel(live.floor, live.unit)}</strong>
                     </span>
                     <span class="lamp" class:lit={live.crossing} data-crossing={live.crossing}>
                       <span class="lamp-dot" aria-hidden="true"></span>
@@ -577,6 +696,29 @@
                     </span>
                   {/if}
                 </div>
+                <!-- The seat's own signal sits with its settings, so a change is seen where it
+                     is made. Only a seat that is on, on the timer, has one. -->
+                {#if onTimer?.enabled}
+                  <div class="signal" data-testid="seat-signal">
+                    <SignalTrace
+                      ring={ringFor(seat.seat)}
+                      {clock}
+                      levels={live}
+                      unit={live?.unit ?? unit}
+                      label="Signal on {label} over the last 10 seconds"
+                    />
+                    <dl class="summary" aria-label="{label} levels">
+                      <div>
+                        <dt class="enter">Enter</dt>
+                        <dd>{formatLevel(live?.enter, live?.unit ?? unit)}</dd>
+                      </div>
+                      <div>
+                        <dt class="exit">Exit</dt>
+                        <dd>{formatLevel(live?.exit, live?.unit ?? unit)}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                {/if}
                 {#if seatLevels}
                   <div class="own">
                     <div class="own-choice">
@@ -612,110 +754,6 @@
         {/if}
       </Card>
 
-      <!-- ── Signal ────────────────────────────────────────────────────── -->
-      <Card
-        title="Signal"
-        subtitle="The last 10 seconds on each seat that is on. A shaded band is a crossing."
-      >
-        {@const shown = config.seats
-          .map((seat, position) => ({ seat, position }))
-          .filter(({ seat }) => seat.enabled)}
-        {#if shown.length === 0}
-          <p class="muted">No seat is on. Turn a seat on and apply to see its signal.</p>
-        {:else}
-          {#if !connected}
-            <p class="muted">No signal arrives while the timer is not connected.</p>
-          {/if}
-          <ul class="traces" aria-label="Signal">
-            {#each shown as { seat, position } (seat.seat)}
-              {@const label = seatName(seat.seat, position)}
-              {@const live = levels.get(seat.seat)}
-              <li class="trace-row" aria-label={label}>
-                <div class="trace-head">
-                  <span class="seat-name">{label}</span>
-                  <span class="muted">
-                    {channelLabel(seat.freq_mhz)
-                      ? `${channelLabel(seat.freq_mhz)} · ${seat.freq_mhz} MHz`
-                      : `${seat.freq_mhz} MHz`}
-                  </span>
-                </div>
-                <SignalTrace
-                  ring={ringFor(seat.seat)}
-                  {clock}
-                  levels={live}
-                  {unit}
-                  label="Signal on {label} over the last 10 seconds"
-                />
-                <dl class="summary" aria-label="{label} levels">
-                  <div>
-                    <dt>Level</dt>
-                    <dd>{formatLevel(live?.level, unit)}</dd>
-                  </div>
-                  <div>
-                    <dt>Noise floor</dt>
-                    <dd>{formatLevel(live?.floor, unit)}</dd>
-                  </div>
-                  <div>
-                    <dt class="enter">Enter</dt>
-                    <dd>{formatLevel(live?.enter, unit)}</dd>
-                  </div>
-                  <div>
-                    <dt class="exit">Exit</dt>
-                    <dd>{formatLevel(live?.exit, unit)}</dd>
-                  </div>
-                </dl>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </Card>
-
-      <!-- ── Timer settings ────────────────────────────────────────────── -->
-      <Card
-        title="Timer settings"
-        subtitle={seatLevels
-          ? "When the timer counts a crossing. These levels are the timer's own. Every seat that has none of its own uses them."
-          : 'When the timer counts a crossing. These settings are for every seat on this timer.'}
-      >
-        <LevelsFields
-          bind:levels={draft.levels}
-          inUse={levelsInUse([...levels.values()], config)}
-          group="threshold-mode"
-          legend="Enter and exit levels"
-        >
-          {#if draft.exitHoldMs !== undefined}
-            <Field
-              label="Exit hold (milliseconds)"
-              hint="The signal must stay below the exit level this long before the crossing ends. A longer hold stops one pass from being split in two."
-            >
-              <Input
-                type="number"
-                inputmode="numeric"
-                min="0"
-                step="1"
-                aria-label="Exit hold, in milliseconds"
-                bind:value={draft.exitHoldMs}
-              />
-            </Field>
-          {/if}
-          {#if draft.lapCooldownS !== undefined}
-            <Field
-              label="Lap cooldown (seconds)"
-              hint="After a crossing, the timer reports no other on that seat for this long. It swallows the bounce of one pass. Keep it shorter than the event's minimum lap time, which is set on the event's Details page."
-            >
-              <Input
-                type="number"
-                inputmode="decimal"
-                min="0"
-                step="0.1"
-                aria-label="Lap cooldown, in seconds"
-                bind:value={draft.lapCooldownS}
-              />
-            </Field>
-          {/if}
-        </LevelsFields>
-      </Card>
-
       <!-- ── Apply ─────────────────────────────────────────────────────── -->
       <div class="apply" data-dirty={dirty}>
         {#if applyError}
@@ -725,6 +763,14 @@
               title="The timer was not changed."
               ondismiss={() => (applyError = undefined)}>{applyError}</Banner
             >
+          </div>
+        {/if}
+        {#if changedElsewhere && dirty}
+          <div data-testid="changed-elsewhere">
+            <Banner tone="warn" title="The timer's settings were changed somewhere else.">
+              Your changes here are not on the timer. “Apply to timer” puts all of these settings on
+              it, over what was changed there. “Discard changes” shows what the timer has now.
+            </Banner>
           </div>
         {/if}
         <div class="apply-row">
@@ -744,7 +790,8 @@
             </Button>
             <Button
               variant="primary"
-              disabled={!dirty || applying || !result?.ok}
+              disabled={!dirty || applying || locked || !result?.ok}
+              title={lockedTitle}
               onclick={() => void apply()}
             >
               {applying ? 'Applying…' : 'Apply to timer'}
@@ -851,8 +898,7 @@
   }
 
   /* Seats */
-  .seats,
-  .traces {
+  .seats {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -973,26 +1019,14 @@
   }
 
   /* Signal */
-  .traces {
-    gap: var(--gf-space-4);
-  }
-  .trace-row {
+  .signal {
+    grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 11rem;
-    grid-template-areas:
-      'head head'
-      'plot numbers';
+    grid-template-columns: minmax(0, 1fr) 9rem;
     gap: var(--gf-space-2) var(--gf-space-4);
     align-items: start;
   }
-  .trace-head {
-    grid-area: head;
-    display: flex;
-    align-items: baseline;
-    gap: var(--gf-space-3);
-  }
   .summary {
-    grid-area: numbers;
     margin: 0;
     display: flex;
     flex-direction: column;
@@ -1066,12 +1100,8 @@
     .frequency {
       flex-wrap: wrap;
     }
-    .trace-row {
+    .signal {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-areas:
-        'head'
-        'plot'
-        'numbers';
     }
   }
 </style>

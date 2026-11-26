@@ -38,6 +38,7 @@ const ORDER = [
   'results',
   'overlays',
   'video',
+  'network',
   'data'
 ];
 

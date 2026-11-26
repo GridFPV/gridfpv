@@ -29,6 +29,7 @@
     PhaseId,
     ProtocolError,
     RaceId,
+    RaceSeatView,
     RaceSignal
   } from '@gridfpv/types';
   import Page from '../Page.svelte';
@@ -36,6 +37,7 @@
   import { toProtocolError, type EventLive } from '../lib/eventLive.svelte.js';
   import {
     canRule,
+    countedLaps,
     defaultRace,
     lockedBy,
     otherRaces,
@@ -132,6 +134,29 @@
   const editable = $derived(!!race && canRule(race));
   const lockPhase = $derived(view && race?.locked ? lockedBy(view.phases, race.heat) : undefined);
   const protests = $derived(view?.protests.filter((p) => p.race === raceId) ?? []);
+
+  // ── One seat at a time ─────────────────────────────────────────────────────
+  // The marshal looks at one pilot's laps at a time. The seat picked stays picked from
+  // race to race, so a marshal watching one seat can step through a heat's races. A race
+  // that does not have that seat shows its first.
+  const seatKey = (seat: { adapter: string; seat: string }) => `${seat.adapter}/${seat.seat}`;
+  /** A seat's line in the picker: where it is and what it has, "Seat 2 · 5 laps". */
+  function seatLine(seat: RaceSeatView, index: number): string {
+    const laps = countedLaps(seat);
+    const parts = [
+      names.seat(seat.adapter, seat.seat, index),
+      `${laps} ${laps === 1 ? 'lap' : 'laps'}`
+    ];
+    if (seat.uncounted.length > 0) parts.push(`${seat.uncounted.length} not counted`);
+    return parts.join(' · ');
+  }
+  let pickedSeat = $state<string | undefined>(undefined);
+  const shownSeat = $derived.by(() => {
+    const seats = race?.seats ?? [];
+    const at = seats.findIndex((seat) => seatKey(seat) === pickedSeat);
+    const index = at < 0 ? 0 : at;
+    return seats.length === 0 ? undefined : { seat: seats[index], index };
+  });
 
   // ── The race's signal: read when the race is opened, never kept in the live store ──
   let signal = $state.raw<RaceSignal | undefined>(undefined);
@@ -307,6 +332,36 @@
               {/each}
             {/if}
           </Card>
+
+          {#if race && race.seats.length > 0}
+            <Card title="Seats" elevation="sm">
+              <ul class="seat-picks" aria-label="Seat to marshal">
+                {#each race.seats as seat, index (seatKey(seat))}
+                  <li>
+                    <button
+                      type="button"
+                      class="race-link seat-pick"
+                      aria-pressed={shownSeat?.index === index}
+                      onclick={() => (pickedSeat = seatKey(seat))}
+                    >
+                      <span class="race-name">
+                        {seat.pilot === undefined
+                          ? names.seatWho('Open', seat.adapter, seat.seat, index)
+                          : names.pilot(seat.pilot)}
+                      </span>
+                      <span class="reason">{seatLine(seat, index)}</span>
+                      {#if seat.false_start || seat.out}
+                        <span class="seat-flags">
+                          {#if seat.false_start}<Badge tone="danger">False start</Badge>{/if}
+                          {#if seat.out}<Badge tone="warn">Out</Badge>{/if}
+                        </span>
+                      {/if}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            </Card>
+          {/if}
         </nav>
 
         <section class="review" aria-label="Race review">
@@ -357,23 +412,22 @@
                 </span>
               </div>
               {#if race.note}<p class="race-note">Note: {race.note}</p>{/if}
-              <p class="muted" data-testid="review-status">
-                {#if race.locked}
-                  {lockPhase === undefined ? 'A phase above this race' : names.phase(lockPhase)} is locked,
-                  so this race is official and cannot be changed. Unlock it on the Phases page to make
-                  a ruling.
-                {:else if race.state === 'Discarded'}
-                  This race was discarded. Its laps do not count, so there is nothing to rule on.
-                {:else if race.state === 'Staging' || race.state === 'Running'}
-                  This race is still going. Rulings can be made once it is stopped.
-                {:else if race.state === 'Stopped'}
-                  This race is stopped and waits to be saved or discarded. Do that on the heat's Run
-                  page.
-                {:else}
-                  Removing a lap joins its time onto the lap after it. Marking a restart gives that
-                  lap no time and leaves the laps either side as they were.
-                {/if}
-              </p>
+              {#if race.locked || race.state !== 'Saved'}
+                <p class="muted" data-testid="review-status">
+                  {#if race.locked}
+                    {lockPhase === undefined ? 'A phase above this race' : names.phase(lockPhase)} is
+                    locked, so this race is official and cannot be changed. Unlock it on the Phases page
+                    to make a ruling.
+                  {:else if race.state === 'Discarded'}
+                    This race was discarded. Its laps do not count, so there is nothing to rule on.
+                  {:else if race.state === 'Staging' || race.state === 'Running'}
+                    This race is still going. Rulings can be made once it is stopped.
+                  {:else if race.state === 'Stopped'}
+                    This race is stopped and waits to be saved or discarded. Do that on the heat's
+                    Run page.
+                  {/if}
+                </p>
+              {/if}
             </Card>
 
             {#if race.video && videoUrl}
@@ -389,12 +443,6 @@
                   >
                     {showVideo ? 'Hide video' : 'Show video'}
                   </Button>
-                  {#if showVideo}
-                    <span class="muted video-hint">
-                      The line on each signal trace is where the video is. Click a trace, or a lap,
-                      to jump there.
-                    </span>
-                  {/if}
                 </div>
                 {#if showVideo}
                   {#key race.race}
@@ -409,8 +457,10 @@
               </Card>
             {/if}
 
+            <!-- One seat at a time: the one picked under "Seats". The race's one recording
+                 shows every pilot, so the video above stays as it is. -->
             <ul class="seats" aria-label="Seats">
-              {#each race.seats as seat, index (`${seat.adapter}/${seat.seat}`)}
+              {#each shownSeat ? [shownSeat] : [] as { seat, index } (`${race.race}/${seatKey(seat)}`)}
                 <MarshalSeat
                   {race}
                   {seat}
@@ -585,6 +635,7 @@
     min-width: 0;
   }
   .todo,
+  .seat-picks,
   .heat-group ul,
   .seats,
   .ranking,
@@ -633,9 +684,15 @@
     outline: 2px solid var(--gf-accent);
     outline-offset: 2px;
   }
-  .race-link[aria-current='true'] {
+  .race-link[aria-current='true'],
+  .race-link[aria-pressed='true'] {
     border-left-color: var(--gf-accent);
     background: var(--gf-surface-sunken);
+  }
+  .seat-flags {
+    display: flex;
+    gap: var(--gf-space-1);
+    flex-wrap: wrap;
   }
   .race-name {
     font-weight: var(--gf-font-weight-semibold);
@@ -744,8 +801,5 @@
   .video-title {
     margin: 0;
     font-size: var(--gf-font-size-md);
-  }
-  .video-hint {
-    margin: 0;
   }
 </style>

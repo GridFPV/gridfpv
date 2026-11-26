@@ -26,6 +26,13 @@ races already flown. Each one saves when you leave its field.
   Leave it empty for no minimum.
 - **Ignore crossings before**: passes in the first seconds after the start are not counted.
   This is for a take-off right under the gate. Passes before the start never count.
+- **Pass window**: for a track that flies close by the gate just before going through it.
+  The timer can see that as two passes. With a pass window, passes this close together
+  are one pass, and the strongest one counts. Try 0.5 seconds. It can be 10 seconds at
+  most. Leave it empty for off.
+
+The timer does the pass window, so the timer needs to have one. Grid sets it on the timer
+for you. If the timer has no pass window, the [Run](#/help/run) page says so.
 
 A good minimum lap time is a little shorter than the fastest lap anyone could fly on the
 track.
@@ -39,9 +46,68 @@ cooldown is longer, the timer hides passes before Grid ever sees them.
 A class is a name plus the pilots racing in it at this event.
 
 - **Add class** picks a class from the class list and its pilots from the pilot list.
-- **Edit roster** changes who is in it.
-- **What counts** picks which phases decide the class's standings, in order. The first
-  phase decides. A later one is only used for pilots the first one did not place.
+- Each class is one line: its name and how many pilots. **Click it to open it.** Inside is
+  its roster. Press a pilot to add them, or the × beside one to take them out, then press
+  **Save roster**. Nothing changes until you save.
+- **Standings come from** lists the phases that decide the class's standings. You do not
+  pick them: every ranked phase made for the class is there by itself, the latest first.
+  - The **first** phase decides. A later one is only used for pilots the first one did
+    not place. So with qualifying and then mains, the mains decide, and qualifying orders
+    the pilots who never made a main.
+  - Press **↑** or **↓** to change the order.
+  - Clear **Counts** on a phase to leave it out: a fun race, a warm-up. Tick it to count
+    it again.
+  - A phase is "for a class" when you picked that class in **Add phase**, or it takes its
+    pilots from a phase of that class. Practice never counts. A phase where you picked no
+    class and named the pilots by hand is for no class.
 
 You do not need a class to race. A heat can name its pilots directly. Add a class when you
 want standings from first to last.
+
+Once a phase counts, the open class also shows its standings under that list.
+
+## Pilot sign-in
+
+A pilot can sign in on their own phone, so Grid knows who they are. Each pilot in the event
+has a short **code** for it.
+
+The codes are on the event's **Pilot codes** page, next to Details in the menu. Press
+**Show codes** there. The codes stay hidden until you do, so a screen left open shows none.
+
+### Printing the codes
+
+Press **Print** on the Pilot codes page to make a sheet to cut up and hand out. Each pilot
+gets a card with their callsign, their QR code, and the code as letters. Pick **4 to a
+page** for big cards or **6 to a page** to save paper.
+
+Your browser's print box opens. Pick a printer, or pick "Save as PDF" to keep a file.
+
+Turn **Public** on, on the Network page, before you print: the QR codes hold Grid's
+address. If you gave Grid a **public address** there, the QR codes use it.
+
+A printed code is like a password on paper. If a pilot loses theirs, give them a **New
+code**. The old card then stops working.
+
+To sign a pilot in:
+
+- Press **QR code** beside their name and let them scan it with the phone's camera. Or
+- Read them their code. On the phone they open Grid's address, press **Pilot** in the top
+  corner, and type it. Capitals and spaces do not matter.
+
+Phones must be able to reach Grid first. Turn that on, on the
+[Network](#/help/network) page.
+
+What to know:
+
+- A code works for **this event only**. The same pilot has another code at another event.
+- **One phone at a time.** If a pilot signs in on a second phone, the first one is signed
+  out.
+- **Signed in** shows beside a pilot whose phone is signed in.
+- **New code** gives a pilot another code. The old one stops working and their phone is
+  signed out. Use it if a code got out.
+- **Sign out** signs a pilot's phone out. Their code still works.
+- A pilot taken out of the event is signed out, and their code stops working.
+- After ten wrong codes in a minute, a phone has to wait a minute.
+
+Signing in does not let a pilot change anything in the race. It only tells Grid who they
+are.

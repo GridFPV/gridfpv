@@ -40,6 +40,7 @@
     isHeat,
     PHASE_STATUS_LABELS,
     phaseStatus,
+    phaseRemovable,
     phaseTree,
     racesOfHeat,
     type PhaseStatus
@@ -50,8 +51,32 @@
     names,
     live,
     onrun,
-    onaddheat
+    onaddheat,
+    onedit = undefined,
+    onsignup = undefined,
+    root = undefined,
+    heatsOf = undefined,
+    emptyNote = true,
+    topHeats = false,
+    subject = undefined
   }: {
+    /**
+     * Show one phase's own heats and nothing deeper. The phase itself is not a row: its
+     * buttons and its ranking sit above the heats, since the page already names it. Phases
+     * inside it are not shown; the phase's page lists those apart.
+     */
+    heatsOf?: PhaseId | undefined;
+    /** With `heatsOf`: say so when the phase has no heats. Off for a phase that never will. */
+    emptyNote?: boolean;
+    /** Show one phase and everything beneath it, in place of the whole event. */
+    root?: PhaseId | undefined;
+    /** Show only the heats that stand alone at the top of the event, under no phase. */
+    topHeats?: boolean;
+    /**
+     * The phase the page is about. Its Edit, Sign-up, Lock, Unlock and Remove are left out
+     * here, because the page shows them at the top.
+     */
+    subject?: PhaseId | undefined;
     view: EventView;
     names: Names;
     /** The live event, to send rulings through. */
@@ -60,17 +85,40 @@
     onrun: (heat: PhaseView['def']['id']) => void;
     /** Add a heat under a phase. Left out, the rows offer no "+ Heat". */
     onaddheat?: (under: PhaseId) => void;
+    /** Edit a phase or a heat: its name, its format, where it sits. Left out, no "Edit". */
+    onedit?: ((phase: PhaseId) => void) | undefined;
+    /** Set up pilot sign-up for a phase that holds heats. */
+    onsignup?: ((phase: PhaseId) => void) | undefined;
   } = $props();
 
-  /** Whether a phase can be removed: nothing beneath it, nothing raced, not locked. */
-  const removable = (phase: PhaseView): boolean =>
-    !phase.locked &&
-    !view.phases.some((other) => other.def.parent === phase.def.id) &&
-    racesOfHeat(view, phase.def.id).length === 0;
+  const removable = (phase: PhaseView): boolean => phaseRemovable(view, phase);
+  /**
+   * Whether this row's own buttons (Edit, Sign-up, Lock, Unlock, Remove) are drawn here.
+   * Not for the page's subject: its page draws them at the top, outside this box.
+   */
+  const ownsButtons = (phase: PhaseView): boolean => phase.def.id !== subject;
 
-  const rows = $derived(phaseTree(view.phases));
+  const rows = $derived(
+    topHeats
+      ? phaseTree(view.phases).filter((row) => row.depth === 0 && isHeat(row.phase.def))
+      : heatsOf !== undefined
+        ? view.phases
+            .filter((phase) => phase.def.parent === heatsOf && isHeat(phase.def))
+            .map((phase) => ({ phase, depth: 0 }))
+        : phaseTree(view.phases, root)
+  );
+  /** The phase whose heats these are, when the list is one phase's. */
+  const own = $derived(
+    heatsOf === undefined ? undefined : view.phases.find((phase) => phase.def.id === heatsOf)
+  );
 
-  const proposals = $derived(openProposals(view));
+  /** The proposals about the phases shown here. Another page shows the rest. */
+  const proposals = $derived(
+    openProposals(view).filter(
+      (proposal) =>
+        proposal.phase === heatsOf || rows.some((row) => row.phase.def.id === proposal.phase)
+    )
+  );
 
   let busy = $state(false);
   let error = $state<ProtocolError | undefined>(undefined);
@@ -135,6 +183,183 @@
   };
 </script>
 
+{#snippet buttons(phase: PhaseView, status: PhaseStatus, heat: boolean)}
+  {#if !heat && onaddheat && !phase.locked}
+    <Button
+      size="sm"
+      variant="secondary"
+      aria-label="Add a heat under {phase.def.label}"
+      onclick={() => onaddheat(phase.def.id)}>+ Heat</Button
+    >
+  {/if}
+  {#if !heat && onsignup && !phase.locked && !phase.signup && ownsButtons(phase)}
+    <Button
+      size="sm"
+      variant="ghost"
+      title="Let pilots put themselves into heats of this phase"
+      aria-label="Set up pilot sign-up for {phase.def.label}"
+      onclick={() => onsignup(phase.def.id)}>Sign-up</Button
+    >
+  {/if}
+  {#if onedit && !phase.locked && ownsButtons(phase)}
+    <Button
+      size="sm"
+      variant="ghost"
+      aria-label="Edit {phase.def.label}"
+      onclick={() => onedit(phase.def.id)}>Edit</Button
+    >
+  {/if}
+  {#if removable(phase) && ownsButtons(phase)}
+    <ConfirmButton
+      size="sm"
+      variant="danger"
+      disabled={busy}
+      title="Remove {phase.def.label}"
+      onconfirm={() => act({ Record: { PhaseRemoved: { phase: phase.def.id } } })}
+      >Remove</ConfirmButton
+    >
+  {/if}
+  {#if !ownsButtons(phase)}
+    {#if heat && !phase.locked && phase.director_done}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        aria-label="Reopen {phase.def.label}"
+        onclick={() => act({ Record: { HeatReopened: { heat: phase.def.id } } })}
+        >Reopen heat</Button
+      >
+    {/if}
+  {:else if phase.locked_here}
+    <Button
+      size="sm"
+      variant="ghost"
+      disabled={busy}
+      aria-label="Unlock {phase.def.label}"
+      onclick={() => act({ Record: { PhaseUnlocked: { phase: phase.def.id } } })}>Unlock</Button
+    >
+  {:else if !phase.locked}
+    {#if heat && phase.director_done}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy}
+        aria-label="Reopen {phase.def.label}"
+        onclick={() => act({ Record: { HeatReopened: { heat: phase.def.id } } })}
+        >Reopen heat</Button
+      >
+    {/if}
+    <Button
+      size="sm"
+      variant="ghost"
+      disabled={busy}
+      title="Make the results official. Rulings are refused until it is unlocked."
+      aria-label="Lock {phase.def.label}"
+      onclick={() => act({ Record: { PhaseLocked: { phase: phase.def.id } } })}>Lock</Button
+    >
+  {/if}
+  {#if heat}
+    {#if status === 'ready' || status === 'racing'}
+      <Button
+        size="sm"
+        variant="primary"
+        aria-label="Run {phase.def.label}"
+        onclick={() => onrun(phase.def.id)}>Run</Button
+      >
+    {:else if racesOfHeat(view, phase.def.id).length > 0 || status === 'complete'}
+      <Button
+        size="sm"
+        variant="ghost"
+        aria-label="View {phase.def.label}"
+        onclick={() => onrun(phase.def.id)}>View</Button
+      >
+    {/if}
+  {/if}
+{/snippet}
+
+{#snippet ranking(phase: PhaseView, heat: boolean)}
+  {#if hasRanking(phase)}
+    <details class="rulings">
+      <summary aria-label="Ranking of {phase.def.label}">Ranking</summary>
+      {#if phase.locked}
+        <p class="locked-note">
+          Locked. The results are official and take no ruling until
+          {phase.locked_here ? 'it is' : 'the phase above is'} unlocked.
+        </p>
+      {/if}
+      <ol class="ranking" aria-label="Ranking of {phase.def.label}">
+        {#each phase.ranking as placed (placed.pilot)}
+          {@const callsign = names.pilot(placed.pilot)}
+          <li>
+            <span class="place">{placed.position}</span>
+            <span class="who">{callsign}</span>
+            {#if placed.position_set}
+              <span title="The director set this position by hand.">
+                <Badge tone="violet">Set by hand</Badge>
+              </span>
+            {/if}
+            {#if placed.disqualified}<Badge tone="danger">Disqualified</Badge>{/if}
+            {#if !placed.flew}<Badge tone="neutral">Did not fly</Badge>{/if}
+            {#if !phase.locked}
+              <span class="rank-actions">
+                {#if heat}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label="Set the position of {callsign} in {phase.def.label}"
+                    onclick={() =>
+                      (positioning = {
+                        heat: phase,
+                        pilot: placed.pilot,
+                        current: placed.position
+                      })}>Set position</Button
+                  >
+                  {#if placed.position_set}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      aria-label="Clear the position of {callsign} in {phase.def.label}"
+                      onclick={() =>
+                        act({
+                          Record: {
+                            PositionCleared: { heat: phase.def.id, pilot: placed.pilot }
+                          }
+                        })}>Clear position</Button
+                    >
+                  {/if}
+                {/if}
+                {#if placed.disqualified}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label="Reinstate {callsign} in {phase.def.label}"
+                    onclick={() =>
+                      act({
+                        Record: { Reinstated: { phase: phase.def.id, pilot: placed.pilot } }
+                      })}>Reinstate</Button
+                  >
+                {:else}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label="Disqualify {callsign} from {phase.def.label}"
+                    onclick={() => (disqualifying = { phase: phase.def.id, pilot: placed.pilot })}
+                    >Disqualify</Button
+                  >
+                {/if}
+              </span>
+            {/if}
+          </li>
+        {/each}
+      </ol>
+    </details>
+  {/if}
+{/snippet}
+
 <ErrorBanner {error} ondismiss={() => (error = undefined)} />
 
 {#each proposals as proposal (`${proposal.phase}/${proposal.pilot}`)}
@@ -152,7 +377,21 @@
   </Banner>
 {/each}
 
-<ul class="phases" aria-label="Phases">
+{#if own}
+  <div class="own">
+    {#if ownsButtons(own) || (onaddheat && !own.locked)}
+      <span class="action own-actions" role="group" aria-label="{own.def.label}: heats">
+        {@render buttons(own, phaseStatus(own, view), false)}
+      </span>
+    {/if}
+    {@render ranking(own, false)}
+  </div>
+  {#if rows.length === 0 && emptyNote}
+    <p class="none" data-testid="no-heats">No heats in this phase yet.</p>
+  {/if}
+{/if}
+
+<ul class="phases" aria-label={own ? `Heats of ${own.def.label}` : 'Phases'}>
   {#each rows as { phase, depth } (phase.def.id)}
     {@const status = phaseStatus(phase, view)}
     {@const heat = isHeat(phase.def)}
@@ -166,70 +405,7 @@
           </span>
         {/if}
         <span class="action">
-          {#if !heat && onaddheat && !phase.locked}
-            <Button
-              size="sm"
-              variant="secondary"
-              aria-label="Add a heat under {phase.def.label}"
-              onclick={() => onaddheat(phase.def.id)}>+ Heat</Button
-            >
-          {/if}
-          {#if removable(phase)}
-            <ConfirmButton
-              size="sm"
-              variant="danger"
-              disabled={busy}
-              title="Remove {phase.def.label}"
-              onconfirm={() => act({ Record: { PhaseRemoved: { phase: phase.def.id } } })}
-              >Remove</ConfirmButton
-            >
-          {/if}
-          {#if phase.locked_here}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              aria-label="Unlock {phase.def.label}"
-              onclick={() => act({ Record: { PhaseUnlocked: { phase: phase.def.id } } })}
-              >Unlock</Button
-            >
-          {:else if !phase.locked}
-            {#if heat && phase.director_done}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                aria-label="Reopen {phase.def.label}"
-                onclick={() => act({ Record: { HeatReopened: { heat: phase.def.id } } })}
-                >Reopen heat</Button
-              >
-            {/if}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              title="Make the results official. Rulings are refused until it is unlocked."
-              aria-label="Lock {phase.def.label}"
-              onclick={() => act({ Record: { PhaseLocked: { phase: phase.def.id } } })}>Lock</Button
-            >
-          {/if}
-          {#if heat}
-            {#if status === 'ready' || status === 'racing'}
-              <Button
-                size="sm"
-                variant="primary"
-                aria-label="Run {phase.def.label}"
-                onclick={() => onrun(phase.def.id)}>Run</Button
-              >
-            {:else if racesOfHeat(view, phase.def.id).length > 0 || status === 'complete'}
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label="View {phase.def.label}"
-                onclick={() => onrun(phase.def.id)}>View</Button
-              >
-            {/if}
-          {/if}
+          {@render buttons(phase, status, heat)}
         </span>
       </div>
       {#if heat && phase.lineup.length > 0}
@@ -237,92 +413,12 @@
           {#each phase.lineup as seat, index (index)}
             <li class:pending={typeof seat.who === 'string' || 'Waiting' in seat.who}>
               <span class="seat">{names.seat(seat.adapter, seat.seat, index)}</span>
-              <span class="who">{names.who(seat.who)}</span>
+              <span class="who">{names.seatWho(seat.who, seat.adapter, seat.seat, index)}</span>
             </li>
           {/each}
         </ol>
       {/if}
-      {#if hasRanking(phase)}
-        <details class="rulings">
-          <summary aria-label="Ranking of {phase.def.label}">Ranking</summary>
-          {#if phase.locked}
-            <p class="locked-note">
-              Locked. The results are official and take no ruling until
-              {phase.locked_here ? 'it is' : 'the phase above is'} unlocked.
-            </p>
-          {/if}
-          <ol class="ranking" aria-label="Ranking of {phase.def.label}">
-            {#each phase.ranking as placed (placed.pilot)}
-              {@const callsign = names.pilot(placed.pilot)}
-              <li>
-                <span class="place">{placed.position}</span>
-                <span class="who">{callsign}</span>
-                {#if placed.position_set}
-                  <span title="The director set this position by hand.">
-                    <Badge tone="violet">Set by hand</Badge>
-                  </span>
-                {/if}
-                {#if placed.disqualified}<Badge tone="danger">Disqualified</Badge>{/if}
-                {#if !placed.flew}<Badge tone="neutral">Did not fly</Badge>{/if}
-                {#if !phase.locked}
-                  <span class="rank-actions">
-                    {#if heat}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        aria-label="Set the position of {callsign} in {phase.def.label}"
-                        onclick={() =>
-                          (positioning = {
-                            heat: phase,
-                            pilot: placed.pilot,
-                            current: placed.position
-                          })}>Set position</Button
-                      >
-                      {#if placed.position_set}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={busy}
-                          aria-label="Clear the position of {callsign} in {phase.def.label}"
-                          onclick={() =>
-                            act({
-                              Record: {
-                                PositionCleared: { heat: phase.def.id, pilot: placed.pilot }
-                              }
-                            })}>Clear position</Button
-                        >
-                      {/if}
-                    {/if}
-                    {#if placed.disqualified}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        aria-label="Reinstate {callsign} in {phase.def.label}"
-                        onclick={() =>
-                          act({
-                            Record: { Reinstated: { phase: phase.def.id, pilot: placed.pilot } }
-                          })}>Reinstate</Button
-                      >
-                    {:else}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        aria-label="Disqualify {callsign} from {phase.def.label}"
-                        onclick={() =>
-                          (disqualifying = { phase: phase.def.id, pilot: placed.pilot })}
-                        >Disqualify</Button
-                      >
-                    {/if}
-                  </span>
-                {/if}
-              </li>
-            {/each}
-          </ol>
-        </details>
-      {/if}
+      {@render ranking(phase, heat)}
     </li>
   {/each}
 </ul>
@@ -350,6 +446,21 @@
   .format {
     font-size: var(--gf-font-size-sm);
     color: var(--gf-text-muted);
+  }
+  .own {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gf-space-2);
+    margin-bottom: var(--gf-space-3);
+  }
+  .own-actions {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .none {
+    margin: 0;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
   }
   .phases {
     list-style: none;

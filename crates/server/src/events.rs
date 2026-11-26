@@ -295,6 +295,14 @@ struct Registry {
     video: crate::video::VideoDesk,
     /// How the race overlay looks, held here for the same reason.
     overlay: crate::overlay::OverlayDesk,
+    /// Whether other devices can reach the Director, held here for the same reason.
+    network: crate::network::NetworkDesk,
+    /// Wrong access tokens tried from other devices, counted by address.
+    guesses: crate::access::Guesses,
+    /// The pilots' sign-in codes and sign-ins, by event.
+    pilot_access: crate::pilot_access::PilotAccess,
+    /// Wrong pilot codes tried, counted by address.
+    pilot_guesses: crate::access::Guesses,
     /// Directory persistent event SQLite files are created under; `None` ⇒ created events
     /// fall back to an in-memory log (no data dir configured — non-durable).
     data_dir: Option<PathBuf>,
@@ -369,6 +377,10 @@ impl EventRegistry {
                 library: crate::library::Library::new(data_dir.clone()),
                 video: crate::video::VideoDesk::new(data_dir.clone()),
                 overlay: crate::overlay::OverlayDesk::new(data_dir.clone()),
+                network: crate::network::NetworkDesk::new(data_dir.clone()),
+                guesses: crate::access::Guesses::default(),
+                pilot_access: crate::pilot_access::PilotAccess::new(data_dir.clone()),
+                pilot_guesses: crate::access::Guesses::default(),
                 data_dir,
                 active_event,
             })),
@@ -459,6 +471,26 @@ impl EventRegistry {
         let reg = self.read();
         let live = &reg.events.get(reg.active_event.as_ref()?)?.live;
         live.race_now.lock().ok()?.clone()
+    }
+
+    /// Whether other devices can reach the Director.
+    pub fn network(&self) -> crate::network::NetworkDesk {
+        self.read().network.clone()
+    }
+
+    /// The pilots' sign-in codes and sign-ins.
+    pub fn pilot_access(&self) -> crate::pilot_access::PilotAccess {
+        self.read().pilot_access.clone()
+    }
+
+    /// Wrong pilot codes tried, counted by address.
+    pub fn pilot_guesses(&self) -> crate::access::Guesses {
+        self.read().pilot_guesses.clone()
+    }
+
+    /// Wrong access tokens tried from other devices.
+    pub fn guesses(&self) -> crate::access::Guesses {
+        self.read().guesses.clone()
     }
 
     /// How the race overlay looks.
@@ -621,6 +653,8 @@ impl EventRegistry {
             )));
         }
         drop(removed);
+        // Its pilots' sign-in codes go with it.
+        reg.pilot_access.forget(id);
 
         // If it was the active event, clear the pointer (and persist the cleared state) so a
         // reload/restart lands on the picker rather than dangling at a now-gone event.

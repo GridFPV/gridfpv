@@ -24,11 +24,12 @@
    * `@gridfpv/components`; this shell only routes between them and owns the session.
    */
   import '@gridfpv/components/tokens.css';
-  import { ToastHost } from '@gridfpv/components';
+  import { ToastHost, toast } from '@gridfpv/components';
   import AppNav from './AppNav.svelte';
   import { Session } from './lib/session.svelte.js';
   import { EventLive } from './lib/eventLive.svelte.js';
   import { marshalCount } from './lib/marshal.js';
+  import { publicSource } from './lib/spectator.js';
   import CapturePage from './screens/CapturePage.svelte';
   import ClassesPage from './screens/ClassesPage.svelte';
   import EventPage from './screens/EventPage.svelte';
@@ -37,6 +38,7 @@
   import HelpPage from './screens/HelpPage.svelte';
   import MarshalPage from './screens/MarshalPage.svelte';
   import OverlaysPage from './screens/OverlaysPage.svelte';
+  import PhasePage from './screens/PhasePage.svelte';
   import PhasesPage from './screens/PhasesPage.svelte';
   import PilotsPage from './screens/PilotsPage.svelte';
   import RaceOverlay from './screens/RaceOverlay.svelte';
@@ -47,8 +49,13 @@
   import SeatsPage from './screens/SeatsPage.svelte';
   import TimersPage from './screens/TimersPage.svelte';
   import TokenDialog from './screens/TokenDialog.svelte';
+  import type { PhaseId, PublicHello } from '@gridfpv/types';
   import DataPage from './screens/DataPage.svelte';
+  import NetworkPage from './screens/NetworkPage.svelte';
+  import VisitorPage from './screens/VisitorPage.svelte';
   import VideoPage from './screens/VideoPage.svelte';
+  import RecordingsPage from './screens/RecordingsPage.svelte';
+  import PilotCodesPage from './screens/PilotCodesPage.svelte';
   import {
     parseHash,
     formatHash,
@@ -99,12 +106,43 @@
   // state; after this the hash is the source of truth.
   // An overlay skips this: it follows the active event by itself and needs no route resolved.
   // (It runs on the first route that is not an overlay, should the hash ever be edited to one.)
+  //
+  // Before any of that, ask the Director who it takes this browser for. On the Grid computer
+  // that is the director, and so is another device that has signed in with the access token.
+  // Any other device is a visitor: the console is not for them, and the Director would
+  // refuse everything it asks, so they get the visitor's page and nothing else is read.
+  // A Director too old to answer, or one that cannot be reached, is treated as before.
   let resumed = false;
+  let hello = $state.raw<PublicHello | undefined>(undefined);
+  let greeted = $state(false);
+  const visitor = $derived(hello?.caller === 'Visitor');
+
+  /**
+   * Put a heat on the timer and open the Run page on it. The Director keeps which heat is
+   * on the timer, so every console, the spectators' page and sign-up all agree. If it
+   * refuses (a race of another heat is still to be decided), the Run page shows the heat
+   * that is on the timer and the reason is said.
+   */
+  async function putOnTimer(heat: PhaseId) {
+    try {
+      await live?.send({ PutOnTimer: { heat } });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+    navigate({ kind: 'run' });
+  }
   const bare = $derived(isOverlay(route));
   $effect(() => {
     if (resumed || bare) return;
     resumed = true;
     void (async () => {
+      try {
+        hello = await session.hello();
+      } catch {
+        hello = undefined;
+      }
+      greeted = true;
+      if (hello?.caller === 'Visitor') return;
       await session.resolveActiveEvent();
       navigate(resolveInitialRoute(location.hash, !!session.currentEvent));
     })();
@@ -114,7 +152,7 @@
   // between them does not read everything again. It lives for as long as an event is open,
   // on whatever page: the nav shows how many races need a marshal from anywhere.
   let live = $state.raw<EventLive | undefined>(undefined);
-  const liveEventId = $derived(bare ? undefined : session.currentEvent?.id);
+  const liveEventId = $derived(bare || visitor ? undefined : session.currentEvent?.id);
   const toMarshal = $derived(live?.view ? marshalCount(live.view) : 0);
   $effect(() => {
     const id = liveEventId;
@@ -164,6 +202,19 @@
       />
     {/key}
   </div>
+{:else if !greeted}
+  <!-- Until the Director has said who this browser is, show neither the console nor the
+       visitor's page: a visitor must never see the console flash by. -->
+  <div class="gridfpv-root">
+    <div class="resume-loading" role="status">
+      <span class="resume-spinner" aria-hidden="true"></span>
+      <span>Connecting…</span>
+    </div>
+  </div>
+{:else if visitor && hello}
+  <div class="gridfpv-root">
+    <VisitorPage {session} {hello} source={publicSource(session.baseUrl)} />
+  </div>
 {:else}
   <div class="gridfpv-root gridfpv-dense">
     {@render shell()}
@@ -196,7 +247,11 @@
     {:else if route.page === 'formats'}
       <FormatsPage {session} />
     {:else if route.page === 'video'}
-      <VideoPage {session} {live} />
+      <VideoPage {session} />
+    {:else if route.page === 'network'}
+      <NetworkPage {session} />
+    {:else if route.page === 'overlays'}
+      <OverlaysPage {session} />
     {:else if route.page === 'data'}
       <DataPage {session} />
     {:else if route.page === 'timers'}
@@ -219,8 +274,7 @@
     {#if route.kind === 'run'}
       <RunPage
         {live}
-        heat={route.heat}
-        onrun={(heat) => navigate({ kind: 'run', heat })}
+        onrun={putOnTimer}
         ontune={(timer, seat) => navigate({ kind: 'capture', timer, seat })}
       />
     {:else if route.kind === 'marshal'}
@@ -228,15 +282,22 @@
         {live}
         race={route.race}
         onopen={(race) => navigate({ kind: 'marshal', race })}
-        onrun={(heat) => navigate({ kind: 'run', heat })}
+        onrun={putOnTimer}
         videoUrl={(event, race, which) => session.raceVideoUrl(event, race, which)}
       />
+    {:else if route.kind === 'event' && route.section === 'phases' && route.phase !== undefined}
+      <!-- Keyed on the phase, so another phase starts with its own dialogs shut. -->
+      {#key route.phase}
+        <PhasePage {live} phase={route.phase} onrun={putOnTimer} />
+      {/key}
     {:else if route.kind === 'event' && route.section === 'phases'}
-      <PhasesPage {live} onrun={(heat) => navigate({ kind: 'run', heat })} />
+      <PhasesPage {live} onrun={putOnTimer} />
     {:else if route.kind === 'event' && route.section === 'results'}
       <ResultsPage {live} />
-    {:else if route.kind === 'event' && route.section === 'overlays'}
-      <OverlaysPage {session} />
+    {:else if route.kind === 'event' && route.section === 'codes'}
+      <PilotCodesPage {session} event={session.currentEvent} {live} />
+    {:else if route.kind === 'event' && route.section === 'recordings'}
+      <RecordingsPage {session} {live} />
     {:else}
       <EventPage {session} event={session.currentEvent} {live} />
     {/if}

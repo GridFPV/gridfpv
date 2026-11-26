@@ -28,11 +28,12 @@ const currentSide = () =>
 
 const EVENT_ROW = [
   ['Details', '#/event'],
+  ['Pilot codes', '#/event/codes'],
   ['Phases', '#/event/phases'],
   ['Run', '#/event/run'],
   ['Marshal', '#/event/marshal'],
   ['Results', '#/event/results'],
-  ['Overlays', '#/event/overlays'],
+  ['Recordings', '#/event/recordings'],
   ['Help', '#/help']
 ];
 const SETUP_ROW = [
@@ -43,7 +44,8 @@ const SETUP_ROW = [
   ['Classes', '#/classes'],
   ['Formats', '#/formats'],
   ['Video', '#/video'],
-  ['Data', '#/data'],
+  ['Overlays', '#/overlays'],
+  ['Network', '#/network'],
   ['Help', '#/help']
 ];
 
@@ -64,7 +66,8 @@ describe('AppNav: the two sides', () => {
     ['the event page', { kind: 'event', section: 'event' }, 'Event', 'Details'],
     ['the Phases page', { kind: 'event', section: 'phases' }, 'Event', 'Phases'],
     ['the Results page', { kind: 'event', section: 'results' }, 'Event', 'Results'],
-    ['the Overlays page', { kind: 'event', section: 'overlays' }, 'Event', 'Overlays'],
+    ['the Recordings page', { kind: 'event', section: 'recordings' }, 'Event', 'Recordings'],
+    ['the Pilot codes page', { kind: 'event', section: 'codes' }, 'Event', 'Pilot codes'],
     ['the Run page', { kind: 'run' }, 'Event', 'Run'],
     ['the Run page of one heat', { kind: 'run', heat: 'q-1' }, 'Event', 'Run'],
     ['the Marshal page', { kind: 'marshal' }, 'Event', 'Marshal'],
@@ -78,7 +81,8 @@ describe('AppNav: the two sides', () => {
     ['the Classes page', { kind: 'page', page: 'classes' }, 'Setup', 'Classes'],
     ['the Formats page', { kind: 'page', page: 'formats' }, 'Setup', 'Formats'],
     ['the Video page', { kind: 'page', page: 'video' }, 'Setup', 'Video'],
-    ['the Data page', { kind: 'page', page: 'data' }, 'Setup', 'Data']
+    ['the Overlays page', { kind: 'page', page: 'overlays' }, 'Setup', 'Overlays'],
+    ['the Network page', { kind: 'page', page: 'network' }, 'Setup', 'Network']
   ])('%s is on the %s side, under %s', (_where, route, sideName, label) => {
     render(AppNav, { route, eventName: 'Club Night' });
     expect(currentSide()).toEqual([sideName]);
@@ -86,6 +90,14 @@ describe('AppNav: the two sides', () => {
     for (const link of within(pages()).getAllByRole('link')) {
       expect(link.classList.contains('active')).toBe(link.textContent?.trim() === label);
     }
+  });
+
+  it('the Data page is not in the row, and opened by its address it is still on the Setup side', () => {
+    render(AppNav, { route: { kind: 'page', page: 'data' }, eventName: 'Club Night' });
+    expect(rowOf()).toEqual(SETUP_ROW);
+    expect(rowOf().map(([label]) => label)).not.toContain('Data');
+    expect(currentSide()).toEqual(['Setup']);
+    expect(currentEntries()).toEqual([]);
   });
 
   it('help is on both rows and leaves the side as it was', async () => {

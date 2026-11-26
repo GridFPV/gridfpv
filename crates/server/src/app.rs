@@ -13,11 +13,11 @@
 //! | `POST /events/{id}/auth/join-token` | mint a read-only join token |
 //! | `GET /events/{id}/state` | the event's competition snapshot |
 //! | `POST /events/{id}/commands` | one console command: checked, then logged as facts |
-//! | `POST /events/{id}/presets/bracket`, `…/presets/mains` | generate phases from a preset |
+//! | `POST /events/{id}/presets/bracket`, `…/presets/mains`, `…/presets/round-robin` | generate phases from a preset |
 //! | `POST /events/{id}/passes` | a gate crossing from outside (tools and tests) |
 //! | `GET /events/{id}/changes` | server-sent events: the log cursor, each time it moves |
 //! | `GET /pilots`, `POST /pilots`, `PUT /pilots/{id}`, `DELETE /pilots/{id}` | the pilot directory |
-//! | `GET /timers`, `POST /timers`, `DELETE /timers/{id}` | the timer directory, with live status |
+//! | `GET /timers`, `POST /timers`, `PUT /timers/{id}`, `DELETE /timers/{id}` | the timer directory, with live status; `PUT` renames |
 //! | `GET /classes`, `POST /classes`, `PUT /classes/{id}`, `DELETE /classes/{id}`, `PUT /classes/{id}/hidden` | the class directory |
 //!
 //! Reads are open; every write demands [`ControlAuth`] first (open until an RD token is
@@ -32,7 +32,7 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use gridfpv_events::{ClassId, PilotId};
 
 use crate::auth::{ControlAuth, JoinTokenResponse};
@@ -99,6 +99,10 @@ pub fn router(registry: EventRegistry) -> Router {
             "/events/{event_id}/presets/mains",
             post(crate::control::post_mains),
         )
+        .route(
+            "/events/{event_id}/presets/round-robin",
+            post(crate::control::post_round_robin),
+        )
         .route("/events/{event_id}/passes", post(crate::control::post_pass))
         .route(
             "/events/{event_id}/changes",
@@ -109,8 +113,13 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/pilots", get(list_pilots).post(create_pilot))
         .route("/pilots/{pilot_id}", put(update_pilot).delete(delete_pilot))
         // The app-level class directory: an open list; create/edit/delete are RD-gated. The
-        // built-in classes are read-only, but any class can be hidden.
+        // classes that come with Grid are like any other: edited, hidden or removed. The ones
+        // that were removed can be put back.
         .route("/classes", get(list_classes).post(create_class))
+        .route(
+            "/classes/builtins",
+            get(removed_builtins).post(restore_builtins),
+        )
         .route(
             "/classes/{class_id}",
             put(update_class).delete(delete_class),
@@ -123,7 +132,7 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/timers/discovered", get(crate::timers::list_discovered))
         .route(
             "/timers/{timer_id}",
-            axum::routing::delete(crate::timers::delete_timer),
+            put(crate::timers::rename_timer).delete(crate::timers::delete_timer),
         )
         .route(
             "/timers/{timer_id}/config",
@@ -150,6 +159,84 @@ pub fn router(registry: EventRegistry) -> Router {
             get(crate::video::get_settings).put(crate::video::put_settings),
         )
         // A copy of everything, to carry to another computer, and bringing one back in.
+        // How other devices reach the Director (docs/primitives.md §11.10): the two doors
+        // and the access token. The token route is listed first so it is not read as a door.
+        .route("/network", get(crate::network::get_network))
+        .route("/network/token", put(crate::network::put_token))
+        .route("/network/address", put(crate::network::put_address))
+        .route("/network/{door}", put(crate::network::put_door))
+        // What a visitor on the network may ask for.
+        .route("/public/hello", get(crate::public::get_hello))
+        // A QR code that opens the public pages, for a kiosk to show.
+        .route("/public/qr", get(crate::pilot_access::get_public_qr))
+        // A pilot's sign-in (docs/primitives.md §11.3): the director's side, and the pilot's.
+        .route(
+            "/events/{event_id}/access",
+            get(crate::pilot_access::get_access),
+        )
+        .route(
+            "/events/{event_id}/access/{pilot_id}/reset",
+            post(crate::pilot_access::post_reset),
+        )
+        .route(
+            "/events/{event_id}/access/{pilot_id}/session",
+            delete(crate::pilot_access::delete_pilot_session),
+        )
+        .route(
+            "/events/{event_id}/access/{pilot_id}/qr",
+            get(crate::pilot_access::get_qr),
+        )
+        .route(
+            "/public/pilot/session",
+            post(crate::pilot_access::post_session).delete(crate::pilot_access::delete_session),
+        )
+        // A pilot signing themselves up for a heat (docs/primitives.md §11.5).
+        .route("/kiosk", get(crate::pilot_access::get_kiosks))
+        .route("/kiosk/codes", post(crate::pilot_access::post_kiosk_code))
+        .route(
+            "/kiosk/codes/{code}",
+            delete(crate::pilot_access::delete_kiosk_code),
+        )
+        .route(
+            "/kiosk/devices/{number}",
+            put(crate::pilot_access::put_kiosk_name)
+                .delete(crate::pilot_access::delete_kiosk_number),
+        )
+        .route(
+            "/public/pilot/kiosk/device",
+            post(crate::pilot_access::post_kiosk_device)
+                .delete(crate::pilot_access::delete_kiosk_device),
+        )
+        .route(
+            "/public/pilot/kiosk",
+            post(crate::pilot_access::post_kiosk).delete(crate::pilot_access::delete_kiosk),
+        )
+        .route(
+            "/public/pilot/checkin/take",
+            post(crate::checkin::post_take),
+        )
+        .route(
+            "/public/pilot/checkin/drop",
+            post(crate::checkin::post_drop),
+        )
+        .route("/public/pilot/signup/take", post(crate::signup::post_take))
+        .route("/public/pilot/signup/next", post(crate::signup::post_next))
+        .route(
+            "/public/pilot/signup/leave",
+            post(crate::signup::post_leave),
+        )
+        // The open event, as a visitor may see it.
+        .route("/public/event", get(crate::spectate::get_event))
+        .route("/public/event/state", get(crate::spectate::get_state))
+        .route("/public/event/changes", get(crate::spectate::get_changes))
+        .route("/public/event/pilots", get(crate::spectate::get_pilots))
+        .route("/public/event/classes", get(crate::spectate::get_classes))
+        .route("/public/event/timers", get(crate::spectate::get_timers))
+        .route("/public/event/channels", get(crate::spectate::get_channels))
+        .route(
+            "/public/session",
+            post(crate::public::post_session).delete(crate::public::delete_session),
+        )
         .route("/data", get(crate::backup::get_data))
         .route("/data/export", post(crate::backup::post_export))
         .route("/data/export/{name}", get(crate::backup::get_export))
@@ -284,6 +371,8 @@ async fn set_active_event(
     let meta = registry
         .set_active(&body.id)
         .map_err(registry_error_to_protocol)?;
+    // The pass window is the event's: another event may set another one.
+    crate::timers::spawn_pass_window_sync(&registry);
     Ok(Json(meta))
 }
 
@@ -416,6 +505,34 @@ async fn delete_class(
     Ok(StatusCode::OK)
 }
 
+/// `GET /classes/builtins`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct BuiltinClasses {
+    /// How many built-in classes the director has removed, and could put back.
+    pub removed: usize,
+}
+
+/// `GET /classes/builtins` — how many built-in classes have been removed. An **open read**.
+async fn removed_builtins(State(registry): State<EventRegistry>) -> Json<BuiltinClasses> {
+    Json(BuiltinClasses {
+        removed: registry.classes().removed_builtins(),
+    })
+}
+
+/// `POST /classes/builtins` — put back every built-in class that was removed, RD-gated.
+/// Answers the whole list of classes.
+async fn restore_builtins(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+) -> Result<Json<Vec<Class>>, ProtocolError> {
+    registry
+        .classes()
+        .restore_builtins()
+        .map(Json)
+        .map_err(class_error_to_protocol)
+}
+
 /// `PUT /classes/{class_id}/hidden` — hide or un-hide a class, RD-gated.
 ///
 /// The body is `{ hidden: bool }`. Hiding is a **visibility preference**, not an edit, so it is
@@ -464,8 +581,6 @@ fn pilot_error_to_protocol(error: PilotError) -> ProtocolError {
 fn class_error_to_protocol(error: ClassError) -> ProtocolError {
     let code = match error.kind {
         ClassErrorKind::Invalid => ErrorCode::BadRequest,
-        // A read-only built-in edit/delete is a rejected bad request (the built-in is canonical).
-        ClassErrorKind::ReadOnly => ErrorCode::BadRequest,
         ClassErrorKind::NotFound => ErrorCode::UnknownScope,
         ClassErrorKind::Internal => ErrorCode::Internal,
     };
@@ -483,7 +598,7 @@ fn class_error_to_protocol(error: ClassError) -> ProtocolError {
 /// A path matches when it equals a prefix exactly or continues with `/` (so `/eventsxyz` is
 /// *not* an API path, but `/events`, `/events/`, and `/events/zzz` all are).
 pub fn is_api_path(path: &str) -> bool {
-    const API_PREFIXES: [&str; 9] = [
+    const API_PREFIXES: [&str; 15] = [
         "/health",
         "/about",
         "/time",
@@ -492,6 +607,12 @@ pub fn is_api_path(path: &str) -> bool {
         "/pilots",
         "/classes",
         "/timers",
+        "/formats",
+        "/data",
+        "/video",
+        "/overlay",
+        "/network",
+        "/public",
         "/diagnostics",
     ];
     API_PREFIXES.iter().any(|prefix| {
@@ -587,6 +708,8 @@ impl IntoResponse for ProtocolError {
             ErrorCode::UnknownScope => StatusCode::NOT_FOUND,
             ErrorCode::StaleCursor => StatusCode::GONE,
             ErrorCode::VersionMismatch => StatusCode::UPGRADE_REQUIRED,
+            ErrorCode::Forbidden => StatusCode::FORBIDDEN,
+            ErrorCode::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
             ErrorCode::Refused => StatusCode::CONFLICT,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1201,8 +1324,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_built_in_class_cannot_be_deleted_but_can_be_hidden() {
+    async fn a_built_in_class_can_be_hidden_removed_and_put_back() {
         let registry = EventRegistry::new(None).unwrap();
+        let all = registry.classes().list().len();
         let built_in = registry
             .classes()
             .list()
@@ -1210,12 +1334,6 @@ mod tests {
             .next()
             .expect("the directory seeds built-in classes");
         let uri = format!("/classes/{}", built_in.id.0);
-
-        // Read-only: a delete is a 400, and the class is still there.
-        let (status, raw) = send(registry.clone(), "DELETE", &uri, None, None).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(error_of(&raw).code, ErrorCode::BadRequest);
-        assert!(registry.classes().exists(&built_in.id));
 
         // Hiding is a preference, not an edit, so it works on a built-in.
         let (status, raw) = send(
@@ -1229,6 +1347,50 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let hidden: Class = serde_json::from_slice(&raw).unwrap();
         assert!(hidden.hidden);
+
+        // Removing it takes it out of the list, and the count of removed built-ins says so.
+        let (status, raw) = send(registry.clone(), "GET", "/classes/builtins", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<BuiltinClasses>(&raw)
+                .unwrap()
+                .removed,
+            0
+        );
+        let (status, _) = send(registry.clone(), "DELETE", &uri, None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!registry.classes().exists(&built_in.id));
+        let (_, raw) = send(registry.clone(), "GET", "/classes/builtins", None, None).await;
+        assert_eq!(
+            serde_json::from_slice::<BuiltinClasses>(&raw)
+                .unwrap()
+                .removed,
+            1
+        );
+        // Removed twice is an unknown class.
+        let (status, _) = send(registry.clone(), "DELETE", &uri, None, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Putting the built-ins back answers the whole list, with it in it and not hidden.
+        let (status, raw) = send(registry.clone(), "POST", "/classes/builtins", None, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let back: Vec<Class> = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(back.len(), all);
+        let again = back.iter().find(|class| class.id == built_in.id).unwrap();
+        assert!(again.builtin && !again.hidden);
+        // It is edited like any other class.
+        let (status, raw) = send(
+            registry.clone(),
+            "PUT",
+            &uri,
+            Some(json!({ "name": "Renamed" })),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let renamed: Class = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(renamed.name, "Renamed");
+        assert_eq!(renamed.id, built_in.id);
 
         // An unknown class is a 404.
         let (status, raw) = send(

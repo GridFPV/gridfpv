@@ -62,6 +62,8 @@
           pilot: 'sample',
           start_at: startedAt,
           false_start: false,
+          out: false,
+          stints: [],
           finish: 1,
           hole_shot: { crossing: 1, at: startedAt + HOLE_SHOT * S },
           laps,
@@ -76,10 +78,14 @@
   /** The made-up race has one pilot and no event, so every name is said here. */
   const names: Names = {
     phase: () => 'Track 2',
+    within: () => undefined,
     pilot: () => 'Your pilot',
     klass: () => 'Class',
     who: () => 'Your pilot',
+    seatWho: () => 'Your pilot',
     seat: () => 'Seat 1',
+    seatPlain: () => 'Seat 1',
+    channel: () => undefined,
     timer: () => 'Timer',
     pilotColor: () => undefined
   };

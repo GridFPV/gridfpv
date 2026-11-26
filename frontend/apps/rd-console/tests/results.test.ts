@@ -323,7 +323,12 @@ describe('where a best came from, and one race in full', () => {
             best_lap_micros: 8 * S,
             total_micros: 26 * S
           }),
-          raceSeat(1, 'p-2b', { finish: 1, laps: [lapOf(11, 11)], false_start: true })
+          raceSeat(1, 'p-2b', {
+            finish: 1,
+            laps: [lapOf(11, 11)],
+            false_start: true,
+            out: true
+          })
         ]
       })
     ]
@@ -386,6 +391,8 @@ describe('where a best came from, and one race in full', () => {
       [2, 'Ace', 3]
     ]);
     expect(rows[0].falseStart).toBe(true);
+    // A pilot marked out keeps their laps and their place; the mark rides along.
+    expect(rows.map((row) => row.out)).toEqual([true, false]);
     expect(rows[1]).toMatchObject({
       bestLapMicros: 8 * S,
       totalMicros: 26 * S,

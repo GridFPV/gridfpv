@@ -146,6 +146,20 @@
           />
         </Field>
       {/if}
+      <Field
+        label="Drop an idle seat after (seconds)"
+        hint="For practice with open seats that pilots check in to. A pilot is dropped from their seat when it has had no pass for this long. Leave empty to drop nobody."
+      >
+        <Input
+          type="number"
+          inputmode="numeric"
+          min="1"
+          step="1"
+          aria-label="Drop an idle seat after, in seconds"
+          bind:value={draft.idleSeatSeconds}
+          disabled={busy}
+        />
+      </Field>
       <Field label="Countdown before the start tone (seconds)" hint="0 starts the race at once.">
         <Input
           type="number"

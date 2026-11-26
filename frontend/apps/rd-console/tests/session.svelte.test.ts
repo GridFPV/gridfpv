@@ -530,7 +530,7 @@ describe('Session', () => {
   });
 
   describe('classes (#84)', () => {
-    const OPEN: Class = { id: 'c1', name: 'Open', source: 'MultiGP' };
+    const OPEN: Class = { id: 'c1', name: 'Open', org: 'MultiGP' };
 
     function classSession(overrides?: SessionOverrides) {
       return new Session({
@@ -551,7 +551,7 @@ describe('Session', () => {
     it('createClass returns the new class (full-trust, no token)', async () => {
       const createClass = vi.fn(async () => OPEN);
       const session = classSession({ createClass });
-      const req: CreateClassRequest = { name: 'Open', source: 'MultiGP' };
+      const req: CreateClassRequest = { name: 'Open', org: 'MultiGP' };
       const result = await session.createClass(req);
       expect(result).toEqual(OPEN);
       expect(createClass).toHaveBeenCalledWith('http://d.local', req, undefined);
@@ -564,7 +564,7 @@ describe('Session', () => {
         .mockResolvedValueOnce(OPEN);
       const session = classSession({ createClass });
       session.setTokenProvider(async () => 'tok');
-      const result = await session.createClass({ name: 'Open', source: 'MultiGP' });
+      const result = await session.createClass({ name: 'Open', org: 'MultiGP' });
       expect(result).toEqual(OPEN);
       expect(createClass).toHaveBeenCalledTimes(2);
       expect(createClass).toHaveBeenLastCalledWith('http://d.local', expect.anything(), 'tok');
@@ -1058,5 +1058,175 @@ describe('Session', () => {
       expect(deleteEvent).toHaveBeenCalledTimes(2);
       expect(ok).toBe(true);
     });
+  });
+});
+
+describe('other devices on the network', () => {
+  const DOOR = {
+    enabled: true,
+    port: 8081,
+    port_picked: false,
+    state: 'Starting' as const,
+    addresses: []
+  };
+  const VIEW = { public: DOOR, remote: { ...DOOR, enabled: false, state: 'Off' as const } };
+  const HELLO = {
+    version: '0.5.1',
+    caller: 'Local' as const,
+    director_sign_in: false,
+    kiosk: false
+  };
+
+  it('signing in as director drops a token the tab was still holding', async () => {
+    sessionStorage.clear();
+    const signInDirector = vi.fn(async () => {});
+    const listEvents = vi.fn(async () => []);
+    const session = new Session({ autoRestore: false, api: { signInDirector, listEvents } });
+    session.setToken('the-token-from-last-week');
+    await session.signInDirector('test');
+    expect(signInDirector).toHaveBeenCalledWith(session.baseUrl, 'test');
+    // What the console sends next carries no token at all: the cookie does the work.
+    await session.listEvents();
+    expect(JSON.stringify(listEvents.mock.calls[0])).not.toContain('last-week');
+    expect(JSON.stringify(listEvents.mock.calls[0])).not.toContain('"test"');
+    expect(session.hasToken).toBe(false);
+    // And a reload of the tab finds nothing kept.
+    expect(Object.values({ ...sessionStorage })).toEqual([]);
+  });
+
+  it('a sign-in that is refused leaves the held token alone', async () => {
+    sessionStorage.clear();
+    const signInDirector = vi.fn(async () => {
+      throw new Error("That is not the director's access token.");
+    });
+    const session = new Session({ autoRestore: false, api: { signInDirector } });
+    session.setToken('kept');
+    await expect(session.signInDirector('wrong')).rejects.toThrow('access token');
+    expect(Object.values({ ...sessionStorage })).toEqual(['kept']);
+  });
+
+  it('signing out as director forgets the token the tab holds', async () => {
+    sessionStorage.clear();
+    const signOutDirector = vi.fn(async () => {});
+    const session = new Session({ autoRestore: false, api: { signOutDirector } });
+    session.setToken('test');
+    await session.signOutDirector();
+    expect(session.hasToken).toBe(false);
+    expect(Object.values({ ...sessionStorage })).toEqual([]);
+  });
+
+  it('listChannels asks the public route, with no token, and never prompts', async () => {
+    const channels = [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }];
+    const listPublicChannels = vi.fn(async () => channels);
+    const session = new Session({ autoRestore: false, api: { listPublicChannels } });
+    expect(await session.listChannels()).toEqual(channels);
+    expect(listPublicChannels).toHaveBeenCalledWith(session.baseUrl);
+  });
+
+  it('hello and getNetwork are plain reads that never prompt', async () => {
+    const getPublicHello = vi.fn(async () => HELLO);
+    const getNetwork = vi.fn(async () => VIEW);
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({ autoRestore: false, api: { getPublicHello, getNetwork } });
+    session.setTokenProvider(tokenProvider);
+    expect(await session.hello()).toEqual(HELLO);
+    expect(await session.getNetwork()).toEqual(VIEW);
+    expect(tokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('a read that fails is passed on as it is, with no prompt', async () => {
+    const getNetwork = vi.fn(async () => {
+      throw refusal(401, "It needs the director's access token.");
+    });
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({ autoRestore: false, api: { getNetwork } });
+    session.setTokenProvider(tokenProvider);
+    await expect(session.getNetwork()).rejects.toThrow(/access token/);
+    expect(tokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('putDoor goes through with no token on an open Director', async () => {
+    const putDoor = vi.fn(async () => VIEW);
+    const session = new Session({ autoRestore: false, api: { putDoor } });
+    expect(await session.putDoor('Public', { enabled: true })).toEqual(VIEW);
+    expect(putDoor).toHaveBeenCalledOnce();
+    expect(putDoor.mock.calls[0].slice(1, 4)).toEqual(['Public', { enabled: true }, undefined]);
+  });
+
+  it('putDoor asks for the token when refused, and sends the change again with it', async () => {
+    let calls = 0;
+    const putDoor = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw refusal(401, 'Control on this Director needs a token.');
+      return VIEW;
+    });
+    const session = new Session({ autoRestore: false, api: { putDoor } });
+    session.setTokenProvider(async () => 'lazy-tok');
+    expect(await session.putDoor('Remote', { enabled: true, port: 9000 })).toEqual(VIEW);
+    expect(putDoor).toHaveBeenCalledTimes(2);
+    expect(putDoor.mock.calls[1].slice(1, 4)).toEqual([
+      'Remote',
+      { enabled: true, port: 9000 },
+      'lazy-tok'
+    ]);
+  });
+
+  it('putDoor gives undefined when the token prompt is cancelled, and sends nothing more', async () => {
+    const putDoor = vi.fn(async () => {
+      throw refusal(401, 'Control on this Director needs a token.');
+    });
+    const session = new Session({ autoRestore: false, api: { putDoor } });
+    session.setTokenProvider(async () => undefined);
+    expect(await session.putDoor('Public', { enabled: true })).toBeUndefined();
+    expect(putDoor).toHaveBeenCalledOnce();
+  });
+
+  it("putDoor passes on the Director's refusal of a port, with no prompt", async () => {
+    const putDoor = vi.fn(async () => {
+      throw refusal(400, 'Port 8082 is the one Remote RD uses. Pick another.');
+    });
+    const tokenProvider = vi.fn(async () => 'lazy-tok');
+    const session = new Session({ autoRestore: false, api: { putDoor } });
+    session.setTokenProvider(tokenProvider);
+    await expect(session.putDoor('Public', { enabled: true, port: 8082 })).rejects.toThrow(
+      /Remote RD uses/
+    );
+    expect(tokenProvider).not.toHaveBeenCalled();
+  });
+
+  it('putAccessToken sends the token typed, or nothing for a new one', async () => {
+    const putAccessToken = vi.fn(async () => ({ ...VIEW, token: 'K7QM-2XWD-9HRA' }));
+    const session = new Session({ autoRestore: false, api: { putAccessToken } });
+    expect((await session.putAccessToken())?.token).toBe('K7QM-2XWD-9HRA');
+    await session.putAccessToken('sunday-race-7');
+    expect(putAccessToken.mock.calls[0].slice(1, 3)).toEqual([{}, undefined]);
+    expect(putAccessToken.mock.calls[1].slice(1, 3)).toEqual([
+      { token: 'sunday-race-7' },
+      undefined
+    ]);
+  });
+
+  it('signing in sends the typed token and never keeps it; a refusal is passed on', async () => {
+    const signInDirector = vi.fn(async (_baseUrl: string, _token: string) => {});
+    const getPublicHello = vi.fn(async (_baseUrl: string, _options?: { token?: string }) => HELLO);
+    const session = new Session({ autoRestore: false, api: { signInDirector, getPublicHello } });
+    await session.signInDirector('the-token');
+    expect(signInDirector.mock.calls[0][1]).toBe('the-token');
+    // The session holds no token afterwards: the cookie carries the sign-in.
+    expect(session.hasToken).toBe(false);
+    await session.hello();
+    expect(getPublicHello.mock.calls[0][1]).toEqual({ token: undefined });
+
+    signInDirector.mockRejectedValueOnce(refusal(401, "That is not the director's access token."));
+    await expect(session.signInDirector('nope')).rejects.toThrow(/not the director/);
+    signInDirector.mockRejectedValueOnce(refusal(429, 'Wait a minute and try again.'));
+    await expect(session.signInDirector('nope')).rejects.toThrow(/Wait a minute/);
+  });
+
+  it('signing out is one call', async () => {
+    const signOutDirector = vi.fn(async () => {});
+    const session = new Session({ autoRestore: false, api: { signOutDirector } });
+    await session.signOutDirector();
+    expect(signOutDirector).toHaveBeenCalledOnce();
   });
 });

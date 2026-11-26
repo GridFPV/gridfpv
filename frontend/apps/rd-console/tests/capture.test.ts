@@ -276,7 +276,8 @@ describe('moveLevel', () => {
 });
 
 describe('levelGap', () => {
-  it('is half a dB for a timer that reports dB or dBm, and one count for one that counts', () => {
+  it('is half a dB for a timer that reports dB or dBm, 5 mV, and one count for one that counts', () => {
+    expect(levelGap('Millivolts')).toBe(5);
     expect(levelGap('TenthsDb')).toBe(5);
     expect(levelGap('TenthsDbm')).toBe(5);
     expect(levelGap('Counts')).toBe(1);

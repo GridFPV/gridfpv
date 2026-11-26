@@ -1,6 +1,6 @@
 # Grid primitives
 
-**Status:** revision 8 (2026-11-12): the design to build against, with build progress in §8.
+**Status:** revision 9 (2026-11-16): the design to build against, with build progress in §8.
 Revision 1 was written from the design discussion of that day; revisions 2 to 7 fold in
 Ryan's notes and answers. Sections marked **Agreed** record what Ryan decided.
 
@@ -27,6 +27,11 @@ events and pilots carry outside ids (§4); a field can be seeded from an importe
 
 **What changed in revision 5:** removing a lap always folds its time into the next lap; a
 restart point is the separate case (§5.7).
+
+**What changed in revision 9** (Ryan, 2026-11-16): §11 is new. It covers the people at a
+race who are not the director: spectators and pilots on their own phones, how a pilot signs
+in, and pilots signing up for heats. It also sets the rules a remote server must keep. None
+of it is built.
 
 **What changed in revision 8** (Ryan, after the first night on real hardware): the minimum
 lap and "ignore crossings before" are lap rules of the **event**, set once (§5.1, §5.6). A
@@ -111,6 +116,14 @@ Timers differ in who owns the start of a race. This is recorded on each race (§
 OFT is the model of a well-behaved timer: Grid updates its config and receives crossings and
 samples. Grid never tells it a race is starting or stopping.
 
+**One program at a time changes an OFT timer** (OFT spec v0.9; built 2026-11-22). A timer
+can be shared: Grid, RotorHazard through its plugin, and the timer's own page can all be
+connected to it. Every one of them reads and gets laps. Only the one that has **control**
+may change the timer's settings. Grid asks for control each time it connects, and the first
+program to ask has it. When another program has it, Grid says so by name, changes nothing,
+and points the director at the timer's own page, which is the one place control is moved.
+This keeps programs that mean well out of each other's way. It is not security.
+
 ### 3.2 Seat and Profile (Agreed)
 
 - A **seat** is one pilot's timing slot on a timer. It has a channel and thresholds (fixed
@@ -143,9 +156,10 @@ trace, and adjust the thresholds against it.
 - A **pass** is one crossing on one seat at one gate. Its time is on the timer's own clock.
 - Lap times are differences between pass times on that one clock. The time a pass arrived at
   Grid never affects a lap time.
-- **Signal samples** are stored in the source's own units at the source's own resolution. OFT
-  reports tenths of a dB; RotorHazard reports counts. Each stream carries a unit tag. Nothing
-  is converted down.
+- **Signal samples** are stored in the source's own units at the source's own resolution. An
+  OFT receiver reports tenths of a dB, or millivolts if it reads a signal-strength pin;
+  RotorHazard reports counts. Each stream carries a unit tag. Nothing is converted down, and
+  nothing is converted from one unit to another.
 
 ### 3.4 Discovery (Agreed)
 
@@ -158,6 +172,13 @@ trace, and adjust the thresholds against it.
   network at a new address (a new DHCP lease), Grid follows it there. It is still the same
   timer: its heats, its profiles and its laps are untouched. The id is an OFT thing; a kind
   of timer without one stays at the address it was given.
+- **A timer's name is Grid's own, and a person can change it** (Ryan, 2026-11-22; built). A
+  timer added from the network starts with the name it gives itself ("oft-3fa2"). **Rename**
+  on the Timers page gives it a friendly one ("Start gate"), and that name is what every
+  list, heat and page shows. The timer is not told. The name the timer gives itself is still
+  shown, as "Calls itself …", on the Timers page and on the timer's own settings page, so a
+  person can match a row to the box and to what the network shows. Renaming changes nothing
+  that was timed: passes carry Grid's handle for the timer, not its name.
 
 ---
 
@@ -174,7 +195,9 @@ trace, and adjust the thresholds against it.
 
 A class simply has a roster (Agreed). There is no separate "entry" record.
 
-- **Check-in** comes later. When it does, a pilot joins a class roster at check-in.
+- **Check-in** to a class roster comes later. When it does, a pilot joins a class roster at
+  check-in. (Checking in to an open **seat** during practice is built: §11.9.)
+- **Pilots and spectators on their own phones**, and pilots signing up for heats, are in §11.
 - **Teams** may come later, and the design leaves room for them (Agreed): a team is a named
   group of pilots at an event. Lineups, passes and races stay about pilots. Team results are
   a ranking rule that combines the results of a team's members. Nothing in §5 has to change
@@ -268,11 +291,24 @@ Event
 - **A ranked phase serves exactly one class.** The same pilots are often in several classes,
   so results are kept apart by class. There is no combined qualifying.
 - Only an unranked phase can serve more than one class. Shared practice is the case.
-- **Class standings** (Agreed): each class lists the phases that count toward its result,
-  in order. The first one decides: for a class with mains, the Mains ranking is the class
-  standings. An earlier phase is only **reached back to** when the first leaves pilots
-  unplaced or level, for example pilots who never made a main are ordered by Qualifying.
-  Practice never counts. This is what gives every class a ranking from 1 to n.
+- **Class standings** (Agreed; worked out by Grid since 2026-11-19): each class has the
+  phases that count toward its result, in order. The first one decides: for a class with
+  mains, the Mains ranking is the class standings. An earlier phase is only **reached back
+  to** when the first leaves pilots unplaced or level, for example pilots who never made a
+  main are ordered by Qualifying. Practice never counts. This is what gives every class a
+  ranking from 1 to n.
+  - **Which phases:** the director does not pick them. A phase is **for a class** when, in
+    this order: the director said so when making it (a bracket or a round robin made from a
+    class's roster keeps the class even if the pilots are then changed by hand); its field
+    is that class's roster; it takes its pilots from a phase of that class; the phases
+    inside it are for that class (a "Mains" holding heats seeded from qualifying); or the
+    phase that holds it is. Every ranked phase that is for the class counts, as one unit:
+    Qualifying with its heats is one phase, a bracket with its rounds is one. A phase that
+    only names pilots, with no class said, is for no class.
+  - **In what order:** the latest phase first, so the last thing raced decides.
+  - **What the director can change:** the order (`StandingsSet`), and whether a phase counts
+    at all (`PhaseCounts`): a fun race or a warm-up can be left out. A phase added after the
+    order was set goes ahead of it.
 
 ### 5.4 Heat (Agreed)
 
@@ -378,7 +414,8 @@ format.
 it. As an option it stops by itself a set wait after every pilot has finished. The wait is
 there for a hard track, where extra crossings are likely and the director may need the race
 kept open to sort laps out. If a finishing lap is removed during the wait, the race keeps
-going. A pilot who never finishes means the race never stops by itself.
+going. A pilot who never finishes means the race never stops by itself, unless the director
+marks them **out** (below).
 
 **A time limit** (Agreed) can be set on any race that is not timed: first-to-N or open. The
 race stops by itself at the limit, whoever has or has not finished. With both a limit and
@@ -406,6 +443,17 @@ A ruling is a human decision recorded as a fact in the log. Rulings are never au
   means B has no lap time at all, and A and C both stay as they were. A and C can never be
   used together: "best N consecutive" may not span a restart. Always marked by a person.
 - **False start:** names the pilot and the race.
+- **Out** (Built 2026-11-18, #510): names the pilot and the race. The pilot crashed or will
+  not finish. It answers the two open questions this way:
+  - "DNF" and "crashed" are **one thing**, called Out. Grid does not ask why.
+  - **It changes when the race ends, never the result.** A race that stops by itself stops
+    waiting for a pilot who is out. The laps they flew still count, and they are ranked on
+    them like anyone else. In a first-to-N race that already puts them below every pilot
+    who finished, since they have fewer laps.
+  - It can be marked while the race is staging, running or stopped, and taken back
+    ("Back in"). Once the race is saved the mark stays as part of the record.
+  - **Not built:** ignoring gate crossings after the mark. A quad carried back through the
+    gate still counts a lap, and the marshal removes it.
 - Penalties: time added, points changed, disqualification.
 - **Position override:** the director can always set a pilot's position **in a heat**. It
   takes effect from there on: every lineup and ranking that reads the heat sees the new
@@ -487,6 +535,42 @@ call were put to him and are folded in above.
 
 ---
 
+### 5.11 Start sounds (Wanted 2026-11-19, not designed, not built)
+
+Notes from a night of flying. This also takes over from issue #193 (the sounds panel),
+which was closed in favour of this section.
+
+**Today.** The console plays three pips in the last three seconds and a long tone at the
+start. That is fixed in the code. The format holds a staging time and nothing else about
+the start. The random hold in §5.1 is not built. Laps are spoken. A hole shot makes no
+sound.
+
+**Wanted.**
+
+- **A tone on the hole shot.** Always wanted.
+- **A choice of start sounds**, because it changes from night to night:
+  - one tone, on go only;
+  - a tone every second, then go;
+  - a few pips, then go (what there is today).
+- **A spoken start with a random wait.** A voice says "Arm your quads. On the tone in less
+  than N." N is the longest wait of a random start between M and N seconds. Nothing sounds
+  during the wait. One tone sounds on go.
+- **A sounds panel** (from #193), one place to set sound up:
+  - a test tone, to check the speakers before a race;
+  - volume and mute;
+  - the start tone's sound;
+  - lap callouts on or off, and what they say.
+
+**To decide before building.**
+
+- Where the choice lives: on the format (it travels with the race rules), on the event, or
+  on the console as a setting. The random wait (M and N) changes when the race starts, so
+  it is a race rule. Which sounds play is closer to a console setting.
+- The random wait needs the Director to pick the time and keep it off every screen, so
+  nobody can see the tone coming. Today every console counts down to a tone time it is told.
+- Whether a tone sounds on every lap, or only on the hole shot.
+- What the voice says for a start with no random wait.
+
 ## 6. Presets
 
 A preset is a **generator**. It runs once, sized to the field, and writes plain phases, heats,
@@ -498,11 +582,51 @@ seat references and formats. The director can then edit any part by hand.
 | Time trial | Lineups from the roster; each heat ranked by best N consecutive; parent takes each pilot's best result |
 | Head-to-head round | Lineups from a seed; ranked by points or finish order |
 | Points heat | One heat, N races, points summed across them |
-| Bracket | A chain of rounds where each lineup refers to earlier heats (see below) |
+| Round robin | R rounds of heats, pilots dealt differently each round; ranked by points summed across every heat |
+| Bracket | A chain of rounds where each lineup refers to earlier heats (see below). Every round is a phase that holds its heats, the final too, so each round opens the same way |
 | Mains | Brackets stacked with bump-ups (§6.1) |
 | Chase the Ace | One heat, raced until a pilot has two wins |
 | Single pilot | One heat with one pilot, done when the director says so, best 3 consecutive |
 | Season | A ranking rule over several events |
+
+**Built 2026-11-18:** a generated bracket makes every round a phase, even a round with one
+heat (it used to put a one-heat round straight in the bracket). The Director keeps a
+bracket's rounds latest first, because the ranking stacks them in that order. The console
+shows them in the order they can be flown: a round comes after every round that feeds it.
+Where two could go in either order the losers round is first, so double elimination reads
+a winners round, then the losers rounds it feeds, then the next winners round (Ryan,
+2026-11-18). A bracket, a set of mains and a round robin keep every heat in their rounds, so
+the console offers no "+ Heat" or sign-up on the phase itself, and its page shows a
+"Ranking" card where a plain phase shows "Heats and ranking".
+
+**Built 2026-11-18:** the console has one Add phase dialog for every kind (Ryan: no row
+of different "add" buttons). Its "Kind" is Empty, Bracket, Multi-Main or Round Robin. A new generator is
+one more kind there. A phase's own page has Add phase too, for a phase inside it. Mains are
+kept best first (A-Main first) and shown bottom main first, the order they are flown.
+
+**Built 2026-11-18: the round robin preset** (#69). It writes one phase holding a phase for
+each round, each holding that round's heats. Rules it keeps:
+
+- A round has as few heats as hold the field, the same size or one apart. Round 1 spreads
+  the seeds across the heats.
+- **Seats are always mixed** (Ryan, 2026-11-18; the first build kept a pilot on one seat
+  all day, which meant pilots who shared a seat never met). Any two pilots can meet. The
+  later rounds are mixed so that pairs of pilots meet as evenly as they can. Where the
+  numbers allow a perfect mix, the deal finds it: 16 pilots in heats of four over five
+  rounds meet each other exactly once.
+- **Then seats are chosen for the fewest seat changes**, because a change of seat is a
+  change of video channel. Even meetings always win over fewer changes. In practice a pilot
+  changes seat about one round in four.
+- The deal is worked out from fixed numbers, so the same request always gives the same
+  heats and seats.
+- It ranks by the format's points summed across every heat, then wins, then best lap. Each
+  round has its own table too.
+- Lineups are named pilots, or places of another phase's ranking, so every heat is ready as
+  soon as the field is known.
+
+**Decided 2026-11-18:** Chase the Ace stays one heat, raced until a pilot has two wins. It
+is not split into several heats in a phase. In a bracket that heat still sits in its own
+"Final" phase, like every other round, so the final is never a heat on its own.
 
 **Brackets** (Agreed). One generator covers every shape Ryan runs: single or double
 elimination, heats of 2 to 8 pilots, and any field from 3 pilots up. The director picks the
@@ -698,6 +822,51 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      decides how seats are spread over its receivers. Grid no longer reads, shows or sends
      it. A v0.4 timer, which needs the field in a write, refuses "Apply to timer" until its
      firmware is updated.
+   - **OFT spec v0.8 (2026-11-22): level units.** A receiver says what its level numbers
+     measure, and a timer passes that on for each receiver: tenths of a dB, or millivolts
+     for a receiver built on an RX5808. Grid used to call every OFT level tenths of a dB.
+     Now each seat's signal, its logged enter and exit levels and a crossing's peak carry
+     the unit of the receiver serving that seat. The Tune page shows and takes numbers in
+     the timer's unit (dB with one decimal, whole millivolts). A unit Grid does not know
+     is kept as plain counts, with no unit claimed. Grid reads the timer's receiver list
+     again every 15 seconds, since a receiver can report in, or come back from a firmware
+     update in another unit, after the timer's `hello`. A saved seat profile records its
+     unit and is refused on a timer that now measures in another: 150 is 15 dB on one
+     receiver and 150 mV on another.
+     - From v0.7 and v0.8 Grid does not use: the wiring pins (`/pins`), a receiver's chip
+       name, and `fw.update.node_image`. Those belong to the timer's own page.
+     - Not done: the Tune page shows one unit for a whole timer. A timer whose seats are
+       on receivers of different units shows each seat's live numbers in its own unit, but
+       the timer-wide levels fields in one.
+   - **OFT spec v0.9 (2026-11-22): control, and `config_rev`.** One program at a time may
+     change a timer (§3.1).
+     - Grid claims control on its stream when it connects, as "GridFPV" and the
+       computer's name, so two installations can be told apart on the timer's page. While
+       Grid has control, the key the timer gave it rides on every write (the settings, "keep
+       these", the pass window). The key never leaves the Director.
+     - `TimerStatus.control` says who has control: nobody, Grid, or another program by
+       name. `control_name` is the name Grid claimed under. A timer older than v0.9 has
+       neither, and is written to as before.
+     - When another program has control, Grid does not send the write at all, and the
+       answer names the program. A `423` from the timer is put into the same words. The
+       Timers, Seats and Tune pages show a notice with a link to the timer's own page;
+       "Apply to timer" and the profile box are off. The Run page's pass window warning
+       says the same when the timer's window is not the event's.
+     - After a dropped link Grid claims again with its key and gets its place back (the
+       timer holds it for ten seconds). A restarted timer is claimed afresh.
+     - Control reaches Grid a moment before Grid hears of it, so a write refused with a
+       `423` waits up to a second for a new key and is sent once more.
+     - When control comes to Grid, or to nobody, Grid checks the event's pass window on
+       the timer and puts it back. That is the only setting Grid sends again: the rest of
+       a timer's settings live on the timer, and Grid reads them from it.
+     - `config_rev` is a count the timer moves whenever its settings change, whoever
+       changed them. `TimerStatus.config_rev` carries it. When it moves, the Director reads
+       the seat channels again and checks the pass window, and the Seats and Tune pages
+       read the settings again. A draft the director was making is kept, with a notice
+       that the timer changed under it.
+     - Grid never sends `POST /control`. Only the timer's own page chooses the writer.
+     - Tested in CI against the fake timer, which keeps claims the way the spec says, and
+       against the real daemon (`oft_live.rs`) with a second program holding control.
    - **A timer that restarts mid-race:** its clock begins again. The laps either side are
      kept, and the stretch across the restart has no time.
    - **Tested against the real daemon** (`crates/app/tests/oft_live.rs`, local only):
@@ -717,8 +886,15 @@ Work happens in this repo on the `primitives` branch, cut from `devel`.
      exit hold. A recording lives in the page only.
    - **Timers:** the directory, with timers found on the network.
    - **Pilots** and **Classes:** the lists that outlive events.
-   - **Phases:** the tree, Up next, and Add phase, Add heat, Add bracket. A phase or heat
-     is given a saved format; a heat under a phase can use the phase's.
+   - **Phases:** a short list (one line a phase, with where it stands and the heat on the
+     timer), then Up next, then heats that stand alone; and Add phase, Add heat, Add
+     bracket. A line opens **the phase's own page**: its own heats and lineups, its ranking
+     and rulings, and its sign-up sheet. A phase inside a phase (a bracket's round) is not
+     shown there in full: the page lists the phases inside as lines, and each has a page
+     of its own. On the list, a phase that holds phases unfolds to show them. A phase or
+     heat is given a saved format; a heat under a phase can use the phase's. (Reworked
+     2026-11-17: the page used to be one long tree with every sign-up sheet stacked above
+     it.)
    - **Formats:** the saved formats (`/formats`) as a table, with an editor over the same
      rules-as-data the engine reads (§5.5). A new Director starts with four.
    - **Run:** a phase, then one of its heats, on the timer. Keyboard shortcuts, lap
@@ -754,8 +930,6 @@ seat, the higher seed keeps it. A director's override of the result is not built
   result on screen.
 - The trace of a race in which the timer restarted is drawn on two clocks at once. The lap
   list is right; the picture is not.
-- Marshal cannot move a lap's time yet, though the Director can. The trace does not pan by
-  touch drag.
 - A class cannot be removed from an event in the console. A timer can be removed while a
   heat still uses it.
 - Every unlocked phase row has a Lock button, which is a lot on a big bracket.
@@ -773,7 +947,8 @@ feature that CI does not enable, so CI on GitHub stays green.
 laps), and seasons. Season rules such as "best N of M events" need measures that §5.5 does
 not have yet; they are added when seasons are built.
 
-**Planned, not built: video in marshaling** (Ryan, 2026-11-10). When reviewing laps today,
+**Video in marshaling: built** (asked for by Ryan on 2026-11-10, released in v0.5.1; the
+plan is kept here as written). When reviewing laps today,
 Ryan opens the OBS recording made through grid-rh's video page and reads the lap times off
 the overlay. Grid should do this natively:
 
@@ -817,8 +992,7 @@ race's laps, so the snapshot can say for every race whether its overlaid video s
 matches: filmed, drawn, none yet, or laps changed. Neither fact changes a result.
 
 The Marshal page plays a race's video lined up with its clock: a line on each signal trace
-shows where the video is, and a click on a trace moves the video there. Not built yet:
-video on the Tune page.
+shows where the video is, and a click on a trace moves the video there.
 
 ffmpeg is not shipped with Grid and there is no installer to fetch it. The Video page has a
 **Get ffmpeg** button: the Director downloads a ready-made build with the system's `curl`
@@ -913,3 +1087,566 @@ of these was read in full on 2026-11-09, and its banner names the sections that 
 | `mock-race-day.md` | The mock harness; its steps follow the old heat flow |
 
 **Current:** this doc, and `conventions.html` (how docs are written).
+
+---
+
+## 11. People at the race: spectators, pilots and sign-up (Agreed, not built)
+
+Agreed with Ryan on 2026-11-16, over one long discussion. Nothing here is built. The
+GitHub issues are #14 (the page), #432 (who may do what) and #16 (the remote server).
+
+Until now only the director used Grid. This section adds the other people at a race.
+
+**Built so far** (2026-11-16):
+
+- **Step 1, letting other devices in safely.** The desktop app answered only its own
+  computer, and anything that could reach the Director could run the race. Now a switch on
+  the Network page (off by default) starts a second listener for other devices. A device
+  that is not the Grid computer is a **visitor**: it can read the public pages and nothing
+  else. A director on another device signs in with the access token. The rules and the
+  routes are in `docs/api.md` ("Who may do what").
+- **Step 2, the spectator's page** (§11.2). A visitor's browser shows the open event: the
+  race that is on with a running clock and each lap as it is flown, or how the last race
+  ended; the heats coming up with who is in them; and the results. It updates by itself and
+  follows the director to another event. It reads the console's own snapshot through
+  `/public/event…`, with the director's things taken out (video paths, notes, protests, a
+  pilot's real name and outside ids, a timer's address).
+- **Step 3, a pilot signs in** (§11.3). Each pilot in an event has a six-character code.
+  The director opens the **Pilot sign-in** card on the event's Details page and shows a
+  pilot theirs, as letters or as a QR code. The pilot types it on their phone, or scans
+  it, and the page then knows them by name. One device at a time; one event; the director
+  can give a new code or sign a phone out.
+- **Step 4, what a pilot sees** (§11.2). A signed-in pilot gets a **Me** tab: their heats
+  in the order they will fly, how many heats away each is, the seat and, for a seat on a
+  timer, its channel; and their own races lap by lap with the best lap marked. An alert
+  sits above every tab when they are two heats away or closer, next, or flying now, and
+  the phone buzzes each time it gets closer. It only reaches a phone with the page open.
+  Everyone, pilot or not, sees each seat's channel in the heats coming up. A pilot's row
+  is marked in the race, the heats and the results.
+- **Step 5, sign-up** (§11.5). A phase that holds heats can be set for pilots to sign up.
+  The director turns it on from the Phases page and gets a sheet: heats down, seats across.
+  Pilots take a free seat, leave theirs, or take the next free spot on a seat, from a
+  **Sign up** tab on their phones. Heats are plain heats under the phase, numbered as they
+  appear; at most N that are open and not full exist at once, and the next appears when one
+  fills, is started, or is closed. The limits (spots held, runs, rest) bind pilots; the
+  director is bound only by what cannot be otherwise. The director adds, drops (counted or
+  not), pulls forward on the same seat, closes a heat to pilots, and gives runs to everyone
+  or to one pilot.
+
+  Where the build differs from the text below, and why:
+
+  - **"On the timer."** As §11.5 says, a heat locks to pilots when the director puts it on
+    the timer, and the director can add a pilot up to the start. (The first build could
+    not do this, because the heat on the timer was kept only in the console's address
+    bar. Since step 8 the Director keeps it.) Taking a heat off the timer without flying
+    it opens it to pilots again. The **Close to pilots** button is still there, for
+    closing a heat that is not on the timer.
+  - **A drop after the race.** A pilot in a saved race has used a run. To give it back,
+    the director gives that pilot one more run, since a flown heat cannot be changed.
+  - **Not built:** opening and closing sign-up on a set time.
+- **Step 6, the kiosk** (§11.4). A tablet at the race director's stand, opened at
+  `#/kiosk`. **Only the director makes a tablet a kiosk**: the Network page makes a
+  **kiosk code**, the director types it on the tablet, and the code is used up. One code,
+  one tablet. The tablet is then listed on the Network page until the director removes
+  it. A pilot's phone cannot become a kiosk.
+
+  With nobody at it a kiosk shows a code box and nothing else. A pilot types their own
+  code (or a handheld scanner types the link in their QR code) and gets the sign-up sheet
+  as a large grid for a tablet on its side. They press **Done** when finished. The page
+  signs them out by itself after 45 seconds with no touch, counting down for the last 15.
+  A reload signs the pilot out too; the tablet stays a kiosk.
+
+  A code typed at a kiosk does **not** count as the pilot's one device, so it never signs
+  their phone out. The Director gives the kiosk a **pass** that lives in memory only,
+  works for that pilot and event, only on a tablet that is still a kiosk, and stops 2
+  minutes after it was last used, or when the director gives the pilot a new code or
+  signs them out.
+
+  - Kiosks come in on the same listener as phones. What keeps a phone from being a kiosk
+    is the kiosk code, not the port (agreed with Ryan, 2026-11-17).
+  - **Not built: the tablet's camera reading a QR code.** A browser only gives a page the
+    camera over HTTPS or on the computer itself, and Grid at the field is plain HTTP on
+    the local network. A cheap handheld scanner that types what it reads works today.
+- **Step 7, the pages after the first try-out** (Ryan, 2026-11-17).
+  - **Spectators** get the race, the heats coming up and the results. They do not see
+    sign-up at all.
+  - **Pilots** get the same three, plus **Me** and **Sign up**. The way in is a **Pilot**
+    link in the top corner; signed in, their callsign and **Sign out** are there.
+  - **Results** are picked phase first, then **Overall** or one heat. A heat shows each
+    of its races, and a race opens to its lap times in a large format. So does a race on
+    the pilot's own tab.
+  - **One race tab, always called Current race** (Ryan, 2026-11-17). It shows **the heat
+    on the timer**, always with a clock: who is in it before it is flown, its race while
+    that is on, and its result once it is saved. The result stays until the director puts
+    another heat on the timer.
+  - **A seat is named with its channel wherever it is named**: "Seat 2 · R2". The channel
+    is what a pilot needs. It comes from the timer, so a bench seat has none. The console
+    and the visitor's page read it the same way, into the one name resolver.
+  - **The sign-up sheet a pilot sees lists only heats still open.** A heat that is closed,
+    on or flown is off it. A full open heat stays, since someone may drop out. The
+    director's sheet shows every heat.
+  - **Kiosks can be named** on the Network page ("By the gate"), and a kiosk shows its
+    name while it waits. Kiosks stay on the same listener as phones (agreed).
+  - **The director's sign-in** from another device is at `#/director`. Nothing on the
+    visitor's page links to it. The director is expected at the Grid computer.
+- **Step 8, the heat on the timer is the Director's** (Ryan, 2026-11-17: "I have to set
+  the heat that is on the timer. That is always the heat I am referring to when I say the
+  active race. You absolutely should know about it").
+  - **On the timer** is one heat: the one the director is running now, whether its race
+    has started or not. The director puts a heat there from the Run page or with **Run**
+    on a heat. Starting a race puts its heat there too. It stays after the race is saved,
+    until another heat is put on.
+  - It is a fact in the event's log (`HeatOnTimer`), so every console, the spectators'
+    page, the pilots' alerts and sign-up all read the same heat, and it is kept when Grid
+    is closed and opened.
+  - While a race is waiting to be saved or thrown out, no other heat can go on the timer.
+  - **"The current race" means the heat on the timer, everywhere.**
+  - Before the director has put anything on the timer, the Run page shows the heat that
+    would be run first and tells the Director so.
+  - The kiosk shows one sign-up sheet at a time, with a picker when a pilot is in more
+    than one, and only the sheets that pilot is in.
+
+### 11.1 Two parts, and the rule between them
+
+- **Local:** people at the race use their own phones, on the field's network, served by
+  the Director. No internet is needed.
+- **Remote:** a server away from the field shows the same things and keeps long-term
+  records. It is covered in §11.7, as rules only.
+
+**The rule:** race day never needs the remote part. Grid must never rely on any one hosted
+service. Everything in §11.2 to §11.6 works with the laptop alone.
+
+### 11.2 Two kinds of visitor
+
+| Visitor | Signs in? | Can do |
+|---|---|---|
+| **Spectator** | No | Look only |
+| **Pilot** | Yes (§11.3) | Everything a spectator can, plus their own things |
+
+**A spectator sees:** the race that is on, results and standings, and the heats coming up
+with who is in them.
+
+**A pilot also sees:** their own upcoming heats, the channel for each one, the sign-up
+(§11.5), and their own race data laid out more cleanly.
+
+**Alerts** for a pilot: "you are 2 heats out", "you are next". With no internet these can
+only reach a phone that has the page open (a sound, a buzz, a banner). Alerts to a locked
+phone go through Apple's and Google's services, which need internet, so those belong to the
+remote part.
+
+The director's console is not part of this. It keeps its own access rules.
+
+### 11.3 Who a pilot is, at the race
+
+- **The Director's pilot list is who people are at a race.** It works with no internet.
+- **The director adds every pilot,** by hand or by import (from MultiGP, for example). A
+  pilot never adds themselves.
+- **Signing in:** each pilot has a short **code** for the event. The director shows it
+  from the console as a **QR code** and the pilot scans it, or the pilot types the code.
+  The QR code is only the code in a form a camera can read.
+- **It lasts for that event only.**
+- **One device.** If a pilot signs in on a second phone, the first one is signed out.
+- A pilot who is signed in through a remote server account does not need the event sign-in.
+
+There are two QR codes, for two jobs:
+
+| Code | Who it is for | What it does |
+|---|---|---|
+| **Event code** | Anyone | Opens the page as a spectator. It can be printed or put on a screen |
+| **Pilot code** | One pilot | Signs that pilot in. The director shows it from the console |
+
+### 11.4 The kiosk
+
+A **kiosk** is a tablet the director sets up at the race director's stand, for a pilot
+with no phone or a flat battery. It must exist. Only the director can make one, with a
+kiosk code that works once (Ryan, 2026-11-17).
+
+A pilot does **not** just tap their name. To act at the kiosk they prove who they are with
+their code (§11.3): they type it, or hold up its QR code, on a phone or printed. There is
+no separate PIN.
+
+### 11.5 Sign-up
+
+A phase can be set so that **pilots put themselves into heats**. This is for practice and
+qualifying, in general.
+
+**Sign-up is never required.** A practice with open seats (§5.4) always works: the timer
+runs, pilots go up when they like and sort it out between themselves, and lap times are
+called out by seat or channel, not by name.
+
+**The rules:**
+
+- **Where it is set:** on the phase.
+- **Who can sign up:** the pilots registered for that phase. Where a phase serves two
+  classes, pilots from both can share a heat.
+- **When:** the director opens sign-up and closes it. The director can also set a time
+  for it to open and a time for it to close, so it happens by itself.
+- **Heats:** each has its number from the moment it appears, and heats fly in number
+  order. So a pilot who signed up for heat 7 knows heat 6 flies first.
+- **How many are open:** at most **N** heats that are not full are open at once. The
+  director sets N. When one fills, the next one opens.
+
+  Say N is 3. Heats 1, 2 and 3 open. Heat 1 gets one pilot, heat 2 fills, heat 3 gets
+  three. Heat 4 opens, because only heats 1 and 3 are not full. When heat 4 fills, heat 5
+  opens.
+- **A heat that is not full can still fly.** It is the director's job to see that no heat
+  flies with one pilot. The tool for that is the **pull** (below).
+- **Taking a spot:** a pilot picks a heat and a free seat. Any free seat: Grid does not
+  give pilots a seat. A seat is a channel, and it is the same channel for the whole phase.
+  There is also **next free** on a seat, which takes the first open spot on that seat.
+- **More than one spot:** a pilot can hold spots in several heats, even two in a row.
+
+**Limits**, all set by the director:
+
+| Limit | What it caps | Default |
+|---|---|---|
+| **Open heats (N)** | How many heats that are not full are open at once | 3 |
+| **Spots held at once** | How many spots a pilot can hold that are not flown yet | To be chosen |
+| **Total runs** | How many heats a pilot can fly in the phase | To be chosen |
+| **Rest between heats** | Heats a pilot must sit out between two of theirs | Off |
+
+The director raises a limit for **everyone at once**. That is the normal case ("one more
+run each"). The director can also change it for **one pilot**, at any time.
+
+**What uses up a run:** a race that is saved. A race that is discarded or flown again does
+not.
+
+**Leaving and dropping:**
+
+- A pilot can leave a spot until the director puts the heat on the timer.
+- From then on the heat is **locked** to pilots. Only the director can change it. The
+  director can still add a pilot up to the moment of Start.
+- The director can **drop** a pilot from a heat, and chooses whether it counts as a run.
+  Not counting it is for a pilot who never got to fly, or had video trouble.
+
+**The pull:** when a heat is thin, the director can pull a pilot forward from a later
+heat. A pilot is only pulled onto **the same seat** they signed up for, so their channel
+does not change. The pilot gets an alert. Grid does not ask them: the director asks in
+person first.
+
+**Three ways in:** the pilot's own phone, the kiosk, and the director's console.
+
+**Results:** every run a pilot flies in the phase feeds the phase's ranking under its
+format (§5.5, §5.6). Sign-up adds no new ranking rule.
+
+### 11.6 What is taken from ZippyQ, and what is not
+
+MultiGP's ZippyQ does a similar job and was looked at for ideas. Its rules are a good
+start. Ryan's view of its screens: "a pain and not user friendly". So Grid takes rules, not
+screens.
+
+- **Taken:** a limit on spots held at once beside the total; one button for the next free
+  spot; a kiosk; the run count shown beside each name; moving pilots up to fill a thin
+  heat.
+- **Different:** ZippyQ is one line per channel, and a pilot gets the next slot in it. In
+  Grid a pilot picks a heat and a seat, with N heats open, so friends can fly together.
+
+### 11.7 The remote server: rules only
+
+The server is not designed yet. These rules are agreed, and anything built must keep them.
+
+- **No reliance.** Grid never depends on any one hosted service. Race day works without
+  the server (§11.1).
+- **Self-hosted and hosted.** Anyone can run their own server. A hosted one may also be
+  offered.
+- **The open-source version always has every feature.** A hosted service may keep some
+  things private, but never a feature.
+- **Accounts belong to a server.** No single account for the whole world is needed.
+- **If there is ever one central Grid service,** accounts on it must be free, and it is
+  the most trusted source of who a pilot is.
+- **Matching a pilot to an account:** a pilot has an id on each server and gives it to the
+  director, who puts it on the pilot. It is one more outside id (§4).
+- **A pilot can link their accounts** on two servers. Both servers must agree to the link,
+  and servers need stronger sign-in than the event code. Once linked, the pilot can see
+  their data from either server.
+- **The server shows what the local page shows**, plus long-term records. So the page and
+  its reads should be one thing, served from two places.
+- **Video** on the server comes later.
+
+### 11.8 Order of work, and what is not decided
+
+**Local comes first** (Ryan, 2026-11-16). The remote part is second: "once we figure out
+local, then remote becomes easier." Long-term records come last.
+
+One case shows what remote is for. Ryan runs RaceGOW on a laptop in the garage and wants to
+see the results on his desktop upstairs while editing. A computer on the same home network
+can already do that by opening the local page. A server is for when the two are not on the
+same network, or the laptop is switched off.
+
+**Not decided yet:**
+
+- The defaults for spots held at once and total runs.
+- What the server stores, and how a Director sends it when there is internet. Future work.
+- Which long-term records come first: results per pilot, seasons, records per track.
+
+One thing to check in the code before sign-up is built: lap callouts for an open seat
+should say the seat or channel. Today a callout is written for a named pilot.
+
+### 11.9 Check-in to an open seat (Built 2026-11-18, #399)
+
+This is for practice run as **one long heat**. The heat has open seats (§5.4), the director
+starts its race, and the timer just runs. Sign-up (§11.5) is for practice planned as heats.
+Check-in is for practice with no plan at all.
+
+- **Taking a seat.** A pilot who wants to fly takes an open seat. Only a seat with no pilot
+  named on it can be taken, and only while the race is counting down or running.
+- **Whose laps.** The pilot's **first pass after taking the seat starts their first lap**.
+  The lap that was under way when they took it is not theirs. This is decided by the order
+  of the log, never by a clock.
+- **When it ends.** A pilot keeps the seat until someone else takes it, they drop it, or the
+  director drops them. Their laps stay theirs. One spell on a seat is a **stint**.
+- **One seat at a time.** A pilot who takes a second seat leaves the first.
+- **Idle drop.** A format can set "drop an idle seat after N seconds". A seat with no pass
+  for that long is dropped by the Director. The wait starts again at each pass. Left empty,
+  nobody is dropped.
+- **Practice laps are the pilot's, ranked or not.** They show on the pilot's own page under
+  "My practice", live while they fly.
+- **Ranking** (Ryan, 2026-11-18). A pilot who took a seat is in the heat, after the pilots
+  its lineup names, and is ranked on **the laps they flew while they held a seat**. Laps
+  flown on a seat nobody held are nobody's and rank nobody. If the format ranks nobody
+  (open practice as it comes), nothing changes. Several stints by one pilot in a race are
+  ranked together, and no lap or run of laps spans the gap between two stints.
+- **Three ways in,** like sign-up: the pilot's phone, the kiosk, and the director's Run
+  page. A pilot can only ever take or drop a seat for themselves.
+
+**Not built:** a pilot marking themselves
+"out" (a checked-in pilot drops the seat instead); check-in to a class roster (§4), which is
+a different thing with the same name.
+
+### 11.10 Three ways in: the Grid computer, Public and Remote RD (Built 2026-11-18)
+
+Grid is reached three ways. Each is a listener on its own port, and the way a request came
+in decides what it may do.
+
+| Way in | For | Port | Switch |
+|---|---|---|---|
+| **The Grid computer** | The director, sitting at it. No password | 8080, this computer only | Always on |
+| **Public** | Spectators, pilots, kiosks (§11.2 to §11.5) | 80, or 8081 when 80 cannot be used | **Enable Public** |
+| **Remote RD** | The director, on another device. The whole console | 8082 | **Enable Remote RD** |
+
+The rules:
+
+- **The Grid computer's own listener is never put on the network.** Whoever reaches it is
+  trusted as the director, so it only ever listens on this computer. There is no setting,
+  flag or start-up option that changes this. A Director on a machine with no screen is
+  reached through an SSH tunnel, which arrives as the machine itself.
+- **Nobody is the director at the Public door.** A token or a director's sign-in sent
+  there is not looked at, and the director's sign-in does not answer there. This holds even
+  for a browser that is signed in at the Remote RD door: a browser sends its cookies to
+  every port of an address, and at the Public door they count for nothing.
+- **The Remote RD door is not for looking.** Until the access token is shown it gives the
+  sign-in page and nothing about the race, not even the event's name.
+- **Nobody who comes in by a door is local,** even from the Grid computer itself.
+- **Both doors are off until switched on,** each by its own switch on the Network page.
+  Switching one off closes every connection it had open.
+- **Ports.** Each door has a usual port and the director can pick another. Public tries 80
+  first, so the address is short to type and to put in a QR code; where the computer does
+  not allow that, it uses 8081 and says so. The two doors and the Grid computer's own
+  listener never share a port.
+
+**The access token** is what the Remote RD door asks for.
+
+- Grid makes it the first time the door is opened: twelve letters and digits, in three
+  groups, with none that look alike. The director can type their own instead.
+- It is **shown on the Grid computer**, at any time. A device that signed in with it is
+  never told it, and cannot change it.
+- Changing it, or shutting the door, signs every other device out at once and closes what
+  they had open.
+- It is kept in `network.json`, which stays out of a copy made on the Data page.
+
+A kiosk, a pilot's QR code and the spectator's page all use the **Public** address.
+
+**The kiosk's QR code** (built 2026-11-18). While a kiosk waits for a pilot it shows a QR
+code that opens the public pages on a pilot's own phone. It holds an address and nothing
+else. It is drawn in Grid's colours, not black and white: Grid's dark ground for the
+squares, a pale tint of Grid's green behind them. The squares are always the dark ones, so
+every phone camera reads it. The address is the one the kiosk itself opened Grid by.
+
+**The public address** (built 2026-11-18). The director types the address people should
+use to reach the public pages, on the Network page. Every address Grid gives out for the
+public pages, and every QR code (a pilot's, the printed sheet, the kiosk's), then uses it
+and not a number. It is a whole address, with `http` or `https`, and nothing but a name and
+a port: no path and nothing after `?` or `#`, so nothing can ride along in a QR code. It
+covers two cases:
+
+- **A name on the race network**, where the field's network has DNS: `http://grid.race.lan`.
+- **An address on the internet.** The Director runs at the track on a hotspot or a
+  satellite link, and a tunnel (Cloudflare Tunnel, or the like) carries an internet address
+  such as `https://race.example.org` to the Public door. People then need not be on the
+  field's network at all.
+
+Grid does not run DNS or a tunnel itself; it only uses the address it is told. Only the
+**Public** door is ever put behind a tunnel: the Remote RD door and the Grid computer's own
+listener stay on the field's network.
+
+**Agreed, not built.** Each of these is decided (Ryan, 2026-11-18) and waits its turn.
+
+- **HTTPS.** Three ways, built in this order: the director's own key and certificate; a
+  certificate Grid signs itself (every phone warns about it, so it suits Remote RD more
+  than Public); and Certbot, as an option only, since it needs the internet and race day
+  must not (§11.1). With HTTPS on, Public's usual port is 443.
+- **Overlays for an OBS on a second computer.** Today the overlay pages are served by the
+  Grid computer's own listener, so OBS must run on the Grid computer. The plan is to serve
+  them at the Public door, since an overlay shows only what a spectator may see, and to
+  keep the overlay settings for the director. To check first: that the overlay pages read
+  nothing but the public routes.
+
+## 12. Setup is set once (Agreed 2026-11-18)
+
+**The rule:** Setup is what a director sets before the event and then leaves alone. During
+an event the only Setup page they should need is a timer's seats. Anything that belongs to
+one event is on the event's side.
+
+What that changed (built 2026-11-18):
+
+- **Overlays** is a Setup page. What an overlay shows is the open event, but where it
+  sits, its logos and its URLs are the same for every event.
+- **Video** in Setup is only how OBS is set up. What was recorded, and the overlay runs,
+  are on the event's **Recordings** page.
+- **Seats** puts the timer's own settings first, and each seat's signal inside that seat's
+  row, with its settings.
+- **Formats** is laid out like Classes: one row each.
+- **Classes:** Grid still ships with the standard classes, and they are **not special**:
+  each can be edited, hidden or removed like a class the director made. The ones removed
+  can all be put back, as shipped. The tag beside a class is its **org**: free text, or
+  empty. There is no fixed list of orgs, no "Custom" tag and no "Built-in" mark.
+- **Data** is out of the menu. Grid is portable, so "where the data is" is not shown. The
+  page still works at its address, and the Director's routes are unchanged.
+
+**The event's pages** got the same pass (built 2026-11-18):
+
+- **Details** says less. Each class is a block that is shut until opened; inside is its
+  roster, changed in place.
+- **Pilot codes** is a page of its own among the event's pages: the sign-in codes (§11.3),
+  and a sheet of them to print, four or six to a page, with each pilot's callsign, QR code
+  and code. The browser prints it, or saves it as a PDF.
+
+### 12.1 More than one timer (Agreed in outline, not designed, not built)
+
+Today a heat's seats are on one timer, and the Seats page shows one timer at a time, with
+a picker when there are several. Two things are wanted, and they are different:
+
+- **Primary and backups.** Two or more timers at the **same gate**, the start/finish. One
+  is the primary. If it misses a pass, or fails, a backup's pass stands in.
+- **Splits.** Timers at **other gates** round the course. A pass there is not a lap. It
+  gives split times, and shows a pilot's progress during a lap.
+
+Open questions, to settle before any of it is built:
+
+1. **Which pass counts** when the primary and a backup both saw it, and when only the
+   backup did. How close in time two passes must be to be the same pass. Whether the
+   marshal sees the backup's passes and can take one by hand.
+2. **Failover.** Whether Grid switches to a backup by itself when the primary drops, or
+   the director does it.
+3. **What a split is** in the model: a pass (§2) that is not a lap. Where it is kept, how a
+   lap's splits are shown, and whether any ranking rule may use them.
+4. **Seats.** One seat is one pilot's channel. With several timers a seat is on each of
+   them. Whether the channel is set once and written to every timer, or per timer.
+5. **The Seats page** with several timers: one page per timer as now, or one row per seat
+   with a column per timer.
+
+### 12.2 Saved OBS profiles (Wanted, not designed)
+
+A named set of video settings the director can switch between, as a seat profile is for a
+timer. To decide: whether a profile holds only where OBS is (address and password), or also
+what records, the scenes and where the files go. The password is never shown again once
+stored (§ security), so a profile can be switched to but not read back.
+
+### 12.2.1 Marshal one seat at a time, and a recording for each seat
+
+**Built 2026-11-19: one seat at a time.** The Marshal page showed every seat of the race,
+one under the other. Now a **Seats** card under the races lists each seat (pilot, seat,
+laps, crossings not counted) and the page shows the one that is picked. The pick stays
+from race to race, so a marshal can follow one seat through a heat. **Add a lap** sits
+right under the signal trace, above the lap list.
+
+The race's video is unchanged: one recording, taken to show every pilot, so it is the same
+whichever seat is picked.
+
+**Wanted, not designed, not built: a recording for each seat.**
+
+- The director picks an OBS scene for each seat, and each is recorded.
+- Or every seat shares one recording, when one scene shows all the pilots. That is what
+  there is today.
+- On the Marshal page, picking a seat would then show that seat's recording.
+- To decide: how several scenes are recorded at once in OBS, where the scene for a seat is
+  set (with the OBS profile of §12.2, most likely), and what a race with some seats
+  recorded and some not looks like.
+
+### 12.3 The Run page's seat cards with many laps (Built 2026-11-19)
+
+A seat's card used to list every lap, so in a long open practice it grew without end.
+
+- **The card shows the last 9 laps**, newest last. Its height is then fixed. With 9 laps or
+  fewer nothing is hidden, so a short race looks as it does now.
+- **Nine is the most a card ever lists.** The best lap is not kept as an extra chip. The
+  card already shows the best time, so the lap's number goes beside it: "7.250 (lap 6)".
+  The best run of N says its laps the same way: "(laps 5 to 7)". (Changed 2026-11-19 after
+  flying: the extra chip made the card ten or more.)
+- **In open practice the laps are the current pilot's:** the last 9 of whoever holds the
+  seat now (§11.9), not the last 9 on the seat.
+- **"All laps", under the cards, shut until opened.** One table for every seat: seat,
+  pilot, lap and time. On an open seat a lap is shown under whoever held the seat, and a
+  lap flown with nobody on it is shown as nobody's. It can be narrowed by seat and by pilot,
+  and put fastest first.
+- **The Marshal page still shows every lap.** That is where laps are changed.
+
+### 12.4 Editing a phase (Built 2026-11-19)
+
+A phase or a heat that is already in the event can be edited. A `PhaseDefined` fact for a
+phase that exists is the edit; there is no other fact for it.
+
+- **Its name** (and its layout hint and false start limit) can change at any time.
+- **Its shape** is what kind of phase it is, its pilots, its format and the phase it sits
+  under. The shape can change **until a race that counts has been saved** in it or anywhere
+  beneath it, in a heat that is ranked. After that the Director refuses the change: it
+  would alter results already flown. A race that was discarded protects nothing.
+- **Practice is free.** An unranked heat has no result to protect, so it can be reshaped
+  however often it was flown. Pilots come and go between races.
+- **A locked phase** takes no edit at all until it is unlocked (§5.8).
+- **Marshal's rulings** on a flown race are a separate thing and stay allowed.
+
+In the console, **Edit** offers the name, the format and "Under". For a phase a generator
+made (a bracket, mains, a round robin), and for everything inside one, it offers the name
+alone: the generator gave it its shape. That last rule is the console's; the Director
+would take any edit the rules above allow.
+
+### 12.5 A heat is always in a phase, in the console (Agreed and built 2026-11-19)
+
+In the model a heat is a small phase and nesting is free (§5.2), so a heat at the top of
+an event is allowed, and the Director takes one. **The console no longer makes one.**
+
+- There is no "+ Add heat" at the top of the Phases page. A heat is added with "+ Heat" on
+  a phase, and its "Under" has no "top of the event".
+- An event with nothing in it offers **Add a practice phase**: one press makes a phase
+  called Practice (with the first saved format that ranks nobody, when there is one) and
+  goes straight on to its first heat.
+- A heat that stands alone in an event from before still loads, shows and races. Edit
+  moves it into a phase; once it is in one, the top is no longer offered.
+
+**Why:** a lone heat has no class, so it counts toward nothing (§5.3); it carries its own
+format; and every page had to treat it as a special case.
+
+### 12.6 The pass window is an event lap rule (Agreed 2026-11-19, built)
+
+Some tracks fly close by the gate just before going through it. The timer sees two
+crossings. OFT spec v0.6 gives the Timer a **pass window** (`pass_window_ms`, 0 to 10000,
+0 is off): crossings that start within the window are one pass, and the strongest is
+reported.
+
+- **It is set on the event, and only there.** `LapRules.pass_window_micros`, beside the
+  minimum lap. The Seats page does not show it. A track needs it or does not, and the
+  track belongs to the event.
+- **The timer applies it.** Grid writes the open event's value to every connected timer
+  that says it has one (`capabilities.config.pass_window_ms`), and reads it back. It does
+  so when the lap rules change, a heat goes on the timer, a race starts, another event is
+  opened, and a timer connects.
+- **Nothing else on the timer is touched.** The write sends back what was read, with the
+  window changed. A settings write from the Seats page carries the timer's window over,
+  because a write without it would switch it off.
+- **A timer that cannot is said, not hidden.** With a window on the event, the Run page
+  says a timer with none does not have it in force. A write that fails shows the reason.
+- **It does not change laps already recorded.** Unlike the minimum lap, it works before
+  Grid sees the crossings.
+- **Later, not built:** Grid merging close crossings itself, so the window holds on every
+  kind of timer and can be changed after the race.

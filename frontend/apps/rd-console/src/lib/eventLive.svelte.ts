@@ -20,6 +20,8 @@
 import { isRequestFailure } from '@gridfpv/protocol-client';
 import type {
   BracketRequest,
+  MainsRequest,
+  RoundRobinRequest,
   Class,
   Command,
   EventId,
@@ -30,6 +32,7 @@ import type {
   RaceId,
   RaceSignal,
   SavedFormat,
+  SeatChannel,
   TimerView,
   VideoSettings,
   VideoStatus
@@ -46,6 +49,8 @@ export type LiveSession = Pick<
   | 'subscribeChanges'
   | 'sendCommand'
   | 'createBracket'
+  | 'createMains'
+  | 'createRoundRobin'
   | 'postPass'
   | 'getRaceSignal'
   | 'listPilots'
@@ -54,7 +59,16 @@ export type LiveSession = Pick<
   | 'listFormats'
   | 'getVideoSettings'
   | 'getVideoStatus'
->;
+> & {
+  /**
+   * Which video channel each seat is on, as the timers say. Left out by a stand-in that
+   * has no timers; seats are then named without a channel.
+   */
+  listChannels?: () => Promise<SeatChannel[]>;
+};
+
+/** How often to ask which channel each seat is on, in milliseconds. They change rarely. */
+export const CHANNEL_POLL_MS = 20_000;
 
 /**
  * Turn whatever a failed call threw into the error shape `ErrorBanner` shows. The message
@@ -89,17 +103,23 @@ export class EventLive {
    * status, read with the timer list. `undefined` until read, or when the read fails.
    */
   video = $state.raw<{ settings: VideoSettings; status: VideoStatus } | undefined>(undefined);
+  /**
+   * Which video channel each seat is on, as far as the timers have said. It goes into
+   * every seat's name (see `names.seat`). A read that fails keeps the last answer.
+   */
+  channels = $state.raw<SeatChannel[]>([]);
   /** What a heat can be timed by: every timer, then the bench. */
   seatSources: SeatSource[] = $derived(seatSources(this.timers));
   /** The one resolver from ids to names for this event. */
   names: Names = $derived(
-    buildNames(this.view?.phases ?? [], this.pilots, this.timers, this.classes)
+    buildNames(this.view?.phases ?? [], this.pilots, this.timers, this.classes, this.channels)
   );
 
   readonly eventId: EventId;
   #session: LiveSession;
   #unsubscribe: (() => void) | undefined;
   #timerPoll: ReturnType<typeof setInterval> | undefined;
+  #channelPoll: ReturnType<typeof setInterval> | undefined;
   #stopped = false;
   #loading = false;
   #loadAgain = false;
@@ -131,6 +151,12 @@ export class EventLive {
     void this.reloadTimers();
     void this.reloadClasses();
     void this.reloadFormats();
+    void this.reloadChannels();
+    clearInterval(this.#channelPoll);
+    // Channels have no change feed. Every screen asks for them, whatever else it polls.
+    this.#channelPoll = this.#session.listChannels
+      ? setInterval(() => void this.reloadChannels(), CHANNEL_POLL_MS)
+      : undefined;
     clearInterval(this.#timerPoll);
     // Video has no change feed either, so it is asked for on the same beat as the timers.
     if (this.#pollTimers) void this.reloadVideo();
@@ -158,6 +184,23 @@ export class EventLive {
     this.#unsubscribe = undefined;
     clearInterval(this.#timerPoll);
     this.#timerPoll = undefined;
+    clearInterval(this.#channelPoll);
+    this.#channelPoll = undefined;
+  }
+
+  /**
+   * Ask again which channel each seat is on. A read that fails keeps the last answer: a
+   * channel is a help to a pilot, and it should not flicker away with one dropped request.
+   */
+  async reloadChannels(): Promise<void> {
+    if (!this.#session.listChannels) return;
+    try {
+      const channels = await this.#session.listChannels();
+      if (this.#stopped) return;
+      if (JSON.stringify(channels) !== JSON.stringify(this.channels)) this.channels = channels;
+    } catch {
+      // Keep what we have.
+    }
   }
 
   /**
@@ -287,6 +330,16 @@ export class EventLive {
   /** Generate a bracket. Same answers as {@link send}. */
   async createBracket(request: BracketRequest): Promise<boolean> {
     return this.#wrote(await this.#session.createBracket(this.eventId, request));
+  }
+
+  /** Generate stacked mains. Same answers as {@link send}. */
+  async createMains(request: MainsRequest): Promise<boolean> {
+    return this.#wrote(await this.#session.createMains(this.eventId, request));
+  }
+
+  /** Generate a round robin. Same answers as {@link send}. */
+  async createRoundRobin(request: RoundRobinRequest): Promise<boolean> {
+    return this.#wrote(await this.#session.createRoundRobin(this.eventId, request));
   }
 
   /** Log one gate crossing. Same answers as {@link send}. */

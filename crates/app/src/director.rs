@@ -29,13 +29,23 @@ use axum::routing::get;
 use axum::{Json, Router};
 use gridfpv_server::app::{router, smart_fallback};
 use gridfpv_server::events::EventRegistry;
-use tower_http::cors::CorsLayer;
+use gridfpv_server::network::Door;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 #[cfg(not(feature = "embed-assets"))]
 use tower_http::services::ServeDir;
 
-/// The default listen address: every interface on port 8080, so the RD console and the
-/// LAN spectators reach the Director without extra config.
-pub const DEFAULT_ADDR: &str = "0.0.0.0:8080";
+/// The default listen address: this computer only, on port 8080. Other devices come in by
+/// the two doors the director switches on in the console (docs/primitives.md §11.10).
+pub const DEFAULT_ADDR: &str = "127.0.0.1:8080";
+
+/// Why an address that is not on this computer is refused, in words.
+pub fn not_this_computer(addr: SocketAddr) -> String {
+    format!(
+        "Grid itself listens on this computer only, and {addr} is not an address on this \
+         computer. Use 127.0.0.1 and a port, such as 127.0.0.1:8080. To let other devices in, \
+         switch on Public or Remote RD on the Network page."
+    )
+}
 
 /// Resolved Director configuration, read from the environment with sane defaults.
 ///
@@ -59,7 +69,8 @@ pub struct Config {
 impl Config {
     /// Read the Director config from the environment, applying defaults.
     ///
-    /// - `GRIDFPV_ADDR` — listen address (default `0.0.0.0:8080`).
+    /// - `GRIDFPV_ADDR` — listen address (default `127.0.0.1:8080`). It must be an address on
+    ///   this computer: the Director's own listener is never put on the network.
     /// - `GRIDFPV_DATA_DIR` — directory for persistent events' SQLite files (one per created
     ///   event) and the pilot/class directories; unset ⇒ everything is in-memory
     ///   (non-durable).
@@ -67,9 +78,15 @@ impl Config {
     ///   `frontend/apps/rd-console/dist`, resolved relative to the workspace root.
     pub fn from_env() -> Result<Self, String> {
         let addr = match std::env::var("GRIDFPV_ADDR") {
-            Ok(value) => value.parse().map_err(|e| {
-                format!("GRIDFPV_ADDR ({value:?}) is not a valid socket address: {e}")
-            })?,
+            Ok(value) => {
+                let addr: SocketAddr = value.parse().map_err(|e| {
+                    format!("GRIDFPV_ADDR ({value:?}) is not a valid socket address: {e}")
+                })?;
+                if !addr.ip().to_canonical().is_loopback() {
+                    return Err(format!("GRIDFPV_ADDR: {}", not_this_computer(addr)));
+                }
+                addr
+            }
             Err(_) => DEFAULT_ADDR
                 .parse()
                 .expect("DEFAULT_ADDR is a valid address"),
@@ -159,6 +176,13 @@ where
         _ => None,
     };
 
+    // The Director's own listener is for this computer only (docs/primitives.md §11.10).
+    // Whoever reaches it is trusted as the director, so it is never put on the network,
+    // whoever asks.
+    if !addr.ip().to_canonical().is_loopback() {
+        return Err(not_this_computer(addr).into());
+    }
+
     // Bind first. If the port is taken this returns here, before anything long-lived has
     // been started: the desktop app tries again on another port, and a first try that had
     // already started the timer connections would leave a second set running.
@@ -179,7 +203,14 @@ where
         format!("http://127.0.0.1:{}", bound.port()),
     );
 
-    let app = build_app(registry, &assets);
+    let app = build_app(registry.clone(), &assets);
+
+    // Other devices (docs/primitives.md §11.10) come in by two more listeners, the Public
+    // door and the Remote RD door, which the director switches on and off in the console.
+    let network = registry.network();
+    network.set_main(bound);
+    let doors = [Door::Public, Door::Remote]
+        .map(|door| crate::network::spawn(registry.clone(), app.clone(), door));
 
     on_ready(&DirectorReady {
         bound,
@@ -187,9 +218,16 @@ where
         log_file,
     });
 
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await;
+    // The gate must know who is calling, so every connection carries its peer's address.
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await;
+    for door in doors {
+        door.abort();
+    }
     timers.abort();
     video.abort();
     renders.abort();
@@ -239,14 +277,17 @@ pub fn default_assets_dir() -> PathBuf {
 /// becomes a single portable file. The default build (feature off) serves from `assets` on
 /// disk exactly as before, keeping the hosted dev loop's rebuild-dist-only workflow intact.
 pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
-    router(registry)
+    let api = router(registry.clone())
         // Where the diagnostics log is (#380). Mounted HERE rather than in the API
         // router because the log file is an *app*-level concern (`crate::logging` owns it)
         // and `gridfpv-server` knows nothing about it.
-        .route("/diagnostics", get(diagnostics))
-        // Anything the API router does not handle falls through to `smart_fallback`:
-        // a mistyped API path → a typed `ProtocolError` 404, any other path → the SPA.
-        .fallback_service(smart_fallback(spa_service(assets)))
+        .route("/diagnostics", get(diagnostics));
+    // Anything the API router does not handle falls through to `smart_fallback`:
+    // a mistyped API path → a typed `ProtocolError` 404, any other path → the SPA.
+    let files = smart_fallback(spa_service(assets));
+    // The gate goes around both (docs/primitives.md §11): a caller on this computer is the
+    // director, and a caller from anywhere else is a visitor who may read the public pages.
+    gridfpv_server::access::guard(api, files, &registry)
         // SPA cache policy. Vite content-hashes every asset, so `assets/*` may be cached forever —
         // a changed file gets a new name. `index.html` must NOT be: it is the one file that names
         // those hashes, and it keeps its URL across every build.
@@ -256,8 +297,34 @@ pub fn build_app(registry: EventRegistry, assets: &Path) -> Router {
         // bundle, so a rebuilt console looked unchanged and even a hard reload was unreliable —
         // hours were lost to "is the new version up?" during a live bench session.
         .layer(axum::middleware::from_fn(spa_cache_headers))
-        // Permissive CORS so the cross-origin Tauri RD app can reach the API.
-        .layer(CorsLayer::permissive())
+        // A page on another origin may call the API only when it is on this computer: the
+        // dev server, or the desktop app's own window. Any other website gets no CORS
+        // answer, so a browser will not let it read anything here.
+        .layer(cors())
+}
+
+/// Which other origins a browser lets call the API: pages on this computer only.
+fn cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            origin.to_str().is_ok_and(local_origin)
+        }))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
+}
+
+/// Whether an `Origin` is a page on this computer: `http(s)://localhost` or a loopback
+/// address, on any port, or the desktop app's own window.
+pub fn local_origin(origin: &str) -> bool {
+    match origin.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("tauri") => true,
+        Some((scheme, host))
+            if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") =>
+        {
+            !host.contains('/') && gridfpv_server::access::is_loopback_host(host)
+        }
+        _ => false,
+    }
 }
 
 /// `GET /diagnostics` — **where the log file is** (#380).
@@ -303,10 +370,18 @@ async fn spa_cache_headers(req: axum::extract::Request, next: axum::middleware::
         // costs nothing, but it can never serve a stale shell without asking.
         "no-cache"
     };
-    resp.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static(value),
-    );
+    // An answer that says it must not be kept at all (a pilot's sign-in code) stays that way.
+    let keep_out = resp
+        .headers()
+        .get(axum::http::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("no-store"));
+    if !keep_out {
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static(value),
+        );
+    }
     resp
 }
 

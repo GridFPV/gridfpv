@@ -56,6 +56,8 @@ pub enum LockError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rulings {
     false_starts: BTreeSet<(RaceId, PilotId)>,
+    /// Pilots marked out of a race.
+    out: BTreeSet<(RaceId, PilotId)>,
     /// Each disqualification, and whether the pilot's earned place stays empty.
     disqualified: BTreeMap<(PhaseId, PilotId), bool>,
     /// Positions the director set by hand, per heat.
@@ -88,6 +90,12 @@ impl Rulings {
             }
             Event::FalseStartCleared { race, pilot } => {
                 self.false_starts.remove(&(race.clone(), pilot.clone()));
+            }
+            Event::PilotOut { race, pilot } => {
+                self.out.insert((race.clone(), pilot.clone()));
+            }
+            Event::PilotBackIn { race, pilot } => {
+                self.out.remove(&(race.clone(), pilot.clone()));
             }
             Event::Disqualified {
                 phase,
@@ -188,6 +196,11 @@ impl Rulings {
     /// Whether a false start is recorded against this pilot in this race.
     pub fn has_false_start(&self, race: &RaceId, pilot: &PilotId) -> bool {
         self.false_starts.contains(&(race.clone(), pilot.clone()))
+    }
+
+    /// Whether this pilot is marked out of this race.
+    pub fn is_out(&self, race: &RaceId, pilot: &PilotId) -> bool {
+        self.out.contains(&(race.clone(), pilot.clone()))
     }
 
     /// Whether a lock sits on exactly this phase (not on one above it).
@@ -350,6 +363,7 @@ mod tests {
                 first_lap: Default::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -376,6 +390,7 @@ mod tests {
             format: Some(one_race()),
             false_start_limit: limit,
             display_hint: None,
+            class: None,
         }
     }
 
@@ -398,6 +413,7 @@ mod tests {
             format: None,
             false_start_limit: None,
             display_hint: None,
+            class: None,
         }
     }
 

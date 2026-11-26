@@ -83,18 +83,8 @@
         : undefined
   );
 
-  /** The pilot's laps in order, the hole shot first as "HS"; `lap` counts from 0 (-1 for HS). */
-  const entries = $derived(
-    solo
-      ? [
-          ...(solo.holeShotMicros !== undefined
-            ? [{ label: 'HS', micros: solo.holeShotMicros, lap: -1 }]
-            : []),
-          ...solo.lapMicros.map((micros, i) => ({ label: `L${i + 1}`, micros, lap: i }))
-        ]
-      : []
-  );
-  const recent = $derived(entries.slice(-SHOWN));
+  /** The pilot's laps in order: the hole shot first as "HS", a marked restart as "RS". */
+  const recent = $derived(solo ? solo.listed.slice(-SHOWN) : []);
   /** The head's unscaled height, for a bottom corner: the laps hang below it. */
   let headPx = $state(0);
 
@@ -212,7 +202,7 @@
     </div>
     {#if solo && recent.length}
       <ol class="laps" aria-label="Recent laps">
-        {#each recent as e (e.label)}
+        {#each recent as e (e.key)}
           <li class="lap" class:lit={e.lap >= 0 && inRun(e.lap, solo.bestRun)}>
             <span class="ln">{e.label}</span>
             <span class="lt">{formatLapMicros(e.micros)}</span>

@@ -56,6 +56,7 @@
   } from '../lib/phases.js';
   import { formatHash } from '../lib/route.js';
   import { isBench } from '../lib/seats.js';
+  import { passWindowTrouble } from '../lib/timers.js';
   import {
     DISCARD_ARM_MS,
     RUN_KEYS,
@@ -74,7 +75,9 @@
   import { StartCue, unlockAudio, type CuePhase } from '../lib/startTone.js';
   import { runVideo } from '../lib/video.js';
   import DiscardDialog from './DiscardDialog.svelte';
+  import { takesCheckIns } from '../lib/checkin.js';
   import RunSeatCard from './RunSeatCard.svelte';
+  import RunAllLaps from './RunAllLaps.svelte';
 
   let {
     live,
@@ -84,8 +87,8 @@
   }: {
     live: EventLive;
     /**
-     * The heat to run, when the URL names one. A wire handle; its label is what is shown.
-     * With none named the page runs the heat being raced, or the next one.
+     * A heat to show in place of the one on the timer. The app never passes it: the page
+     * always shows the heat on the timer, which the Director keeps. Tests use it.
      */
     heat?: PhaseId;
     /** Put another heat on the timer. */
@@ -96,10 +99,29 @@
 
   const names = $derived(live.names);
   const view = $derived(live.view);
-  /** The heat on this page: the one named, or the one the Director would race next. */
+  /** The heat on this page: the one on the timer. (A test may name another.) */
   const heatId = $derived(named ?? (view ? defaultHeat(view) : undefined));
+
   const phase = $derived(view?.phases.find((p) => p.def.id === heatId && isHeat(p.def)));
   const races = $derived(view && heatId !== undefined ? racesOfHeat(view, heatId) : []);
+
+  // The page says "On the timer" above a heat, so the Director must agree that it is.
+  // Before the director has put anything there, the page shows the heat they would run
+  // first; tell the Director so, once. After that only a choice made by hand changes it,
+  // so two consoles can never pull it back and forth.
+  let claimed = false;
+  $effect(() => {
+    if (claimed || named !== undefined || !view || view.on_timer !== undefined) return;
+    if (heatId === undefined || !phase) return;
+    claimed = true;
+    void live.send({ PutOnTimer: { heat: heatId } }).catch(() => {});
+  });
+  /** The heat to go to once this one is done: the first in the run order that is not it. */
+  const nextUp = $derived(
+    view && !view.current_race && phase && (phase.complete || phase.locked)
+      ? view.queue.find((id) => id !== heatId)
+      : undefined
+  );
 
   // ── On the timer: a phase, then one of its heats ───────────────────────────
   const groups = $derived(view ? heatGroups(view.phases) : []);
@@ -160,8 +182,24 @@
     return undefined;
   });
 
+  /**
+   * The race the seat cards show when none is on: the heat's last saved race, once the heat
+   * is done and will not be raced again. A finished heat on the timer shows how it ended,
+   * not a row of empty cards. A heat with races still to fly shows its lineup, ready.
+   */
+  const flown = $derived(
+    !race && phase && (phase.complete || phase.locked)
+      ? races.filter((r) => r.state === 'Saved').at(-1)
+      : undefined
+  );
   const rows: SeatRow[] = $derived(
-    race ? raceSeatRows(race, names) : phase ? lineupSeatRows(phase, names) : []
+    race
+      ? raceSeatRows(race, names)
+      : flown
+        ? raceSeatRows(flown, names)
+        : phase
+          ? lineupSeatRows(phase, names)
+          : []
   );
   /**
    * What times this heat, by name, and what is wrong with it when something is. A heat is
@@ -182,7 +220,14 @@
           detail: 'Its seats cannot be timed. Add the heat again on a timer that is in the list.'
         };
       }
-      if (found.status.connected) return { adapter, name };
+      if (found.status.connected) {
+        // Connected: the one thing left to say is that the event's pass window is not on it.
+        return {
+          adapter,
+          name,
+          ...passWindowTrouble(name, found.status, live.view?.lap_rules.pass_window_micros)
+        };
+      }
       return {
         adapter,
         name,
@@ -377,6 +422,44 @@
     }
   }
 
+  /** Whether the race on screen is one a pilot can be marked out of. */
+  const canMarkOut = $derived(
+    race !== undefined && ['Staging', 'Running', 'Stopped'].includes(race.state)
+  );
+
+  /** Mark a pilot out of the race on screen, or put them back in. */
+  async function markOut(row: SeatRow, out: boolean) {
+    if (!race || row.pilot === undefined) return;
+    const fact = { race: race.race, pilot: row.pilot };
+    try {
+      await live.send({ Record: out ? { PilotOut: fact } : { PilotBackIn: fact } });
+    } catch (e) {
+      error = toProtocolError(e);
+    }
+  }
+
+  /** Whether the race on screen is one a pilot can be checked in to an open seat of. */
+  const canCheckIn = $derived(race !== undefined && takesCheckIns(race));
+  /** The pilots who can be checked in: everyone at the event with no seat of their own here. */
+  const checkInPilots = $derived(
+    live.pilots
+      .filter((entry) => !race?.seats.some((seat) => seat.pilot === entry.id))
+      .map((entry) => ({ id: entry.id, callsign: entry.callsign }))
+  );
+
+  /** Check a pilot in to an open seat of the race on screen, or drop whoever has it. */
+  async function checkIn(row: SeatRow, pilot: PilotId | undefined) {
+    if (!race) return;
+    const seat = { race: race.race, adapter: row.adapter, seat: row.seat };
+    try {
+      await live.send({
+        Record: pilot === undefined ? { SeatDropped: seat } : { SeatTaken: { ...seat, pilot } }
+      });
+    } catch (e) {
+      error = toProtocolError(e);
+    }
+  }
+
   const STATE_TONES = {
     Staging: 'warn',
     Running: 'success',
@@ -462,6 +545,16 @@
                   {/each}
                 </Select>
               </div>
+              {#if nextUp !== undefined}
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onclick={() => onrun(nextUp)}
+                  data-testid="next-heat"
+                >
+                  Next: {names.phase(nextUp)}
+                </Button>
+              {/if}
               <p class="rules" data-testid="run-rules">
                 {#if phase.format}
                   <a href={formatHash({ kind: 'page', page: 'formats' })}>{phase.format.name}</a>
@@ -641,9 +734,16 @@
               ? formatHash({ kind: 'capture', timer: row.adapter, seat: row.seat })
               : undefined}
             oncrossing={() => crossing(row)}
+            onout={canMarkOut ? (out) => markOut(row, out) : undefined}
+            pilots={checkInPilots}
+            oncheckin={canCheckIn ? (pilot) => checkIn(row, pilot) : undefined}
           />
         {/each}
       </ul>
+
+      {#if race}
+        <RunAllLaps {race} {names} />
+      {/if}
 
       {#if showRanking}
         <Card title="Ranking" elevation="sm">

@@ -130,11 +130,12 @@ test('the switch moves between Setup and the event, and each side remembers its 
   await openPage(page, 'Results');
   await expect(pagesNav(page).getByRole('link')).toHaveText([
     'Details',
+    'Pilot codes',
     'Phases',
     'Run',
     'Marshal',
     'Results',
-    'Overlays',
+    'Recordings',
     'Help'
   ]);
 
@@ -148,7 +149,8 @@ test('the switch moves between Setup and the event, and each side remembers its 
     'Classes',
     'Formats',
     'Video',
-    'Data',
+    'Overlays',
+    'Network',
     'Help'
   ]);
   await openPage(page, 'Formats');

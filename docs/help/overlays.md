@@ -2,6 +2,9 @@
 
 An overlay is a page you put on top of your video in OBS.
 
+The Overlays page is under **Setup**. You set the overlays up once, and they follow
+whichever event is open.
+
 ## Adding one to OBS
 
 1. In OBS, add a **Browser** source.
@@ -20,8 +23,10 @@ It is a small panel in one corner of the video. It shows:
 - the race clock, and a word for what is going on: READY, STAGING, LIVE, TIME UP or
   FINISHED.
 - with several pilots, a line for each one: place, laps, last lap and best lap.
-- with one pilot, their laps so far and their last six laps. `HS` is the hole shot. When the
-  heat is ranked on laps in a row, the best run is shown and its laps are lit up.
+- with one pilot, their laps so far and their last six laps. `HS` is the hole shot. `RS` is
+  a restart you marked on the Marshal page: it shows the time up to the pass the pilot
+  started again at, and it is not a lap. When the heat is ranked on laps in a row, the best
+  run is shown and its laps are lit up.
 
 A race with a time limit counts down. A small second clock shows the time since the start.
 

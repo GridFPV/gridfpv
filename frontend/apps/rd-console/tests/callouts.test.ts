@@ -39,7 +39,9 @@ const row = (seat: number, who: string, ...seconds: number[]): SeatRow => ({
   who,
   laps: laps(...seconds),
   onCourse: seconds.length > 0,
-  falseStart: false
+  falseStart: false,
+  out: false,
+  open: false
 });
 
 describe('spokenLap', () => {

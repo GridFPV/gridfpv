@@ -1,5 +1,5 @@
 /**
- * The Formats page: the saved formats as a table that says what each one does in words, and
+ * The Formats page: the saved formats as a list that says what each one does in words, and
  * the dialog that makes, changes and copies one. Rendered against a session whose format
  * seams are stand-ins.
  */
@@ -46,22 +46,20 @@ function open(start: SavedFormat[] = SAVED_FORMATS, seams: SessionSeams = {}) {
   return { session, listFormats, createFormat, updateFormat, deleteFormat };
 }
 
-/** The table as text: one string per row, cells joined by " | ". */
+/** The list as text: one string per format, its name and facts joined by " | ". */
 async function tableRows(): Promise<string[]> {
-  const table = await screen.findByRole('table', { name: 'Formats' });
-  return within(table)
-    .getAllByRole('row')
-    .slice(1)
+  const list = await screen.findByRole('list', { name: 'Formats' });
+  return within(list)
+    .getAllByRole('listitem')
     .map((row) =>
-      [...row.querySelectorAll('th, td')]
-        .slice(0, 5)
+      [...row.querySelectorAll('[data-testid="format-name"], .fact')]
         .map((cell) => cell.textContent?.trim())
         .join(' | ')
     );
 }
 
 const rowOf = async (name: string): Promise<HTMLElement> =>
-  (await screen.findByRole('rowheader', { name })).closest('tr') as HTMLElement;
+  await screen.findByRole('listitem', { name });
 
 describe('FormatsPage', () => {
   it('lists each saved format with what it does in words, and never its id', async () => {
@@ -81,7 +79,7 @@ describe('FormatsPage', () => {
   it('says so when no format is saved', async () => {
     open([]);
     expect(await screen.findByTestId('no-formats')).toHaveTextContent('No format is saved.');
-    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Formats' })).toBeNull();
   });
 
   it('says so when the formats cannot be read', async () => {
@@ -136,7 +134,7 @@ describe('a new format', () => {
     });
     // The dialog closes and the table is read again with the new format in it.
     await waitFor(() => expect(screen.queryByRole('form', { name: 'New format' })).toBeNull());
-    expect(await screen.findByRole('rowheader', { name: 'First to 5' })).toBeVisible();
+    expect(await screen.findByRole('listitem', { name: 'First to 5' })).toBeVisible();
   });
 
   it('asks for a name, in the dialog, before anything is sent', async () => {
@@ -268,9 +266,9 @@ describe('edit, duplicate and delete', () => {
     await waitFor(() => expect(deleteFormat).toHaveBeenCalledTimes(1));
     expect(deleteFormat.mock.calls[0][1]).toBe('fmt-practice-9k2d');
     await waitFor(() =>
-      expect(screen.queryByRole('rowheader', { name: 'Open practice' })).toBeNull()
+      expect(screen.queryByRole('listitem', { name: 'Open practice' })).toBeNull()
     );
-    expect(screen.getByRole('rowheader', { name: 'First to 3 laps' })).toBeVisible();
+    expect(screen.getByRole('listitem', { name: 'First to 3 laps' })).toBeVisible();
   });
 
   it('a refused delete leaves the format in the table', async () => {
@@ -284,6 +282,6 @@ describe('edit, duplicate and delete', () => {
     await waitFor(() => expect(deleteFormat).toHaveBeenCalledTimes(1));
     // The row is back to a plain Delete, and the format is still listed.
     expect(await within(row).findByRole('button', { name: /^Delete / })).toBeEnabled();
-    expect(screen.getByRole('rowheader', { name: 'Open practice' })).toBeVisible();
+    expect(screen.getByRole('listitem', { name: 'Open practice' })).toBeVisible();
   });
 });

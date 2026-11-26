@@ -46,3 +46,100 @@ describe('notAddedYet', () => {
     expect(notAddedYet([])).toEqual([]);
   });
 });
+
+describe('the pass window on the Run page', () => {
+  const on = { connected: true, pass_window: true };
+  const none = { connected: true, pass_window: false };
+
+  it('says nothing when the event sets none, whatever the timer can do', async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    for (const window of [undefined, 0]) {
+      expect(passWindowTrouble('Gate', none, window)).toBeUndefined();
+      expect(passWindowTrouble('Gate', on, window)).toBeUndefined();
+    }
+  });
+
+  it('says a timer with none does not have the event’s window in force, in seconds', async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    expect(passWindowTrouble('Gate', none, 1_500_000)).toEqual({
+      trouble: 'Gate has no pass window.',
+      detail:
+        "The event's pass window of 1.5 s is not in force on it: every crossing it reports counts by itself."
+    });
+    expect(passWindowTrouble('Gate', on, 1_500_000)).toBeUndefined();
+  });
+
+  it("passes on the Director's reason when the window could not be set, even with none on the event", async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    const failed = { ...on, pass_window_problem: 'Could not reach Gate.' };
+    for (const window of [undefined, 400_000]) {
+      expect(passWindowTrouble('Gate', failed, window)).toEqual({
+        trouble: 'The pass window could not be set on Gate.',
+        detail: 'Could not reach Gate.'
+      });
+    }
+  });
+
+  it('leaves a timer that is not connected to the bigger warning', async () => {
+    const { passWindowTrouble } = await import('../src/lib/timers.js');
+    expect(
+      passWindowTrouble('Gate', { connected: false, pass_window: false }, 400_000)
+    ).toBeUndefined();
+  });
+});
+
+describe('controlTrouble', () => {
+  const gate = { name: 'Gate', address: '192.168.1.50:7270' };
+
+  it('says nothing when Grid may change the timer', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    // A timer with no control at all, one nobody controls, and one Grid controls.
+    expect(controlTrouble(gate, { connected: true })).toBeUndefined();
+    expect(
+      controlTrouble(gate, { connected: true, control: { holder: 'Nobody' } })
+    ).toBeUndefined();
+    expect(
+      controlTrouble(gate, {
+        connected: true,
+        control: { holder: 'Grid' },
+        control_name: 'GridFPV race-laptop'
+      })
+    ).toBeUndefined();
+  });
+
+  it('names the program that has control, the name Grid is listed under, and the timer’s page', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    expect(
+      controlTrouble(gate, {
+        connected: true,
+        control: { holder: 'Other', name: 'RotorHazard pi-timer' },
+        control_name: 'GridFPV race-laptop'
+      })
+    ).toEqual({
+      trouble: '“RotorHazard pi-timer” has control of Gate.',
+      detail:
+        "Grid still shows its settings and takes its laps, but cannot change it. To change it from here, open the timer's own page and give control to “GridFPV race-laptop”.",
+      page: 'http://192.168.1.50:7270/'
+    });
+  });
+
+  it('still makes sense with no name for the program or for Grid', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    const said = controlTrouble(gate, {
+      connected: true,
+      control: { holder: 'Other', name: '  ' }
+    });
+    expect(said?.trouble).toBe('Another program has control of Gate.');
+    expect(said?.detail).toContain('give control to Grid.');
+  });
+
+  it('leaves a timer that is not connected to the bigger warning', async () => {
+    const { controlTrouble } = await import('../src/lib/timers.js');
+    expect(
+      controlTrouble(gate, {
+        connected: false,
+        control: { holder: 'Other', name: 'RotorHazard' }
+      })
+    ).toBeUndefined();
+  });
+});

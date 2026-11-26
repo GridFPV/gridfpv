@@ -14,7 +14,7 @@
 <Page
   title="Overlays"
   help="overlays"
-  lede="Pages that go on top of your video in OBS. They follow the open event and only read."
+  lede="Pages that go on top of your video in OBS. Set them up once: they follow whichever event is open, and only read."
 >
   <Card elevation="sm">
     <EventOverlays {session} />

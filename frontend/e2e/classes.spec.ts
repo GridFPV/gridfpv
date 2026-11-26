@@ -6,8 +6,8 @@
  *  1. **Built-ins + Custom CRUD** — open the console, land on the **home hub**, open the **Classes**
  *     page, and confirm the standard **built-in** classes are listed with org source badges and a
  *     built-in/lock indicator, and are **not removable** (no Remove button). Then **add** a class:
- *     the form has no org source picker (new classes are `Custom`), and the created row shows the
- *     `Custom` badge and keeps Edit/Remove; finally **remove** it.
+ *     the form takes an org the director types, and the created row shows it as
+ *     its tag and keeps Edit/Remove; finally **remove** it.
  *  2. **Hide / unhide** — hide a built-in, see it marked Hidden (and flagged on the wire), reload
  *     to prove it persisted, and unhide it again.
  *
@@ -18,44 +18,64 @@
 import { expect, test } from './observability.js';
 import { gotoPage } from './nav.js';
 
-test('Classes page lists the locked built-ins (org badges, not removable) and full CRUD on a Custom class', async ({
+test('Classes page lists the built-ins (org badges, not editable), full CRUD on a Custom class, and a built-in is removed and put back', async ({
   page
 }) => {
   const NAME = `E2E-Class-${Date.now()}`;
   // ── Setup → Classes ────────────────────────────────────────────────────────────────────
   await gotoPage(page, 'Classes');
 
-  // ── The built-ins are present, org-badged, locked (no Remove) ──────────────────────────
+  // ── The built-ins are present and org-badged ─────────────────────────────────────────
   const list = page.getByRole('list', { name: 'Class directory' });
   const openBuiltin = list.getByRole('listitem').filter({ hasText: 'Open Class' });
   await expect(openBuiltin).toBeVisible({ timeout: 15_000 });
-  // It carries its real org as a badge + a built-in/lock indicator…
+  // It carries its real org as a badge, and no lock or "Built-in" label…
   await expect(openBuiltin.getByText('MultiGP', { exact: true })).toBeVisible();
-  await expect(openBuiltin.getByLabel('Built-in')).toBeVisible();
-  // …and is read-only: no Edit / Remove on a built-in row.
-  await expect(openBuiltin.getByRole('button', { name: 'Remove' })).toHaveCount(0);
-  await expect(openBuiltin.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+  await expect(openBuiltin.getByText('Built-in')).toHaveCount(0);
+  // …and the same Edit and Remove as any other class. Both are tried at the end of this test.
+  await expect(openBuiltin.getByRole('button', { name: 'Edit' })).toBeVisible();
+  await expect(openBuiltin.getByRole('button', { name: 'Remove' })).toBeVisible();
+  await expect(page.getByTestId('removed-builtins')).toHaveCount(0);
   // A couple more are listed, across orgs.
   await expect(list.getByRole('listitem').filter({ hasText: 'Tiny Trainer' })).toBeVisible();
   await expect(list.getByRole('listitem').filter({ hasText: 'Street League' })).toBeVisible();
 
-  // ── Add a class — the form offers NO org source picker; new classes are Custom ───────────
+  // ── Add a class, with an org of the director's own typed in ──────────────────────────────
+  const ORG = 'E2E Club';
   await page.getByRole('button', { name: '+ Add class' }).click();
   const addForm = page.getByRole('form', { name: 'Add class' });
   await expect(addForm).toBeVisible();
   await expect(addForm.getByLabel('Source')).toHaveCount(0);
-  await expect(addForm.getByLabel('Add from MultiGP')).toHaveCount(0);
+  await expect(addForm).not.toContainText('Custom');
   await addForm.getByLabel('Name').fill(NAME);
+  // An org too long to be a tag is refused on the spot.
+  await addForm.getByLabel('Org').fill('x'.repeat(25));
+  await expect(addForm).toContainText('An org name can have 24 characters at most.');
+  await expect(page.getByRole('button', { name: 'Add class', exact: true })).toBeDisabled();
+  await addForm.getByLabel('Org').fill(ORG);
 
   await page.getByRole('button', { name: 'Add class', exact: true }).click();
   await expect(page.getByRole('form', { name: 'Control token' })).toBeHidden();
 
-  // The created class appears as a Custom row with full Edit/Remove controls.
+  // The created class appears with the org typed as its tag, and full Edit/Remove controls.
   const row = list.getByRole('listitem').filter({ hasText: NAME });
   await expect(row).toBeVisible({ timeout: 15_000 });
-  await expect(row.getByText('Custom', { exact: true })).toBeVisible();
-  await expect(row.getByLabel('Built-in')).toHaveCount(0);
+  await expect(row.getByTestId('class-org')).toHaveText(ORG);
+  await expect(row.getByText('Custom', { exact: true })).toHaveCount(0);
   await expect(row.getByRole('button', { name: 'Edit' })).toBeVisible();
+
+  // ── Clear the org: the tag goes away, and the Director has none for it ───────────────────
+  await row.getByRole('button', { name: 'Edit' }).click();
+  const editForm = page.getByRole('form', { name: 'Edit class' });
+  await expect(editForm.getByLabel('Org')).toHaveValue(ORG);
+  await editForm.getByLabel('Org').fill('');
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(row.getByTestId('class-org')).toHaveCount(0, { timeout: 15_000 });
+  const saved = (
+    (await (await page.request.get('/classes')).json()) as { name: string; org?: string }[]
+  ).find((c) => c.name === NAME);
+  expect(saved).toBeDefined();
+  expect(saved?.org).toBeUndefined();
 
   // ── Remove the Custom class (with the confirm step) ──────────────────────────────────────
   await row.getByRole('button', { name: 'Remove' }).click();
@@ -67,6 +87,48 @@ test('Classes page lists the locked built-ins (org badges, not removable) and fu
   });
   // The built-in is still there afterward.
   await expect(list.getByRole('listitem').filter({ hasText: 'Open Class' })).toBeVisible();
+
+  // ── Edit a class that came with Grid, remove it, and put it back as shipped ──────────────
+  const shrieker = list.getByRole('listitem').filter({ hasText: 'Shrieker' });
+  try {
+    await shrieker.getByRole('button', { name: 'Edit' }).click();
+    const shipped = page.getByRole('form', { name: 'Edit class' });
+    await expect(shipped.getByLabel('Name')).toHaveValue('Shrieker');
+    await expect(shipped.getByLabel('Org')).toHaveValue('UDL');
+    await shipped.getByLabel('Org').fill('E2E League');
+    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect(shrieker.getByTestId('class-org')).toHaveText('E2E League', { timeout: 15_000 });
+    // The edit is kept across a reload.
+    await page.reload();
+    await expect(shrieker.getByTestId('class-org')).toHaveText('E2E League', { timeout: 15_000 });
+
+    await shrieker.getByRole('button', { name: 'Remove' }).click();
+    await expect(confirm).toContainText('You can put those classes back at any time');
+    await confirm.getByRole('button', { name: 'Remove' }).click();
+    await expect(shrieker).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByTestId('removed-builtins')).toContainText(
+      '1 class that came with Grid has been removed.'
+    );
+    // The Director dropped it, and a reload does not bring it back.
+    const ids = async () =>
+      ((await (await page.request.get('/classes')).json()) as { id: string }[]).map((c) => c.id);
+    expect(await ids()).not.toContain('udl-shrieker');
+    await page.reload();
+    await expect(list.getByRole('listitem').filter({ hasText: 'Open Class' })).toBeVisible({
+      timeout: 15_000
+    });
+    await expect(shrieker).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Put them back' }).click();
+    await expect(shrieker).toBeVisible({ timeout: 15_000 });
+    // It is back as Grid ships it: the edit made above went with the removal.
+    await expect(shrieker.getByTestId('class-org')).toHaveText('UDL');
+    await expect(page.getByTestId('removed-builtins')).toHaveCount(0);
+    expect(await ids()).toContain('udl-shrieker');
+  } finally {
+    // Leave the shared Director with every built-in, whatever happened above.
+    await page.request.post('/classes/builtins');
+  }
 });
 
 test('RD hides a class on the Classes page; it stays hidden across a reload; unhide restores it', async ({

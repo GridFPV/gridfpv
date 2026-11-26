@@ -14,15 +14,28 @@ newest race.
   with the one being raced. The box above it picks another phase or all of them.
 - **Show discarded races** adds the races that were thrown away.
 
+## One seat at a time
+
+You marshal one pilot at a time. Under the races is **Seats**, with a button for each seat
+in the race. It shows the pilot, the seat, how many laps they have, and how many passes
+do not count. Click one to see that pilot's laps. Your pick stays when you open another
+race.
+
+The video is the same for every seat. It is one recording of the whole race.
+
 ## The trace
 
-Each seat has a picture of its signal for the whole race. The solid line is the enter
+The seat has a picture of its signal for the whole race. The solid line is the enter
 level and the dashed line is the exit level. Marks along the top show the start, the hole
 shot, and each lap.
 
-- **+** and **−** zoom. The arrows move left and right. **Whole race** fits it all.
+- **+** and **−** zoom, and so does the mouse wheel. **Whole race** fits it all.
+- Zoomed in, a scroll bar shows under the trace. Drag it to move left and right. You can
+  also drag the trace itself, use the arrows, or scroll sideways (hold Shift and turn the
+  wheel).
 - Click a lap's name in the table to find it on the trace.
 - Click an empty spot on the trace to add a lap there.
+- Drag a lap's mark to move it. A finger works too: slide the trace, or drag a mark.
 
 ## The video
 
@@ -57,10 +70,14 @@ line.
   and B was a false reading. Remove B and lap C now runs from the end of A.
 - **Mark as restart** is for a pilot who crashed and started again. That lap gets no time,
   and the laps either side stay as they were. A "fastest laps in a row" run never crosses a
-  restart.
-- **Add a lap** puts in a pass the gate missed. Type the seconds into the race.
+  restart. The one-pilot overlay lists it as `RS`.
+- **Add a lap** puts in a pass the gate missed. It is right under the trace. Type the
+  seconds into the race.
   If the gate missed the **hole shot**, add it the same way. A pass you add before the
   first one becomes the hole shot, and the old first pass becomes the end of lap 1.
+- **Move** a pass that was read at the wrong moment. Drag its mark along the trace, or
+  click the lap, go to the right moment in the video, and press **Move here**. Grid shows
+  the new lap times first. Nothing changes until you press **Move it**.
 - **Crossings that do not count** lists passes that were left out, each with the reason.
   One that was too soon after the pass before it, or too soon after the start, has
   **Count it**. Press it if the lap was real. After that no lap rule leaves it out.

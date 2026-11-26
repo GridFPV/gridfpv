@@ -113,6 +113,77 @@ describe('TimersPage', () => {
     expect(screen.getByRole('form', { name: 'Add timer' })).toBeVisible();
   });
 
+  it('renames a timer in a dialog, and keeps showing the name the timer gives itself', async () => {
+    // Added from the network, so Grid's name for it began as the timer's own.
+    const found: TimerView = {
+      timer: {
+        id: 'oft-3fa2-k1m2',
+        name: 'oft-3fa2',
+        kind: 'Oft',
+        address: '10.0.0.5:7270',
+        own_id: 'oft-3fa2'
+      },
+      status: { connected: true, seats: ['0'] }
+    };
+    const list = [found];
+    const renameTimerImpl = vi.fn(async (_base: string, _id: string, name: string) => {
+      list[0] = { ...found, timer: { ...found.timer, name } };
+      return list[0].timer;
+    });
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [...list]),
+      renameTimerImpl
+    });
+    render(TimersPage, { session });
+    const row = await screen.findByRole('listitem', { name: 'oft-3fa2' });
+    expect(within(row).getByTestId('own-name')).toHaveTextContent('Calls itself oft-3fa2');
+
+    await fireEvent.click(within(row).getByRole('button', { name: 'Rename' }));
+    const form = screen.getByRole('form', { name: 'Rename timer' });
+    const name = within(form).getByLabelText('Name');
+    // It starts from the name it has.
+    expect(name).toHaveValue('oft-3fa2');
+    await fireEvent.input(name, { target: { value: ' Start gate ' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    await waitFor(() =>
+      expect(renameTimerImpl).toHaveBeenCalledWith(
+        'http://d.local',
+        'oft-3fa2-k1m2',
+        'Start gate',
+        'tok'
+      )
+    );
+
+    // The list shows the new name; the timer's own name is still there, under it.
+    const renamed = await screen.findByRole('listitem', { name: 'Start gate' });
+    expect(within(renamed).getByTestId('own-name')).toHaveTextContent('Calls itself oft-3fa2');
+    expect(screen.queryByRole('form', { name: 'Rename timer' })).toBeNull();
+    // Grid's own handle for the timer is never on the page.
+    expect(document.body.textContent).not.toContain('oft-3fa2-k1m2');
+  });
+
+  it("shows the Director's sentence when a new name is refused, and keeps the dialog open", async () => {
+    const REFUSED = 'A timer needs a name.';
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [GATE]),
+      renameTimerImpl: vi.fn(async () => {
+        throw new Error(REFUSED);
+      })
+    });
+    render(TimersPage, { session });
+    const gate = await screen.findByRole('listitem', { name: 'Gate' });
+    // A timer with no name of its own shows no such line.
+    expect(within(gate).queryByTestId('own-name')).toBeNull();
+    await fireEvent.click(within(gate).getByRole('button', { name: 'Rename' }));
+    const form = screen.getByRole('form', { name: 'Rename timer' });
+    await fireEvent.input(within(form).getByLabelText('Name'), { target: { value: '' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    expect(await within(form).findByText(REFUSED)).toBeVisible();
+    expect(screen.getByRole('form', { name: 'Rename timer' })).toBeVisible();
+  });
+
   it('removes a timer only after the second click', async () => {
     const list = [GATE];
     const deleteTimerImpl = vi.fn(async () => {
@@ -365,5 +436,38 @@ describe('TimersPage', () => {
       // The timer list is still shown.
       expect(screen.getByRole('listitem', { name: 'Gate' })).toBeVisible();
     });
+  });
+
+  it('says which program has control of a timer, with a link to the timer’s own page', async () => {
+    const held: TimerView = {
+      timer: { id: 'gate-x1y2', name: 'Gate', kind: 'Oft', address: '10.0.0.5:7270' },
+      status: {
+        connected: true,
+        seats: ['0'],
+        control: { holder: 'Other', name: 'RotorHazard pi-timer' },
+        control_name: 'GridFPV race-laptop'
+      }
+    };
+    const ours: TimerView = {
+      timer: { id: 'split-a1b2', name: 'Split', kind: 'Oft', address: '10.0.0.6:7270' },
+      status: { connected: true, seats: ['0'], control: { holder: 'Grid' } }
+    };
+    const { session } = makeTestSession({
+      noEnter: true,
+      listTimersImpl: vi.fn(async () => [held, ours])
+    });
+    render(TimersPage, { session });
+    const row = await screen.findByRole('listitem', { name: 'Gate' });
+    const said = within(row).getByTestId('timer-control');
+    expect(said).toHaveTextContent(
+      "“RotorHazard pi-timer” has control of Gate. Grid cannot change this timer. Open the timer's page to give control to Grid."
+    );
+    expect(within(said).getByRole('link', { name: "Open the timer's page" })).toHaveAttribute(
+      'href',
+      'http://10.0.0.5:7270/'
+    );
+    // A timer Grid controls says nothing about it.
+    const other = screen.getByRole('listitem', { name: 'Split' });
+    expect(within(other).queryByTestId('timer-control')).toBeNull();
   });
 });

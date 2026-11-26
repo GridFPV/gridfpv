@@ -137,6 +137,13 @@ function expectNoRawIds() {
 
 afterEach(() => vi.restoreAllMocks());
 
+/** The seat picker under the races. */
+const seatPicks = () => within(screen.getByRole('list', { name: 'Seat to marshal' }));
+/** Pick the seat of the pilot called `who` to marshal. */
+async function pickSeat(who: string) {
+  await fireEvent.click(seatPicks().getByRole('button', { name: new RegExp(`^${who}\\b`) }));
+}
+
 describe('MarshalPage lists', () => {
   it('lists what needs a look with why, and the other races by heat', async () => {
     const flagged = savedRace();
@@ -409,6 +416,7 @@ describe('MarshalPage race review', () => {
       expect(screen.queryByRole('group', { name: 'Why remove lap 2?' })).toBeNull()
     );
 
+    await pickSeat('Bee');
     await fireEvent.click(screen.getByRole('button', { name: 'Remove the hole shot of Bee' }));
     await clickWhenReady(screen.getByRole('button', { name: 'No reason' }));
     await waitFor(() =>
@@ -452,6 +460,7 @@ describe('MarshalPage race review', () => {
     );
 
     // A crossing before the start can be counted too.
+    await pickSeat('Bee');
     await clickWhenReady(screen.getByRole('button', { name: /^Count the crossing of Bee/ }));
     await waitFor(() =>
       expect(sent(session)[1]).toEqual({ Record: { LapCounted: { race: RACE, crossing: 19 } } })
@@ -482,6 +491,7 @@ describe('MarshalPage race review', () => {
     await clickWhenReady(screen.getByRole('button', { name: 'Mark lap 3 of Ace as a restart' }));
     await waitFor(() => expect(sent(session)).toHaveLength(2));
     // Bee's first lap is a marked restart: no number, no time, and it can be unmarked.
+    await pickSeat('Bee');
     const bee = screen.getByRole('listitem', { name: 'Seat 2, Bee' });
     expect(within(bee).getByText('No lap time')).toBeVisible();
     expect(within(bee).getByRole('button', { name: /^Lap 1$/ })).toBeVisible();
@@ -496,6 +506,7 @@ describe('MarshalPage race review', () => {
 
   it('adds a lap at a time typed as seconds into the race', async () => {
     const { session } = await open(view(), RACE);
+    await pickSeat('Bee');
     const box = screen.getByRole('textbox', { name: 'Seconds into the race, for Bee' });
     const form = screen.getByRole('form', { name: 'Add a lap for Bee' });
     await fireEvent.input(box, { target: { value: 'soon' } });
@@ -524,6 +535,7 @@ describe('MarshalPage race review', () => {
     const { session } = await open(eventView({ phases: tree(), races: [flagged] }), RACE);
     await fireEvent.click(screen.getByRole('button', { name: 'False start by Ace' }));
     await waitFor(() => expect(sent(session)).toHaveLength(1));
+    await pickSeat('Bee');
     await clickWhenReady(screen.getByRole('button', { name: 'Clear the false start for Bee' }));
     await waitFor(() => expect(sent(session)).toHaveLength(2));
     expect(sent(session)).toEqual([
@@ -622,6 +634,66 @@ describe('MarshalPage race review', () => {
     const { nav } = await open(view(), RACE);
     await fireEvent.click(screen.getByRole('button', { name: 'Run this heat' }));
     expect(nav.onrun).toHaveBeenCalledWith(HEAT);
+  });
+
+  describe('MarshalPage: one seat at a time', () => {
+    it('lists every seat of the race to pick from, and shows the first', async () => {
+      await open(view(), RACE);
+      const picks = seatPicks().getAllByRole('button');
+      expect(picks).toHaveLength(2);
+      expect(picks[0]).toHaveTextContent('Ace');
+      expect(picks[0]).toHaveTextContent('Seat 1');
+      expect(picks[1]).toHaveTextContent('Bee');
+      expect(picks[1]).toHaveTextContent('Seat 2');
+      expect(picks[0]).toHaveAttribute('aria-pressed', 'true');
+      expect(picks[1]).toHaveAttribute('aria-pressed', 'false');
+      // Only the picked seat's laps are on the page.
+      const shown = within(screen.getByRole('list', { name: 'Seats' })).getAllByRole('listitem', {
+        name: /^Seat \d, /
+      });
+      expect(shown).toHaveLength(1);
+      expect(shown[0]).toHaveAccessibleName('Seat 1, Ace');
+      // No raw id reaches the picker.
+      expect(screen.getByRole('list', { name: 'Seat to marshal' }).textContent).not.toMatch(
+        /p-\d|bench/
+      );
+    });
+
+    it('shows the seat that is picked, and only that one', async () => {
+      await open(view(), RACE);
+      await pickSeat('Bee');
+      expect(screen.getByRole('listitem', { name: 'Seat 2, Bee' })).toBeVisible();
+      expect(screen.queryByRole('listitem', { name: 'Seat 1, Ace' })).toBeNull();
+      const picks = seatPicks().getAllByRole('button');
+      expect(picks[1]).toHaveAttribute('aria-pressed', 'true');
+      expect(picks[0]).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('says how many laps each seat has, and how many crossings do not count', async () => {
+      await open(view(), RACE);
+      const picks = seatPicks().getAllByRole('button');
+      expect(picks.map((p) => p.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+        'Ace Seat 1 · 3 laps · 2 not counted',
+        'Bee Seat 2 · 1 lap'
+      ]);
+    });
+
+    it('a saved race that can be ruled on carries no sentences of advice', async () => {
+      await open(view(), RACE);
+      expect(screen.queryByTestId('review-status')).toBeNull();
+      expect(screen.queryByTestId('add-hint')).toBeNull();
+      expect(document.body.textContent).not.toMatch(
+        /Missed the hole shot|Removing a lap joins|Or click an empty spot/
+      );
+    });
+
+    it('puts adding a lap above the lap list, under the trace', async () => {
+      await open(view(), RACE);
+      const seat = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+      const form = within(seat).getByRole('form', { name: 'Add a lap for Ace' });
+      const laps = within(seat).getByRole('table', { name: 'Laps for Ace' });
+      expect(form.compareDocumentPosition(laps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
   });
 });
 
@@ -763,6 +835,7 @@ describe('MarshalPage trace', () => {
     expect(picture.querySelector('canvas')).not.toBeNull();
     expect(ace).toHaveTextContent('Seat 1 · Gate');
     // The other seat logged nothing: one plain sentence naming the timer.
+    await pickSeat('Bee');
     const bee = screen.getByRole('listitem', { name: 'Seat 2, Bee' });
     expect(within(bee).getByTestId('no-signal')).toHaveTextContent(
       'Gate logged no signal for this seat, so there is no trace.'
@@ -790,6 +863,222 @@ describe('MarshalPage trace', () => {
     expect(lap2).toHaveAttribute('aria-pressed', 'false');
     await fireEvent.click(lap1);
     expect(lap1).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  // ── Moving a crossing ──────────────────────────────────────────────────────
+  /** Where a moment of the race sits across the 1000 px canvas, and back. */
+  function scale(view: EventView, signal: RaceSignal) {
+    const marks = traceMarks(view.races[0].seats[0], START);
+    const whole = wholeWindow(new RaceTrace(signal.seats[0].chunks), marks)!;
+    return {
+      x: (seconds: number) => ((START + seconds * S - whole.from) / (whole.to - whole.from)) * 1000,
+      at: (x: number) => Math.round(whole.from + (x / 1000) * (whole.to - whole.from))
+    };
+  }
+
+  it('dragging a crossing previews the move, and nothing is sent until "Move it"', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x, at } = scale(view, signal);
+    // Lap 2 ended 10.5 s into the race. Drag it to about 12 s.
+    const to = x(12);
+    await fireEvent.mouseDown(canvas, { clientX: x(10.5) + 1, button: 0 });
+    await fireEvent.mouseMove(canvas, { clientX: to });
+    await fireEvent.mouseUp(canvas, { clientX: to, button: 0 });
+
+    const bar = within(ace).getByRole('group', { name: 'Move lap 2 of Ace' });
+    expect(bar).toHaveTextContent('Move lap 2 from 10.500 s to');
+    expect(within(bar).getByTestId('move-laps')).toHaveTextContent(
+      /lap 2 becomes .+, lap 3 becomes .+\./
+    );
+    expect(within(ace).getByTestId('trace-moving')).toHaveTextContent('2');
+    expect(within(ace).getByRole('button', { name: /^Lap 2$/ })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    expect(session.sendCommand).not.toHaveBeenCalled();
+
+    await fireEvent.click(within(bar).getByRole('button', { name: 'Move it' }));
+    await waitFor(() =>
+      expect(sent(session)).toEqual([
+        { Record: { LapAdjusted: { race: RACE, crossing: 12, at: at(to) } } }
+      ])
+    );
+    await waitFor(() => expect(within(ace).queryByTestId('trace-moving')).toBeNull());
+  });
+
+  it('a move can be cancelled, and a drag on an empty spot still slides the trace', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x } = scale(view, signal);
+    await fireEvent.mouseDown(canvas, { clientX: x(10.5), button: 0 });
+    await fireEvent.mouseMove(canvas, { clientX: x(13) });
+    await fireEvent.mouseUp(canvas, { clientX: x(13), button: 0 });
+    const bar = within(ace).getByRole('group', { name: 'Move lap 2 of Ace' });
+    await fireEvent.click(within(bar).getByRole('button', { name: 'Cancel' }));
+    expect(within(ace).queryByRole('group', { name: 'Move lap 2 of Ace' })).toBeNull();
+    // Away from any crossing, a drag moves nothing.
+    await fireEvent.mouseDown(canvas, { clientX: x(14), button: 0 });
+    await fireEvent.mouseMove(canvas, { clientX: x(16) });
+    await fireEvent.mouseUp(canvas, { clientX: x(16), button: 0 });
+    expect(within(ace).queryByRole('group', { name: /^Move .* of Ace$/ })).toBeNull();
+    expect(session.sendCommand).not.toHaveBeenCalled();
+  });
+
+  // ── Moving along a zoomed-in trace ─────────────────────────────────────────
+  /** The stretch on screen, as the two times written under the plot. */
+  const showing = (seat: HTMLElement) =>
+    (within(seat).getByTestId('trace-window').textContent ?? '').match(/-?\d+\.\d+/g)!.map(Number);
+
+  /** Open the gate race with the trace zoomed in twice (a quarter of the race on screen). */
+  async function zoomedIn() {
+    layOut();
+    vi.spyOn(HTMLDivElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 1000,
+      bottom: 10,
+      width: 1000,
+      height: 10,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    });
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    expect(within(ace).queryByRole('scrollbar')).toBeNull();
+    const zoomIn = within(ace).getByRole('button', { name: 'Zoom in' });
+    await fireEvent.click(zoomIn);
+    await fireEvent.click(zoomIn);
+    return { ace, canvas, session, bar: within(ace).getByRole('scrollbar') };
+  }
+
+  it('zoomed in, a scroll bar shows which part is on screen and goes away at the whole race', async () => {
+    const { ace, bar } = await zoomedIn();
+    // Zooming with the buttons keeps the middle, so the plot is halfway along.
+    expect(bar).toHaveAttribute('aria-valuenow', '50');
+    expect(bar).toHaveAttribute('aria-orientation', 'horizontal');
+    expect(document.getElementById(bar.getAttribute('aria-controls')!)?.tagName).toBe('CANVAS');
+    const thumb = within(ace).getByTestId('trace-thumb');
+    expect(thumb.style.width).toBe('250px');
+    expect(thumb.style.left).toBe('375px');
+    await fireEvent.click(within(ace).getByRole('button', { name: 'Whole race' }));
+    expect(within(ace).queryByRole('scrollbar')).toBeNull();
+  });
+
+  it('dragging the scroll bar handle, or pressing beside it, slides the trace', async () => {
+    const { ace, bar, session } = await zoomedIn();
+    const [from, to] = showing(ace);
+    // Grab the handle (375–625 px) and take it 100 px right.
+    await fireEvent.mouseDown(bar, { clientX: 400, button: 0 });
+    expect(showing(ace)).toEqual([from, to]);
+    await fireEvent.mouseMove(document.body, { clientX: 500 });
+    await fireEvent.mouseUp(document.body, { clientX: 500, button: 0 });
+    const [later] = showing(ace);
+    expect(later).toBeGreaterThan(from);
+    expect(showing(ace)[1] - later).toBeCloseTo(to - from, 2);
+    expect(within(ace).getByTestId('trace-thumb').style.left).toBe('475px');
+    // Once let go, the mouse no longer moves it.
+    await fireEvent.mouseMove(document.body, { clientX: 900 });
+    expect(showing(ace)[0]).toBe(later);
+    // A press at the far left of the bar goes to the start of the race.
+    await fireEvent.mouseDown(bar, { clientX: 2, button: 0 });
+    await fireEvent.mouseUp(document.body, { clientX: 2, button: 0 });
+    expect(bar).toHaveAttribute('aria-valuenow', '0');
+    expect(within(ace).getByRole('button', { name: 'Earlier' })).toBeDisabled();
+    // A finger does the same.
+    await fireEvent.touchStart(bar, { touches: [{ clientX: 125 }] });
+    await fireEvent.touchMove(bar, { touches: [{ clientX: 875 }] });
+    await fireEvent.touchEnd(bar, { changedTouches: [{ clientX: 875 }] });
+    expect(bar).toHaveAttribute('aria-valuenow', '100');
+    expect(session.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('the scroll bar takes the arrow keys, Home and End', async () => {
+    const { ace, bar } = await zoomedIn();
+    const [from] = showing(ace);
+    await fireEvent.keyDown(bar, { key: 'ArrowRight' });
+    expect(showing(ace)[0]).toBeGreaterThan(from);
+    await fireEvent.keyDown(bar, { key: 'ArrowLeft' });
+    expect(showing(ace)[0]).toBeCloseTo(from, 2);
+    await fireEvent.keyDown(bar, { key: 'End' });
+    expect(bar).toHaveAttribute('aria-valuenow', '100');
+    expect(within(ace).getByRole('button', { name: 'Later' })).toBeDisabled();
+    await fireEvent.keyDown(bar, { key: 'Home' });
+    expect(bar).toHaveAttribute('aria-valuenow', '0');
+  });
+
+  it('a sideways scroll slides the trace, and an up-and-down one still zooms', async () => {
+    const { ace, canvas } = await zoomedIn();
+    const [from, to] = showing(ace);
+    // A trackpad swipe: 100 px across a 1000 px plot is a tenth of what is on screen.
+    await fireEvent.wheel(canvas, { deltaX: 100, deltaY: 3, clientX: 500 });
+    expect(showing(ace)[0]).toBeCloseTo(from + (to - from) / 10, 2);
+    expect(showing(ace)[1] - showing(ace)[0]).toBeCloseTo(to - from, 2);
+    // Shift and the wheel, on a browser that leaves it as up-and-down.
+    await fireEvent.wheel(canvas, { deltaY: -100, shiftKey: true, clientX: 500 });
+    expect(showing(ace)[0]).toBeCloseTo(from, 2);
+    // The plain wheel zooms, as before.
+    await fireEvent.wheel(canvas, { deltaY: -100, clientX: 500 });
+    expect(showing(ace)[1] - showing(ace)[0]).toBeLessThan(to - from);
+  });
+
+  it('a drag on an empty spot slides the trace, and carries on outside the plot', async () => {
+    const { ace, canvas, session } = await zoomedIn();
+    const [from, to] = showing(ace);
+    // Away from any crossing. The mouse leaves the canvas and the drag goes on.
+    await fireEvent.mouseDown(canvas, { clientX: 700, button: 0 });
+    await fireEvent.mouseLeave(canvas);
+    await fireEvent.mouseMove(document.body, { clientX: 500 });
+    await fireEvent.mouseUp(document.body, { clientX: 500, button: 0 });
+    // 200 px left on a 1000 px plot: a fifth of what is on screen, later.
+    expect(showing(ace)[0]).toBeCloseTo(from + (to - from) / 5, 2);
+    expect(within(ace).queryByRole('group', { name: /^Move .* of Ace$/ })).toBeNull();
+    expect(session.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('a finger drags a crossing the same way', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x } = scale(view, signal);
+    await fireEvent.touchStart(canvas, { touches: [{ clientX: x(10.5) }] });
+    await fireEvent.touchMove(canvas, { touches: [{ clientX: x(12) }] });
+    await fireEvent.touchEnd(canvas, { changedTouches: [{ clientX: x(12) }] });
+    expect(within(ace).getByRole('group', { name: 'Move lap 2 of Ace' })).toBeInTheDocument();
+  });
+
+  it('"Move here" moves the picked lap to the spot picked on the trace', async () => {
+    layOut();
+    const { view, signal } = onGate();
+    const { session } = await open(view, RACE, { getRaceSignal: vi.fn(async () => signal) });
+    const ace = screen.getByRole('listitem', { name: 'Seat 1, Ace' });
+    const canvas = (await within(ace).findByRole('img')).querySelector('canvas')!;
+    const { x, at } = scale(view, signal);
+    await fireEvent.click(within(ace).getByRole('button', { name: /^Lap 2$/ }));
+    // Nowhere to move it to yet.
+    expect(within(ace).queryByRole('button', { name: 'Move lap 2 of Ace here' })).toBeNull();
+    await clickAt(canvas, x(12));
+    await fireEvent.click(
+      await within(ace).findByRole('button', { name: 'Move lap 2 of Ace here' })
+    );
+    const bar = within(ace).getByRole('group', { name: 'Move lap 2 of Ace' });
+    await fireEvent.click(within(bar).getByRole('button', { name: 'Move it' }));
+    await waitFor(() =>
+      expect(sent(session)).toEqual([
+        { Record: { LapAdjusted: { race: RACE, crossing: 12, at: at(x(12)) } } }
+      ])
+    );
   });
 
   // ── The race's video, lined up with the trace ──────────────────────────────

@@ -8,9 +8,18 @@ Two boxes pick the heat. The first picks the **phase**. The second picks a **hea
 phase. A heat's name shows where it stands: how many races it has, or that it is complete,
 waiting or locked.
 
-With no heat picked by you, the page shows the heat with a race in progress, or the first
-heat of **Up next**. The boxes are locked while a race is counting down, running, or
-waiting to be saved.
+The heat on the timer is **the current race** for everyone: this page, any other console,
+the spectators' and pilots' phones, and sign-up. Grid remembers it, so it is still there
+after a reload or a restart.
+
+- Picking a heat here, or pressing **Run** on a heat on the Phases page, puts it on the
+  timer.
+- Starting a race puts its heat on the timer too.
+- After a race is saved the heat stays on the timer, showing its result, until you put
+  another one on. When the heat is complete, a **Next** button names the heat to go to.
+- Before you have put anything on the timer, the page shows the first heat of **Up next**.
+
+The boxes are locked while a race is counting down, running, or waiting to be saved.
 
 Under the boxes are the heat's format and the timer that times it.
 
@@ -50,11 +59,51 @@ Keys do nothing while you type in a field or a dialog is open.
 ## Seat cards
 
 One card for each seat in the heat. During a race it shows the pilot's place, lap count,
-last lap and best lap, and every lap in order. The fastest lap has a green border.
+last lap and best lap, and its latest laps in order. The fastest lap has a green border.
+
+A card lists the **last 9 laps** and no more, so it stays the same size in a long
+practice. The lap count and the best lap at the top are for the whole race. Beside the
+best lap is which lap it was, like **(lap 6)**, because that lap may have scrolled off.
+
+Every lap is in **All laps**, under the cards. Click it to open it. It lists each seat's
+laps with the pilot who flew them. Pick a seat or a pilot to see only theirs, and pick
+**Fastest first** to sort by time. The Marshal page also shows every lap, and is where a
+lap is changed.
 
 In a heat ranked on the fastest laps in a row, the card also shows **Best 3** for this
 race and **Heat best 3** for the whole heat. The laps that make up this race's best run
 are filled in.
+
+**Out** marks a pilot as out of the race. Use it when a pilot crashes or will not finish.
+
+- A race set to stop by itself stops waiting for that pilot. When every pilot still
+  flying has finished, the race ends as usual.
+- The laps the pilot flew still count. They are ranked on those laps like anyone else.
+- **Back in** takes it back if the pilot gets going again.
+- The button is there while a race is counting down, running or stopped. After you save
+  the race, the mark stays on it and shows on the results as **Out**.
+
+Grid still counts a lap if the quad is carried through the gate. Take that lap off on the
+[Marshal](#/help/marshal) page.
+
+### Open seats: checking a pilot in
+
+An open seat has no pilot named on it. This is how you run practice as one long heat:
+start the race and let pilots come and go.
+
+- **Check in…** on an open seat puts a pilot on it. Their first pass through the gate
+  starts their first lap. The card then shows that pilot and only their laps.
+- **Change pilot…** gives the seat to someone else. The first pilot keeps the laps they
+  flew.
+- **Drop** frees the seat.
+- Pilots can do the same for themselves from their phone or a kiosk, under **Fly now**.
+- A format can drop a seat by itself when nobody has flown it for a while. Set **Drop an
+  idle seat after** on the [format](#/help/formats).
+
+A pilot's practice laps show on their own page under **My practice**.
+
+If the heat's format ranks pilots (fastest lap, say), a pilot who checked in is ranked on
+the laps they flew while they had a seat. Laps flown on a seat nobody had count for nobody.
 
 **tune** opens the seat's tuning page. A **Bench** seat has a **Crossing** button, which
 logs a pass by hand.
@@ -79,4 +128,5 @@ The line above the buttons says why. The heat may be waiting on another heat, co
 locked. Or another heat has a race that is not saved or discarded yet, and a button takes
 you to it.
 
-A banner at the top says so if the heat's timer is not connected.
+A banner at the top says so if the heat's timer is not connected. It also says so if the
+event has a pass window and the timer cannot use it.

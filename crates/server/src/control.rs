@@ -19,6 +19,7 @@
 //! | `POST /events/{id}/commands` | one [`Command`]; refused with `Refused` (409) and a reason |
 //! | `POST /events/{id}/presets/bracket` | generate a bracket's phases |
 //! | `POST /events/{id}/presets/mains` | generate stacked mains |
+//! | `POST /events/{id}/presets/round-robin` | generate a round robin |
 //! | `POST /events/{id}/passes` | a gate crossing from outside |
 //! | `GET /events/{id}/changes` | server-sent `cursor` events |
 //! | `GET /events/{id}/signal?race=…` | a race's logged signal, for the marshal |
@@ -34,11 +35,11 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use futures_util::stream::{self, Stream};
-use gridfpv_engine::presets::{self, Bracket, Elimination, Mains};
+use gridfpv_engine::presets::{self, Bracket, Elimination, Mains, RoundRobin};
 use gridfpv_engine::state::EventState;
 use gridfpv_events::{
-    AdapterId, Command, Event, FieldSlice, Format, GateIndex, Pass, PhaseDef, PhaseId, RaceId,
-    SeatRef, SeatSource, SignalChunk, SignalThresholds, SourceTime,
+    AdapterId, Command, Event, FieldSlice, Format, GateIndex, Measure, Pass, PhaseDef, PhaseId,
+    RaceId, RankingRule, SeatRef, SeatSource, SignalChunk, SignalThresholds, SourceTime,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -207,7 +208,7 @@ impl Session<'_> {
         self.append(self.now, event)
     }
 
-    fn outcome(&self) -> CommandOutcome {
+    pub(crate) fn outcome(&self) -> CommandOutcome {
         CommandOutcome {
             cursor: self.state.applied,
         }
@@ -284,10 +285,21 @@ pub async fn post_command(
     Path(event_id): Path<EventId>,
     Json(command): Json<Command>,
 ) -> Result<Json<CommandOutcome>, ProtocolError> {
-    with_event(&registry, &event_id, |session| {
+    // The event's pass window is the timer's to apply. Whenever it may have changed, or a
+    // race is about to be flown, the timers are brought into step with it.
+    let syncs = match &command {
+        Command::Record(fact) => matches!(**fact, Event::LapRulesSet { .. }),
+        Command::PutOnTimer { .. } | Command::StartRace { .. } => true,
+        _ => false,
+    };
+    let outcome = with_event(&registry, &event_id, |session| {
         session.commands(vec![command])?;
         Ok(Json(session.outcome()))
-    })
+    })?;
+    if syncs && registry.active().is_some_and(|open| open.id == event_id) {
+        crate::timers::spawn_pass_window_sync(&registry);
+    }
+    Ok(outcome)
 }
 
 /// A seat every heat of a generated bracket is flown on.
@@ -326,6 +338,11 @@ pub struct BracketRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent: Option<PhaseId>,
+    /// The class the phase is for, when the director picked one. Its results then count
+    /// toward that class's standings, whatever pilots were picked in the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<gridfpv_events::ClassId>,
     /// The bracket's field, in seed order.
     pub field: Vec<FieldSlice>,
     /// Who starts on each seeded place, top seed first.
@@ -405,7 +422,8 @@ pub async fn post_bracket(
     Path(event_id): Path<EventId>,
     Json(body): Json<BracketRequest>,
 ) -> Result<Json<CommandOutcome>, ProtocolError> {
-    let defs = presets::bracket(Bracket {
+    let class = body.class.clone();
+    let mut defs = presets::bracket(Bracket {
         id: body.id,
         label: body.label,
         parent: body.parent,
@@ -418,6 +436,10 @@ pub async fn post_bracket(
         final_format: body.final_format,
     })
     .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    // The first phase made is the bracket itself: it carries the class.
+    if let Some(top) = defs.first_mut() {
+        top.class = class;
+    }
     with_event(&registry, &event_id, |session| {
         define(session, defs)?;
         Ok(Json(session.outcome()))
@@ -450,6 +472,71 @@ pub async fn post_mains(
         top_final_format: body.top_final_format,
     })
     .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    with_event(&registry, &event_id, |session| {
+        define(session, defs)?;
+        Ok(Json(session.outcome()))
+    })
+}
+
+/// What `POST /events/{id}/presets/round-robin` takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct RoundRobinRequest {
+    /// The id for the round robin phase. Its rounds and heats get ids beneath it.
+    pub id: PhaseId,
+    /// The director's name for it.
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent: Option<PhaseId>,
+    /// The class the phase is for, when the director picked one. Its results then count
+    /// toward that class's standings, whatever pilots were picked in the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub class: Option<gridfpv_events::ClassId>,
+    /// The round robin's field, in seed order.
+    pub field: Vec<FieldSlice>,
+    /// Who flies, top seed first.
+    pub entrants: Vec<SeatSource>,
+    /// The seats a heat is flown on. How many there are is the most pilots in a heat.
+    pub seats: Vec<PresetSeat>,
+    /// How many rounds. Every pilot flies one heat in each.
+    pub rounds: u32,
+    /// The format for every heat. Its points table scores each race.
+    pub format: Format,
+    /// How the pilots are ranked across every heat. Left out: most points, then most
+    /// wins, then best lap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ranking: Option<RankingRule>,
+}
+
+/// `POST /events/{event_id}/presets/round-robin` — generate a round robin, RD-gated.
+pub async fn post_round_robin(
+    _auth: ControlAuth,
+    State(registry): State<EventRegistry>,
+    Path(event_id): Path<EventId>,
+    Json(body): Json<RoundRobinRequest>,
+) -> Result<Json<CommandOutcome>, ProtocolError> {
+    let class = body.class.clone();
+    let mut defs = presets::round_robin(RoundRobin {
+        id: body.id,
+        label: body.label,
+        parent: body.parent,
+        field: body.field,
+        entrants: body.entrants,
+        seats: seats(body.seats),
+        rounds: body.rounds,
+        format: body.format,
+        ranking: body.ranking.unwrap_or_else(|| RankingRule {
+            sort: vec![Measure::Points, Measure::Wins, Measure::BestLap],
+        }),
+    })
+    .map_err(|e| ProtocolError::new(ErrorCode::BadRequest, e.to_string()))?;
+    // The first phase made is the round robin itself: it carries the class.
+    if let Some(top) = defs.first_mut() {
+        top.class = class;
+    }
     with_event(&registry, &event_id, |session| {
         define(session, defs)?;
         Ok(Json(session.outcome()))
@@ -739,6 +826,7 @@ mod tests {
                 first_lap: FirstLap::default(),
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::SavedRaces(1),
             ranking: Some(RankingRule {
@@ -748,7 +836,7 @@ mod tests {
         }
     }
 
-    /// Four pilots in one bracket with four seats: a single final heat, "finals/final".
+    /// Four pilots in one bracket with four seats: a single final heat, "finals/final/heat-1".
     fn bracket_request(staging_micros: i64) -> serde_json::Value {
         let pilots: Vec<PilotId> = ["ana", "ben", "cat", "dee"]
             .iter()
@@ -758,6 +846,7 @@ mod tests {
             id: PhaseId("finals".into()),
             label: "Finals".into(),
             parent: None,
+            class: None,
             field: vec![FieldSlice::Imported(pilots.clone())],
             entrants: pilots.into_iter().map(SeatSource::Pilot).collect(),
             seats: (0..4)
@@ -804,12 +893,13 @@ mod tests {
     #[tokio::test]
     async fn a_heat_is_raced_start_to_save_over_http_and_the_snapshot_shows_it() {
         let (registry, event) = with_bracket(0).await;
-        let heat = PhaseId("finals/final".into());
+        let heat = PhaseId("finals/final/heat-1".into());
         let before = state(&registry, &event).await;
-        assert_eq!(before.phases.len(), 2);
-        assert_eq!(before.phases[1].lineup.len(), 4);
+        // The bracket, its final (a phase), and the final's one heat.
+        assert_eq!(before.phases.len(), 3);
+        assert_eq!(before.phases[2].lineup.len(), 4);
         assert_eq!(
-            before.phases[1].lineup[0].who,
+            before.phases[2].lineup[0].who,
             SeatWhoView::Pilot(PilotId("ana".into()))
         );
         assert_eq!(before.current_race, None);
@@ -818,7 +908,7 @@ mod tests {
             command(&registry, &event, Command::StartRace { heat: heat.clone() }).await,
             StatusCode::OK
         );
-        let race = RaceId("finals/final#1".into());
+        let race = RaceId("finals/final/heat-1#1".into());
         // Dee (seat 3) flies the lap fastest; Ana never crosses.
         for (seat, at) in [("seat-1", 0), ("seat-2", 0), ("seat-3", 0)] {
             pass(&registry, &event, seat, at).await;
@@ -882,6 +972,114 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Refused);
         assert!(error.message.contains("no race"), "{}", error.message);
         assert_eq!(state(&registry, &event).await.cursor, before);
+    }
+
+    #[tokio::test]
+    async fn a_bracket_made_for_a_class_counts_toward_that_class_by_itself() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = new_event(&registry);
+        let command = |body: serde_json::Value| {
+            let registry = registry.clone();
+            let event = event.clone();
+            async move {
+                let (status, raw) = send(
+                    &registry,
+                    "POST",
+                    &format!("/events/{}/commands", event.0),
+                    Some(body),
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{raw}");
+            }
+        };
+        command(json!({"Record": {"RosterSet": {
+            "class": "open", "pilots": ["ana", "ben", "cat", "dee"]
+        }}}))
+        .await;
+        // Nothing is for the class yet.
+        let view = state(&registry, &event).await;
+        assert!(view.rosters[0].phases.is_empty());
+        assert!(view.rosters[0].counted_phases.is_empty());
+
+        // A bracket of pilots picked by hand, said to be for the class.
+        let mut request = bracket_request(0);
+        request["class"] = json!("open");
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/presets/bracket", event.0),
+            Some(request),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let view = state(&registry, &event).await;
+        // The bracket carries the class; its rounds and heats do not need to.
+        let finals = view
+            .phases
+            .iter()
+            .find(|phase| phase.def.id.0 == "finals")
+            .unwrap();
+        assert_eq!(
+            finals.def.class.as_ref().map(|c| c.0.as_str()),
+            Some("open")
+        );
+        assert!(
+            view.phases
+                .iter()
+                .filter(|phase| phase.def.id.0 != "finals")
+                .all(|phase| phase.def.class.is_none())
+        );
+        // It counts, as one phase, with nothing set by hand.
+        let roster = &view.rosters[0];
+        assert_eq!(roster.counted_phases, vec![PhaseId("finals".into())]);
+        assert_eq!(roster.phases.len(), 1);
+        assert!(roster.phases[0].counts);
+
+        // The director says it does not count, and it is left out but still listed.
+        command(json!({"Record": {"PhaseCounts": {"phase": "finals", "counts": false}}})).await;
+        let view = state(&registry, &event).await;
+        assert!(view.rosters[0].counted_phases.is_empty());
+        assert_eq!(view.rosters[0].phases.len(), 1);
+        assert!(!view.rosters[0].phases[0].counts);
+        // A phase that is not there cannot be said to count or not.
+        let (status, _) = send(
+            &registry,
+            "POST",
+            &format!("/events/{}/commands", event.0),
+            Some(json!({"Record": {"PhaseCounts": {"phase": "nope", "counts": false}}})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // The same bracket with no class said is for no class: it names its pilots.
+        let other = EventRegistry::new(None).unwrap();
+        let other_event = new_event(&other);
+        let (status, _) = send(
+            &other,
+            "POST",
+            &format!("/events/{}/commands", other_event.0),
+            Some(json!({"Record": {"RosterSet": {"class": "open", "pilots": ["ana"]}}})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &other,
+            "POST",
+            &format!("/events/{}/presets/bracket", other_event.0),
+            Some(bracket_request(0)),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            state(&other, &other_event).await.rosters[0]
+                .phases
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -959,10 +1157,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_round_robin_is_generated_whole_and_ranks_by_points_unless_told_otherwise() {
+        let registry = EventRegistry::new(None).unwrap();
+        let event = new_event(&registry);
+        let pilots: Vec<PilotId> = ["ana", "ben", "cat", "dee", "eve", "fin"]
+            .iter()
+            .map(|name| PilotId((*name).into()))
+            .collect();
+        let mut request = serde_json::to_value(RoundRobinRequest {
+            id: PhaseId("robin".into()),
+            label: "Round Robin".into(),
+            parent: None,
+            class: None,
+            field: vec![FieldSlice::Imported(pilots.clone())],
+            entrants: pilots.into_iter().map(SeatSource::Pilot).collect(),
+            seats: (0..3)
+                .map(|i| PresetSeat {
+                    adapter: AdapterId("oft".into()),
+                    seat: SeatRef(format!("seat-{i}")),
+                })
+                .collect(),
+            rounds: 3,
+            format: format(0),
+            ranking: None,
+        })
+        .unwrap();
+        let uri = format!("/events/{}/presets/round-robin", event.0);
+        let (status, _) = send(&registry, "POST", &uri, Some(request.clone()), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view = state(&registry, &event).await;
+        let robin = &view.phases[0];
+        assert_eq!(robin.def.display_hint.as_deref(), Some("round-robin"));
+        assert_eq!(
+            robin.def.kind,
+            gridfpv_events::PhaseKind::Group {
+                field: vec![FieldSlice::Imported(
+                    ["ana", "ben", "cat", "dee", "eve", "fin"]
+                        .iter()
+                        .map(|name| PilotId((*name).into()))
+                        .collect()
+                )],
+                combine: gridfpv_events::CombineRule::Measures(RankingRule {
+                    sort: vec![Measure::Points, Measure::Wins, Measure::BestLap],
+                }),
+            }
+        );
+        // Three rounds, each a phase holding two heats of three.
+        let rounds: Vec<&str> = view
+            .phases
+            .iter()
+            .filter(|phase| phase.def.parent == Some(PhaseId("robin".into())))
+            .map(|phase| phase.def.label.as_str())
+            .collect();
+        assert_eq!(rounds, vec!["Round 1", "Round 2", "Round 3"]);
+        assert_eq!(view.phases.len(), 1 + 3 + 6);
+        // Every heat can be flown from the start.
+        assert_eq!(view.queue.len(), 6);
+
+        // A shape that cannot work is a bad request, and nothing is logged.
+        request["id"] = json!("robin-2");
+        request["rounds"] = json!(0);
+        let (status, body) = send(&registry, "POST", &uri, Some(request), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.to_string().contains("at least one round"), "{body}");
+        assert_eq!(state(&registry, &event).await.phases.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn a_pilot_marked_out_shows_on_the_race_and_can_be_put_back_in() {
+        let (registry, event) = with_bracket(0).await;
+        let uri = format!("/events/{}/commands", event.0);
+        let start = json!({ "StartRace": { "heat": "finals/final/heat-1" } });
+        let (status, _) = send(&registry, "POST", &uri, Some(start), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let race = state(&registry, &event).await.races[0].race.clone();
+        let out_of = |view: &EventView| -> Vec<(String, bool)> {
+            view.races[0]
+                .seats
+                .iter()
+                .map(|seat| (seat.pilot.clone().unwrap().0, seat.out))
+                .collect()
+        };
+
+        let mark = json!({ "Record": { "PilotOut": { "race": race.0, "pilot": "ben" } } });
+        let (status, _) = send(&registry, "POST", &uri, Some(mark.clone()), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view = state(&registry, &event).await;
+        assert!(out_of(&view).contains(&("ben".into(), true)));
+        assert_eq!(out_of(&view).iter().filter(|(_, out)| *out).count(), 1);
+
+        // Marking the same pilot out twice is refused, in a sentence.
+        let (status, body) = send(&registry, "POST", &uri, Some(mark), None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.to_string().contains("already out"), "{body}");
+
+        let back = json!({ "Record": { "PilotBackIn": { "race": race.0, "pilot": "ben" } } });
+        let (status, _) = send(&registry, "POST", &uri, Some(back), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out_of(&state(&registry, &event).await)
+                .iter()
+                .all(|(_, out)| !out)
+        );
+    }
+
+    #[tokio::test]
     async fn writes_need_the_rd_token_and_reads_do_not() {
         let (registry, event) = with_bracket(0).await;
         let token = registry.tokens().issue_rd_token();
-        let start = json!({ "StartRace": { "heat": "finals/final" } });
+        let start = json!({ "StartRace": { "heat": "finals/final/heat-1" } });
         let uri = format!("/events/{}/commands", event.0);
         let (status, _) = send(&registry, "POST", &uri, Some(start.clone()), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1018,7 +1321,7 @@ mod tests {
                 &registry,
                 &event,
                 Command::StartRace {
-                    heat: PhaseId("finals/final".into()),
+                    heat: PhaseId("finals/final/heat-1".into()),
                 },
             )
             .await;
@@ -1054,7 +1357,7 @@ mod tests {
             &registry,
             &event,
             Command::StartRace {
-                heat: PhaseId("finals/final".into()),
+                heat: PhaseId("finals/final/heat-1".into()),
             },
         )
         .await;
@@ -1074,7 +1377,7 @@ mod tests {
             &registry,
             &event,
             Command::StartRace {
-                heat: PhaseId("finals/final".into()),
+                heat: PhaseId("finals/final/heat-1".into()),
             },
         )
         .await;
@@ -1107,7 +1410,7 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_names_things_by_their_names_never_by_id() {
         let (registry, event) = with_bracket(0).await;
-        let heat = PhaseId("finals/final".into());
+        let heat = PhaseId("finals/final/heat-1".into());
         command(&registry, &event, Command::StartRace { heat: heat.clone() }).await;
         let refuse = |body: serde_json::Value| {
             let registry = registry.clone();
@@ -1121,10 +1424,10 @@ mod tests {
             }
         };
         // Saving a race that is still running.
-        let message = refuse(json!({ "SaveRace": { "race": "finals/final#1" } })).await;
+        let message = refuse(json!({ "SaveRace": { "race": "finals/final/heat-1#1" } })).await;
         assert_eq!(message, "cannot save race 1 of Final while it is Running");
         // Starting again while it runs.
-        let message = refuse(json!({ "StartRace": { "heat": "finals/final" } })).await;
+        let message = refuse(json!({ "StartRace": { "heat": "finals/final/heat-1" } })).await;
         assert!(message.contains("race 1 of Final"), "{message}");
         assert!(!message.contains("finals"), "{message}");
         assert!(!message.contains('#'), "{message}");
@@ -1134,7 +1437,7 @@ mod tests {
     async fn a_races_logged_signal_is_read_back_and_kept_apart_from_the_next_race() {
         use gridfpv_events::{SignalChunk, SignalThresholds, SignalUnit};
         let (registry, event) = with_bracket(0).await;
-        let heat = PhaseId("finals/final".into());
+        let heat = PhaseId("finals/final/heat-1".into());
         let chunk = |from: i64, level: i32| {
             Event::SignalChunk(SignalChunk {
                 adapter: AdapterId("oft".into()),
@@ -1170,7 +1473,7 @@ mod tests {
             // 100 ms are missing before this one.
             chunk(300_000, -900),
         ]);
-        let first = RaceId("finals/final#1".into());
+        let first = RaceId("finals/final/heat-1#1".into());
         command(
             &registry,
             &event,
@@ -1193,7 +1496,7 @@ mod tests {
             );
             async move { send(&registry, "GET", &uri, None, None).await }
         };
-        let (status, body) = read("finals/final#1").await;
+        let (status, body) = read("finals/final/heat-1#1").await;
         assert_eq!(status, StatusCode::OK);
         let signal: RaceSignal = serde_json::from_value(body).unwrap();
         // Four seats in the lineup; only seat 0 has signal.
@@ -1209,7 +1512,7 @@ mod tests {
         assert!(signal.seats[1].chunks.is_empty());
 
         // The second race has only its own signal.
-        let (_, body) = read("finals/final#2").await;
+        let (_, body) = read("finals/final/heat-1#2").await;
         let signal: RaceSignal = serde_json::from_value(body).unwrap();
         assert_eq!(signal.seats[0].chunks.len(), 1);
         assert_eq!(

@@ -3,7 +3,8 @@
 Grid keeps everything in one folder on the computer it runs on. The Data page moves it all
 to another computer.
 
-The Data page is under **Setup**.
+The Data page is not in the menu, because it is rarely needed. Open it here:
+[the Data page](#/data).
 
 ## What is in a copy
 

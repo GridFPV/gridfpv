@@ -107,6 +107,13 @@
         <StatusPill status="Disconnected" label="Not connected" size="sm" />
       {/if}
       <span class="address">{shown.timer.address}</span>
+      {#if shown.timer.own_id}
+        <!-- The name the timer gives itself, the one it announces on the network. Grid's
+             own name for it is the one above and in every list. -->
+        <span class="own-name" data-testid="own-name">
+          Calls itself <span class="address">{shown.timer.own_id}</span>
+        </span>
+      {/if}
     </div>
     <!-- Keyed on the timer, so another timer starts a fresh draft and a fresh live feed. -->
     {#key shown.timer.id}
@@ -144,6 +151,10 @@
   .timer-name {
     font-size: var(--gf-font-size-lg);
     font-weight: var(--gf-font-weight-semibold);
+  }
+  .own-name {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
   }
   .address {
     color: var(--gf-text-muted);

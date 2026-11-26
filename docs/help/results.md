@@ -2,13 +2,6 @@
 
 What the event has decided so far.
 
-## Class standings
-
-Each class is listed from first to last, with the phase that placed each pilot. A class's
-standings come from the phases picked under **What counts** on the [Details](#/help/event)
-page. The first phase decides. A later one is only used for pilots the first one did not
-place.
-
 ## Phase results
 
 Pick a phase to see its ranking and the numbers behind each place. The page opens on the
@@ -21,6 +14,18 @@ phase raced last.
 - **Wins** and **Points** show when the format ranks by them.
 - **Set by hand** marks a place the director set. **Did not fly** marks a pilot with no
   race. **Disqualified** marks a pilot who was removed.
+
+## Class standings
+
+Under the phase results.
+
+Each class is listed from first to last, with the phase that placed each pilot. A class's
+standings come from the ranked phases made for that class. Grid works out which, with the
+latest one first. The first phase decides. A later one is only used for pilots the first
+one did not place. To change the order, or to leave a phase out, open the class on the
+[Details](#/help/event) page.
+
+Until a phase counts for a class, its card says so and shows no table.
 
 ## The races of a phase
 

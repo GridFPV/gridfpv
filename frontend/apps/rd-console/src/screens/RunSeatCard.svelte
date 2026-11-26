@@ -5,12 +5,21 @@
    * in a row it also shows that run: this race's, the heat's best so far, and which laps
    * make it up.
    *
+   * While a race is being flown, or has stopped and is not saved yet, a seat with a pilot
+   * has an **Out** button: the pilot has crashed or will not finish. The race then stops
+   * waiting for them. Their laps still count. **Back in** takes it back.
+   *
+   * An **open seat** (no pilot named on it) can have a pilot checked in while the race is
+   * flown: pick them in "Check in". The laps on the seat are then theirs from their next
+   * pass, and the card shows that pilot and those laps. **Drop** frees the seat.
+   *
    * A bench seat has no timer behind it, so it also carries a "Crossing" button marked
    * "Bench" that logs a crossing by hand. A seat on a real timer never shows it.
    */
   import { Badge, Button, formatMicros } from '@gridfpv/components';
-  import { inRun, type LapRun } from '../lib/overlay.js';
-  import type { SeatRow } from '../lib/run.js';
+  import type { LapRun } from '../lib/overlay.js';
+  import type { PilotId } from '@gridfpv/types';
+  import { cardLaps, runLapsLabel, type SeatRow } from '../lib/run.js';
 
   let {
     row,
@@ -19,7 +28,10 @@
     run,
     heatBestMicros,
     tuneHref,
-    oncrossing
+    oncrossing,
+    onout,
+    pilots = [],
+    oncheckin
   }: {
     row: SeatRow;
     /** Whether a race is running, so a crossing would count. */
@@ -34,15 +46,73 @@
     tuneHref?: string;
     /** Log a crossing on this seat by hand (the bench tool). */
     oncrossing: () => void;
+    /**
+     * Mark the pilot out of the race (`true`), or back in (`false`). Left out when there
+     * is no race a pilot could be out of, and the button is then not shown.
+     */
+    onout?: (out: boolean) => void;
+    /** The pilots who can be checked in to an open seat, by callsign. */
+    pilots?: readonly { id: PilotId; callsign: string }[];
+    /**
+     * Check a pilot in to this open seat, or (`undefined`) drop whoever has it. Left out
+     * when there is no race a seat could be taken in.
+     */
+    oncheckin?: (pilot: PilotId | undefined) => void;
   } = $props();
+
+  // The latest laps only, so the card is one size however long the race runs. Which lap
+  // was the best is said beside the best time. Every lap is in the table under the cards.
+  const listed = $derived(cardLaps(row.laps, row.bestLapMicros, run));
 </script>
 
-<li class="seat" aria-label="{row.seatName}, {row.who}">
+<li class="seat" class:out={row.out} aria-label="{row.seatName}, {row.who}">
   <div class="head">
     <span class="seat-name">{row.seatName}</span>
     <span class="who">{row.who}</span>
     {#if row.falseStart}<Badge tone="danger">False start</Badge>{/if}
-    {#if row.onCourse && racing}<Badge tone="success" dot>On course</Badge>{/if}
+    {#if row.out}
+      <Badge tone="warn">Out</Badge>
+    {:else if row.onCourse && racing}
+      <Badge tone="success" dot>On course</Badge>
+    {/if}
+    {#if oncheckin && row.open}
+      <span class="checkin">
+        <select
+          aria-label="Check a pilot in to {row.seatName}"
+          value=""
+          onchange={(e) => {
+            const picked = e.currentTarget.value;
+            e.currentTarget.value = '';
+            if (picked) oncheckin(picked);
+          }}
+        >
+          <option value="">{row.pilot === undefined ? 'Check in…' : 'Change pilot…'}</option>
+          {#each pilots.filter((pilot) => pilot.id !== row.pilot) as pilot (pilot.id)}
+            <option value={pilot.id}>{pilot.callsign}</option>
+          {/each}
+        </select>
+        {#if row.pilot !== undefined}
+          <Button
+            size="sm"
+            variant="secondary"
+            title="Free this seat. The laps this pilot flew stay theirs."
+            aria-label="Drop {row.who} from {row.seatName}"
+            onclick={() => oncheckin(undefined)}>Drop</Button
+          >
+        {/if}
+      </span>
+    {/if}
+    {#if onout && row.pilot !== undefined && !row.open}
+      <Button
+        size="sm"
+        variant="secondary"
+        title={row.out
+          ? 'Put this pilot back in the race'
+          : 'This pilot has crashed or will not finish. The race stops waiting for them.'}
+        aria-label={row.out ? `Put ${row.who} back in` : `Mark ${row.who} out`}
+        onclick={() => onout(!row.out)}>{row.out ? 'Back in' : 'Out'}</Button
+      >
+    {/if}
     {#if tuneHref}<a class="tune" href={tuneHref} aria-label="Tune {row.seatName}">tune</a>{/if}
     {#if row.bench}
       <span class="bench">
@@ -71,16 +141,22 @@
       <dt>Last lap</dt>
       <dd data-stat="last">{formatMicros(row.lastLapMicros)}</dd>
     </div>
-    <div class="stat">
+    <div class="stat wide">
       <dt>Best lap</dt>
-      <dd data-stat="best">{formatMicros(row.bestLapMicros)}</dd>
+      <dd data-stat="best">
+        {formatMicros(row.bestLapMicros)}{#if listed.bestNumber !== undefined}
+          <span class="which">{' '}(lap {listed.bestNumber})</span>{/if}
+      </dd>
     </div>
     {#if runLength !== undefined}
-      <div class="stat">
+      <div class="stat wide">
         <dt>Best {runLength}</dt>
-        <dd data-stat="run">{formatMicros(run?.totalMicros)}</dd>
+        <dd data-stat="run">
+          {formatMicros(run?.totalMicros)}{#if run}
+            <span class="which">{' '}({runLapsLabel(run)})</span>{/if}
+        </dd>
       </div>
-      <div class="stat">
+      <div class="stat wide">
         <dt>Heat best {runLength}</dt>
         <dd data-stat="heat-run">{formatMicros(heatBestMicros)}</dd>
       </div>
@@ -88,9 +164,9 @@
   </dl>
   {#if row.laps.length > 0}
     <ol class="laps" aria-label="Laps for {row.seatName}">
-      {#each row.laps as lap, index (lap.crossing)}
-        <li class:best={lap.micros === row.bestLapMicros} class:in-run={inRun(index, run)}>
-          <span class="n">{index + 1}</span>{formatMicros(lap.micros)}
+      {#each listed.laps as shown (shown.lap.crossing)}
+        <li class:best={shown.best} class:in-run={shown.inRun} data-lap={shown.number}>
+          <span class="n">{shown.number}</span>{formatMicros(shown.lap.micros)}
         </li>
       {/each}
     </ol>
@@ -107,6 +183,14 @@
     display: grid;
     gap: var(--gf-space-3);
     align-content: start;
+  }
+  /* A pilot who is out is no longer the one to watch. */
+  .seat.out {
+    border-style: dashed;
+  }
+  .seat.out .who,
+  .seat.out .stats {
+    opacity: 0.6;
   }
   .head {
     display: flex;
@@ -129,6 +213,21 @@
     font-weight: var(--gf-font-weight-bold);
     overflow-wrap: anywhere;
   }
+  .checkin {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gf-space-1);
+  }
+  .checkin select {
+    font: inherit;
+    font-size: var(--gf-font-size-sm);
+    color: var(--gf-text);
+    background: var(--gf-surface);
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-sm);
+    padding: 0.2em 0.4em;
+    max-width: 9rem;
+  }
   .bench {
     margin-left: auto;
     display: inline-flex;
@@ -138,13 +237,31 @@
   .stats {
     margin: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
+    /* Place, laps and last lap share the top row. A column never grows past its share, so
+       one long value cannot push into the next. */
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: end;
     gap: var(--gf-space-2);
   }
   .stat {
     display: flex;
     flex-direction: column-reverse;
     gap: 2px;
+  }
+  /* A best time has words after it ("lap 9", "laps 7 to 9"), so it gets a row of its own:
+     the name on the left, the time on the right. On a very narrow card the time drops
+     under the name instead of running over it. */
+  .stat.wide {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0 var(--gf-space-2);
+  }
+  .stat.wide dd {
+    margin-left: auto;
+    text-align: right;
   }
   .stat dt {
     font-size: var(--gf-font-size-xs);
@@ -192,6 +309,13 @@
   .laps li.best {
     border-color: var(--gf-success);
     color: var(--gf-success);
+  }
+  /* Which lap a best time was: small and quiet beside the time. */
+  .which {
+    font-size: var(--gf-font-size-sm);
+    font-weight: normal;
+    color: var(--gf-text-muted);
+    white-space: nowrap;
   }
   .laps .n {
     margin-right: 0.5em;

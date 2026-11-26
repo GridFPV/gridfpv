@@ -12,6 +12,8 @@
  */
 
 import type {
+  AddressRequest,
+  BuiltinClasses,
   ActiveEvent,
   AdapterId,
   BracketRequest,
@@ -21,41 +23,58 @@ import type {
   CommandOutcome,
   CreateClassRequest,
   CreateEventRequest,
+  CreatePilotRequest,
+  CreateTimerRequest,
+  RenameTimerRequest,
   DataCopy,
   DataExport,
   DataInfo,
-  OverlayLook,
-  OverlayPlacement,
-  CreatePilotRequest,
-  CreateTimerRequest,
   DiscoveredTimer,
   EventId,
   EventMeta,
   EventView,
   Format,
+  KioskPassView,
+  KioskView,
   MainsRequest,
+  RoundRobinRequest,
+  Door,
+  DoorRequest,
+  NetworkView,
+  TokenRequest,
+  OverlayLook,
+  OverlayPlacement,
   PassRequest,
+  PhaseId,
   Pilot,
+  PilotAccessView,
+  PilotCodeView,
   PilotId,
   ProtocolError,
+  PublicEvent,
+  PublicHello,
+  PublicPilot,
   RaceId,
   RaceSignal,
+  RenderRequest,
   SavedFormat,
+  SeatChannel,
   SeatLevels,
   SeatProfile,
   SeatProfileRequest,
   SetClassHiddenRequest,
   SignalChunk,
+  SignupSeat,
   Timer,
   TimerConfig,
   TimerProfiles,
   TimerView,
   UpdateClassRequest,
   UpdatePilotRequest,
-  RenderRequest,
   VideoSettings,
   VideoSettingsRequest,
-  VideoStatus
+  VideoStatus,
+  SeatRef
 } from '@gridfpv/types';
 
 /** Minimal `fetch` surface this client needs (injectable for tests / Node). */
@@ -156,7 +175,12 @@ interface RequestOptions {
   token?: string;
   /** Inject a `fetch` (defaults to the global). Used by tests and Node. */
   fetch?: FetchLike;
+  /** A kiosk pass: the pilot who proved who they are at a shared tablet (§11.4). */
+  kiosk?: string;
 }
+
+/** The header a kiosk pass is sent in. */
+export const KIOSK_HEADER = 'X-GridFPV-Kiosk';
 
 /**
  * **The one request path.** Every endpoint below routes through here: it resolves the injected
@@ -181,6 +205,7 @@ async function apiRequest(
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  if (options.kiosk) headers[KIOSK_HEADER] = options.kiosk;
   const init: RequestInit = { headers };
   if (options.method) init.method = options.method;
   if (options.body !== undefined) init.body = JSON.stringify(options.body);
@@ -422,6 +447,26 @@ export async function createTimer(
     '/timers',
     { method: 'POST', body: request, token, fetch: options.fetch },
     'add the timer'
+  );
+}
+
+/**
+ * Give a timer another name (`PUT /timers/{id}`). RD-gated. Only the name people see changes;
+ * the timer itself is not told. A blank name is a **400** with a sentence for the director, an
+ * unknown id a **404**. Resolves to the {@link Timer} as it now is.
+ */
+export async function renameTimer(
+  baseUrl: string,
+  id: AdapterId,
+  name: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Timer> {
+  return apiJson<Timer>(
+    baseUrl,
+    `/timers/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: { name } satisfies RenameTimerRequest, token, fetch: options.fetch },
+    'rename the timer'
   );
 }
 
@@ -772,6 +817,478 @@ export async function deleteDataImport(
   );
 }
 
+/**
+ * The two doors other devices come in by, and where their listeners stand (`GET /network`).
+ * The access token is in the answer only on the Grid computer.
+ */
+export async function getNetwork(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(baseUrl, '/network', options, 'read the network setting');
+}
+
+/** Open or shut a door, or change its port (`PUT /network/{door}`), RD-gated. */
+export async function putDoor(
+  baseUrl: string,
+  door: Door,
+  request: DoorRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(
+    baseUrl,
+    `/network/${door === 'Public' ? 'public' : 'remote'}`,
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the network setting'
+  );
+}
+
+/**
+ * Change the access token of the Remote RD door (`PUT /network/token`): to the one given,
+ * or to a new one Grid makes. Only the Grid computer may.
+ */
+export async function putAccessToken(
+  baseUrl: string,
+  request: TokenRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(
+    baseUrl,
+    '/network/token',
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the access token'
+  );
+}
+
+/**
+ * Set the public address (`PUT /network/address`): the address every public link and QR code
+ * uses, such as a name on the race network or an internet address a tunnel carries to the
+ * Public door. An empty one clears it. RD-gated.
+ */
+export async function putPublicAddress(
+  baseUrl: string,
+  request: AddressRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<NetworkView> {
+  return apiJson<NetworkView>(
+    baseUrl,
+    '/network/address',
+    { method: 'PUT', body: request, token, fetch: options.fetch },
+    'change the public address'
+  );
+}
+
+/**
+ * Who the Director takes this browser for, and which event is open (`GET /public/hello`).
+ * Open to everyone: it is the first thing a page asks.
+ */
+export async function getPublicHello(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<PublicHello> {
+  return apiJson<PublicHello>(baseUrl, '/public/hello', options, 'reach Grid');
+}
+
+/**
+ * Every pilot in an event with their sign-in code (`GET /events/{id}/access`). For the
+ * director: a visitor is refused.
+ */
+export async function getPilotAccess(
+  baseUrl: string,
+  event: EventId,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<PilotAccessView> {
+  return apiJson<PilotAccessView>(
+    baseUrl,
+    eventPath(event, '/access'),
+    options,
+    "read the pilots' sign-in codes"
+  );
+}
+
+/** Give a pilot a new sign-in code; the old one stops working. RD-gated. */
+export async function resetPilotCode(
+  baseUrl: string,
+  event: EventId,
+  pilot: PilotId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PilotCodeView> {
+  return apiJson<PilotCodeView>(
+    baseUrl,
+    eventPath(event, `/access/${encodeURIComponent(pilot)}/reset`),
+    { method: 'POST', token, fetch: options.fetch },
+    'give the pilot a new code'
+  );
+}
+
+/** Sign a pilot's device out; their code still works. RD-gated. */
+export async function endPilotSession(
+  baseUrl: string,
+  event: EventId,
+  pilot: PilotId,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    eventPath(event, `/access/${encodeURIComponent(pilot)}/session`),
+    { method: 'DELETE', token, fetch: options.fetch },
+    "sign the pilot's device out"
+  );
+}
+
+/** Where a pilot's QR code picture is served from, for an `<img>`. */
+export function pilotQrUrl(baseUrl: string, event: EventId, pilot: PilotId): string {
+  return `${trimSlash(baseUrl)}${eventPath(event, `/access/${encodeURIComponent(pilot)}/qr`)}`;
+}
+
+/**
+ * Sign in as a pilot with their code (`POST /public/pilot/session`). The Director sets a
+ * cookie the browser then sends by itself, and answers who the pilot is.
+ */
+export async function signInPilot(
+  baseUrl: string,
+  code: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PublicPilot> {
+  return apiJson<PublicPilot>(
+    baseUrl,
+    '/public/pilot/session',
+    { method: 'POST', body: { code }, fetch: options.fetch },
+    'sign in'
+  );
+}
+
+/** Sign out as a pilot (`DELETE /public/pilot/session`). */
+export async function signOutPilot(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/pilot/session',
+    { method: 'DELETE', fetch: options.fetch },
+    'sign out'
+  );
+}
+
+/** The kiosk codes waiting to be used and the kiosks set up (`GET /kiosk`). Director only. */
+export async function getKiosks(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(baseUrl, '/kiosk', options, 'read the kiosks');
+}
+
+/** Make one more kiosk code (`POST /kiosk/codes`). Each sets up one tablet, once. */
+export async function newKioskCode(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    '/kiosk/codes',
+    { method: 'POST', token, fetch: options.fetch },
+    'make a kiosk code'
+  );
+}
+
+/** Cancel a kiosk code that has not been used (`DELETE /kiosk/codes/{code}`). */
+export async function cancelKioskCode(
+  baseUrl: string,
+  code: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    `/kiosk/codes/${encodeURIComponent(code)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'cancel the kiosk code'
+  );
+}
+
+/**
+ * Name a kiosk, so two tablets can be told apart (`PUT /kiosk/devices/{number}`). An
+ * empty name takes the name away.
+ */
+export async function renameKiosk(
+  baseUrl: string,
+  number: number,
+  name: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    `/kiosk/devices/${number}`,
+    { method: 'PUT', body: { name }, token, fetch: options.fetch },
+    'name the kiosk'
+  );
+}
+
+/** Remove a kiosk, so its tablet stops being one (`DELETE /kiosk/devices/{number}`). */
+export async function removeKiosk(
+  baseUrl: string,
+  number: number,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskView> {
+  return apiJson<KioskView>(
+    baseUrl,
+    `/kiosk/devices/${number}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove the kiosk'
+  );
+}
+
+/**
+ * Make this device a kiosk, with a kiosk code the director made
+ * (`POST /public/pilot/kiosk/device`). The code is used up. The Director sets a cookie the
+ * browser then sends by itself.
+ */
+export async function kioskSetUp(
+  baseUrl: string,
+  code: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/pilot/kiosk/device',
+    { method: 'POST', body: { code }, fetch: options.fetch },
+    'set up the kiosk'
+  );
+}
+
+/**
+ * Prove who a pilot is at a kiosk, with their code (`POST /public/pilot/kiosk`). Unlike
+ * {@link signInPilot} it sets no cookie and leaves the pilot's own phone signed in. The
+ * pass it answers is what the kiosk hands to the calls below, and it stops working by
+ * itself a little while after it was last used.
+ */
+export async function kioskIn(
+  baseUrl: string,
+  code: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<KioskPassView> {
+  return apiJson<KioskPassView>(
+    baseUrl,
+    '/public/pilot/kiosk',
+    { method: 'POST', body: { code }, fetch: options.fetch },
+    'check the code'
+  );
+}
+
+/** The pilot is done at the kiosk (`DELETE /public/pilot/kiosk`). */
+export async function kioskDone(
+  baseUrl: string,
+  pass: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/pilot/kiosk',
+    { method: 'DELETE', kiosk: pass, fetch: options.fetch },
+    'sign out'
+  );
+}
+
+/**
+ * The signed-in pilot takes a seat in a heat (`POST /public/pilot/signup/take`). Who the
+ * pilot is comes from their sign-in, never from here. Rejects with the Director's reason
+ * when the rules do not allow it.
+ */
+export async function takeSpot(
+  baseUrl: string,
+  heat: PhaseId,
+  seat: SignupSeat,
+  options: { fetch?: FetchLike; kiosk?: string } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/signup/take',
+    { method: 'POST', body: { heat, seat }, fetch: options.fetch, kiosk: options.kiosk },
+    'take the spot'
+  );
+}
+
+/** The signed-in pilot takes the first free spot on a seat (`POST /public/pilot/signup/next`). */
+export async function takeNextSpot(
+  baseUrl: string,
+  phase: PhaseId,
+  seat: SignupSeat,
+  options: { fetch?: FetchLike; kiosk?: string } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/signup/next',
+    { method: 'POST', body: { phase, seat }, fetch: options.fetch, kiosk: options.kiosk },
+    'take the next free spot'
+  );
+}
+
+/** The signed-in pilot gives their spot in a heat up (`POST /public/pilot/signup/leave`). */
+export async function leaveSpot(
+  baseUrl: string,
+  heat: PhaseId,
+  options: { fetch?: FetchLike; kiosk?: string } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/signup/leave',
+    { method: 'POST', body: { heat }, fetch: options.fetch, kiosk: options.kiosk },
+    'leave the heat'
+  );
+}
+
+/**
+ * The signed-in pilot takes an open seat in a race that is being flown
+ * (`POST /public/pilot/checkin/take`). The laps on the seat are theirs from their next
+ * crossing. Who the pilot is comes from their sign-in, never from here.
+ */
+export async function takeSeat(
+  baseUrl: string,
+  race: RaceId,
+  seat: { adapter: AdapterId; seat: SeatRef },
+  options: { fetch?: FetchLike; kiosk?: string } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/checkin/take',
+    {
+      method: 'POST',
+      body: { race, adapter: seat.adapter, seat: seat.seat },
+      fetch: options.fetch,
+      kiosk: options.kiosk
+    },
+    'take the seat'
+  );
+}
+
+/** The signed-in pilot gives up the seat they took (`POST /public/pilot/checkin/drop`). */
+export async function dropSeat(
+  baseUrl: string,
+  race: RaceId,
+  options: { fetch?: FetchLike; kiosk?: string } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    '/public/pilot/checkin/drop',
+    { method: 'POST', body: { race }, fetch: options.fetch, kiosk: options.kiosk },
+    'drop the seat'
+  );
+}
+
+/** Which event is open, for a visitor (`GET /public/event`). Empty when none is. */
+export async function getPublicEvent(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PublicEvent> {
+  return apiJson<PublicEvent>(baseUrl, '/public/event', options, 'see which event is open');
+}
+
+/**
+ * The open event's snapshot as a visitor may see it (`GET /public/event/state`): the
+ * console's own shape, with the director's things taken out.
+ */
+export async function getPublicEventState(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EventView> {
+  return apiJson<EventView>(baseUrl, '/public/event/state', options, 'read the event');
+}
+
+/** The pilots in the open event: callsign and colour only (`GET /public/event/pilots`). */
+export async function listPublicPilots(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Pilot[]> {
+  return apiJson<Pilot[]>(baseUrl, '/public/event/pilots', options, 'read the pilots');
+}
+
+/** The classes in the open event: name only (`GET /public/event/classes`). */
+export async function listPublicClasses(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Class[]> {
+  return apiJson<Class[]>(baseUrl, '/public/event/classes', options, 'read the classes');
+}
+
+/** The timers the open event is flown on: name and seats only (`GET /public/event/timers`). */
+export async function listPublicTimers(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<TimerView[]> {
+  return apiJson<TimerView[]>(baseUrl, '/public/event/timers', options, 'read the timers');
+}
+
+/**
+ * The video channel of each seat the open event is flown on (`GET /public/event/channels`).
+ * A bench seat has none. The Director asks each timer at most once in a while.
+ */
+export async function listPublicChannels(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<SeatChannel[]> {
+  return apiJson<SeatChannel[]>(baseUrl, '/public/event/channels', options, 'read the channels');
+}
+
+/**
+ * Hear when the open event changes, as a visitor (`GET /public/event/changes`). The same
+ * feed as {@link subscribeChanges}, for the one event that is open.
+ */
+export function subscribePublicChanges(
+  baseUrl: string,
+  onCursor: (cursor: number) => void,
+  opts: { EventSource?: EventSourceConstructor; onError?: () => void } = {}
+): () => void {
+  const Source: EventSourceConstructor | undefined =
+    opts.EventSource ?? (globalThis as { EventSource?: EventSourceConstructor }).EventSource;
+  if (!Source) throw new Error('This browser cannot listen for live changes.');
+  const source = new Source(`${trimSlash(baseUrl)}/public/event/changes`);
+  source.addEventListener('cursor', (event) => {
+    const cursor = Number(event.data);
+    if (Number.isFinite(cursor)) onCursor(cursor);
+  });
+  if (opts.onError) source.addEventListener('error', opts.onError);
+  return () => source.close();
+}
+
+/**
+ * Sign in as the director from another device (`POST /public/session`). The Director sets
+ * a cookie the browser then sends by itself; the page never keeps the token.
+ */
+export async function signInDirector(
+  baseUrl: string,
+  token: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/session',
+    { method: 'POST', token, fetch: options.fetch },
+    'sign in'
+  );
+}
+
+/** Sign out again (`DELETE /public/session`). */
+export async function signOutDirector(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/public/session',
+    { method: 'DELETE', fetch: options.fetch },
+    'sign out'
+  );
+}
+
 /** How the race overlay looks: where it sits and which logos it has (`GET /overlay/look`). */
 export async function getOverlayLook(
   baseUrl: string,
@@ -912,8 +1429,8 @@ export async function updateClass(
 
 /**
  * Delete a class (`DELETE /classes/{id}`) — issue #84. RD-gated. An unknown id answers **404**.
- * A built-in class is read-only and answers **400**. Resolves once the delete succeeds, or rejects
- * on a non-2xx / transport failure.
+ * A built-in class can be removed too; {@link restoreBuiltinClasses} puts them back. Resolves
+ * once the delete succeeds, or rejects on a non-2xx / transport failure.
  */
 export async function deleteClass(
   baseUrl: string,
@@ -951,6 +1468,31 @@ export async function setClassHidden(
     `/classes/${encodeURIComponent(id)}/hidden`,
     { method: 'PUT', body, token, fetch: options.fetch },
     'change the class visibility'
+  );
+}
+
+/** How many built-in classes the director has removed (`GET /classes/builtins`). Open. */
+export async function getBuiltinClasses(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<BuiltinClasses> {
+  return apiJson<BuiltinClasses>(baseUrl, '/classes/builtins', options, 'read the classes');
+}
+
+/**
+ * Put back every built-in class that was removed (`POST /classes/builtins`). RD-gated.
+ * Resolves to the whole list of classes.
+ */
+export async function restoreBuiltinClasses(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Class[]> {
+  return apiJson<Class[]>(
+    baseUrl,
+    '/classes/builtins',
+    { method: 'POST', token, fetch: options.fetch },
+    'put the built-in classes back'
   );
 }
 
@@ -1028,6 +1570,25 @@ export async function createMains(
     eventPath(id, '/presets/mains'),
     { method: 'POST', body: request, token, fetch: options.fetch },
     'add the mains'
+  );
+}
+
+/**
+ * Generate a round robin (`POST /events/{id}/presets/round-robin`). RD-gated. All or none,
+ * like {@link createBracket}.
+ */
+export async function createRoundRobin(
+  baseUrl: string,
+  id: EventId,
+  request: RoundRobinRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CommandOutcome> {
+  return apiJson<CommandOutcome>(
+    baseUrl,
+    eventPath(id, '/presets/round-robin'),
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add the round robin'
   );
 }
 

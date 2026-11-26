@@ -76,7 +76,7 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     await expect(page.getByText('Nothing to race yet.')).toBeVisible();
 
     // ── Add a heat: Ace on Seat 1, Bee on Seat 2, first to 3 laps ────────────────────────
-    await page.getByRole('button', { name: '+ Add heat' }).click();
+    await page.getByRole('button', { name: 'Add a practice phase' }).click();
     const form = page.getByRole('form', { name: 'Add a heat' });
     await form.getByLabel('Heat name').fill(HEAT);
     await form.getByRole('button', { name: ACE, exact: true }).click();
@@ -84,10 +84,12 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     await form.getByLabel('Format').selectOption({ label: 'First to 3 laps' });
     await page.getByRole('button', { name: 'Add heat', exact: true }).click();
     await expect(form).toBeHidden({ timeout: 15_000 });
+    // A heat is always in a phase: this one is on the Practice phase's own page.
+    await page.getByRole('link', { name: 'Open Practice' }).click();
 
     // The heat is in the phase list, ready, with its lineup by seat and callsign.
     const phase = page
-      .getByRole('list', { name: 'Phases' })
+      .getByRole('list', { name: 'Heats of Practice' })
       .locator('li.phase')
       .filter({ hasText: HEAT });
     await expect(phase).toContainText('Ready', { timeout: 15_000 });
@@ -97,10 +99,24 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
 
     // ── Open the Run view ────────────────────────────────────────────────────────────────
     await phase.getByRole('button', { name: `Run ${HEAT}` }).click();
-    await expect(page).toHaveURL(/#\/event\/run\//);
+    // The address does not carry the heat: which heat is on the timer is the Director's.
+    await expect(page).toHaveURL(/#\/event\/run$/);
     await expect(page.getByRole('heading', { name: 'Run', level: 1 })).toBeVisible();
     // The heat is on the timer, with its format and what times it said in words.
     await expect(heatOnTimer(page)).toHaveText(HEAT);
+    // The console told the Director, so every other screen agrees on the current heat.
+    await expect
+      .poll(async () => {
+        const told = (await (await page.request.get(`/events/${eventId}/state`)).json()) as {
+          on_timer?: string;
+          phases: { def: { id: string; label: string } }[];
+        };
+        return told.phases.find((entry) => entry.def.id === told.on_timer)?.def.label;
+      })
+      .toBe(HEAT);
+    // A reload keeps it: it does not live in the address or in this browser.
+    await page.reload();
+    await expect(heatOnTimer(page)).toHaveText(HEAT, { timeout: 15_000 });
     await expect(openEvent(page)).toContainText(EVENT);
     await expect(page.getByTestId('run-rules')).toContainText('First to 3 laps');
     await expect(page.getByTestId('timed-by')).toHaveText('Timed by Bench');
@@ -162,14 +178,20 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
 
     // ── No wire handle is on the page ────────────────────────────────────────────────────
     const state = (await (await page.request.get(`/events/${eventId}/state`)).json()) as {
-      phases: { def: { id: string }; complete: boolean; ranking: { pilot: string }[] }[];
+      phases: {
+        def: { id: string; parent?: string };
+        complete: boolean;
+        ranking: { pilot: string }[];
+      }[];
       races: { race: string; state: string }[];
     };
-    expect(state.phases).toHaveLength(1);
-    expect(state.phases[0].complete).toBe(true);
+    // The Practice phase, and the heat in it.
+    expect(state.phases).toHaveLength(2);
+    const flown = state.phases.find((phase) => phase.def.parent !== undefined)!;
+    expect(flown.complete).toBe(true);
     expect(state.races.map((race) => race.state)).toEqual(['Saved']);
-    const phaseId = state.phases[0].def.id;
-    const pilotIds = state.phases[0].ranking.map((placed) => placed.pilot);
+    const phaseId = flown.def.id;
+    const pilotIds = flown.ranking.map((placed) => placed.pilot);
     expect(pilotIds).toHaveLength(2);
     const raw = [phaseId, state.races[0].race, '#1', 'bench', 'seat-1', 'seat-2', ...pilotIds];
     const runText = await page.locator('body').innerText();
@@ -180,6 +202,7 @@ test('RD adds a heat, runs one race with bench crossings, saves it, and sees the
     await expect(heatOnTimer(page)).toContainText(HEAT, { timeout: 15_000 });
     await expect(ranking.nth(0)).toContainText(ACE);
     await openPage(page, 'Phases');
+    await page.getByRole('link', { name: 'Open Practice' }).click();
     await expect(phase).toContainText('Complete', { timeout: 15_000 });
 
     // ── And the Results page has the heat's ranking, in the same order ───────────────────

@@ -5,11 +5,16 @@
    * The list of timers the Director knows. Each row shows the timer's name and address,
    * whether the Director is connected to it, what is wrong when it is not (the Director's
    * own sentence), how many seats it reports and how well its clock is known. A timer is
-   * added in a dialog and removed with a two-step button. **Tune** opens the timer's Tune page.
+   * added in a dialog and removed with a two-step button. **Settings** opens the timer's own
+   * page.
+   *
+   * A timer's name is Grid's own and a person can change it (**Rename**). The name the timer
+   * gives itself, the one it announces on the network, is shown under it and never changes
+   * here.
    *
    * Under the list, **Found on the network** shows the timers that advertise themselves and
    * are not added yet. Each has an Add button that adds it in one click, with the name the
-   * timer gives itself and the address it was found at.
+   * timer gives itself and the address it was found at. It can be renamed afterwards.
    *
    * The Director holds the connection to each timer and there is no change feed for them, so
    * this page reads both lists again every {@link TIMER_POLL_MS} while it is open.
@@ -37,6 +42,7 @@
   import type { Session } from '../lib/session.svelte.js';
   import {
     clockSentence,
+    controlTrouble,
     notAddedYet,
     seatCount,
     seatCountSentence,
@@ -161,6 +167,39 @@
     }
   }
 
+  // ── Rename a timer ─────────────────────────────────────────────────────────
+  // The name is Grid's own: what people see in every list. The timer is not told.
+  /** The timer being renamed, while the dialog is open. */
+  let renaming = $state.raw<TimerView | undefined>(undefined);
+  let newName = $state('');
+  let renameSaving = $state(false);
+  let renameError = $state<string | undefined>(undefined);
+
+  function openRename(view: TimerView) {
+    renaming = view;
+    newName = view.timer.name;
+    renameError = undefined;
+  }
+
+  async function submitRename(e?: Event) {
+    e?.preventDefault();
+    if (renameSaving || !renaming) return;
+    renameError = undefined;
+    renameSaving = true;
+    try {
+      // The Director checks the name and answers in a sentence, shown as it is.
+      const renamed = await session.renameTimer(renaming.timer.id, newName.trim());
+      if (!renamed) return;
+      renaming = undefined;
+      toast.success(`Renamed to “${renamed.name}”.`);
+      await load();
+    } catch (err) {
+      renameError = err instanceof Error ? err.message : String(err);
+    } finally {
+      renameSaving = false;
+    }
+  }
+
   // ── Remove a timer ─────────────────────────────────────────────────────────
   let removing = $state<string | undefined>(undefined);
 
@@ -202,6 +241,7 @@
           <ul class="timers" aria-label="Timers">
             {#each timers as view (view.timer.id)}
               {@const status = view.status}
+              {@const control = controlTrouble(view.timer, status)}
               <li class="timer" aria-label={view.timer.name}>
                 <div class="main">
                   <div class="headline">
@@ -213,8 +253,21 @@
                     {/if}
                   </div>
                   <span class="address">{view.timer.address}</span>
+                  {#if view.timer.own_id}
+                    <span class="own-name" data-testid="own-name">
+                      Calls itself <span class="address">{view.timer.own_id}</span>
+                    </span>
+                  {/if}
                   {#if !status.connected && status.problem}
                     <p class="problem" data-testid="timer-problem">{status.problem}</p>
+                  {/if}
+                  {#if control}
+                    <p class="problem" data-testid="timer-control">
+                      {control.trouble} Grid cannot change this timer.
+                      <a href={control.page} target="_blank" rel="noreferrer"
+                        >Open the timer's page</a
+                      > to give control to Grid.
+                    </p>
                   {/if}
                   <p class="facts">
                     <span data-fact="seats">{seatCountSentence(status)}</span>
@@ -230,6 +283,11 @@
                       onclick={() => ontune(view.timer.id)}>Settings</Button
                     >
                   {/if}
+                  <Button
+                    variant="secondary"
+                    title="Rename {view.timer.name}"
+                    onclick={() => openRename(view)}>Rename</Button
+                  >
                   <ConfirmButton
                     variant="danger"
                     disabled={removing === view.timer.id}
@@ -336,6 +394,33 @@
   </Dialog>
 {/if}
 
+{#if renaming}
+  <Dialog open={true} title="Rename timer" onclose={() => (renaming = undefined)}>
+    <form class="form" aria-label="Rename timer" onsubmit={submitRename}>
+      <Field
+        label="Name"
+        required
+        hint={renaming.timer.own_id
+          ? `What people will call it. The timer still calls itself ${renaming.timer.own_id}.`
+          : 'What people will call it, like Gate.'}
+      >
+        <Input bind:value={newName} aria-label="Name" autocomplete="off" />
+      </Field>
+      {#if renameError}
+        <Banner tone="danger">{renameError}</Banner>
+      {/if}
+    </form>
+    {#snippet footer()}
+      <Button variant="ghost" onclick={() => (renaming = undefined)} disabled={renameSaving}>
+        Cancel
+      </Button>
+      <Button variant="primary" onclick={() => submitRename()} disabled={renameSaving}>
+        {renameSaving ? 'Saving…' : 'Save name'}
+      </Button>
+    {/snippet}
+  </Dialog>
+{/if}
+
 <style>
   .page-inner {
     display: flex;
@@ -390,6 +475,10 @@
     font-size: var(--gf-font-size-md);
     overflow-wrap: anywhere;
   }
+  .own-name {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
   .address {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
@@ -401,6 +490,9 @@
     color: var(--gf-danger);
     font-size: var(--gf-font-size-sm);
     overflow-wrap: anywhere;
+  }
+  .problem a {
+    color: var(--gf-accent);
   }
   .facts {
     margin: 0;

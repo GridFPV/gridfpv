@@ -45,8 +45,16 @@ const CONFIG: TimerConfig = {
 };
 
 const LEVELS: SeatLevels[] = [
-  { seat: '0', level: -773, floor: -921, enter: -771, exit: -821, crossing: true },
-  { seat: '1', enter: -771, exit: -821, crossing: false }
+  {
+    seat: '0',
+    unit: 'TenthsDbm',
+    level: -773,
+    floor: -921,
+    enter: -771,
+    exit: -821,
+    crossing: true
+  },
+  { seat: '1', unit: 'TenthsDbm', enter: -771, exit: -821, crossing: false }
 ];
 
 const CHUNK: SignalChunk = {
@@ -165,14 +173,14 @@ describe('TimerSeats', () => {
     expect(feed.opened).toEqual([ID]);
     expect(within(one).getByTestId('seat-live')).toHaveTextContent('Waiting for levels…');
 
-    // One trace for the seat that is on; none for the seat that is off.
-    const traces = screen.getByRole('list', { name: 'Signal' });
-    expect(within(traces).getAllByRole('listitem')).toHaveLength(1);
-    const trace = within(traces).getByRole('listitem', { name: 'Seat 1' });
-    expect(trace).toHaveTextContent('R1 · 5658 MHz');
+    // The seat that is on has its signal inside its own row. The seat that is off has none.
+    expect(screen.queryByRole('list', { name: 'Signal' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Signal' })).toBeNull();
+    expect(screen.getAllByTestId('seat-signal')).toHaveLength(1);
     expect(
-      within(trace).getByRole('img', { name: 'Signal on Seat 1 over the last 10 seconds' })
+      within(one).getByRole('img', { name: 'Signal on Seat 1 over the last 10 seconds' })
     ).toBeInTheDocument();
+    expect(within(seatRow('Seat 2')).queryByTestId('seat-signal')).toBeNull();
 
     feed.handlers!.onLevels(LEVELS);
     await waitFor(() => expect(within(one).getByTestId('seat-live')).toHaveTextContent('-77.3 dB'));
@@ -181,21 +189,61 @@ describe('TimerSeats', () => {
     expect(lamp).toHaveAttribute('data-crossing', 'true');
     expect(lamp).toHaveClass('lit');
 
-    // The same numbers beside the trace, with the enter and exit levels.
-    const numbers = within(trace).getByLabelText('Seat 1 levels');
-    expect(numbers).toHaveTextContent('Level -77.3 dB');
-    expect(numbers).toHaveTextContent('Noise floor -92.1 dB');
+    // Beside the trace: the enter and exit levels. The level and the noise floor are in the
+    // row above and are not said twice.
+    const numbers = within(one).getByLabelText('Seat 1 levels');
     expect(numbers).toHaveTextContent('Enter -77.1 dB');
     expect(numbers).toHaveTextContent('Exit -82.1 dB');
+    expect(numbers).not.toHaveTextContent('Noise floor');
 
     // A calibrated timer's chunks say dBm, and the page follows.
     feed.handlers!.onSignal(CHUNK);
-    await waitFor(() => expect(numbers).toHaveTextContent('Level -77.3 dBm'));
+    await waitFor(() => expect(numbers).toHaveTextContent('Enter -77.1 dBm'));
+    expect(within(one).getByTestId('seat-live')).toHaveTextContent('-77.3 dBm');
 
     // The crossing ends.
     feed.handlers!.onLevels([{ ...LEVELS[0], level: -900, crossing: false }, LEVELS[1]]);
     const dark = await within(one).findByText('No crossing');
     expect(dark).not.toHaveClass('lit');
+  });
+
+  it('shows and sends millivolts on a timer that measures millivolts', async () => {
+    // An OFT timer whose receiver reads a signal-strength pin (spec v0.8). Its settings are
+    // the same bare numbers; the timer says they are millivolts.
+    const mv = timerView(ID, 'Gate', 2, { level_unit: 'Millivolts' });
+    const config: TimerConfig = { ...CONFIG, threshold: { Manual: { enter: 850, exit: 810 } } };
+    const { feed, putTimerConfigImpl } = open(
+      { getTimerConfigImpl: vi.fn(async () => structuredClone(config)) },
+      mv
+    );
+    const one = await waitFor(() => seatRow('Seat 1'));
+    // 850 is 850 mV. Read as tenths of a dB it would have shown 85.
+    const enter = screen.getByLabelText('Enter level, in mV');
+    expect(enter).toHaveValue(850);
+    expect(screen.getByLabelText('Exit level, in mV')).toHaveValue(810);
+    expect(screen.queryByLabelText('Enter level, in dB')).toBeNull();
+
+    feed.handlers!.onLevels([
+      {
+        seat: '0',
+        unit: 'Millivolts',
+        level: 742,
+        floor: 380,
+        enter: 850,
+        exit: 810,
+        crossing: false
+      }
+    ]);
+    await waitFor(() => expect(within(one).getByTestId('seat-live')).toHaveTextContent('742 mV'));
+    expect(within(one).getByLabelText('Seat 1 levels')).toHaveTextContent('Enter 850 mV');
+
+    // A typed level goes to the timer as millivolts, not ten times it.
+    await fireEvent.input(enter, { target: { value: '900' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+    await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalled());
+    expect(putTimerConfigImpl.mock.calls[0][2].threshold).toEqual({
+      Manual: { enter: 900, exit: 810 }
+    });
   });
 
   it('keeps edits as a draft, then applies the whole settings and takes what came back', async () => {
@@ -245,9 +293,7 @@ describe('TimerSeats', () => {
     expect(await screen.findByText('This is what the timer is using.')).toBeVisible();
     expect(screen.getByLabelText('Exit this far below enter, in dB')).toHaveValue(4);
     // Seat 2 is on now, so it has a trace.
-    expect(
-      within(screen.getByRole('list', { name: 'Signal' })).getAllByRole('listitem')
-    ).toHaveLength(2);
+    expect(screen.getAllByTestId('seat-signal')).toHaveLength(2);
   });
 
   it("shows the Director's sentence when the timer says no, and keeps the draft", async () => {
@@ -494,11 +540,18 @@ describe('TimerSeats', () => {
       await waitFor(() => seatRow('Seat 1'));
       feed.handlers!.onLevels([
         LEVELS[0],
-        { seat: '1', level: -880, floor: -915, enter: -600, exit: -660, crossing: false }
+        {
+          seat: '1',
+          unit: 'TenthsDbm',
+          level: -880,
+          floor: -915,
+          enter: -600,
+          exit: -660,
+          crossing: false
+        }
       ]);
-      const traces = screen.getByRole('list', { name: 'Signal' });
-      const one = within(traces).getByRole('listitem', { name: 'Seat 1' });
-      const two = within(traces).getByRole('listitem', { name: 'Seat 2' });
+      const one = seatRow('Seat 1');
+      const two = seatRow('Seat 2');
       await waitFor(() =>
         expect(within(two).getByLabelText('Seat 2 levels')).toHaveTextContent('Enter -60.0 dB')
       );
@@ -920,5 +973,177 @@ describe('the profile bar', () => {
     expect(picker(profile)).toBeDisabled();
     expect(within(profile).getByRole('button', { name: 'Save as new…' })).toBeDisabled();
     expect(seatRow('Seat 1')).toBeVisible();
+  });
+});
+
+describe('a timer another program has control of', () => {
+  const HELD = timerView(ID, 'Gate', 2, {
+    control: { holder: 'Other', name: 'RotorHazard pi-timer' },
+    control_name: 'GridFPV race-laptop'
+  });
+  const OURS = timerView(ID, 'Gate', 2, {
+    control: { holder: 'Grid' },
+    control_name: 'GridFPV race-laptop'
+  });
+
+  it('says who has control and where to put that right, and still shows the settings', async () => {
+    open({}, HELD);
+    const banner = await screen.findByTestId('control-trouble');
+    expect(banner).toHaveTextContent('“RotorHazard pi-timer” has control of Gate.');
+    expect(banner).toHaveTextContent('give control to “GridFPV race-laptop”');
+    const link = within(banner).getByRole('link', { name: "Open the timer's page" });
+    expect(link).toHaveAttribute('href', 'http://192.168.1.50:7270/');
+    expect(link).toHaveAttribute('target', '_blank');
+    // The settings were read and are on the page.
+    const one = await waitFor(() => seatRow('Seat 1'));
+    expect(within(one).getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5658);
+  });
+
+  it('sends nothing to the timer: Apply and the profile box are off, even with a draft', async () => {
+    const profile: SeatProfile = { id: 'p1', name: 'Field', config: structuredClone(CONFIG) };
+    const applyProfileImpl = vi.fn(async () => structuredClone(CONFIG));
+    const { putTimerConfigImpl, rerender } = open(
+      {
+        listProfilesImpl: vi.fn(async (): Promise<TimerProfiles> => ({ profiles: [profile] })),
+        applyProfileImpl
+      },
+      HELD
+    );
+    const one = await waitFor(() => seatRow('Seat 1'));
+    await waitFor(() => expect(screen.getByLabelText('Profile')).toBeDisabled());
+    await fireEvent.change(within(one).getByLabelText('Seat 1 channel'), {
+      target: { value: '5806' }
+    });
+    expect(await screen.findByText('Not applied')).toBeVisible();
+    const apply = screen.getByRole('button', { name: 'Apply to timer' });
+    expect(apply).toBeDisabled();
+    expect(apply).toHaveAttribute('title', 'Another program has control of this timer.');
+    await fireEvent.click(apply);
+    expect(putTimerConfigImpl).not.toHaveBeenCalled();
+    // The draft can still be dropped.
+    expect(screen.getByRole('button', { name: 'Discard changes' })).toBeEnabled();
+
+    // Control comes to Grid: the notice goes, and the same draft can be applied.
+    await rerender({ timers: [OURS] });
+    await waitFor(() => expect(screen.queryByTestId('control-trouble')).toBeNull());
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Apply to timer' })).toBeEnabled()
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+    await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalledTimes(1));
+    expect(applyProfileImpl).not.toHaveBeenCalled();
+  });
+
+  it('shows no notice for a timer Grid controls, one nobody controls, or one with no control', async () => {
+    const { rerender } = open({}, OURS);
+    await waitFor(() => seatRow('Seat 1'));
+    expect(screen.queryByTestId('control-trouble')).toBeNull();
+    await rerender({ timers: [timerView(ID, 'Gate', 2, { control: { holder: 'Nobody' } })] });
+    expect(screen.queryByTestId('control-trouble')).toBeNull();
+    await rerender({ timers: [GATE] });
+    expect(screen.queryByTestId('control-trouble')).toBeNull();
+    expect(screen.getByLabelText('Profile')).toBeEnabled();
+  });
+});
+
+describe('settings changed somewhere else', () => {
+  const at = (rev: number | undefined) =>
+    timerView(ID, 'Gate', 2, rev === undefined ? {} : { config_rev: rev });
+  const MOVED: TimerConfig = {
+    ...CONFIG,
+    seats: [
+      { seat: '0', freq_mhz: 5917, enabled: true },
+      { seat: '1', freq_mhz: 5700, enabled: false }
+    ]
+  };
+
+  it('reads the settings again when the timer says they changed, and shows them', async () => {
+    const { getTimerConfigImpl, rerender } = open({}, at(3));
+    const one = await waitFor(() => seatRow('Seat 1'));
+    expect(getTimerConfigImpl).toHaveBeenCalledTimes(1);
+
+    // The same count again (every poll hands down a new list): nothing is read.
+    await rerender({ timers: [at(3)] });
+    expect(getTimerConfigImpl).toHaveBeenCalledTimes(1);
+
+    getTimerConfigImpl.mockResolvedValue(structuredClone(MOVED));
+    await rerender({ timers: [at(4)] });
+    await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(within(one).getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5917)
+    );
+    // It is what the timer has, so there is nothing to apply and nothing to warn about.
+    expect(screen.getByText('This is what the timer is using.')).toBeVisible();
+    expect(screen.queryByTestId('changed-elsewhere')).toBeNull();
+  });
+
+  it('keeps a draft the director was making, and says the timer moved under it', async () => {
+    const { getTimerConfigImpl, putTimerConfigImpl, rerender } = open({}, at(3));
+    await waitFor(() => seatRow('Seat 1'));
+    await fireEvent.click(screen.getByRole('switch', { name: 'Seat 2 on' }));
+    expect(await screen.findByText('Not applied')).toBeVisible();
+
+    getTimerConfigImpl.mockResolvedValue(structuredClone(MOVED));
+    await rerender({ timers: [at(4)] });
+    const banner = await screen.findByTestId('changed-elsewhere');
+    expect(banner).toHaveTextContent("The timer's settings were changed somewhere else.");
+    // The draft is as the director left it: seat 2 on, seat 1 still on the old channel.
+    expect(screen.getByRole('switch', { name: 'Seat 2 on' })).toBeChecked();
+    expect(screen.getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5658);
+    expect(putTimerConfigImpl).not.toHaveBeenCalled();
+
+    // Discard shows what the timer has now, and the notice goes.
+    await fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+    await waitFor(() => expect(screen.getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5917));
+    expect(screen.queryByTestId('changed-elsewhere')).toBeNull();
+    expect(screen.getByRole('switch', { name: 'Seat 2 on' })).not.toBeChecked();
+  });
+
+  it('applying over a change made elsewhere sends the draft and clears the notice', async () => {
+    const { getTimerConfigImpl, putTimerConfigImpl, rerender } = open({}, at(3));
+    await waitFor(() => seatRow('Seat 1'));
+    await fireEvent.click(screen.getByRole('switch', { name: 'Seat 2 on' }));
+    getTimerConfigImpl.mockResolvedValue(structuredClone(MOVED));
+    await rerender({ timers: [at(4)] });
+    await screen.findByTestId('changed-elsewhere');
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+    await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('This is what the timer is using.')).toBeVisible();
+    expect(screen.queryByTestId('changed-elsewhere')).toBeNull();
+  });
+
+  it("is not fooled by Grid's own apply moving the count", async () => {
+    const { getTimerConfigImpl, putTimerConfigImpl, rerender } = open({}, at(3));
+    await waitFor(() => seatRow('Seat 1'));
+    await fireEvent.click(screen.getByRole('switch', { name: 'Seat 2 on' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Apply to timer' }));
+    await waitFor(() => expect(putTimerConfigImpl).toHaveBeenCalledTimes(1));
+    const applied = putTimerConfigImpl.mock.calls[0][2];
+    // The timer counted Grid's write (and its "keep these"): the read finds the same thing.
+    getTimerConfigImpl.mockResolvedValue(structuredClone(applied));
+    await rerender({ timers: [at(5)] });
+    await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(2));
+    // A new edit made meanwhile is not thrown away and nothing is called a change elsewhere.
+    await fireEvent.click(screen.getByRole('switch', { name: 'Seat 2 on' }));
+    expect(await screen.findByText('Not applied')).toBeVisible();
+    await rerender({ timers: [at(6)] });
+    await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(3));
+    expect(screen.queryByTestId('changed-elsewhere')).toBeNull();
+    expect(screen.getByRole('switch', { name: 'Seat 2 on' })).not.toBeChecked();
+  });
+
+  it('does nothing on a timer that gives no count, or when a read fails', async () => {
+    const { getTimerConfigImpl, rerender } = open({}, at(undefined));
+    await waitFor(() => seatRow('Seat 1'));
+    await rerender({ timers: [at(undefined)] });
+    // The first count seen is where counting starts, not a change.
+    await rerender({ timers: [at(9)] });
+    expect(getTimerConfigImpl).toHaveBeenCalledTimes(1);
+    // A read that fails leaves the page as it is, with no error banner over good settings.
+    getTimerConfigImpl.mockRejectedValue(new Error('Could not reach Gate.'));
+    await rerender({ timers: [at(10)] });
+    await waitFor(() => expect(getTimerConfigImpl).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId('settings-problem')).toBeNull();
+    expect(screen.getByLabelText('Seat 1 frequency in MHz')).toHaveValue(5658);
   });
 });

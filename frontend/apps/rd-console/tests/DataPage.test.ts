@@ -31,9 +31,11 @@ function open(first: DataInfo, later: DataInfo = first) {
 }
 
 describe('DataPage', () => {
-  it('says where the data is kept', async () => {
+  it('does not show the folder Grid keeps its data in', async () => {
     open(HERE);
-    expect(await screen.findByText('C:\\Grid\\gridfpv-data')).toBeVisible();
+    await screen.findByRole('button', { name: 'Save a copy' });
+    expect(screen.queryByText('Where the data is')).toBeNull();
+    expect(document.body.textContent).not.toContain('gridfpv-data');
   });
 
   it('saves a copy, says where it is and offers it as a download', async () => {

@@ -80,12 +80,12 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     await page.reload();
     await expect(minLap).toHaveValue(String(MIN_LAP_SECONDS), { timeout: 15_000 });
 
-    // ── Formats: a table, and an editor that says the format back in words ───────────────
+    // ── Formats: a list, and an editor that says the format back in words ───────────────
     await openPage(page, 'Formats');
-    const formats = page.getByRole('table', { name: 'Formats' });
-    await expect(formats.getByRole('row').filter({ hasText: 'Best 3 consecutive' })).toContainText(
-      'Ranked by fastest 3 laps in a row'
-    );
+    const formats = page.getByRole('list', { name: 'Formats' });
+    await expect(
+      formats.getByRole('listitem').filter({ hasText: 'Best 3 consecutive' })
+    ).toContainText('Ranked by fastest 3 laps in a row');
     await page.getByRole('button', { name: '+ New format' }).click();
     const editor = page.getByRole('form', { name: 'New format' });
     await editor.getByLabel('Format name').fill(FORMAT);
@@ -100,7 +100,7 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     );
     await page.getByRole('button', { name: 'Save format' }).click();
     await expect(editor).toBeHidden({ timeout: 15_000 });
-    const made = formats.getByRole('row').filter({ hasText: FORMAT });
+    const made = formats.getByRole('listitem').filter({ hasText: FORMAT });
     await expect(made).toContainText('First to 2 laps');
     await expect(made).toContainText('Starts at once');
     // The same name again is refused, in the Director's words, and the dialog stays open.
@@ -123,10 +123,11 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     await page.getByRole('button', { name: 'Add phase', exact: true }).click();
     await expect(phaseForm).toBeHidden({ timeout: 15_000 });
 
-    const tree = page.getByRole('list', { name: 'Phases' });
-    const phaseRow = tree.locator('li.phase').filter({ hasText: PHASE }).first();
-    await expect(phaseRow).toContainText(FORMAT);
-    await phaseRow.getByRole('button', { name: `Add a heat under ${PHASE}` }).click();
+    // The phase is one line on the list, with its format. A heat can be added from the line.
+    const line = page.getByRole('link', { name: `Open ${PHASE}` });
+    await expect(line).toContainText(FORMAT);
+    await expect(line).toContainText('No heats yet');
+    await page.getByRole('button', { name: `Add a heat under ${PHASE}` }).click();
     const heatForm = page.getByRole('form', { name: 'Add a heat' });
     await expect(heatForm.getByLabel('Under').locator('option:checked')).toHaveText(PHASE);
     // The format box starts on the phase's, so the heat carries none of its own.
@@ -137,6 +138,11 @@ test('one pilot runs a home session in full mode: lap rule, format, phase, race,
     await heatForm.getByRole('button', { name: ACE, exact: true }).click();
     await page.getByRole('button', { name: 'Add heat', exact: true }).click();
     await expect(heatForm).toBeHidden({ timeout: 15_000 });
+    await expect(line).toContainText('1 heat', { timeout: 15_000 });
+    // The heat itself is on the phase's own page.
+    await line.click();
+    await expect(page.getByRole('heading', { name: PHASE, level: 1 })).toBeVisible();
+    const tree = page.getByRole('list', { name: `Heats of ${PHASE}` });
     const heatRow = tree.locator('li.phase.heat').filter({ hasText: HEAT });
     await expect(heatRow).toContainText('Ready', { timeout: 15_000 });
     await expect(heatRow).toContainText(FORMAT);

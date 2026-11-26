@@ -44,6 +44,12 @@ races: Array<RaceView>,
  */
 current_race?: RaceId, 
 /**
+ * The heat that is **on the timer**: the one the director is running now, whether its
+ * race has started or not. It is the heat of `current_race` when there is one. Absent
+ * until the director has put a heat on the timer.
+ */
+on_timer?: PhaseId, 
+/**
  * The run queue: the heats that can be raced now, in the suggested order. A
  * suggestion only: any of them can be started.
  */

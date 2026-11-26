@@ -89,6 +89,7 @@ fn define_heat(registry: &EventRegistry, event: &EventId) {
                 first_lap: FirstLap::HoleShot,
                 stop_after_all_finish_micros: None,
                 max_micros: None,
+                drop_idle_seat_micros: None,
             },
             completion: CompletionRule::DirectorDecides,
             ranking: None,
@@ -96,6 +97,7 @@ fn define_heat(registry: &EventRegistry, event: &EventId) {
         }),
         false_start_limit: None,
         display_hint: None,
+        class: None,
     };
     send(
         registry,

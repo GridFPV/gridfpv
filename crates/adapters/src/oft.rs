@@ -20,12 +20,17 @@
 //! - `pong` → a clock sample for [`ClockFit`], which maps the Director's clock onto the
 //!   Timer's so the start tone can be placed on the Timer's clock.
 //!
-//! - `samples` → [`Event::SignalChunk`], with every level exactly as the Timer sent it
-//!   (signed tenths of a dB). The Director does not log all of them: [`SignalBuffer`]
+//! - `samples` → [`Event::SignalChunk`], with every level exactly as the Timer sent it, in
+//!   the unit of the Node that measured it (spec v0.8: tenths of a dB, or millivolts; see
+//!   [`OftAdapter::unit`]). The Director does not log all of them: [`SignalBuffer`]
 //!   decides which, so a race's signal is kept and idle hours are not.
 //!
 //! `status` gives no events: its per-seat levels are for the Tune screen, live, and are
 //! never logged. [`OftConfig`] is the Timer's settings as `/config` reads and writes them.
+//!
+//! `control` gives no events either (spec v0.9, §6.6). One client at a time may change a
+//! Timer; the Timer says on every stream who that is. [`claim`] is what Grid sends to be
+//! that client, and [`ControlStanding`] is where a `control` message leaves Grid.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -47,10 +52,64 @@ pub struct OftSeat {
     pub rate_hz: u32,
 }
 
-/// One seat's levels right now, from a `status` message. Power is in tenths of a dB.
+/// One Node (receiver) in a Timer's `hello` or `/info`. Only what Grid reads is kept.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OftNode {
+    /// The Node's id, as `status.seats[].node` names it.
+    #[serde(default)]
+    pub id: String,
+    /// What the Node's level numbers measure (spec v0.8). Absent on an older Timer, which
+    /// means tenths of a dB.
+    #[serde(default)]
+    pub level: Option<OftLevel>,
+}
+
+/// The unit of a Node's levels: multiply a level by `scale` and label it with `unit`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OftLevel {
+    pub unit: String,
+    #[serde(default)]
+    pub scale: Option<f64>,
+}
+
+/// The body of `GET /oft/v1/info`, as far as Grid reads it: the same Nodes a `hello` lists.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OftInfo {
+    #[serde(default)]
+    pub nodes: Vec<OftNode>,
+    #[serde(default)]
+    pub calibrated: bool,
+}
+
+/// Grid's unit for a Node's levels. Grid keeps levels as whole numbers exactly as sent, so
+/// it knows a unit by its name **and** its scale: tenths of a dB, or whole millivolts. Any
+/// other unit is kept as plain counts, shown as the numbers the Timer sent with no unit
+/// claimed for them.
+fn unit_of(level: Option<&OftLevel>, calibrated: bool) -> SignalUnit {
+    let db = if calibrated {
+        SignalUnit::TenthsDbm
+    } else {
+        SignalUnit::TenthsDb
+    };
+    let Some(level) = level else {
+        // No unit given: an older Timer, where every level is tenths of a dB.
+        return db;
+    };
+    let near = |scale: f64| (level.scale.unwrap_or(scale) - scale).abs() < 1e-9;
+    match level.unit.as_str() {
+        "dB" if near(0.1) => db,
+        "mV" if near(1.0) => SignalUnit::Millivolts,
+        _ => SignalUnit::Counts,
+    }
+}
+
+/// One seat's levels right now, from a `status` message, in the unit of the seat's Node.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OftSeatStatus {
     pub seat: u32,
+    /// The id of the Node serving the seat (spec v0.8). Absent on an older Timer.
+    #[serde(default)]
+    pub node: Option<String>,
     /// The latest signal level.
     #[serde(default)]
     pub rssi: Option<i32>,
@@ -81,7 +140,9 @@ pub struct OftSeatConfig {
     pub threshold: Option<OftThreshold>,
 }
 
-/// How a Timer sets its crossing levels. Values are tenths of a dB.
+/// How a Timer sets its crossing levels. Values are in the level unit of the Node serving
+/// the seat (spec v0.8): 150 is 15 dB on a Node that reports dB, and 150 mV on one that
+/// reports millivolts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum OftThreshold {
@@ -109,6 +170,13 @@ pub struct OftConfig {
     /// so what was read is always sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_hold_ms: Option<u32>,
+    /// The pass window, in milliseconds (protocol v0.6, capability
+    /// `config.pass_window_ms`): crossings that start within this long of the first are one
+    /// pass, and the Timer reports only the strongest. `0` is off. Absent on a Timer that
+    /// does not have the setting. A `PUT` without it switches the window off, so what was
+    /// read is always sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_window_ms: Option<u32>,
 }
 
 /// The capabilities Grid reads from a Timer's `hello` (spec §6.2). An absent key means the
@@ -117,6 +185,83 @@ pub struct OftConfig {
 pub struct OftCapabilities {
     #[serde(default)]
     pub config: OftConfigCapability,
+    /// Whether one client at a time may change the Timer (spec v0.9, §6.6). The key has no
+    /// values of its own: being there is the whole of it.
+    #[serde(default, deserialize_with = "present")]
+    pub control: bool,
+}
+
+/// A capability with nothing inside it: `true` when the key is there, whatever it holds.
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
+}
+
+/// A claim that holds control of a Timer, as a `control` message names it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OftHolder {
+    /// The claim's id. Not reused while the Timer runs.
+    pub id: u32,
+    /// The name the client claimed under, for people to read.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Who may change a Timer, as one `control` message leaves it for the stream it came on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlStanding {
+    /// Nobody holds control, so any client may write.
+    Nobody,
+    /// This stream's own claim holds control. Writes carry `key`.
+    Ours { key: String },
+    /// Another client holds control. Its name is for people to read.
+    Other { name: String },
+}
+
+impl ControlStanding {
+    /// Read a `control` message's fields. `holder` is the claim that holds control,
+    /// `claim` is this stream's own claim, and `key` is only sent to the holder.
+    pub fn read(holder: Option<&OftHolder>, claim: Option<u32>, key: Option<&str>) -> Self {
+        match (holder, key) {
+            (None, _) => Self::Nobody,
+            (Some(holder), Some(key)) if Some(holder.id) == claim => Self::Ours {
+                key: key.to_owned(),
+            },
+            (Some(holder), _) => Self::Other {
+                name: holder.name.clone(),
+            },
+        }
+    }
+}
+
+/// The longest name a claim can have (spec §6.6).
+pub const CLAIM_NAME_MAX: usize = 32;
+
+/// A name to claim control under: `wanted` with everything a Timer would drop taken out
+/// (anything but printable ASCII, and `"` and `\`), cut to [`CLAIM_NAME_MAX`]. Grid cleans
+/// the name itself so the name it shows people is the one the Timer lists.
+pub fn claim_name(wanted: &str) -> String {
+    let name: String = wanted
+        .trim()
+        .chars()
+        .filter(|c| (' '..='~').contains(c) && *c != '"' && *c != '\\')
+        .take(CLAIM_NAME_MAX)
+        .collect();
+    let name = name.trim_end();
+    if name.is_empty() {
+        "GridFPV".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
+/// The message that claims control of a Timer under `name` (spec §6.6). With the `key` of
+/// a claim Grid held before the link dropped, the Timer gives that claim back.
+pub fn claim(name: &str, key: Option<&str>) -> String {
+    let mut message = serde_json::json!({ "type": "control", "claim": claim_name(name) });
+    if let Some(key) = key {
+        message["key"] = key.into();
+    }
+    message.to_string()
 }
 
 /// What a Timer's `/config` accepts.
@@ -128,6 +273,9 @@ pub struct OftConfigCapability {
     /// Whether `/config/save` works: the Timer can keep its settings across a restart.
     #[serde(default)]
     pub persist: bool,
+    /// Whether the Timer has a pass window (spec v0.6).
+    #[serde(default)]
+    pub pass_window_ms: bool,
 }
 
 /// One message from a Timer's WebSocket. Fields Grid does not use are left out; unknown
@@ -147,9 +295,13 @@ pub enum OftMessage {
         time_us: u64,
         #[serde(default)]
         seats: Vec<OftSeat>,
-        /// Whether power values are tenths of a dBm (true) or relative tenths of a dB.
+        /// Whether dB levels are tenths of a dBm (true) or relative tenths of a dB.
         #[serde(default)]
         calibrated: bool,
+        /// The Timer's Nodes, each with the unit of its levels (spec v0.8). Empty while no
+        /// Node has reported in, and on a Timer older than v0.8 that lists none.
+        #[serde(default)]
+        nodes: Vec<OftNode>,
         /// What the Timer can do. Only the keys Grid reads are picked out.
         #[serde(default)]
         capabilities: OftCapabilities,
@@ -161,7 +313,7 @@ pub enum OftMessage {
         seat: u32,
         /// The lap instant: the middle of the crossing, on the Timer's clock.
         t_mid: u64,
-        /// Peak power, in tenths of a dB.
+        /// Peak level, in the unit of the seat's Node.
         #[serde(default)]
         peak: Option<i32>,
     },
@@ -174,9 +326,9 @@ pub enum OftMessage {
         t0: u64,
         /// Microseconds between samples.
         dt_us: u32,
-        /// Power, in tenths of a dB.
+        /// Levels, in the unit of the seat's Node.
         p: Vec<i32>,
-        /// The noise floor, in tenths of a dB.
+        /// The noise floor, in the same unit.
         #[serde(default)]
         nf: Option<i32>,
     },
@@ -184,6 +336,22 @@ pub enum OftMessage {
     Status {
         #[serde(default)]
         seats: Vec<OftSeatStatus>,
+        /// A number that changes whenever the Timer's settings, or whether they are saved,
+        /// change (spec v0.9). It starts again when the Timer does. Absent on an older Timer.
+        #[serde(default)]
+        config_rev: Option<u32>,
+    },
+    /// Who may change the Timer (spec v0.9, §6.6). Sent after `hello` and whenever it
+    /// changes. See [`ControlStanding::read`].
+    Control {
+        #[serde(default)]
+        holder: Option<OftHolder>,
+        /// This stream's own claim.
+        #[serde(default)]
+        claim: Option<u32>,
+        /// What the holder's writes must carry. Only on the holder's stream.
+        #[serde(default)]
+        key: Option<String>,
     },
     /// The Timer acknowledged a subscription.
     Ack {},
@@ -220,8 +388,12 @@ pub struct OftAdapter {
     boot_id: Option<String>,
     /// The highest crossing `seq` seen this boot.
     last_seq: Option<u64>,
-    /// Whether the Timer said its power values are calibrated.
+    /// Whether the Timer said its dB levels are calibrated.
     calibrated: bool,
+    /// The unit of each Node's levels, by Node id, as the Timer last listed them.
+    node_units: BTreeMap<String, SignalUnit>,
+    /// The Node serving each seat, from the Timer's `status` messages.
+    seat_nodes: BTreeMap<u32, String>,
 }
 
 impl OftAdapter {
@@ -232,7 +404,64 @@ impl OftAdapter {
             boot_id: None,
             last_seq: None,
             calibrated: false,
+            node_units: BTreeMap::new(),
+            seat_nodes: BTreeMap::new(),
         }
+    }
+
+    /// Take the Timer's list of Nodes, from a `hello` or from `/info`. It replaces what was
+    /// known: a Node can be swapped, or come back from a firmware update measuring in
+    /// another unit.
+    pub fn learn_nodes(&mut self, nodes: &[OftNode], calibrated: bool) {
+        self.calibrated = calibrated;
+        self.node_units = nodes
+            .iter()
+            .map(|node| (node.id.clone(), unit_of(node.level.as_ref(), calibrated)))
+            .collect();
+    }
+
+    /// The unit of one seat's levels: the unit of the Node serving it (spec §6.4).
+    ///
+    /// Until a `status` has said which Node that is, the unit every listed Node shares is
+    /// used; a Timer with one Node, or with Nodes all of one kind, is never in doubt. With
+    /// no Node listed at all (an older Timer, or no Node yet) it is tenths of a dB, as the
+    /// spec says.
+    pub fn unit(&self, seat: u32) -> SignalUnit {
+        let db = if self.calibrated {
+            SignalUnit::TenthsDbm
+        } else {
+            SignalUnit::TenthsDb
+        };
+        if let Some(unit) = self
+            .seat_nodes
+            .get(&seat)
+            .and_then(|node| self.node_units.get(node))
+        {
+            return *unit;
+        }
+        let mut units = self.node_units.values();
+        match units.next() {
+            Some(first) if units.all(|unit| unit == first) => *first,
+            _ => db,
+        }
+    }
+
+    /// The one unit every seat of the Timer reports in, when there is one. `None` while
+    /// Nodes of different units serve its seats.
+    pub fn shared_unit(&self) -> Option<SignalUnit> {
+        let mut units = self.node_units.values();
+        match units.next() {
+            Some(first) => units.all(|unit| unit == first).then_some(*first),
+            None => Some(self.unit(0)),
+        }
+    }
+
+    /// Whether a `status` names a Node the Timer's last list did not have: a Node that
+    /// reported in after the `hello`. The list should be read again (`/info`).
+    pub fn has_unlisted_node(&self) -> bool {
+        self.seat_nodes
+            .values()
+            .any(|node| !self.node_units.contains_key(node))
     }
 
     /// The subscription to send after `hello`: every crossing after the last one seen, so a
@@ -272,9 +501,12 @@ impl Adapter for OftAdapter {
                 boot_id,
                 seats,
                 calibrated,
+                nodes,
                 ..
             } => {
-                self.calibrated = calibrated;
+                self.learn_nodes(&nodes, calibrated);
+                // Which Node serves which seat is said again by the next `status`.
+                self.seat_nodes.clear();
                 let new_boot = self.boot_id.as_deref() != Some(boot_id.as_str());
                 if new_boot {
                     // A new boot: the Timer's crossing numbers start again.
@@ -315,8 +547,8 @@ impl Adapter for OftAdapter {
                     at: SourceTime::from_micros(i64::try_from(t_mid).unwrap_or(i64::MAX)),
                     sequence: Some(seq),
                     gate: GateIndex::LAP,
-                    signal: peak.map(|tenths| SignalContext {
-                        rssi_peak: Some(tenths as f32 / 10.0),
+                    signal: peak.map(|level| SignalContext {
+                        rssi_peak: Some(level as f32 / self.unit(seat).per_shown() as f32),
                     }),
                     race: None,
                 })]
@@ -333,17 +565,21 @@ impl Adapter for OftAdapter {
                 from: SourceTime::from_micros(i64::try_from(t0).unwrap_or(i64::MAX)),
                 period_micros: dt_us,
                 levels: p,
-                unit: if self.calibrated {
-                    SignalUnit::TenthsDbm
-                } else {
-                    SignalUnit::TenthsDb
-                },
+                unit: self.unit(seat),
                 noise_floor: nf,
             })],
+            OftMessage::Status { seats, .. } => {
+                // No events: only which Node serves each seat is kept, for its unit.
+                self.seat_nodes = seats
+                    .into_iter()
+                    .filter_map(|seat| Some((seat.seat, seat.node?)))
+                    .collect();
+                Vec::new()
+            }
             OftMessage::Pong { .. }
-            | OftMessage::Status { .. }
             | OftMessage::Ack {}
             | OftMessage::Error { .. }
+            | OftMessage::Control { .. }
             | OftMessage::Unknown => Vec::new(),
         }
     }
@@ -730,6 +966,129 @@ mod tests {
         assert_eq!(chunk.unit, SignalUnit::TenthsDbm);
     }
 
+    /// A `hello` whose Timer lists these Nodes.
+    fn hello_with_nodes(nodes: &str) -> OftMessage {
+        let hello = HELLO.replace(
+            r#""capabilities""#,
+            &format!(r#""nodes": {nodes}, "capabilities""#),
+        );
+        OftMessage::parse(&hello).unwrap()
+    }
+
+    fn status_naming(seats: &[(u32, &str)]) -> OftMessage {
+        let seats: Vec<String> = seats
+            .iter()
+            .map(|(seat, node)| {
+                format!(r#"{{"seat":{seat},"node":"{node}","enter":600,"exit":550}}"#)
+            })
+            .collect();
+        OftMessage::parse(&format!(
+            r#"{{"type":"status","seats":[{}]}}"#,
+            seats.join(",")
+        ))
+        .unwrap()
+    }
+
+    fn chunk_unit(adapter: &mut OftAdapter, seat: u32) -> SignalUnit {
+        let frame = format!(r#"{{"type":"samples","seat":{seat},"t0":0,"dt_us":1000,"p":[1]}}"#);
+        let events = adapter.translate(OftMessage::parse(&frame).unwrap());
+        let [Event::SignalChunk(chunk)] = &events[..] else {
+            panic!("expected one chunk");
+        };
+        chunk.unit
+    }
+
+    #[test]
+    fn a_node_says_what_its_levels_measure_and_a_seat_takes_its_nodes_unit() {
+        // Spec v0.8, §6.4. An STM32 + RX5808 Node reports millivolts.
+        let mut adapter = adapter();
+        adapter.translate(hello_with_nodes(
+            r#"[{"id":"aa","chip":"stm32f1-rx5808","level":{"unit":"mV","scale":1}}]"#,
+        ));
+        assert_eq!(adapter.shared_unit(), Some(SignalUnit::Millivolts));
+        // One Node: every seat is its, even before a status says so.
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::Millivolts);
+        // A crossing's peak is millivolts, not tenths of anything.
+        let events = adapter.translate(OftMessage::Crossing {
+            seq: 1,
+            seat: 0,
+            t_mid: 100,
+            peak: Some(742),
+        });
+        let [Event::Pass(pass)] = &events[..] else {
+            panic!("expected a pass");
+        };
+        assert_eq!(pass.signal.unwrap().rssi_peak, Some(742.0));
+
+        // A dB Node, the reference ESP32-C5: tenths of a dB, dBm when calibrated.
+        let db = r#"[{"id":"bb","chip":"esp32c5","level":{"unit":"dB","scale":0.1}}]"#;
+        adapter.translate(hello_with_nodes(db));
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::TenthsDb);
+        adapter.learn_nodes(&serde_json::from_str::<Vec<OftNode>>(db).unwrap(), true);
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::TenthsDbm);
+    }
+
+    #[test]
+    fn a_timer_with_no_unit_or_no_node_means_tenths_of_a_db() {
+        let mut adapter = adapter();
+        // A Timer older than v0.8 lists no Nodes at all.
+        adapter.translate(OftMessage::parse(HELLO).unwrap());
+        assert_eq!(adapter.shared_unit(), Some(SignalUnit::TenthsDb));
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::TenthsDb);
+        // A Node listed with no `level` is the same.
+        adapter.translate(hello_with_nodes(r#"[{"id":"aa","chip":"esp32c5"}]"#));
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::TenthsDb);
+    }
+
+    #[test]
+    fn a_unit_grid_does_not_know_is_kept_as_plain_counts() {
+        let mut adapter = adapter();
+        adapter.translate(hello_with_nodes(
+            r#"[{"id":"aa","level":{"unit":"counts","scale":1}}]"#,
+        ));
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::Counts);
+        // A known name on a scale Grid does not hold levels in is not that unit either:
+        // whole dB shown as tenths would be ten times out.
+        adapter.translate(hello_with_nodes(
+            r#"[{"id":"aa","level":{"unit":"dB","scale":1}}]"#,
+        ));
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::Counts);
+    }
+
+    #[test]
+    fn seats_on_nodes_of_different_units_each_keep_their_own() {
+        let mut adapter = adapter();
+        adapter.translate(hello_with_nodes(
+            r#"[{"id":"aa","level":{"unit":"dB","scale":0.1}},
+                {"id":"bb","level":{"unit":"mV","scale":1}}]"#,
+        ));
+        assert_eq!(adapter.shared_unit(), None);
+        adapter.translate(status_naming(&[(0, "aa"), (1, "bb")]));
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::TenthsDb);
+        assert_eq!(chunk_unit(&mut adapter, 1), SignalUnit::Millivolts);
+        assert!(!adapter.has_unlisted_node());
+    }
+
+    #[test]
+    fn a_node_that_reports_in_after_the_hello_is_noticed_and_learned() {
+        let mut adapter = adapter();
+        adapter.translate(hello_with_nodes("[]"));
+        assert!(!adapter.has_unlisted_node());
+        // The status names a Node the hello did not list: the list must be read again.
+        adapter.translate(status_naming(&[(0, "aa")]));
+        assert!(adapter.has_unlisted_node());
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::TenthsDb);
+        // `/info`, read again, has it.
+        let info: OftInfo = serde_json::from_str(
+            r#"{"id":"oft-1","calibrated":false,
+                "nodes":[{"id":"aa","chip":"stm32f1-rx5808","level":{"unit":"mV","scale":1}}]}"#,
+        )
+        .unwrap();
+        adapter.learn_nodes(&info.nodes, info.calibrated);
+        assert!(!adapter.has_unlisted_node());
+        assert_eq!(chunk_unit(&mut adapter, 0), SignalUnit::Millivolts);
+    }
+
     /// A 50 ms batch at 1 kHz for a seat, starting at `from_ms`, every level equal to `from_ms`.
     fn batch(seat: &str, from_ms: i64) -> SignalChunk {
         SignalChunk {
@@ -827,13 +1186,16 @@ mod tests {
             "drift_ppm":null,"node_connected":true,"clients":1,
             "seats":[{"seat":0,"node":"00aabbccddee","rate_hz":1000,"rssi":-880,
                       "floor":-900,"enter":-750,"exit":-800,"crossing":false}]}"#;
-        let OftMessage::Status { seats } = OftMessage::parse(frame).unwrap() else {
+        let OftMessage::Status { seats, config_rev } = OftMessage::parse(frame).unwrap() else {
             panic!("expected a status");
         };
+        // A Timer older than v0.9 has no `config_rev`.
+        assert_eq!(config_rev, None);
         assert_eq!(
             seats,
             vec![OftSeatStatus {
                 seat: 0,
+                node: Some("00aabbccddee".into()),
                 rssi: Some(-880),
                 floor: Some(-900),
                 enter: -750,
@@ -957,6 +1319,108 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&config).unwrap(),
             serde_json::from_str::<serde_json::Value>(body).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_v0_9_timer_says_it_has_control_and_its_status_carries_config_rev() {
+        // `oftd` sends the capability as an empty object.
+        let hello = HELLO.replace(
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 }"#,
+            r#""crossings": { "algorithms": ["edge_mid"], "replay": 256 }, "control": {}"#,
+        );
+        let OftMessage::Hello { capabilities, .. } = OftMessage::parse(&hello).unwrap() else {
+            panic!("expected a hello");
+        };
+        assert!(capabilities.control);
+        // An older Timer has no such key.
+        let OftMessage::Hello { capabilities, .. } = OftMessage::parse(HELLO).unwrap() else {
+            panic!("expected a hello");
+        };
+        assert!(!capabilities.control);
+
+        let frame = r#"{"type":"status","seats":[],"clients":2,"config_rev":7,
+            "control":{"id":3,"name":"RotorHazard"}}"#;
+        let OftMessage::Status { config_rev, .. } = OftMessage::parse(frame).unwrap() else {
+            panic!("expected a status");
+        };
+        assert_eq!(config_rev, Some(7));
+    }
+
+    /// Where a `control` frame leaves the stream it came on.
+    fn standing(frame: &str) -> ControlStanding {
+        let OftMessage::Control { holder, claim, key } = OftMessage::parse(frame).unwrap() else {
+            panic!("expected a control message: {frame}");
+        };
+        ControlStanding::read(holder.as_ref(), claim, key.as_deref())
+    }
+
+    #[test]
+    fn a_control_message_says_who_may_write() {
+        // The three examples from the spec, §6.6.
+        assert_eq!(
+            standing(r#"{"type":"control","holder":{"id":3,"name":"RotorHazard"},"claim":5}"#),
+            ControlStanding::Other {
+                name: "RotorHazard".into()
+            }
+        );
+        assert_eq!(
+            standing(
+                r#"{"type":"control","holder":{"id":3,"name":"RotorHazard"},"claim":3,"key":"9f3a61c2"}"#
+            ),
+            ControlStanding::Ours {
+                key: "9f3a61c2".into()
+            }
+        );
+        assert_eq!(
+            standing(r#"{"type":"control","holder":null,"claim":null}"#),
+            ControlStanding::Nobody
+        );
+        // Straight after `hello`, before this stream has claimed: another holds control.
+        assert_eq!(
+            standing(r#"{"type":"control","holder":{"id":3,"name":"Timer page"},"claim":null}"#),
+            ControlStanding::Other {
+                name: "Timer page".into()
+            }
+        );
+        // Nobody holds control though this stream has a claim (the Timer's page freed it).
+        assert_eq!(
+            standing(r#"{"type":"control","holder":null,"claim":5}"#),
+            ControlStanding::Nobody
+        );
+        // A key is never trusted without the claim it belongs to.
+        assert_eq!(
+            standing(r#"{"type":"control","holder":{"id":3,"name":"X"},"claim":5,"key":"k"}"#),
+            ControlStanding::Other { name: "X".into() }
+        );
+        // A control message gives no events.
+        let message =
+            OftMessage::parse(r#"{"type":"control","holder":null,"claim":null}"#).unwrap();
+        assert!(adapter().translate(message).is_empty());
+    }
+
+    #[test]
+    fn a_claim_carries_a_clean_name_and_the_key_only_when_there_is_one() {
+        let sent: serde_json::Value =
+            serde_json::from_str(&claim("GridFPV race-laptop", None)).unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({"type": "control", "claim": "GridFPV race-laptop"})
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(&claim("GridFPV race-laptop", Some("9f3a61c2"))).unwrap();
+        assert_eq!(sent["key"], "9f3a61c2");
+
+        // What a Timer would drop is dropped here, so the name shown is the name listed.
+        assert_eq!(claim_name("  Grid \"FPV\" \\ caf\u{e9}\n"), "Grid FPV  caf");
+        assert_eq!(claim_name("\u{1f3c1}"), "GridFPV");
+        assert_eq!(claim_name(""), "GridFPV");
+        let long = claim_name(&"a".repeat(40));
+        assert_eq!(long.len(), CLAIM_NAME_MAX);
+        // Cut at 32, a name does not end in a space.
+        assert_eq!(
+            claim_name(&format!("{} tail", "b".repeat(31))),
+            "b".repeat(31)
         );
     }
 }

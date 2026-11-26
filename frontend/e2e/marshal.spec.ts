@@ -87,7 +87,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     expect(eventId).toBeTruthy();
 
     await openPage(page, 'Phases');
-    await page.getByRole('button', { name: '+ Add heat' }).click();
+    await page.getByRole('button', { name: 'Add a practice phase' }).click();
     const form = page.getByRole('form', { name: 'Add a heat' });
     await form.getByLabel('Heat name').fill(HEAT);
     await form.getByRole('button', { name: ACE, exact: true }).click();
@@ -95,9 +95,11 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     await form.getByLabel('Format').selectOption({ label: 'First to 3 laps' });
     await page.getByRole('button', { name: 'Add heat', exact: true }).click();
     await expect(form).toBeHidden({ timeout: 15_000 });
+    // A heat is always in a phase: this one is on the Practice phase's own page.
+    await page.getByRole('link', { name: 'Open Practice' }).click();
 
     const phase = page
-      .getByRole('list', { name: 'Phases' })
+      .getByRole('list', { name: 'Heats of Practice' })
       .locator('li.phase')
       .filter({ hasText: HEAT });
     await expect(phase).toContainText('Ready', { timeout: 15_000 });
@@ -105,8 +107,8 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     await expect(page.getByTestId('marshal-count')).toHaveCount(0);
 
     // ── Run the race. Ace's second crossing after the hole shot is the stray one. ────────
-    // The heat is first in the run queue; run it from there.
-    await page.getByRole('button', { name: `Run ${HEAT} next` }).click();
+    // Run it from its row on the phase's page.
+    await page.getByRole('button', { name: `Run ${HEAT}`, exact: true }).click();
     await expect(heatOnTimer(page)).toHaveText(HEAT);
     const status = page.getByTestId('run-status');
     const runAce = page.getByRole('listitem', { name: `Seat 1, ${ACE}` });
@@ -168,10 +170,16 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
 
     const ace = page.getByRole('listitem', { name: `Seat 1, ${ACE}` });
     const bee = page.getByRole('listitem', { name: `Seat 2, ${BEE}` });
+    // One seat is marshalled at a time, picked under the races. The first is shown.
+    const picks = page.getByRole('list', { name: 'Seat to marshal' });
+    const pick = (who: string) => picks.getByRole('button').filter({ hasText: who });
+    await expect(picks.getByRole('button')).toHaveCount(2);
+    await expect(pick(ACE)).toHaveAttribute('aria-pressed', 'true');
+    await expect(bee).toHaveCount(0);
     const ranking = page.getByRole('list', { name: 'Heat ranking' }).getByRole('listitem');
     await expect(ace).toContainText('Seat 1 · Bench');
     await expect(lapCount(ace)).toHaveText(/3\s+laps/);
-    await expect(lapCount(bee)).toHaveText(/3\s+laps/);
+    await expect(pick(BEE)).toContainText('Seat 2 · 3 laps');
     await expect(ace.locator('[data-stat="place"]')).toHaveText('1st');
     await expect(ranking.nth(0)).toContainText(ACE);
     await expect(ranking.nth(1)).toContainText(BEE);
@@ -200,8 +208,12 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
     const uncounted = ace.getByRole('list', { name: `Crossings of ${ACE} that do not count` });
     await expect(uncounted).toContainText('Removed by a marshal: false detection.');
     // Ace no longer has 3 laps, so Bee wins the race and leads the heat.
-    await expect(bee.locator('[data-stat="place"]')).toHaveText('1st');
     await expect(ace.locator('[data-stat="place"]')).toHaveText('2nd');
+    await pick(BEE).click();
+    await expect(ace).toHaveCount(0);
+    await expect(bee.locator('[data-stat="place"]')).toHaveText('1st');
+    await pick(ACE).click();
+    await expect(pick(ACE)).toContainText('1 not counted');
     await expect(ranking.nth(0)).toContainText(BEE);
     await expect(ranking.nth(1)).toContainText(ACE);
 
@@ -261,6 +273,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
 
     // ── A heat with an open protest cannot be locked: the Director says why ──────────────
     await openPage(page, 'Phases');
+    await page.getByRole('link', { name: 'Open Practice' }).click();
     await expect(phase).toContainText('Complete', { timeout: 15_000 });
     await phase.getByRole('button', { name: `Lock ${HEAT}` }).click();
     const refusal = page.getByRole('alert').filter({ hasText: 'That didn’t work.' });
@@ -296,6 +309,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
 
     // ── Lock the heat: the race is official and read-only ────────────────────────────────
     await openPage(page, 'Phases');
+    await page.getByRole('link', { name: 'Open Practice' }).click();
     await expect(page.getByTestId('marshal-count')).toHaveCount(0);
     await phase.getByRole('button', { name: `Lock ${HEAT}` }).click();
     await expect(phase).toContainText('Locked', { timeout: 15_000 });
@@ -323,6 +337,7 @@ test('a marshal reviews a flagged race: lap rulings, a protest, looked at, and t
 
     // ── Unlock: rulings are offered again ────────────────────────────────────────────────
     await openPage(page, 'Phases');
+    await page.getByRole('link', { name: 'Open Practice' }).click();
     await phase.getByRole('button', { name: `Unlock ${HEAT}` }).click();
     await expect(phase).toContainText('Complete', { timeout: 15_000 });
     const eventText = await page.locator('body').innerText();

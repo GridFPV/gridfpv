@@ -33,6 +33,8 @@ function fakeSession(over: Partial<LiveSession> = {}): {
     }),
     sendCommand: vi.fn(async () => ({ cursor: 2 })),
     createBracket: vi.fn(async () => ({ cursor: 2 })),
+    createMains: vi.fn(async () => ({ cursor: 2 })),
+    createRoundRobin: vi.fn(async () => ({ cursor: 2 })),
     postPass: vi.fn(async () => ({ cursor: 2 })),
     getRaceSignal: vi.fn(async (_id, race) => ({ race, seats: [] })),
     listPilots: vi.fn(async (): Promise<Pilot[]> => []),
@@ -181,7 +183,7 @@ describe('EventLive', () => {
 
   it('reads the class directory on start and names classes from it', async () => {
     const { session } = fakeSession({
-      listClasses: vi.fn(async () => [{ id: 'cls-9k', name: 'Open', source: 'Custom' as const }])
+      listClasses: vi.fn(async () => [{ id: 'cls-9k', name: 'Open' }])
     });
     const live = new EventLive(session, 'evt');
     live.start();
@@ -326,5 +328,89 @@ describe('toProtocolError', () => {
     expect(live.timers).toBe(first);
     await live.reloadTimers();
     expect(live.names.timer('gate-x1y2')).toBe('Gate');
+  });
+
+  describe('seat channels', () => {
+    const GATE = timerView('gate', 'Gate', 2);
+    const R1 = [{ adapter: 'gate', seat: '0', freq_mhz: 5658 }];
+
+    it('are read on start and put into every seat name', async () => {
+      const { session } = fakeSession({
+        listTimers: vi.fn(async () => [GATE]),
+        listChannels: vi.fn(async () => R1)
+      });
+      const live = new EventLive(session, 'evt-1');
+      live.start();
+      await settle();
+      expect(live.channels).toEqual(R1);
+      expect(live.names.seat('gate', '0')).toBe('Seat 1 · R1');
+      expect(live.names.seat('gate', '1')).toBe('Seat 2');
+      expect(live.names.channel('gate', '0')).toBe('R1 · 5658 MHz');
+      live.stop();
+    });
+
+    it('are asked for again now and then, and a change shows in the names', async () => {
+      vi.useFakeTimers();
+      try {
+        const listChannels = vi.fn(async () => R1);
+        const { session } = fakeSession({ listTimers: vi.fn(async () => [GATE]), listChannels });
+        const live = new EventLive(session, 'evt-1', { pollTimers: false });
+        live.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(listChannels).toHaveBeenCalledTimes(1);
+        listChannels.mockResolvedValue([{ adapter: 'gate', seat: '0', freq_mhz: 5695 }]);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(listChannels).toHaveBeenCalledTimes(2);
+        expect(live.names.seat('gate', '0')).toBe('Seat 1 · R2');
+        // Stopped, it asks no more.
+        live.stop();
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(listChannels).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keep the last answer when a read fails', async () => {
+      const listChannels = vi.fn(async () => R1);
+      const { session } = fakeSession({ listTimers: vi.fn(async () => [GATE]), listChannels });
+      const live = new EventLive(session, 'evt-1');
+      await live.reloadTimers();
+      await live.reloadChannels();
+      listChannels.mockRejectedValueOnce(new Error('Failed to fetch'));
+      await live.reloadChannels();
+      expect(live.names.seat('gate', '0')).toBe('Seat 1 · R1');
+    });
+
+    it('keeps the same list when nothing changed, so screens are not redrawn for nothing', async () => {
+      const { session } = fakeSession({ listChannels: vi.fn(async () => [...R1]) });
+      const live = new EventLive(session, 'evt-1');
+      await live.reloadChannels();
+      const first = live.channels;
+      await live.reloadChannels();
+      expect(live.channels).toBe(first);
+    });
+
+    it('a session that cannot say names seats without a channel, and nothing is asked', async () => {
+      const { session } = fakeSession({ listTimers: vi.fn(async () => [GATE]) });
+      const live = new EventLive(session, 'evt-1');
+      live.start();
+      await settle();
+      await live.reloadChannels();
+      expect(live.channels).toEqual([]);
+      expect(live.names.seat('gate', '0')).toBe('Seat 1');
+      live.stop();
+    });
+
+    it('a read that lands after the store is stopped is dropped', async () => {
+      const gate = deferred<typeof R1>();
+      const { session } = fakeSession({ listChannels: vi.fn(() => gate.promise) });
+      const live = new EventLive(session, 'evt-1');
+      const reading = live.reloadChannels();
+      live.stop();
+      gate.resolve(R1);
+      await reading;
+      expect(live.channels).toEqual([]);
+    });
   });
 });

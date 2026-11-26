@@ -34,7 +34,8 @@
     formFromClass,
     isBuiltin,
     isHidden,
-    sourceTone,
+    orgProblem,
+    orgTone,
     type ClassFormValues
   } from '../lib/classes.js';
 
@@ -80,6 +81,40 @@
     keepRow?: (cls: Class) => boolean;
   } = $props();
 
+  /**
+   * How many built-in classes have been removed and could be put back. Only looked up where
+   * classes are managed (the Classes page), and never allowed to fail the list.
+   */
+  let removedBuiltins = $state(0);
+  let restoring = $state(false);
+
+  async function countRemoved() {
+    if (!manageHidden) return;
+    try {
+      removedBuiltins = await session.removedBuiltinClasses();
+    } catch {
+      removedBuiltins = 0;
+    }
+  }
+
+  async function restoreBuiltins() {
+    if (restoring) return;
+    restoring = true;
+    try {
+      const back = await session.restoreBuiltinClasses();
+      if (back === undefined) {
+        toast.info('A control token is required to put the classes back.');
+        return;
+      }
+      toast.success('The classes that came with Grid are back.');
+      await reload();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      restoring = false;
+    }
+  }
+
   type LoadState =
     | { kind: 'loading' }
     | { kind: 'error'; message: string }
@@ -93,6 +128,7 @@
       const list = await session.listClasses();
       loadState = { kind: 'ready', classes: list };
       classes = list;
+      await countRemoved();
     } catch (e) {
       loadState = { kind: 'error', message: e instanceof Error ? e.message : String(e) };
     }
@@ -127,8 +163,6 @@
   }
 
   function openEdit(cls: Class) {
-    // Built-ins are read-only — never open the edit form for one (the UI offers no Edit on them).
-    if (isBuiltin(cls)) return;
     editing = cls;
     form = formFromClass(cls);
     formError = undefined;
@@ -142,6 +176,7 @@
       formError = 'A name is required.';
       return;
     }
+    if (orgProblem(form.org)) return;
     saving = true;
     formError = undefined;
     try {
@@ -177,7 +212,6 @@
 
   function askRemove(cls: Class) {
     // Built-ins are read-only — they can't be removed (the UI offers no Remove on them).
-    if (isBuiltin(cls)) return;
     confirming = cls;
   }
 
@@ -266,11 +300,9 @@
           <div class="class-main">
             <div class="class-head">
               <span class="class-name">{cls.name}</span>
-              <Badge tone={sourceTone(cls.source)}>{cls.source}</Badge>
-              {#if isBuiltin(cls)}
-                <span class="builtin-lock" title="Built-in class — read-only" aria-label="Built-in">
-                  🔒 Built-in
-                </span>
+              {#if cls.org}
+                <Badge tone={orgTone(cls.org)}><span data-testid="class-org">{cls.org}</span></Badge
+                >
               {/if}
               {#if isHidden(cls)}
                 <Badge tone="neutral">Hidden</Badge>
@@ -300,42 +332,57 @@
                 {isHidden(cls) ? 'Unhide' : 'Hide'}
               </Button>
             {/if}
-            {#if !isBuiltin(cls)}
-              <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
-              <Button
-                variant="danger"
-                size="sm"
-                loading={removing === cls.id}
-                onclick={() => askRemove(cls)}
-              >
-                Remove
-              </Button>
-            {/if}
+            <!-- Every class is the same here, the ones that came with Grid too. -->
+            <Button variant="ghost" size="sm" onclick={() => openEdit(cls)}>Edit</Button>
+            <Button
+              variant="danger"
+              size="sm"
+              loading={removing === cls.id}
+              onclick={() => askRemove(cls)}
+            >
+              Remove
+            </Button>
           </div>
         </li>
       {/each}
     </ul>
     {@render listFooter?.()}
   {/if}
+  {#if loadState.kind === 'ready' && removedBuiltins > 0}
+    <p class="removed-builtins" data-testid="removed-builtins">
+      {removedBuiltins}
+      {removedBuiltins === 1 ? 'class' : 'classes'} that came with Grid
+      {removedBuiltins === 1 ? 'has' : 'have'} been removed.
+      <Button variant="ghost" size="sm" loading={restoring} onclick={restoreBuiltins}>
+        Put them back
+      </Button>
+    </p>
+  {/if}
 </div>
 
 <!-- The add / edit dialog stacks above whatever embeds the manager. -->
 <Dialog bind:open={formOpen} title={editing ? 'Edit class' : 'Add class'}>
   <form class="class-form" onsubmit={submitForm} aria-label={editing ? 'Edit class' : 'Add class'}>
-    {#if !editing}
-      <!-- New classes are always Custom; the canonical org classes ship as locked built-ins. -->
-      <p class="custom-note">
-        New classes are <strong>Custom</strong>. The standard org classes (MultiGP, Five33, …) are
-        built in.
-      </p>
-    {/if}
-
     <Field label="Name" required error={formError}>
       <Input
         bind:value={form.name}
         placeholder="e.g. House Spec"
         aria-label="Name"
         autocomplete="off"
+      />
+    </Field>
+
+    <Field
+      label="Org"
+      hint="Whose class it is, such as MultiGP or your club. It shows as a tag beside the name. Leave it empty for none."
+      error={orgProblem(form.org)}
+    >
+      <Input
+        bind:value={form.org}
+        placeholder="e.g. MultiGP"
+        aria-label="Org"
+        autocomplete="off"
+        maxlength={48}
       />
     </Field>
 
@@ -354,7 +401,12 @@
   </form>
   {#snippet footer()}
     <Button variant="ghost" onclick={() => (formOpen = false)} disabled={saving}>Cancel</Button>
-    <Button variant="primary" onclick={submitForm} loading={saving} disabled={!form.name.trim()}>
+    <Button
+      variant="primary"
+      onclick={submitForm}
+      loading={saving}
+      disabled={!form.name.trim() || orgProblem(form.org) !== undefined}
+    >
       {editing ? 'Save changes' : 'Add class'}
     </Button>
   {/snippet}
@@ -370,6 +422,11 @@
     Remove <strong>{confirming?.name}</strong> from the directory? Any event that selected it keeps running;
     this only removes the directory entry.
   </p>
+  {#if confirming && isBuiltin(confirming)}
+    <p class="confirm-text">
+      It came with Grid. You can put those classes back at any time, from the bottom of this page.
+    </p>
+  {/if}
   {#snippet footer()}
     <Button
       variant="ghost"
@@ -384,6 +441,15 @@
 </Dialog>
 
 <style>
+  .removed-builtins {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
   .class-manager {
     display: flex;
     flex-direction: column;
@@ -500,21 +566,6 @@
     font-size: var(--gf-font-size-md);
     font-weight: var(--gf-font-weight-semibold);
     letter-spacing: var(--gf-tracking-tight);
-  }
-  .builtin-lock {
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
-    font-weight: var(--gf-font-weight-medium);
-    letter-spacing: var(--gf-tracking-tight);
-  }
-  .custom-note {
-    margin: 0;
-    font-size: var(--gf-font-size-xs);
-    color: var(--gf-text-muted);
-    line-height: 1.5;
-  }
-  .custom-note strong {
-    color: var(--gf-text-secondary);
   }
   .reference {
     font-size: var(--gf-font-size-xs);

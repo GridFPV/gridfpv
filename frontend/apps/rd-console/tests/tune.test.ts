@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest';
 import type { SeatLevels, TimerConfig } from '@gridfpv/types';
 import {
   addSeat,
-  dbToTenths,
   draftConfig,
   draftFrom,
   fieldNumber,
-  formatDb,
+  formatGap,
+  fromShown,
   formatLevel,
   isDirty,
   levelsInUse,
@@ -17,8 +17,9 @@ import {
   ownLevels,
   sameConfig,
   secondsToMs,
-  tenthsToDb,
+  toShown,
   unitLabel,
+  unitScale,
   withMode,
   type DraftSeat
 } from '../src/lib/tune.js';
@@ -60,8 +61,18 @@ describe('levels in words', () => {
     expect(formatLevel(undefined, 'TenthsDb')).toBe('—');
   });
 
-  it('writes a difference in dB', () => {
-    expect(formatDb(150)).toBe('15.0 dB');
+  it('writes a difference in dB, also between two dBm levels', () => {
+    expect(formatGap(150, 'TenthsDb')).toBe('15.0 dB');
+    expect(formatGap(150, 'TenthsDbm')).toBe('15.0 dB');
+  });
+
+  it('shows millivolts whole, never divided by ten', () => {
+    // A receiver that reads a signal-strength pin (OFT spec v0.8): 850 is 850 mV.
+    expect(unitLabel('Millivolts')).toBe('mV');
+    expect(unitScale('Millivolts')).toBe(1);
+    expect(formatLevel(850, 'Millivolts')).toBe('850 mV');
+    expect(formatGap(40, 'Millivolts')).toBe('40 mV');
+    expect(formatGap(12, 'Counts')).toBe('12');
   });
 });
 
@@ -78,11 +89,18 @@ describe('field numbers', () => {
   });
 
   it('converts dB to tenths and back without drift', () => {
-    expect(tenthsToDb(-773)).toBe(-77.3);
-    expect(dbToTenths(-77.3)).toBe(-773);
-    expect(dbToTenths('15')).toBe(150);
-    expect(dbToTenths(0.1 + 0.2)).toBe(3);
-    expect(dbToTenths('')).toBeUndefined();
+    expect(toShown(-773, 'TenthsDb')).toBe(-77.3);
+    expect(fromShown(-77.3, 'TenthsDb')).toBe(-773);
+    expect(fromShown('15', 'TenthsDb')).toBe(150);
+    expect(fromShown(0.1 + 0.2, 'TenthsDb')).toBe(3);
+    expect(fromShown('', 'TenthsDb')).toBeUndefined();
+  });
+
+  it('leaves millivolts and counts as they are, to the whole number', () => {
+    expect(toShown(850, 'Millivolts')).toBe(850);
+    expect(fromShown('850', 'Millivolts')).toBe(850);
+    expect(fromShown(850.4, 'Millivolts')).toBe(850);
+    expect(fromShown(120, 'Counts')).toBe(120);
   });
 
   it('converts seconds to milliseconds, to one decimal of a second', () => {
@@ -94,54 +112,98 @@ describe('field numbers', () => {
   });
 });
 
+describe('a timer that measures millivolts', () => {
+  const MV: TimerConfig = {
+    seats: [
+      { seat: '0', freq_mhz: 5658, enabled: true, threshold: { Manual: { enter: 850, exit: 810 } } }
+    ],
+    threshold: { Auto: { snr_enter: 150, hysteresis: 50 } }
+  };
+
+  it('drafts its settings as the same whole numbers, and sends them back unchanged', () => {
+    const draft = draftFrom(MV, 'Millivolts');
+    expect(draft.unit).toBe('Millivolts');
+    // 150 above the floor is 150 mV here. Read as dB it would have shown 15.
+    expect(draft.levels).toMatchObject({ unit: 'Millivolts', aboveFloor: 150, belowEnter: 50 });
+    expect(draft.seats[0].levels).toMatchObject({ enter: 850, exit: 810 });
+    expect(draftConfig(draft, seatName)).toEqual({ ok: true, config: MV });
+    expect(isDirty(draft, MV)).toBe(false);
+  });
+
+  it('sends a typed level as millivolts, not ten times it', () => {
+    const draft = draftFrom(MV, 'Millivolts');
+    draft.seats[0].levels!.enter = '900';
+    const result = draftConfig(draft, seatName);
+    expect(result.ok && result.config.seats[0].threshold).toEqual({
+      Manual: { enter: 900, exit: 810 }
+    });
+  });
+
+  it('fills fixed levels from the levels in use, in millivolts', () => {
+    const draft = draftFrom(MV, 'Millivolts');
+    expect(withMode(draft.levels, 'Manual', { enter: 846, exit: 800 })).toMatchObject({
+      enter: 846,
+      exit: 800
+    });
+    expect(ownLevels(draft.levels, { enter: 846, exit: 800 })).toMatchObject({
+      unit: 'Millivolts',
+      enter: 846,
+      exit: 800
+    });
+  });
+});
+
 describe('the draft', () => {
   it('says what the settings say, in dB and seconds', () => {
-    expect(draftFrom(AUTO)).toEqual({
+    expect(draftFrom(AUTO, 'TenthsDb')).toEqual({
+      unit: 'TenthsDb',
       seats: [
         { seat: '0', mhz: 5658, enabled: true },
         { seat: '1', mhz: 5695, enabled: false }
       ],
-      levels: { mode: 'Auto', aboveFloorDb: 15, belowEnterDb: 5, enterDb: '', exitDb: '' }
+      levels: { mode: 'Auto', unit: 'TenthsDb', aboveFloor: 15, belowEnter: 5, enter: '', exit: '' }
     });
-    const manual = draftFrom(MANUAL).levels;
+    const manual = draftFrom(MANUAL, 'TenthsDb').levels;
     expect(manual.mode).toBe('Manual');
-    expect(manual.enterDb).toBe(-70);
-    expect(manual.exitDb).toBe(-76.5);
-    expect(manual.aboveFloorDb).toBe('');
+    expect(manual.enter).toBe(-70);
+    expect(manual.exit).toBe(-76.5);
+    expect(manual.aboveFloor).toBe('');
   });
 
   it("holds a seat's own levels only for a seat that has them", () => {
-    const draft = draftFrom(OWN);
+    const draft = draftFrom(OWN, 'TenthsDb');
     expect('levels' in draft.seats[0]).toBe(false);
     expect(draft.seats[1].levels).toEqual({
       mode: 'Manual',
-      aboveFloorDb: '',
-      belowEnterDb: '',
-      enterDb: -60,
-      exitDb: -66
+      unit: 'TenthsDb',
+      aboveFloor: '',
+      belowEnter: '',
+      enter: -60,
+      exit: -66
     });
-    expect(levelsFrom({ Auto: { snr_enter: 120, hysteresis: 45 } })).toEqual({
+    expect(levelsFrom({ Auto: { snr_enter: 120, hysteresis: 45 } }, 'TenthsDb')).toEqual({
       mode: 'Auto',
-      aboveFloorDb: 12,
-      belowEnterDb: 4.5,
-      enterDb: '',
-      exitDb: ''
+      unit: 'TenthsDb',
+      aboveFloor: 12,
+      belowEnter: 4.5,
+      enter: '',
+      exit: ''
     });
   });
 
   it('turns back into the very same settings', () => {
     const everything: TimerConfig = { ...OWN, exit_hold_ms: 30, lap_cooldown_ms: 2500 };
     for (const config of [AUTO, MANUAL, OWN, everything]) {
-      expect(draftConfig(draftFrom(config), seatName)).toEqual({ ok: true, config });
+      expect(draftConfig(draftFrom(config, 'TenthsDb'), seatName)).toEqual({ ok: true, config });
     }
   });
 
   it('carries every edit into the settings it would send', () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     draft.seats[1].enabled = true;
     draft.seats[1].mhz = '5800';
-    draft.levels.aboveFloorDb = '12.5';
-    draft.levels.belowEnterDb = 4;
+    draft.levels.aboveFloor = '12.5';
+    draft.levels.belowEnter = 4;
     expect(draftConfig(draft, seatName)).toEqual({
       ok: true,
       config: {
@@ -156,7 +218,7 @@ describe('the draft', () => {
 
   it('says what is missing in a sentence, naming a seat by its name', () => {
     const problemOf = (change: (draft: ReturnType<typeof draftFrom>) => void, from = AUTO) => {
-      const draft = draftFrom(from);
+      const draft = draftFrom(from, 'TenthsDb');
       change(draft);
       const result = draftConfig(draft, seatName);
       return result.ok ? undefined : result.problem;
@@ -165,17 +227,15 @@ describe('the draft', () => {
     expect(problemOf((d) => (d.seats[0].mhz = 5658.5))).toBe(
       'Seat 1 needs a frequency in whole MHz.'
     );
-    expect(problemOf((d) => (d.levels.aboveFloorDb = ''))).toBe(
+    expect(problemOf((d) => (d.levels.aboveFloor = ''))).toBe(
       'Say how far above the noise floor to enter.'
     );
-    expect(problemOf((d) => (d.levels.belowEnterDb = ''))).toBe('Say how far below enter to exit.');
-    expect(problemOf((d) => (d.levels.enterDb = ''), MANUAL)).toBe(
+    expect(problemOf((d) => (d.levels.belowEnter = ''))).toBe('Say how far below enter to exit.');
+    expect(problemOf((d) => (d.levels.enter = ''), MANUAL)).toBe(
       'Fixed levels need an enter level.'
     );
-    expect(problemOf((d) => (d.levels.exitDb = ''), MANUAL)).toBe(
-      'Fixed levels need an exit level.'
-    );
-    expect(problemOf((d) => (d.levels.exitDb = -70), MANUAL)).toBe(
+    expect(problemOf((d) => (d.levels.exit = ''), MANUAL)).toBe('Fixed levels need an exit level.');
+    expect(problemOf((d) => (d.levels.exit = -70), MANUAL)).toBe(
       'The exit level must be below the enter level.'
     );
   });
@@ -183,13 +243,14 @@ describe('the draft', () => {
 
 describe("a seat's own levels in the draft", () => {
   it('sends a threshold only for a seat with its own, and no key at all for the others', () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     draft.seats[1].levels = {
       mode: 'Auto',
-      aboveFloorDb: 12,
-      belowEnterDb: '4.5',
-      enterDb: '',
-      exitDb: ''
+      unit: 'TenthsDb',
+      aboveFloor: 12,
+      belowEnter: '4.5',
+      enter: '',
+      exit: ''
     };
     const result = draftConfig(draft, seatName);
     if (!result.ok) throw new Error(result.problem);
@@ -206,7 +267,7 @@ describe("a seat's own levels in the draft", () => {
   });
 
   it('sends every seat that has its own each time, whichever one was edited', () => {
-    const draft = draftFrom(OWN);
+    const draft = draftFrom(OWN, 'TenthsDb');
     draft.seats[0].mhz = 5800;
     expect(draftConfig(draft, seatName)).toMatchObject({
       ok: true,
@@ -220,7 +281,7 @@ describe("a seat's own levels in the draft", () => {
   });
 
   it('puts a seat back on the timer by dropping its levels', () => {
-    const draft = draftFrom(OWN);
+    const draft = draftFrom(OWN, 'TenthsDb');
     draft.seats[1].levels = undefined;
     const result = draftConfig(draft, seatName);
     if (!result.ok) throw new Error(result.problem);
@@ -228,25 +289,25 @@ describe("a seat's own levels in the draft", () => {
   });
 
   it('never sends one to a timer that does not take them', () => {
-    const result = draftConfig(draftFrom(OWN), seatName, false);
+    const result = draftConfig(draftFrom(OWN, 'TenthsDb'), seatName, false);
     if (!result.ok) throw new Error(result.problem);
     expect(result.config.seats.some((seat) => 'threshold' in seat)).toBe(false);
     // A hole in levels that will not be sent is not a problem either.
-    const holed = draftFrom(OWN);
-    holed.seats[1].levels!.enterDb = '';
+    const holed = draftFrom(OWN, 'TenthsDb');
+    holed.seats[1].levels!.enter = '';
     expect(draftConfig(holed, seatName, false).ok).toBe(true);
   });
 
   it('says what is missing, naming the seat by its name', () => {
     const problemOf = (change: (levels: NonNullable<DraftSeat['levels']>) => void) => {
-      const draft = draftFrom(OWN);
+      const draft = draftFrom(OWN, 'TenthsDb');
       change(draft.seats[1].levels!);
       const result = draftConfig(draft, seatName);
       return result.ok ? undefined : result.problem;
     };
-    expect(problemOf((own) => (own.enterDb = ''))).toBe('Seat 2 needs an enter level.');
-    expect(problemOf((own) => (own.exitDb = ''))).toBe('Seat 2 needs an exit level.');
-    expect(problemOf((own) => (own.exitDb = -60))).toBe(
+    expect(problemOf((own) => (own.enter = ''))).toBe('Seat 2 needs an enter level.');
+    expect(problemOf((own) => (own.exit = ''))).toBe('Seat 2 needs an exit level.');
+    expect(problemOf((own) => (own.exit = -60))).toBe(
       'On Seat 2, the exit level must be below the enter level.'
     );
     expect(problemOf((own) => (own.mode = 'Auto'))).toBe(
@@ -255,42 +316,47 @@ describe("a seat's own levels in the draft", () => {
     expect(
       problemOf((own) => {
         own.mode = 'Auto';
-        own.aboveFloorDb = 12;
+        own.aboveFloor = 12;
       })
     ).toBe('Say how far below enter Seat 2 exits.');
   });
 
   it("starts a seat's own levels the way the timer's are set, with the seat's levels right now as its fixed levels", () => {
-    const timer = draftFrom(AUTO).levels;
+    const timer = draftFrom(AUTO, 'TenthsDb').levels;
     const own = ownLevels(timer, { enter: -771, exit: -821 });
     expect(own).toEqual({
       mode: 'Auto',
-      aboveFloorDb: 15,
-      belowEnterDb: 5,
-      enterDb: -77.1,
-      exitDb: -82.1
+      unit: 'TenthsDb',
+      aboveFloor: 15,
+      belowEnter: 5,
+      enter: -77.1,
+      exit: -82.1
     });
     expect(own).not.toBe(timer);
     // Going to fixed levels keeps what was filled in.
-    expect(withMode(own, 'Manual', undefined)).toMatchObject({ enterDb: -77.1, exitDb: -82.1 });
+    expect(withMode(own, 'Manual', undefined)).toMatchObject({ enter: -77.1, exit: -82.1 });
     // With no live levels the timer's fixed levels in the draft stand in.
-    expect(ownLevels(draftFrom(MANUAL).levels, undefined)).toEqual(draftFrom(MANUAL).levels);
-    expect(ownLevels(draftFrom(MANUAL).levels, { enter: -650, exit: -700 })).toMatchObject({
+    expect(ownLevels(draftFrom(MANUAL, 'TenthsDb').levels, undefined)).toEqual(
+      draftFrom(MANUAL, 'TenthsDb').levels
+    );
+    expect(
+      ownLevels(draftFrom(MANUAL, 'TenthsDb').levels, { enter: -650, exit: -700 })
+    ).toMatchObject({
       mode: 'Manual',
-      enterDb: -65,
-      exitDb: -70
+      enter: -65,
+      exit: -70
     });
   });
 });
 
 describe('dirty', () => {
   it('is clean straight from the timer', () => {
-    expect(isDirty(draftFrom(AUTO), AUTO)).toBe(false);
-    expect(isDirty(draftFrom(MANUAL), MANUAL)).toBe(false);
+    expect(isDirty(draftFrom(AUTO, 'TenthsDb'), AUTO)).toBe(false);
+    expect(isDirty(draftFrom(MANUAL, 'TenthsDb'), MANUAL)).toBe(false);
   });
 
   it('is dirty after any edit, and clean again when the edit is undone', () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     draft.seats[0].mhz = 5800;
     expect(isDirty(draft, AUTO)).toBe(true);
     draft.seats[0].mhz = '5658';
@@ -300,42 +366,42 @@ describe('dirty', () => {
   });
 
   it('is dirty when the draft cannot be sent yet', () => {
-    const draft = draftFrom(AUTO);
-    draft.levels.aboveFloorDb = '';
+    const draft = draftFrom(AUTO, 'TenthsDb');
+    draft.levels.aboveFloor = '';
     expect(isDirty(draft, AUTO)).toBe(true);
   });
 
   it("sees a seat's own levels given, changed and taken away, and is clean again after a discard", () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     draft.seats[0].levels = ownLevels(draft.levels, undefined);
     // Same numbers as the timer's, but the seat now carries its own: that is a change.
     expect(isDirty(draft, AUTO)).toBe(true);
     draft.seats[0].levels = undefined;
     expect(isDirty(draft, AUTO)).toBe(false);
 
-    const own = draftFrom(OWN);
+    const own = draftFrom(OWN, 'TenthsDb');
     expect(isDirty(own, OWN)).toBe(false);
-    own.seats[1].levels!.enterDb = -58;
+    own.seats[1].levels!.enter = -58;
     expect(isDirty(own, OWN)).toBe(true);
-    own.seats[1].levels!.enterDb = '';
+    own.seats[1].levels!.enter = '';
     expect(isDirty(own, OWN)).toBe(true);
     own.seats[1].levels = undefined;
     expect(isDirty(own, OWN)).toBe(true);
     // Discard is a new draft from what the timer has.
-    expect(draftFrom(OWN).seats[1].levels?.enterDb).toBe(-60);
-    expect(isDirty(draftFrom(OWN), OWN)).toBe(false);
+    expect(draftFrom(OWN, 'TenthsDb').seats[1].levels?.enter).toBe(-60);
+    expect(isDirty(draftFrom(OWN, 'TenthsDb'), OWN)).toBe(false);
   });
 
   it("does not count a seat's levels on a timer that does not take them", () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     draft.seats[0].levels = ownLevels(draft.levels, undefined);
     expect(isDirty(draft, AUTO, false)).toBe(false);
   });
 
   it('is dirty with a seat added, a mode changed, or a number changed', () => {
-    expect(isDirty(addSeat(draftFrom(AUTO)), AUTO)).toBe(true);
-    expect(isDirty(draftFrom(MANUAL), AUTO)).toBe(true);
-    expect(isDirty(draftFrom(OWN), AUTO)).toBe(true);
+    expect(isDirty(addSeat(draftFrom(AUTO, 'TenthsDb')), AUTO)).toBe(true);
+    expect(isDirty(draftFrom(MANUAL, 'TenthsDb'), AUTO)).toBe(true);
+    expect(isDirty(draftFrom(OWN, 'TenthsDb'), AUTO)).toBe(true);
   });
 
   it('sameConfig compares every part', () => {
@@ -406,9 +472,25 @@ describe('dirty', () => {
 
 describe('switching how the levels are set', () => {
   const LEVELS: SeatLevels[] = [
-    { seat: '0', level: -880, floor: -920, enter: -770, exit: -820, crossing: false },
+    {
+      seat: '0',
+      unit: 'TenthsDb',
+      level: -880,
+      floor: -920,
+      enter: -770,
+      exit: -820,
+      crossing: false
+    },
     // Seat 1 has the higher enter level, but it is off, so it does not count.
-    { seat: '1', level: -700, floor: -800, enter: -650, exit: -700, crossing: false }
+    {
+      seat: '1',
+      unit: 'TenthsDb',
+      level: -700,
+      floor: -800,
+      enter: -650,
+      exit: -700,
+      crossing: false
+    }
   ];
 
   it('takes the levels in use from the seats that are on, the highest enter winning', () => {
@@ -432,11 +514,11 @@ describe('switching how the levels are set', () => {
   });
 
   it('fills the fixed levels from the levels in use when going to fixed', () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     const next = withMode(draft.levels, 'Manual', { enter: -770, exit: -820 });
     expect(next.mode).toBe('Manual');
-    expect(next.enterDb).toBe(-77);
-    expect(next.exitDb).toBe(-82);
+    expect(next.enter).toBe(-77);
+    expect(next.exit).toBe(-82);
     expect(draftConfig({ ...draft, levels: next }, seatName)).toMatchObject({
       ok: true,
       config: { threshold: { Manual: { enter: -770, exit: -820 } } }
@@ -444,20 +526,20 @@ describe('switching how the levels are set', () => {
   });
 
   it('keeps numbers the director already typed, and what was there on the way back', () => {
-    const typed = { ...draftFrom(AUTO).levels, enterDb: -60, exitDb: '' };
+    const typed = { ...draftFrom(AUTO, 'TenthsDb').levels, enter: -60, exit: '' };
     const next = withMode(typed, 'Manual', { enter: -770, exit: -820 });
-    expect(next.enterDb).toBe(-60);
-    expect(next.exitDb).toBe(-82);
+    expect(next.enter).toBe(-60);
+    expect(next.exit).toBe(-82);
     const back = withMode(next, 'Auto', { enter: -770, exit: -820 });
     expect(back.mode).toBe('Auto');
-    expect(back.aboveFloorDb).toBe(15);
-    expect(back.enterDb).toBe(-60);
+    expect(back.aboveFloor).toBe(15);
+    expect(back.enter).toBe(-60);
   });
 
   it('leaves the fields empty when the timer has reported no levels', () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     const next = withMode(draft.levels, 'Manual', undefined);
-    expect(next.enterDb).toBe('');
+    expect(next.enter).toBe('');
     expect(draftConfig({ ...draft, levels: next }, seatName)).toEqual({
       ok: false,
       problem: 'Fixed levels need an enter level.'
@@ -465,14 +547,14 @@ describe('switching how the levels are set', () => {
   });
 
   it('is the same draft when the mode does not change', () => {
-    const { levels } = draftFrom(AUTO);
+    const { levels } = draftFrom(AUTO, 'TenthsDb');
     expect(withMode(levels, 'Auto', undefined)).toBe(levels);
   });
 });
 
 describe('adding a seat', () => {
   it('adds the lowest seat number not in use, on, on a free Raceband channel', () => {
-    const draft = draftFrom(AUTO);
+    const draft = draftFrom(AUTO, 'TenthsDb');
     expect(nextSeat(draft)).toBe('2');
     const next = addSeat(draft);
     expect(next.seats).toHaveLength(3);
@@ -480,24 +562,27 @@ describe('adding a seat', () => {
   });
 
   it('fills a gap and keeps the seats in number order', () => {
-    const draft = draftFrom({
-      ...AUTO,
-      seats: [
-        { seat: '0', freq_mhz: 5658, enabled: true },
-        { seat: '2', freq_mhz: 5732, enabled: true }
-      ]
-    });
+    const draft = draftFrom(
+      {
+        ...AUTO,
+        seats: [
+          { seat: '0', freq_mhz: 5658, enabled: true },
+          { seat: '2', freq_mhz: 5732, enabled: true }
+        ]
+      },
+      'TenthsDb'
+    );
     expect(addSeat(draft).seats.map((seat) => seat.seat)).toEqual(['0', '1', '2']);
     expect(addSeat(draft).seats[1].mhz).toBe(5695);
   });
 
   it('starts an empty timer at seat 0 on R1', () => {
-    const next = addSeat(draftFrom({ ...AUTO, seats: [] }));
+    const next = addSeat(draftFrom({ ...AUTO, seats: [] }, 'TenthsDb'));
     expect(next.seats).toEqual([{ seat: '0', mhz: 5658, enabled: true }]);
   });
 
   it('stops at eight seats', () => {
-    let draft = draftFrom({ ...AUTO, seats: [] });
+    let draft = draftFrom({ ...AUTO, seats: [] }, 'TenthsDb');
     for (let i = 0; i < 8; i += 1) draft = addSeat(draft);
     expect(draft.seats.map((seat) => seat.seat)).toEqual(['0', '1', '2', '3', '4', '5', '6', '7']);
     expect(nextSeat(draft)).toBeUndefined();
@@ -509,12 +594,12 @@ describe('the exit hold', () => {
   const name = () => 'Seat';
 
   it('is in the draft and sent back only for a timer that has it', () => {
-    expect(draftFrom(AUTO).exitHoldMs).toBeUndefined();
-    const without = draftConfig(draftFrom(AUTO), name);
+    expect(draftFrom(AUTO, 'TenthsDb').exitHoldMs).toBeUndefined();
+    const without = draftConfig(draftFrom(AUTO, 'TenthsDb'), name);
     expect(without.ok && 'exit_hold_ms' in without.config).toBe(false);
 
     const has: TimerConfig = { ...AUTO, exit_hold_ms: 30 };
-    const draft = draftFrom(has);
+    const draft = draftFrom(has, 'TenthsDb');
     expect(draft.exitHoldMs).toBe(30);
     const sent = draftConfig(draft, name);
     expect(sent.ok && sent.config.exit_hold_ms).toBe(30);
@@ -522,7 +607,7 @@ describe('the exit hold', () => {
 
   it('makes the draft dirty when it changes, and must be a whole number', () => {
     const has: TimerConfig = { ...AUTO, exit_hold_ms: 30 };
-    const draft = draftFrom(has);
+    const draft = draftFrom(has, 'TenthsDb');
     expect(isDirty(draft, has)).toBe(false);
     draft.exitHoldMs = 80;
     expect(isDirty(draft, has)).toBe(true);
@@ -548,25 +633,25 @@ describe('the lap cooldown', () => {
   const PROBLEM = 'The lap cooldown must be a number of seconds, 0 or more.';
 
   it('is in the draft, in seconds, only for a timer that has it', () => {
-    expect('lapCooldownS' in draftFrom(AUTO)).toBe(false);
-    expect(draftFrom(has).lapCooldownS).toBe(2.5);
+    expect('lapCooldownS' in draftFrom(AUTO, 'TenthsDb')).toBe(false);
+    expect(draftFrom(has, 'TenthsDb').lapCooldownS).toBe(2.5);
     // A cooldown of 0 is still a setting the timer has.
-    expect(draftFrom({ ...AUTO, lap_cooldown_ms: 0 }).lapCooldownS).toBe(0);
+    expect(draftFrom({ ...AUTO, lap_cooldown_ms: 0 }, 'TenthsDb').lapCooldownS).toBe(0);
   });
 
   it('is sent back in milliseconds only to a timer that has it', () => {
-    const without = draftConfig(draftFrom(AUTO), name);
+    const without = draftConfig(draftFrom(AUTO, 'TenthsDb'), name);
     if (!without.ok) throw new Error(without.problem);
     expect('lap_cooldown_ms' in without.config).toBe(false);
 
-    const sent = draftConfig(draftFrom(has), name);
+    const sent = draftConfig(draftFrom(has, 'TenthsDb'), name);
     if (!sent.ok) throw new Error(sent.problem);
     expect(sent.config.lap_cooldown_ms).toBe(2500);
   });
 
   it('carries an edit, typed or picked, to the nearest tenth of a second', () => {
     const sentFor = (lapCooldownS: number | string) => {
-      const result = draftConfig({ ...draftFrom(has), lapCooldownS }, name);
+      const result = draftConfig({ ...draftFrom(has, 'TenthsDb'), lapCooldownS }, name);
       if (!result.ok) throw new Error(result.problem);
       return result.config.lap_cooldown_ms;
     };
@@ -578,7 +663,7 @@ describe('the lap cooldown', () => {
 
   it('must be a number of seconds, 0 or more', () => {
     for (const lapCooldownS of ['', '  ', 'abc', -1, '-2.5']) {
-      expect(draftConfig({ ...draftFrom(has), lapCooldownS }, name)).toEqual({
+      expect(draftConfig({ ...draftFrom(has, 'TenthsDb'), lapCooldownS }, name)).toEqual({
         ok: false,
         problem: PROBLEM
       });
@@ -586,7 +671,7 @@ describe('the lap cooldown', () => {
   });
 
   it('makes the draft dirty when it changes, and clean again when it is put back', () => {
-    const draft = draftFrom(has);
+    const draft = draftFrom(has, 'TenthsDb');
     expect(isDirty(draft, has)).toBe(false);
     draft.lapCooldownS = 3;
     expect(isDirty(draft, has)).toBe(true);
@@ -598,13 +683,13 @@ describe('the lap cooldown', () => {
 
   it('is its own setting: changing it leaves the exit hold alone, and the other way round', () => {
     const both: TimerConfig = { ...AUTO, exit_hold_ms: 30, lap_cooldown_ms: 2500 };
-    const draft = draftFrom(both);
+    const draft = draftFrom(both, 'TenthsDb');
     draft.lapCooldownS = 4;
     expect(draftConfig(draft, name)).toMatchObject({
       ok: true,
       config: { exit_hold_ms: 30, lap_cooldown_ms: 4000 }
     });
-    const other = draftFrom(both);
+    const other = draftFrom(both, 'TenthsDb');
     other.exitHoldMs = 50;
     expect(draftConfig(other, name)).toMatchObject({
       ok: true,

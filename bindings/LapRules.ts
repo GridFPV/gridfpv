@@ -15,4 +15,11 @@ min_lap_micros?: number,
  * right under the gate). It needs the start on the timer's clock; a timer that cannot
  * give it filters nothing here. `None` ignores only crossings before the start.
  */
-ignore_before_micros?: number, };
+ignore_before_micros?: number, 
+/**
+ * The pass window, in microseconds: crossings on a seat that start within this long of
+ * the first one are one pass, and only the strongest counts. For a track that flies
+ * close by the gate just before going through it. The timer applies it, so it holds
+ * only on a timer that can (`docs/primitives.md` §12.6). `None` is off.
+ */
+pass_window_micros?: number, };

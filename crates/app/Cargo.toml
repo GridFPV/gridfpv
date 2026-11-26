@@ -38,6 +38,9 @@ gridfpv-events.workspace = true
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+# The listener for other devices serves its connections by hand, so that switching it off
+# also ends the connections it has open (`network.rs`). Both are in the tree through axum.
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 
 # Only compiled in under `--features embed-assets`: `rust-embed` bakes the built RD console
 # `dist/` into the binary at compile time, and `mime_guess` resolves each embedded file's
@@ -48,6 +51,8 @@ mime_guess = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 mdns-sd = "0.21.7"
+# This computer's name, for the name Grid asks an OFT timer for control under.
+gethostname = "1"
 # The password handshake of OBS's WebSocket server (obs-websocket 5) is two SHA-256 hashes,
 # each written as base64.
 sha2 = "0.10"

@@ -18,7 +18,6 @@
   import Page from '../Page.svelte';
   import type { EventLive } from '../lib/eventLive.svelte.js';
   import { isHeat } from '../lib/phases.js';
-  import { formatHash } from '../lib/route.js';
   import type { Session } from '../lib/session.svelte.js';
   import ClassRosterDialog from './ClassRosterDialog.svelte';
   import EventClasses from './EventClasses.svelte';
@@ -60,7 +59,11 @@
   // Each field shows what the Director has until it is typed in. Leaving it sends the pair.
   // An emptied number field binds `null`; it is kept as `''` so it reads as "typed, and
   // empty" (no rule) rather than "not typed" (which would show the Director's value again).
-  let typed = $state<{ minLap?: number | string; ignore?: number | string }>({});
+  let typed = $state<{
+    minLap?: number | string;
+    ignore?: number | string;
+    window?: number | string;
+  }>({});
   let rulesBusy = $state(false);
   let rulesError = $state<string | undefined>(undefined);
   let rulesSaved = $state(false);
@@ -68,6 +71,9 @@
     micros === undefined ? '' : micros / SECOND;
   const minLap = $derived(typed.minLap ?? seconds(view?.lap_rules.min_lap_micros));
   const ignore = $derived(typed.ignore ?? seconds(view?.lap_rules.ignore_before_micros));
+  const passWindow = $derived(typed.window ?? seconds(view?.lap_rules.pass_window_micros));
+  /** The longest pass window a timer can be given, in seconds. */
+  const PASS_WINDOW_MAX = 10;
 
   /** Seconds from a field as microseconds. Empty or 0 is "none". `null` is not a time. */
   function micros(value: number | string): number | undefined | null {
@@ -81,19 +87,26 @@
     if (rulesBusy || !view) return;
     const min = micros(minLap);
     const ign = micros(ignore);
+    const win = micros(passWindow);
     rulesSaved = false;
-    if (min === null || ign === null) {
+    if (min === null || ign === null || win === null) {
       rulesError = 'A lap rule is a number of seconds, 0 or more.';
+      return;
+    }
+    if (win !== undefined && win > PASS_WINDOW_MAX * SECOND) {
+      rulesError = `The pass window can be ${PASS_WINDOW_MAX} seconds at most.`;
       return;
     }
     const rules: LapRules = {
       ...(min === undefined ? {} : { min_lap_micros: min }),
-      ...(ign === undefined ? {} : { ignore_before_micros: ign })
+      ...(ign === undefined ? {} : { ignore_before_micros: ign }),
+      ...(win === undefined ? {} : { pass_window_micros: win })
     };
     const now = view.lap_rules;
     if (
       rules.min_lap_micros === now.min_lap_micros &&
-      rules.ignore_before_micros === now.ignore_before_micros
+      rules.ignore_before_micros === now.ignore_before_micros &&
+      rules.pass_window_micros === now.pass_window_micros
     ) {
       typed = {};
       rulesError = undefined;
@@ -151,7 +164,7 @@
 <Page
   title={event.name}
   help="event"
-  lede="What this event is, the lap rules its races run under, and who is racing in it."
+  lede="What this event is, its lap rules, and who is racing in it."
 >
   {#snippet actions()}
     <Button variant="secondary" onclick={openEdit}>Edit</Button>
@@ -184,21 +197,12 @@
             </div>
           {/each}
         </dl>
-        <p class="muted">
-          Heats are added on the
-          <a href={formatHash({ kind: 'event', section: 'phases' })}>Phases page</a>. Pilots,
-          classes, formats and seat profiles are kept outside the event and carry over.
-        </p>
       {/if}
     </Card>
   </div>
 
   {#if view}
-    <Card
-      title="Lap rules"
-      subtitle="Set once for the whole event. They apply to every race in it, flown or still to fly."
-      elevation="sm"
-    >
+    <Card title="Lap rules" elevation="sm">
       <form
         class="rules"
         aria-label="Lap rules"
@@ -209,7 +213,7 @@
       >
         <Field
           label="Minimum lap time (seconds)"
-          hint="A crossing sooner than this after the pilot's last one is not counted as a lap. It stays in the race, and Marshal can count it. Empty or 0 means no minimum."
+          hint="A crossing sooner than this is not counted as a lap. Empty means no minimum."
         >
           <Input
             type="number"
@@ -226,7 +230,7 @@
         </Field>
         <Field
           label="Ignore crossings before (seconds)"
-          hint="Crossings in the first seconds after the start are not counted: a take-off right under the gate. Crossings before the start never count. Empty or 0 ignores nothing after it."
+          hint="Crossings this soon after the start are not counted. Empty ignores none."
         >
           <Input
             type="number"
@@ -236,6 +240,24 @@
             aria-label="Ignore crossings before, in seconds"
             bind:value={
               () => ignore, (value) => ((typed.ignore = value ?? ''), (rulesSaved = false))
+            }
+            onblur={() => void saveRules()}
+            disabled={rulesBusy}
+          />
+        </Field>
+        <Field
+          label="Pass window (seconds)"
+          hint="Crossings this close together are one pass, and the strongest counts. For a track that flies by the gate just before going through it. Empty is off."
+        >
+          <Input
+            type="number"
+            inputmode="decimal"
+            min="0"
+            max={PASS_WINDOW_MAX}
+            step="0.1"
+            aria-label="Pass window, in seconds"
+            bind:value={
+              () => passWindow, (value) => ((typed.window = value ?? ''), (rulesSaved = false))
             }
             onblur={() => void saveRules()}
             disabled={rulesBusy}
@@ -252,11 +274,6 @@
         {:else if rulesSaved}
           Saved. The Director has these rules.
         {/if}
-      </p>
-      <p class="muted">
-        A timer also has a lap cooldown of its own, set on the
-        <a href={formatHash({ kind: 'seats' })}>Seats page</a>. It swallows the bounce of one pass
-        at the timer. Keep it shorter than the minimum lap time here.
       </p>
     </Card>
 
@@ -333,9 +350,6 @@
     margin: var(--gf-space-3) 0 0;
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
-  }
-  .muted a {
-    color: var(--gf-accent);
   }
   .rules {
     display: grid;

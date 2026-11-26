@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import { buildNames } from '../src/lib/names.js';
 import {
   classesToAdd,
-  countablePhases,
   hasRanking,
   moveInQueue,
   openProposals,
@@ -96,6 +95,7 @@ describe('class standings', () => {
           class: 'open',
           pilots: ['p-1a', 'p-2b'],
           counted_phases: ['finals'],
+          phases: [{ phase: 'finals', counts: true }],
           standings: [
             { pilot: 'p-2b', position: 1, placed_by: 'finals' },
             { pilot: 'p-1a', position: 2 }
@@ -109,32 +109,24 @@ describe('class standings', () => {
     ]);
   });
 
-  it('offers ranked phases to count, and never an unranked heat', () => {
-    const practice = heat('practice', 'Practice', [], {
-      format: {
-        name: 'Open practice',
-        race: { end: 'Open', staging_micros: 0, first_lap: 'HoleShot' },
-        completion: 'DirectorDecides'
-      }
-    });
-    expect(countablePhases([...phases, practice]).map((p) => p.def.id)).toEqual([
-      'finals',
-      'finals/h1'
-    ]);
-  });
-
   it('offers the classes that are not in the event and not hidden', () => {
     const classes = [
       { id: 'open', name: 'Open' },
       { id: 'spec', name: 'Spec' },
       { id: 'old', name: 'Old', hidden: true }
     ];
-    const rosters = [{ class: 'open', pilots: [], counted_phases: [], standings: [] }];
+    const rosters = [{ class: 'open', pilots: [], counted_phases: [], phases: [], standings: [] }];
     expect(classesToAdd(classes, rosters).map((c) => c.id)).toEqual(['spec']);
   });
 
   it('prefills a picker from a roster, cut to the most it can hold', () => {
-    const roster = { class: 'open', pilots: ['a', 'b', 'c'], counted_phases: [], standings: [] };
+    const roster = {
+      class: 'open',
+      pilots: ['a', 'b', 'c'],
+      counted_phases: [],
+      phases: [],
+      standings: []
+    };
     expect(rosterPrefill(roster)).toEqual(['a', 'b', 'c']);
     expect(rosterPrefill(roster, 2)).toEqual(['a', 'b']);
   });

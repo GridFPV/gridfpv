@@ -3,7 +3,8 @@
 Grid can have OBS record every race, each in its own file. OBS does the filming. Grid tells
 it when to start and stop, and names the file.
 
-The Video page is under **Setup**.
+The Video page is under **Setup**. It is where OBS is set up, once. What was recorded is on
+the open event's **Recordings** page.
 
 ## Setting it up
 
@@ -59,8 +60,8 @@ The files are named after the race and end in `- Clean` and `- Overlay`.
 
 ## Drawing the overlay onto a recording
 
-Open an event, then open the Video page. The **Recordings** card lists the event's
-recorded races. Each one says where its overlay stands:
+Open an event, then open its **Recordings** page. The **Recordings** card lists the
+event's recorded races. Each one says where its overlay stands:
 
 - **No overlay yet**: there is a clean recording, and the overlay has not been drawn.
 - **Overlay drawn**: Grid drew it, with the laps as they are now.
@@ -143,7 +144,8 @@ So you never find out afterwards that a run was not filmed.
 
 ## Runs
 
-The Video page lists the races recorded since Grid was started, newest first. Each shows
+The event's **Recordings** page also lists the races recorded since Grid was started,
+newest first. Each shows
 its file and how far into the file the start tone is.
 
 ## If OBS is already recording
@@ -157,8 +159,3 @@ recording in OBS to have each race recorded by itself.
 Grid can start, stop and name recordings on an OBS anywhere on the network. It can only
 move a file to the trash when it runs on the same computer as OBS. If it does not, a
 discarded race's file stays where it is and the run says why.
-
-## Not yet
-
-- Watching a race's video in Marshal.
-- Video on the Tune page.

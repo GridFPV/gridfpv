@@ -12,6 +12,10 @@
    * - **Mark as restart** is the other case: that lap has no time, and the laps either side
    *   stay as they were.
    *
+   * - **Move** gives a crossing a new time. Drag it on the trace, or pick the lap and use
+   *   "Move here". Either way it is a preview first, with the lap times it would give, and
+   *   goes to the Director only when the marshal says "Move it".
+   *
    * A lap picked in the list is highlighted on the trace, and a crossing clicked on the trace
    * is picked in the list.
    */
@@ -21,8 +25,10 @@
     countedLaps,
     formatOffset,
     lapRows,
+    movePreview,
     parseOffset,
     REMOVAL_REASONS,
+    rowWords,
     timeBase,
     traceMarks,
     uncountedLabel
@@ -64,7 +70,11 @@
     onseek?: ((raceMicros: number) => void) | undefined;
   } = $props();
 
-  const who = $derived(seat.pilot === undefined ? names.who('Open') : names.pilot(seat.pilot));
+  const who = $derived(
+    seat.pilot === undefined
+      ? names.seatWho('Open', seat.adapter, seat.seat, index)
+      : names.pilot(seat.pilot)
+  );
   const seatName = $derived(names.seat(seat.adapter, seat.seat, index));
   const timer = $derived(names.timer(seat.adapter));
   const rows = $derived(lapRows(seat));
@@ -140,6 +150,28 @@
   /** The race every ruling here names. */
   const ref = $derived({ race: race.race });
 
+  /** A crossing the marshal is moving and where to. A preview until "Move it". */
+  let move = $state<{ crossing: LogRef; at: number } | undefined>(undefined);
+  const preview = $derived(move ? movePreview(seat, move.crossing, move.at) : undefined);
+  /** Moves smaller than this are not offered: a millisecond is as fine as a lap time is shown. */
+  const SMALLEST_MOVE = 1000;
+
+  /** A crossing was dragged on the trace: preview it there, and show that moment in the video. */
+  function dragged(crossing: LogRef, at: number) {
+    move = { crossing, at };
+    selected = crossing;
+    seekTo?.(at);
+  }
+  /** Whether "Move here" has somewhere to move a row to: the video's moment or a picked spot. */
+  const canMoveTo = (row: (typeof rows)[number]): boolean =>
+    addAt !== undefined && Math.abs(addAt - row.at) >= SMALLEST_MOVE;
+
+  async function confirmMove() {
+    if (!move) return;
+    const done = await act({ Record: { LapAdjusted: { ...ref, ...move } } });
+    if (done) move = undefined;
+  }
+
   async function remove(crossing: LogRef, reason?: (typeof REMOVAL_REASONS)[number]['reason']) {
     const done = await act({
       Record: {
@@ -166,14 +198,7 @@
     }
   }
 
-  const rowName = (row: (typeof rows)[number]): string =>
-    row.kind === 'holeshot'
-      ? 'the hole shot'
-      : row.kind === 'restart'
-        ? 'the restart'
-        : row.kind === 'timerRestart'
-          ? 'the crossing after the timer restarted'
-          : `lap ${row.number}`;
+  const rowName = rowWords;
 </script>
 
 <li class="seat" aria-label="{seatName}, {who}">
@@ -194,6 +219,7 @@
       <span class="num">total {formatMicros(seat.total_micros)}</span>
     {/if}
     {#if seat.false_start}<Badge tone="danger">False start</Badge>{/if}
+    {#if seat.out}<Badge tone="warn">Out</Badge>{/if}
     {#if editable && seat.pilot !== undefined}
       {@const pilot = seat.pilot}
       <span class="head-action">
@@ -231,7 +257,30 @@
       onpick={editable ? pickOnTrace : undefined}
       {cursor}
       onseek={seekTo}
+      moving={preview ? move : undefined}
+      onmove={editable ? dragged : undefined}
     />
+    {#if move && preview && base}
+      <div class="move" role="group" aria-label="Move {preview.name} of {who}">
+        <span>
+          Move {preview.name} from {formatOffset(preview.from, base.at)} s to
+          <strong data-testid="move-to">{formatOffset(move.at, base.at)} s</strong>?
+        </span>
+        {#if preview.laps.length > 0}
+          <span class="muted" data-testid="move-laps">
+            {#each preview.laps as lap, n (lap.name)}{n > 0 ? ', ' : ''}{lap.name} becomes {formatMicros(
+                lap.micros
+              )}{/each}.
+          </span>
+        {:else}
+          <span class="muted" data-testid="move-laps">
+            This moves it past another crossing, so the laps are worked out again.
+          </span>
+        {/if}
+        <Button size="sm" disabled={busy} onclick={confirmMove}>Move it</Button>
+        <Button size="sm" variant="ghost" onclick={() => (move = undefined)}>Cancel</Button>
+      </div>
+    {/if}
   {:else if signalState === 'loading'}
     <p class="muted" role="status">Reading the signal…</p>
   {:else if signalState === 'failed'}
@@ -244,6 +293,41 @@
     <p class="muted" data-testid="no-signal">
       {timer} logged no signal for this seat, so there is no trace.
     </p>
+  {/if}
+
+  <!-- Adding a lap sits right under the trace: that is where the marshal is looking. -->
+  {#if editable}
+    {#if base}
+      <form class="add" aria-label="Add a lap for {who}" onsubmit={addLap}>
+        <label class="add-label" for="add-{index}">
+          Add a lap: seconds {base.words}
+        </label>
+        <span class="add-input">
+          <Input
+            id="add-{index}"
+            bind:value={addText}
+            size="sm"
+            inputmode="decimal"
+            placeholder="e.g. 12.5"
+            autocomplete="off"
+            aria-label="Seconds {base.words}, for {who}"
+            oninput={typed}
+            onfocus={() => (typing = true)}
+            onblur={() => (typing = false)}
+            disabled={busy}
+          />
+        </span>
+        <Button size="sm" type="submit" disabled={busy || addText.trim() === ''}>
+          {pickedAt === undefined ? 'Add lap' : 'Add a lap here'}
+        </Button>
+        {#if addError}<span class="error" role="alert">{addError}</span>{/if}
+      </form>
+    {:else}
+      <p class="muted">
+        A lap cannot be added by time here: the race's start on {timer} is not known and the seat has
+        no crossing to count from.
+      </p>
+    {/if}
   {/if}
 
   {#if rows.length === 0}
@@ -327,6 +411,19 @@
                       >Unmark restart</Button
                     >
                   {/if}
+                  {#if selected === row.crossing && canMoveTo(row) && addAt !== undefined}
+                    {@const to = addAt}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      title={cursor !== undefined
+                        ? 'Move this crossing to where the video is'
+                        : 'Move this crossing to the time in "Add a lap"'}
+                      aria-label="Move {rowName(row)} of {who} here"
+                      onclick={() => (move = { crossing: row.crossing, at: to })}>Move here</Button
+                    >
+                  {/if}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -390,44 +487,6 @@
         {/each}
       </ul>
     </div>
-  {/if}
-
-  {#if editable}
-    {#if base}
-      <form class="add" aria-label="Add a lap for {who}" onsubmit={addLap}>
-        <label class="add-label" for="add-{index}">
-          Add a lap: seconds {base.words}
-        </label>
-        <span class="add-input">
-          <Input
-            id="add-{index}"
-            bind:value={addText}
-            size="sm"
-            inputmode="decimal"
-            placeholder="e.g. 12.5"
-            autocomplete="off"
-            aria-label="Seconds {base.words}, for {who}"
-            oninput={typed}
-            onfocus={() => (typing = true)}
-            onblur={() => (typing = false)}
-            disabled={busy}
-          />
-        </span>
-        <Button size="sm" type="submit" disabled={busy || addText.trim() === ''}>
-          {pickedAt === undefined ? 'Add lap' : 'Add a lap here'}
-        </Button>
-        {#if hasTrace}<span class="muted">Or click an empty spot on the trace.</span>{/if}
-        <span class="muted" data-testid="add-hint">
-          Missed the hole shot? Add it here. A crossing before the first one becomes the hole shot.
-        </span>
-        {#if addError}<span class="error" role="alert">{addError}</span>{/if}
-      </form>
-    {:else}
-      <p class="muted">
-        A lap cannot be added by time here: the race's start on {timer} is not known and the seat has
-        no crossing to count from.
-      </p>
-    {/if}
   {/if}
 </li>
 
@@ -560,6 +619,16 @@
     gap: var(--gf-space-2);
     flex-wrap: wrap;
     font-size: var(--gf-font-size-sm);
+  }
+  .move {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    flex-wrap: wrap;
+    font-size: var(--gf-font-size-sm);
+    padding: var(--gf-space-2);
+    border: 1px dashed var(--gf-accent);
+    border-radius: var(--gf-radius-sm);
   }
   .add-label {
     font-weight: var(--gf-font-weight-semibold);
