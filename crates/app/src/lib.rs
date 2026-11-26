@@ -15,6 +15,7 @@
 #[macro_use]
 pub mod logging;
 pub mod discovery;
+pub mod link;
 pub mod links;
 pub mod network;
 pub mod obs;

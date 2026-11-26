@@ -35,6 +35,7 @@ gridfpv-adapters.workspace = true
 # Tauri app, a different origin, can call the API/WS). axum matches the server's 0.8.
 gridfpv-server.workspace = true
 gridfpv-events.workspace = true
+gridfpv-storage.workspace = true
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
@@ -56,11 +57,20 @@ gethostname = "1"
 # The password handshake of OBS's WebSocket server (obs-websocket 5) is two SHA-256 hashes,
 # each written as base64.
 sha2 = "0.10"
+# Pushing events to a remote server (`link.rs`, docs/primitives.md §13.5). The client is
+# built by `gridfpv_server::http`, which also says why the TLS features are what they are.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider"] }
 base64 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# `tests/link.rs` pushes to a real remote server, started in the test.
+gridfpv-serverd = { path = "../serverd" }
+tempfile = "3"
+# `tests/link_tls.rs` runs the server behind HTTPS, with certificates made in the test.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 # The fake OFT timer in `tests/oft_link.rs` is an axum WebSocket server.
 axum = { version = "0.8", features = ["ws"] }
 serde_json.workspace = true

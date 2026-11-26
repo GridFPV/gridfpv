@@ -57,6 +57,9 @@ pub trait EventSource {
     fn read_range(&self, start: Offset, end: Offset) -> StorageResult<Vec<StoredEvent>>;
     /// Append a single event, returning its assigned offset.
     fn append(&mut self, event: Event, recorded_at: Option<i64>) -> StorageResult<Offset>;
+    /// Read every entry from `start` on as it is stored, for sending the log to a remote
+    /// server (`gridfpv_storage::RawEntry`).
+    fn read_raw_from(&self, start: Offset) -> StorageResult<Vec<gridfpv_storage::RawEntry>>;
     /// The number of entries — equivalently the offset the next append receives.
     fn len(&self) -> StorageResult<u64>;
     /// Whether the log has no entries.
@@ -77,6 +80,9 @@ impl<L: EventLog> EventSource for L {
     }
     fn append(&mut self, event: Event, recorded_at: Option<i64>) -> StorageResult<Offset> {
         EventLog::append(self, event, recorded_at)
+    }
+    fn read_raw_from(&self, start: Offset) -> StorageResult<Vec<gridfpv_storage::RawEntry>> {
+        EventLog::read_raw_from(self, start)
     }
     fn len(&self) -> StorageResult<u64> {
         EventLog::len(self)
@@ -297,6 +303,7 @@ struct Registry {
     overlay: crate::overlay::OverlayDesk,
     /// Whether other devices can reach the Director, held here for the same reason.
     network: crate::network::NetworkDesk,
+    link: crate::link::LinkDesk,
     /// Wrong access tokens tried from other devices, counted by address.
     guesses: crate::access::Guesses,
     /// The pilots' sign-in codes and sign-ins, by event.
@@ -378,6 +385,7 @@ impl EventRegistry {
                 video: crate::video::VideoDesk::new(data_dir.clone()),
                 overlay: crate::overlay::OverlayDesk::new(data_dir.clone()),
                 network: crate::network::NetworkDesk::new(data_dir.clone()),
+                link: crate::link::LinkDesk::new(data_dir.clone()),
                 guesses: crate::access::Guesses::default(),
                 pilot_access: crate::pilot_access::PilotAccess::new(data_dir.clone()),
                 pilot_guesses: crate::access::Guesses::default(),
@@ -471,6 +479,11 @@ impl EventRegistry {
         let reg = self.read();
         let live = &reg.events.get(reg.active_event.as_ref()?)?.live;
         live.race_now.lock().ok()?.clone()
+    }
+
+    /// The link to a remote server: its settings, and how the pushing stands.
+    pub fn link(&self) -> crate::link::LinkDesk {
+        self.read().link.clone()
     }
 
     /// Whether other devices can reach the Director.

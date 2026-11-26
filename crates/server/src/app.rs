@@ -165,6 +165,15 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/network/token", put(crate::network::put_token))
         .route("/network/address", put(crate::network::put_address))
         .route("/network/{door}", put(crate::network::put_door))
+        // The link to a remote server (§13).
+        .route(
+            "/server-link",
+            get(crate::link::get_link).put(crate::link::put_link),
+        )
+        .route(
+            "/server-link/events/{id}/replace",
+            post(crate::link::post_replace),
+        )
         // What a visitor on the network may ask for.
         .route("/public/hello", get(crate::public::get_hello))
         // A QR code that opens the public pages, for a kiosk to show.
