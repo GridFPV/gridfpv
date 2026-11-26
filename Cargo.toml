@@ -7,6 +7,7 @@ members = [
     "crates/engine",
     "crates/server",
     "crates/app",
+    "crates/serverd",
     "xtask",
 ]
 # `src-tauri` is the **release-only** native desktop app (Tauri 2). It is deliberately

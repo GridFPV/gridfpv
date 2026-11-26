@@ -488,12 +488,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "gridfpv-serverd"
+version = "0.6.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "gridfpv-events",
+ "gridfpv-server",
+ "gridfpv-storage",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "gridfpv-storage"
 version = "0.6.0"
 dependencies = [
  "gridfpv-events",
  "rusqlite",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

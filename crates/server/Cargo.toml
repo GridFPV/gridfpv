@@ -12,7 +12,9 @@ gridfpv-storage.workspace = true
 gridfpv-engine.workspace = true
 gridfpv-adapters.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `raw_value` keeps a log entry as the text it was stored as, on its way to a remote server
+# (`remote.rs`).
+serde_json = { workspace = true, features = ["raw_value"] }
 ts-rs = "12"
 thiserror = "2"
 

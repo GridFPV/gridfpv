@@ -1,0 +1,18 @@
+//! The Grid remote server (docs/primitives.md §13).
+//!
+//! A Director runs one event on a laptop at the race. This program runs somewhere that is
+//! always on, and holds the events Directors push to it.
+//!
+//! - [`book`]: the clubs on this server, and the link tokens Directors push with.
+//! - [`store`]: the server's copy of each event's log.
+//! - [`push`]: the routes a Director pushes to.
+//! - [`app`]: the one router.
+//!
+//! **The server never writes an event.** A Director is the only writer of its events
+//! (§13.4). What is here only ever adds what a Director sent to the end of a copy.
+#![forbid(unsafe_code)]
+
+pub mod app;
+pub mod book;
+pub mod push;
+pub mod store;
