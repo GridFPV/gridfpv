@@ -196,6 +196,8 @@ where
     let _discovery = crate::discovery::spawn(registry.clone());
     // Have OBS record each race, while video is switched on in the settings.
     let video = crate::video::spawn(registry.clone());
+    // Push every event to the remote server, while one is set and switched on.
+    let link = crate::link::spawn(registry.clone());
     // Draw overlays onto clean recordings when asked. The browser it runs is on this
     // machine, so it reaches the console here whatever address the listener is bound to.
     let renders = crate::render::spawn(
@@ -230,6 +232,7 @@ where
     }
     timers.abort();
     video.abort();
+    link.abort();
     renders.abort();
     served?;
     Ok(())

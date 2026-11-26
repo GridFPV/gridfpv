@@ -924,7 +924,7 @@ fn unreachable(timer: &Timer, cause: &reqwest::Error) -> TimerError {
 /// come back from a firmware update measuring in another unit, after that.
 pub async fn read_info(timer: &Timer) -> Result<OftInfo, TimerError> {
     let unreachable = |e: reqwest::Error| unreachable(timer, &e);
-    reqwest::Client::new()
+    crate::http::client()
         .get(format!("http://{}/oft/v1/info", timer.address))
         .timeout(TIMER_ANSWER)
         .send()
@@ -939,7 +939,7 @@ pub async fn read_info(timer: &Timer) -> Result<OftInfo, TimerError> {
 
 async fn read_config(timer: &Timer) -> Result<OftConfig, TimerError> {
     let unreachable = |e: reqwest::Error| unreachable(timer, &e);
-    reqwest::Client::new()
+    crate::http::client()
         .get(config_url(timer))
         .timeout(TIMER_ANSWER)
         .send()
@@ -974,7 +974,7 @@ async fn send_write(
     body: Option<&OftConfig>,
 ) -> Result<reqwest::Response, TimerError> {
     let send = |key: Option<String>| {
-        let mut request = reqwest::Client::new()
+        let mut request = crate::http::client()
             .request(method.clone(), url.clone())
             .timeout(TIMER_ANSWER);
         if let Some(key) = key {
