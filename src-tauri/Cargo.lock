@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-adapters"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "gridfpv-events",
  "serde",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-app"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-desktop"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "gridfpv-app",
  "tauri",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-engine"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "gridfpv-events",
  "thiserror 2.0.18",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-events"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "serde",
  "ts-rs",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-server"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-storage"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "gridfpv-events",
  "rusqlite",
