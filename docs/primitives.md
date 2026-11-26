@@ -1659,7 +1659,7 @@ reported.
 ## 13. The remote server (Agreed 2026-11-26, not built)
 
 This is the remote part of §11.1. The rules in §11.7 still hold, and this section builds on
-them. Lines marked **Proposed** are Claude's and are not agreed yet.
+them.
 
 ### 13.1 Three tiers
 
@@ -1695,8 +1695,8 @@ Video is not stored. It comes later (§11.7).
   result goes back with the next push.
 - **The Director hears of a request at once.** It says which events it wants to hear about,
   and the server tells it the moment there is something new. It does not wait for a slow
-  poll. **Proposed:** this is one long-lived connection the Director opens (a WebSocket),
-  and the Director asks for anything it missed whenever it reconnects.
+  poll. This is one long-lived connection the Director opens (a WebSocket), and the
+  Director asks for anything it missed whenever it reconnects.
 
 ### 13.4 A secure connection
 
@@ -1707,8 +1707,8 @@ Video is not stored. It comes later (§11.7).
   with no open ports.
 - **A server with its own certificate** needs a choice the director makes on purpose. The
   Director offers two: add certificate authorities to trust, or allow a self-signed
-  certificate. Both are off until switched on. **Proposed:** "allow self-signed" trusts the
-  one certificate the director is shown and accepts, not any certificate.
+  certificate. Both are off until switched on. "Allow self-signed" trusts the one
+  certificate the director is shown and accepts, not any certificate.
 
 ### 13.5 Who may push
 
@@ -1735,9 +1735,8 @@ Video is not stored. It comes later (§11.7).
      yes. This does not have to be the director: a server has roles, and a role says what
      a person may do.
 - **Knowing an id is never enough to claim.** Anyone can type an id.
-- **Proposed roles**, to be settled when accounts are built: server owner, director (may
-  push events and approve claims on their own events), claims approver (may approve
-  claims on any event), pilot.
+- **Roles:** server owner, director (may push events and approve claims on their own
+  events), claims approver (may approve claims on any event), pilot.
 
 ### 13.7 Who can read
 
@@ -1767,7 +1766,7 @@ signed-in people only, video.
 - How a pilot signs in to a server. It must be stronger than the event code (§11.7), and
   a self-hosted server may have no way to send email.
 - How two servers agree to link an account, and how a hub fetches from a server.
-- The exact roles, and who may give them out.
+- Who may give out roles.
 - Which long-term records come first: results per pilot, seasons (#129), records per
   track (#61).
 - Whether a pilot's sign-in at the race (§11.3) and their server account can be one step
