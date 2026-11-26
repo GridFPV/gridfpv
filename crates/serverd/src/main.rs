@@ -15,6 +15,8 @@
 //! - `GRIDFPV_SERVER_ADDR`: the address to listen on. Default `127.0.0.1:8470`.
 //! - `GRIDFPV_SERVER_PUBLIC_URL`: the address people open, such as
 //!   `https://grid.example.org`. Signing in needs it.
+//! - `GRIDFPV_SERVER_DISCORD_CLIENT_ID` and `…_DISCORD_CLIENT_SECRET`, and the same with
+//!   `GOOGLE`: the app registered with each provider, to sign in with it.
 //! - `GRIDFPV_SERVER_ASSETS`: a folder with the web page (the built console). Not needed in
 //!   a build with the page inside it (`embed-page`). With no page, the server still takes
 //!   pushes and answers the API.
@@ -85,7 +87,9 @@ fn serve() -> Done {
         .parse()
         .map_err(|e| format!("GRIDFPV_SERVER_ADDR is not an address like {DEFAULT_ADDR}: {e}"))?;
     let dir = data_dir();
-    let state = AppState::open(&dir)?.at(public_url());
+    let state = AppState::open(&dir)?
+        .at(public_url())
+        .with_providers(gridfpv_serverd::signin::Provider::from_env());
     let asked = std::env::var_os("GRIDFPV_SERVER_ASSETS")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from);
@@ -100,6 +104,16 @@ fn serve() -> Done {
         println!("  data in {}", dir.display());
         for club in state.book.clubs() {
             println!("  club: {}", club.name);
+        }
+        match (&state.public_url, state.providers.is_empty()) {
+            (Some(url), false) => {
+                let names: Vec<&str> = state.providers.iter().map(|p| p.name.as_str()).collect();
+                println!("  sign-in with {} at {url}", names.join(" and "));
+            }
+            (None, false) => println!(
+                "  Sign-in is off: set GRIDFPV_SERVER_PUBLIC_URL to the address people open."
+            ),
+            (_, true) => println!("  Sign-in is off: no provider is set up."),
         }
         if state.book.tokens().iter().all(|t| t.revoked_at.is_some()) {
             println!(

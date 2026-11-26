@@ -32,6 +32,23 @@ pub const ACCOUNTS_FILE: &str = "accounts.sqlite";
 /// How long a session lasts from when it is made, in milliseconds: thirty days.
 pub const SESSION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// How long a browser has to come back from a provider, in milliseconds: ten minutes.
+pub const PENDING_MS: i64 = 10 * 60 * 1000;
+
+/// A sign-in that is under way: a browser has been sent to a provider and has not come
+/// back yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSignIn {
+    pub provider: String,
+    /// The secret half of the proof that the browser that comes back is the one that left
+    /// (PKCE).
+    pub verifier: String,
+    /// The invite the person came with, if any.
+    pub invite: Option<String>,
+    /// The account this sign-in is being added to, when that is what is being done.
+    pub add_to: Option<AccountId>,
+}
+
 /// What an invite link's secret starts with.
 pub const INVITE_PREFIX: &str = "gfi_";
 
@@ -321,6 +338,14 @@ impl Accounts {
                 added_at INTEGER NOT NULL,
                 PRIMARY KEY (account, club)
             );
+            CREATE TABLE IF NOT EXISTS pending_sign_ins (
+                hash       TEXT PRIMARY KEY,
+                provider   TEXT NOT NULL,
+                verifier   TEXT NOT NULL,
+                invite     TEXT,
+                add_to     TEXT,
+                created_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS invites (
                 id         TEXT PRIMARY KEY,
                 hash       TEXT NOT NULL UNIQUE,
@@ -517,6 +542,68 @@ impl Accounts {
             params![account.0],
         )?;
         Ok(())
+    }
+
+    // ── A sign-in that is under way ─────────────────────────────────────────
+
+    /// Note that a browser has been sent to a provider. `state` is the value the provider
+    /// will hand back; it is kept only as a hash.
+    pub fn start_sign_in(&self, state: &str, pending: &PendingSignIn, now: i64) -> Result<()> {
+        let conn = self.lock();
+        // One that was never finished is of no use after a while.
+        conn.execute(
+            "DELETE FROM pending_sign_ins WHERE created_at <= ?1",
+            params![now - PENDING_MS],
+        )?;
+        conn.execute(
+            "INSERT INTO pending_sign_ins (hash, provider, verifier, invite, add_to, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                hash(state),
+                pending.provider,
+                pending.verifier,
+                pending.invite,
+                pending.add_to.as_ref().map(|a| a.0.clone()),
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Take the sign-in a `state` belongs to. It is given once: a second ask, a `state`
+    /// that was never made, and one from too long ago all get `None`.
+    pub fn take_sign_in(&self, state: &str, now: i64) -> Result<Option<PendingSignIn>> {
+        if state.is_empty() {
+            return Ok(None);
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let found = tx
+            .query_row(
+                "SELECT provider, verifier, invite, add_to, created_at FROM pending_sign_ins
+                 WHERE hash = ?1",
+                params![hash(state)],
+                |row| {
+                    Ok((
+                        PendingSignIn {
+                            provider: row.get(0)?,
+                            verifier: row.get(1)?,
+                            invite: row.get(2)?,
+                            add_to: row.get::<_, Option<String>>(3)?.map(AccountId),
+                        },
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        tx.execute(
+            "DELETE FROM pending_sign_ins WHERE hash = ?1",
+            params![hash(state)],
+        )?;
+        tx.commit()?;
+        Ok(found
+            .filter(|(_, made)| now - made < PENDING_MS)
+            .map(|(pending, _)| pending))
     }
 
     // ── Signing in ──────────────────────────────────────────────────────────

@@ -19,6 +19,9 @@ StateDirectory=gridfpv-server
 Environment=GRIDFPV_SERVER_DATA_DIR=/var/lib/gridfpv-server
 # This computer only. A web server in front gives it HTTPS (Caddy, below in the guide).
 Environment=GRIDFPV_SERVER_ADDR=127.0.0.1:8470
+# The server's own address and its sign-in settings, when the file is there. It holds
+# secrets: keep it readable by root only (chmod 600). See docs/server-setup.md.
+EnvironmentFile=-/etc/gridfpv-server.env
 Restart=on-failure
 RestartSec=2
 

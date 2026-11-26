@@ -186,6 +186,77 @@ gridfpv-serverctl token revoke tN81uJZy
 
 A token that is taken back stops working straight away.
 
+## Signing in
+
+People can have an account on your server. They sign in with Discord or Google. Grid never
+sees a password. Nobody can make an account without an invite.
+
+This part is being built. Signing in works, and the pages for it are not there yet.
+
+### 1. Tell the server its own address
+
+The server must know the address people open, so a provider can send them back to it.
+
+- **Without Docker:** copy `gridfpv-server.env` from the download to
+  `/etc/gridfpv-server.env`, and put your address in it:
+
+  ```
+  install -m 600 gridfpv-server.env /etc/gridfpv-server.env
+  ```
+
+  The file will hold secrets. `600` means only root can read it.
+
+- **With Docker:** the address is taken from `GRID_DOMAIN`. There is nothing to do.
+
+### 2. Register an app with a provider
+
+You do this once for each provider you want. Both are free.
+
+**Discord**
+
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and
+   make a **New Application**.
+2. Under **OAuth2**, add this **Redirect**, with your own address:
+   `https://grid.example.org/auth/discord/callback`
+3. Copy the **Client ID** and the **Client Secret**.
+
+**Google**
+
+1. Open the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) and
+   make an **OAuth client ID** of the type **Web application**.
+2. Add this **Authorized redirect URI**, with your own address:
+   `https://grid.example.org/auth/google/callback`
+3. Copy the **Client ID** and the **Client secret**.
+
+The redirect must match exactly, down to the `https` and no slash on the end.
+
+Grid asks a provider only who the person is: an id and a name. It does not ask for their
+email.
+
+### 3. Give the server the two values
+
+- **Without Docker:** put them in `/etc/gridfpv-server.env`, then run
+  `systemctl restart gridfpv-server`.
+- **With Docker:** put them in `docker/server/.env`, then run `docker compose up -d`:
+
+  ```
+  DISCORD_CLIENT_ID=...
+  DISCORD_CLIENT_SECRET=...
+  GOOGLE_CLIENT_ID=...
+  GOOGLE_CLIENT_SECRET=...
+  ```
+
+The server's log says which providers are on when it starts.
+
+### 4. Make yourself the owner
+
+```
+gridfpv-serverctl owner invite
+```
+
+It prints a link. Open it and sign in. Whoever does becomes an owner of the server. The
+link works once, and for one day.
+
 ## What is kept
 
 The clubs and tokens are in one file, and each event has a file of its own. The server
@@ -212,6 +283,6 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
 
 ## What it does not do yet
 
-- There are no accounts. Anyone can look. Only a director with a token can send.
+- Accounts are being built. Anyone can look. Only a director with a token can send.
 - There is one club on a server.
 - Videos are not stored.

@@ -13,6 +13,13 @@ services:
       context: ../..
       dockerfile: docker/server/Dockerfile
     restart: unless-stopped
+    environment:
+      GRIDFPV_SERVER_PUBLIC_URL: https://${GRID_DOMAIN}
+      # Sign-in. Put these in .env to switch a provider on (docs/server-setup.md).
+      GRIDFPV_SERVER_DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      GRIDFPV_SERVER_DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      GRIDFPV_SERVER_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GRIDFPV_SERVER_GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
     volumes:
       - grid-data:/data
     # Not published: only Caddy reaches it.
