@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-adapters"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "gridfpv-events",
  "serde",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-app"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-engine"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "gridfpv-events",
  "thiserror",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-events"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-server"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "gridfpv-storage"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "gridfpv-events",
  "rusqlite",
@@ -1834,7 +1834,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "yoke"
