@@ -112,6 +112,14 @@ pub struct ServerEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub location: Option<String>,
+    /// What the director wrote about the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// Who runs it, as the director wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub organizer: Option<String>,
     /// When the Director made the event, in milliseconds since 1970.
     #[ts(type = "number")]
     pub created_at: i64,

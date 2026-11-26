@@ -136,6 +136,16 @@
       {#if pickedEvent}
         <p class="event" data-testid="server-event">{pickedEvent.name}</p>
         {#if eventDetail(pickedEvent)}<p class="muted">{eventDetail(pickedEvent)}</p>{/if}
+        {#if pickedEvent.organizer?.trim()}
+          <p class="muted" data-testid="server-event-organizer">
+            Run by {pickedEvent.organizer.trim()}
+          </p>
+        {/if}
+        {#if pickedEvent.description?.trim()}
+          <p class="about" data-testid="server-event-description">
+            {pickedEvent.description.trim()}
+          </p>
+        {/if}
       {/if}
       {#if live}
         <SpectatorView {live} />
@@ -210,6 +220,11 @@
     margin: 0;
     font-size: var(--gf-font-size-xl);
     font-weight: var(--gf-font-weight-bold);
+    overflow-wrap: anywhere;
+  }
+  .about {
+    margin: 0;
+    white-space: pre-line;
     overflow-wrap: anywhere;
   }
   .back {

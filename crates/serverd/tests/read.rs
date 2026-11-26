@@ -200,8 +200,8 @@ async fn race_day(d: &Director, finish: bool) -> String {
                 "name": "Friday Night Whoops",
                 "date": "2026-11-27",
                 "location": "Main field",
-                "description": format!("{MARK}-eventnote"),
-                "organizer": format!("{MARK}-organizer")
+                "description": "Whoops only. Bring spare props.",
+                "organizer": "Recon FPV"
             }),
         )
         .await,
@@ -740,6 +740,8 @@ async fn an_event_is_listed_once_its_header_has_arrived() {
             "name": "Friday Night Whoops",
             "date": "2026-11-27",
             "location": "Main field",
+            "description": "Whoops only. Bring spare props.",
+            "organizer": "Recon FPV",
             "created_at": list[0]["created_at"]
         }])
     );
@@ -776,6 +778,7 @@ async fn events_are_listed_newest_first() {
     assert_eq!(ids, ["new", "also-mid", "mid", "old"]);
     // No date or place given: the keys are not there at all.
     assert!(list[0].get("date").is_none() && list[0].get("location").is_none());
+    assert!(list[0].get("description").is_none() && list[0].get("organizer").is_none());
 }
 
 #[tokio::test]

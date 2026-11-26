@@ -30,7 +30,7 @@ second after it is flown.
 
 - The race itself goes up whole: every lap and every ruling.
 - Pilots go up by callsign and colour only. Real names stay on your computer.
-- An event's name, date and place go up. Your own notes about it do not.
+- An event's name, date, place, description and organizer go up.
 
 If the internet drops, keep racing. Grid sends what was missed when it is back.
 
