@@ -109,29 +109,93 @@ impl Provider {
         }
     }
 
-    /// The providers set up in the environment: each needs its app's id and secret.
+    /// A sign-in service of the server owner's own choosing that speaks OpenID Connect: a
+    /// club's own, or one this build has no name for. `openid profile` is asked for unless
+    /// another scope is given. The person's id is `sub`.
+    pub fn custom(custom: Custom) -> Self {
+        Self {
+            id: "oidc".into(),
+            name: custom.name,
+            authorize_url: custom.authorize_url,
+            token_url: custom.token_url,
+            user_url: custom.userinfo_url,
+            scope: custom.scope.unwrap_or_else(|| "openid profile".into()),
+            client_id: custom.client_id,
+            client_secret: custom.client_secret,
+            subject_field: "sub".into(),
+            label_fields: vec!["name".into(), "preferred_username".into()],
+        }
+    }
+
+    /// The providers set up in the environment. Each needs all of its settings, or it is
+    /// left off.
     ///
     /// - `GRIDFPV_SERVER_DISCORD_CLIENT_ID` and `GRIDFPV_SERVER_DISCORD_CLIENT_SECRET`
     /// - `GRIDFPV_SERVER_GOOGLE_CLIENT_ID` and `GRIDFPV_SERVER_GOOGLE_CLIENT_SECRET`
+    /// - `GRIDFPV_SERVER_OIDC_NAME`, `…_OIDC_AUTHORIZE_URL`, `…_OIDC_TOKEN_URL`,
+    ///   `…_OIDC_USERINFO_URL`, `…_OIDC_CLIENT_ID`, `…_OIDC_CLIENT_SECRET`, and
+    ///   optionally `…_OIDC_SCOPE`
     pub fn from_env() -> Vec<Self> {
-        let pair = |name: &str| {
-            let get = |key: &str| {
-                std::env::var(format!("GRIDFPV_SERVER_{name}_{key}"))
-                    .ok()
-                    .map(|v| v.trim().to_owned())
-                    .filter(|v| !v.is_empty())
-            };
-            Some((get("CLIENT_ID")?, get("CLIENT_SECRET")?))
+        Self::from_settings(|key| std::env::var(key).ok())
+    }
+
+    /// [`from_env`](Self::from_env), reading settings from anywhere.
+    pub fn from_settings(read: impl Fn(&str) -> Option<String>) -> Vec<Self> {
+        let get = |key: &str| {
+            read(&format!("GRIDFPV_SERVER_{key}"))
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
         };
         let mut found = Vec::new();
-        if let Some((id, secret)) = pair("DISCORD") {
+        if let (Some(id), Some(secret)) = (get("DISCORD_CLIENT_ID"), get("DISCORD_CLIENT_SECRET")) {
             found.push(Self::discord(id, secret));
         }
-        if let Some((id, secret)) = pair("GOOGLE") {
+        if let (Some(id), Some(secret)) = (get("GOOGLE_CLIENT_ID"), get("GOOGLE_CLIENT_SECRET")) {
             found.push(Self::google(id, secret));
+        }
+        // An address for the provider's own pages must be a web address. HTTPS, or this
+        // same computer.
+        let address = |key: &str| {
+            get(key).filter(|url| {
+                url.starts_with("https://")
+                    || url.starts_with("http://127.0.0.1")
+                    || url.starts_with("http://localhost")
+                    || url.starts_with("http://[::1]")
+            })
+        };
+        let custom = (|| {
+            Some(Custom {
+                name: get("OIDC_NAME")?
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(40)
+                    .collect(),
+                authorize_url: address("OIDC_AUTHORIZE_URL")?,
+                token_url: address("OIDC_TOKEN_URL")?,
+                userinfo_url: address("OIDC_USERINFO_URL")?,
+                client_id: get("OIDC_CLIENT_ID")?,
+                client_secret: get("OIDC_CLIENT_SECRET")?,
+                scope: get("OIDC_SCOPE"),
+            })
+        })();
+        if let Some(custom) = custom {
+            found.push(Self::custom(custom));
         }
         found
     }
+}
+
+/// The settings of a sign-in service of the server owner's own choosing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Custom {
+    /// The name on the button.
+    pub name: String,
+    pub authorize_url: String,
+    pub token_url: String,
+    pub userinfo_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scope: Option<String>,
 }
 
 /// A provider, for the page's buttons.

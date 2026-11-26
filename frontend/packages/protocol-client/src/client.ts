@@ -19,6 +19,7 @@ import type {
   BuiltinClasses,
   Class,
   ClassId,
+  ClubRole,
   Command,
   CommandOutcome,
   CreateClassRequest,
@@ -35,11 +36,16 @@ import type {
   EventMeta,
   EventView,
   Format,
+  InviteMade,
+  InviteRequest,
+  InviteView,
   KioskPassView,
   KioskView,
   LinkSettings,
   LinkView,
   MainsRequest,
+  Me,
+  MemberView,
   NetworkView,
   OverlayLook,
   OverlayPlacement,
@@ -68,6 +74,7 @@ import type {
   ServerEvent,
   SetClassHiddenRequest,
   SignalChunk,
+  SignInProvider,
   SignupSeat,
   Timer,
   TimerConfig,
@@ -849,6 +856,191 @@ export async function listServerEvents(
  */
 export function serverEventBase(baseUrl: string, club: string, event: string): string {
   return `${baseUrl.replace(/\/$/, '')}/api/clubs/${encodeURIComponent(club)}/events/${encodeURIComponent(event)}`;
+}
+
+// ── Accounts on a remote server (docs/primitives.md §13.8). Asked of a server. ──────────
+// The browser's session cookie says who is asking, so none of these takes a token.
+
+/** Who this browser is signed in as on a server, if anyone (`GET /api/me`). */
+export async function getServerMe(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(baseUrl, '/api/me', options, 'read the account');
+}
+
+/** Change the signed-in account's name (`PATCH /api/me`). */
+export async function renameServerMe(
+  baseUrl: string,
+  name: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/me',
+    { method: 'PATCH', body: { name }, fetch: options.fetch },
+    'change the name'
+  );
+}
+
+/** Take a sign-in off the signed-in account (`DELETE /api/me/sign-ins/{provider}/{subject}`). */
+export async function removeServerSignIn(
+  baseUrl: string,
+  provider: string,
+  subject: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    `/api/me/sign-ins/${encodeURIComponent(provider)}/${encodeURIComponent(subject)}`,
+    { method: 'DELETE', fetch: options.fetch },
+    'remove the sign-in'
+  );
+}
+
+/** Sign this browser out of a server (`POST /api/sign-out`). */
+export async function signOutOfServer(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(baseUrl, '/api/sign-out', { method: 'POST', fetch: options.fetch }, 'sign out');
+}
+
+/** The providers a server lets people sign in with (`GET /api/sign-in/providers`). */
+export async function listSignInProviders(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<SignInProvider[]> {
+  return apiJson<SignInProvider[]>(
+    baseUrl,
+    '/api/sign-in/providers',
+    options,
+    'read how to sign in'
+  );
+}
+
+/**
+ * The address that sends a browser to a provider to sign in (`/auth/{provider}/start`).
+ * `invite` is the invite the person came with; `add` adds the provider to the account that
+ * is signed in.
+ */
+export function signInUrl(
+  baseUrl: string,
+  provider: string,
+  how: { invite?: string; add?: boolean } = {}
+): string {
+  const query = how.add ? '?add=1' : how.invite ? `?invite=${encodeURIComponent(how.invite)}` : '';
+  return `${trimSlash(baseUrl)}/auth/${encodeURIComponent(provider)}/start${query}`;
+}
+
+/** What an invite link is for, when it still works (`GET /api/invites/{secret}`). */
+export async function getServerInvite(
+  baseUrl: string,
+  secret: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<InviteView> {
+  return apiJson<InviteView>(
+    baseUrl,
+    `/api/invites/${encodeURIComponent(secret)}`,
+    options,
+    'read the invite'
+  );
+}
+
+/** Use an invite as the signed-in account (`POST /api/invites/{secret}/accept`). */
+export async function acceptServerInvite(
+  baseUrl: string,
+  secret: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    `/api/invites/${encodeURIComponent(secret)}/accept`,
+    { method: 'POST', fetch: options.fetch },
+    'use the invite'
+  );
+}
+
+const clubPath = (club: string, rest: string): string =>
+  `/api/clubs/${encodeURIComponent(club)}/${rest}`;
+
+/** A club's invites (`GET /api/clubs/{club}/invites`). For its directors. */
+export async function listClubInvites(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<InviteView[]> {
+  return apiJson<InviteView[]>(baseUrl, clubPath(club, 'invites'), options, 'read the invites');
+}
+
+/** Make an invite to a club (`POST /api/clubs/{club}/invites`). Its link is given this once. */
+export async function makeClubInvite(
+  baseUrl: string,
+  club: string,
+  request: InviteRequest,
+  options: { fetch?: FetchLike } = {}
+): Promise<InviteMade> {
+  return apiJson<InviteMade>(
+    baseUrl,
+    clubPath(club, 'invites'),
+    { method: 'POST', body: request, fetch: options.fetch },
+    'make the invite'
+  );
+}
+
+/** Take an invite back (`DELETE /api/clubs/{club}/invites/{id}`). */
+export async function revokeClubInvite(
+  baseUrl: string,
+  club: string,
+  id: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    clubPath(club, `invites/${encodeURIComponent(id)}`),
+    { method: 'DELETE', fetch: options.fetch },
+    'take the invite back'
+  );
+}
+
+/** A club's members (`GET /api/clubs/{club}/members`). For its directors. */
+export async function listClubMembers(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<MemberView[]> {
+  return apiJson<MemberView[]>(baseUrl, clubPath(club, 'members'), options, 'read the members');
+}
+
+/** Give a member of a club a role (`PUT /api/clubs/{club}/members/{account}`). */
+export async function setClubRole(
+  baseUrl: string,
+  club: string,
+  account: string,
+  role: ClubRole,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    clubPath(club, `members/${encodeURIComponent(account)}`),
+    { method: 'PUT', body: { role }, fetch: options.fetch },
+    'change the role'
+  );
+}
+
+/** Remove a member from a club (`DELETE /api/clubs/{club}/members/{account}`). */
+export async function removeClubMember(
+  baseUrl: string,
+  club: string,
+  account: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    clubPath(club, `members/${encodeURIComponent(account)}`),
+    { method: 'DELETE', fetch: options.fetch },
+    'remove the member'
+  );
 }
 
 /**

@@ -11,7 +11,7 @@
    */
   import { Card } from '@gridfpv/components';
   import { listServerClubs, listServerEvents, serverEventBase } from '@gridfpv/protocol-client';
-  import type { PushClub, ServerEvent } from '@gridfpv/types';
+  import type { MyAccount, PushClub, ServerEvent, SignInProvider } from '@gridfpv/types';
   import { EventLive, type LiveSession } from '../lib/eventLive.svelte.js';
   import {
     eventDetail,
@@ -19,7 +19,12 @@
     parseServerHash,
     type ServerPlace
   } from '../lib/serverHome.js';
+  import { peopleApi, signInProblem, type PeopleApi } from '../lib/serverPeople.js';
   import { publicSource } from '../lib/spectator.js';
+  import ServerAccount from './ServerAccount.svelte';
+  import ServerClub from './ServerClub.svelte';
+  import ServerInvite from './ServerInvite.svelte';
+  import ServerSignIn from './ServerSignIn.svelte';
   import SpectatorView from './SpectatorView.svelte';
 
   /** How often the list of events is read again, in milliseconds. */
@@ -31,7 +36,9 @@
       clubs: () => listServerClubs(baseUrl),
       events: (club: string) => listServerEvents(baseUrl, club)
     },
-    sourceFor = (club: string, event: string) => publicSource(serverEventBase(baseUrl, club, event))
+    sourceFor = (club: string, event: string) =>
+      publicSource(serverEventBase(baseUrl, club, event)),
+    people = peopleApi(baseUrl)
   }: {
     /** The server's address. */
     baseUrl: string;
@@ -42,7 +49,42 @@
     };
     /** Where one event is read from. A test passes its own. */
     sourceFor?: (club: string, event: string) => LiveSession;
+    /** Accounts: who is signed in, invites, members. A test passes its own. */
+    people?: PeopleApi;
   } = $props();
+
+  // ── Who is signed in ───────────────────────────────────────────────────────
+  /** The account this browser is signed in as. `null` once it is known there is none. */
+  let account = $state<MyAccount | null | undefined>(undefined);
+  let providers = $state<SignInProvider[] | undefined>(undefined);
+
+  async function readMe() {
+    try {
+      account = (await people.me()).account ?? null;
+    } catch {
+      // Not reachable right now. The page still shows events; nobody is shown signed in.
+      if (account === undefined) account = null;
+    }
+  }
+  $effect(() => {
+    void readMe();
+    people
+      .providers()
+      .then((found) => (providers = found))
+      .catch(() => (providers = []));
+  });
+
+  const go = (to: ServerPlace) => {
+    location.hash = formatServerHash(to);
+  };
+
+  // A page about the account reads it again on the way in: a role may have been given or
+  // taken since the page was opened, and what it shows must be what is so.
+  $effect(() => {
+    if (place.kind === 'account' || place.kind === 'club' || place.kind === 'invite') {
+      void readMe();
+    }
+  });
 
   // ── Where the page is ──────────────────────────────────────────────────────
   let place = $state<ServerPlace>(parseServerHash(location.hash));
@@ -117,6 +159,15 @@
 <main class="server">
   <header class="top">
     <h1><a href="#/">Grid<span class="accent">FPV</span></a></h1>
+    {#if account}
+      <a class="who" href={formatServerHash({ kind: 'account' })} data-testid="server-who"
+        >{account.name}</a
+      >
+    {:else if account === null && providers && providers.length > 0}
+      <a class="who" href={formatServerHash({ kind: 'sign-in' })} data-testid="server-sign-in"
+        >Sign in</a
+      >
+    {/if}
   </header>
 
   {#if offline}
@@ -125,7 +176,63 @@
     </p>
   {/if}
 
-  {#if picked}
+  {#if place.kind === 'sign-in'}
+    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+    {#if account}
+      <Card elevation="sm">
+        <p>You are signed in as <strong>{account.name}</strong>.</p>
+        {#if signInProblem(place.problem)}<p class="muted">{signInProblem(place.problem)}</p>{/if}
+      </Card>
+    {:else}
+      <p class="event">Sign in</p>
+      <ServerSignIn api={people} {providers} problem={signInProblem(place.problem)} />
+      <p class="muted">You need an invite from your club to make an account.</p>
+    {/if}
+  {:else if place.kind === 'invite'}
+    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+    {#if account !== undefined}
+      <ServerInvite
+        api={people}
+        secret={place.secret}
+        account={account ?? undefined}
+        {providers}
+        onjoined={async () => {
+          await readMe();
+          go({ kind: 'account' });
+        }}
+      />
+    {/if}
+  {:else if place.kind === 'account'}
+    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+    {#if account}
+      <ServerAccount
+        api={people}
+        {account}
+        {providers}
+        clubs={clubs?.map((entry) => entry.club) ?? []}
+        onchange={(me) => (account = me.account ?? null)}
+        onsignedout={() => {
+          account = null;
+          go({ kind: 'list' });
+        }}
+      />
+    {:else if account === null}
+      <p class="event">Sign in</p>
+      <ServerSignIn api={people} {providers} />
+    {/if}
+  {:else if place.kind === 'club'}
+    {@const wanted = place.club}
+    {@const found = clubs?.find((entry) => entry.club.id === wanted)?.club}
+    <p class="back"><a href={formatServerHash({ kind: 'account' })}>← Your account</a></p>
+    {#if account && found}
+      <ServerClub api={people} club={found} me={account.id} />
+    {:else if account === null}
+      <p class="event">Sign in</p>
+      <ServerSignIn api={people} {providers} />
+    {:else if account && clubs !== undefined}
+      <Card elevation="sm"><p class="event">This club is not here</p></Card>
+    {/if}
+  {:else if picked}
     <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
     {#if gone}
       <Card elevation="sm">
@@ -205,6 +312,11 @@
   h1 a {
     color: inherit;
     text-decoration: none;
+  }
+  .who {
+    font-size: var(--gf-font-size-sm);
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
   .accent {
     color: var(--gf-accent);
