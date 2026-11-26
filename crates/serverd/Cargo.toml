@@ -36,6 +36,8 @@ tower-http = { version = "0.6", features = ["fs"] }
 # Accounts, sessions, invites and roles are kept in one SQLite file (`accounts.rs`). The
 # same build of SQLite the event logs use.
 rusqlite = { version = "0.41", features = ["bundled"] }
+# The shapes the server's page reads are generated to TypeScript, as the Director's are.
+ts-rs = "12"
 # Link tokens are random and kept only as a hash.
 # The change feed a page follows an event by.
 futures-util = { version = "0.3", default-features = false }

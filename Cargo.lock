@@ -562,6 +562,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "ts-rs",
 ]
 
 [[package]]
