@@ -8,10 +8,9 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use tower::ServiceExt;
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::book::{Book, BookError};
+use crate::page::Page;
 use crate::push;
 use crate::read;
 use crate::store::Store;
@@ -51,15 +50,6 @@ async fn get_health() -> Json<Health> {
     })
 }
 
-/// The folder the web page is served from, when there is one: the built console
-/// (`frontend/apps/rd-console/dist`). It is the same page a Director serves. Asked
-/// `GET /public/hello`, this server says it is a server, and the page shows its events.
-fn pages(assets: &Path) -> ServeDir<ServeFile> {
-    // Any address that is not a file is the page itself: it reads where it is from the
-    // part after the `#`.
-    ServeDir::new(assets).fallback(ServeFile::new(assets.join("index.html")))
-}
-
 /// What an address that is no route and no file gets, when no page is served.
 async fn nothing_here() -> push::ApiError {
     push::ApiError::new(
@@ -81,25 +71,26 @@ fn is_api_path(path: &str) -> bool {
     })
 }
 
-/// Every route, and the web page from `assets` when a folder is given.
-pub fn router_with_pages(state: AppState, assets: Option<&Path>) -> Router {
-    let api = router(state);
-    let Some(assets) = assets else {
-        return api.fallback(nothing_here);
-    };
-    let files = pages(assets);
-    api.fallback(move |request: axum::extract::Request| {
-        let files = files.clone();
+/// Every route, and the web page (see [`Page`]).
+pub fn router_with_page(state: AppState, page: Page) -> Router {
+    router(state).fallback(move |request: axum::extract::Request| {
+        let page = page.clone();
         async move {
             if is_api_path(request.uri().path()) {
                 return nothing_here().await.into_response();
             }
-            match files.oneshot(request).await {
-                Ok(response) => response.into_response(),
-                Err(never) => match never {},
+            match page.serve(request).await {
+                Some(response) => response,
+                None => nothing_here().await.into_response(),
             }
         }
     })
+}
+
+/// Every route, and the web page from `assets` when a folder is given.
+pub fn router_with_pages(state: AppState, assets: Option<&Path>) -> Router {
+    let page = assets.map_or(Page::None, |dir| Page::Folder(dir.to_owned()));
+    router_with_page(state, page)
 }
 
 /// Every route.

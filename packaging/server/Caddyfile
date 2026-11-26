@@ -1,0 +1,10 @@
+# /etc/caddy/Caddyfile for a Grid server installed without Docker.
+# Put your own name in place of grid.example.org. Caddy gets the HTTPS certificate itself.
+grid.example.org {
+	encode zstd gzip
+
+	# The page that follows an event holds one request open for as long as it is watched.
+	reverse_proxy 127.0.0.1:8470 {
+		flush_interval -1
+	}
+}

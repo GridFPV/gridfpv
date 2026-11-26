@@ -1,0 +1,43 @@
+# The Grid remote server, as a systemd service. See docs/server-setup.md.
+#
+#   sudo cp gridfpv-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gridfpv-server
+
+[Unit]
+Description=Grid remote server
+Documentation=https://github.com/GridFPV/gridfpv/blob/main/docs/server-setup.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/gridfpv-server
+User=gridfpv
+Group=gridfpv
+# systemd makes /var/lib/gridfpv-server, owned by the user above.
+StateDirectory=gridfpv-server
+Environment=GRIDFPV_SERVER_DATA_DIR=/var/lib/gridfpv-server
+# This computer only. A web server in front gives it HTTPS (Caddy, below in the guide).
+Environment=GRIDFPV_SERVER_ADDR=127.0.0.1:8470
+Restart=on-failure
+RestartSec=2
+
+# It needs its data folder and the network, and nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

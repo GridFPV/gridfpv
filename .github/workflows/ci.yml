@@ -77,6 +77,10 @@ jobs:
       - name: Contract suite (strict client↔server wire checks)
         run: npm run contract
         working-directory: frontend
+      # The remote server with its page built in. It can only be built once the page is,
+      # so its tests run here and not in the Rust job.
+      - name: Server with the page built in
+        run: cargo test -p gridfpv-serverd --features embed-page
 
   e2e:
     # The browser click-through against a REAL Director. Split from the job above because it needs

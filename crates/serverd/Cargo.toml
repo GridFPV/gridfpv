@@ -13,7 +13,14 @@ rust-version.workspace = true
 name = "gridfpv-server"
 path = "src/main.rs"
 
+[features]
+# Take the built console into the program, so it is one file with nothing beside it. The
+# frontend must be built first (`npm run build` in `frontend/`).
+embed-page = ["dep:rust-embed", "dep:mime_guess"]
+
 [dependencies]
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
 gridfpv-events.workspace = true
 gridfpv-storage.workspace = true
 gridfpv-engine.workspace = true

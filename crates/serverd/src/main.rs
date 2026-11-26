@@ -12,9 +12,9 @@
 //!
 //! - `GRIDFPV_SERVER_DATA_DIR`: where everything is kept. Default `./gridfpv-server-data`.
 //! - `GRIDFPV_SERVER_ADDR`: the address to listen on. Default `127.0.0.1:8470`.
-//! - `GRIDFPV_SERVER_ASSETS`: the folder with the web page (the built console). Default
-//!   `frontend/apps/rd-console/dist`. With no page there, the server still takes pushes and
-//!   answers the API.
+//! - `GRIDFPV_SERVER_ASSETS`: a folder with the web page (the built console). Not needed in
+//!   a build with the page inside it (`embed-page`). With no page, the server still takes
+//!   pushes and answers the API.
 //!
 //! The server speaks plain HTTP and listens on this computer only by default. It is meant
 //! to sit behind a web server that gives it HTTPS (§13.5).
@@ -24,8 +24,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use gridfpv_serverd::app::{AppState, router_with_pages};
+use gridfpv_serverd::app::{AppState, router_with_page};
 use gridfpv_serverd::book::Book;
+use gridfpv_serverd::page::Page;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8470";
 const DEFAULT_DATA_DIR: &str = "gridfpv-server-data";
@@ -80,11 +81,10 @@ fn serve() -> Done {
         .map_err(|e| format!("GRIDFPV_SERVER_ADDR is not an address like {DEFAULT_ADDR}: {e}"))?;
     let dir = data_dir();
     let state = AppState::open(&dir)?;
-    let assets = std::env::var_os("GRIDFPV_SERVER_ASSETS")
+    let asked = std::env::var_os("GRIDFPV_SERVER_ASSETS")
         .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_ASSETS));
-    let has_page = assets.join("index.html").is_file();
+        .map(PathBuf::from);
+    let page = Page::pick(asked.clone(), std::path::Path::new(DEFAULT_ASSETS));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -101,15 +101,18 @@ fn serve() -> Done {
                 "  No Director can push yet. Make a link token: gridfpv-server token new <label>"
             );
         }
-        if has_page {
-            println!("  web page from {}", assets.display());
-        } else {
-            println!(
+        match (&page, &asked) {
+            (Page::Embedded, _) => println!("  web page: built in"),
+            (Page::Folder(dir), _) => println!("  web page from {}", dir.display()),
+            (Page::None, Some(dir)) => println!(
                 "  No web page: {} has no index.html. Pushes and the API still work.",
-                assets.display()
-            );
+                dir.display()
+            ),
+            (Page::None, None) => {
+                println!("  No web page. Pushes and the API still work.")
+            }
         }
-        let app = router_with_pages(state, has_page.then_some(assets.as_path()));
+        let app = router_with_page(state, page);
         axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
