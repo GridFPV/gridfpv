@@ -1684,11 +1684,15 @@ A server can hold more than one club, and a director usually belongs to one.
   pilot list.
 - **Roles are at two levels.**
   - **Server:** owners. They look after the server itself, make clubs, and name a club's
-    first director.
+    first director. An owner may do anything a director can, in every club.
   - **Club:** directors. A director runs their own club and has no say in another club,
     unless they are made a director there too.
+- **Only a club's directors hand out roles in that club** (and server owners, who may do
+  everything).
 - **An account is for the whole server.** One pilot can fly with several clubs on it, with
   one account.
+- **A person's role is set club by club.** The same account can be a director in one club
+  and a pilot in another.
 - **The first build has one club,** made when the server is set up. Events are stored
   under a club from the start, so adding more clubs later changes nothing already stored.
 
@@ -1818,6 +1822,6 @@ signed-in people only, video.
 - Whether a pilot's page at the race (§11.3) offers their personal invite when the
   Director is linked to a server.
 - How two servers agree to link an account, and how a hub fetches from a server.
-- Who in a club may give out its roles, and whether a club has its own page address.
+- Whether a club has its own page address on the server.
 - Which long-term records come first: results per pilot, seasons (#129), records per
   track (#61).
