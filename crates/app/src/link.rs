@@ -481,7 +481,21 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
 
             // Connected. Push until the settings change or the server stops answering.
             let mut memory = Memory::default();
+            // The open event says when its log grows, so a lap goes up at once. It is
+            // listened to from BEFORE each look, not after: a lap that lands while a look
+            // is under way must not wait for the next tick.
+            let mut open: Option<(EventId, tokio::sync::watch::Receiver<u64>)> = None;
             loop {
+                let active = registry.active().map(|event| event.id);
+                if open.as_ref().map(|(id, _)| id) != active.as_ref() {
+                    open = active.and_then(|id| {
+                        let live = registry.live(&id)?;
+                        Some((id, live.changed.subscribe()))
+                    });
+                }
+                if let Some((_, grew)) = &mut open {
+                    grew.borrow_and_update();
+                }
                 if let Err(why) = sync_all(&registry, &client, &mut memory).await {
                     desk.report(LinkState::Failed {
                         message: why.to_string(),
@@ -492,16 +506,15 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                     }
                     break;
                 }
-                // The open event says when its log grows, so a lap goes up at once. Every
-                // other reason to look (another event, a pilot renamed) waits for the tick.
-                let mut open = registry
-                    .active()
-                    .and_then(|event| registry.live(&event.id))
-                    .map(|live| live.changed.subscribe());
+                // Every other reason to look (another event, a pilot renamed) waits for
+                // the tick.
                 let grew = async {
                     match &mut open {
-                        Some(open) => {
-                            let _ = open.changed().await;
+                        Some((_, grew)) => {
+                            if grew.changed().await.is_err() {
+                                // The event is gone. The tick finds what is open now.
+                                std::future::pending::<()>().await;
+                            }
                         }
                         None => std::future::pending().await,
                     }
