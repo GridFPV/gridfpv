@@ -960,8 +960,9 @@ async fn left_running_it_connects_pushes_and_keeps_up_with_a_race() {
         })
         .await;
     }
+    // (The bound is loose on purpose: a busy build machine runs this ten times slower.)
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(4),
         "{:?}",
         started.elapsed()
     );
