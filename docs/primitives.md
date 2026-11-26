@@ -1743,19 +1743,30 @@ Video is not stored. It comes later (§11.7).
 - **An account is not its sign-in.** The account is the server's own record. A sign-in is
   a key attached to it, and one account can hold several keys.
 - **Sign in with a provider** is the main way: the pilot uses an account they already
-  have somewhere else. **Discord is first.** It is built as one general piece, so Google
-  and others are added by settings. Grid never sees or stores a password.
+  have somewhere else. **Discord and Google are the two to start with.** It is built as
+  one general piece, so others are added by settings. Grid never sees or stores a
+  password.
 - **Each server owner sets a provider up once.** They register a free app with the
   provider and put its two values in the server's settings. A provider that is not set up
   is not offered.
 - **Passkeys** are the way that needs no outside service: the phone's fingerprint, face or
-  PIN. They come after Discord. Until then, a server needs Discord to have accounts.
+  PIN. They come later. Until then, a server needs Discord or Google to have accounts.
 - **No passwords** for now. They are the most work and the most risk.
 - **A provider can do the claiming.** When the director puts a pilot's Discord account on
   the pilot, the results attach when that pilot signs in with Discord. That is proof of
   who they are, which a typed id is not (§13.6).
 - **Two sign-ins are never joined because their email matches.** A pilot who is signed in
-  adds another sign-in to their own account.
+  adds another sign-in to their own account, from their account page. It should be easy.
+- **An account is made only with an invite.** Nobody can make one just by turning up.
+  Signing in with no account and no invite says an invite is needed.
+  - **A personal invite** is made by a director for one pilot, and works once. Using it
+    makes the account and claims that pilot's results in the same step (§13.6).
+  - **A group invite** is one link for a club, to share where the club talks. It has an
+    end date and a limit on uses, and can be switched off. It makes an account and claims
+    nothing.
+  - **Who may invite:** the server owner and directors.
+  - **The first owner** is made the same way: a new server shows a one-time setup link.
+- **Spectators need no account.** Reading is public (§13.8).
 - **Providers that cost money are not used** while Grid spends nothing. Sign in with Apple
   needs a paid developer account.
 
@@ -1770,7 +1781,7 @@ This is one iteration. All three steps are in it.
 
 1. **A server and a push.** One self-hosted server. A Director is linked with a token,
    pushes whole events, and the server shows the same pages, read-only. No accounts.
-2. **Accounts.** Pilots sign in on that server with Discord (§13.7). Results attach in
+2. **Accounts.** Pilots are invited and sign in with Discord or Google (§13.7). Results attach in
    the two ways of §13.6.
    No linking between servers.
 3. **Sign-up through the server.** A pilot signs up for a heat on the server, and the
@@ -1785,11 +1796,10 @@ signed-in people only, video.
 
 ### 13.10 Not decided yet
 
-- How a server's first owner account is made, and how an owner helps a pilot who has
-  lost every sign-in.
+- How an owner helps a pilot who has lost every sign-in.
+- Whether a pilot's page at the race (§11.3) offers their personal invite when the
+  Director is linked to a server.
 - How two servers agree to link an account, and how a hub fetches from a server.
 - Who may give out roles.
 - Which long-term records come first: results per pilot, seasons (#129), records per
   track (#61).
-- Whether a pilot's sign-in at the race (§11.3) and their server account can be one step
-  when the Director has internet.
