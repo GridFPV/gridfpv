@@ -1738,18 +1738,40 @@ Video is not stored. It comes later (§11.7).
 - **Roles:** server owner, director (may push events and approve claims on their own
   events), claims approver (may approve claims on any event), pilot.
 
-### 13.7 Who can read
+### 13.7 How a pilot signs in to a server
+
+- **An account is not its sign-in.** The account is the server's own record. A sign-in is
+  a key attached to it, and one account can hold several keys.
+- **Sign in with a provider** is the main way: the pilot uses an account they already
+  have somewhere else. **Discord is first.** It is built as one general piece, so Google
+  and others are added by settings. Grid never sees or stores a password.
+- **Each server owner sets a provider up once.** They register a free app with the
+  provider and put its two values in the server's settings. A provider that is not set up
+  is not offered.
+- **Passkeys** are the way that needs no outside service: the phone's fingerprint, face or
+  PIN. They come after Discord. Until then, a server needs Discord to have accounts.
+- **No passwords** for now. They are the most work and the most risk.
+- **A provider can do the claiming.** When the director puts a pilot's Discord account on
+  the pilot, the results attach when that pilot signs in with Discord. That is proof of
+  who they are, which a typed id is not (§13.6).
+- **Two sign-ins are never joined because their email matches.** A pilot who is signed in
+  adds another sign-in to their own account.
+- **Providers that cost money are not used** while Grid spends nothing. Sign in with Apple
+  needs a paid developer account.
+
+### 13.8 Who can read
 
 Events and results on a server are public. A director can keep an event unlisted. An
 option to show a server only to signed-in people may come later.
 
-### 13.8 Order of work
+### 13.9 Order of work
 
 This is one iteration. All three steps are in it.
 
 1. **A server and a push.** One self-hosted server. A Director is linked with a token,
    pushes whole events, and the server shows the same pages, read-only. No accounts.
-2. **Accounts.** Pilots sign in on that server. Results attach in the two ways of §13.6.
+2. **Accounts.** Pilots sign in on that server with Discord (§13.7). Results attach in
+   the two ways of §13.6.
    No linking between servers.
 3. **Sign-up through the server.** A pilot signs up for a heat on the server, and the
    Director hears of it at once (§13.3). The iteration is not done without this.
@@ -1761,10 +1783,10 @@ on the server.
 fetching from another server, directors pushing with their own account, reading for
 signed-in people only, video.
 
-### 13.9 Not decided yet
+### 13.10 Not decided yet
 
-- How a pilot signs in to a server. It must be stronger than the event code (§11.7), and
-  a self-hosted server may have no way to send email.
+- How a server's first owner account is made, and how an owner helps a pilot who has
+  lost every sign-in.
 - How two servers agree to link an account, and how a hub fetches from a server.
 - Who may give out roles.
 - Which long-term records come first: results per pilot, seasons (#129), records per
