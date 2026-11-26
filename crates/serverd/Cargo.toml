@@ -1,0 +1,33 @@
+[package]
+name = "gridfpv-serverd"
+description = "The Grid remote server: holds the events Directors push to it (docs/primitives.md §13)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The program is `gridfpv-server`. The package is not called that because `gridfpv-server`
+# is already the library with the Director's HTTP API, which this one is built on.
+[[bin]]
+name = "gridfpv-server"
+path = "src/main.rs"
+
+[dependencies]
+gridfpv-events.workspace = true
+gridfpv-storage.workspace = true
+gridfpv-server.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = "2"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+# Link tokens are random and kept only as a hash.
+getrandom = "0.3"
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

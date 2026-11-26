@@ -40,7 +40,7 @@
 //! stores the event's `EventMeta` JSON here on create and on every meta change,
 //! and reloads it on boot so created events survive a Director restart.
 
-use crate::{EventLog, Offset, Result, StorageError, StoredEvent};
+use crate::{EventLog, Offset, RawEntry, Result, StorageError, StoredEvent};
 use gridfpv_events::Event;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -127,6 +127,65 @@ impl SqliteLog {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Append entries **as text**, for a copy of a log made on another machine (see
+    /// [`RawEntry`]). All of them are written, or none. Returns the offset of the first.
+    ///
+    /// The text is stored as given. The caller must already know each one reads as an
+    /// [`Event`]: an entry that does not would make the whole log unreadable.
+    pub fn append_raw_batch<'a>(
+        &mut self,
+        entries: impl IntoIterator<Item = (&'a str, Option<i64>)>,
+    ) -> Result<Offset> {
+        let tx = self.conn.transaction()?;
+        let first = Self::next_offset(&tx)?;
+        for (offset, (json, recorded_at)) in (first..).zip(entries) {
+            Self::insert(&tx, offset, recorded_at, json)?;
+        }
+        tx.commit()?;
+        Ok(first)
+    }
+
+    /// The stored rows from `start` on, in order, with `end` of `None` meaning the end.
+    fn select_raw(&self, start: Offset, end: Option<Offset>) -> Result<Vec<RawEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT offset, recorded_at, event
+             FROM log
+             WHERE offset >= ?1 AND (?2 IS NULL OR offset < ?2)
+             ORDER BY offset ASC",
+        )?;
+        let end_param = end.map(|e| e as i64);
+        let rows = stmt.query_map(params![start as i64, end_param], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (offset, recorded_at, json) = row?;
+            if offset < 0 {
+                return Err(StorageError::Corrupt(format!(
+                    "negative offset {offset} in log table"
+                )));
+            }
+            out.push(RawEntry {
+                offset: offset as u64,
+                recorded_at,
+                json,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The stored rows in `[start, end)`, as text.
+    pub fn read_raw_range(&self, start: Offset, end: Offset) -> Result<Vec<RawEntry>> {
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        self.select_raw(start, Some(end))
     }
 
     /// The next offset to assign = one past the current maximum, or `0` when
@@ -224,6 +283,10 @@ impl EventLog for SqliteLog {
 
     fn read_from(&self, start: Offset) -> Result<Vec<StoredEvent>> {
         self.select_range(start, None)
+    }
+
+    fn read_raw_from(&self, start: Offset) -> Result<Vec<RawEntry>> {
+        self.select_raw(start, None)
     }
 
     fn read_range(&self, start: Offset, end: Offset) -> Result<Vec<StoredEvent>> {

@@ -24,9 +24,11 @@
 //! the same trait over Postgres.
 #![forbid(unsafe_code)]
 
+mod copy;
 mod memory;
 mod sqlite;
 
+pub use copy::{Chain, RawEntry};
 pub use memory::InMemoryLog;
 pub use sqlite::{SqliteLog, snapshot};
 
@@ -120,6 +122,25 @@ pub trait EventLog {
     /// order. If `start >= end` the result is empty; `end` beyond the log end
     /// is clamped.
     fn read_range(&self, start: Offset, end: Offset) -> Result<Vec<StoredEvent>>;
+
+    /// Read every entry from `start` to the end **as it is stored**, for copying the log to
+    /// another machine (see [`RawEntry`]).
+    ///
+    /// A backend that keeps events as text hands back that text. One that keeps them parsed
+    /// writes each out; that is only the same text every time for as long as the process
+    /// runs, which is all an in-memory log lives for.
+    fn read_raw_from(&self, start: Offset) -> Result<Vec<RawEntry>> {
+        self.read_from(start)?
+            .into_iter()
+            .map(|stored| {
+                Ok(RawEntry {
+                    offset: stored.offset,
+                    recorded_at: stored.recorded_at,
+                    json: serde_json::to_string(&stored.event)?,
+                })
+            })
+            .collect()
+    }
 
     /// The number of entries in the log, which equals the offset that the next
     /// appended event will receive.

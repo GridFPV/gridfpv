@@ -10,6 +10,8 @@ rust-version.workspace = true
 gridfpv-events.workspace = true
 serde_json.workspace = true
 thiserror = "2"
+# The chain that tells two copies of a log apart (`copy.rs`). Already in the tree.
+sha2 = "0.10"
 # `bundled` compiles SQLite from source, so no system libsqlite3 is needed
 # (a C compiler is required at build time). Keeps the build hermetic.
 rusqlite = { version = "0.41", features = ["bundled"] }
