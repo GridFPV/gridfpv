@@ -516,6 +516,55 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     ).rejects.toThrow('Port 8080 is the one Grid itself uses on this computer. Pick another.');
   });
 
+  it('the server link is read, set and an event replaced at the right addresses', async () => {
+    const link = {
+      url: 'https://grid.example.org',
+      has_token: true,
+      on: true,
+      trust: 'System',
+      state: 'Connected',
+      events: []
+    };
+    const { seen, fetch } = recorder(200, link);
+    const { getServerLink, putServerLink, replaceOnServer } = await import('./client.js');
+    expect(await getServerLink('http://d.local:8080/', { fetch })).toEqual(link);
+    expect(seen[0].url).toBe('http://d.local:8080/server-link');
+    expect(seen[0].init?.method ?? 'GET').toBe('GET');
+
+    const settings = {
+      url: 'https://grid.example.org',
+      token: 'gfs_abc',
+      on: true,
+      trust: 'System' as const
+    };
+    expect(await putServerLink('http://d.local:8080', settings, 'rd-tok', { fetch })).toEqual(link);
+    expect(seen[1].url).toBe('http://d.local:8080/server-link');
+    expect(seen[1].init?.method).toBe('PUT');
+    expect((seen[1].init?.headers as Record<string, string>).Authorization).toBe('Bearer rd-tok');
+    expect(JSON.parse(seen[1].init?.body as string)).toEqual(settings);
+
+    await replaceOnServer('http://d.local:8080', 'friday night/1', undefined, { fetch });
+    expect(seen[2].url).toBe('http://d.local:8080/server-link/events/friday%20night%2F1/replace');
+    expect(seen[2].init?.method).toBe('POST');
+  });
+
+  it("putServerLink rejects with the Director's own words", async () => {
+    const { fetch } = recorder(400, {
+      code: 'BadRequest',
+      message:
+        'The address must start with https://. Only a server on this same computer may use http://'
+    });
+    const { putServerLink } = await import('./client.js');
+    await expect(
+      putServerLink(
+        'http://d.local:8080',
+        { url: 'http://x.example', on: true, trust: 'System' },
+        undefined,
+        { fetch }
+      )
+    ).rejects.toThrow('The address must start with https://');
+  });
+
   it('putAccessToken PUTs the token typed, or nothing for a new one', async () => {
     const { seen, fetch } = recorder(200, { ...view, token: 'K7QM-2XWD-9HRA' });
     const { putAccessToken } = await import('./client.js');

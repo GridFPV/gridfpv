@@ -52,6 +52,7 @@
   import type { PhaseId, PublicHello } from '@gridfpv/types';
   import DataPage from './screens/DataPage.svelte';
   import NetworkPage from './screens/NetworkPage.svelte';
+  import ServerPage from './screens/ServerPage.svelte';
   import VisitorPage from './screens/VisitorPage.svelte';
   import VideoPage from './screens/VideoPage.svelte';
   import RecordingsPage from './screens/RecordingsPage.svelte';
@@ -250,6 +251,8 @@
       <VideoPage {session} />
     {:else if route.page === 'network'}
       <NetworkPage {session} />
+    {:else if route.page === 'server'}
+      <ServerPage {session} />
     {:else if route.page === 'overlays'}
       <OverlaysPage {session} />
     {:else if route.page === 'data'}

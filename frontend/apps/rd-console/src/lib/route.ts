@@ -34,6 +34,7 @@
  *   - `#/pilots`, `#/classes`, `#/formats` → the lists that outlive events
  *   - `#/video`         → the Video page: OBS, and the recording of each race
  *   - `#/network`       → the Network page: whether other devices can open Grid
+ *   - `#/server`        → the Server page: sending events to a remote server
  *   - `#/data`          → the Data page: a copy of everything, to move to another computer
  *   - `#/help`          → the help index, and `#/help/‹page›` → one help page
  *   - `#/overlay/race`  → the race overlay, a page for an OBS browser source: light text, for
@@ -62,6 +63,7 @@ export type AppPage =
   | 'formats'
   | 'video'
   | 'network'
+  | 'server'
   | 'overlays'
   | 'data';
 
@@ -127,6 +129,7 @@ const APP_PAGES: readonly AppPage[] = [
   'formats',
   'video',
   'network',
+  'server',
   'overlays',
   'data'
 ];

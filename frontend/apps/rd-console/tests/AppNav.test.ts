@@ -46,6 +46,7 @@ const SETUP_ROW = [
   ['Video', '#/video'],
   ['Overlays', '#/overlays'],
   ['Network', '#/network'],
+  ['Server', '#/server'],
   ['Help', '#/help']
 ];
 
@@ -82,7 +83,8 @@ describe('AppNav: the two sides', () => {
     ['the Formats page', { kind: 'page', page: 'formats' }, 'Setup', 'Formats'],
     ['the Video page', { kind: 'page', page: 'video' }, 'Setup', 'Video'],
     ['the Overlays page', { kind: 'page', page: 'overlays' }, 'Setup', 'Overlays'],
-    ['the Network page', { kind: 'page', page: 'network' }, 'Setup', 'Network']
+    ['the Network page', { kind: 'page', page: 'network' }, 'Setup', 'Network'],
+    ['the Server page', { kind: 'page', page: 'server' }, 'Setup', 'Server']
   ])('%s is on the %s side, under %s', (_where, route, sideName, label) => {
     render(AppNav, { route, eventName: 'Club Night' });
     expect(currentSide()).toEqual([sideName]);

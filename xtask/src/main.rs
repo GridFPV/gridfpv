@@ -397,8 +397,14 @@ const PLAYWRIGHT_IMAGE: &str = "mcr.microsoft.com/playwright:v1.61.0-noble";
 /// to `cargo`, which is not in the image — a missing binary would fail deep inside a spec instead
 /// of here, where the message can say what to do.
 fn e2e(args: &[String]) -> bool {
-    if !run("cargo", &["build", "-p", "gridfpv-app"]) {
-        eprintln!("e2e: the Director binary must build before the suite can boot it");
+    // The Director, and the remote server one spec pushes to.
+    if !run(
+        "cargo",
+        &["build", "-p", "gridfpv-app", "-p", "gridfpv-serverd"],
+    ) {
+        eprintln!(
+            "e2e: the Director and server binaries must build before the suite can boot them"
+        );
         return false;
     }
     let installed = playwright_version();

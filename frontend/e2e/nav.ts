@@ -19,7 +19,8 @@ const SETUP_PAGES = [
   'Formats',
   'Video',
   'Overlays',
-  'Network'
+  'Network',
+  'Server'
 ];
 
 /** The row of pages of the side that is showing. */

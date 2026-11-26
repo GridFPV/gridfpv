@@ -70,6 +70,9 @@ import {
   postDataImport,
   deleteDataImport,
   getNetwork,
+  getServerLink,
+  putServerLink,
+  replaceOnServer,
   putDoor,
   putAccessToken,
   putPublicAddress,
@@ -129,6 +132,8 @@ import type {
   Door,
   DoorRequest,
   NetworkView,
+  LinkSettings,
+  LinkView,
   OverlayLook,
   OverlayPlacement,
   PassRequest,
@@ -259,6 +264,9 @@ const realApi = {
   postDataImport,
   deleteDataImport,
   getNetwork,
+  getServerLink,
+  putServerLink,
+  replaceOnServer,
   putDoor,
   putAccessToken,
   putPublicAddress,
@@ -702,6 +710,23 @@ export class Session {
   /** Sign this browser out as a pilot. */
   signOutPilot(): Promise<void> {
     return this.#api.signOutPilot(this.baseUrl);
+  }
+
+  /** The link to a remote server: its settings and how the pushing stands. */
+  getServerLink(): Promise<LinkView> {
+    return this.#api.getServerLink(this.baseUrl, { token: this.#token });
+  }
+
+  /** Set the link to a remote server. `undefined` on a cancelled prompt. */
+  putServerLink(settings: LinkSettings): Promise<LinkView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.putServerLink(this.baseUrl, settings, token));
+  }
+
+  /** Replace the server's copy of an event with this Director's. */
+  replaceOnServer(eventId: string): Promise<LinkView | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.replaceOnServer(this.baseUrl, eventId, token)
+    );
   }
 
   /** The two doors other devices come in by, and where their listeners stand. */

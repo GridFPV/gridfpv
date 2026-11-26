@@ -12,11 +12,11 @@
  */
 
 import type {
-  AddressRequest,
-  BuiltinClasses,
   ActiveEvent,
   AdapterId,
+  AddressRequest,
   BracketRequest,
+  BuiltinClasses,
   Class,
   ClassId,
   Command,
@@ -25,23 +25,22 @@ import type {
   CreateEventRequest,
   CreatePilotRequest,
   CreateTimerRequest,
-  RenameTimerRequest,
   DataCopy,
   DataExport,
   DataInfo,
   DiscoveredTimer,
+  Door,
+  DoorRequest,
   EventId,
   EventMeta,
   EventView,
   Format,
   KioskPassView,
   KioskView,
+  LinkSettings,
+  LinkView,
   MainsRequest,
-  RoundRobinRequest,
-  Door,
-  DoorRequest,
   NetworkView,
-  TokenRequest,
   OverlayLook,
   OverlayPlacement,
   PassRequest,
@@ -56,12 +55,15 @@ import type {
   PublicPilot,
   RaceId,
   RaceSignal,
+  RenameTimerRequest,
   RenderRequest,
+  RoundRobinRequest,
   SavedFormat,
   SeatChannel,
   SeatLevels,
   SeatProfile,
   SeatProfileRequest,
+  SeatRef,
   SetClassHiddenRequest,
   SignalChunk,
   SignupSeat,
@@ -69,12 +71,12 @@ import type {
   TimerConfig,
   TimerProfiles,
   TimerView,
+  TokenRequest,
   UpdateClassRequest,
   UpdatePilotRequest,
   VideoSettings,
   VideoSettingsRequest,
-  VideoStatus,
-  SeatRef
+  VideoStatus
 } from '@gridfpv/types';
 
 /** Minimal `fetch` surface this client needs (injectable for tests / Node). */
@@ -814,6 +816,50 @@ export async function deleteDataImport(
     '/data/import',
     { method: 'DELETE', token, fetch: options.fetch },
     'forget the copy'
+  );
+}
+
+/**
+ * The link to a remote server: its settings and how the pushing stands (`GET /server-link`).
+ * The link token is never in the answer, only whether one is set.
+ */
+export async function getServerLink(
+  baseUrl: string,
+  options: { token?: string; fetch?: FetchLike } = {}
+): Promise<LinkView> {
+  return apiJson<LinkView>(baseUrl, '/server-link', options, 'read the server setting');
+}
+
+/** Set the link to a remote server (`PUT /server-link`), RD-gated. */
+export async function putServerLink(
+  baseUrl: string,
+  settings: LinkSettings,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<LinkView> {
+  return apiJson<LinkView>(
+    baseUrl,
+    '/server-link',
+    { method: 'PUT', body: settings, token, fetch: options.fetch },
+    'change the server setting'
+  );
+}
+
+/**
+ * Replace the server's copy of an event with this Director's
+ * (`POST /server-link/events/{id}/replace`), RD-gated.
+ */
+export async function replaceOnServer(
+  baseUrl: string,
+  eventId: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<LinkView> {
+  return apiJson<LinkView>(
+    baseUrl,
+    `/server-link/events/${encodeURIComponent(eventId)}/replace`,
+    { method: 'POST', body: {}, token, fetch: options.fetch },
+    "replace the server's copy"
   );
 }
 

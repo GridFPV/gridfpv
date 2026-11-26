@@ -9,7 +9,7 @@
    * The switch reads just "Setup" and "Event"; the rest is in its tooltips. The open event's
    * name is at the top right, and leads to the Events page.
    * - **Setup** is what is kept for every event: Events (open, add or delete one), Timers,
-   *   Seats, Pilots, Classes, Formats, Video, Overlays, Network.
+   *   Seats, Pilots, Classes, Formats, Video, Overlays, Network, Server.
    *
    * The side follows the page that is showing, so a link or the back button lands on the
    * right one. Each side remembers the page it was last on: switching to Setup and back
@@ -63,7 +63,8 @@
     { key: 'video', label: 'Video', to: { kind: 'page', page: 'video' } },
     // How the overlays look is the same for every event, so it is set here, beside Video.
     { key: 'overlays', label: 'Overlays', to: { kind: 'page', page: 'overlays' } },
-    { key: 'network', label: 'Network', to: { kind: 'page', page: 'network' } }
+    { key: 'network', label: 'Network', to: { kind: 'page', page: 'network' } },
+    { key: 'server', label: 'Server', to: { kind: 'page', page: 'server' } }
     // The Data page (`#/data`) is not listed: moving Grid to another computer is rare, and
     // Setup is kept to what a director uses. The help page on Data says how to get there.
   ];
@@ -120,7 +121,7 @@
       href={setupHref}
       class:active={side === 'setup'}
       aria-current={side === 'setup' ? 'true' : undefined}
-      title="What is kept for every event: events, timers, seats, pilots, classes, formats, video, overlays, network"
+      title="What is kept for every event: events, timers, seats, pilots, classes, formats, video, overlays, network, server"
     >
       <span class="side-name">Setup</span>
     </a>
