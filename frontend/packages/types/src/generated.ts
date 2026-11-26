@@ -200,3 +200,4 @@ export type * from '@bindings/PushLog';
 export type * from '@bindings/PushRefusal';
 export type * from '@bindings/PushRefused';
 export type * from '@bindings/PushStatus';
+export type * from '@bindings/ServerEvent';

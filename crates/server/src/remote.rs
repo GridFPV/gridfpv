@@ -91,6 +91,30 @@ pub struct PushLog {
     /// The chain value of every entry before `from`, as hex.
     pub before: String,
     pub entries: Vec<PushEntry>,
+    /// What the Director's clock said when it sent this, in microseconds since 1970. Every
+    /// time in the log is on that clock. The server uses this to tell a page that is
+    /// counting a race down what the Director's clock says now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub sent_at: Option<i64>,
+}
+
+/// An event a server holds, for a list of them (`GET /api/clubs/{club}/events`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerEvent {
+    pub id: crate::events::EventId,
+    pub name: String,
+    /// The date the director gave it, as they typed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub location: Option<String>,
+    /// When the Director made the event, in milliseconds since 1970.
+    #[ts(type = "number")]
+    pub created_at: i64,
 }
 
 /// Why a server did not take a batch.

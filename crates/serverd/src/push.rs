@@ -108,6 +108,13 @@ impl FromRequestParts<AppState> for Pusher {
     }
 }
 
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
 fn status(held: Held) -> PushStatus {
     PushStatus {
         len: held.len,
@@ -198,7 +205,7 @@ pub async fn post_log(
     }
     let entries: Vec<(String, Option<i64>)> = log
         .entries
-        .into_iter()
+        .iter()
         .map(|entry| (entry.event.get().to_owned(), entry.recorded_at))
         .collect();
     let copy = state
@@ -206,7 +213,13 @@ pub async fn post_log(
         .get_or_create(&club.id, &id)?
         .ok_or_else(|| ApiError::not_held(&id.0))?;
     Ok(match copy.append(log.from, before, &entries)? {
-        Ok(held) => Json(status(held)).into_response(),
+        Ok(held) => {
+            // Only a Director whose log this is says what the clock is.
+            if let Some(sent_at) = log.sent_at {
+                copy.set_clock(sent_at, now_micros())?;
+            }
+            Json(status(held)).into_response()
+        }
         Err((refusal, held)) => (
             StatusCode::CONFLICT,
             Json(PushRefused {
