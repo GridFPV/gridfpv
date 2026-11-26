@@ -149,7 +149,24 @@ pub async fn get_hello(
         pilot: None,
         kiosk: false,
         kiosk_name: None,
+        server: false,
     }))
+}
+
+/// `GET /public/hello`, at the server's own address: this is a server, not a Director. The
+/// console's page asks this first, and shows the server's list of events when told so.
+pub async fn get_server_hello() -> Json<PublicHello> {
+    Json(PublicHello {
+        version: gridfpv_server::BUILD_VERSION.to_owned(),
+        caller: Caller::Visitor,
+        door: None,
+        event: None,
+        director_sign_in: false,
+        pilot: None,
+        kiosk: false,
+        kiosk_name: None,
+        server: true,
+    })
 }
 
 /// `GET …/public/event`.

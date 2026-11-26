@@ -52,6 +52,7 @@
   import type { PhaseId, PublicHello } from '@gridfpv/types';
   import DataPage from './screens/DataPage.svelte';
   import NetworkPage from './screens/NetworkPage.svelte';
+  import ServerHome from './screens/ServerHome.svelte';
   import ServerPage from './screens/ServerPage.svelte';
   import VisitorPage from './screens/VisitorPage.svelte';
   import VideoPage from './screens/VideoPage.svelte';
@@ -143,7 +144,8 @@
         hello = undefined;
       }
       greeted = true;
-      if (hello?.caller === 'Visitor') return;
+      // A visitor, or a remote server: there is no console here to set up.
+      if (hello?.caller === 'Visitor' || hello?.server) return;
       await session.resolveActiveEvent();
       navigate(resolveInitialRoute(location.hash, !!session.currentEvent));
     })();
@@ -211,6 +213,11 @@
       <span class="resume-spinner" aria-hidden="true"></span>
       <span>Connecting…</span>
     </div>
+  </div>
+{:else if hello?.server}
+  <!-- A remote server, not a Director: its list of events. -->
+  <div class="gridfpv-root">
+    <ServerHome baseUrl={session.baseUrl} />
   </div>
 {:else if visitor && hello}
   <div class="gridfpv-root">

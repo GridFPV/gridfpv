@@ -25,7 +25,8 @@ const HELLO: PublicHello = {
   caller: 'Visitor',
   event: 'Friday Night Whoops',
   director_sign_in: true,
-  kiosk: false
+  kiosk: false,
+  server: false
 };
 
 /** What Grid answers when Bee types their code at a kiosk. */
@@ -135,7 +136,8 @@ describe('VisitorPage', () => {
       caller: 'Visitor',
       door: 'Remote',
       director_sign_in: true,
-      kiosk: false
+      kiosk: false,
+      server: false
     });
     // No address to know: the sign-in is the page.
     expect(await screen.findByLabelText('Access token')).toBeVisible();
@@ -154,7 +156,8 @@ describe('VisitorPage', () => {
       caller: 'Visitor',
       door: 'Remote',
       director_sign_in: true,
-      kiosk: false
+      kiosk: false,
+      server: false
     });
     expect(await screen.findByLabelText('Access token')).toBeVisible();
   });

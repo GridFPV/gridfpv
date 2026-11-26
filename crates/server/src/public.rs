@@ -62,6 +62,10 @@ pub struct PublicHello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kiosk_name: Option<String>,
+    /// Whether this is a remote server and not a Director (§13). A page told so shows the
+    /// server's list of events, where a Director's shows the one event that is open.
+    #[serde(default)]
+    pub server: bool,
 }
 
 /// How long a director stays signed in on another device: half a day, which covers a race
@@ -105,6 +109,7 @@ pub async fn get_hello(
             pilot: None,
             kiosk: false,
             kiosk_name: None,
+            server: false,
         });
     }
     Json(PublicHello {
@@ -116,6 +121,7 @@ pub async fn get_hello(
         pilot: crate::pilot_access::signed_in_pilot(&registry, &headers),
         kiosk: crate::pilot_access::is_kiosk_device(&registry, &headers),
         kiosk_name: crate::pilot_access::kiosk_label(&registry, &headers),
+        server: false,
     })
 }
 

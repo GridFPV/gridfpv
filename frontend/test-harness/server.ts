@@ -44,7 +44,11 @@ function freePort(): Promise<number> {
   });
 }
 
-export async function startServer(club = 'E2E Club'): Promise<RemoteServer> {
+/**
+ * `assets` is the folder with the built console, which the server shows as its own page.
+ * Left out, the server takes pushes and answers the API and has no page.
+ */
+export async function startServer(club = 'E2E Club', assets?: string): Promise<RemoteServer> {
   if (!existsSync(SERVER_BIN)) {
     const built = spawnSync('cargo', ['build', '-p', 'gridfpv-serverd'], {
       cwd: repoRoot,
@@ -59,7 +63,9 @@ export async function startServer(club = 'E2E Club'): Promise<RemoteServer> {
   const env = {
     ...process.env,
     GRIDFPV_SERVER_DATA_DIR: data,
-    GRIDFPV_SERVER_ADDR: `127.0.0.1:${port}`
+    GRIDFPV_SERVER_ADDR: `127.0.0.1:${port}`,
+    // A folder with no page in it, when none is given: never the checkout's own by chance.
+    GRIDFPV_SERVER_ASSETS: assets ?? join(data, 'no-page')
   };
   const cli = (args: string[]): string => {
     const ran = spawnSync(SERVER_BIN, args, { env, encoding: 'utf8' });

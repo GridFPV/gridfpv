@@ -1074,7 +1074,8 @@ describe('other devices on the network', () => {
     version: '0.5.1',
     caller: 'Local' as const,
     director_sign_in: false,
-    kiosk: false
+    kiosk: false,
+    server: false
   };
 
   it('signing in as director drops a token the tab was still holding', async () => {

@@ -53,6 +53,7 @@ import type {
   PublicEvent,
   PublicHello,
   PublicPilot,
+  PushClub,
   RaceId,
   RaceSignal,
   RenameTimerRequest,
@@ -64,6 +65,7 @@ import type {
   SeatProfile,
   SeatProfileRequest,
   SeatRef,
+  ServerEvent,
   SetClassHiddenRequest,
   SignalChunk,
   SignupSeat,
@@ -817,6 +819,36 @@ export async function deleteDataImport(
     { method: 'DELETE', token, fetch: options.fetch },
     'forget the copy'
   );
+}
+
+/** The clubs on a remote server (`GET /api/clubs`). Asked of a server, not a Director. */
+export async function listServerClubs(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PushClub[]> {
+  return apiJson<PushClub[]>(baseUrl, '/api/clubs', options, 'read the clubs');
+}
+
+/** A club's events on a remote server, newest first (`GET /api/clubs/{club}/events`). */
+export async function listServerEvents(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerEvent[]> {
+  return apiJson<ServerEvent[]>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/events`,
+    options,
+    'read the events'
+  );
+}
+
+/**
+ * Where one event on a remote server is read from. Its public reads sit under this, with
+ * the same names a Director's have, so `publicSource` reads either.
+ */
+export function serverEventBase(baseUrl: string, club: string, event: string): string {
+  return `${baseUrl.replace(/\/$/, '')}/api/clubs/${encodeURIComponent(club)}/events/${encodeURIComponent(event)}`;
 }
 
 /**

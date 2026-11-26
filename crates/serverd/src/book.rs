@@ -8,7 +8,10 @@
 //! - **A token is shown once,** when it is made. Only its hash is kept, so the file does not
 //!   let whoever reads it push.
 //! - **The file may be changed by another process** while the server runs: the same program,
-//!   run to make or take back a token. So it is read again whenever it has changed on disk.
+//!   run to make or take back a token. So the file is read every time the book is asked
+//!   anything, and taken in again when its contents differ. It is a small file. Its time and
+//!   size are not trusted to say it changed: two changes in one tick of the clock can leave
+//!   both the same, and a token that was taken back would go on working.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -78,12 +81,10 @@ pub enum BookError {
     Invalid(&'static str),
 }
 
-/// When the file was last seen: enough to tell that it has changed.
-type Stamp = Option<(SystemTime, u64)>;
-
 struct Held {
     pages: Pages,
-    stamp: Stamp,
+    /// The file's contents when it was last taken in. `None` before the first read.
+    seen: Option<Vec<u8>>,
 }
 
 /// The server's book. See the module docs.
@@ -97,11 +98,6 @@ fn now_ms() -> i64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-fn stamp(path: &Path) -> Stamp {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
 }
 
 fn hash(token: &str) -> String {
@@ -139,14 +135,15 @@ impl Book {
             path,
             held: RwLock::new(Held {
                 pages: Pages::default(),
-                stamp: None,
+                seen: None,
             }),
         };
         if book.path.exists() {
-            let pages = book.read_file()?;
+            let bytes = std::fs::read(&book.path)?;
+            let pages = book.parse(&bytes)?;
             let mut held = book.held.write().expect("book lock");
             held.pages = pages;
-            held.stamp = stamp(&book.path);
+            held.seen = Some(bytes);
         } else {
             let mut held = book.held.write().expect("book lock");
             held.pages.clubs.push(Club {
@@ -158,9 +155,8 @@ impl Book {
         Ok(book)
     }
 
-    fn read_file(&self) -> Result<Pages, BookError> {
-        let text = std::fs::read_to_string(&self.path)?;
-        serde_json::from_str(&text).map_err(|e| BookError::Unreadable {
+    fn parse(&self, bytes: &[u8]) -> Result<Pages, BookError> {
+        serde_json::from_slice(bytes).map_err(|e| BookError::Unreadable {
             path: self.path.display().to_string(),
             why: e.to_string(),
         })
@@ -171,25 +167,28 @@ impl Book {
     fn write_file(&self, held: &mut Held) -> Result<(), BookError> {
         let text = serde_json::to_string_pretty(&held.pages).expect("the book is plain data");
         let part = self.path.with_extension("json.part");
-        std::fs::write(&part, text)?;
+        std::fs::write(&part, &text)?;
         std::fs::rename(&part, &self.path)?;
-        held.stamp = stamp(&self.path);
+        held.seen = Some(text.into_bytes());
         Ok(())
     }
 
-    /// Read the file again if another process has changed it. A file that has become
-    /// unreadable keeps what was last read: a half-saved edit must not lock every Director
-    /// out.
+    /// Take the file in again if another process has changed it. A file that cannot be
+    /// read, or has become unreadable, keeps what was last taken in: a half-saved edit must
+    /// not lock every Director out.
     fn refresh(&self) {
-        let seen = stamp(&self.path);
-        if self.held.read().expect("book lock").stamp == seen {
+        let Ok(bytes) = std::fs::read(&self.path) else {
+            return;
+        };
+        if self.held.read().expect("book lock").seen.as_deref() == Some(bytes.as_slice()) {
             return;
         }
         let mut held = self.held.write().expect("book lock");
-        if let Ok(pages) = self.read_file() {
+        if let Ok(pages) = self.parse(&bytes) {
             held.pages = pages;
         }
-        held.stamp = seen;
+        // Remembered either way, so a spoiled file is not parsed again on every request.
+        held.seen = Some(bytes);
     }
 
     /// Change the book and save it. The change is not kept if it cannot be saved.
@@ -424,6 +423,41 @@ mod tests {
         cli.new_token(&club(), "second").unwrap();
         assert_eq!(server.clubs()[0].name, "Renamed");
         assert_eq!(server.tokens().len(), 2);
+    }
+
+    #[test]
+    fn two_changes_of_the_same_size_at_the_same_moment_are_both_seen() {
+        // What a check by time and size missed: one process renames the club to a name of
+        // the same length, and the other writes straight after. With the change missed, the
+        // second wrote its old copy back over the first.
+        let dir = tempfile::tempdir().unwrap();
+        let server = Book::open(dir.path()).unwrap();
+        let cli = Book::open(dir.path()).unwrap();
+        for round in 0..200 {
+            let name = if round % 2 == 0 { "Renamed" } else { "My club" };
+            assert_eq!(name.len(), 7);
+            server.rename_club(&club(), name).unwrap();
+            assert_eq!(
+                cli.clubs()[0].name,
+                name,
+                "round {round}: the other process saw it"
+            );
+            cli.rename_club(&club(), "Another").unwrap();
+            assert_eq!(server.clubs()[0].name, "Another", "round {round}");
+        }
+    }
+
+    #[test]
+    fn a_token_taken_back_by_another_process_stops_working_however_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = Book::open(dir.path()).unwrap();
+        let cli = Book::open(dir.path()).unwrap();
+        for _ in 0..50 {
+            let (record, secret) = cli.new_token(&club(), "laptop").unwrap();
+            assert!(server.club_for_token(&secret).is_some());
+            cli.revoke_token(&record.id).unwrap();
+            assert!(server.club_for_token(&secret).is_none());
+        }
     }
 
     #[test]
