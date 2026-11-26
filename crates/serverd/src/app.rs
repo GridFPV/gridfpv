@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::book::{Book, BookError};
 use crate::push;
+use crate::read;
 use crate::store::Store;
 
 /// The largest request body taken. A batch of log entries with signal in them is the big
@@ -59,6 +60,20 @@ pub fn router(state: AppState) -> Router {
                 .delete(push::delete_event),
         )
         .route("/push/events/{id}/log", axum::routing::post(push::post_log))
+        .route("/api/clubs", get(read::get_clubs))
+        .route("/api/clubs/{club}/events", get(read::get_events))
+        .nest(
+            "/api/clubs/{club}/events/{event}/public",
+            Router::new()
+                .route("/hello", get(read::get_hello))
+                .route("/event", get(read::get_event))
+                .route("/event/state", get(read::get_state))
+                .route("/event/changes", get(read::get_changes))
+                .route("/event/pilots", get(read::get_pilots))
+                .route("/event/classes", get(read::get_classes))
+                .route("/event/timers", get(read::get_timers))
+                .route("/event/channels", get(read::get_channels)),
+        )
         .layer(DefaultBodyLimit::max(BODY_MAX))
         .with_state(state)
 }

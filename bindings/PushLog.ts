@@ -12,4 +12,10 @@ from: number,
 /**
  * The chain value of every entry before `from`, as hex.
  */
-before: string, entries: Array<PushEntry>, };
+before: string, entries: Array<PushEntry>, 
+/**
+ * What the Director's clock said when it sent this, in microseconds since 1970. Every
+ * time in the log is on that clock. The server uses this to tell a page that is
+ * counting a race down what the Director's clock says now.
+ */
+sent_at?: number, };

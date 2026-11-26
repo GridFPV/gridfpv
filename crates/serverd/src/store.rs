@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use gridfpv_engine::state::EventState;
 use gridfpv_server::events::EventId;
 use gridfpv_storage::{Chain, EventLog, Offset, RawEntry, SqliteLog, StorageError};
 use tokio::sync::watch;
@@ -27,6 +28,9 @@ use crate::book::ClubId;
 
 /// The key, in an event file's `meta` table, of the header a Director sent.
 const HEADER_KEY: &str = "push_header";
+
+/// The key of how far the Director's clock is ahead of this server's, in microseconds.
+const CLOCK_KEY: &str = "push_clock_ahead";
 
 /// Where clubs' events are kept, under the data folder.
 const CLUBS_DIR: &str = "clubs";
@@ -74,6 +78,12 @@ pub enum StoreError {
 struct Inner {
     log: SqliteLog,
     held: Held,
+    /// The event as its log makes it, worked out as far as `state.applied`.
+    state: EventState,
+    /// How far the Director's clock is ahead of this server's, in microseconds. Every time
+    /// in the log is on the Director's clock, so a page that counts a race down needs to
+    /// know what that clock says now.
+    clock_ahead: i64,
 }
 
 /// The server's copy of one event.
@@ -93,9 +103,18 @@ impl Copy {
             len: raw.len() as Offset,
             chain: Chain::start().then_all(&raw),
         };
+        let clock_ahead = log
+            .get_meta(CLOCK_KEY)?
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0);
         Ok(Self {
             grew: watch::Sender::new(held.len),
-            inner: Mutex::new(Inner { log, held }),
+            inner: Mutex::new(Inner {
+                log,
+                held,
+                state: EventState::new(),
+                clock_ahead,
+            }),
         })
     }
 
@@ -125,6 +144,38 @@ impl Copy {
         // A page following the event reads the header again too.
         self.grew.send_modify(|_| {});
         Ok(())
+    }
+
+    /// Note what the Director's clock said (`director_now`) when this server's said
+    /// `server_now`, both in microseconds since 1970.
+    pub fn set_clock(&self, director_now: i64, server_now: i64) -> Result<(), StoreError> {
+        let ahead = director_now.saturating_sub(server_now);
+        let mut inner = self.lock();
+        inner.clock_ahead = ahead;
+        inner.log.set_meta(CLOCK_KEY, &ahead.to_string())?;
+        Ok(())
+    }
+
+    /// What the Director's clock says when this server's says `server_now`, as far as the
+    /// last push told. The server's own clock until a Director has said.
+    pub fn director_now(&self, server_now: i64) -> i64 {
+        server_now.saturating_add(self.lock().clock_ahead)
+    }
+
+    /// Look at the event as its log makes it. The state is brought up to the end of the
+    /// copy first.
+    ///
+    /// Nothing is ever added here for time having passed (a countdown reaching its tone):
+    /// that is a fact only the Director writes, and it arrives with the next push.
+    pub fn with_state<R>(&self, f: impl FnOnce(&EventState) -> R) -> Result<R, StoreError> {
+        let mut inner = self.lock();
+        let inner = &mut *inner;
+        for stored in inner.log.read_from(inner.state.applied)? {
+            inner
+                .state
+                .apply(stored.offset, stored.recorded_at, &stored.event);
+        }
+        Ok(f(&inner.state))
     }
 
     /// Every entry from `start` on, as stored.

@@ -6,6 +6,7 @@
 //! - [`book`]: the clubs on this server, and the link tokens Directors push with.
 //! - [`store`]: the server's copy of each event's log.
 //! - [`push`]: the routes a Director pushes to.
+//! - [`read`]: the routes anyone may read: an event, as a visitor may see it.
 //! - [`app`]: the one router.
 //!
 //! **The server never writes an event.** A Director is the only writer of its events
@@ -15,4 +16,5 @@
 pub mod app;
 pub mod book;
 pub mod push;
+pub mod read;
 pub mod store;
