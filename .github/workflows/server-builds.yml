@@ -2,13 +2,24 @@ name: Server builds
 
 # The Grid remote server as ONE file for a Linux computer (docs/server-setup.md): the
 # program with its web page inside it, linked so it runs on any distribution, in a
-# container or not. Like the desktop release builds, this does not run on every push:
-#   - manually (workflow_dispatch — `gh workflow run server-builds.yml --ref <branch>`)
-#   - on merge to main
+# container or not.
+#
+# It runs:
+#   - on a push to `server` (the branch the server is built on) and to `main`: the files
+#     to install are this run's artifacts;
+#   - on a pull request that changes the server or how it is packed, to prove both builds;
+#   - manually (workflow_dispatch), once this file is on the default branch. GitHub will
+#     not start a workflow by hand before that.
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, server]
+  pull_request:
+    paths:
+      - "crates/serverd/**"
+      - "crates/storage/**"
+      - "packaging/server/**"
+      - ".github/workflows/server-builds.yml"
 
 concurrency:
   group: server-builds-${{ github.ref }}
