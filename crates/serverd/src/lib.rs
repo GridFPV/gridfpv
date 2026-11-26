@@ -14,6 +14,7 @@
 //! (§13.4). What is here only ever adds what a Director sent to the end of a copy.
 #![forbid(unsafe_code)]
 
+pub mod accounts;
 pub mod app;
 pub mod book;
 pub mod page;
