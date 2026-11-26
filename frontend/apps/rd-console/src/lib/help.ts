@@ -39,6 +39,7 @@ const ORDER = [
   'overlays',
   'video',
   'network',
+  'server',
   'data'
 ];
 

@@ -106,8 +106,9 @@ jobs:
         working-directory: frontend
       # Each worker boots the real binary; the harness would build it on demand, but doing it here
       # keeps a compile failure out of the middle of a spec.
-      - name: Build Director
-        run: cargo build -p gridfpv-app
+      # The remote server too: one spec pushes an event to it.
+      - name: Build Director and server
+        run: cargo build -p gridfpv-app -p gridfpv-serverd
       - name: e2e
         run: npm run e2e
         working-directory: frontend

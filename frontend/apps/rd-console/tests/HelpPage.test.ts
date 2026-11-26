@@ -48,6 +48,7 @@ describe('HelpPage index', () => {
       'overlays',
       'video',
       'network',
+      'server',
       'data'
     ]);
   });
