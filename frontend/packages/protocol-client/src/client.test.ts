@@ -548,6 +548,24 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     expect(seen[2].init?.method).toBe('POST');
   });
 
+  it('a remote server is asked for its clubs and their events, and one event has its own base', async () => {
+    const { listServerClubs, listServerEvents, serverEventBase } = await import('./client.js');
+    const clubs = recorder(200, [{ id: 'club', name: 'Recon FPV' }]);
+    expect(await listServerClubs('https://grid.example.org/', { fetch: clubs.fetch })).toEqual([
+      { id: 'club', name: 'Recon FPV' }
+    ]);
+    expect(clubs.seen[0].url).toBe('https://grid.example.org/api/clubs');
+
+    const events = recorder(200, [{ id: 'friday', name: 'Friday', created_at: 1 }]);
+    await listServerEvents('https://grid.example.org', 'north club', { fetch: events.fetch });
+    expect(events.seen[0].url).toBe('https://grid.example.org/api/clubs/north%20club/events');
+
+    expect(serverEventBase('https://grid.example.org/', 'club', 'friday-night-1')).toBe(
+      'https://grid.example.org/api/clubs/club/events/friday-night-1'
+    );
+    expect(serverEventBase('', 'a b', 'c/d')).toBe('/api/clubs/a%20b/events/c%2Fd');
+  });
+
   it("putServerLink rejects with the Director's own words", async () => {
     const { fetch } = recorder(400, {
       code: 'BadRequest',

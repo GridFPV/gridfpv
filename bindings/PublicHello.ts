@@ -35,4 +35,9 @@ kiosk: boolean,
 /**
  * What the director calls this kiosk: its name, or "Kiosk 2". Absent off a kiosk.
  */
-kiosk_name?: string, };
+kiosk_name?: string, 
+/**
+ * Whether this is a remote server and not a Director (§13). A page told so shows the
+ * server's list of events, where a Director's shows the one event that is open.
+ */
+server: boolean, };

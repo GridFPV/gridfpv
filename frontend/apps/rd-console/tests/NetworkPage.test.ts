@@ -59,7 +59,8 @@ const HELLO: PublicHello = {
   caller: 'Local',
   event: 'Friday Night Whoops',
   director_sign_in: false,
-  kiosk: false
+  kiosk: false,
+  server: false
 };
 
 function open(

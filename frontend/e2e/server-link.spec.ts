@@ -5,16 +5,23 @@
  * real `gridfpv` binary and the server is the real `gridfpv-server` binary, so what the
  * page says is on the server is checked by asking the server.
  */
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import type { Page } from '@playwright/test';
 
 import { startServer, type RemoteServer } from '../test-harness/server.js';
 import { gotoPage } from './nav.js';
 import { E2E_EVENT_NAME, expect, test } from './observability.js';
 
+/** The built console. The global setup builds it before any spec runs. */
+const dist = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'rd-console', 'dist');
+
 let server: RemoteServer;
 
 test.beforeAll(async () => {
-  server = await startServer();
+  // With the built console, so the server has its own page to show.
+  server = await startServer('E2E Club', dist);
 });
 test.afterAll(async () => {
   await server?.stop();
@@ -89,6 +96,42 @@ test('an event goes to the server once the link is set and switched on', async (
   await power(page).click();
   await expect(state(page)).toHaveText('Off');
   await expect(page.getByTestId('link-event')).toHaveCount(0);
+});
+
+test("the server's own page lists the event and shows it as a visitor at the race sees it", async ({
+  page,
+  director
+}) => {
+  await gotoPage(page, 'Server');
+  await setLink(page, server.baseUrl, server.token);
+  await power(page).click();
+  await expect(page.getByTestId('link-event').filter({ hasText: E2E_EVENT_NAME })).toContainText(
+    'On the server',
+    { timeout: 15_000 }
+  );
+
+  // Someone opens the server's address. They get its list of events, not a console.
+  await page.goto(server.baseUrl);
+  const link = page.getByTestId('server-event-link').filter({ hasText: E2E_EVENT_NAME });
+  await expect(link).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('heading', { name: server.club })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Pages' })).toHaveCount(0);
+
+  await link.click();
+  await expect(page.getByTestId('server-event')).toHaveText(E2E_EVENT_NAME);
+  await expect.poll(() => new URL(page.url()).hash).toBe(`#/e/club/${director.event}`);
+  // The same tabs a visitor at the race gets.
+  await expect(page.getByRole('tab').first()).toBeVisible();
+
+  // A refresh stays on the event, and the way back is there.
+  await page.reload();
+  await expect(page.getByTestId('server-event')).toHaveText(E2E_EVENT_NAME, { timeout: 15_000 });
+  await page.getByRole('link', { name: '← All events' }).click();
+  await expect(link).toBeVisible();
+
+  // An address for an event that is not there says so.
+  await page.goto(`${server.baseUrl}/#/e/club/no-such-event`);
+  await expect(page.getByText('This event is not here')).toBeVisible();
 });
 
 test('a server that is not there is said plainly, and racing is not held up', async ({
