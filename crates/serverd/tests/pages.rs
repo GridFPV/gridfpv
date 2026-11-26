@@ -225,3 +225,76 @@ async fn the_page_cannot_be_written_to() {
         "<title>the page</title>"
     );
 }
+
+/// The page built into the program (`--features embed-page`). These run only in that build,
+/// which CI makes after building the frontend.
+#[cfg(feature = "embed-page")]
+mod built_in {
+    use super::*;
+    use gridfpv_serverd::app::router_with_page;
+    use gridfpv_serverd::page::Page;
+
+    fn app() -> (tempfile::TempDir, Router) {
+        let data = tempfile::tempdir().unwrap();
+        let app = router_with_page(AppState::open(data.path()).unwrap(), Page::Embedded);
+        (data, app)
+    }
+
+    #[tokio::test]
+    async fn the_page_and_a_path_that_is_no_file_both_get_the_console() {
+        let (_data, app) = app();
+        let (status, kind, index) = get(&app, Method::GET, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(kind.contains("html"), "{kind}");
+        assert!(
+            index.contains("<div id=\"app\">") || index.contains("<script"),
+            "{index}"
+        );
+        for path in ["/index.html", "/e/club/friday", "/no/such/file.js"] {
+            let (status, kind, body) = get(&app, Method::GET, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(kind.contains("html"), "{path}: {kind}");
+            assert_eq!(body, index, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pages_own_files_come_with_their_kind() {
+        let (_data, app) = app();
+        let (_, _, index) = get(&app, Method::GET, "/").await;
+        // The page names its script and its stylesheet. Each must be served as what it is.
+        let named = |ext: &str| -> String {
+            index
+                .split('"')
+                .find(|part| part.contains("assets/") && part.ends_with(ext))
+                .unwrap_or_else(|| panic!("the page names no {ext} file: {index}"))
+                .trim_start_matches('.')
+                .to_owned()
+        };
+        let (status, kind, body) = get(&app, Method::GET, &named(".js")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(kind.contains("javascript"), "{kind}");
+        assert!(body.len() > 10_000);
+        let (status, kind, _) = get(&app, Method::GET, &named(".css")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(kind.contains("css"), "{kind}");
+    }
+
+    #[tokio::test]
+    async fn the_api_is_still_the_api_and_the_page_cannot_be_written_to() {
+        let (_data, app) = app();
+        let (status, kind, _) = get(&app, Method::GET, "/api/nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(kind.contains("json"));
+        let (status, _, body) = get(&app, Method::GET, "/public/hello").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"server\":true"));
+        for method in [Method::POST, Method::PUT, Method::DELETE] {
+            let (status, _, _) = get(&app, method.clone(), "/index.html").await;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        }
+        let (status, _, body) = get(&app, Method::HEAD, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_empty());
+    }
+}

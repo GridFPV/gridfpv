@@ -1,0 +1,95 @@
+name: Server builds
+
+# The Grid remote server as ONE file for a Linux computer (docs/server-setup.md): the
+# program with its web page inside it, linked so it runs on any distribution, in a
+# container or not.
+#
+# It runs:
+#   - on a push to `server` (the branch the server is built on) and to `main`: the files
+#     to install are this run's artifacts;
+#   - on a pull request that changes the server or how it is packed, to prove both builds;
+#   - manually (workflow_dispatch), once this file is on the default branch. GitHub will
+#     not start a workflow by hand before that.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, server]
+  pull_request:
+    paths:
+      - "crates/serverd/**"
+      - "crates/storage/**"
+      - "packaging/server/**"
+      - ".github/workflows/server-builds.yml"
+
+concurrency:
+  group: server-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.arch }} — gridfpv-server
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      # The tags name a build made on a release commit by its version (see crates/server/build.rs).
+      - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # The page goes inside the program, so it is built first.
+      - name: Build the web page
+        run: npm ci && npm run build
+        working-directory: frontend
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-${{ matrix.target }}
+      # musl: the C library goes inside the program too, so it needs nothing from the system.
+      - name: Install the musl C compiler
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked -p gridfpv-serverd --features embed-page --target ${{ matrix.target }}
+      - name: Check it is one file that needs nothing, and that it runs
+        run: |
+          BIN=target/${{ matrix.target }}/release/gridfpv-server
+          file "$BIN"
+          # A static program has no interpreter and lists no libraries.
+          if ldd "$BIN" 2>&1 | grep -q '=>'; then echo "it needs system libraries:"; ldd "$BIN"; exit 1; fi
+          DATA=$(mktemp -d)
+          GRIDFPV_SERVER_DATA_DIR="$DATA" "$BIN" token new "smoke" | grep -q 'gfs_'
+          GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_ADDR=127.0.0.1:8470 "$BIN" > "$DATA/out.log" 2>&1 &
+          for i in $(seq 1 50); do curl -sf http://127.0.0.1:8470/health >/dev/null && break; sleep 0.1; done
+          cat "$DATA/out.log"
+          grep -q 'web page: built in' "$DATA/out.log"
+          curl -sf http://127.0.0.1:8470/ | grep -qi '<html'
+          curl -sf http://127.0.0.1:8470/public/hello | grep -q '"server":true'
+          kill %1
+      - name: Pack it with what an install needs
+        run: |
+          OUT=gridfpv-server-linux-${{ matrix.arch }}
+          mkdir "$OUT"
+          cp target/${{ matrix.target }}/release/gridfpv-server "$OUT/"
+          cp packaging/server/gridfpv-server.service packaging/server/gridfpv-serverctl packaging/server/Caddyfile "$OUT/"
+          cp docs/server-setup.md "$OUT/README.md"
+          tar -czf "$OUT.tar.gz" "$OUT"
+          sha256sum "$OUT.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gridfpv-server-linux-${{ matrix.arch }}
+          path: gridfpv-server-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 30

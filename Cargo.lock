@@ -551,6 +551,8 @@ dependencies = [
  "gridfpv-server",
  "gridfpv-storage",
  "http-body-util",
+ "mime_guess",
+ "rust-embed",
  "serde",
  "serde_json",
  "sha2",

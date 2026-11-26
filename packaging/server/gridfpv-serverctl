@@ -1,0 +1,26 @@
+#!/bin/sh
+# Run a gridfpv-server command on the installed server's data, as the server's own user.
+#
+#   gridfpv-serverctl token new "Ryan's laptop"
+#   gridfpv-serverctl token list
+#   gridfpv-serverctl token revoke <id>
+#   gridfpv-serverctl club name "Recon FPV"
+#
+# It is the same as running gridfpv-server yourself, with the data folder and the user the
+# service uses. Running it as another user would leave files the service cannot change.
+set -eu
+
+DATA=/var/lib/gridfpv-server
+USER_NAME=gridfpv
+
+if [ "$#" -eq 0 ]; then
+    echo "usage: gridfpv-serverctl token new <label> | token list | token revoke <id> | club name <name>" >&2
+    exit 2
+fi
+if [ "$(id -un)" = "$USER_NAME" ]; then
+    GRIDFPV_SERVER_DATA_DIR="$DATA" exec /usr/local/bin/gridfpv-server "$@"
+fi
+if command -v runuser >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
+    exec runuser -u "$USER_NAME" -- env GRIDFPV_SERVER_DATA_DIR="$DATA" /usr/local/bin/gridfpv-server "$@"
+fi
+exec sudo -u "$USER_NAME" env GRIDFPV_SERVER_DATA_DIR="$DATA" /usr/local/bin/gridfpv-server "$@"
