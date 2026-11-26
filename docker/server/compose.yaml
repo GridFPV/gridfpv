@@ -1,0 +1,40 @@
+# The Grid remote server behind Caddy, which gets and renews an HTTPS certificate by itself.
+#
+#   1. Point a domain name at this computer, and let ports 80 and 443 in.
+#   2. Put the name in a file called `.env` beside this one:   GRID_DOMAIN=grid.example.org
+#   3. docker compose up -d
+#   4. docker compose exec server gridfpv-server token new "my laptop"
+#
+# The full steps, and what to do with no domain name, are in docs/server-setup.md.
+
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: docker/server/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - grid-data:/data
+    # Not published: only Caddy reaches it.
+    expose:
+      - "8470"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      GRID_DOMAIN: ${GRID_DOMAIN:?Set GRID_DOMAIN in .env to the name people will open, such as grid.example.org}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - server
+
+volumes:
+  grid-data:
+  caddy-data:
+  caddy-config:

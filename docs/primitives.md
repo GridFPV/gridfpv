@@ -1656,7 +1656,7 @@ reported.
 - **Later, not built:** Grid merging close crossings itself, so the window holds on every
   kind of timer and can be changed after the race.
 
-## 13. The remote server (Agreed 2026-11-26, not built)
+## 13. The remote server (Agreed 2026-11-26; step 1 built, see §13.12)
 
 This is the remote part of §11.1. The rules in §11.7 still hold, and this section builds on
 them.
@@ -1825,3 +1825,43 @@ signed-in people only, video.
 - Whether a club has its own page address on the server.
 - Which long-term records come first: results per pilot, seasons (#129), records per
   track (#61).
+
+### 13.12 What is built (step 1, 2026-11-27)
+
+Step 1 of §13.10 is built on the `server` branch: a server, a push, and the server's own
+page. Steps 2 and 3 are not started.
+
+- **The program** is `gridfpv-server` (crate `gridfpv-serverd`). It keeps the clubs and
+  link tokens in one file and each event in its own file, the same kind a Director keeps.
+  `docs/server-setup.md` says how to run it.
+- **A Director sends** from **Setup → Server**: the address, the link token and a switch.
+- **The server's page** is the console's own. It lists the events and shows one as a
+  visitor at the race sees it.
+
+**How a copy is kept right.** A Director sends the log as it is stored, entry for entry.
+Each batch carries one short value that stands for everything before it (a hash, entry by
+entry). The server takes a batch only when it continues the copy it holds. So:
+
+- a batch sent twice is kept once;
+- an event made again from nothing, or brought back from an old backup, is a **different
+  event** to the server even though its id is the same. It is never written over. The
+  Server page says so, and the director chooses to replace the server's copy.
+
+**The clock.** Every time in a log is on the Director's clock. A push says what that clock
+reads, and the server gives a page that time, so a countdown on a remote page is right
+even when the two clocks differ.
+
+**Choices made while building, for Ryan to confirm or change:**
+
+1. **Every event is sent** once a server is linked. There is no switch for one event, and
+   no "unlisted" yet (§13.9).
+2. **Pilots, classes and timers go up as a visitor may see them:** a callsign and a
+   colour, not a real name. The log itself goes up whole, as agreed (§13.3), and the
+   server leaves out of every answer what the Director's Public door leaves out.
+3. **An event's name, date and place are sent.** Its description and organizer are not.
+4. **"Allow self-signed" is done by pasting the certificate** on the Server page. There
+   is no step where Grid shows the certificate and the director accepts it (§13.5).
+5. **Plain HTTP is allowed to a server on the same computer** (`http://localhost`), and
+   nowhere else. It is how a server is tried out.
+6. **Removing an event on the Director does not remove it from the server.**
+7. **Link tokens are made on the server's command line.** There is no page for the owner.
