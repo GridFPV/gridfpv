@@ -1,6 +1,6 @@
 # Grid primitives
 
-**Status:** revision 9 (2026-11-16): the design to build against, with build progress in §8.
+**Status:** revision 10 (2026-11-26): the design to build against, with build progress in §8.
 Revision 1 was written from the design discussion of that day; revisions 2 to 7 fold in
 Ryan's notes and answers. Sections marked **Agreed** record what Ryan decided.
 
@@ -27,6 +27,10 @@ events and pilots carry outside ids (§4); a field can be seeded from an importe
 
 **What changed in revision 5:** removing a lap always folds its time into the next lap; a
 restart point is the separate case (§5.7).
+
+**What changed in revision 10** (Ryan, 2026-11-26): §13 is new. It is the design of the
+remote server: three tiers, what a server stores, how a Director sends to it and hears from
+it, accounts and claiming results, and the order of work. None of it is built.
 
 **What changed in revision 9** (Ryan, 2026-11-16): §11 is new. It covers the people at a
 race who are not the director: spectators and pilots on their own phones, how a pilot signs
@@ -1376,7 +1380,8 @@ same network, or the laptop is switched off.
 **Not decided yet:**
 
 - The defaults for spots held at once and total runs.
-- What the server stores, and how a Director sends it when there is internet. Future work.
+- What the server stores, and how a Director sends it when there is internet. Settled
+  2026-11-26: §13.
 - Which long-term records come first: results per pilot, seasons, records per track.
 
 One thing to check in the code before sign-up is built: lap callouts for an open seat
@@ -1650,3 +1655,173 @@ reported.
   Grid sees the crossings.
 - **Later, not built:** Grid merging close crossings itself, so the window holds on every
   kind of timer and can be changed after the race.
+
+## 13. The remote server (Agreed 2026-11-26, not built)
+
+This is the remote part of §11.1. The rules in §11.7 still hold, and this section builds on
+them.
+
+### 13.1 Three tiers
+
+| Tier | What it holds | Who it talks to |
+| --- | --- | --- |
+| **Director** | One event at a time, on the laptop at the race. | Pushes to a server, and pulls from it. |
+| **Server** | Many events over time, for one club or several (§13.2). | Directors push to it and pull from it. It does not talk to other servers. |
+| **Hub** | Pilots' results from many servers. | Directors push and pull, as with a server. It can also fetch a pilot's results from a server, using the pilot's own sign-in there (a linked account). |
+
+- **A hub is a role, not separate software.** The open-source version always has every
+  feature (§11.7), so any server can be a hub. A hosted Grid service would simply be the
+  hub most people trust.
+- **A pilot can have accounts on many servers.**
+- **A pilot sees all their results in one place only on a hub.** A plain server shows what
+  was pushed to it and nothing from elsewhere.
+
+### 13.2 Clubs
+
+A server can hold more than one club, and a director usually belongs to one.
+
+- **Every event on a server belongs to a club.** So does every link token, invite and
+  pilot list.
+- **Roles are at two levels.**
+  - **Server:** owners. They look after the server itself, make clubs, and name a club's
+    first director. An owner may do anything a director can, in every club.
+  - **Club:** directors. A director runs their own club and has no say in another club,
+    unless they are made a director there too.
+- **Only a club's directors hand out roles in that club** (and server owners, who may do
+  everything).
+- **An account is for the whole server.** One pilot can fly with several clubs on it, with
+  one account.
+- **A person's role is set club by club.** The same account can be a director in one club
+  and a pilot in another.
+- **The first build has one club,** made when the server is set up. Events are stored
+  under a club from the start, so adding more clubs later changes nothing already stored.
+
+### 13.3 What a server stores
+
+**The whole event**, not a summary: every lap, ruling and change, with the pilots and
+classes the event uses. The server can then show the same pages from the same data (§11.7),
+and new records can be worked out later from old events.
+
+Video is not stored. It comes later (§11.7).
+
+### 13.4 Director and server
+
+- **The Director pushes.** It sends an event to the server as it happens when there is
+  internet, and catches up afterwards when there is not.
+- **The Director always connects outward.** Nothing reaches in to the laptop, so it works
+  behind Starlink, a hotspot or a home router.
+- **The Director is the only writer of an event.** A change asked for on the server, such
+  as a pilot signing up for a heat, is a request. The Director fetches it, decides, and the
+  result goes back with the next push.
+- **The Director hears of a request at once.** It says which events it wants to hear about,
+  and the server tells it the moment there is something new. It does not wait for a slow
+  poll. This is one long-lived connection the Director opens (a WebSocket), and the
+  Director asks for anything it missed whenever it reconnects.
+
+### 13.5 A secure connection
+
+- **A Director only talks to a server over HTTPS.** Grid does not add its own encryption
+  on top. Pilots reach the server with a phone browser, and a browser needs HTTPS anyway.
+- **The server should make HTTPS easy and free:** a setup that gets its own certificate
+  when the server has a domain name, and written steps for a tunnel when it is at home
+  with no open ports.
+- **A server with its own certificate** needs a choice the director makes on purpose. The
+  Director offers two: add certificate authorities to trust, or allow a self-signed
+  certificate. Both are off until switched on. "Allow self-signed" trusts the one
+  certificate the director is shown and accepts, not any certificate.
+
+### 13.6 Who may push
+
+- **First:** a link token for one club, made by a server owner, who can take it back. A
+  Director pushes into that club and no other.
+- **Later:** a director has an account on the server with the director role in a club. They push with
+  that account, or with a token they make in it. That token can be short-lived and for one
+  event.
+
+### 13.7 Accounts, roles and claiming results
+
+- **Accounts belong to a server** (§11.7). In the first build an account on one server has
+  nothing to do with an account on another. Account ids name their server from the start,
+  so linking can be added without changing them.
+- **The Director's pilot list stays the main record at a race.** A server account is a
+  separate thing the pilot owns. The two are joined by the account id on the pilot, one
+  more outside id (§4).
+- **A Director can fetch pilots from a server**, and can push pilots to it.
+- **A pilot with no account id is unclaimed** on the server. Their results are kept.
+- **Results reach an account in two ways:**
+  1. The director puts the pilot's account id on the pilot. The results attach with no
+     further step.
+  2. The pilot asks to claim an unclaimed entry. Someone allowed to approve claims says
+     yes. This does not have to be the director: a server has roles, and a role says what
+     a person may do.
+- **Knowing an id is never enough to claim.** Anyone can type an id.
+- **Roles** (§13.2): server owner; and in a club, director (may push events, invite, and
+  approve claims in that club), claims approver (may approve claims in that club) and
+  pilot.
+
+### 13.8 How a pilot signs in to a server
+
+- **An account is not its sign-in.** The account is the server's own record. A sign-in is
+  a key attached to it, and one account can hold several keys.
+- **Sign in with a provider** is the main way: the pilot uses an account they already
+  have somewhere else. **Discord and Google are the two to start with.** It is built as
+  one general piece, so others are added by settings. Grid never sees or stores a
+  password.
+- **Each server owner sets a provider up once.** They register a free app with the
+  provider and put its two values in the server's settings. A provider that is not set up
+  is not offered.
+- **Passkeys** are the way that needs no outside service: the phone's fingerprint, face or
+  PIN. They come later. Until then, a server needs Discord or Google to have accounts.
+- **No passwords** for now. They are the most work and the most risk.
+- **A provider can do the claiming.** When the director puts a pilot's Discord account on
+  the pilot, the results attach when that pilot signs in with Discord. That is proof of
+  who they are, which a typed id is not (§13.7).
+- **Two sign-ins are never joined because their email matches.** A pilot who is signed in
+  adds another sign-in to their own account, from their account page. It should be easy.
+- **An account is made only with an invite.** Nobody can make one just by turning up.
+  Signing in with no account and no invite says an invite is needed.
+  - **A personal invite** is made by a director for one pilot of their club, and works
+    once. Using it
+    makes the account and claims that pilot's results in the same step (§13.7).
+  - **A group invite** is one link for one club, to share where the club talks. It has an
+    end date and a limit on uses, and can be switched off. It makes an account and claims
+    nothing.
+  - **Who may invite:** a club's directors, for their club. A server owner, for any.
+  - **The first owner** is made the same way: a new server shows a one-time setup link.
+- **Spectators need no account.** Reading is public (§13.9).
+- **Providers that cost money are not used** while Grid spends nothing. Sign in with Apple
+  needs a paid developer account.
+
+### 13.9 Who can read
+
+Events and results on a server are public. A director can keep an event unlisted. An
+option to show a server only to signed-in people may come later.
+
+### 13.10 Order of work
+
+This is one iteration. All three steps are in it.
+
+1. **A server and a push.** One self-hosted server with one club (§13.2). A Director is
+   linked with a token,
+   pushes whole events, and the server shows the same pages, read-only. No accounts.
+2. **Accounts.** Pilots are invited and sign in with Discord or Google (§13.8). Results
+   attach in the two ways of §13.7. No linking between servers.
+3. **Sign-up through the server.** A pilot signs up for a heat on the server, and the
+   Director hears of it at once (§13.4). The iteration is not done without this.
+
+The bracket visualizer (#548) is planned for the same stretch of work. It does not depend
+on the server.
+
+**Later, not in this iteration:** linking accounts across servers, the hub, a server
+fetching from another server, directors pushing with their own account, reading for
+signed-in people only, video.
+
+### 13.11 Not decided yet
+
+- How an owner helps a pilot who has lost every sign-in.
+- Whether a pilot's page at the race (§11.3) offers their personal invite when the
+  Director is linked to a server.
+- How two servers agree to link an account, and how a hub fetches from a server.
+- Whether a club has its own page address on the server.
+- Which long-term records come first: results per pilot, seasons (#129), records per
+  track (#61).
