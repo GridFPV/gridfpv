@@ -18,10 +18,13 @@
     problem = undefined,
     password = false,
     canMake = false,
+    email = false,
     onsignedin = undefined
   }: {
     api: Pick<PeopleApi, 'signInUrl'> &
-      Partial<Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>>;
+      Partial<
+        Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword' | 'forgotPassword'>
+      >;
     /** The providers the server offers. `undefined` while that is being read. */
     providers: readonly SignInProvider[] | undefined;
     /** The invite the person came with. */
@@ -34,6 +37,8 @@
     password?: boolean;
     /** Whether someone with no invite may make an account here. */
     canMake?: boolean;
+    /** Whether this server sends email, so a forgotten password can be set by a link. */
+    email?: boolean;
     /** Someone signed in with a password: here is their account. */
     onsignedin?: ((me: Me) => void) | undefined;
   } = $props();
@@ -61,7 +66,9 @@
   {:else}
     {#if withPassword && onsignedin}
       <ServerPassword
-        api={api as Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>}
+        api={api as Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'> &
+          Partial<Pick<PeopleApi, 'forgotPassword'>>}
+        forgot={reconnecting ? undefined : email ? 'email' : 'owner'}
         mode={reconnecting ? 'make' : 'sign-in'}
         {invite}
         canMake={!reconnecting && (invite !== undefined || canMake)}

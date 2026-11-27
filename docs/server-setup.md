@@ -262,6 +262,54 @@ Once you are an owner you can also switch it on and off on your account page, un
 
 Use HTTPS. A password typed over plain `http://` can be read on the way.
 
+### Email
+
+A server can send email, if you give it an email account to send from. It is optional. It
+is used for two things only:
+
+- **To confirm an address.** A person can give their email address on their account page.
+  The server sends a link to it, and the address counts once they open the link.
+- **To set a forgotten password.** On the sign-in page, **Forgot your password?** sends a
+  link to the person's confirmed address. Without email, you send them a re-connect link
+  yourself.
+
+Put the settings of your email account in `/etc/gridfpv-server.env` (or
+`docker/server/.env`), then restart the server:
+
+```
+GRIDFPV_SERVER_SMTP_HOST=smtp.example.org
+GRIDFPV_SERVER_SMTP_USER=grid@example.org
+GRIDFPV_SERVER_SMTP_PASSWORD=...
+GRIDFPV_SERVER_SMTP_FROM=Grid <grid@example.org>
+```
+
+Your email provider gives you these. Look for "SMTP" in its help pages. Many want a
+special password made for apps, not the one you sign in with.
+
+- The port is 587 unless you set `GRIDFPV_SERVER_SMTP_PORT`.
+- For a provider that wants port 465, add `GRIDFPV_SERVER_SMTP_TLS=tls`.
+- The connection is always encrypted. `GRIDFPV_SERVER_SMTP_TLS=none` is taken only for an
+  email program on this same computer.
+- The server must know its own address (step 1 below), so a link in a mail can be opened.
+
+Check it works:
+
+```
+gridfpv-serverctl email test you@example.org
+```
+
+If a setting is wrong, the server says which one and does not start.
+
+What to know:
+
+- A person's address is shown to nobody else, not even to you.
+- A link to confirm an address works once, for one day.
+- A link to set a password works once, for one hour. The same person is not sent another
+  for five minutes.
+- The sign-in page says the same thing whether or not the username exists, so it cannot be
+  used to find out who has an account.
+- Email does not join accounts. Two accounts with one address stay two accounts.
+
 ### 1. Tell the server its own address
 
 The server must know the address people open, so a provider can send them back to it.
@@ -474,9 +522,10 @@ gridfpv-serverctl club name "Northern Whoops" north-whoops
 
 ### 9. Help someone who cannot sign in
 
-A Grid server sends no email, so nobody can reset their own password or get back in by
-themselves. If someone forgets their password, or loses the Discord or Google account they
-sign in with, an **owner** of the server gets them back in.
+Someone who gave the server their email address, and confirmed it, can set a forgotten
+password by themselves (see **Email**). Everyone else needs you. If someone forgets their
+password, or loses the Discord or Google account they sign in with, an **owner** of the
+server gets them back in.
 
 On the club's page, under **Members**, press **Sign-ins…** next to the person. You can:
 

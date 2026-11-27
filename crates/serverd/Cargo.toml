@@ -49,6 +49,7 @@ getrandom = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
 argon2 = "0.5"
+lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
 
 [dev-dependencies]
 # The read tests run a whole Director, push its event here, and compare what each shows.

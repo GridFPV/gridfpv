@@ -62,6 +62,7 @@
   import ServerJoin from './ServerJoin.svelte';
   import ServerReconnect from './ServerReconnect.svelte';
   import ServerClubs from './ServerClubs.svelte';
+  import ServerConfirmEmail from './ServerConfirmEmail.svelte';
   import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
   import ServerPasswordSetting from './ServerPasswordSetting.svelte';
@@ -146,6 +147,8 @@
   let openSignUp = $state<boolean | undefined>(undefined);
   /** Whether people may sign in here with a username and password. */
   let passwordOn = $state(false);
+  /** Whether this server sends email. */
+  let emailOn = $state(false);
   /** Whether there is any way to sign in here. */
   const canSignIn = $derived((providers !== undefined && providers.length > 0) || passwordOn);
   /** Someone signed in with a password. `to` is where they land. */
@@ -174,6 +177,7 @@
       .then((info) => {
         openSignUp = info.open_sign_up;
         passwordOn = info.password_sign_in ?? false;
+        emailOn = info.email ?? false;
       })
       // An older server cannot say. It asks for an invite.
       .catch(() => (openSignUp = false));
@@ -536,6 +540,7 @@
         {providers}
         problem={signInProblem(place.problem)}
         password={passwordOn}
+        email={emailOn}
         canMake={openSignUp === true}
         onsignedin={(me) => signedIn(me, { kind: me.account?.clubs.length ? 'list' : 'account' })}
       />
@@ -550,6 +555,7 @@
         account={account ?? undefined}
         {providers}
         password={passwordOn}
+        email={emailOn}
         onsignedin={(me) => signedIn(me, { kind: 'account' })}
         onjoined={async () => {
           await readMe();
@@ -557,6 +563,9 @@
         }}
       />
     {/if}
+  {:else if place.kind === 'confirm-email'}
+    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+    <ServerConfirmEmail api={people} secret={place.secret} onconfirmed={readMe} />
   {:else if place.kind === 'reconnect'}
     <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
     {#if account !== undefined}
@@ -566,6 +575,7 @@
         account={account ?? undefined}
         {providers}
         password={passwordOn}
+        email={emailOn}
         onsignedin={(me) => signedIn(me, { kind: 'account' })}
       />
     {/if}
@@ -577,6 +587,7 @@
         {account}
         {providers}
         password={passwordOn}
+        email={emailOn}
         clubs={clubs?.map((entry) => entry.club) ?? []}
         onchange={(me) => (account = me.account ?? null)}
         onreread={readMe}
@@ -601,6 +612,7 @@
         api={people}
         {providers}
         password={passwordOn}
+        email={emailOn}
         canMake={openSignUp === true}
         onsignedin={(me) => signedIn(me)}
       />
@@ -663,6 +675,7 @@
         api={people}
         {providers}
         password={passwordOn}
+        email={emailOn}
         canMake={openSignUp === true}
         onsignedin={(me) => signedIn(me)}
       />
@@ -679,6 +692,7 @@
         api={people}
         {providers}
         password={passwordOn}
+        email={emailOn}
         canMake={openSignUp === true}
         onsignedin={(me) => signedIn(me)}
       />

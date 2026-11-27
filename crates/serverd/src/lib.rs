@@ -27,6 +27,7 @@ pub mod app;
 pub mod asks;
 pub mod book;
 pub mod claims;
+pub mod email;
 pub mod join;
 pub mod manage;
 pub mod page;

@@ -60,6 +60,7 @@ const USAGE: &str = "usage:
   gridfpv-server club archive <club>   make a club read-only and take it off the list
   gridfpv-server club restore <club>   bring an archived club back
   gridfpv-server owner invite          make a link that makes its user an owner
+  gridfpv-server email test <address>  send a test email with the email settings
   gridfpv-server password              say whether people may sign in with a password
   gridfpv-server password on           let people sign in with a username and password
   gridfpv-server password off          sign in with Discord, Google and the like only
@@ -92,6 +93,7 @@ fn main() -> ExitCode {
         ["club", "archive", club] => club_archive(club, true),
         ["club", "restore", club] => club_archive(club, false),
         ["owner", "invite"] => owner_invite(),
+        ["email", "test", to] => email_test(to),
         ["password"] => password(None),
         ["password", "on"] => password(Some(true)),
         ["password", "off"] => password(Some(false)),
@@ -125,9 +127,16 @@ fn serve() -> Done {
         .parse()
         .map_err(|e| format!("GRIDFPV_SERVER_ADDR is not an address like {DEFAULT_ADDR}: {e}"))?;
     let dir = data_dir();
+    // Settings for email that do not make sense stop the server from starting: a server
+    // that silently sent nothing would be found out only when someone needed a link.
+    let mailer = match gridfpv_serverd::email::MailSettings::from_env()? {
+        Some(settings) => Some(gridfpv_serverd::email::Mailer::smtp(&settings)?),
+        None => None,
+    };
     let state = AppState::open(&dir)?
         .at(public_url())
-        .with_providers(gridfpv_serverd::signin::Provider::from_env());
+        .with_providers(gridfpv_serverd::signin::Provider::from_env())
+        .with_mailer(mailer);
     let asked = std::env::var_os("GRIDFPV_SERVER_ASSETS")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from);
@@ -158,6 +167,13 @@ fn serve() -> Done {
         }
         if state.book.password_sign_in() {
             println!("  sign-in with a username and password");
+        }
+        match (&state.mailer, &state.public_url) {
+            (Some(_), Some(_)) => println!("  email is set up"),
+            (Some(_), None) => println!(
+                "  Email is off: set GRIDFPV_SERVER_PUBLIC_URL, so a link in a mail can be opened."
+            ),
+            (None, _) => {}
         }
         if state.book.open_sign_up() {
             println!("  Anyone who can sign in may make an account.");
@@ -344,6 +360,29 @@ fn account_reconnect(id: &str) -> Done {
     println!("  {}/#/reconnect/{secret}", link_base());
     println!();
     println!("It works once, and for seven days. It is not kept here and cannot be shown again.");
+    Ok(())
+}
+
+/// Send one email with the settings in the environment, to check they work.
+fn email_test(to: &str) -> Done {
+    use gridfpv_serverd::email::{Mail, MailSettings, Mailer};
+    let Some(settings) = MailSettings::from_env()? else {
+        return Err("Email is not set up: GRIDFPV_SERVER_SMTP_HOST is not set.".into());
+    };
+    let mailer = Mailer::smtp(&settings)?;
+    let mail = Mail {
+        to: to.to_owned(),
+        subject: "A test from your Grid server".into(),
+        body: "This is a test. If you can read it, your Grid server can send email.\n".into(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(mailer.send(mail))?;
+    println!(
+        "Sent to {to}, through {} on port {}. Look for it in the inbox.",
+        settings.host, settings.port
+    );
     Ok(())
 }
 

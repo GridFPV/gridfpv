@@ -396,6 +396,12 @@ fn clean(text: &str, empty: &'static str) -> Result<String> {
     Ok(text.to_owned())
 }
 
+/// What the secret of a link that confirms an email address starts with.
+pub const EMAIL_LINK_PREFIX: &str = "gfe_";
+
+/// How long such a link works: a day.
+pub const EMAIL_LINK_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// The `provider` of a username-and-password sign-in. Its `subject` is the username.
 pub const PASSWORD_PROVIDER: &str = "password";
 
@@ -493,6 +499,18 @@ impl Accounts {
                 color          TEXT,
                 multigp_id     TEXT,
                 velocidrone_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS emails (
+                account  TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                address  TEXT NOT NULL,
+                verified INTEGER NOT NULL DEFAULT 0,
+                set_at   INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS email_links (
+                hash       TEXT PRIMARY KEY,
+                account    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                address    TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS passwords (
                 account TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
@@ -1068,6 +1086,18 @@ impl Accounts {
         by: Option<&AccountId>,
         now: i64,
     ) -> Result<(Reconnect, String)> {
+        self.new_reconnect_for(account, by, now, RECONNECT_MS)
+    }
+
+    /// [`new_reconnect`](Self::new_reconnect), with how long the link works. A link sent
+    /// by email is given less time than one an owner hands over.
+    pub fn new_reconnect_for(
+        &self,
+        account: &AccountId,
+        by: Option<&AccountId>,
+        now: i64,
+        life_ms: i64,
+    ) -> Result<(Reconnect, String)> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         if Self::account_in(&tx, account)?.is_none() {
@@ -1103,7 +1133,7 @@ impl Accounts {
             account: account.clone(),
             created_by: by.cloned(),
             created_at: now,
-            expires_at: now + RECONNECT_MS,
+            expires_at: now + life_ms,
         };
         tx.execute(
             "INSERT INTO reconnects (id, hash, account, created_by, created_at, expires_at)
@@ -1286,6 +1316,108 @@ impl Accounts {
             "DELETE FROM sessions WHERE account = ?1 AND hash != ?2",
             params![account.0, hash(keep)],
         )?)
+    }
+
+    // ── An account's email address (§13.8) ──────────────────────────────────
+
+    /// The email address an account gave, and whether they have shown it is theirs.
+    pub fn email_of(&self, account: &AccountId) -> Result<Option<(String, bool)>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT address, verified FROM emails WHERE account = ?1",
+                params![account.0],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?)
+    }
+
+    /// Note the address an account gave, not yet shown to be theirs, and make the link
+    /// that will show it. Returns **the link's secret, which is not kept**. A link made
+    /// before for this account stops working.
+    ///
+    /// The same address again keeps what was known of it: an address already confirmed
+    /// stays confirmed.
+    pub fn set_email(&self, account: &AccountId, address: &str, now: i64) -> Result<String> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if Self::account_in(&tx, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        tx.execute(
+            "INSERT INTO emails (account, address, verified, set_at) VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT (account) DO UPDATE SET
+                verified = CASE WHEN emails.address = excluded.address THEN emails.verified ELSE 0 END,
+                address = excluded.address, set_at = excluded.set_at",
+            params![account.0, address, now],
+        )?;
+        tx.execute(
+            "DELETE FROM email_links WHERE account = ?1",
+            params![account.0],
+        )?;
+        tx.execute(
+            "DELETE FROM email_links WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        let secret = format!("{EMAIL_LINK_PREFIX}{}", random(24));
+        tx.execute(
+            "INSERT INTO email_links (hash, account, address, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![hash(&secret), account.0, address, now + EMAIL_LINK_MS],
+        )?;
+        tx.commit()?;
+        Ok(secret)
+    }
+
+    /// Use the link that shows an address is its account's. It works once, and only while
+    /// the account still has that address. Returns the account and the address.
+    pub fn verify_email(&self, secret: &str, now: i64) -> Result<Option<(AccountId, String)>> {
+        if !secret.starts_with(EMAIL_LINK_PREFIX) {
+            return Ok(None);
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let found: Option<(String, String)> = tx
+            .query_row(
+                "SELECT account, address FROM email_links WHERE hash = ?1 AND expires_at > ?2",
+                params![hash(secret), now],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((account, address)) = found else {
+            return Ok(None);
+        };
+        tx.execute(
+            "DELETE FROM email_links WHERE hash = ?1",
+            params![hash(secret)],
+        )?;
+        let changed = tx.execute(
+            "UPDATE emails SET verified = 1 WHERE account = ?1 AND address = ?2",
+            params![account, address],
+        )?;
+        tx.commit()?;
+        Ok((changed > 0).then_some((AccountId(account), address)))
+    }
+
+    /// Take an account's email address off.
+    pub fn clear_email(&self, account: &AccountId) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM emails WHERE account = ?1", params![account.0])?;
+        conn.execute(
+            "DELETE FROM email_links WHERE account = ?1",
+            params![account.0],
+        )?;
+        Ok(())
+    }
+
+    /// The accounts that have confirmed an address. More than one may: an address is not
+    /// what makes an account, and two accounts are never joined by it (§13.8).
+    pub fn accounts_with_email(&self, address: &str) -> Result<Vec<AccountId>> {
+        let conn = self.lock();
+        let mut read = conn.prepare(
+            "SELECT account FROM emails WHERE address = ?1 AND verified = 1 ORDER BY set_at",
+        )?;
+        let rows = read.query_map(params![address], |row| Ok(AccountId(row.get(0)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // ── Joining a club (§13.7) ──────────────────────────────────────────────

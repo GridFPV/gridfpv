@@ -113,6 +113,9 @@ test('pilots make their own accounts and get into a club the ways a club allows'
   await expect(asks.nth(1)).toContainText('Quin');
   await ryan.getByRole('button', { name: 'Let Pia in' }).click();
   await expect(ryan.getByTestId('join-ask')).toHaveCount(1);
+  // It worked, and the page does not say otherwise.
+  await expect(ryan.getByTestId('club-join-setting').getByRole('alert')).toHaveCount(0);
+  await expect(ryan.getByTestId('club-join-setting')).not.toContainText('JSON');
   await expect(ryan.getByRole('list', { name: 'Members' })).toContainText('Pia');
   await ryan.getByRole('button', { name: 'Say no to Quin' }).click();
   await expect(ryan.getByTestId('no-join-asks')).toBeVisible();
@@ -134,6 +137,7 @@ test('pilots make their own accounts and get into a club the ways a club allows'
   await expect(foundRay).toHaveCount(1);
   await expect(foundRay).toContainText('Ray (Rotorhead)');
   await ryan.getByRole('button', { name: 'Add Ray (Rotorhead) to Recon FPV' }).click();
+  await expect(ryan.getByTestId('club-join-setting')).not.toContainText('JSON');
   await expect(ryan.getByRole('list', { name: 'Members' })).toContainText('Ray');
   expect(await memberNames(ryan)).toEqual(['Pia', 'Ray']);
   await ray.reload();

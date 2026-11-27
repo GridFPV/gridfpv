@@ -651,6 +651,55 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     ).rejects.toThrow('That username and password do not match.');
   });
 
+  it('a call the server answers with nothing does not try to read an answer', async () => {
+    // The server says 204 with no body to each of these. Reading one as JSON throws, and
+    // the page then shows an error for something that worked.
+    const { answerClubJoinAsk, addClubMember, forgotServerPassword } = await import('./client.js');
+    const empty: FetchLike = async () =>
+      ({
+        ok: true,
+        status: 204,
+        json: async (): Promise<unknown> => {
+          throw new SyntaxError('Unexpected end of JSON input');
+        }
+      }) as unknown as Response;
+    const base = 'https://grid.example.org';
+    await expect(
+      answerClubJoinAsk(base, 'north', 'acct_pia', true, { fetch: empty })
+    ).resolves.toBeUndefined();
+    await expect(
+      answerClubJoinAsk(base, 'north', 'acct_pia', false, { fetch: empty })
+    ).resolves.toBeUndefined();
+    await expect(
+      addClubMember(base, 'north', 'acct_pia', { fetch: empty })
+    ).resolves.toBeUndefined();
+    await expect(forgotServerPassword(base, 'ace', { fetch: empty })).resolves.toBeUndefined();
+  });
+
+  it('email goes to the right addresses', async () => {
+    const { setServerEmail, removeServerEmail, confirmServerEmail, forgotServerPassword } =
+      await import('./client.js');
+    const { seen, fetch } = recorder(200, { address: 'ace@example.org' });
+    const base = 'https://grid.example.org';
+    await setServerEmail(`${base}/`, 'ace@example.org', { fetch });
+    expect(seen[0].url).toBe(`${base}/api/me/email`);
+    expect(seen[0].init?.method).toBe('PUT');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({ address: 'ace@example.org' });
+    await removeServerEmail(base, { fetch });
+    expect(seen[1].url).toBe(`${base}/api/me/email`);
+    expect(seen[1].init?.method).toBe('DELETE');
+    // The link's secret goes in the body, not in an address a server would log.
+    expect(await confirmServerEmail(base, 'gfe_abc', { fetch })).toEqual({
+      address: 'ace@example.org'
+    });
+    expect(seen[2].url).toBe(`${base}/api/email/confirm`);
+    expect(JSON.parse(seen[2].init?.body as string)).toEqual({ secret: 'gfe_abc' });
+    await forgotServerPassword(base, 'ace', { fetch });
+    expect(seen[3].url).toBe(`${base}/api/password/forgot`);
+    expect(seen[3].init?.method).toBe('POST');
+    expect(JSON.parse(seen[3].init?.body as string)).toEqual({ who: 'ace' });
+  });
+
   it('a pilot profile and the sign-up setting go to the right addresses', async () => {
     const { setServerProfile, getServerInfo, setServerOpenSignUp } = await import('./client.js');
     const me = recorder(200, { account: { id: 'acct_1', profile: { callsign: 'Ace' } } });

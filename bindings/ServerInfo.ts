@@ -13,4 +13,9 @@ open_sign_up: boolean,
  * Whether people may sign in with a username and password kept here (§13.8). The
  * owner's choice.
  */
-password_sign_in: boolean, };
+password_sign_in: boolean, 
+/**
+ * Whether this server sends email: to confirm an address, and to let someone set a
+ * forgotten password by themselves (§13.8).
+ */
+email: boolean, };

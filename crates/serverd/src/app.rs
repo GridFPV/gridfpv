@@ -42,6 +42,10 @@ pub struct AppState {
     pub asks: Arc<Asks>,
     /// Who has guessed a password wrong, and how often (`password`).
     pub guesses: Arc<crate::password::Guesses>,
+    /// What sends this server's email, when its owner set that up (`email`).
+    pub mailer: Option<Arc<crate::email::Mailer>>,
+    /// When each account was last sent a mail (`email`).
+    pub sent: Arc<crate::email::Sent>,
 }
 
 impl AppState {
@@ -51,6 +55,13 @@ impl AppState {
         self.public_url = public_url
             .map(|url| url.trim().trim_end_matches('/').to_owned())
             .filter(|url| !url.is_empty());
+        self
+    }
+
+    /// Say what sends this server's email.
+    #[must_use]
+    pub fn with_mailer(mut self, mailer: Option<crate::email::Mailer>) -> Self {
+        self.mailer = mailer.map(Arc::new);
         self
     }
 
@@ -73,6 +84,8 @@ impl AppState {
             providers: Arc::default(),
             asks: Arc::default(),
             guesses: Arc::default(),
+            mailer: None,
+            sent: Arc::default(),
         })
     }
 }
@@ -233,6 +246,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/me/password",
             axum::routing::put(crate::password::put_my_password),
+        )
+        .route(
+            "/api/me/email",
+            axum::routing::put(crate::email::put_my_email).delete(crate::email::delete_my_email),
+        )
+        .route(
+            "/api/email/confirm",
+            axum::routing::post(crate::email::post_confirm),
+        )
+        .route(
+            "/api/password/forgot",
+            axum::routing::post(crate::email::post_forgot),
         )
         .route("/api/sign-out", axum::routing::post(people::post_sign_out))
         .route(

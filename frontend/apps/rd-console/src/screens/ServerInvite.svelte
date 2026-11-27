@@ -18,17 +18,22 @@
     account,
     providers,
     password = false,
+    email = false,
     onsignedin = undefined,
     onjoined
   }: {
     api: Pick<PeopleApi, 'invite' | 'acceptInvite' | 'signInUrl'> &
-      Partial<Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>>;
+      Partial<
+        Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword' | 'forgotPassword'>
+      >;
     secret: string;
     /** The account that is signed in, if one is. */
     account: MyAccount | undefined;
     providers: readonly SignInProvider[] | undefined;
     /** Whether this server lets people sign in with a username and password. */
     password?: boolean;
+    /** Whether this server sends email. */
+    email?: boolean;
     /** Someone signed in, or made their account, with a password. */
     onsignedin?: ((me: Me) => void) | undefined;
     /** The signed-in account has used the invite. */
@@ -98,7 +103,7 @@
         </div>
       {:else}
         <p>Sign in to accept. If you have no account here yet, this makes one.</p>
-        <ServerSignIn {api} {providers} invite={secret} {password} {onsignedin} />
+        <ServerSignIn {api} {providers} invite={secret} {password} {email} {onsignedin} />
       {/if}
     {/if}
   </div>

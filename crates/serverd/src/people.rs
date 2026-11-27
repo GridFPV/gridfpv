@@ -141,6 +141,10 @@ pub struct MyAccount {
     /// The clubs they asked to join and have not heard from (§13.7).
     #[serde(default)]
     pub join_asks: Vec<PushClub>,
+    /// The email address they gave, when they gave one (§13.8). Shown to nobody else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub email: Option<crate::email::MyEmail>,
 }
 
 /// `GET /api/server`: what anyone may know of how this server is run.
@@ -154,6 +158,10 @@ pub struct ServerInfo {
     /// owner's choice.
     #[serde(default)]
     pub password_sign_in: bool,
+    /// Whether this server sends email: to confirm an address, and to let someone set a
+    /// forgotten password by themselves (§13.8).
+    #[serde(default)]
+    pub email: bool,
 }
 
 /// How a server is run, as anyone may know it.
@@ -161,6 +169,7 @@ pub(crate) fn server_info(state: &AppState) -> ServerInfo {
     ServerInfo {
         open_sign_up: state.book.open_sign_up(),
         password_sign_in: state.book.password_sign_in(),
+        email: state.mailer.is_some() && state.public_url.is_some(),
     }
 }
 
@@ -549,6 +558,7 @@ fn my_account(state: &AppState, standing: &Standing) -> Result<Option<MyAccount>
         primary: primary_of(state, standing)?,
         pilots: crate::claims::my_pilots(state, &standing.account)?,
         profile: state.accounts.profile(&standing.account)?,
+        email: crate::email::my_email(state, &standing.account)?,
         join_asks: state
             .accounts
             .my_join_asks(&standing.account)?

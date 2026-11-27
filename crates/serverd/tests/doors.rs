@@ -100,6 +100,18 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
         (Method::POST, "/api/sign-out", Anyone, None),
         (
             Method::POST,
+            "/api/email/confirm",
+            Anyone,
+            Some(json!({"secret": "gfe_nothing"})),
+        ),
+        (
+            Method::POST,
+            "/api/password/forgot",
+            Anyone,
+            Some(json!({"who": "doorman"})),
+        ),
+        (
+            Method::POST,
             "/api/sign-in/password",
             Anyone,
             Some(json!({"username": "doorman", "password": "a long password"})),
@@ -184,6 +196,13 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             Account,
             Some(json!({"callsign": "Ace"})),
         ),
+        (
+            Method::PUT,
+            "/api/me/email",
+            Account,
+            Some(json!({"address": "pilot@example.org"})),
+        ),
+        (Method::DELETE, "/api/me/email", Account, None),
         (
             Method::PUT,
             "/api/me/password",

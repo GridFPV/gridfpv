@@ -25,6 +25,8 @@ export type ServerPlace =
   | { kind: 'invite'; secret: string }
   /** A re-connect link, for someone who can no longer sign in (§13.8). */
   | { kind: 'reconnect'; secret: string }
+  /** The link sent to an email address, to confirm it. */
+  | { kind: 'confirm-email'; secret: string }
   /** The signed-in account. */
   | { kind: 'account' }
   /** A club's members, invites and pilots, for those who look after it. */
@@ -43,6 +45,7 @@ export type ServerPlace =
  * - `#/sign-in`, `#/sign-in?problem=‹code›`
  * - `#/invite/‹secret›`
  * - `#/reconnect/‹secret›`
+ * - `#/confirm-email/‹secret›`
  * - `#/account`
  * - `#/club/‹club›`
  * - `#/results`
@@ -64,6 +67,9 @@ export function parseServerHash(hash: string): ServerPlace {
     }
     if (first === 'invite' && rest.length === 1) return { kind: 'invite', secret: rest[0] };
     if (first === 'reconnect' && rest.length === 1) return { kind: 'reconnect', secret: rest[0] };
+    if (first === 'confirm-email' && rest.length === 1) {
+      return { kind: 'confirm-email', secret: rest[0] };
+    }
     if (first === 'account' && rest.length === 0) return { kind: 'account' };
     if (first === 'club' && rest.length === 1) return { kind: 'club', club: rest[0] };
     if (first === 'results' && rest.length === 0) return { kind: 'results' };
@@ -91,6 +97,8 @@ export function formatServerHash(place: ServerPlace): string {
       return `#/invite/${encodeURIComponent(place.secret)}`;
     case 'reconnect':
       return `#/reconnect/${encodeURIComponent(place.secret)}`;
+    case 'confirm-email':
+      return `#/confirm-email/${encodeURIComponent(place.secret)}`;
     case 'account':
       return '#/account';
     case 'club':

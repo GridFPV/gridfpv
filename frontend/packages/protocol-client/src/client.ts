@@ -53,6 +53,7 @@ import type {
   LinkPeople,
   ClubSettings,
   PilotProfile,
+  EmailConfirmed,
   PasswordChange,
   PasswordSignIn,
   PasswordSignUp,
@@ -1106,7 +1107,7 @@ export async function answerClubJoinAsk(
   yes: boolean,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  await apiJson<void>(
+  await apiRequest(
     baseUrl,
     `/api/clubs/${encodeURIComponent(club)}/join-asks/${encodeURIComponent(account)}`,
     { method: yes ? 'PUT' : 'DELETE', fetch: options.fetch },
@@ -1139,7 +1140,7 @@ export async function addClubMember(
   account: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<void> {
-  await apiJson<void>(
+  await apiRequest(
     baseUrl,
     `/api/clubs/${encodeURIComponent(club)}/members`,
     { method: 'POST', body: { account }, fetch: options.fetch },
@@ -1213,6 +1214,67 @@ export async function setServerPasswordSignIn(
     '/api/server/password-sign-in',
     { method: 'PUT', body: { on }, fetch: options.fetch },
     'change how people sign in'
+  );
+}
+
+/**
+ * Give the signed-in account an email address (`PUT /api/me/email`). A link is sent to it,
+ * and it is not used until the link is opened.
+ */
+export async function setServerEmail(
+  baseUrl: string,
+  address: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/me/email',
+    { method: 'PUT', body: { address }, fetch: options.fetch },
+    'save your email address'
+  );
+}
+
+/** Take the signed-in account's email address off (`DELETE /api/me/email`). */
+export async function removeServerEmail(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/me/email',
+    { method: 'DELETE', fetch: options.fetch },
+    'remove your email address'
+  );
+}
+
+/** Confirm an email address with the link sent to it (`POST /api/email/confirm`). */
+export async function confirmServerEmail(
+  baseUrl: string,
+  secret: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<EmailConfirmed> {
+  return apiJson<EmailConfirmed>(
+    baseUrl,
+    '/api/email/confirm',
+    { method: 'POST', body: { secret }, fetch: options.fetch },
+    'confirm the email address'
+  );
+}
+
+/**
+ * Ask for a link to set a new password (`POST /api/password/forgot`). `who` is a username
+ * or an email address. The answer is the same whether or not there is such an account.
+ */
+export async function forgotServerPassword(
+  baseUrl: string,
+  who: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    '/api/password/forgot',
+    { method: 'POST', body: { who }, fetch: options.fetch },
+    'ask for a link'
   );
 }
 
