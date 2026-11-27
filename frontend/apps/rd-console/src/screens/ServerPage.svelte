@@ -9,19 +9,22 @@
    * The link token is typed in and never shown back. The Director only says one is set.
    */
   import { Badge, Banner, Button, Card, Dialog, Input } from '@gridfpv/components';
-  import type { LinkEvent, LinkView } from '@gridfpv/types';
+  import type { CertificateLook, LinkEvent, LinkView } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import {
+    certificateVerdict,
     changed,
     eventLabel,
     eventProblem,
     eventTone,
+    fingerprintRows,
     formOf,
     formProblem,
     linkLabel,
     linkProblem,
     linkTone,
     refreshEvery,
+    trustOf,
     settingsOf,
     type LinkForm
   } from '../lib/serverLink.js';
@@ -30,7 +33,10 @@
   let {
     session
   }: {
-    session: Pick<Session, 'getServerLink' | 'putServerLink' | 'replaceOnServer'>;
+    session: Pick<
+      Session,
+      'getServerLink' | 'putServerLink' | 'replaceOnServer' | 'lookAtServerCertificate'
+    >;
   } = $props();
 
   let view = $state<LinkView | undefined>(undefined);
@@ -104,6 +110,38 @@
     if (!form || problem) return;
     const sending = form;
     await change(() => session.putServerLink(settingsOf(sending)));
+  }
+
+  // ── The server's own certificate (§13.5) ────────────────────────────────────
+  /** What Grid found when it looked at the server's certificate. */
+  let looked = $state<CertificateLook | undefined>(undefined);
+  let looking = $state(false);
+  let lookError = $state<string | undefined>(undefined);
+  const verdict = $derived(looked ? certificateVerdict(looked) : undefined);
+
+  async function lookAt() {
+    if (!form || looking) return;
+    looking = true;
+    lookError = undefined;
+    try {
+      const found = await session.lookAtServerCertificate({
+        url: settingsOf(form).url,
+        trust: trustOf(form)
+      });
+      if (found) looked = found;
+    } catch (err) {
+      lookError = say(err);
+    } finally {
+      looking = false;
+    }
+  }
+
+  /** The director accepts the certificate they were shown. It is kept with the link. */
+  async function accept() {
+    const found = looked;
+    if (!form || !found) return;
+    const sending = { ...form, extra: true, pem: found.pem.trim() };
+    if (await change(() => session.putServerLink(settingsOf(sending)))) looked = undefined;
   }
 
   /** The switch saves at once, with whatever else is in the form. */
@@ -198,6 +236,18 @@
           The server uses its own certificate
         </label>
         {#if form.extra}
+          <p class="muted">
+            Let Grid look at the certificate the server shows, and accept it. Or paste the
+            certificate, or its certificate authority, in the box.
+          </p>
+          <div>
+            <Button size="sm" disabled={busy || looking || form.url.trim() === ''} onclick={lookAt}
+              >{looking ? 'Looking…' : "Look at the server's certificate"}</Button
+            >
+          </div>
+          {#if lookError}
+            <p class="error" role="alert" data-testid="certificate-problem">{lookError}</p>
+          {/if}
           <textarea
             aria-label="The server's certificate, or its certificate authority"
             rows="6"
@@ -258,6 +308,50 @@
   {/if}
 </Page>
 
+{#if looked && verdict}
+  <Dialog open={true} title="The server's certificate" onclose={() => (looked = undefined)}>
+    {#if verdict === 'trusted'}
+      <p data-testid="certificate-verdict">
+        Grid already trusts this server's certificate. There is nothing to accept.
+      </p>
+    {:else}
+      <p>This is the fingerprint of the certificate the server showed:</p>
+      <p class="fingerprint" data-testid="certificate-fingerprint">
+        {#each fingerprintRows(looked.fingerprint) as row (row)}<span>{row}</span>{/each}
+      </p>
+      {#if verdict === 'accept'}
+        <p data-testid="certificate-verdict">
+          The server made this certificate for itself. Ask whoever runs the server to read you the
+          fingerprint of theirs. <strong
+            >Accept it only if every letter and number is the same.</strong
+          >
+        </p>
+        <p class="muted">
+          Grid will then trust this one certificate, for this server, and no other.
+        </p>
+      {:else}
+        <p data-testid="certificate-verdict">
+          Accepting this certificate would not be enough. It was signed by a certificate authority
+          this computer does not know, or it was made for another address.
+        </p>
+        <p class="muted">
+          Ask whoever runs the server for their certificate authority, and paste it in the box on
+          this page. Check the address too.
+        </p>
+      {/if}
+    {/if}
+    {#if error}<Banner tone="danger">{error}</Banner>{/if}
+    {#snippet footer()}
+      {#if verdict === 'accept'}
+        <Button variant="ghost" onclick={() => (looked = undefined)}>Cancel</Button>
+        <Button variant="primary" disabled={busy} onclick={accept}>Accept this certificate</Button>
+      {:else}
+        <Button variant="primary" onclick={() => (looked = undefined)}>Done</Button>
+      {/if}
+    {/snippet}
+  </Dialog>
+{/if}
+
 {#if replacing}
   {@const target = replacing}
   {@const again = target.state === 'Removed'}
@@ -289,6 +383,14 @@
 {/if}
 
 <style>
+  .fingerprint {
+    display: grid;
+    gap: var(--gf-space-1);
+    font-family: var(--gf-font-mono);
+    font-size: var(--gf-font-size-lg);
+    letter-spacing: 0.04em;
+    user-select: all;
+  }
   p {
     margin: 0 0 var(--gf-space-3);
     max-width: 65ch;

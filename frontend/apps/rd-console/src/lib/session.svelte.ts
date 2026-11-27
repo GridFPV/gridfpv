@@ -73,6 +73,7 @@ import {
   getServerLink,
   putServerLink,
   replaceOnServer,
+  lookAtServerCertificate,
   getServerPeople,
   setPilotServerAccount,
   pullFromServer,
@@ -117,6 +118,8 @@ import type { TimerLiveHandlers } from '@gridfpv/protocol-client';
 import type {
   AdapterId,
   BracketRequest,
+  CertificateLook,
+  CertificateRequest,
   MainsRequest,
   RoundRobinRequest,
   Class,
@@ -276,6 +279,7 @@ const realApi = {
   getServerLink,
   putServerLink,
   replaceOnServer,
+  lookAtServerCertificate,
   getServerPeople,
   setPilotServerAccount,
   pullFromServer,
@@ -750,6 +754,16 @@ export class Session {
   /** Set the link to a remote server. `undefined` on a cancelled prompt. */
   putServerLink(settings: LinkSettings): Promise<LinkView | undefined> {
     return this.#privilegedWrite((token) => this.#api.putServerLink(this.baseUrl, settings, token));
+  }
+
+  /**
+   * Read the certificate a server shows, to check and accept. Nothing is changed by
+   * looking. `undefined` on a cancelled prompt.
+   */
+  lookAtServerCertificate(request: CertificateRequest): Promise<CertificateLook | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.lookAtServerCertificate(this.baseUrl, request, token)
+    );
   }
 
   /** Replace the server's copy of an event with this Director's. */

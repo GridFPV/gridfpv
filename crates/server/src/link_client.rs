@@ -343,7 +343,7 @@ impl Client {
 }
 
 /// A network error without the address in it twice, and with its cause.
-fn plain(error: reqwest::Error) -> String {
+pub(crate) fn plain(error: reqwest::Error) -> String {
     use std::error::Error;
     let error = error.without_url();
     let mut text = error.to_string();

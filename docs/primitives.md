@@ -1928,10 +1928,13 @@ code of §13.13.
    server leaves out of every answer what the Director's Public door leaves out.
 3. **An event's own details are all sent:** name, date, place, description and organizer.
    (Ryan, 2026-11-27. The first build held the last two back.)
-4. **"Allow self-signed" is done by pasting the certificate** on the Server page. There
-   is no step where Grid shows the certificate and the director accepts it (§13.5).
-   **Fine for now, not for a release** (Ryan, 2026-11-27): the show-and-accept step is
-   owed before this ships.
+4. **"Allow self-signed" was first done by pasting the certificate.** Ryan, 2026-11-27:
+   "fine for now, not for release". **Now built:** the director presses **Look at the
+   server's certificate**, Grid shows the fingerprint of the one certificate the server
+   presents, and the director accepts it (§13.5). Looking trusts nothing and sends no
+   token. Grid says when accepting would not help (the certificate is from an authority
+   this computer does not know, or is for another address). Pasting still works, and is
+   the way for a club's own authority.
 5. **Plain HTTP is allowed to a server on the same computer** (`http://localhost`), and
    nowhere else. It is how a server is tried out.
 6. **Removing an event on the Director does not remove it from the server.** It is

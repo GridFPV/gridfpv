@@ -3,7 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import type { LinkSettings, LinkView } from '@gridfpv/types';
+import type { CertificateLook, CertificateRequest, LinkSettings, LinkView } from '@gridfpv/types';
 import ServerPage from '../src/screens/ServerPage.svelte';
 
 beforeEach(() => {
@@ -37,6 +37,16 @@ const CONNECTED: LinkView = {
   ]
 };
 const TOKEN = 'gfs_the-secret-token';
+const PEM = '-----BEGIN CERTIFICATE-----\nMIIBown\n-----END CERTIFICATE-----\n';
+const FINGERPRINT = Array.from({ length: 32 }, (_, i) =>
+  (i * 7 + 16).toString(16).toUpperCase().padStart(2, '0')
+).join(':');
+const OWN: CertificateLook = {
+  fingerprint: FINGERPRINT,
+  pem: PEM,
+  trusted: false,
+  stands_alone: true
+};
 
 /** A Director that keeps the link as it is set, the way the real one does. */
 function fake(start: LinkView) {
@@ -55,7 +65,11 @@ function fake(start: LinkView) {
       };
       return view;
     }),
-    replaceOnServer: vi.fn(async (): Promise<LinkView | undefined> => view)
+    replaceOnServer: vi.fn(async (): Promise<LinkView | undefined> => view),
+    // A server that made its own certificate, which Grid does not take by itself.
+    lookAtServerCertificate: vi.fn(
+      async (_request: CertificateRequest): Promise<CertificateLook | undefined> => OWN
+    )
   };
   return {
     session,
@@ -304,6 +318,165 @@ describe('ServerPage', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(session.putServerLink).toHaveBeenCalled());
     expect(session.putServerLink.mock.calls[0][0].trust).toEqual({ ExtraAuthorities: { pem } });
+  });
+
+  describe("looking at the server's certificate", () => {
+    const openBox = async () => {
+      await fireEvent.click(screen.getByRole('checkbox', { name: /uses its own certificate/ }));
+      return screen.getByRole('button', { name: "Look at the server's certificate" });
+    };
+
+    it('is offered only once the server is said to use its own certificate', async () => {
+      const { session } = fake(CONNECTED);
+      render(ServerPage, { session });
+      await shown();
+      expect(screen.queryByRole('button', { name: /Look at the server/ })).toBeNull();
+      await openBox();
+      expect(session.lookAtServerCertificate).not.toHaveBeenCalled();
+    });
+
+    it('cannot look with no address', async () => {
+      const { session } = fake(NOT_SET);
+      render(ServerPage, { session });
+      await shown();
+      const look = (await openBox()) as HTMLButtonElement;
+      expect(look.disabled).toBe(true);
+      await fireEvent.input(address(), { target: { value: 'https://home.example.org' } });
+      expect(look.disabled).toBe(false);
+    });
+
+    it('shows the fingerprint and accepts the certificate only when the director says', async () => {
+      const { session } = fake(CONNECTED);
+      render(ServerPage, { session });
+      await shown();
+      await fireEvent.click(await openBox());
+      // Grid looked at the address in the form, with the trust in the form.
+      await waitFor(() =>
+        expect(session.lookAtServerCertificate).toHaveBeenCalledWith({
+          url: 'https://grid.example.org',
+          trust: 'System'
+        })
+      );
+      const dialog = await screen.findByRole('dialog');
+      // The whole fingerprint is shown, in rows short enough to read out.
+      const rows = within(dialog).getByTestId('certificate-fingerprint').querySelectorAll('span');
+      expect(rows).toHaveLength(4);
+      expect(Array.from(rows, (row) => row.textContent).join(':')).toBe(FINGERPRINT);
+      expect(within(dialog).getByTestId('certificate-verdict').textContent).toContain(
+        'made this certificate for itself'
+      );
+      expect(dialog.textContent).toContain('every letter and number is the');
+      // Nothing is trusted by looking.
+      expect(session.putServerLink).not.toHaveBeenCalled();
+
+      await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(session.putServerLink).not.toHaveBeenCalled();
+
+      await fireEvent.click(
+        screen.getByRole('button', { name: "Look at the server's certificate" })
+      );
+      await fireEvent.click(
+        within(await screen.findByRole('dialog')).getByRole('button', {
+          name: 'Accept this certificate'
+        })
+      );
+      await waitFor(() => expect(session.putServerLink).toHaveBeenCalledTimes(1));
+      const sent = session.putServerLink.mock.calls[0][0];
+      // Exactly the certificate that was shown is what is kept, and nothing else changes.
+      expect(sent.trust).toEqual({ ExtraAuthorities: { pem: PEM.trim() } });
+      expect(sent.url).toBe('https://grid.example.org');
+      expect(sent.on).toBe(true);
+      expect(sent.token).toBeUndefined();
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      // The box now holds it.
+      expect(
+        (screen.getByRole('textbox', { name: /certificate/ }) as HTMLTextAreaElement).value
+      ).toBe(PEM.trim());
+    });
+
+    it('says there is nothing to accept when Grid trusts the certificate already', async () => {
+      const { session } = fake(CONNECTED);
+      session.lookAtServerCertificate.mockResolvedValueOnce({ ...OWN, trusted: true });
+      render(ServerPage, { session });
+      await shown();
+      await fireEvent.click(await openBox());
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByTestId('certificate-verdict').textContent).toContain(
+        'already trusts'
+      );
+      expect(within(dialog).queryByRole('button', { name: 'Accept this certificate' })).toBeNull();
+      expect(within(dialog).queryByTestId('certificate-fingerprint')).toBeNull();
+      await fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(session.putServerLink).not.toHaveBeenCalled();
+    });
+
+    it('does not offer to accept a certificate that would not be enough', async () => {
+      const { session } = fake(CONNECTED);
+      session.lookAtServerCertificate.mockResolvedValueOnce({ ...OWN, stands_alone: false });
+      render(ServerPage, { session });
+      await shown();
+      await fireEvent.click(await openBox());
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByTestId('certificate-verdict').textContent).toContain(
+        'would not be enough'
+      );
+      expect(dialog.textContent).toContain('certificate authority');
+      // The fingerprint is still shown: it is what to tell whoever runs the server.
+      expect(within(dialog).getByTestId('certificate-fingerprint')).toBeTruthy();
+      expect(within(dialog).queryByRole('button', { name: 'Accept this certificate' })).toBeNull();
+      expect(session.putServerLink).not.toHaveBeenCalled();
+    });
+
+    it('looks with the certificate that is already in the box', async () => {
+      const { session } = fake({ ...CONNECTED, trust: { ExtraAuthorities: { pem: PEM.trim() } } });
+      render(ServerPage, { session });
+      await shown();
+      await fireEvent.click(
+        screen.getByRole('button', { name: "Look at the server's certificate" })
+      );
+      await waitFor(() =>
+        expect(session.lookAtServerCertificate).toHaveBeenCalledWith({
+          url: 'https://grid.example.org',
+          trust: { ExtraAuthorities: { pem: PEM.trim() } }
+        })
+      );
+    });
+
+    it("shows Grid's words when the server cannot be looked at, and opens nothing", async () => {
+      const { session } = fake(CONNECTED);
+      session.lookAtServerCertificate.mockRejectedValueOnce(
+        new Error('The server could not be reached: connection refused')
+      );
+      render(ServerPage, { session });
+      await shown();
+      await fireEvent.click(await openBox());
+      expect(await screen.findByTestId('certificate-problem')).toHaveTextContent(
+        'The server could not be reached: connection refused'
+      );
+      expect(screen.queryByRole('dialog')).toBeNull();
+      // A second look clears what the first one said.
+      await fireEvent.click(
+        screen.getByRole('button', { name: "Look at the server's certificate" })
+      );
+      await screen.findByRole('dialog');
+      expect(screen.queryByTestId('certificate-problem')).toBeNull();
+    });
+
+    it('says why when accepting is refused, and keeps the dialog open', async () => {
+      const { session } = fake(CONNECTED);
+      render(ServerPage, { session });
+      await shown();
+      await fireEvent.click(await openBox());
+      const dialog = await screen.findByRole('dialog');
+      session.putServerLink.mockRejectedValueOnce(new Error('Grid could not save the link.'));
+      await fireEvent.click(
+        within(dialog).getByRole('button', { name: 'Accept this certificate' })
+      );
+      expect(await within(dialog).findByText('Grid could not save the link.')).toBeTruthy();
+      expect(screen.getByRole('dialog')).toBeTruthy();
+    });
   });
 
   it('follows the Director as the pushing moves on, and leaves a half-typed form alone', async () => {

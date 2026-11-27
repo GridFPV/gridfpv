@@ -2,6 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import type { LinkEvent, LinkView } from '@gridfpv/types';
 import {
+  certificateVerdict,
+  fingerprintRows,
   changed,
   eventLabel,
   eventProblem,
@@ -201,5 +203,24 @@ describe('formProblem', () => {
   it('catches a pasted thing that is not a certificate', () => {
     expect(formProblem({ ...form, extra: true, pem: 'hello' }, set)).toContain('certificate');
     expect(formProblem({ ...form, extra: false, pem: 'hello' }, set)).toBeUndefined();
+  });
+});
+
+describe("a server's certificate", () => {
+  it('is trusted, to be accepted, or needs its authority', () => {
+    expect(certificateVerdict({ trusted: true, stands_alone: true })).toBe('trusted');
+    expect(certificateVerdict({ trusted: true, stands_alone: false })).toBe('trusted');
+    expect(certificateVerdict({ trusted: false, stands_alone: true })).toBe('accept');
+    expect(certificateVerdict({ trusted: false, stands_alone: false })).toBe('authority');
+  });
+
+  it('has its fingerprint read out eight pairs to a row', () => {
+    const pairs = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(2, '0'));
+    const rows = fingerprintRows(pairs.join(':'));
+    expect(rows).toHaveLength(4);
+    expect(rows[0]).toBe('00:01:02:03:04:05:06:07');
+    expect(rows.join(':')).toBe(pairs.join(':'));
+    expect(fingerprintRows('AA:BB:CC')).toEqual(['AA:BB:CC']);
+    expect(fingerprintRows('')).toEqual([]);
   });
 });

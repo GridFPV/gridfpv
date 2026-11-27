@@ -114,7 +114,21 @@ event as usual.
 Most servers need nothing extra. Some clubs and home servers make their own certificate.
 Grid will not trust one until you say so.
 
-Tick **The server uses its own certificate** and paste the certificate the server's owner
+Tick **The server uses its own certificate**. Then there are two ways.
+
+**Let Grid look.** Press **Look at the server's certificate**. Grid shows the
+certificate's **fingerprint**, a long row of letters and numbers. Ask whoever runs the
+server to read you theirs. If every letter and number is the same, press **Accept this
+certificate**. Grid then trusts that one certificate, for that server, and no other.
+
+Do not accept a fingerprint you have not checked. Someone between you and the server could
+show you a certificate of their own.
+
+Sometimes Grid says accepting would not be enough. Then the certificate was signed by the
+club's own certificate authority, or the address is not the one the certificate was made
+for. Use the second way.
+
+**Paste it.** Paste the certificate, or the certificate authority, that the server's owner
 gave you. It starts with `-----BEGIN CERTIFICATE-----`.
 
 ## Turning it off

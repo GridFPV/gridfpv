@@ -175,6 +175,10 @@ pub fn router(registry: EventRegistry) -> Router {
             post(crate::link::post_replace),
         )
         // Pilots and the accounts that hold them on that server (§13.7).
+        .route(
+            "/server-link/certificate",
+            post(crate::link_cert::post_certificate),
+        )
         .route("/server-link/people", get(crate::link_pilots::get_people))
         .route("/server-link/pull", post(crate::link_pilots::post_pull))
         .route(

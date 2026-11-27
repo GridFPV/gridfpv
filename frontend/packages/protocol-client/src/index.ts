@@ -95,6 +95,7 @@ export {
   serverEventBase,
   putServerLink,
   replaceOnServer,
+  lookAtServerCertificate,
   putDoor,
   putAccessToken,
   putPublicAddress,

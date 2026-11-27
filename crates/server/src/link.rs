@@ -207,7 +207,7 @@ pub struct LinkDesk {
 }
 
 /// The address a server is reached at, tidied: scheme and host (and port), no slash after.
-fn clean_url(text: &str) -> Result<String, LinkError> {
+pub(crate) fn clean_url(text: &str) -> Result<String, LinkError> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(String::new());
@@ -231,7 +231,7 @@ fn clean_url(text: &str) -> Result<String, LinkError> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
-fn clean_trust(trust: LinkTrust) -> Result<LinkTrust, LinkError> {
+pub(crate) fn clean_trust(trust: LinkTrust) -> Result<LinkTrust, LinkError> {
     match trust {
         LinkTrust::System => Ok(LinkTrust::System),
         LinkTrust::ExtraAuthorities { pem } => {

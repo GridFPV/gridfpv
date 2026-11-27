@@ -1356,6 +1356,7 @@ name = "gridfpv-server"
 version = "0.6.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures-util",
  "getrandom 0.3.4",
  "gridfpv-adapters",
@@ -1368,6 +1369,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tower",

@@ -328,8 +328,22 @@ never changes an event. It only adds what a director sends.
 ## A server with its own certificate
 
 If you use a certificate from your own certificate authority, or one the server made for
-itself, Grid will not trust it by itself. Give the certificate to your directors. They
-tick **The server uses its own certificate** on the Server page and paste it in.
+itself, Grid will not trust it by itself. Your directors tick **The server uses its own
+certificate** on the Server page. Then:
+
+- **A certificate the server made for itself:** the director presses **Look at the
+  server's certificate**. Grid shows its fingerprint. Read them yours, and they accept it
+  if the two match. To see yours:
+
+  ```
+  openssl x509 -in server.crt -noout -fingerprint -sha256
+  ```
+
+  The certificate must be made for the address directors type. One made for another name
+  cannot be accepted.
+
+- **A certificate from your own certificate authority:** give directors the authority's
+  certificate. They paste it in.
 
 ## Building it yourself
 

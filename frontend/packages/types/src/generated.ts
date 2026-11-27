@@ -243,3 +243,5 @@ export type * from '@bindings/LinkTokenRequest';
 export type * from '@bindings/LinkTokenView';
 export type * from '@bindings/PushHeld';
 export type * from '@bindings/RaceCodeView';
+export type * from '@bindings/CertificateLook';
+export type * from '@bindings/CertificateRequest';
