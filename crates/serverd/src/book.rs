@@ -145,6 +145,10 @@ struct Pages {
     /// owner's choice. Off until they switch it on.
     #[serde(default)]
     password_sign_in: bool,
+    /// The email account this server sends from, when an owner set it on the page
+    /// (§13.8). It holds that account's password, so this file is kept to its owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mail: Option<crate::email::MailSettings>,
 }
 
 /// What the server notes about one event of a club, apart from the event itself.
@@ -271,6 +275,12 @@ impl Book {
         let text = serde_json::to_string_pretty(&held.pages).expect("the book is plain data");
         let part = self.path.with_extension("json.part");
         std::fs::write(&part, &text)?;
+        // It can hold the password of the email account the server sends from.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::rename(&part, &self.path)?;
         held.seen = Some(text.into_bytes());
         Ok(())
@@ -437,6 +447,20 @@ impl Book {
     pub fn password_sign_in(&self) -> bool {
         self.refresh();
         self.held.read().expect("book lock").pages.password_sign_in
+    }
+
+    /// The email account an owner set on the page, if they did.
+    pub fn mail(&self) -> Option<crate::email::MailSettings> {
+        self.refresh();
+        self.held.read().expect("book lock").pages.mail.clone()
+    }
+
+    /// Keep the email account to send from, or forget it.
+    pub fn set_mail(&self, mail: Option<crate::email::MailSettings>) -> Result<(), BookError> {
+        self.change(|pages| {
+            pages.mail = mail;
+            Ok(())
+        })
     }
 
     /// Switch signing in with a username and password on or off.

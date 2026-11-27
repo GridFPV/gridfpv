@@ -71,6 +71,7 @@
   import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
   import ServerPasswordSetting from './ServerPasswordSetting.svelte';
+  import ServerEmailSetting from './ServerEmailSetting.svelte';
   import ServerSignUpSetting from './ServerSignUpSetting.svelte';
   import SpectatorView from './SpectatorView.svelte';
 
@@ -709,22 +710,7 @@
           </Card>
         </div>
       {:else}
-        <div class="cards">
-          <Card elevation="sm">
-            <div class="block" data-testid="email-setting">
-              <div class="head">
-                <h2>Email</h2>
-                <InfoTip
-                  text="Used to confirm an address, and to send a link for a forgotten password. It is set in the server's settings file."
-                  label="About email"
-                />
-                <Badge tone={emailOn ? 'success' : 'neutral'}>
-                  <span data-testid="email-on">{emailOn ? 'On' : 'Off'}</span>
-                </Badge>
-              </div>
-            </div>
-          </Card>
-        </div>
+        <ServerEmailSetting api={people} onchange={(on) => (emailOn = on)} />
       {/if}
     {:else if account}
       <Card elevation="sm"><p>Only an owner of this server can open this page.</p></Card>

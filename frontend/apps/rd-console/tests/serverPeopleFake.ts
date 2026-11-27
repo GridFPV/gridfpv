@@ -7,6 +7,8 @@ import { vi } from 'vitest';
 import type {
   AccountSignIns,
   EmailConfirmed,
+  ServerEmail,
+  ServerEmailChange,
   ServerClub,
   MySignIn,
   ReconnectMade,
@@ -92,6 +94,14 @@ export interface FakeServer {
   passwordOn: boolean;
   /** Whether the server sends email. */
   emailOn: boolean;
+  /** The email account an owner set on the page, with its password. */
+  mail?: ServerEmailChange;
+  /** The email account in the server's own settings file, if it has one. */
+  envMail?: ServerEmailChange;
+  /** Whether the server knows its own address, for the links in its mails. */
+  knowsAddress: boolean;
+  /** Who a test mail was sent to, in order. */
+  mailTests: string[];
   /** Links sent to confirm an address: secret to the address. */
   emailLinks: Record<string, string>;
   /** Who a link to set a new password was asked for, in order. */
@@ -146,6 +156,8 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     people: [],
     passwordOn: false,
     emailOn: false,
+    knowsAddress: true,
+    mailTests: [],
     emailLinks: {},
     forgotten: [],
     passwords: {},
@@ -176,6 +188,22 @@ export function fakePeople(server: FakeServer) {
     email: server.emailOn
   });
   let mailed = 0;
+  const owner = () => {
+    if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');
+  };
+  /** The email account in use, as an owner is shown it: never its password. */
+  const mailView = (): ServerEmail => {
+    const held = server.mail ?? server.envMail;
+    const source = server.mail ? 'page' : server.envMail ? 'env' : 'off';
+    if (!held) return { source, password_set: false, knows_address: server.knowsAddress };
+    const { password, ...shown } = held;
+    return {
+      source,
+      ...shown,
+      password_set: password !== undefined,
+      knows_address: server.knowsAddress
+    };
+  };
   const clubs: Record<string, { id: string; name: string }> = {
     north: { ...NORTH },
     south: { ...SOUTH }
@@ -604,6 +632,44 @@ export function fakePeople(server: FakeServer) {
       }
       server.passwordOn = on;
       return info();
+    }),
+    mailSettings: vi.fn(async (): Promise<ServerEmail> => {
+      owner();
+      return mailView();
+    }),
+    setMailSettings: vi.fn(async (change: ServerEmailChange): Promise<ServerEmail> => {
+      owner();
+      const host = change.host.trim();
+      if (host === '') refuse('Give the name of the email server.');
+      if (!/<[^\s@]+@[^\s@]+>$|^[^\s@<]+@[^\s@>]+$/.test(change.from.trim())) {
+        refuse('Who the mail is from is not an address. It looks like: Grid <grid@example.org>');
+      }
+      const tls = change.tls ?? 'starttls';
+      const password = change.password || server.mail?.password;
+      if (change.user && !password) refuse('Give the password of that email account.');
+      server.mail = {
+        host,
+        port: change.port ?? (tls === 'tls' ? 465 : 587),
+        user: change.user?.trim() || undefined,
+        password: change.user ? password : undefined,
+        from: change.from.trim(),
+        tls
+      };
+      server.emailOn = server.knowsAddress;
+      return mailView();
+    }),
+    removeMailSettings: vi.fn(async (): Promise<ServerEmail> => {
+      owner();
+      server.mail = undefined;
+      server.emailOn = server.envMail !== undefined && server.knowsAddress;
+      return mailView();
+    }),
+    testMail: vi.fn(async (to: string) => {
+      owner();
+      if (!server.mail && !server.envMail) {
+        refuse('Email is not set up yet. Save the settings first.');
+      }
+      server.mailTests.push(to.trim().toLowerCase());
     }),
     setEmail: vi.fn(async (address: string) => {
       const account = server.account ?? refuse('Sign in first.');

@@ -290,7 +290,29 @@ is used for two things only:
   link to the person's confirmed address. Without email, you send them a re-connect link
   yourself.
 
-Put the settings of your email account in `/etc/gridfpv-server.env` (or
+**Set it up on the page.** Open **Server → Email** and fill in:
+
+| Box | What goes in it |
+| --- | --- |
+| **Server** | your email provider's sending server, like `smtp.example.org` |
+| **Security** | **STARTTLS** for most providers. **TLS** if yours wants port 465 |
+| **Port** | leave it empty for the usual one (587, or 465 with TLS) |
+| **Username** and **Password** | the sign-in of the email account |
+| **From** | who the mail is from, like `Grid <grid@example.org>` |
+
+Press **Save**. It is used at once. Then type your own address under **Send a test** and
+press **Send**. If the test does not go, the page shows what the email server said.
+
+Your email provider gives you these values. Look for "SMTP" in its help pages. Many want
+a special password made for apps, not the one you sign in with.
+
+- The password is kept on the server, in its data folder. The page never shows it again.
+  To keep it when you change something else, leave the password box empty.
+- **Remove…** takes the settings off again.
+- The server must know its own address (step 1 below), so a link in a mail can be opened.
+  The page warns you when it does not.
+
+**Or set it in the settings file.** Put the same values in `/etc/gridfpv-server.env` (or
 `docker/server/.env`), then restart the server:
 
 ```
@@ -300,22 +322,19 @@ GRIDFPV_SERVER_SMTP_PASSWORD=...
 GRIDFPV_SERVER_SMTP_FROM=Grid <grid@example.org>
 ```
 
-Your email provider gives you these. Look for "SMTP" in its help pages. Many want a
-special password made for apps, not the one you sign in with.
-
 - The port is 587 unless you set `GRIDFPV_SERVER_SMTP_PORT`.
 - For a provider that wants port 465, add `GRIDFPV_SERVER_SMTP_TLS=tls`.
-- The connection is always encrypted. `GRIDFPV_SERVER_SMTP_TLS=none` is taken only for an
-  email program on this same computer.
-- The server must know its own address (step 1 below), so a link in a mail can be opened.
+- If a setting in the file is wrong, the server says which one and does not start.
+- What you save on the page is used in place of the file.
 
-Check it works:
+Either way the connection is always encrypted. No encryption is allowed only for an email
+program on the same computer as the server.
+
+You can also test from the command line:
 
 ```
 gridfpv-serverctl email test you@example.org
 ```
-
-If a setting is wrong, the server says which one and does not start.
 
 What to know:
 
@@ -434,8 +453,8 @@ gridfpv-serverctl sign-up invite
 The first one says how it is set now. If you turn it off again, accounts already made
 stay.
 
-**Public and private clubs.** A club's director chooses, under **Club → Settings**, at **Who
-can join**. A club starts private.
+**Public and private clubs.** A club's director chooses, under **Club → Settings**, with the
+**Public** switch. A club starts private.
 
 - **Public:** anyone with an account on your server can join. They press **Join** under
   **Account → Clubs**, or at the club's own address.

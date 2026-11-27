@@ -44,6 +44,25 @@ fn rig_at(public_url: Option<&str>) -> Rig {
     }
 }
 
+/// A server whose owner has set up no email at all.
+fn rig_bare() -> Rig {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(BOOK_FILE),
+        r#"{"clubs":[{"id":"north","name":"North FPV"},{"id":"south","name":"South FPV"}]}"#,
+    )
+    .unwrap();
+    let state = AppState::open(dir.path())
+        .unwrap()
+        .at(Some("https://grid.example.org".to_owned()));
+    state.book.set_password_sign_in(true).unwrap();
+    Rig {
+        app: router(state.clone()),
+        state,
+        _dir: dir,
+    }
+}
+
 fn club(id: &str) -> ClubId {
     ClubId(id.into())
 }
@@ -851,4 +870,294 @@ async fn the_whole_way_a_forgotten_password_link_goes_through_a_real_email_serve
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(sign_in(&rig, "pia", PW2).await, StatusCode::OK);
+}
+
+// ── The email account, set by an owner on the page ──────────────────────────
+
+const SERVER_EMAIL: &str = "/api/server/email";
+const SERVER_EMAIL_TEST: &str = "/api/server/email/test";
+
+/// What an owner types for an email server on this computer, at `port`.
+fn typed(port: u16) -> Value {
+    json!({
+        "host": "127.0.0.1",
+        "port": port,
+        "from": "Grid Test <grid@example.org>",
+        "tls": "none"
+    })
+}
+
+/// A port on this computer that nothing listens on.
+async fn dead_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+async fn sends_email(rig: &Rig) -> bool {
+    let (_, info) = call(rig, None, Method::GET, "/api/server", None).await;
+    info["email"].as_bool().unwrap()
+}
+
+#[tokio::test]
+async fn only_an_owner_sees_or_sets_how_the_server_sends_email() {
+    let rig = rig_bare();
+    let director = rig.member("Dana", "north", Role::Director);
+    for who in [None, Some(&director)] {
+        let wanted = if who.is_some() {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        for (method, path, body) in [
+            (Method::GET, SERVER_EMAIL, None),
+            (Method::PUT, SERVER_EMAIL, Some(typed(2525))),
+            (Method::DELETE, SERVER_EMAIL, None),
+            (
+                Method::POST,
+                SERVER_EMAIL_TEST,
+                Some(json!({"to": "a@example.org"})),
+            ),
+        ] {
+            let (status, _) = call(&rig, who, method.clone(), path, body).await;
+            assert_eq!(status, wanted, "{method} {path}");
+        }
+    }
+    assert_eq!(rig.state.book.mail(), None);
+}
+
+#[tokio::test]
+async fn an_owner_sets_email_on_the_page_and_a_mail_really_goes() {
+    let rig = rig_bare();
+    let oz = rig.owner("Oz");
+    let (status, shown) = call(&rig, Some(&oz), Method::GET, SERVER_EMAIL, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(shown["source"], "off");
+    assert_eq!(shown["knows_address"], true);
+    assert!(!sends_email(&rig).await);
+    // With nothing set up there is nothing to test.
+    let test = Some(json!({"to": "oz@example.org"}));
+    let (status, said) = call(
+        &rig,
+        Some(&oz),
+        Method::POST,
+        SERVER_EMAIL_TEST,
+        test.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{said}");
+
+    let (port, server) = smtp_server().await;
+    let (status, shown) = call(
+        &rig,
+        Some(&oz),
+        Method::PUT,
+        SERVER_EMAIL,
+        Some(typed(port)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    assert_eq!(shown["source"], "page");
+    assert_eq!(shown["host"], "127.0.0.1");
+    assert_eq!(shown["port"], port);
+    assert_eq!(shown["from"], "Grid Test <grid@example.org>");
+    assert_eq!(shown["tls"], "none");
+    assert_eq!(shown["password_set"], false);
+    // It is used at once: nothing is restarted.
+    assert!(sends_email(&rig).await);
+
+    let (status, said) = call(&rig, Some(&oz), Method::POST, SERVER_EMAIL_TEST, test).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{said}");
+    // Taking the settings off lets go of the connection, so the stand-in can say what came.
+    let (status, shown) = call(&rig, Some(&oz), Method::DELETE, SERVER_EMAIL, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(shown["source"], "off");
+    assert!(!sends_email(&rig).await);
+    let (from, to, data) = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .expect("the email server was let go of")
+        .unwrap();
+    assert!(from.contains("<grid@example.org>"), "{from}");
+    assert!(to.contains("<oz@example.org>"), "{to}");
+    assert!(
+        data.contains("Subject: A test from your Grid server"),
+        "{data}"
+    );
+}
+
+#[tokio::test]
+async fn the_password_of_the_email_account_is_kept_and_never_shown() {
+    let rig = rig_bare();
+    let oz = rig.owner("Oz");
+    let secret = "app-password-9f3k2";
+    let mut typed = json!({
+        "host": " smtp.example.org ",
+        "user": "grid@example.org",
+        "password": secret,
+        "from": "Grid <grid@example.org>"
+    });
+    let (status, shown) = call(
+        &rig,
+        Some(&oz),
+        Method::PUT,
+        SERVER_EMAIL,
+        Some(typed.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    // Tidied, and the usual port and TLS for what was left out.
+    assert_eq!(shown["host"], "smtp.example.org");
+    assert_eq!(shown["port"], 587);
+    assert_eq!(shown["tls"], "starttls");
+    assert_eq!(shown["user"], "grid@example.org");
+    assert_eq!(shown["password_set"], true);
+    assert!(!shown.to_string().contains(secret), "{shown}");
+    let (_, again) = call(&rig, Some(&oz), Method::GET, SERVER_EMAIL, None).await;
+    assert!(!again.to_string().contains(secret), "{again}");
+    assert!(again.get("password").is_none());
+    // Nobody else is told anything of it.
+    let (_, info) = call(&rig, None, Method::GET, "/api/server", None).await;
+    assert!(!info.to_string().contains("smtp.example.org"), "{info}");
+
+    // Saved again with no password typed, the one kept stays.
+    typed.as_object_mut().unwrap().remove("password");
+    typed["from"] = json!("Recon <grid@example.org>");
+    typed["tls"] = json!("tls");
+    let (status, shown) = call(&rig, Some(&oz), Method::PUT, SERVER_EMAIL, Some(typed)).await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    assert_eq!(shown["port"], 465);
+    assert_eq!(shown["password_set"], true);
+    let kept = rig.state.book.mail().unwrap();
+    assert_eq!(kept.password.as_deref(), Some(secret));
+    assert_eq!(kept.from, "Recon <grid@example.org>");
+
+    // The file that holds it is its owner's alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(rig._dir.path().join(BOOK_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "{mode:o}");
+    }
+    // And the settings are still there for a server started again on the same folder.
+    let later = AppState::open(rig._dir.path()).unwrap();
+    assert_eq!(later.book.mail().unwrap().password.as_deref(), Some(secret));
+}
+
+#[tokio::test]
+async fn settings_that_make_no_sense_are_refused_in_words_and_nothing_is_kept() {
+    let rig = rig_bare();
+    let oz = rig.owner("Oz");
+    let good = json!({"host": "smtp.example.org", "from": "Grid <grid@example.org>"});
+    for (change, words) in [
+        (json!({"host": "  "}), "name of the email server"),
+        (
+            json!({"host": "smtp.example.org/x"}),
+            "not the name of an email server",
+        ),
+        (json!({"from": "nobody"}), "is not an address"),
+        (json!({"from": ""}), "who the mail is from"),
+        (
+            json!({"tls": "none"}),
+            "only for an email server on this same computer",
+        ),
+        (json!({"port": 0}), "not a port number"),
+        (
+            json!({"user": "grid@example.org"}),
+            "password of that email account",
+        ),
+    ] {
+        let mut body = good.clone();
+        for (key, value) in change.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let (status, said) = call(&rig, Some(&oz), Method::PUT, SERVER_EMAIL, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{change} {said}");
+        let message = said["message"].as_str().unwrap_or_default().to_lowercase();
+        assert!(message.contains(&words.to_lowercase()), "{change}: {said}");
+    }
+    assert_eq!(rig.state.book.mail(), None);
+    assert!(!sends_email(&rig).await);
+}
+
+#[tokio::test]
+async fn what_is_set_on_the_page_wins_over_the_environment_until_it_is_taken_off() {
+    // `rig()` has a mailer as one from the environment would be.
+    let rig = rig();
+    let oz = rig.owner("Oz");
+    let pia = rig.with_password("pia").await;
+    let (_, shown) = call(&rig, Some(&oz), Method::GET, SERVER_EMAIL, None).await;
+    assert_eq!(shown["source"], "env");
+
+    // The page points at an email server that is not there. Mail goes that way, and fails.
+    let body = Some(typed(dead_port().await));
+    let (status, shown) = call(&rig, Some(&oz), Method::PUT, SERVER_EMAIL, body).await;
+    assert_eq!(status, StatusCode::OK, "{shown}");
+    assert_eq!(shown["source"], "page");
+    let (status, _) = give(&rig, Some(&pia), "pia@example.org").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(rig.mails().is_empty());
+    // An owner testing it is told why, in the email server's own words.
+    let test = Some(json!({"to": "oz@example.org"}));
+    let (status, said) = call(&rig, Some(&oz), Method::POST, SERVER_EMAIL_TEST, test).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{said}");
+    assert!(
+        said["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not take the mail"),
+        "{said}"
+    );
+
+    // Taken off, the environment's settings are used again.
+    let (_, shown) = call(&rig, Some(&oz), Method::DELETE, SERVER_EMAIL, None).await;
+    assert_eq!(shown["source"], "env");
+    let quin = rig.with_password("quin").await;
+    let (status, _) = give(&rig, Some(&quin), "quin@example.org").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.mails().len(), 1);
+}
+
+#[tokio::test]
+async fn a_test_mail_needs_an_address_and_is_not_sent_again_and_again() {
+    let rig = rig();
+    let oz = rig.owner("Oz");
+    let (status, _) = call(
+        &rig,
+        Some(&oz),
+        Method::POST,
+        SERVER_EMAIL_TEST,
+        Some(json!({"to": "not an address"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let test = Some(json!({"to": "Oz@Example.org"}));
+    let (status, _) = call(
+        &rig,
+        Some(&oz),
+        Method::POST,
+        SERVER_EMAIL_TEST,
+        test.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&rig, Some(&oz), Method::POST, SERVER_EMAIL_TEST, test).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let mails = rig.mails();
+    assert_eq!(mails.len(), 1);
+    assert_eq!(mails[0].to, "oz@example.org");
+}
+
+#[test]
+fn a_book_from_before_email_settings_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(BOOK_FILE),
+        r#"{"clubs":[{"id":"north","name":"North FPV"}],"open_sign_up":true}"#,
+    )
+    .unwrap();
+    let state = AppState::open(dir.path()).unwrap();
+    assert_eq!(state.book.mail(), None);
+    assert!(state.book.open_sign_up());
 }

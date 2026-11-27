@@ -2170,6 +2170,10 @@ code of §13.13.
       link tokens, settings), and **Server** for owners (clubs, sign-in, email).
       Addresses use whole words: `#/club/<word>`, `#/event/<club>/<event>`,
       `#/manage/<word>/<page>`, `#/admin/<page>`.
+    - The email account a server sends from can be set by an owner on the server's Email
+      page, as well as in the environment. What is set on the page wins, is used at once,
+      and is kept with the server's other settings, in a file only its owner can read.
+      The account's password is never sent back to a browser.
     - With sign-up open, an invite that does not work still makes no account.
 14. **How the list of clubs in Grid was built (§13.2).** Choices made while building, not
     confirmed:

@@ -169,7 +169,7 @@ pub(crate) fn server_info(state: &AppState) -> ServerInfo {
     ServerInfo {
         open_sign_up: state.book.open_sign_up(),
         password_sign_in: state.book.password_sign_in(),
-        email: state.mailer.is_some() && state.public_url.is_some(),
+        email: crate::email::mailer_now(state).is_some() && state.public_url.is_some(),
     }
 }
 

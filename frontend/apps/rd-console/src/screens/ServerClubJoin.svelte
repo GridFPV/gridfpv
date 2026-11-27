@@ -6,8 +6,9 @@
    * someone who runs the club says yes). Either way a director can add someone they find
    * by name, and invites work as before.
    */
-  import { Badge, Banner, Button, Card, InfoTip, Input } from '@gridfpv/components';
+  import { Banner, Button, Card, InfoTip, Input } from '@gridfpv/components';
   import type { PersonView } from '@gridfpv/types';
+  import Switch from '../lib/Switch.svelte';
   import { personLabel, type PeopleApi } from '../lib/serverPeople.js';
 
   let {
@@ -116,21 +117,21 @@
   <Card elevation="sm">
     <div class="block" data-testid="club-join-setting">
       <div class="row">
-        <h2>Who can join</h2>
+        <h2>Public</h2>
         <InfoTip
-          text="Public: anyone with an account joins. Private: people ask, and you say yes or no. Either way you can invite and add people."
-          label="About public and private"
+          text="On: anyone with an account joins. Off: people ask, and you say yes or no. Either way you can invite and add people."
+          label="About a public club"
         />
-        <Badge tone={isOpen ? 'info' : 'neutral'}>
-          <span data-testid="club-open-state">{isOpen ? 'Public' : 'Private'}</span>
-        </Badge>
+        <span class="grow"></span>
+        <span class="state" data-testid="club-open-state">{isOpen ? 'Public' : 'Private'}</span>
+        <Switch
+          checked={isOpen}
+          label="Let anyone with an account join"
+          disabled={busy || club.archived}
+          onchange={(next) => void setOpen(next)}
+        />
       </div>
       {#if error}<Banner tone="danger">{error}</Banner>{/if}
-      <div>
-        <Button size="sm" disabled={busy || club.archived} onclick={() => setOpen(!isOpen)}
-          >{isOpen ? 'Make it private' : 'Make it public'}</Button
-        >
-      </div>
     </div>
   </Card>
 {:else}
@@ -222,6 +223,10 @@
 {/if}
 
 <style>
+  .state {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
   .block {
     display: grid;
     gap: var(--gf-space-3);
@@ -232,7 +237,6 @@
     gap: var(--gf-space-3);
   }
   h2 {
-    flex: 1;
     margin: 0;
     font-size: var(--gf-font-size-lg);
   }
