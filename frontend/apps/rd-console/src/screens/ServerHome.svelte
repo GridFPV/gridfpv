@@ -47,7 +47,13 @@
     pilotHere,
     type ServerPlace
   } from '../lib/serverHome.js';
-  import { peopleApi, sayIn, signInProblem, type PeopleApi } from '../lib/serverPeople.js';
+  import {
+    peopleApi,
+    sayIn,
+    signInProblem,
+    signUpLine,
+    type PeopleApi
+  } from '../lib/serverPeople.js';
   import { publicSource, type PublicSource } from '../lib/spectator.js';
   import ServerAccount from './ServerAccount.svelte';
   import ServerClub from './ServerClub.svelte';
@@ -56,6 +62,7 @@
   import ServerClubs from './ServerClubs.svelte';
   import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
+  import ServerSignUpSetting from './ServerSignUpSetting.svelte';
   import SpectatorView from './SpectatorView.svelte';
 
   /** An event's reads, with the three things a pilot can ask for when they are there. */
@@ -132,6 +139,8 @@
   /** The account this browser is signed in as. `null` once it is known there is none. */
   let account = $state<MyAccount | null | undefined>(undefined);
   let providers = $state<SignInProvider[] | undefined>(undefined);
+  /** Whether someone with no invite may make an account here. Unknown until read. */
+  let openSignUp = $state<boolean | undefined>(undefined);
 
   async function readMe() {
     try {
@@ -147,6 +156,11 @@
       .providers()
       .then((found) => (providers = found))
       .catch(() => (providers = []));
+    people
+      .serverInfo()
+      .then((info) => (openSignUp = info.open_sign_up))
+      // An older server cannot say. It asks for an invite.
+      .catch(() => (openSignUp = false));
   });
 
   const go = (to: ServerPlace) => {
@@ -502,7 +516,7 @@
     {:else}
       <p class="event">Sign in</p>
       <ServerSignIn api={people} {providers} problem={signInProblem(place.problem)} />
-      <p class="muted">You need an invite from your club to make an account.</p>
+      <p class="muted" data-testid="sign-up-line">{signUpLine(openSignUp)}</p>
     {/if}
   {:else if place.kind === 'invite'}
     <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
@@ -544,6 +558,7 @@
         }}
       />
       {#if account.owner}
+        <ServerSignUpSetting api={people} onchange={(open) => (openSignUp = open)} />
         <ServerClubs
           api={people}
           onchange={() => {

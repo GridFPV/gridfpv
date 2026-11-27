@@ -565,6 +565,40 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     expect(seen[6].init?.method).toBe('POST');
   });
 
+  it('a pilot profile and the sign-up setting go to the right addresses', async () => {
+    const { setServerProfile, getServerInfo, setServerOpenSignUp } = await import('./client.js');
+    const me = recorder(200, { account: { id: 'acct_1', profile: { callsign: 'Ace' } } });
+    const profile = { callsign: 'Ace', color: '#FF8800', multigp_id: '12345' };
+    expect(
+      await setServerProfile('https://grid.example.org/', profile, { fetch: me.fetch })
+    ).toEqual({ account: { id: 'acct_1', profile: { callsign: 'Ace' } } });
+    expect(me.seen[0].url).toBe('https://grid.example.org/api/me/profile');
+    expect(me.seen[0].init?.method).toBe('PUT');
+    expect(JSON.parse(me.seen[0].init?.body as string)).toEqual(profile);
+
+    const info = recorder(200, { open_sign_up: true });
+    expect(await getServerInfo('https://grid.example.org', { fetch: info.fetch })).toEqual({
+      open_sign_up: true
+    });
+    expect(info.seen[0].url).toBe('https://grid.example.org/api/server');
+    expect(info.seen[0].init?.method ?? 'GET').toBe('GET');
+    await setServerOpenSignUp('https://grid.example.org', false, { fetch: info.fetch });
+    expect(info.seen[1].url).toBe('https://grid.example.org/api/server/sign-up');
+    expect(info.seen[1].init?.method).toBe('PUT');
+    expect(JSON.parse(info.seen[1].init?.body as string)).toEqual({ open: false });
+  });
+
+  it("a profile the server refuses is said in the server's own words", async () => {
+    const { setServerProfile } = await import('./client.js');
+    const { fetch } = recorder(400, {
+      code: 'BadRequest',
+      message: 'A colour is a # and six letters or digits, like #FF8800.'
+    });
+    await expect(
+      setServerProfile('https://grid.example.org', { color: 'red' }, { fetch })
+    ).rejects.toThrow('A colour is a # and six letters or digits');
+  });
+
   it('a remote server is asked for its clubs and their events, and one event has its own base', async () => {
     const { listServerClubs, listServerEvents, serverEventBase } = await import('./client.js');
     const clubs = recorder(200, [{ id: 'club', name: 'Recon FPV' }]);

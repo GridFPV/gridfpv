@@ -52,6 +52,8 @@ import type {
   KioskView,
   LinkPeople,
   ClubSettings,
+  PilotProfile,
+  ServerInfo,
   LinkView,
   MainsRequest,
   Me,
@@ -978,6 +980,48 @@ export async function setServerPrimaryClub(
     '/api/me/primary-club',
     { method: 'PUT', body: { club }, fetch: options.fetch },
     'mark the club as primary'
+  );
+}
+
+/**
+ * Set the signed-in account's pilot profile, all of it (`PUT /api/me/profile`). A part
+ * left out is cleared.
+ */
+export async function setServerProfile(
+  baseUrl: string,
+  profile: PilotProfile,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/me/profile',
+    { method: 'PUT', body: profile, fetch: options.fetch },
+    'save your pilot profile'
+  );
+}
+
+/** What anyone may know of how a server is run (`GET /api/server`). */
+export async function getServerInfo(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerInfo> {
+  return apiJson<ServerInfo>(baseUrl, '/api/server', options, 'read how the server is run');
+}
+
+/**
+ * Say whether someone with no invite may make an account (`PUT /api/server/sign-up`).
+ * For an owner of the server.
+ */
+export async function setServerOpenSignUp(
+  baseUrl: string,
+  open: boolean,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerInfo> {
+  return apiJson<ServerInfo>(
+    baseUrl,
+    '/api/server/sign-up',
+    { method: 'PUT', body: { open }, fetch: options.fetch },
+    'change who may make an account'
   );
 }
 

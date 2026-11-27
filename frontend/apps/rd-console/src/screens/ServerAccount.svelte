@@ -11,6 +11,7 @@
   import { formatServerHash } from '../lib/serverHome.js';
   import { lookedAfterClubs, providerName, roleWord, type PeopleApi } from '../lib/serverPeople.js';
   import ServerMyPilots from './ServerMyPilots.svelte';
+  import ServerProfile from './ServerProfile.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
 
   let {
@@ -32,6 +33,7 @@
       | 'askFor'
       | 'dropClaim'
       | 'setPrimary'
+      | 'setProfile'
     >;
     account: MyAccount;
     providers: readonly SignInProvider[] | undefined;
@@ -156,6 +158,8 @@
       {/if}
     </div>
   </Card>
+
+  <ServerProfile {api} {account} {onchange} />
 
   <ServerMyPilots {api} {account} onchange={onreread} />
 

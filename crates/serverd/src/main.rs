@@ -60,6 +60,9 @@ const USAGE: &str = "usage:
   gridfpv-server club archive <club>   make a club read-only and take it off the list
   gridfpv-server club restore <club>   bring an archived club back
   gridfpv-server owner invite          make a link that makes its user an owner
+  gridfpv-server sign-up               say who may make an account
+  gridfpv-server sign-up open          let anyone who can sign in make an account
+  gridfpv-server sign-up invite        an account needs an invite (how a server starts)
   gridfpv-server account list          list the accounts, and how each signs in
   gridfpv-server account reconnect <id>   make a link that lets someone back in";
 
@@ -86,6 +89,9 @@ fn main() -> ExitCode {
         ["club", "archive", club] => club_archive(club, true),
         ["club", "restore", club] => club_archive(club, false),
         ["owner", "invite"] => owner_invite(),
+        ["sign-up"] => sign_up(None),
+        ["sign-up", "open"] => sign_up(Some(true)),
+        ["sign-up", "invite"] => sign_up(Some(false)),
         ["account", "list"] => account_list(),
         ["account", "reconnect", id] => account_reconnect(id),
         _ => {
@@ -140,6 +146,9 @@ fn serve() -> Done {
                 "  Sign-in is off: set GRIDFPV_SERVER_PUBLIC_URL to the address people open."
             ),
             (_, true) => println!("  Sign-in is off: no provider is set up."),
+        }
+        if state.book.open_sign_up() {
+            println!("  Anyone who can sign in may make an account.");
         }
         if state.book.tokens().iter().all(|t| t.revoked_at.is_some()) {
             println!(
@@ -323,6 +332,23 @@ fn account_reconnect(id: &str) -> Done {
     println!("  {}/#/reconnect/{secret}", link_base());
     println!();
     println!("It works once, and for seven days. It is not kept here and cannot be shown again.");
+    Ok(())
+}
+
+/// Say who may make an account, after changing it when asked to.
+fn sign_up(open: Option<bool>) -> Done {
+    let book = Book::open(&data_dir())?;
+    let open = match open {
+        Some(open) => book.set_open_sign_up(open)?,
+        None => book.open_sign_up(),
+    };
+    if open {
+        println!("Anyone who can sign in may make an account.");
+        println!("To ask for an invite again: gridfpv-server sign-up invite");
+    } else {
+        println!("An account needs an invite.");
+        println!("To let anyone make one: gridfpv-server sign-up open");
+    }
     Ok(())
 }
 

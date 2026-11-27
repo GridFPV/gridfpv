@@ -30,6 +30,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use gridfpv_server::remote::PilotProfile;
+
 use crate::book::ClubId;
 
 /// The file the accounts are kept in, under the data folder.
@@ -392,6 +394,67 @@ fn clean(text: &str, empty: &'static str) -> Result<String> {
     Ok(text.to_owned())
 }
 
+/// The longest callsign, or id from elsewhere, a profile may hold.
+const PROFILE_MAX: usize = 40;
+
+/// One part of a profile, tidied. Empty, or all spaces, is left out.
+fn clean_part(text: Option<String>, what: &'static str) -> Result<Option<String>> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.chars().count() > PROFILE_MAX || text.chars().any(char::is_control) {
+        return Err(AccountError::Invalid(what));
+    }
+    Ok(Some(text.to_owned()))
+}
+
+/// A profile as it is kept: each part tidied, and nothing in it that is not what it says.
+fn clean_profile(profile: PilotProfile) -> Result<PilotProfile> {
+    let callsign = clean_part(
+        profile.callsign,
+        "A callsign is 40 characters at most, on one line.",
+    )?;
+    let color = match profile.color.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(color) => {
+            let hex = color.strip_prefix('#').unwrap_or("");
+            if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(AccountError::Invalid(
+                    "A colour is a # and six letters or digits, like #FF8800.",
+                ));
+            }
+            Some(format!("#{}", hex.to_ascii_uppercase()))
+        }
+    };
+    // An id from elsewhere is one word: it is matched letter for letter later.
+    let id = |text: Option<String>, what: &'static str| -> Result<Option<String>> {
+        let text = clean_part(text, what)?;
+        if text
+            .as_deref()
+            .is_some_and(|t| t.chars().any(char::is_whitespace))
+        {
+            return Err(AccountError::Invalid(what));
+        }
+        Ok(text)
+    };
+    Ok(PilotProfile {
+        callsign,
+        color,
+        multigp_id: id(
+            profile.multigp_id,
+            "A MultiGP id is 40 characters at most, with no spaces.",
+        )?,
+        velocidrone_id: id(
+            profile.velocidrone_id,
+            "A Velocidrone id is 40 characters at most, with no spaces.",
+        )?,
+    })
+}
+
 /// Every account on this server. See the module docs.
 pub struct Accounts {
     conn: Mutex<Connection>,
@@ -418,6 +481,13 @@ impl Accounts {
                 id         TEXT PRIMARY KEY,
                 name       TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS profiles (
+                account        TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                callsign       TEXT,
+                color          TEXT,
+                multigp_id     TEXT,
+                velocidrone_id TEXT
             );
             CREATE TABLE IF NOT EXISTS sign_ins (
                 provider TEXT NOT NULL,
@@ -1121,6 +1191,81 @@ impl Accounts {
         Ok(Self::account_in(&conn, account)?.expect("just updated"))
     }
 
+    // ── The pilot profile ───────────────────────────────────────────────────
+
+    /// What an account says of itself as a pilot (§13.7). Empty until they fill it in.
+    pub fn profile(&self, account: &AccountId) -> Result<PilotProfile> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT callsign, color, multigp_id, velocidrone_id
+                 FROM profiles WHERE account = ?1",
+                params![account.0],
+                |row| {
+                    Ok(PilotProfile {
+                        callsign: row.get(0)?,
+                        color: row.get(1)?,
+                        multigp_id: row.get(2)?,
+                        velocidrone_id: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// The profiles of several accounts at once. An account with nothing filled in is not
+    /// in the answer.
+    pub fn profiles(&self) -> Result<std::collections::BTreeMap<AccountId, PilotProfile>> {
+        let conn = self.lock();
+        let mut read = conn
+            .prepare("SELECT account, callsign, color, multigp_id, velocidrone_id FROM profiles")?;
+        let rows = read.query_map([], |row| {
+            Ok((
+                AccountId(row.get(0)?),
+                PilotProfile {
+                    callsign: row.get(1)?,
+                    color: row.get(2)?,
+                    multigp_id: row.get(3)?,
+                    velocidrone_id: row.get(4)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Set an account's pilot profile, all of it: a part left out is cleared. Nothing is
+    /// kept unless every part is right. Returns the profile as kept.
+    pub fn set_profile(&self, account: &AccountId, profile: PilotProfile) -> Result<PilotProfile> {
+        let profile = clean_profile(profile)?;
+        let conn = self.lock();
+        if Self::account_in(&conn, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        if profile.is_empty() {
+            conn.execute(
+                "DELETE FROM profiles WHERE account = ?1",
+                params![account.0],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO profiles (account, callsign, color, multigp_id, velocidrone_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (account) DO UPDATE SET
+                    callsign = excluded.callsign, color = excluded.color,
+                    multigp_id = excluded.multigp_id, velocidrone_id = excluded.velocidrone_id",
+                params![
+                    account.0,
+                    profile.callsign,
+                    profile.color,
+                    profile.multigp_id,
+                    profile.velocidrone_id
+                ],
+            )?;
+        }
+        Ok(profile)
+    }
+
     // ── Invites ─────────────────────────────────────────────────────────────
 
     fn invite_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Invite, bool)> {
@@ -1397,6 +1542,36 @@ impl Accounts {
         let session = Self::new_session_in(&tx, &account.id, now)?;
         tx.commit()?;
         Ok((account, invite, session))
+    }
+
+    /// Make an account with no invite, for someone who has just signed in with `sign_in`,
+    /// which no account has yet. The account is in no club and holds nothing. Returns it
+    /// and a session's secret.
+    ///
+    /// **Only for a server whose owner switched open sign-up on** (§13.7). The caller
+    /// checks that; this does not know the setting.
+    pub fn join_open(
+        &self,
+        sign_in: &NewSignIn<'_>,
+        name: &str,
+        now: i64,
+    ) -> Result<(Account, String)> {
+        let name = clean(name, "An account needs a name.").unwrap_or_else(|_| "Pilot".to_owned());
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let account = Account {
+            id: AccountId(format!("acct_{}", random(9))),
+            name,
+            created_at: now,
+        };
+        tx.execute(
+            "INSERT INTO accounts (id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![account.id.0, account.name, now],
+        )?;
+        Self::add_sign_in_in(&tx, &account.id, sign_in, now)?;
+        let session = Self::new_session_in(&tx, &account.id, now)?;
+        tx.commit()?;
+        Ok((account, session))
     }
 
     /// Use an invite as an account that already exists: someone with an account is invited

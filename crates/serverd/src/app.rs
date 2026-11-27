@@ -209,6 +209,12 @@ pub fn router(state: AppState) -> Router {
             "/api/me/primary-club",
             axum::routing::put(people::put_primary_club),
         )
+        .route("/api/me/profile", axum::routing::put(people::put_profile))
+        .route("/api/server", get(people::get_server))
+        .route(
+            "/api/server/sign-up",
+            axum::routing::put(people::put_sign_up),
+        )
         .route("/api/sign-out", axum::routing::post(people::post_sign_out))
         .route(
             "/api/accounts/{account}/sign-ins",

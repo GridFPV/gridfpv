@@ -21,7 +21,9 @@ import type {
   MemberView,
   MyAccount,
   MyResult,
+  PilotProfile,
   ServerEvent,
+  ServerInfo,
   SignInProvider
 } from '@gridfpv/types';
 import type { PeopleApi } from '../src/lib/serverPeople.js';
@@ -39,7 +41,8 @@ export const ACE: MyAccount = {
   owner: false,
   sign_ins: [{ provider: 'discord', subject: '111', label: 'ace_fpv' }],
   clubs: [{ club: NORTH, role: 'Director' }],
-  pilots: []
+  pilots: [],
+  profile: {}
 };
 
 /** When a re-connect link made here stops working: 4 December 2026, midday. */
@@ -74,6 +77,8 @@ export interface FakeServer {
   reconnects: Record<string, string>;
   /** Accounts that were signed out everywhere, by an owner taking a sign-in off. */
   signedOut: string[];
+  /** Whether someone with no invite may make an account. */
+  openSignUp: boolean;
 }
 
 /** An event a club holds on the server. */
@@ -117,6 +122,7 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     },
     reconnects: {},
     signedOut: [],
+    openSignUp: false,
     clubList: [
       { ...NORTH, word: 'north-fpv', archived: false },
       { ...SOUTH, word: 'south-fpv', archived: false }
@@ -444,6 +450,20 @@ export function fakePeople(server: FakeServer) {
       }
       server.account = { ...account, primary: club };
       return me();
+    }),
+    setProfile: vi.fn(async (profile: PilotProfile) => {
+      const account = server.account ?? refuse('Sign in first.');
+      if (profile.color !== undefined && !/^#[0-9A-Fa-f]{6}$/.test(profile.color)) {
+        refuse('A colour is a # and six letters or digits, like #FF8800.');
+      }
+      server.account = { ...account, profile: { ...profile } };
+      return me();
+    }),
+    serverInfo: vi.fn(async (): Promise<ServerInfo> => ({ open_sign_up: server.openSignUp })),
+    setOpenSignUp: vi.fn(async (open: boolean): Promise<ServerInfo> => {
+      if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');
+      server.openSignUp = open;
+      return { open_sign_up: open };
     }),
     archiveClub: vi.fn(async (club: string, archived: boolean): Promise<ServerClub> => {
       if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');

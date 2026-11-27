@@ -153,6 +153,7 @@ describe('lookedAfterClubs', () => {
     sign_ins: [],
     clubs: [],
     pilots: [],
+    profile: {},
     ...over
   });
 

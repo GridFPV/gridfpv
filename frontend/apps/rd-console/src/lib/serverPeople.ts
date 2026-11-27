@@ -39,7 +39,10 @@ import {
   listServerClubs,
   makeServerClub,
   setServerClubArchived,
-  setServerPrimaryClub
+  setServerPrimaryClub,
+  setServerProfile,
+  getServerInfo,
+  setServerOpenSignUp
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
@@ -58,7 +61,9 @@ import type {
   MyAccount,
   MyClassResult,
   MyResult,
+  PilotProfile,
   ServerEvent,
+  ServerInfo,
   SignInProvider
 } from '@gridfpv/types';
 import { ordinal } from './names.js';
@@ -122,6 +127,12 @@ export interface PeopleApi {
   archiveClub(club: string, archived: boolean): Promise<ServerClub>;
   /** Mark the club the signed-in account's front page opens on. */
   setPrimary(club: string): Promise<Me>;
+  /** Set the signed-in account's pilot profile, all of it. A part left out is cleared. */
+  setProfile(profile: PilotProfile): Promise<Me>;
+  /** What anyone may know of how the server is run. */
+  serverInfo(): Promise<ServerInfo>;
+  /** Say whether someone with no invite may make an account. For an owner. */
+  setOpenSignUp(open: boolean): Promise<ServerInfo>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -166,8 +177,84 @@ export function peopleApi(baseUrl: string): PeopleApi {
     makeClub: (name) => makeServerClub(baseUrl, name),
     archiveClub: (club, archived) => setServerClubArchived(baseUrl, club, archived),
     setPrimary: (club) => setServerPrimaryClub(baseUrl, club),
+    setProfile: (profile) => setServerProfile(baseUrl, profile),
+    serverInfo: () => getServerInfo(baseUrl),
+    setOpenSignUp: (open) => setServerOpenSignUp(baseUrl, open),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
+}
+
+/** The form for a pilot profile: every box as text, empty for a part that is not set. */
+export interface ProfileForm {
+  callsign: string;
+  color: string;
+  multigp_id: string;
+  velocidrone_id: string;
+}
+
+export function profileForm(profile: PilotProfile | undefined): ProfileForm {
+  return {
+    callsign: profile?.callsign ?? '',
+    color: profile?.color ?? '',
+    multigp_id: profile?.multigp_id ?? '',
+    velocidrone_id: profile?.velocidrone_id ?? ''
+  };
+}
+
+/** What to send for a form: each part tidied, and an empty one left out. */
+export function profileOf(form: ProfileForm): PilotProfile {
+  const out: PilotProfile = {};
+  const callsign = form.callsign.trim();
+  const color = form.color.trim().toUpperCase();
+  const multigp = form.multigp_id.trim();
+  const velocidrone = form.velocidrone_id.trim();
+  if (callsign !== '') out.callsign = callsign;
+  if (color !== '') out.color = color;
+  if (multigp !== '') out.multigp_id = multigp;
+  if (velocidrone !== '') out.velocidrone_id = velocidrone;
+  return out;
+}
+
+/**
+ * What is wrong with a profile form, in words, before it is sent. The server checks it
+ * all again; this is so the pilot sees it while typing.
+ */
+export function profileProblem(form: ProfileForm): string | undefined {
+  const profile = profileOf(form);
+  if ([...(profile.callsign ?? '')].length > 40) return 'A callsign is 40 letters at most.';
+  if (profile.color !== undefined && !/^#[0-9A-F]{6}$/.test(profile.color)) {
+    return 'A colour is a # and six letters or digits, like #FF8800.';
+  }
+  for (const [id, what] of [
+    [profile.multigp_id, 'A MultiGP id'],
+    [profile.velocidrone_id, 'A Velocidrone id']
+  ] as const) {
+    if (id === undefined) continue;
+    if ([...id].length > 40) return `${what} is 40 letters at most.`;
+    if (/\s/.test(id)) return `${what} has no spaces in it.`;
+  }
+  return undefined;
+}
+
+/** Whether a form differs from the profile that is kept. */
+export function profileChanged(form: ProfileForm, profile: PilotProfile | undefined): boolean {
+  return JSON.stringify(profileOf(form)) !== JSON.stringify(profileOf(profileForm(profile)));
+}
+
+/**
+ * What a pilot is called on a server: the callsign in their profile, or else their
+ * account's name.
+ */
+export function pilotName(account: { name: string; profile?: PilotProfile }): string {
+  return account.profile?.callsign?.trim() || account.name;
+}
+
+/** What the sign-in page says of making an account, by the owner's choice. */
+export function signUpLine(open: boolean | undefined): string {
+  if (open === undefined) return '';
+  return open
+    ? 'No account yet? Sign in, and one is made for you.'
+    : 'You need an invite from your club to make an account.';
 }
 
 /** Why a sign-in did not work, in words, from the code the server put in the address. */

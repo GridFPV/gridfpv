@@ -93,6 +93,7 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             None,
         ),
         (Method::GET, "/api/sign-in/providers", Anyone, None),
+        (Method::GET, "/api/server", Anyone, None),
         (Method::GET, "/auth/{provider}/start", Anyone, None),
         (Method::GET, "/auth/{provider}/callback", Anyone, None),
         (Method::GET, "/api/me", Anyone, None),
@@ -107,6 +108,12 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             "/api/clubs",
             Owner,
             Some(json!({"name": "West FPV"})),
+        ),
+        (
+            Method::PUT,
+            "/api/server/sign-up",
+            Owner,
+            Some(json!({"open": true})),
         ),
         (
             Method::PUT,
@@ -152,6 +159,12 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             "/api/me/primary-club",
             Account,
             Some(json!({"club": "north"})),
+        ),
+        (
+            Method::PUT,
+            "/api/me/profile",
+            Account,
+            Some(json!({"callsign": "Ace"})),
         ),
         (Method::POST, "/api/invites/{secret}/accept", Account, None),
         (Method::GET, "/api/me/results", Account, None),

@@ -36,7 +36,8 @@ const BEE: MyAccount = {
   owner: false,
   sign_ins: [{ provider: 'discord', subject: '222', label: 'bee_fpv' }],
   clubs: [{ club: NORTH, role: 'Pilot' }],
-  pilots: []
+  pilots: [],
+  profile: {}
 };
 const APP: MyAccount = {
   ...BEE,

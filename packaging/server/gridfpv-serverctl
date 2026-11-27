@@ -8,6 +8,9 @@
 #   gridfpv-serverctl club list
 #   gridfpv-serverctl club new "North Whoops"
 #   gridfpv-serverctl owner invite
+#   gridfpv-serverctl sign-up
+#   gridfpv-serverctl sign-up open
+#   gridfpv-serverctl sign-up invite
 #   gridfpv-serverctl account list
 #   gridfpv-serverctl account reconnect <id>
 #

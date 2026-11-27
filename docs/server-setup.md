@@ -199,7 +199,8 @@ A token that is taken back stops working straight away.
 ## Signing in
 
 People can have an account on your server. They sign in with Discord or Google. Grid never
-sees a password. Nobody can make an account without an invite.
+sees a password. A server starts with invites only: nobody can make an account without
+one. You can change that. See **Let anyone make an account** below.
 
 The server's page has **Sign in** at the top once a provider is set up.
 
@@ -289,6 +290,31 @@ another.
 
 Directors can invite to their own club and change the roles of its members. They cannot
 touch another club. A club always keeps at least one director.
+
+**Let anyone make an account.** This is your choice as the owner, and it starts off.
+
+- **Off (invite only):** someone needs an invite to make an account.
+- **On:** anyone who can sign in with Discord or Google gets an account. A new account
+  is in no club. It sees what any visitor sees until it joins a club.
+
+Invites work either way. You can always send one, and so can a club's director.
+
+To change it, open your account page and find **Who may make an account**. Or on the
+command line:
+
+```
+gridfpv-serverctl sign-up
+gridfpv-serverctl sign-up open
+gridfpv-serverctl sign-up invite
+```
+
+The first one says how it is set now. If you turn it off again, accounts already made
+stay.
+
+**The pilot profile.** Each person fills in their own on their account page: a callsign,
+a colour, a MultiGP id and a Velocidrone id. All of it is optional. It belongs to the
+account, so it is the same in every club on your server. The ids are there so a race
+director can match a pilot to MultiGP and Velocidrone later.
 
 ### 6. Tie pilots to accounts
 
@@ -442,6 +468,7 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
   the director shows at the race. Seasons and records come later.
 - A director still sends events with a link token. Anyone with its link can look at an
   event.
-- Grid sends every event to one club. It cannot yet keep a list of clubs and pick one
-  for each event.
+- A pilot's profile is kept, and not used yet. Results still show the callsign the event
+  was run with, and Grid does not yet pull the profile down.
+- A pilot cannot yet join a club by themselves. They need an invite.
 - Videos are not stored.

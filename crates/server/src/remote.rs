@@ -152,6 +152,37 @@ pub struct PushAccount {
     pub name: String,
 }
 
+/// What a pilot says of themselves on a server (§13.7): how they are shown, and the ids
+/// they have elsewhere. It belongs to their account, so it is the same in every club.
+/// Every part may be left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PilotProfile {
+    /// The name they race under. Left out, the account's own name stands in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub callsign: Option<String>,
+    /// Their colour, as `#RRGGBB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub color: Option<String>,
+    /// Their MultiGP pilot id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub multigp_id: Option<String>,
+    /// Their Velocidrone id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub velocidrone_id: Option<String>,
+}
+
+impl PilotProfile {
+    /// Whether nothing is filled in.
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// A pilot of a club, between a Director and a server (`/push/pilots`).
 ///
 /// A Director sends the pilots it has, so the server knows them before any event names
