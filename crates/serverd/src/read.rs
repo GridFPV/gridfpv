@@ -57,12 +57,25 @@ fn not_found(what: &str) -> ApiError {
 
 /// One event a club holds, with its header. An event whose header has not arrived is not
 /// there yet for a reader: it has no name to be shown by.
-struct Shown {
-    copy: Arc<Copy>,
-    header: PushHeader,
+pub(crate) struct Shown {
+    pub(crate) copy: Arc<Copy>,
+    pub(crate) header: PushHeader,
 }
 
-fn shown(state: &AppState, club: &str, event: &str) -> Result<Shown, ApiError> {
+/// An event as a list shows it.
+pub(crate) fn server_event(id: EventId, meta: gridfpv_server::events::EventMeta) -> ServerEvent {
+    ServerEvent {
+        id,
+        name: meta.name,
+        date: meta.date,
+        location: meta.location,
+        description: meta.description,
+        organizer: meta.organizer,
+        created_at: meta.created_at,
+    }
+}
+
+pub(crate) fn shown(state: &AppState, club: &str, event: &str) -> Result<Shown, ApiError> {
     let gone = || not_found("This server holds no such event.");
     let club = state.book.club(&ClubId(club.to_owned())).ok_or_else(gone)?;
     let copy = state
@@ -78,7 +91,7 @@ fn shown(state: &AppState, club: &str, event: &str) -> Result<Shown, ApiError> {
 
 impl Shown {
     /// The event's snapshot, for a visitor.
-    fn view(&self) -> Result<EventView, ApiError> {
+    pub(crate) fn view(&self) -> Result<EventView, ApiError> {
         let now = self.copy.director_now(now_micros());
         let view = self.copy.with_state(|state| EventView::build(state, now))?;
         Ok(spectate::for_visitors(view))
@@ -119,16 +132,7 @@ pub async fn get_events(
         let Ok(shown) = shown(&state, &club.id.0, &id.0) else {
             continue;
         };
-        let meta = shown.header.meta;
-        events.push(ServerEvent {
-            id,
-            name: meta.name,
-            date: meta.date,
-            location: meta.location,
-            description: meta.description,
-            organizer: meta.organizer,
-            created_at: meta.created_at,
-        });
+        events.push(server_event(id, shown.header.meta));
     }
     events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
     Ok(Json(events))

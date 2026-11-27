@@ -4,21 +4,29 @@
  */
 import {
   acceptServerInvite,
+  askForClubPilot,
+  dropClubPilotClaim,
+  freeClubPilot,
   getServerInvite,
   getServerMe,
+  getServerMyResults,
   listClubInvites,
   listClubMembers,
+  listClubPilots,
   listSignInProviders,
   makeClubInvite,
+  refuseClubPilotAsk,
   removeClubMember,
   removeServerSignIn,
   renameServerMe,
   revokeClubInvite,
+  setClubPilotHolder,
   setClubRole,
   signInUrl,
   signOutOfServer
 } from '@gridfpv/protocol-client';
 import type {
+  ClubPilotView,
   ClubRole,
   InviteMade,
   InviteRequest,
@@ -26,8 +34,11 @@ import type {
   Me,
   MemberView,
   MyAccount,
+  MyClassResult,
+  MyResult,
   SignInProvider
 } from '@gridfpv/types';
+import { ordinal } from './names.js';
 
 /** Everything the account pages ask a server for. A test passes its own. */
 export interface PeopleApi {
@@ -46,6 +57,20 @@ export interface PeopleApi {
   members(club: string): Promise<MemberView[]>;
   setRole(club: string, account: string, role: ClubRole): Promise<void>;
   removeMember(club: string, account: string): Promise<void>;
+  /** A club's pilots, and which are taken. For anyone in the club. */
+  clubPilots(club: string): Promise<ClubPilotView[]>;
+  /** Ask for a pilot. Nothing is held until someone allowed says yes. */
+  askFor(club: string, pilot: string): Promise<void>;
+  /** Stop asking for a pilot, or let go of one that is held. */
+  dropClaim(club: string, pilot: string): Promise<void>;
+  /** Say an account holds a pilot: the yes to an ask, or a director giving it. */
+  giveTo(club: string, pilot: string, account: string): Promise<void>;
+  /** Take a pilot from its holder. */
+  freePilot(club: string, pilot: string): Promise<void>;
+  /** Say no to an account that asked. */
+  refuseAsk(club: string, pilot: string, account: string): Promise<void>;
+  /** The events the account's pilots flew, newest first. */
+  results(): Promise<MyResult[]>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -64,7 +89,14 @@ export function peopleApi(baseUrl: string): PeopleApi {
     revokeInvite: (club, id) => revokeClubInvite(baseUrl, club, id),
     members: (club) => listClubMembers(baseUrl, club),
     setRole: (club, account, role) => setClubRole(baseUrl, club, account, role),
-    removeMember: (club, account) => removeClubMember(baseUrl, club, account)
+    removeMember: (club, account) => removeClubMember(baseUrl, club, account),
+    clubPilots: (club) => listClubPilots(baseUrl, club),
+    askFor: (club, pilot) => askForClubPilot(baseUrl, club, pilot),
+    dropClaim: (club, pilot) => dropClubPilotClaim(baseUrl, club, pilot),
+    giveTo: (club, pilot, account) => setClubPilotHolder(baseUrl, club, pilot, account),
+    freePilot: (club, pilot) => freeClubPilot(baseUrl, club, pilot),
+    refuseAsk: (club, pilot, account) => refuseClubPilotAsk(baseUrl, club, pilot, account),
+    results: () => getServerMyResults(baseUrl)
   };
 }
 
@@ -123,14 +155,51 @@ export function inviteLink(origin: string, secret: string): string {
   return `${origin.replace(/\/$/, '')}/#/invite/${encodeURIComponent(secret)}`;
 }
 
-/** The clubs an account may manage: all of them for an owner, else where it is a director. */
-export function managedClubs(
+/** A club an account looks after, and how far its say goes there. */
+export interface LookedAfter {
+  club: { id: string; name: string };
+  /** Runs the club: members, invites and pilots. Otherwise only says yes or no to claims. */
+  runs: boolean;
+}
+
+/**
+ * The clubs an account looks after: every club for an owner, else the ones it is a
+ * director of (it runs those) or an approver of (it answers claims there).
+ */
+export function lookedAfterClubs(
   account: MyAccount | undefined,
   all: readonly { id: string; name: string }[]
-): { id: string; name: string }[] {
+): LookedAfter[] {
   if (!account) return [];
-  if (account.owner) return [...all];
-  return account.clubs.filter((entry) => entry.role === 'Director').map((entry) => entry.club);
+  if (account.owner) return all.map((club) => ({ club, runs: true }));
+  return account.clubs
+    .filter((entry) => entry.role !== 'Pilot')
+    .map((entry) => ({ club: entry.club, runs: entry.role === 'Director' }));
+}
+
+/** How far an account's say goes in one club. `undefined` when it has none. */
+export function sayIn(
+  account: MyAccount | undefined,
+  club: string
+): 'runs' | 'answers' | undefined {
+  if (!account) return undefined;
+  if (account.owner) return 'runs';
+  const role = account.clubs.find((entry) => entry.club.id === club)?.role;
+  return role === 'Director' ? 'runs' : role === 'Approver' ? 'answers' : undefined;
+}
+
+/** Where a pilot stands in a class, in words: "2nd of 12", or that racing has not placed them. */
+export function placeWords(result: Pick<MyClassResult, 'position' | 'of' | 'placed'>): string {
+  if (!result.placed) return 'Not placed yet';
+  return `${ordinal(result.position)} of ${result.of}`;
+}
+
+/** How a pilot of a club stands for the person looking, in a few words. */
+export function pilotStanding(pilot: Pick<ClubPilotView, 'mine' | 'asked' | 'taken'>): string {
+  if (pilot.mine) return 'Yours';
+  if (pilot.asked) return 'You asked';
+  if (pilot.taken) return 'Taken';
+  return '';
 }
 
 /** A provider's name for a sign-in an account holds, when the server still offers it. */

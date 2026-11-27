@@ -91,7 +91,7 @@ test('an owner, a director and a pilot each get their account by invite and thei
   await expect(late.getByText('This invite does not work')).toBeVisible();
 
   // ── The owner invites a director to the club. ─────────────────────────────
-  await ryan.getByRole('link', { name: 'Members and invites of Recon FPV' }).click();
+  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
   await expect(ryan.getByTestId('server-club')).toBeVisible();
   await expect(ryan.getByTestId('club-member')).toHaveCount(0);
   const directorLink = await invite(ryan, 'Dana', 'Director');
@@ -110,7 +110,7 @@ test('an owner, a director and a pilot each get their account by invite and thei
 
   // ── The director invites a pilot. ─────────────────────────────────────────
   await dana.getByTestId('server-who').click();
-  await dana.getByRole('link', { name: 'Members and invites of Recon FPV' }).click();
+  await dana.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
   await expect(dana.getByTestId('club-member')).toHaveCount(1);
   await expect(dana.getByTestId('club-member')).toContainText('(you)');
   const pilotLink = await invite(dana, 'Ace', 'Pilot');
@@ -125,9 +125,11 @@ test('an owner, a director and a pilot each get their account by invite and thei
   await ace.getByTestId('server-who').click();
   await expect(ace.getByRole('list', { name: 'Your clubs' })).toContainText('Recon FPV');
   await expect(ace.getByRole('list', { name: 'Your clubs' })).toContainText('Pilot');
-  await expect(ace.getByRole('list', { name: 'Clubs you run' })).toHaveCount(0);
+  await expect(ace.getByRole('list', { name: 'Clubs you look after' })).toHaveCount(0);
   await ace.goto(`${server.baseUrl}/#/club/club`);
-  await expect(ace.getByText('Only a director of this club can do that.')).toBeVisible();
+  await expect(
+    ace.getByText('Only those who look after this club can open this page.')
+  ).toBeVisible();
   await expect(ace.getByTestId('club-member')).toHaveCount(0);
   const tried = await ace.request.post(`${server.baseUrl}/api/clubs/club/invites`, {
     data: { kind: 'Personal', label: 'Sneaky', role: 'Director' }

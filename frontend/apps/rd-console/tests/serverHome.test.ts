@@ -37,11 +37,16 @@ describe('formatServerHash', () => {
     for (const place of [
       { kind: 'list' } as const,
       { kind: 'event', club: 'club', event: 'friday-night-764c5x' } as const,
-      { kind: 'event', club: 'north club', event: 'a/b?c#d' } as const
+      { kind: 'event', club: 'north club', event: 'a/b?c#d' } as const,
+      { kind: 'results' } as const,
+      { kind: 'club', club: 'north club' } as const
     ]) {
       expect(parseServerHash(formatServerHash(place))).toEqual(place);
     }
     expect(formatServerHash({ kind: 'list' })).toBe('#/');
+    expect(formatServerHash({ kind: 'results' })).toBe('#/results');
+    // Nothing hangs off the results page.
+    expect(parseServerHash('#/results/more')).toEqual({ kind: 'list' });
   });
 });
 

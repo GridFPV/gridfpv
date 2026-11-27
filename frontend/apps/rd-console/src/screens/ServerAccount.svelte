@@ -1,7 +1,7 @@
 <script lang="ts">
   /**
    * ServerAccount — the signed-in account on a remote server (docs/primitives.md §13.8):
-   * its name, the ways it signs in, and the clubs it is in.
+   * its name, the ways it signs in, the clubs it is in, and the pilots it holds.
    *
    * An account can hold several sign-ins and keeps at least one. Another is added here,
    * signed in: that is the only way two sign-ins come to belong to one account.
@@ -9,7 +9,8 @@
   import { Banner, Button, Card, Input } from '@gridfpv/components';
   import type { Me, MyAccount, SignInProvider } from '@gridfpv/types';
   import { formatServerHash } from '../lib/serverHome.js';
-  import { managedClubs, providerName, roleWord, type PeopleApi } from '../lib/serverPeople.js';
+  import { lookedAfterClubs, providerName, roleWord, type PeopleApi } from '../lib/serverPeople.js';
+  import ServerMyPilots from './ServerMyPilots.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
 
   let {
@@ -18,15 +19,21 @@
     providers,
     clubs,
     onchange,
+    onreread,
     onsignedout
   }: {
-    api: Pick<PeopleApi, 'rename' | 'removeSignIn' | 'signOut' | 'signInUrl'>;
+    api: Pick<
+      PeopleApi,
+      'rename' | 'removeSignIn' | 'signOut' | 'signInUrl' | 'clubPilots' | 'askFor' | 'dropClaim'
+    >;
     account: MyAccount;
     providers: readonly SignInProvider[] | undefined;
     /** Every club on the server, for an owner's links. */
     clubs: readonly { id: string; name: string }[];
     /** The account changed: here it is as it now stands. */
     onchange: (me: Me) => void;
+    /** Something about the account changed on the server: read it again. */
+    onreread: () => void | Promise<void>;
     onsignedout: () => void;
   } = $props();
 
@@ -36,7 +43,7 @@
   let busy = $state(false);
 
   const say = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-  const managed = $derived(managedClubs(account, clubs));
+  const lookedAfter = $derived(lookedAfterClubs(account, clubs));
   /** The providers the account does not sign in with yet. */
   const toAdd = $derived(
     providers?.filter((p) => !account.sign_ins.some((held) => held.provider === p.id))
@@ -113,12 +120,12 @@
           {/each}
         </ul>
       {/if}
-      {#if managed.length > 0}
-        <ul aria-label="Clubs you run">
-          {#each managed as club (club.id)}
+      {#if lookedAfter.length > 0}
+        <ul aria-label="Clubs you look after">
+          {#each lookedAfter as { club, runs } (club.id)}
             <li>
               <a href={formatServerHash({ kind: 'club', club: club.id })}
-                >Members and invites of {club.name}</a
+                >{runs ? 'Members, invites and pilots' : 'Pilots'} of {club.name}</a
               >
             </li>
           {/each}
@@ -126,6 +133,8 @@
       {/if}
     </div>
   </Card>
+
+  <ServerMyPilots {api} {account} onchange={onreread} />
 
   <Card elevation="sm">
     <div class="block">

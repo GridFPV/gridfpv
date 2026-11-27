@@ -13,6 +13,12 @@
 //!   another. A server owner is separate, and may do anything in any club.
 //! - **A club is never left with no director** by a change of role.
 //! - **Secrets are shown once.** A session and an invite are kept only as a hash.
+//! - **A club's pilot has one holder at most.** A pilot of a club (the id a Director gave
+//!   them) is held by one account, which is how results reach an account (§13.7). An
+//!   account that asks for a pilot does not hold it until someone allowed says yes.
+//!   **Knowing a pilot's id is never enough.**
+//! - **Only a member of a club holds or asks for one of its pilots.** Leaving the club
+//!   lets go of them.
 //!
 //! Who may do what is in [`Standing::may`]. Nothing here speaks HTTP.
 
@@ -136,6 +142,10 @@ pub enum Act<'a> {
     SetRole(&'a ClubId),
     /// Approve a pilot's claim to results in a club.
     ApproveClaim(&'a ClubId),
+    /// See a club's pilots, and ask for one of them.
+    SeePilots(&'a ClubId),
+    /// Say which account holds a pilot of a club, with nobody having asked.
+    GivePilot(&'a ClubId),
     /// Look after the server itself: make clubs, link tokens, owners.
     RunServer,
 }
@@ -153,7 +163,11 @@ impl Standing {
         let director = |club| self.role_in(club) == Some(Role::Director);
         match act {
             // Only a club's directors invite to it and hand out its roles.
-            Act::Invite(club, _) | Act::SeeMembers(club) | Act::SetRole(club) => director(club),
+            Act::Invite(club, _)
+            | Act::SeeMembers(club)
+            | Act::SetRole(club)
+            | Act::GivePilot(club) => director(club),
+            Act::SeePilots(club) => self.role_in(club).is_some(),
             Act::ApproveClaim(club) => {
                 matches!(self.role_in(club), Some(Role::Director | Role::Approver))
             }
@@ -232,8 +246,71 @@ pub struct NewInvite {
     pub expires_at: Option<i64>,
 }
 
+/// A pilot of a club, as the server knows them: the id a Director gave them and the
+/// callsign it sent. Kept from every event header and every list of pilots a Director
+/// sends, and never removed, so results from long ago still have a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClubPilot {
+    pub pilot: String,
+    pub callsign: String,
+    pub color: Option<String>,
+}
+
+/// How an account came to hold a pilot, or that it has only asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimHow {
+    /// The account asked. Nobody has said yes.
+    Asked,
+    /// A director said so.
+    Director,
+    /// The account used a personal invite made for this pilot.
+    Invite,
+    /// The account asked and someone allowed said yes.
+    Approved,
+}
+
+impl ClaimHow {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Asked => "asked",
+            Self::Director => "director",
+            Self::Invite => "invite",
+            Self::Approved => "approved",
+        }
+    }
+    fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "asked" => Self::Asked,
+            "director" => Self::Director,
+            "invite" => Self::Invite,
+            "approved" => Self::Approved,
+            _ => return None,
+        })
+    }
+    /// Whether the account holds the pilot, rather than having asked for it.
+    pub fn holds(self) -> bool {
+        self != Self::Asked
+    }
+}
+
+/// An account's tie to a pilot of a club: it holds the pilot, or has asked to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    pub club: ClubId,
+    pub pilot: String,
+    pub account: Account,
+    pub how: ClaimHow,
+    pub at: i64,
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AccountError {
+    #[error("This club has no such pilot.")]
+    NoSuchPilot,
+    #[error("That pilot already belongs to an account.")]
+    PilotTaken,
+    #[error("Nobody has asked for that.")]
+    NoSuchClaim,
     #[error("That invite does not work. It may have been used, taken back, or have run out.")]
     InviteDoesNotWork,
     #[error("That sign-in already belongs to an account.")]
@@ -357,7 +434,27 @@ impl Accounts {
                 created_by TEXT,
                 created_at INTEGER NOT NULL,
                 revoked_at INTEGER
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS club_pilots (
+                club     TEXT NOT NULL,
+                pilot    TEXT NOT NULL,
+                callsign TEXT NOT NULL,
+                color    TEXT,
+                seen_at  INTEGER NOT NULL,
+                PRIMARY KEY (club, pilot)
+            );
+            CREATE TABLE IF NOT EXISTS claims (
+                club    TEXT NOT NULL,
+                pilot   TEXT NOT NULL,
+                account TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                held    INTEGER NOT NULL,
+                how     TEXT NOT NULL,
+                at      INTEGER NOT NULL,
+                by      TEXT,
+                PRIMARY KEY (club, pilot, account)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS claims_one_holder
+                ON claims (club, pilot) WHERE held = 1;",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -790,6 +887,20 @@ impl Accounts {
         }
         let secret = format!("{INVITE_PREFIX}{}", random(24));
         let conn = self.lock();
+        // An invite made for a pilot is for one the club has and nobody holds.
+        if let InviteKind::Personal {
+            club,
+            pilot: Some(pilot),
+            ..
+        } = &spec.kind
+        {
+            if Self::club_pilot_in(&conn, club, pilot)?.is_none() {
+                return Err(AccountError::NoSuchPilot);
+            }
+            if Self::holder_in(&conn, club, pilot)?.is_some() {
+                return Err(AccountError::PilotTaken);
+            }
+        }
         let id = loop {
             let id = random(6);
             let taken = conn
@@ -922,6 +1033,23 @@ impl Accounts {
                         params![account.0, club.0, role.as_str(), now],
                     )?;
                 }
+                // An invite made for a pilot gives that pilot, unless someone came to
+                // hold it since. The person still joins the club.
+                if let InviteKind::Personal {
+                    pilot: Some(pilot), ..
+                } = kind
+                    && Self::holder_in(tx, club, pilot)?.is_none()
+                {
+                    Self::hold_in(
+                        tx,
+                        club,
+                        pilot,
+                        account,
+                        ClaimHow::Invite,
+                        invite.created_by.as_ref(),
+                        now,
+                    )?;
+                }
             }
         }
         let used = tx.execute(
@@ -1041,9 +1169,300 @@ impl Accounts {
             "DELETE FROM members WHERE account = ?1 AND club = ?2",
             params![account.0, club.0],
         )?;
+        // Only a member holds or asks for a club's pilots.
+        tx.execute(
+            "DELETE FROM claims WHERE account = ?1 AND club = ?2",
+            params![account.0, club.0],
+        )?;
         tx.commit()?;
         Ok(())
     }
+
+    // ── A club's pilots, and who holds them ─────────────────────────────────
+
+    /// Note pilots a Director sent for a club: new ones are added, and a known one takes
+    /// the callsign and colour it has now. None is ever removed.
+    pub fn note_pilots(&self, club: &ClubId, pilots: &[ClubPilot], now: i64) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        for pilot in pilots {
+            if !valid_pilot_id(&pilot.pilot) {
+                continue;
+            }
+            // A callsign that will not do is not worth refusing an event over.
+            let Ok(callsign) = clean(&pilot.callsign, "") else {
+                continue;
+            };
+            tx.execute(
+                "INSERT INTO club_pilots (club, pilot, callsign, color, seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(club, pilot) DO UPDATE SET
+                    callsign = excluded.callsign, color = excluded.color, seen_at = excluded.seen_at",
+                params![club.0, pilot.pilot, callsign, pilot.color, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn club_pilot_in(conn: &Connection, club: &ClubId, pilot: &str) -> Result<Option<ClubPilot>> {
+        Ok(conn
+            .query_row(
+                "SELECT pilot, callsign, color FROM club_pilots WHERE club = ?1 AND pilot = ?2",
+                params![club.0, pilot],
+                |row| {
+                    Ok(ClubPilot {
+                        pilot: row.get(0)?,
+                        callsign: row.get(1)?,
+                        color: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// One pilot of a club, if the club has them.
+    pub fn club_pilot(&self, club: &ClubId, pilot: &str) -> Result<Option<ClubPilot>> {
+        Self::club_pilot_in(&self.lock(), club, pilot)
+    }
+
+    /// A club's pilots, by callsign.
+    pub fn club_pilots(&self, club: &ClubId) -> Result<Vec<ClubPilot>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pilot, callsign, color FROM club_pilots WHERE club = ?1
+             ORDER BY callsign COLLATE NOCASE, pilot",
+        )?;
+        let rows = stmt.query_map(params![club.0], |row| {
+            Ok(ClubPilot {
+                pilot: row.get(0)?,
+                callsign: row.get(1)?,
+                color: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn holder_in(conn: &Connection, club: &ClubId, pilot: &str) -> Result<Option<AccountId>> {
+        Ok(conn
+            .query_row(
+                "SELECT account FROM claims WHERE club = ?1 AND pilot = ?2 AND held = 1",
+                params![club.0, pilot],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(AccountId))
+    }
+
+    fn is_member_in(conn: &Connection, club: &ClubId, account: &AccountId) -> Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM members WHERE account = ?1 AND club = ?2",
+                params![account.0, club.0],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Make `account` the holder of a pilot, inside a transaction: whoever held it lets
+    /// go, and everyone who had asked for it is answered by this.
+    fn hold_in(
+        tx: &Connection,
+        club: &ClubId,
+        pilot: &str,
+        account: &AccountId,
+        how: ClaimHow,
+        by: Option<&AccountId>,
+        now: i64,
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM claims WHERE club = ?1 AND pilot = ?2",
+            params![club.0, pilot],
+        )?;
+        tx.execute(
+            "INSERT INTO claims (club, pilot, account, held, how, at, by)
+             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
+            params![
+                club.0,
+                pilot,
+                account.0,
+                how.as_str(),
+                now,
+                by.map(|a| a.0.clone())
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Ask to hold a pilot of a club. The account must be a member, and the pilot must
+    /// be one nobody holds. Asking twice is asking once. Nothing is held until someone
+    /// allowed says yes ([`Accounts::approve_claim`]).
+    pub fn ask_claim(
+        &self,
+        club: &ClubId,
+        pilot: &str,
+        account: &AccountId,
+        now: i64,
+    ) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if !Self::is_member_in(&tx, club, account)? {
+            return Err(AccountError::NotAMember);
+        }
+        if Self::club_pilot_in(&tx, club, pilot)?.is_none() {
+            return Err(AccountError::NoSuchPilot);
+        }
+        match Self::holder_in(&tx, club, pilot)? {
+            // Asking for what is already yours changes nothing.
+            Some(holder) if &holder == account => return Ok(()),
+            Some(_) => return Err(AccountError::PilotTaken),
+            None => {}
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO claims (club, pilot, account, held, how, at)
+             VALUES (?1, ?2, ?3, 0, 'asked', ?4)",
+            params![club.0, pilot, account.0, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Say yes to an account that asked for a pilot. Whether the one saying so may is the
+    /// caller's to check. Anyone else who asked for that pilot is answered by this.
+    pub fn approve_claim(
+        &self,
+        club: &ClubId,
+        pilot: &str,
+        account: &AccountId,
+        by: &AccountId,
+        now: i64,
+    ) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let asked = tx
+            .query_row(
+                "SELECT 1 FROM claims
+                 WHERE club = ?1 AND pilot = ?2 AND account = ?3 AND held = 0",
+                params![club.0, pilot, account.0],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !asked {
+            return Err(AccountError::NoSuchClaim);
+        }
+        if Self::holder_in(&tx, club, pilot)?.is_some() {
+            return Err(AccountError::PilotTaken);
+        }
+        // Someone removed from the club since they asked holds nothing in it.
+        if !Self::is_member_in(&tx, club, account)? {
+            return Err(AccountError::NotAMember);
+        }
+        Self::hold_in(&tx, club, pilot, account, ClaimHow::Approved, Some(by), now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Say which account holds a pilot, with nobody having asked: what a director does.
+    /// Whoever held it lets go. The account must be a member of the club.
+    pub fn give_pilot(
+        &self,
+        club: &ClubId,
+        pilot: &str,
+        account: &AccountId,
+        by: Option<&AccountId>,
+        now: i64,
+    ) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if Self::club_pilot_in(&tx, club, pilot)?.is_none() {
+            return Err(AccountError::NoSuchPilot);
+        }
+        if Self::account_in(&tx, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        if !Self::is_member_in(&tx, club, account)? {
+            return Err(AccountError::NotAMember);
+        }
+        if Self::holder_in(&tx, club, pilot)?.as_ref() != Some(account) {
+            Self::hold_in(&tx, club, pilot, account, ClaimHow::Director, by, now)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Take a pilot from whoever holds it. `false` when nobody did. Those who asked for
+    /// it are still asking.
+    pub fn free_pilot(&self, club: &ClubId, pilot: &str) -> Result<bool> {
+        Ok(self.lock().execute(
+            "DELETE FROM claims WHERE club = ?1 AND pilot = ?2 AND held = 1",
+            params![club.0, pilot],
+        )? > 0)
+    }
+
+    /// End one account's tie to a pilot: an ask is withdrawn or refused, a pilot held is
+    /// let go. `false` when there was none.
+    pub fn drop_claim(&self, club: &ClubId, pilot: &str, account: &AccountId) -> Result<bool> {
+        Ok(self.lock().execute(
+            "DELETE FROM claims WHERE club = ?1 AND pilot = ?2 AND account = ?3",
+            params![club.0, pilot, account.0],
+        )? > 0)
+    }
+
+    fn claims_where(&self, clause: &str, value: &str) -> Result<Vec<Claim>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT c.club, c.pilot, c.how, c.at, a.id, a.name, a.created_at FROM claims c
+             JOIN accounts a ON a.id = c.account
+             WHERE {clause} ORDER BY c.at, c.club, c.pilot, a.id"
+        ))?;
+        let rows = stmt.query_map(params![value], |row| {
+            Ok((
+                row.get::<_, String>(2)?,
+                Claim {
+                    club: ClubId(row.get(0)?),
+                    pilot: row.get(1)?,
+                    account: Account {
+                        id: AccountId(row.get(4)?),
+                        name: row.get(5)?,
+                        created_at: row.get(6)?,
+                    },
+                    how: ClaimHow::Asked,
+                    at: row.get(3)?,
+                },
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (how, claim) = row?;
+            // A kind this build does not know gives nothing.
+            if let Some(how) = ClaimHow::parse(&how) {
+                out.push(Claim { how, ..claim });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every tie between an account and a pilot of a club: held and asked, oldest first.
+    pub fn claims_in(&self, club: &ClubId) -> Result<Vec<Claim>> {
+        self.claims_where("c.club = ?1", &club.0)
+    }
+
+    /// Every pilot an account holds or has asked for, in any club.
+    pub fn claims_of(&self, account: &AccountId) -> Result<Vec<Claim>> {
+        self.claims_where("c.account = ?1", &account.0)
+    }
+}
+
+/// Whether text can be a pilot's id: what a Director makes, and nothing that could be
+/// mistaken for part of an address.
+pub fn valid_pilot_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 120
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// A sign-in a provider has just vouched for.

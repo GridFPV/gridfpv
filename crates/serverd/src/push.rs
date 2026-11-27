@@ -50,7 +50,7 @@ impl ApiError {
             body: ProtocolError::new(code, message),
         }
     }
-    fn bad(message: impl Into<String>) -> Self {
+    pub(crate) fn bad(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, message)
     }
     fn not_held(id: &str) -> Self {
@@ -176,6 +176,8 @@ pub async fn put_event(
         .get_or_create(&club.id, &id)?
         .ok_or_else(|| ApiError::not_held(&id.0))?;
     copy.set_header(&json)?;
+    // The club now knows these pilots, whatever becomes of the event (§13.7).
+    crate::claims::note(&state, &club.id, header.pilots.iter())?;
     Ok(Json(status(copy.held())))
 }
 

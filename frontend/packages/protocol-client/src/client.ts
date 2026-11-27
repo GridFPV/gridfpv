@@ -19,6 +19,7 @@ import type {
   BuiltinClasses,
   Class,
   ClassId,
+  ClubPilotView,
   ClubRole,
   Command,
   CommandOutcome,
@@ -46,6 +47,7 @@ import type {
   MainsRequest,
   Me,
   MemberView,
+  MyResult,
   NetworkView,
   OverlayLook,
   OverlayPlacement,
@@ -1041,6 +1043,106 @@ export async function removeClubMember(
     { method: 'DELETE', fetch: options.fetch },
     'remove the member'
   );
+}
+
+const pilotPath = (club: string, pilot: string, rest: string): string =>
+  clubPath(club, `pilots/${encodeURIComponent(pilot)}/${rest}`);
+
+/** A club's pilots, and which are taken (`GET /api/clubs/{club}/pilots`). For its members. */
+export async function listClubPilots(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ClubPilotView[]> {
+  return apiJson<ClubPilotView[]>(baseUrl, clubPath(club, 'pilots'), options, 'read the pilots');
+}
+
+/** Ask for a pilot of a club (`POST /api/clubs/{club}/pilots/{pilot}/claim`). */
+export async function askForClubPilot(
+  baseUrl: string,
+  club: string,
+  pilot: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    pilotPath(club, pilot, 'claim'),
+    { method: 'POST', fetch: options.fetch },
+    'ask for the pilot'
+  );
+}
+
+/** Stop asking for a pilot, or let go of one (`DELETE …/pilots/{pilot}/claim`). */
+export async function dropClubPilotClaim(
+  baseUrl: string,
+  club: string,
+  pilot: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    pilotPath(club, pilot, 'claim'),
+    { method: 'DELETE', fetch: options.fetch },
+    'let go of the pilot'
+  );
+}
+
+/**
+ * Say an account holds a pilot (`PUT …/pilots/{pilot}/holder`): the yes to an account that
+ * asked, or a director giving it with no ask.
+ */
+export async function setClubPilotHolder(
+  baseUrl: string,
+  club: string,
+  pilot: string,
+  account: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    pilotPath(club, pilot, 'holder'),
+    { method: 'PUT', body: { account }, fetch: options.fetch },
+    'give the pilot'
+  );
+}
+
+/** Take a pilot from its holder (`DELETE …/pilots/{pilot}/holder`). For directors. */
+export async function freeClubPilot(
+  baseUrl: string,
+  club: string,
+  pilot: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    pilotPath(club, pilot, 'holder'),
+    { method: 'DELETE', fetch: options.fetch },
+    'take the pilot back'
+  );
+}
+
+/** Say no to an account that asked for a pilot (`DELETE …/pilots/{pilot}/asks/{account}`). */
+export async function refuseClubPilotAsk(
+  baseUrl: string,
+  club: string,
+  pilot: string,
+  account: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    pilotPath(club, pilot, `asks/${encodeURIComponent(account)}`),
+    { method: 'DELETE', fetch: options.fetch },
+    'say no'
+  );
+}
+
+/** The events the signed-in account's pilots flew, newest first (`GET /api/me/results`). */
+export async function getServerMyResults(
+  baseUrl: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<MyResult[]> {
+  return apiJson<MyResult[]>(baseUrl, '/api/me/results', options, 'read your results');
 }
 
 /**

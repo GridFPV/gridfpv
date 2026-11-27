@@ -5,6 +5,7 @@
  */
 import { vi } from 'vitest';
 import type {
+  ClubPilotView,
   ClubRole,
   InviteMade,
   InviteRequest,
@@ -12,6 +13,7 @@ import type {
   Me,
   MemberView,
   MyAccount,
+  MyResult,
   SignInProvider
 } from '@gridfpv/types';
 import type { PeopleApi } from '../src/lib/serverPeople.js';
@@ -28,7 +30,8 @@ export const ACE: MyAccount = {
   name: 'Ace',
   owner: false,
   sign_ins: [{ provider: 'discord', subject: '111', label: 'ace_fpv' }],
-  clubs: [{ club: NORTH, role: 'Director' }]
+  clubs: [{ club: NORTH, role: 'Director' }],
+  pilots: []
 };
 
 export interface FakeServer {
@@ -38,7 +41,20 @@ export interface FakeServer {
   invites: Record<string, InviteView[]>;
   /** Invite links that work: secret to what they are for. */
   links: Record<string, InviteView>;
+  /**
+   * Each club's pilots, with who holds and who asked. What a reader is shown of it is
+   * worked out as the real server does, from who is signed in.
+   */
+  pilots: Record<string, ClubPilotView[]>;
+  results: MyResult[];
 }
+
+/** A pilot of a club that nobody holds or has asked for. */
+export const clubPilot = (
+  id: string,
+  callsign: string,
+  over: Partial<ClubPilotView> = {}
+): ClubPilotView => ({ id, callsign, taken: false, mine: false, asked: false, asks: [], ...over });
 
 export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
   return {
@@ -52,6 +68,8 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     },
     invites: { north: [] },
     links: {},
+    pilots: { north: [clubPilot('p-cat', 'Cat'), clubPilot('p-dog', 'Dog')] },
+    results: [],
     ...over
   };
 }
@@ -63,6 +81,36 @@ const refuse = (message: string): never => {
 export function fakePeople(server: FakeServer) {
   let made = 0;
   const me = (): Me => (server.account ? { account: server.account } : {});
+  const clubs: Record<string, { id: string; name: string }> = { north: NORTH, south: SOUTH };
+  const nameOf = (club: string, account: string): string =>
+    server.members[club]?.find((m) => m.id === account)?.name ??
+    (server.account?.id === account ? server.account.name : account);
+  /** Whether the signed-in account is told who holds and who asked. */
+  const seesWho = (club: string): boolean => {
+    const account = server.account;
+    if (!account) return false;
+    if (account.owner) return true;
+    const role = account.clubs.find((c) => c.club.id === club)?.role;
+    return role === 'Director' || role === 'Approver';
+  };
+  const pilotOf = (club: string, id: string): ClubPilotView =>
+    server.pilots[club]?.find((p) => p.id === id) ?? refuse('This club has no such pilot.');
+  /** Keep the signed-in account's own list in step with the club's. */
+  const sync = () => {
+    const account = server.account;
+    if (!account) return;
+    const pilots = Object.entries(server.pilots).flatMap(([club, list]) =>
+      list
+        .filter((p) => p.holder?.id === account.id || p.asks.some((a) => a.id === account.id))
+        .map((p) => ({
+          club: clubs[club],
+          id: p.id,
+          callsign: p.callsign,
+          held: p.holder?.id === account.id
+        }))
+    );
+    server.account = { ...account, pilots };
+  };
   const api = {
     me: vi.fn(async () => me()),
     providers: vi.fn(async () => server.providers),
@@ -115,6 +163,9 @@ export function fakePeople(server: FakeServer) {
         kind: request.kind,
         club: club === 'north' ? NORTH : SOUTH,
         role: request.kind === 'Group' ? 'Pilot' : (request.role ?? 'Pilot'),
+        ...(request.pilot
+          ? { pilot: { id: request.pilot, callsign: pilotOf(club, request.pilot).callsign } }
+          : {}),
         label: request.label,
         max_uses: request.kind === 'Group' ? (request.max_uses ?? 0) : 1,
         uses: 0,
@@ -148,7 +199,55 @@ export function fakePeople(server: FakeServer) {
         return refuse('A club must keep at least one director.');
       }
       server.members[club] = list.filter((m) => m.id !== account);
-    })
+    }),
+    clubPilots: vi.fn(async (club: string): Promise<ClubPilotView[]> => {
+      const list = server.pilots[club] ?? refuse('Only a member of this club can do that.');
+      const mine = server.account?.id;
+      const sees = seesWho(club);
+      return list.map((p) => {
+        const { holder, ...rest } = p;
+        return {
+          ...rest,
+          taken: holder !== undefined,
+          mine: holder?.id === mine,
+          asked: p.asks.some((a) => a.id === mine),
+          asks: sees ? [...p.asks] : [],
+          ...(sees && holder ? { holder } : {})
+        };
+      });
+    }),
+    askFor: vi.fn(async (club: string, pilot: string) => {
+      const account = server.account ?? refuse('Sign in first.');
+      const target = pilotOf(club, pilot);
+      if (target.holder) return refuse('That pilot already belongs to an account.');
+      if (!target.asks.some((a) => a.id === account.id)) {
+        target.asks = [...target.asks, { id: account.id, name: account.name }];
+      }
+      sync();
+    }),
+    dropClaim: vi.fn(async (club: string, pilot: string) => {
+      const account = server.account ?? refuse('Sign in first.');
+      const target = pilotOf(club, pilot);
+      if (target.holder?.id === account.id) delete target.holder;
+      target.asks = target.asks.filter((a) => a.id !== account.id);
+      sync();
+    }),
+    giveTo: vi.fn(async (club: string, pilot: string, account: string) => {
+      const target = pilotOf(club, pilot);
+      target.holder = { id: account, name: nameOf(club, account) };
+      target.asks = [];
+      sync();
+    }),
+    freePilot: vi.fn(async (club: string, pilot: string) => {
+      delete pilotOf(club, pilot).holder;
+      sync();
+    }),
+    refuseAsk: vi.fn(async (club: string, pilot: string, account: string) => {
+      const target = pilotOf(club, pilot);
+      target.asks = target.asks.filter((a) => a.id !== account);
+      sync();
+    }),
+    results: vi.fn(async () => [...server.results])
   } satisfies PeopleApi;
   return api;
 }
