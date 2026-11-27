@@ -495,6 +495,89 @@ async fn the_directors_rules_decide_and_its_reason_reaches_the_pilot() {
 }
 
 #[tokio::test]
+async fn two_pilots_asking_for_one_seat_at_the_same_moment_never_both_get_it() {
+    let s = server().await;
+    let d = director();
+    let day = race_day(&s, &d).await;
+    let _stream = connected(&d).await;
+    let client = client(&d);
+    let ask_for =
+        |session: &str, route: &str, body: Value| as_member(&s, session, &day.event, route, body);
+
+    for round in 0..15 {
+        // Both ask for the same seat before the Director has looked at either.
+        let seat_no = 1 + (round % 3);
+        let body = json!({"heat": heat(1), "seat": seat(seat_no)});
+        let (first, second) = if round % 2 == 0 {
+            (&day.pia, &day.quin)
+        } else {
+            (&day.quin, &day.pia)
+        };
+        let a = ask_for(first, "take", body.clone());
+        let b = ask_for(second, "take", body);
+        let end = tokio::time::Instant::now() + Duration::from_secs(8);
+        while s.state.asks.waiting(&club()).len() < 2 {
+            assert!(tokio::time::Instant::now() < end, "both asks never arrived");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The Director answers everything that is waiting, in one go.
+        assert_eq!(answer_waiting(&d.registry, &client).await.unwrap(), 2);
+        let (a, b) = (a.await.unwrap(), b.await.unwrap());
+        let got: Vec<StatusCode> = vec![a.0, b.0];
+        assert_eq!(
+            got.iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
+            1,
+            "round {round}: exactly one of them gets the seat: {a:?} {b:?}"
+        );
+        assert_eq!(
+            got.iter()
+                .filter(|status| **status == StatusCode::CONFLICT)
+                .count(),
+            1,
+            "round {round}: and the other is told no: {a:?} {b:?}"
+        );
+        // The sheet has one pilot on that seat, and nobody anywhere else in the heat.
+        let row = spots(&d, &day.event).await[0].clone();
+        let taken: Vec<&str> = row.split(',').filter(|who| *who != "-").collect();
+        assert_eq!(taken.len(), 1, "round {round}: {row}");
+        assert!(taken[0] == "Ace" || taken[0] == "Bee", "{row}");
+        assert_ne!(
+            row.split(',').nth(seat_no as usize - 1).unwrap(),
+            "-",
+            "{row}"
+        );
+        // Nothing is left waiting on the server.
+        assert!(s.state.asks.waiting(&club()).is_empty());
+
+        // Whoever got it gives it up, ready for the next round. The other has nothing to
+        // leave, and is told so rather than taking anyone's spot away.
+        let leaving_a = ask_for(first, "leave", json!({"heat": heat(1)}));
+        let leaving_b = ask_for(second, "leave", json!({"heat": heat(1)}));
+        while s.state.asks.waiting(&club()).len() < 2 {
+            assert!(tokio::time::Instant::now() < end, "both asks never arrived");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        answer_waiting(&d.registry, &client).await.unwrap();
+        let left = [leaving_a.await.unwrap().0, leaving_b.await.unwrap().0];
+        assert_eq!(
+            left.iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
+            1,
+            "round {round}: {left:?}"
+        );
+        assert_eq!(spots(&d, &day.event).await[0], "-,-,-", "round {round}");
+    }
+    // What the Director wrote is what the server ends up with.
+    sync_all(&d.registry, &client, &mut Memory::default())
+        .await
+        .unwrap();
+    assert_eq!(spots_on_server(&s, &d, &day.event).await[0], "-,-,-");
+}
+
+#[tokio::test]
 async fn the_next_free_spot_and_leaving_work_the_same_way() {
     let s = server().await;
     let d = director();

@@ -988,6 +988,175 @@ async fn a_hidden_event_is_still_kept_up_to_date() {
     assert_eq!(list, json!([]), "still hidden from the list");
 }
 
+/// A small source of numbers that is the same every run for the same seed.
+struct Dice(u64);
+
+impl Dice {
+    fn roll(&mut self, sides: u64) -> u64 {
+        // xorshift64*: plenty for picking what to do next.
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) % sides
+    }
+}
+
+/// Whether the server says this event was removed there.
+fn removed_on_server(s: &Server, event: &str) -> bool {
+    s.state
+        .book
+        .event_note(&ClubId("club".into()), event)
+        .removed_at
+        .is_some()
+}
+
+/// Many rounds of whatever can happen to an event, in an order picked by `seed`: laps,
+/// a renamed pilot, the server losing its copy, someone removing or hiding the event on
+/// the server's page, the director sending it again. After each round the Director and
+/// the server must agree, with no step by hand that a real director would not take.
+async fn mixed_changes(seed: u64, rounds: usize) {
+    let s = server().await;
+    let d = director();
+    let names = ["Friday", "Saturday", "Sunday"];
+    let mut events = Vec::new();
+    for name in names {
+        events.push(event(&d, name).await);
+    }
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    let mut dice = Dice(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let club = ClubId("club".into());
+    let mut story = Vec::new();
+
+    for round in 0..rounds {
+        // One to three things happen between two looks.
+        for _ in 0..=dice.roll(3) {
+            let which = dice.roll(events.len() as u64) as usize;
+            let event = events[which].clone();
+            let what = dice.roll(10);
+            story.push(format!("round {round}: {} does {what}", names[which]));
+            match what {
+                // Racing goes on. The commonest thing by far.
+                0..=3 => passes(&d, &event, 1 + dice.roll(4) as usize).await,
+                // A pilot is renamed: the header changes and the log does not.
+                4 => {
+                    let header = gridfpv_server::link::header(&d.registry, &EventId(event.clone()))
+                        .await
+                        .unwrap();
+                    let pilot = header.pilots[0].id.0.clone();
+                    direct(
+                        &d,
+                        Method::PUT,
+                        &format!("/pilots/{pilot}"),
+                        json!({"callsign": format!("Ace {round}")}),
+                    )
+                    .await;
+                }
+                // The server loses its copy with nobody having removed it.
+                5 => {
+                    s.state
+                        .store
+                        .delete(&club, &EventId(event.clone()))
+                        .unwrap();
+                }
+                // Someone who runs the club removes it on the page, if it is there.
+                6 if s.held(&event).is_some() && s.header(&event).is_some() => {
+                    remove_on_the_page(&s, &event).await;
+                }
+                // The director says to send it again, removed or not.
+                7 => send_it_again(&d, &event).await,
+                // Hidden, or shown again.
+                8 if s.held(&event).is_some() => {
+                    on_the_page(
+                        &s,
+                        Method::PUT,
+                        &format!("/api/clubs/club/events/{event}/listing"),
+                        Some(json!({ "hidden": dice.roll(2) == 0 })),
+                    )
+                    .await;
+                }
+                // Nothing at all.
+                _ => {}
+            }
+        }
+
+        // The Director looks until nothing is left to do. A real one looks every second;
+        // a few looks is all it should ever need. One event in trouble is told on its
+        // own row and tried again, so a look itself never fails here.
+        let mut settled = false;
+        for _ in 0..4 {
+            memory.check_now();
+            sync_all(&d.registry, &client, &mut memory)
+                .await
+                .unwrap_or_else(|why| panic!("seed {seed}: a look failed: {why}\n{story:#?}"));
+            settled = events.iter().all(|event| {
+                matches!(
+                    status_of(&d, event).2,
+                    LinkEventState::Sent | LinkEventState::Removed
+                )
+            });
+            if settled {
+                break;
+            }
+        }
+        assert!(settled, "seed {seed}: never settled\n{story:#?}");
+
+        for (event, name) in events.iter().zip(names) {
+            let (len, sent, state) = status_of(&d, event);
+            let ours = log_of(&d, event);
+            assert_eq!(len, ours.len() as u64, "seed {seed}, {name}\n{story:#?}");
+            if removed_on_server(&s, event) {
+                // Removed stays removed until the director says otherwise.
+                assert_eq!(
+                    state,
+                    LinkEventState::Removed,
+                    "seed {seed}, {name}\n{story:#?}"
+                );
+                assert_eq!(sent, 0);
+                assert!(
+                    s.held(event).is_none(),
+                    "seed {seed}: {name} was put back\n{story:#?}"
+                );
+            } else {
+                assert_eq!(
+                    state,
+                    LinkEventState::Sent,
+                    "seed {seed}, {name}\n{story:#?}"
+                );
+                // Entry for entry what the Director has, in the same order.
+                assert_eq!(
+                    s.held(event).unwrap(),
+                    ours,
+                    "seed {seed}: {name} differs on the server\n{story:#?}"
+                );
+                assert_eq!(sent, len);
+                // And the header is the one the Director has now.
+                let header = gridfpv_server::link::header(&d.registry, &EventId(event.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    s.header(event).unwrap()["pilots"],
+                    serde_json::to_value(&header.pilots).unwrap(),
+                    "seed {seed}: {name}'s header is stale\n{story:#?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn whatever_happens_in_whatever_order_the_server_ends_up_agreeing_with_the_director() {
+    // A handful of orders on every run. `GRIDFPV_SOAK_SEEDS=500` tries many more by hand.
+    let seeds = std::env::var("GRIDFPV_SOAK_SEEDS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(6);
+    for seed in 1..=seeds {
+        mixed_changes(seed, 25).await;
+    }
+}
+
 #[tokio::test]
 async fn the_header_is_sent_again_when_a_name_in_it_changes() {
     let s = server().await;

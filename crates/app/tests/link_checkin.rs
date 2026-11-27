@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
 use gridfpv_app::director::build_app;
-use gridfpv_app::link::{Client, Memory, sync_all};
+use gridfpv_app::link::{Client, Memory, spawn, sync_all};
 use gridfpv_app::listen::answer_waiting;
 use gridfpv_server::events::{EventId, EventRegistry};
 use gridfpv_server::link::{LinkSettings, LinkTrust};
@@ -954,4 +954,111 @@ async fn the_qr_code_points_at_the_events_page_on_the_server_once_connected() {
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let svg = response.into_body().collect().await.unwrap().to_bytes();
     assert!(String::from_utf8_lossy(&svg).contains("<svg"));
+}
+
+// ── Left running ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn left_running_a_seat_taken_on_the_server_is_decided_and_shows_there_by_itself() {
+    let s = server().await;
+    let d = director();
+    let mut day = practice_day(&s, &d).await;
+    // The stream the tests above hold by hand is let go: the real task opens its own.
+    drop(day.stream.take());
+    let end = tokio::time::Instant::now() + Duration::from_secs(5);
+    while s.state.asks.listening(&club()) {
+        assert!(
+            tokio::time::Instant::now() < end,
+            "the server never noticed"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let task = spawn(d.registry.clone());
+    let end = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !s.state.asks.listening(&club()) {
+        assert!(
+            tokio::time::Instant::now() < end,
+            "the Director never listened"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Nothing here answers by hand. A wrong code first: it is refused by the Director.
+    let wrong = if day.code == "AAAAAA" {
+        "BBBBBB"
+    } else {
+        "AAAAAA"
+    };
+    let (status, answer) = take(&s, &day.pia, &day, 1, Some(wrong)).await.unwrap();
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED, "{answer}");
+    assert_eq!(holders_here(&d, &day.event).await, ["-", "-", "-"]);
+
+    let began = std::time::Instant::now();
+    let (status, answer) = take(&s, &day.pia, &day, 1, Some(&day.code)).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "it was heard at once, not on a slow poll: {:?}",
+        began.elapsed()
+    );
+    assert_eq!(holders_here(&d, &day.event).await[0], day.ace);
+
+    // The server's own copy shows the seat, pushed by the same task.
+    let end = tokio::time::Instant::now() + Duration::from_secs(10);
+    while holders_on_server(&s, &day.event).await[0] != day.ace {
+        assert!(
+            tokio::time::Instant::now() < end,
+            "the seat never showed on the server"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A lap flown at the race shows on the server too, as hers.
+    cross(&d, &day.event, 1, 100).await;
+    cross(&d, &day.event, 1, 112).await;
+    let end = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let request = Request::builder()
+            .uri(format!(
+                "/api/clubs/club/events/{}/public/event/state",
+                day.event
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let response = router(s.state.clone()).oneshot(request).await.unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let state: Value = serde_json::from_slice(&bytes).unwrap();
+        let stints = state["races"][0]["seats"][0]["stints"].as_array().unwrap();
+        if stints.len() == 1 && stints[0]["laps"].as_array().unwrap().len() == 1 {
+            assert_eq!(stints[0]["pilot"], json!(day.ace));
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < end,
+            "her lap never showed on the server: {stints:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // She drops it, and that shows as well.
+    let (status, answer) = as_member(
+        &s,
+        Some(&day.pia),
+        &day.event,
+        "drop",
+        json!({"race": RACE}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let end = tokio::time::Instant::now() + Duration::from_secs(10);
+    while holders_on_server(&s, &day.event).await[0] != "-" {
+        assert!(
+            tokio::time::Instant::now() < end,
+            "the drop never showed on the server"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    task.abort();
 }
