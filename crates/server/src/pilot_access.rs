@@ -1027,7 +1027,7 @@ pub struct RaceCodeView {
     /// What a pilot types on the server's page to show they are at the race.
     pub code: String,
     /// The event's page on the linked server, with the code in it: what the QR code
-    /// holds. Left out while no server is linked and connected.
+    /// holds. Left out when the event goes to no club, or its server has never answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub link: Option<String>,
@@ -1044,11 +1044,12 @@ pub fn here_link(server: &str, club: &str, event: &EventId, code: &str) -> Strin
 }
 
 fn race_code_view(registry: &EventRegistry, event: &EventId, code: String) -> RaceCodeView {
-    let link = registry.link().view();
-    let link = link
-        .club
-        .as_ref()
-        .map(|club| here_link(&link.url, &club.id, event, &code));
+    // The event's page is on the club the event goes to, once that server has said which
+    // club its token is for.
+    let link = registry.link().club_of(event).and_then(|saved| {
+        let club = saved.club.as_ref()?;
+        Some(here_link(&saved.url, &club.id, event, &code))
+    });
     RaceCodeView { code, link }
 }
 

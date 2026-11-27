@@ -668,6 +668,8 @@ impl EventRegistry {
         drop(removed);
         // Its pilots' sign-in codes go with it.
         reg.pilot_access.forget(id);
+        // And it goes to no club any more.
+        reg.link.forget_event(id);
 
         // If it was the active event, clear the pointer (and persist the cleared state) so a
         // reload/restart lands on the picker rather than dangling at a now-gone event.

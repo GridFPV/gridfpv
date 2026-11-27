@@ -166,9 +166,15 @@ pub fn router(registry: EventRegistry) -> Router {
         .route("/network/address", put(crate::network::put_address))
         .route("/network/{door}", put(crate::network::put_door))
         // The link to a remote server (§13).
+        .route("/server-link", get(crate::link::get_link))
+        .route("/server-link/clubs", post(crate::link::post_club))
         .route(
-            "/server-link",
-            get(crate::link::get_link).put(crate::link::put_link),
+            "/server-link/clubs/{club}",
+            put(crate::link::put_club).delete(crate::link::delete_club),
+        )
+        .route(
+            "/server-link/events/{id}/club",
+            put(crate::link::put_event_club),
         )
         .route(
             "/server-link/events/{id}/replace",

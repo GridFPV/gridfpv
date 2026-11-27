@@ -71,7 +71,9 @@ import {
   deleteDataImport,
   getNetwork,
   getServerLink,
-  putServerLink,
+  saveLinkClub,
+  removeLinkClub,
+  setEventLinkClub,
   replaceOnServer,
   lookAtServerCertificate,
   getServerPeople,
@@ -142,7 +144,7 @@ import type {
   DoorRequest,
   NetworkView,
   LinkPeople,
-  LinkSettings,
+  ClubSettings,
   LinkView,
   OverlayLook,
   OverlayPlacement,
@@ -277,7 +279,9 @@ const realApi = {
   deleteDataImport,
   getNetwork,
   getServerLink,
-  putServerLink,
+  saveLinkClub,
+  removeLinkClub,
+  setEventLinkClub,
   replaceOnServer,
   lookAtServerCertificate,
   getServerPeople,
@@ -746,14 +750,31 @@ export class Session {
     return this.#api.signOutPilot(this.baseUrl);
   }
 
-  /** The link to a remote server: its settings and how the pushing stands. */
+  /** The clubs to send to, each event's club, and how the sending stands. */
   getServerLink(): Promise<LinkView> {
     return this.#api.getServerLink(this.baseUrl, { token: this.#token });
   }
 
-  /** Set the link to a remote server. `undefined` on a cancelled prompt. */
-  putServerLink(settings: LinkSettings): Promise<LinkView | undefined> {
-    return this.#privilegedWrite((token) => this.#api.putServerLink(this.baseUrl, settings, token));
+  /**
+   * Save a club to send to: a new one, or a change to the one with `id`. `undefined` on a
+   * cancelled prompt.
+   */
+  saveLinkClub(id: string | undefined, settings: ClubSettings): Promise<LinkView | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.saveLinkClub(this.baseUrl, id, settings, token)
+    );
+  }
+
+  /** Forget a saved club. Its events go to none. */
+  removeLinkClub(id: string): Promise<LinkView | undefined> {
+    return this.#privilegedWrite((token) => this.#api.removeLinkClub(this.baseUrl, id, token));
+  }
+
+  /** Say which saved club an event goes to, or `null` for none. */
+  setEventLinkClub(eventId: string, club: string | null): Promise<LinkView | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.setEventLinkClub(this.baseUrl, eventId, club, token)
+    );
   }
 
   /**

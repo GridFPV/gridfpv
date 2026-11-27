@@ -18,6 +18,7 @@ import type { Browser, Page } from '@playwright/test';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
+import { linkTo, unlink } from './link.js';
 import { openPage } from './nav.js';
 import { expect, test } from './observability.js';
 
@@ -46,7 +47,7 @@ test.afterEach(async ({ director }) => {
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
-  await send('PUT', '/server-link', { url: '', token: '', on: false });
+  await unlink(director.baseUrl);
   await send('PUT', '/active-event', { id: director.event });
   for (const id of made.events.splice(0)) await send('DELETE', `/events/${id}`);
   for (const id of made.pilots.splice(0)) await send('DELETE', `/pilots/${id}`);
@@ -138,7 +139,7 @@ test('a pilot takes a seat from the server with the race code shown at the race'
   await expect(pia.getByTestId('server-who')).toHaveText('Pia');
 
   // ── The director links the server and ties Dash to Pia. ───────────────────
-  await call('/server-link', { url: server.baseUrl, token: server.token, on: true }, 'PUT');
+  await linkTo(director.baseUrl, server.baseUrl, server.token, event);
   const people = await call<{ members: { id: string; name: string }[] }>(
     '/server-link/people',
     undefined,

@@ -17,6 +17,7 @@ import type { Browser, Page } from '@playwright/test';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
+import { linkOnPage, unlink } from './link.js';
 import { gotoPage } from './nav.js';
 import { expect, test } from './observability.js';
 
@@ -46,7 +47,7 @@ test.afterEach(async ({ director }) => {
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
-  await send('PUT', '/server-link', { url: '', token: '', on: false });
+  await unlink(director.baseUrl);
   await send('PUT', '/active-event', { id: director.event });
   for (const id of made.events.splice(0)) await send('DELETE', `/events/${id}`);
   const left = (await (await send('GET', '/pilots')).json()) as { id: string; callsign: string }[];
@@ -175,10 +176,7 @@ test('a pilot tied to an account on the Pilots page sees where they placed', asy
 
   // ── The director links the server, and the event goes up. ─────────────────
   await gotoPage(page, 'Server');
-  await page.getByLabel('Address').fill(server.baseUrl);
-  await page.getByLabel('Link token').fill(server.token);
-  await page.getByRole('button', { name: 'Save' }).click();
-  await page.getByRole('switch', { name: 'Send events to the server' }).click();
+  await linkOnPage(page, server.baseUrl, server.token, 'Claims Cup');
   await expect(page.getByTestId('link-event').filter({ hasText: 'Claims Cup' })).toContainText(
     'On the server',
     { timeout: 20_000 }

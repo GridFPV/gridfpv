@@ -15,7 +15,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use gridfpv_app::director::build_app;
 use gridfpv_app::link::{Client, Memory, sync_all};
 use gridfpv_server::events::{CreateEventRequest, EventId, EventRegistry};
-use gridfpv_server::link::{LinkSettings, LinkTrust};
+use gridfpv_server::link::{ClubSettings, LinkTrust};
 use gridfpv_server::link_cert::{fingerprint, look};
 use gridfpv_serverd::app::{AppState, router};
 use gridfpv_serverd::book::ClubId;
@@ -170,18 +170,22 @@ async fn the_director_is_shown_the_certificate_the_server_really_has_and_accepti
     let meta = registry
         .create(&CreateEventRequest::named("Friday"))
         .unwrap();
-    registry
-        .link()
-        .save(LinkSettings {
-            url: url.clone(),
-            token: Some(token),
-            on: true,
-            trust: LinkTrust::ExtraAuthorities {
-                pem: found.pem.clone(),
+    let desk = registry.link();
+    let club = desk
+        .save_club(
+            None,
+            ClubSettings {
+                name: String::new(),
+                url: url.clone(),
+                token: Some(token),
+                trust: LinkTrust::ExtraAuthorities {
+                    pem: found.pem.clone(),
+                },
             },
-        })
+        )
         .unwrap();
-    let client = Client::new(&registry.link().stored()).unwrap();
+    desk.set_event_club(&meta.id, Some(&club)).unwrap();
+    let client = Client::new(&desk.club_of(&meta.id).unwrap()).unwrap();
     assert_eq!(client.hello().await.unwrap().club.name, "My club");
     sync_all(&registry, &client, &mut Memory::default())
         .await
@@ -411,7 +415,7 @@ async fn the_director_asks_grid_to_look_and_a_visitor_cannot() {
             .starts_with("-----BEGIN CERTIFICATE-----")
     );
     // Looking changes nothing that is set.
-    assert_eq!(registry.link().view().url, "");
+    assert!(registry.link().stored().clubs.is_empty());
 
     // What cannot be looked at is refused in words, before anything is connected to.
     let before = seen.lock().unwrap().len();

@@ -292,7 +292,7 @@ touch another club. A club always keeps at least one director.
 
 ### 6. Tie pilots to accounts
 
-A club's pilots show on its page once a director has sent an event, or their pilot list.
+A club's pilots show on its page once a director has sent an event they fly in.
 The account that **holds** a pilot gets the results flown under that pilot's callsign.
 There are three ways an account comes to hold one:
 
@@ -345,6 +345,9 @@ club they joined. A visitor who is not signed in sees every club.
 
 One club's director has no say in another club, and one club's link token sends only into
 that club.
+
+**A director of two clubs** saves both in Grid, each with its own link token, and picks a
+club for each event. Grid talks to one club at a time: the club of the event that is open.
 
 The same on the command line:
 
@@ -403,7 +406,7 @@ never changes an event. It only adds what a director sends.
 
 If you use a certificate from your own certificate authority, or one the server made for
 itself, Grid will not trust it by itself. Your directors tick **The server uses its own
-certificate** on the Server page. Then:
+certificate** when they save your club on Grid's Server page. Then:
 
 - **A certificate the server made for itself:** the director presses **Look at the
   server's certificate**. Grid shows its fingerprint. Read them yours, and they accept it

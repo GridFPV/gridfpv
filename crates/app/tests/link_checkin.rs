@@ -17,7 +17,7 @@ use gridfpv_app::director::build_app;
 use gridfpv_app::link::{Client, Memory, spawn, sync_all};
 use gridfpv_app::listen::answer_waiting;
 use gridfpv_server::events::{EventId, EventRegistry};
-use gridfpv_server::link::{LinkSettings, LinkTrust};
+use gridfpv_server::link::{ClubSettings, LinkTrust};
 use gridfpv_serverd::accounts::{AccountId, InviteKind, NewInvite, NewSignIn, Role};
 use gridfpv_serverd::app::{AppState, router};
 use gridfpv_serverd::book::ClubId;
@@ -178,20 +178,55 @@ async fn pilot(d: &Director, callsign: &str) -> String {
         .to_owned()
 }
 
+/// Save the server as the Director's one club. With `on`, every event the Director has
+/// now goes to it. Without, none does.
+fn link_to(registry: &EventRegistry, url: &str, token: Option<&str>, on: bool, trust: LinkTrust) {
+    let desk = registry.link();
+    let settings = ClubSettings {
+        name: String::new(),
+        url: url.to_owned(),
+        token: token.map(str::to_owned),
+        trust,
+    };
+    let saved = desk.stored().clubs.first().map(|club| club.id.clone());
+    let id = desk.save_club(saved.as_deref(), settings).unwrap();
+    for meta in registry.list() {
+        desk.set_event_club(&meta.id, on.then_some(id.as_str()))
+            .unwrap();
+    }
+}
+
+/// A client for the saved club, as the pusher would make one. An event made since the
+/// club was saved goes to it too: these tests send every event.
+fn client_of(registry: &EventRegistry) -> Client {
+    let desk = registry.link();
+    let club = desk
+        .stored()
+        .clubs
+        .first()
+        .cloned()
+        .expect("a club is saved");
+    for meta in registry.list() {
+        if desk.club_id_of(&meta.id).is_none() {
+            desk.set_event_club(&meta.id, Some(&club.id)).unwrap();
+        }
+    }
+    desk.begin(&club);
+    Client::new(&club).unwrap()
+}
+
 fn link(d: &Director, s: &Server) {
-    d.registry
-        .link()
-        .save(LinkSettings {
-            url: s.url(),
-            token: Some(s.token.clone()),
-            on: true,
-            trust: LinkTrust::System,
-        })
-        .unwrap();
+    link_to(
+        &d.registry,
+        &s.url(),
+        Some(&s.token),
+        true,
+        LinkTrust::System,
+    );
 }
 
 fn client(d: &Director) -> Client {
-    Client::new(&d.registry.link().stored()).unwrap()
+    client_of(&d.registry)
 }
 
 async fn set_account(d: &Director, pilot: &str, account: Value) -> (StatusCode, Value) {

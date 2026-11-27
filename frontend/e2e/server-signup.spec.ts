@@ -13,6 +13,7 @@ import type { Browser, Page } from '@playwright/test';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
+import { linkTo, sendEventTo, unlink } from './link.js';
 import { expect, test } from './observability.js';
 
 const dist = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'rd-console', 'dist');
@@ -40,7 +41,7 @@ test.afterEach(async ({ director }) => {
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
-  await send('PUT', '/server-link', { url: '', token: '', on: false });
+  await unlink(director.baseUrl);
   await send('PUT', '/active-event', { id: director.event });
   for (const id of made.events.splice(0)) await send('DELETE', `/events/${id}`);
   for (const id of made.pilots.splice(0)) await send('DELETE', `/pilots/${id}`);
@@ -127,7 +128,7 @@ test('a pilot signs up on the server, and the Director decides', async ({ browse
   await expect(pia.getByTestId('server-who')).toHaveText('Pia');
 
   // ── The director links the server and ties Dash to Pia. ───────────────────
-  await call('/server-link', { url: server.baseUrl, token: server.token, on: true }, 'PUT');
+  await linkTo(director.baseUrl, server.baseUrl, server.token, event);
   const people = await call<{ members: { id: string; name: string }[] }>(
     '/server-link/people',
     undefined,
@@ -213,7 +214,7 @@ test('a pilot signs up on the server, and the Director decides', async ({ browse
   expect(await firstHeat()).toEqual([null, null]);
 
   // ── The race computer goes away. She is told so, at once. ─────────────────
-  await call('/server-link', { url: server.baseUrl, on: false }, 'PUT');
+  await sendEventTo(director.baseUrl, event, null);
   await expect
     .poll(
       async () => {

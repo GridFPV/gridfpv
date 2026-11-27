@@ -10,6 +10,6 @@ export type RaceCodeView = {
 code: string, 
 /**
  * The event's page on the linked server, with the code in it: what the QR code
- * holds. Left out while no server is linked and connected.
+ * holds. Left out when the event goes to no club, or its server has never answered.
  */
 link?: string, };

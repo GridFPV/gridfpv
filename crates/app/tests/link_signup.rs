@@ -16,7 +16,7 @@ use gridfpv_app::director::build_app;
 use gridfpv_app::link::{Client, Memory, spawn, sync_all};
 use gridfpv_app::listen::answer_waiting;
 use gridfpv_server::events::EventRegistry;
-use gridfpv_server::link::{LinkSettings, LinkTrust};
+use gridfpv_server::link::{ClubSettings, LinkTrust};
 use gridfpv_serverd::accounts::{AccountId, InviteKind, NewInvite, NewSignIn, Role};
 use gridfpv_serverd::app::{AppState, router};
 use gridfpv_serverd::book::ClubId;
@@ -183,20 +183,55 @@ async fn pilots_of(d: &Director) -> Vec<Value> {
     list.as_array().unwrap().clone()
 }
 
+/// Save the server as the Director's one club. With `on`, every event the Director has
+/// now goes to it. Without, none does.
+fn link_to(registry: &EventRegistry, url: &str, token: Option<&str>, on: bool, trust: LinkTrust) {
+    let desk = registry.link();
+    let settings = ClubSettings {
+        name: String::new(),
+        url: url.to_owned(),
+        token: token.map(str::to_owned),
+        trust,
+    };
+    let saved = desk.stored().clubs.first().map(|club| club.id.clone());
+    let id = desk.save_club(saved.as_deref(), settings).unwrap();
+    for meta in registry.list() {
+        desk.set_event_club(&meta.id, on.then_some(id.as_str()))
+            .unwrap();
+    }
+}
+
+/// A client for the saved club, as the pusher would make one. An event made since the
+/// club was saved goes to it too: these tests send every event.
+fn client_of(registry: &EventRegistry) -> Client {
+    let desk = registry.link();
+    let club = desk
+        .stored()
+        .clubs
+        .first()
+        .cloned()
+        .expect("a club is saved");
+    for meta in registry.list() {
+        if desk.club_id_of(&meta.id).is_none() {
+            desk.set_event_club(&meta.id, Some(&club.id)).unwrap();
+        }
+    }
+    desk.begin(&club);
+    Client::new(&club).unwrap()
+}
+
 fn link(d: &Director, s: &Server) {
-    d.registry
-        .link()
-        .save(LinkSettings {
-            url: s.url(),
-            token: Some(s.token.clone()),
-            on: true,
-            trust: LinkTrust::System,
-        })
-        .unwrap();
+    link_to(
+        &d.registry,
+        &s.url(),
+        Some(&s.token),
+        true,
+        LinkTrust::System,
+    );
 }
 
 fn client(d: &Director) -> Client {
-    Client::new(&d.registry.link().stored()).unwrap()
+    client_of(&d.registry)
 }
 
 async fn until(what: &str, seconds: u64, mut check: impl FnMut() -> bool) {
@@ -676,6 +711,7 @@ async fn an_ask_the_director_cannot_stand_behind_is_refused_or_left_alone() {
 
     // An event this Director does not have is another Director's: it is not answered.
     let asks = s.state.asks.clone();
+    let take_again = take.clone();
     let elsewhere = tokio::spawn(async move {
         asks.ask(
             &club(),
@@ -698,6 +734,29 @@ async fn an_ask_the_director_cannot_stand_behind_is_refused_or_left_alone() {
         "it is left for whoever has it"
     );
     assert!(elsewhere.await.unwrap().is_err());
+
+    // The director stops sending the event to this club. An ask about it that comes in
+    // on a stream still open is not this Director's to answer any more.
+    link_to(&d.registry, &s.url(), None, false, LinkTrust::System);
+    let asks = s.state.asks.clone();
+    let not_ours = tokio::spawn(async move {
+        asks.ask(
+            &club(),
+            event,
+            gridfpv_events::PilotId("ghost-9".into()),
+            take_again,
+            None,
+            Duration::from_millis(400),
+        )
+        .await
+    });
+    until("the ask is waiting", 5, || {
+        !s.state.asks.waiting(&club()).is_empty()
+    })
+    .await;
+    assert_eq!(answer_waiting(&d.registry, &client).await.unwrap(), 0);
+    assert!(not_ours.await.unwrap().is_err());
+    assert_eq!(spots(&d, &day.event).await[0], "-,-,-");
 }
 
 // ── The task, left to run ───────────────────────────────────────────────────
@@ -771,16 +830,8 @@ async fn left_running_a_sign_up_on_the_server_lands_and_shows_there_by_itself() 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(spots(&d, &day.event).await[0], "Ace,Bee,-");
 
-    // The director switches the link off. The server soon knows nobody is listening.
-    d.registry
-        .link()
-        .save(LinkSettings {
-            url: s.url(),
-            token: None,
-            on: false,
-            trust: LinkTrust::System,
-        })
-        .unwrap();
+    // The director sends the event to no club any more. The server soon knows nobody is listening.
+    link_to(&d.registry, &s.url(), None, false, LinkTrust::System);
     until("the server sees the Director has gone", 20, || {
         !s.state.asks.listening(&club())
     })
@@ -843,15 +894,13 @@ async fn left_running_a_stream_that_drops_is_opened_again() {
     let day = race_day(&s, &d).await;
     // From here the Director reaches the server over a wire that can be cut.
     let wire = Wire::to(s.addr).await;
-    d.registry
-        .link()
-        .save(LinkSettings {
-            url: format!("http://{}", wire.addr),
-            token: Some(s.token.clone()),
-            on: true,
-            trust: LinkTrust::System,
-        })
-        .unwrap();
+    link_to(
+        &d.registry,
+        &format!("http://{}", wire.addr),
+        Some(&s.token),
+        true,
+        LinkTrust::System,
+    );
     let task = spawn(d.registry.clone());
     until("the Director is listening", 10, || {
         s.state.asks.listening(&club())

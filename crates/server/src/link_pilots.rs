@@ -77,16 +77,18 @@ fn pilot_error(error: PilotError) -> ProtocolError {
     ProtocolError::new(code, error.to_string())
 }
 
-/// A client for the linked server, or why there is none to ask.
+/// A client for the club the open event goes to, or why there is none to ask.
 fn client(registry: &EventRegistry) -> Result<Client, ProtocolError> {
-    let stored = registry.link().stored();
-    if !stored.ready() {
-        return Err(ProtocolError::new(
-            ErrorCode::Refused,
-            "No server is linked. Set one up, and switch it on, on the Server page.",
-        ));
-    }
-    Ok(Client::new(&stored)?)
+    let club = registry
+        .active()
+        .and_then(|event| registry.link().club_of(&event.id))
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::Refused,
+                "The open event is not sent to a server. Pick a club for it on the Server page.",
+            )
+        })?;
+    Ok(Client::new(&club)?)
 }
 
 /// A pilot as the server is told of it: what a visitor may see, and no more.

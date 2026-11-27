@@ -1,32 +1,37 @@
 <script lang="ts">
   /**
-   * ServerPage — sending events to a remote server (docs/primitives.md §13).
+   * ServerPage — sending events to clubs on Grid servers (docs/primitives.md §13).
    *
-   * One card sets the link: the server's address, the link token and a switch. Under it is
-   * every event and how much of it the server holds. An event the server holds a
-   * different copy of is never overwritten on its own: the director says so here.
+   * The director keeps a list of clubs: each is a server's address and a link token for
+   * one club there. An event goes to one club, or to none. Grid connects only to the club
+   * of the open event, and says here how that is going.
    *
-   * The link token is typed in and never shown back. The Director only says one is set.
+   * An event the server holds a different copy of is never overwritten on its own: the
+   * director says so here. A link token is typed in and never shown back.
    */
-  import { Badge, Banner, Button, Card, Dialog, Input } from '@gridfpv/components';
-  import type { CertificateLook, LinkEvent, LinkView } from '@gridfpv/types';
+  import { Badge, Banner, Button, Card, Dialog, Input, Select } from '@gridfpv/components';
+  import type { CertificateLook, LinkClub, LinkEvent, LinkView } from '@gridfpv/types';
   import Page from '../Page.svelte';
   import {
     certificateVerdict,
     changed,
+    clubName,
     eventLabel,
-    eventProblem,
+    eventNote,
     eventTone,
+    eventsOf,
     fingerprintRows,
     formOf,
     formProblem,
     linkLabel,
+    linkLine,
     linkProblem,
     linkTone,
+    openEvent,
     refreshEvery,
     trustOf,
     settingsOf,
-    type LinkForm
+    type ClubForm
   } from '../lib/serverLink.js';
   import type { Session } from '../lib/session.svelte.js';
 
@@ -35,30 +40,36 @@
   }: {
     session: Pick<
       Session,
-      'getServerLink' | 'putServerLink' | 'replaceOnServer' | 'lookAtServerCertificate'
+      | 'getServerLink'
+      | 'saveLinkClub'
+      | 'removeLinkClub'
+      | 'setEventLinkClub'
+      | 'replaceOnServer'
+      | 'lookAtServerCertificate'
     >;
   } = $props();
 
   let view = $state<LinkView | undefined>(undefined);
-  let form = $state<LinkForm | undefined>(undefined);
   let loadError = $state<string | undefined>(undefined);
   let error = $state<string | undefined>(undefined);
   let busy = $state(false);
   /** The event whose copy on the server the director is about to replace. */
   let replacing = $state<LinkEvent | undefined>(undefined);
+  /** The saved club the director is about to remove. */
+  let removing = $state<LinkClub | undefined>(undefined);
+
+  /** The club form, when it is open: for the saved club with `id`, or a new one. */
+  let editing = $state<{ id: string | undefined; form: ClubForm } | undefined>(undefined);
+  /** The saved club the open form is for. Nothing for a new club. */
+  const edited = $derived(
+    editing && view ? view.clubs.find((club) => club.id === editing?.id) : undefined
+  );
 
   const say = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-  /** Take what the Director says. The form is left alone while the director is in it. */
-  function take(next: LinkView, reset: boolean) {
-    const untouched = form === undefined || view === undefined || !changed(form, view);
-    view = next;
-    if (reset || untouched) form = { ...formOf(next), on: next.on };
-  }
-
   async function load() {
     try {
-      take(await session.getServerLink(), false);
+      view = await session.getServerLink();
       loadError = undefined;
     } catch (err) {
       loadError = say(err);
@@ -91,7 +102,7 @@
     try {
       const next = await what();
       if (!next) return false;
-      take(next, true);
+      view = next;
       schedule();
       return true;
     } catch (err) {
@@ -102,14 +113,41 @@
     }
   }
 
-  const problem = $derived(form && view ? formProblem(form, view) : undefined);
-  const dirty = $derived(form !== undefined && view !== undefined && changed(form, view));
+  // ── The list of clubs ───────────────────────────────────────────────────────
+  const problem = $derived(editing ? formProblem(editing.form, edited) : undefined);
+  const dirty = $derived(editing !== undefined && changed(editing.form, edited));
+
+  function edit(club: LinkClub | undefined) {
+    error = undefined;
+    looked = undefined;
+    lookError = undefined;
+    editing = { id: club?.id, form: formOf(club) };
+  }
 
   async function save(e: Event) {
     e.preventDefault();
-    if (!form || problem) return;
-    const sending = form;
-    await change(() => session.putServerLink(settingsOf(sending)));
+    if (!editing || problem) return;
+    const { id, form } = editing;
+    if (await change(() => session.saveLinkClub(id, settingsOf(form)))) editing = undefined;
+  }
+
+  async function remove() {
+    const target = removing;
+    if (!target) return;
+    if (await change(() => session.removeLinkClub(target.id))) {
+      removing = undefined;
+      if (editing?.id === target.id) editing = undefined;
+    }
+  }
+
+  // ── Which club an event goes to ─────────────────────────────────────────────
+  async function send(event: LinkEvent, e: Event) {
+    const select = e.currentTarget as HTMLSelectElement;
+    const club = select.value === '' ? null : select.value;
+    // A refusal leaves the event where it was, and the box says so again.
+    if (!(await change(() => session.setEventLinkClub(event.id, club)))) {
+      select.value = event.club ?? '';
+    }
   }
 
   // ── The server's own certificate (§13.5) ────────────────────────────────────
@@ -120,13 +158,13 @@
   const verdict = $derived(looked ? certificateVerdict(looked) : undefined);
 
   async function lookAt() {
-    if (!form || looking) return;
+    if (!editing || looking) return;
     looking = true;
     lookError = undefined;
     try {
       const found = await session.lookAtServerCertificate({
-        url: settingsOf(form).url,
-        trust: trustOf(form)
+        url: settingsOf(editing.form).url,
+        trust: trustOf(editing.form)
       });
       if (found) looked = found;
     } catch (err) {
@@ -136,28 +174,16 @@
     }
   }
 
-  /** The director accepts the certificate they were shown. It is kept with the link. */
-  async function accept() {
+  /**
+   * The director accepts the certificate they were shown. It goes in the form, to be kept
+   * with the club when the form is saved.
+   */
+  function accept() {
     const found = looked;
-    if (!form || !found) return;
-    const sending = { ...form, extra: true, pem: found.pem.trim() };
-    if (await change(() => session.putServerLink(settingsOf(sending)))) looked = undefined;
-  }
-
-  /** The switch saves at once, with whatever else is in the form. */
-  async function flip(e: Event) {
-    if (!form || !view) return;
-    const box = e.currentTarget as HTMLInputElement;
-    const next = { ...form, on: box.checked };
-    const trouble = formProblem(next, view);
-    if (trouble) {
-      error = trouble;
-      box.checked = form.on;
-      return;
-    }
-    if (!(await change(() => session.putServerLink(settingsOf(next))))) {
-      box.checked = view.on;
-    }
+    if (!editing || !found) return;
+    editing.form.extra = true;
+    editing.form.pem = found.pem.trim();
+    looked = undefined;
   }
 
   async function replace() {
@@ -167,128 +193,208 @@
   }
 </script>
 
-<Page title="Server" help="server" lede="Send your events to a Grid server.">
+<Page title="Server" help="server" lede="Send your events to your club on a Grid server.">
   {#if loadError}
     <Banner tone="danger" title="Grid could not read its server setting.">{loadError}</Banner>
   {/if}
-  {#if view && form}
+  {#if view}
+    {@const open = openEvent(view)}
     <Card elevation="sm">
-      <!-- A refusal is about what was in the form then. Typing again clears it. -->
-      <form
-        class="link"
-        onsubmit={save}
-        oninput={() => (error = undefined)}
-        aria-label="Server"
-        data-testid="server-link"
-      >
+      <section class="link" aria-label="The open event" data-testid="server-link">
         <header>
           <div class="title">
-            <h2>Remote server</h2>
+            <h2>{open ? open.name : 'No event is open'}</h2>
           </div>
           <Badge tone={linkTone(view.state)}>
             <span data-testid="link-state">{linkLabel(view)}</span>
           </Badge>
-          <label class="switch">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label="Send events to the server"
-              checked={view.on}
-              disabled={busy}
-              onchange={flip}
-            />
-            <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-          </label>
         </header>
-
-        {#if error}<Banner tone="danger">{error}</Banner>{/if}
+        <p class="muted" data-testid="link-line">{linkLine(view)}</p>
         {#if linkProblem(view.state)}
           <Banner tone="warn"
             ><span data-testid="link-problem">{linkProblem(view.state)}</span></Banner
           >
         {/if}
+      </section>
+    </Card>
 
-        <div class="fields">
-          <label for="server-url">Address</label>
-          <Input
-            id="server-url"
-            type="url"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="https://grid.example.org"
-            bind:value={form.url}
-            disabled={busy}
-          />
-          <label for="server-token">Link token</label>
-          <Input
-            id="server-token"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder={view.has_token ? 'Set. Type a new one to change it' : 'gfs_…'}
-            bind:value={form.token}
-            disabled={busy}
-          />
-        </div>
-
-        <label class="extra">
-          <input type="checkbox" bind:checked={form.extra} disabled={busy} />
-          The server uses its own certificate
-        </label>
-        {#if form.extra}
-          <p class="muted">
-            Let Grid look at the certificate the server shows, and accept it. Or paste the
-            certificate, or its certificate authority, in the box.
-          </p>
-          <div>
-            <Button size="sm" disabled={busy || looking || form.url.trim() === ''} onclick={lookAt}
-              >{looking ? 'Looking…' : "Look at the server's certificate"}</Button
-            >
+    <Card elevation="sm">
+      <section class="clubs" aria-label="Clubs">
+        <header>
+          <div class="title">
+            <h2>Clubs</h2>
           </div>
-          {#if lookError}
-            <p class="error" role="alert" data-testid="certificate-problem">{lookError}</p>
+          {#if !editing}
+            <Button size="sm" disabled={busy} onclick={() => edit(undefined)}>Add a club</Button>
           {/if}
-          <textarea
-            aria-label="The server's certificate, or its certificate authority"
-            rows="6"
-            spellcheck="false"
-            placeholder="-----BEGIN CERTIFICATE-----"
-            bind:value={form.pem}
-            disabled={busy}
-          ></textarea>
+        </header>
+        <p class="muted">
+          A club here is a server's address and a link token for your club on it. Save each club you
+          run events for.
+        </p>
+        {#if error && !editing && !removing && !replacing}
+          <Banner tone="danger">{error}</Banner>
+        {/if}
+        {#if view.clubs.length === 0}
+          {#if !editing}<p class="muted" data-testid="no-clubs">No clubs saved yet.</p>{/if}
+        {:else}
+          <ul aria-label="Saved clubs">
+            {#each view.clubs as club (club.id)}
+              <li data-testid="link-club">
+                <span class="name">{clubName(club)}</span>
+                <span class="muted">{club.url}</span>
+                {#if view.club === club.id && view.state === 'Connected'}
+                  <Badge tone="success">Connected</Badge>
+                {/if}
+                <span class="grow"></span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label={`Change ${clubName(club)}`}
+                  onclick={() => edit(club)}>Change…</Button
+                >
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label={`Remove ${clubName(club)}`}
+                  onclick={() => {
+                    error = undefined;
+                    removing = club;
+                  }}>Remove…</Button
+                >
+              </li>
+            {/each}
+          </ul>
         {/if}
 
-        {#if problem && dirty}<p class="error" role="alert">{problem}</p>{/if}
-        {#if dirty}
-          <div class="actions">
-            <Button
-              variant="primary"
-              size="sm"
-              type="submit"
-              disabled={busy || problem !== undefined}>Save</Button
-            >
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={busy}
-              onclick={() => view && (form = formOf(view))}>Cancel</Button
-            >
-          </div>
+        {#if editing}
+          <!-- A refusal is about what was in the form then. Typing again clears it. -->
+          <form
+            class="club-form"
+            onsubmit={save}
+            oninput={() => (error = undefined)}
+            aria-label={edited ? `Change ${clubName(edited)}` : 'Add a club'}
+            data-testid="club-form"
+          >
+            <h3>{edited ? `Change ${clubName(edited)}` : 'Add a club'}</h3>
+            {#if error}<Banner tone="danger">{error}</Banner>{/if}
+            <div class="fields">
+              <label for="server-url">Address</label>
+              <Input
+                id="server-url"
+                type="url"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="https://grid.example.org"
+                bind:value={editing.form.url}
+                disabled={busy}
+              />
+              <label for="server-token">Link token</label>
+              <Input
+                id="server-token"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder={edited ? 'Set. Type a new one to change it' : 'gfs_…'}
+                bind:value={editing.form.token}
+                disabled={busy}
+              />
+              <label for="server-name">Name</label>
+              <Input
+                id="server-name"
+                autocomplete="off"
+                placeholder={edited?.club?.name ??
+                  "Your own name for it. Leave empty to use the club's"}
+                bind:value={editing.form.name}
+                disabled={busy}
+              />
+            </div>
+
+            <label class="extra">
+              <input type="checkbox" bind:checked={editing.form.extra} disabled={busy} />
+              The server uses its own certificate
+            </label>
+            {#if editing.form.extra}
+              <p class="muted">
+                Let Grid look at the certificate the server shows, and accept it. Or paste the
+                certificate, or its certificate authority, in the box.
+              </p>
+              <div>
+                <Button
+                  size="sm"
+                  disabled={busy || looking || editing.form.url.trim() === ''}
+                  onclick={lookAt}
+                  >{looking ? 'Looking…' : "Look at the server's certificate"}</Button
+                >
+              </div>
+              {#if lookError}
+                <p class="error" role="alert" data-testid="certificate-problem">{lookError}</p>
+              {/if}
+              <textarea
+                aria-label="The server's certificate, or its certificate authority"
+                rows="6"
+                spellcheck="false"
+                placeholder="-----BEGIN CERTIFICATE-----"
+                bind:value={editing.form.pem}
+                disabled={busy}
+              ></textarea>
+            {/if}
+
+            {#if problem && dirty && (editing.form.url.trim() !== '' || editing.form.token.trim() !== '')}
+              <p class="error" role="alert">{problem}</p>
+            {/if}
+            <div class="actions">
+              <Button
+                variant="primary"
+                size="sm"
+                type="submit"
+                disabled={busy || !dirty || problem !== undefined}>Save</Button
+              >
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onclick={() => (editing = undefined)}>Cancel</Button
+              >
+            </div>
+          </form>
         {/if}
-      </form>
+      </section>
     </Card>
 
     {#if view.events.length > 0}
       <Card elevation="sm">
         <div class="events">
           <h2>Events</h2>
-          <ul aria-label="Events and how much of each is on the server">
+          <p class="muted">
+            Pick the club each event is sent to. A new event is not sent until you pick one.
+          </p>
+          <ul aria-label="Events, where each is sent, and how much of each is on the server">
             {#each view.events as event (event.id)}
               <li data-testid="link-event">
                 <span class="name">{event.name}</span>
-                <Badge tone={eventTone(event)}>{eventLabel(event)}</Badge>
-                {#if eventProblem(event)}
-                  <span class="muted">{eventProblem(event)}</span>
+                {#if event.id === view.open}<Badge tone="info">Open</Badge>{/if}
+                <span class="where">
+                  <Select
+                    size="sm"
+                    value={event.club ?? ''}
+                    aria-label={`Where ${event.name} is sent`}
+                    disabled={busy || view.clubs.length === 0}
+                    onchange={(e: Event) => send(event, e)}
+                  >
+                    <option value="">Not sent</option>
+                    {#each view.clubs as club (club.id)}
+                      <option value={club.id}>{clubName(club)}</option>
+                    {/each}
+                  </Select>
+                </span>
+                {#if event.state !== 'NoClub'}
+                  <Badge tone={eventTone(event)}>{eventLabel(event)}</Badge>
+                {/if}
+                {#if eventNote(event, view)}
+                  <span class="muted">{eventNote(event, view)}</span>
                 {/if}
                 {#if event.state === 'Different'}
                   <Button size="sm" disabled={busy} onclick={() => (replacing = event)}
@@ -327,7 +433,8 @@
           >
         </p>
         <p class="muted">
-          Grid will then trust this one certificate, for this server, and no other.
+          Grid will then trust this one certificate, for this server, and no other. It is kept when
+          you save the club.
         </p>
       {:else}
         <p data-testid="certificate-verdict">
@@ -340,14 +447,34 @@
         </p>
       {/if}
     {/if}
-    {#if error}<Banner tone="danger">{error}</Banner>{/if}
     {#snippet footer()}
       {#if verdict === 'accept'}
         <Button variant="ghost" onclick={() => (looked = undefined)}>Cancel</Button>
-        <Button variant="primary" disabled={busy} onclick={accept}>Accept this certificate</Button>
+        <Button variant="primary" onclick={accept}>Accept this certificate</Button>
       {:else}
         <Button variant="primary" onclick={() => (looked = undefined)}>Done</Button>
       {/if}
+    {/snippet}
+  </Dialog>
+{/if}
+
+{#if removing}
+  {@const target = removing}
+  {@const count = view ? eventsOf(view, target.id) : 0}
+  <Dialog open={true} title={`Remove ${clubName(target)}?`} onclose={() => (removing = undefined)}>
+    <p>Grid forgets the address and the link token.</p>
+    {#if count > 0}
+      <p data-testid="remove-club-events">
+        {count === 1 ? '1 event goes' : `${count} events go`} to this club. {count === 1
+          ? 'It'
+          : 'They'} will not be sent any more.
+      </p>
+    {/if}
+    <p class="muted">What is already on the server stays there.</p>
+    {#if error}<Banner tone="danger">{error}</Banner>{/if}
+    {#snippet footer()}
+      <Button variant="ghost" onclick={() => (removing = undefined)}>Cancel</Button>
+      <Button variant="danger" disabled={busy} onclick={remove}>Remove</Button>
     {/snippet}
   </Dialog>
 {/if}
@@ -396,9 +523,26 @@
     max-width: 65ch;
   }
   .link,
+  .clubs,
+  .club-form,
   .events {
     display: grid;
     gap: var(--gf-space-3);
+  }
+  .club-form {
+    padding-top: var(--gf-space-3);
+    border-top: 1px solid var(--gf-border);
+  }
+  h3 {
+    margin: 0;
+    font-size: var(--gf-font-size-md);
+  }
+  .grow {
+    flex: 1;
+  }
+  .where {
+    width: 14rem;
+    max-width: 100%;
   }
   header {
     display: flex;
@@ -469,61 +613,5 @@
   .muted {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
-  }
-
-  .switch {
-    position: relative;
-    display: inline-flex;
-    cursor: pointer;
-  }
-  .switch input {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    opacity: 0;
-    cursor: pointer;
-    /* Above the drawn track and its thumb, so a click always lands on the box itself. */
-    z-index: 1;
-  }
-  .switch input:disabled {
-    cursor: default;
-  }
-  .track {
-    width: 2.75rem;
-    height: 1.5rem;
-    border-radius: var(--gf-radius-pill);
-    background: var(--gf-surface-sunken);
-    border: 1px solid var(--gf-border-strong);
-    transition: background var(--gf-motion-fast) var(--gf-ease-out);
-    display: flex;
-    align-items: center;
-    padding: 0 2px;
-    pointer-events: none;
-  }
-  .thumb {
-    width: 1.125rem;
-    height: 1.125rem;
-    border-radius: 50%;
-    background: var(--gf-text-muted);
-    transition:
-      transform var(--gf-motion-fast) var(--gf-ease-out),
-      background var(--gf-motion-fast) var(--gf-ease-out);
-  }
-  .switch input:checked + .track {
-    background: var(--gf-accent);
-    border-color: var(--gf-accent);
-  }
-  .switch input:checked + .track .thumb {
-    transform: translateX(1.2rem);
-    background: var(--gf-accent-contrast);
-  }
-  .switch input:focus-visible + .track {
-    outline: var(--gf-ring-width) solid var(--gf-ring-color);
-    outline-offset: var(--gf-ring-offset);
-  }
-  .switch input:disabled + .track {
-    opacity: 0.6;
   }
 </style>

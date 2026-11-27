@@ -592,8 +592,10 @@ impl PilotDirectory {
         self.read().account_changes
     }
 
-    /// Make every pilot's server account what the server says it is: `held` is each pilot
-    /// that has a holder there. A pilot not in it has none.
+    /// Make each pilot's server account what the connected club says it is. `known` is
+    /// every pilot that club has heard of, and `held` each of them that has a holder. A
+    /// known pilot not in `held` has none. A pilot the club has never heard of is left as
+    /// it is: another club may hold them, and this one cannot say.
     ///
     /// The answer is dropped when an account was changed here since `mark` was taken: the
     /// server was asked before that change, so its answer is older than what is here.
@@ -601,6 +603,7 @@ impl PilotDirectory {
     pub fn take_server_accounts(
         &self,
         mark: u64,
+        known: &std::collections::BTreeSet<PilotId>,
         held: &BTreeMap<PilotId, PilotAccount>,
     ) -> Result<bool, PilotError> {
         let mut dir = self.write();
@@ -609,6 +612,9 @@ impl PilotDirectory {
         }
         let mut changed = false;
         for (id, pilot) in &mut dir.pilots {
+            if !known.contains(id) {
+                continue;
+            }
             let now = held.get(id);
             if pilot.server_account.as_ref() != now {
                 pilot.server_account = now.cloned();
@@ -910,40 +916,73 @@ mod tests {
         }
     }
 
+    fn ids(of: &[&PilotId]) -> std::collections::BTreeSet<PilotId> {
+        of.iter().map(|id| (*id).clone()).collect()
+    }
+
     #[test]
-    fn the_servers_word_on_who_holds_a_pilot_is_taken_whole() {
+    fn the_clubs_word_on_who_holds_a_pilot_is_taken_for_the_pilots_it_knows() {
         let dir = PilotDirectory::new(None).unwrap();
         let ace = dir.create(&req("Ace")).unwrap().id;
         let bee = dir.create(&req("Bee")).unwrap().id;
+        let cat = dir.create(&req("Cat")).unwrap().id;
         dir.set_server_account(&bee, Some(account("old"))).unwrap();
+        dir.set_server_account(&cat, Some(account("other-club")))
+            .unwrap();
 
-        // The server says Ace is Pia's and says nothing of Bee: Bee has no holder.
+        // The club knows Ace and Bee. It says Ace is Pia's and nobody holds Bee. It has
+        // never heard of Cat, so it cannot say: Cat keeps the holder another club gave.
+        let known = ids(&[&ace, &bee]);
         let held = BTreeMap::from([(ace.clone(), account("pia"))]);
-        assert!(dir.take_server_accounts(dir.account_mark(), &held).unwrap());
+        assert!(
+            dir.take_server_accounts(dir.account_mark(), &known, &held)
+                .unwrap()
+        );
         assert_eq!(dir.get(&ace).unwrap().server_account, Some(account("pia")));
         assert_eq!(dir.get(&bee).unwrap().server_account, None);
+        assert_eq!(
+            dir.get(&cat).unwrap().server_account,
+            Some(account("other-club"))
+        );
         // The same answer again changes nothing.
-        assert!(!dir.take_server_accounts(dir.account_mark(), &held).unwrap());
+        assert!(
+            !dir.take_server_accounts(dir.account_mark(), &known, &held)
+                .unwrap()
+        );
+        // A club that knows nobody changes nothing.
+        assert!(
+            !dir.take_server_accounts(dir.account_mark(), &Default::default(), &Default::default())
+                .unwrap()
+        );
+        assert_eq!(dir.get(&ace).unwrap().server_account, Some(account("pia")));
         // A pilot the server names and this Director does not have is not made up.
-        let stray = BTreeMap::from([(PilotId("stray".into()), account("x"))]);
-        dir.take_server_accounts(dir.account_mark(), &stray)
-            .unwrap();
-        assert_eq!(dir.list().len(), 2);
+        let stray = PilotId("stray".into());
+        dir.take_server_accounts(
+            dir.account_mark(),
+            &ids(&[&stray]),
+            &BTreeMap::from([(stray.clone(), account("x"))]),
+        )
+        .unwrap();
+        assert_eq!(dir.list().len(), 3);
     }
 
     #[test]
     fn an_answer_older_than_a_change_made_here_is_dropped() {
         let dir = PilotDirectory::new(None).unwrap();
         let ace = dir.create(&req("Ace")).unwrap().id;
+        let known = ids(&[&ace]);
         // The server is asked. Before it answers, the director ties Ace to Pia.
         let mark = dir.account_mark();
         dir.set_server_account(&ace, Some(account("pia"))).unwrap();
         // The answer says nobody holds Ace. It was true when asked, and is not now.
-        assert!(!dir.take_server_accounts(mark, &BTreeMap::new()).unwrap());
+        assert!(
+            !dir.take_server_accounts(mark, &known, &BTreeMap::new())
+                .unwrap()
+        );
         assert_eq!(dir.get(&ace).unwrap().server_account, Some(account("pia")));
         // The next answer, asked after, is taken.
         assert!(
-            dir.take_server_accounts(dir.account_mark(), &BTreeMap::new())
+            dir.take_server_accounts(dir.account_mark(), &known, &BTreeMap::new())
                 .unwrap()
         );
         assert_eq!(dir.get(&ace).unwrap().server_account, None);

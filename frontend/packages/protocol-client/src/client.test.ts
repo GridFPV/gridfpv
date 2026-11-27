@@ -518,34 +518,51 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
 
   it('the server link is read, set and an event replaced at the right addresses', async () => {
     const link = {
-      url: 'https://grid.example.org',
-      has_token: true,
-      on: true,
-      trust: 'System',
-      state: 'Connected',
+      clubs: [{ id: 'k1', name: '', url: 'https://grid.example.org', trust: 'System' }],
+      state: 'NotSet',
       events: []
     };
     const { seen, fetch } = recorder(200, link);
-    const { getServerLink, putServerLink, replaceOnServer } = await import('./client.js');
+    const { getServerLink, saveLinkClub, removeLinkClub, setEventLinkClub, replaceOnServer } =
+      await import('./client.js');
     expect(await getServerLink('http://d.local:8080/', { fetch })).toEqual(link);
     expect(seen[0].url).toBe('http://d.local:8080/server-link');
     expect(seen[0].init?.method ?? 'GET').toBe('GET');
 
+    // A new club is posted. A change is put to the club's own address.
     const settings = {
+      name: 'Recon',
       url: 'https://grid.example.org',
       token: 'gfs_abc',
-      on: true,
       trust: 'System' as const
     };
-    expect(await putServerLink('http://d.local:8080', settings, 'rd-tok', { fetch })).toEqual(link);
-    expect(seen[1].url).toBe('http://d.local:8080/server-link');
-    expect(seen[1].init?.method).toBe('PUT');
+    expect(
+      await saveLinkClub('http://d.local:8080', undefined, settings, 'rd-tok', { fetch })
+    ).toEqual(link);
+    expect(seen[1].url).toBe('http://d.local:8080/server-link/clubs');
+    expect(seen[1].init?.method).toBe('POST');
     expect((seen[1].init?.headers as Record<string, string>).Authorization).toBe('Bearer rd-tok');
     expect(JSON.parse(seen[1].init?.body as string)).toEqual(settings);
 
+    await saveLinkClub('http://d.local:8080', 'k 1/x', settings, undefined, { fetch });
+    expect(seen[2].url).toBe('http://d.local:8080/server-link/clubs/k%201%2Fx');
+    expect(seen[2].init?.method).toBe('PUT');
+
+    await removeLinkClub('http://d.local:8080', 'k 1/x', undefined, { fetch });
+    expect(seen[3].url).toBe('http://d.local:8080/server-link/clubs/k%201%2Fx');
+    expect(seen[3].init?.method).toBe('DELETE');
+
+    // An event goes to a club, or to none.
+    await setEventLinkClub('http://d.local:8080', 'friday night/1', 'k1', undefined, { fetch });
+    expect(seen[4].url).toBe('http://d.local:8080/server-link/events/friday%20night%2F1/club');
+    expect(seen[4].init?.method).toBe('PUT');
+    expect(JSON.parse(seen[4].init?.body as string)).toEqual({ club: 'k1' });
+    await setEventLinkClub('http://d.local:8080', 'friday', null, undefined, { fetch });
+    expect(JSON.parse(seen[5].init?.body as string)).toEqual({ club: null });
+
     await replaceOnServer('http://d.local:8080', 'friday night/1', undefined, { fetch });
-    expect(seen[2].url).toBe('http://d.local:8080/server-link/events/friday%20night%2F1/replace');
-    expect(seen[2].init?.method).toBe('POST');
+    expect(seen[6].url).toBe('http://d.local:8080/server-link/events/friday%20night%2F1/replace');
+    expect(seen[6].init?.method).toBe('POST');
   });
 
   it('a remote server is asked for its clubs and their events, and one event has its own base', async () => {
@@ -566,17 +583,18 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     expect(serverEventBase('', 'a b', 'c/d')).toBe('/api/clubs/a%20b/events/c%2Fd');
   });
 
-  it("putServerLink rejects with the Director's own words", async () => {
+  it("saveLinkClub rejects with the Director's own words", async () => {
     const { fetch } = recorder(400, {
       code: 'BadRequest',
       message:
         'The address must start with https://. Only a server on this same computer may use http://'
     });
-    const { putServerLink } = await import('./client.js');
+    const { saveLinkClub } = await import('./client.js');
     await expect(
-      putServerLink(
+      saveLinkClub(
         'http://d.local:8080',
-        { url: 'http://x.example', on: true, trust: 'System' },
+        undefined,
+        { name: '', url: 'http://x.example', token: 'gfs_abc', trust: 'System' },
         undefined,
         { fetch }
       )

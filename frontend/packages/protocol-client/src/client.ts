@@ -51,7 +51,7 @@ import type {
   KioskPassView,
   KioskView,
   LinkPeople,
-  LinkSettings,
+  ClubSettings,
   LinkView,
   MainsRequest,
   Me,
@@ -1427,8 +1427,8 @@ export async function getServerMyResults(
 }
 
 /**
- * The link to a remote server: its settings and how the pushing stands (`GET /server-link`).
- * The link token is never in the answer, only whether one is set.
+ * The clubs this Director can send to, which club each event goes to, and how the sending
+ * stands (`GET /server-link`). A link token is never in the answer.
  */
 export async function getServerLink(
   baseUrl: string,
@@ -1437,18 +1437,56 @@ export async function getServerLink(
   return apiJson<LinkView>(baseUrl, '/server-link', options, 'read the server setting');
 }
 
-/** Set the link to a remote server (`PUT /server-link`), RD-gated. */
-export async function putServerLink(
+/**
+ * Save a club to send to: a new one (`POST /server-link/clubs`), or a change to the one
+ * with `id` (`PUT /server-link/clubs/{club}`). RD-gated.
+ */
+export async function saveLinkClub(
   baseUrl: string,
-  settings: LinkSettings,
+  id: string | undefined,
+  settings: ClubSettings,
   token?: string,
   options: { fetch?: FetchLike } = {}
 ): Promise<LinkView> {
   return apiJson<LinkView>(
     baseUrl,
-    '/server-link',
-    { method: 'PUT', body: settings, token, fetch: options.fetch },
-    'change the server setting'
+    id === undefined ? '/server-link/clubs' : `/server-link/clubs/${encodeURIComponent(id)}`,
+    { method: id === undefined ? 'POST' : 'PUT', body: settings, token, fetch: options.fetch },
+    'save the club'
+  );
+}
+
+/** Forget a saved club (`DELETE /server-link/clubs/{club}`), RD-gated. */
+export async function removeLinkClub(
+  baseUrl: string,
+  id: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<LinkView> {
+  return apiJson<LinkView>(
+    baseUrl,
+    `/server-link/clubs/${encodeURIComponent(id)}`,
+    { method: 'DELETE', token, fetch: options.fetch },
+    'remove the club'
+  );
+}
+
+/**
+ * Say which saved club an event goes to, or `null` for none
+ * (`PUT /server-link/events/{id}/club`), RD-gated.
+ */
+export async function setEventLinkClub(
+  baseUrl: string,
+  eventId: string,
+  club: string | null,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<LinkView> {
+  return apiJson<LinkView>(
+    baseUrl,
+    `/server-link/events/${encodeURIComponent(eventId)}/club`,
+    { method: 'PUT', body: { club }, token, fetch: options.fetch },
+    'change where the event is sent'
   );
 }
 
