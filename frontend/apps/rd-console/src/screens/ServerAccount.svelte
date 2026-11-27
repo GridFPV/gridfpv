@@ -9,9 +9,16 @@
   import { Badge, Banner, Button, Card, Dialog, Input } from '@gridfpv/components';
   import type { Me, MyAccount, MyClub, SignInProvider } from '@gridfpv/types';
   import { formatServerHash } from '../lib/serverHome.js';
-  import { lookedAfterClubs, providerName, roleWord, type PeopleApi } from '../lib/serverPeople.js';
+  import {
+    PASSWORD_PROVIDER,
+    lookedAfterClubs,
+    providerName,
+    roleWord,
+    type PeopleApi
+  } from '../lib/serverPeople.js';
   import ServerJoinClubs from './ServerJoinClubs.svelte';
   import ServerMyPilots from './ServerMyPilots.svelte';
+  import ServerPassword from './ServerPassword.svelte';
   import ServerProfile from './ServerProfile.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
 
@@ -19,6 +26,7 @@
     api,
     account,
     providers,
+    password = false,
     clubs,
     onchange,
     onreread,
@@ -38,9 +46,14 @@
       | 'serverClubs'
       | 'joinClub'
       | 'leaveClub'
+      | 'passwordSignIn'
+      | 'passwordSignUp'
+      | 'setPassword'
     >;
     account: MyAccount;
     providers: readonly SignInProvider[] | undefined;
+    /** Whether this server lets people sign in with a username and password. */
+    password?: boolean;
     /** Every club on the server, for an owner's links. */
     clubs: readonly { id: string; name: string }[];
     /** The account changed: here it is as it now stands. */
@@ -54,6 +67,11 @@
   let editing = $state(false);
   let error = $state<string | undefined>(undefined);
   let busy = $state(false);
+  /** The password form on this page, when it is open: adding one, or changing it. */
+  let passwordForm = $state<'add' | 'change' | undefined>(undefined);
+  const hasPassword = $derived(
+    account.sign_ins.some((held) => held.provider === PASSWORD_PROVIDER)
+  );
   /** The club the person is about to leave. */
   let leaving = $state<MyClub | undefined>(undefined);
 
@@ -194,6 +212,14 @@
           <li>
             <span>{providerName(held.provider, providers ?? [])}</span>
             <span class="muted">{held.label}</span>
+            {#if held.provider === PASSWORD_PROVIDER && password && passwordForm === undefined}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                onclick={() => (passwordForm = 'change')}>Change password</Button
+              >
+            {/if}
             {#if account.sign_ins.length > 1}
               <Button
                 size="sm"
@@ -207,6 +233,23 @@
           </li>
         {/each}
       </ul>
+      {#if passwordForm}
+        <ServerPassword
+          {api}
+          mode={passwordForm}
+          oncancel={() => (passwordForm = undefined)}
+          ondone={(me) => {
+            passwordForm = undefined;
+            onchange(me);
+          }}
+        />
+      {:else if password && !hasPassword}
+        <div>
+          <Button size="sm" disabled={busy} onclick={() => (passwordForm = 'add')}
+            >Add a username and password</Button
+          >
+        </div>
+      {/if}
       {#if toAdd && toAdd.length > 0}
         <ServerSignIn {api} providers={toAdd} add />
       {/if}

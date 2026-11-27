@@ -49,7 +49,11 @@ import {
   listClubJoinAsks,
   answerClubJoinAsk,
   findClubPeople,
-  addClubMember
+  addClubMember,
+  signInWithPassword,
+  signUpWithPassword,
+  setServerPassword,
+  setServerPasswordSignIn
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
@@ -68,6 +72,8 @@ import type {
   MyAccount,
   MyClassResult,
   MyResult,
+  PasswordChange,
+  PasswordSignUp,
   PersonView,
   PilotProfile,
   ServerEvent,
@@ -155,6 +161,14 @@ export interface PeopleApi {
   findPeople(club: string, text: string): Promise<PersonView[]>;
   /** Add an account to a club, as a pilot. */
   addMember(club: string, account: string): Promise<void>;
+  /** Sign in with a username and a password the server keeps. */
+  passwordSignIn(username: string, password: string): Promise<Me>;
+  /** Make an account with a username and password. A re-connect link sets a way back in. */
+  passwordSignUp(given: PasswordSignUp): Promise<Me>;
+  /** Add a username and password to the signed-in account, or change its password. */
+  setPassword(change: PasswordChange): Promise<Me>;
+  /** Switch signing in with a password on or off. For an owner. */
+  setPasswordSignIn(on: boolean): Promise<ServerInfo>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -209,6 +223,10 @@ export function peopleApi(baseUrl: string): PeopleApi {
     answerJoinAsk: (club, account, yes) => answerClubJoinAsk(baseUrl, club, account, yes),
     findPeople: (club, text) => findClubPeople(baseUrl, club, text),
     addMember: (club, account) => addClubMember(baseUrl, club, account),
+    passwordSignIn: (username, password) => signInWithPassword(baseUrl, { username, password }),
+    passwordSignUp: (given) => signUpWithPassword(baseUrl, given),
+    setPassword: (change) => setServerPassword(baseUrl, change),
+    setPasswordSignIn: (on) => setServerPasswordSignIn(baseUrl, on),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }
@@ -447,5 +465,40 @@ export function tokenStanding(token: Pick<LinkTokenView, 'revoked_at'>): string 
 
 /** A provider's name for a sign-in an account holds, when the server still offers it. */
 export function providerName(id: string, providers: readonly SignInProvider[]): string {
+  if (id === PASSWORD_PROVIDER) return 'Username and password';
   return providers.find((provider) => provider.id === id)?.name ?? id;
+}
+
+/** The `provider` of a sign-in that is a username and a password kept on the server. */
+export const PASSWORD_PROVIDER = 'password';
+
+/** The shortest password a server takes. */
+export const PASSWORD_MIN = 10;
+
+/**
+ * What is wrong with a username, in words, before it is sent. The server checks it again.
+ */
+export function usernameProblem(username: string): string | undefined {
+  const text = username.trim();
+  if (text === '') return undefined;
+  if (!/^[A-Za-z0-9._-]{3,32}$/.test(text)) {
+    return 'A username is 3 to 32 letters and digits. A dot, a dash and an underscore are fine too.';
+  }
+  return undefined;
+}
+
+/**
+ * What is wrong with a new password, in words. `again` is the password typed a second
+ * time, when the form asks for it.
+ */
+export function passwordProblem(password: string, again?: string): string | undefined {
+  if (password === '') return undefined;
+  if ([...password].length < PASSWORD_MIN) {
+    return `A password is at least ${PASSWORD_MIN} characters. A few words in a row is a good one.`;
+  }
+  if ([...password].length > 200) return 'A password is 200 characters at most.';
+  if (again !== undefined && again !== '' && again !== password) {
+    return 'The two passwords are not the same.';
+  }
+  return undefined;
 }

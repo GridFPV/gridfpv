@@ -21,6 +21,8 @@ import type {
   MemberView,
   MyAccount,
   MyResult,
+  PasswordChange,
+  PasswordSignUp,
   PersonView,
   PilotProfile,
   ServerEvent,
@@ -85,6 +87,10 @@ export interface FakeServer {
   joinAsks: Record<string, PersonView[]>;
   /** Everyone with an account on the server, in a club or not. */
   people: PersonView[];
+  /** Whether people may sign in with a username and password. */
+  passwordOn: boolean;
+  /** Each username's password, and the account it signs in to. */
+  passwords: Record<string, { password: string; account: MyAccount }>;
 }
 
 /** An event a club holds on the server. */
@@ -131,6 +137,8 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     openSignUp: false,
     joinAsks: {},
     people: [],
+    passwordOn: false,
+    passwords: {},
     clubList: [
       { ...NORTH, word: 'north-fpv', archived: false, open: false },
       { ...SOUTH, word: 'south-fpv', archived: false, open: false }
@@ -142,6 +150,8 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
 const ARCHIVED =
   'This club is archived, so nothing in it can be changed. An owner of this server can bring it back.';
 
+const PASSWORDS_OFF = 'Signing in with a password is switched off on this server.';
+
 const refuse = (message: string): never => {
   throw new Error(message);
 };
@@ -149,6 +159,10 @@ const refuse = (message: string): never => {
 export function fakePeople(server: FakeServer) {
   let made = 0;
   const me = (): Me => (server.account ? { account: server.account } : {});
+  const info = (): ServerInfo => ({
+    open_sign_up: server.openSignUp,
+    password_sign_in: server.passwordOn
+  });
   const clubs: Record<string, { id: string; name: string }> = {
     north: { ...NORTH },
     south: { ...SOUTH }
@@ -561,11 +575,96 @@ export function fakePeople(server: FakeServer) {
       server.account = { ...account, profile: { ...profile } };
       return me();
     }),
-    serverInfo: vi.fn(async (): Promise<ServerInfo> => ({ open_sign_up: server.openSignUp })),
+    serverInfo: vi.fn(async (): Promise<ServerInfo> => info()),
     setOpenSignUp: vi.fn(async (open: boolean): Promise<ServerInfo> => {
       if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');
       server.openSignUp = open;
-      return { open_sign_up: open };
+      return info();
+    }),
+    setPasswordSignIn: vi.fn(async (on: boolean): Promise<ServerInfo> => {
+      const account = server.account;
+      if (account?.owner !== true) refuse('Only an owner of this server can do that.');
+      if (!on && account?.sign_ins.every((held) => held.provider === 'password')) {
+        refuse(
+          'A password is the only way you sign in. Add another way to sign in first, or you would lock yourself out.'
+        );
+      }
+      server.passwordOn = on;
+      return info();
+    }),
+    passwordSignIn: vi.fn(async (username: string, password: string) => {
+      if (!server.passwordOn) refuse(PASSWORDS_OFF);
+      const held = server.passwords[username.trim().toLowerCase()];
+      if (!held || held.password !== password) refuse('That username and password do not match.');
+      server.account = held.account;
+      return me();
+    }),
+    passwordSignUp: vi.fn(async (given: PasswordSignUp) => {
+      if (!server.passwordOn) refuse(PASSWORDS_OFF);
+      const username = given.username.trim().toLowerCase();
+      const held: MySignIn = { provider: 'password', subject: username, label: username };
+      const secret = given.invite;
+      let account: MyAccount;
+      if (secret?.startsWith('gfr_')) {
+        // A re-connect link: the username and password become a way in to that account.
+        const id = server.reconnects[secret] ?? refuse('That re-connect link does not work.');
+        if (server.passwords[username] && server.passwords[username].account.id !== id) {
+          refuse('That sign-in already belongs to an account.');
+        }
+        delete server.reconnects[secret];
+        for (const [name, kept] of Object.entries(server.passwords)) {
+          if (kept.account.id === id) delete server.passwords[name];
+        }
+        account = {
+          ...ACE,
+          id,
+          name: accountName(id),
+          sign_ins: [...(server.signIns[id] ?? []).filter((s) => s.provider !== 'password'), held]
+        };
+      } else {
+        if (server.passwords[username]) refuse('That sign-in already belongs to an account.');
+        const invite = secret === undefined ? undefined : server.links[secret];
+        if (secret !== undefined && !invite) refuse('That invite does not work.');
+        if (secret === undefined && !server.openSignUp) {
+          refuse('You need an invite to make an account here. Ask your club for a link.');
+        }
+        if (secret !== undefined) delete server.links[secret];
+        account = {
+          ...ACE,
+          id: `acct_${username}`,
+          name: given.name ?? username,
+          sign_ins: [held],
+          clubs: invite?.club ? [{ club: invite.club, role: invite.role ?? 'Pilot' }] : []
+        };
+      }
+      server.passwords[username] = { password: given.password, account };
+      server.account = account;
+      return me();
+    }),
+    setPassword: vi.fn(async (change: PasswordChange) => {
+      if (!server.passwordOn) refuse(PASSWORDS_OFF);
+      const account = server.account ?? refuse('Sign in first.');
+      const mine = Object.entries(server.passwords).find(
+        ([, kept]) => kept.account.id === account.id
+      );
+      if (mine) {
+        if (mine[1].password !== change.current) refuse('That is not the password you have now.');
+        mine[1].password = change.password;
+        return me();
+      }
+      const username = (change.username ?? '').trim().toLowerCase();
+      if (username === '') refuse('A username is 3 to 32 letters and digits.');
+      if (server.passwords[username]) refuse('That sign-in already belongs to an account.');
+      const next = {
+        ...account,
+        sign_ins: [
+          ...account.sign_ins,
+          { provider: 'password', subject: username, label: username }
+        ]
+      };
+      server.account = next;
+      server.passwords[username] = { password: change.password, account: next };
+      return me();
     }),
     archiveClub: vi.fn(async (club: string, archived: boolean): Promise<ServerClub> => {
       if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');

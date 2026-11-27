@@ -1836,9 +1836,19 @@ Video is not stored. It comes later (§11.7).
   is not offered.
 - **Passkeys** are the way that needs no outside service: the phone's fingerprint, face or
   PIN. They come later. Until then, a server needs Discord or Google to have accounts.
-- **No passwords** for now. They are the most work and the most risk.
+- **A username and a password kept on the server** is the other way that needs no
+  outside service (Ryan, 2026-11-27: "a good option to allow for... in case people want
+  pure local"). It was first left out as the most work and the most risk.
+  - **Off until an owner switches it on.** A server may run on it alone, on a provider
+    alone, or on both.
+  - The server keeps a hash of each password (Argon2id), never the password. Wrong
+    guesses are slowed: five in a row for one username, then a minute's wait.
+  - A username is a sign-in like any other. An account may have one beside Discord or
+    Google, and keeps at least one way in.
+  - **A forgotten password is set again with the re-connect link** an owner makes (below).
+    The server sends no email yet, so nobody resets their own.
 - **Someone who can no longer sign in is helped by an owner of the server** (Ryan,
-  2026-11-28). With no passwords there is nothing to reset. The owner does two things,
+  2026-11-28). The owner does two things,
   from the club's members list:
   - **Takes a sign-in off the account**, even the last one. The account is signed out
     everywhere at once. This is for a stolen or closed provider account.
@@ -2055,6 +2065,25 @@ code of §13.13.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
     sign-in and send a link to re-connect. Built for server owners and not for a club's
     directors, for the reason in §13.8. Agreed (Ryan, 2026-11-27).
+19. **Signing in with a username and a password (§13.8).** Built. Choices made while
+    building, not confirmed:
+    - Off on a new server. An owner switches it on the page, or with
+      `gridfpv-server password on|off`. The command line is how a server with no provider
+      gets its first owner.
+    - A username is 3 to 32 of `a-z 0-9 . _ -`, kept in lower case. The account is named
+      as the username was typed. A password is 10 to 200 characters, judged by length
+      alone.
+    - An account is made with a password the same ways as with a provider: an invite, a
+      re-connect link, or open sign-up.
+    - A re-connect link used with a password gives the account that username, and takes
+      off the username it had. An account has one username.
+    - Changing a password needs the one there is, and signs every other browser out.
+    - A wrong password and a username nobody has get the same answer after the same work.
+    - An owner whose only way in is a password cannot switch passwords off from the page.
+      The command line can.
+    - Switching it off keeps the passwords. They work again when it is back on.
+    - **No email yet.** That is the next step: a server's own email settings, an email on
+      an account, and a reset link sent by email.
 18. **A server behind a Cloudflare Tunnel was tried for real** (2026-11-27), on a test
     server: the standalone install, plain HTTP on the home network, the tunnel giving
     HTTPS. A Director sent an event through it, a lap showed on the public side in about

@@ -40,6 +40,8 @@ pub struct AppState {
     pub providers: Arc<Vec<Provider>>,
     /// What pilots have asked for that a Director has yet to answer (`asks`).
     pub asks: Arc<Asks>,
+    /// Who has guessed a password wrong, and how often (`password`).
+    pub guesses: Arc<crate::password::Guesses>,
 }
 
 impl AppState {
@@ -70,6 +72,7 @@ impl AppState {
             public_url: None,
             providers: Arc::default(),
             asks: Arc::default(),
+            guesses: Arc::default(),
         })
     }
 }
@@ -214,6 +217,22 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/server/sign-up",
             axum::routing::put(people::put_sign_up),
+        )
+        .route(
+            "/api/server/password-sign-in",
+            axum::routing::put(crate::password::put_setting),
+        )
+        .route(
+            "/api/sign-in/password",
+            axum::routing::post(crate::password::post_sign_in),
+        )
+        .route(
+            "/api/sign-up/password",
+            axum::routing::post(crate::password::post_sign_up),
+        )
+        .route(
+            "/api/me/password",
+            axum::routing::put(crate::password::put_my_password),
         )
         .route("/api/sign-out", axum::routing::post(people::post_sign_out))
         .route(

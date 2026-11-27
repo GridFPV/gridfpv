@@ -23,6 +23,7 @@
   } from '@gridfpv/protocol-client';
   import type {
     AdapterId,
+    Me,
     MyAccount,
     PushClub,
     ServerClub as ClubOnServer,
@@ -63,6 +64,7 @@
   import ServerClubs from './ServerClubs.svelte';
   import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
+  import ServerPasswordSetting from './ServerPasswordSetting.svelte';
   import ServerSignUpSetting from './ServerSignUpSetting.svelte';
   import SpectatorView from './SpectatorView.svelte';
 
@@ -142,6 +144,16 @@
   let providers = $state<SignInProvider[] | undefined>(undefined);
   /** Whether someone with no invite may make an account here. Unknown until read. */
   let openSignUp = $state<boolean | undefined>(undefined);
+  /** Whether people may sign in here with a username and password. */
+  let passwordOn = $state(false);
+  /** Whether there is any way to sign in here. */
+  const canSignIn = $derived((providers !== undefined && providers.length > 0) || passwordOn);
+  /** Someone signed in with a password. `to` is where they land. */
+  function signedIn(me: Me, to?: ServerPlace) {
+    account = me.account ?? null;
+    listAgain += 1;
+    if (to) go(to);
+  }
 
   async function readMe() {
     try {
@@ -159,7 +171,10 @@
       .catch(() => (providers = []));
     people
       .serverInfo()
-      .then((info) => (openSignUp = info.open_sign_up))
+      .then((info) => {
+        openSignUp = info.open_sign_up;
+        passwordOn = info.password_sign_in ?? false;
+      })
       // An older server cannot say. It asks for an invite.
       .catch(() => (openSignUp = false));
   });
@@ -494,7 +509,7 @@
       <a class="who" href={formatServerHash({ kind: 'account' })} data-testid="server-who"
         >{account.name}</a
       >
-    {:else if account === null && providers && providers.length > 0}
+    {:else if account === null && canSignIn}
       <a class="who" href={formatServerHash({ kind: 'sign-in' })} data-testid="server-sign-in"
         >Sign in</a
       >
@@ -516,7 +531,14 @@
       </Card>
     {:else}
       <p class="event">Sign in</p>
-      <ServerSignIn api={people} {providers} problem={signInProblem(place.problem)} />
+      <ServerSignIn
+        api={people}
+        {providers}
+        problem={signInProblem(place.problem)}
+        password={passwordOn}
+        canMake={openSignUp === true}
+        onsignedin={(me) => signedIn(me, { kind: me.account?.clubs.length ? 'list' : 'account' })}
+      />
       <p class="muted" data-testid="sign-up-line">{signUpLine(openSignUp)}</p>
     {/if}
   {:else if place.kind === 'invite'}
@@ -527,6 +549,8 @@
         secret={place.secret}
         account={account ?? undefined}
         {providers}
+        password={passwordOn}
+        onsignedin={(me) => signedIn(me, { kind: 'account' })}
         onjoined={async () => {
           await readMe();
           go({ kind: 'account' });
@@ -541,6 +565,8 @@
         secret={place.secret}
         account={account ?? undefined}
         {providers}
+        password={passwordOn}
+        onsignedin={(me) => signedIn(me, { kind: 'account' })}
       />
     {/if}
   {:else if place.kind === 'account'}
@@ -550,6 +576,7 @@
         api={people}
         {account}
         {providers}
+        password={passwordOn}
         clubs={clubs?.map((entry) => entry.club) ?? []}
         onchange={(me) => (account = me.account ?? null)}
         onreread={readMe}
@@ -560,6 +587,7 @@
       />
       {#if account.owner}
         <ServerSignUpSetting api={people} onchange={(open) => (openSignUp = open)} />
+        <ServerPasswordSetting api={people} onchange={(on) => (passwordOn = on)} />
         <ServerClubs
           api={people}
           onchange={() => {
@@ -569,7 +597,13 @@
       {/if}
     {:else if account === null}
       <p class="event">Sign in</p>
-      <ServerSignIn api={people} {providers} />
+      <ServerSignIn
+        api={people}
+        {providers}
+        password={passwordOn}
+        canMake={openSignUp === true}
+        onsignedin={(me) => signedIn(me)}
+      />
     {/if}
   {:else if place.kind === 'c'}
     <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
@@ -625,7 +659,13 @@
       <Card elevation="sm"><p>Only those who look after this club can open this page.</p></Card>
     {:else if account === null}
       <p class="event">Sign in</p>
-      <ServerSignIn api={people} {providers} />
+      <ServerSignIn
+        api={people}
+        {providers}
+        password={passwordOn}
+        canMake={openSignUp === true}
+        onsignedin={(me) => signedIn(me)}
+      />
     {:else if account && clubs !== undefined}
       <Card elevation="sm"><p class="event">This club is not here</p></Card>
     {/if}
@@ -635,7 +675,13 @@
       <ServerResults api={people} />
     {:else if account === null}
       <p class="event">Sign in</p>
-      <ServerSignIn api={people} {providers} />
+      <ServerSignIn
+        api={people}
+        {providers}
+        password={passwordOn}
+        canMake={openSignUp === true}
+        onsignedin={(me) => signedIn(me)}
+      />
     {/if}
   {:else if picked}
     <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>

@@ -98,6 +98,18 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
         (Method::GET, "/auth/{provider}/callback", Anyone, None),
         (Method::GET, "/api/me", Anyone, None),
         (Method::POST, "/api/sign-out", Anyone, None),
+        (
+            Method::POST,
+            "/api/sign-in/password",
+            Anyone,
+            Some(json!({"username": "doorman", "password": "a long password"})),
+        ),
+        (
+            Method::POST,
+            "/api/sign-up/password",
+            Anyone,
+            Some(json!({"username": "newcomer", "password": "a long password"})),
+        ),
         (Method::GET, "/api/invites/{secret}", Anyone, None),
         (Method::GET, "/api/reconnect/{secret}", Anyone, None),
         (Method::GET, "/api/clubs/{club}", Anyone, None),
@@ -108,6 +120,12 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             "/api/clubs",
             Owner,
             Some(json!({"name": "West FPV"})),
+        ),
+        (
+            Method::PUT,
+            "/api/server/password-sign-in",
+            Owner,
+            Some(json!({"on": true})),
         ),
         (
             Method::PUT,
@@ -165,6 +183,12 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             "/api/me/profile",
             Account,
             Some(json!({"callsign": "Ace"})),
+        ),
+        (
+            Method::PUT,
+            "/api/me/password",
+            Account,
+            Some(json!({"username": "newname", "password": "a long password"})),
         ),
         (Method::POST, "/api/invites/{secret}/accept", Account, None),
         (Method::POST, "/api/clubs/{club}/join", Account, None),
@@ -451,6 +475,26 @@ async fn rig() -> Rig {
     )
     .unwrap();
     let state = AppState::open(dir.path()).unwrap();
+    // Passwords are on here, with someone who has one, so the password routes have
+    // someone to let in. Anyone may make an account, so signing up has too.
+    state.book.set_password_sign_in(true).unwrap();
+    state.book.set_open_sign_up(true).unwrap();
+    {
+        let sign_in = gridfpv_serverd::accounts::NewSignIn {
+            provider: gridfpv_serverd::accounts::PASSWORD_PROVIDER,
+            subject: "doorman",
+            label: "doorman",
+        };
+        let (doorman, _) = state
+            .accounts
+            .join_open(&sign_in, "Doorman", now_ms())
+            .unwrap();
+        let hash = gridfpv_serverd::password::hash_password("a long password");
+        state
+            .accounts
+            .set_password_hash(&doorman.id, &hash, now_ms())
+            .unwrap();
+    }
     let north = state.book.new_token(&club("north"), "laptop").unwrap().1;
     let south = state.book.new_token(&club("south"), "laptop").unwrap().1;
     let person = |name: &str, kind: InviteKind| -> (String, String) {

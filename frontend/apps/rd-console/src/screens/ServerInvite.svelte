@@ -8,7 +8,7 @@
    * with the account they have.
    */
   import { Banner, Button, Card } from '@gridfpv/components';
-  import type { InviteView, MyAccount, SignInProvider } from '@gridfpv/types';
+  import type { InviteView, Me, MyAccount, SignInProvider } from '@gridfpv/types';
   import { inviteWords, type PeopleApi } from '../lib/serverPeople.js';
   import ServerSignIn from './ServerSignIn.svelte';
 
@@ -17,13 +17,20 @@
     secret,
     account,
     providers,
+    password = false,
+    onsignedin = undefined,
     onjoined
   }: {
-    api: Pick<PeopleApi, 'invite' | 'acceptInvite' | 'signInUrl'>;
+    api: Pick<PeopleApi, 'invite' | 'acceptInvite' | 'signInUrl'> &
+      Partial<Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>>;
     secret: string;
     /** The account that is signed in, if one is. */
     account: MyAccount | undefined;
     providers: readonly SignInProvider[] | undefined;
+    /** Whether this server lets people sign in with a username and password. */
+    password?: boolean;
+    /** Someone signed in, or made their account, with a password. */
+    onsignedin?: ((me: Me) => void) | undefined;
     /** The signed-in account has used the invite. */
     onjoined: () => void;
   } = $props();
@@ -91,7 +98,7 @@
         </div>
       {:else}
         <p>Sign in to accept. If you have no account here yet, this makes one.</p>
-        <ServerSignIn {api} {providers} invite={secret} />
+        <ServerSignIn {api} {providers} invite={secret} {password} {onsignedin} />
       {/if}
     {/if}
   </div>
