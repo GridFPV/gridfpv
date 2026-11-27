@@ -2055,12 +2055,19 @@ code of §13.13.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
     sign-in and send a link to re-connect. Built for server owners and not for a club's
     directors, for the reason in §13.8. Agreed (Ryan, 2026-11-27).
+18. **A server behind a Cloudflare Tunnel was tried for real** (2026-11-27), on a test
+    server: the standalone install, plain HTTP on the home network, the tunnel giving
+    HTTPS. A Director sent an event through it, a lap showed on the public side in about
+    a fifth of a second, and the stream the Director listens on was not held back. Still
+    not tried for real: sign-in with a real Discord or Google app, and a Let's Encrypt
+    certificate from Caddy.
 17. **Pilots on a server (§13.7), third step: the account wins.** Built. A pilot an
     account holds is shown on the server under the account's callsign and colour: on an
     event's pages, in the club's list, and in the pilot's own results. A Director takes
     the account's callsign, colour, MultiGP id and Velocidrone id for a pilot it holds:
     when it pulls from the server, when the director ties a pilot to a member, and when
-    pilots are brought in. Choices made while building, not confirmed:
+    pilots are brought in. Choices made while building. Ryan agreed on 2026-11-27 that
+    claims stay club by club underneath:
     - **The event's own record is not rewritten.** The server changes how a held pilot
       is shown, not the header the Director sent. The header changes when the Director
       next sends it, with the pilot's new callsign.
@@ -2079,7 +2086,7 @@ code of §13.13.
     director sets their club public or private; anyone with an account joins a public
     club; a private club is asked, and a director says yes or no; a director finds an
     account by name or callsign and adds it; a member leaves. Choices made while
-    building, not confirmed:
+    building. Ryan agreed on 2026-11-27 to the first, the second and the search limits:
     - **A club starts private.**
     - **Private is about joining only.** It does not hide the club or its events from
       visitors. They are as open as before.

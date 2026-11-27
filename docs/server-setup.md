@@ -155,6 +155,29 @@ docker run -d --name grid --restart unless-stopped \
 
 The server answers only this computer (`127.0.0.1`). The tunnel is the one way in.
 
+**If the tunnel runs on another computer,** the server has to answer your home network,
+not only itself. Without Docker, make a file
+`/etc/systemd/system/gridfpv-server.service.d/listen.conf`:
+
+```
+[Service]
+Environment=GRIDFPV_SERVER_ADDR=0.0.0.0:8470
+```
+
+Then run `systemctl daemon-reload` and `systemctl restart gridfpv-server`, and point the
+tunnel at `http://<this computer's address>:8470`. To use port 80 instead, write `0.0.0.0:80`
+and add these two lines to the same file, since a low port needs leave:
+
+```
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+```
+
+Only do this on a network you trust. Anyone on it reaches the server over plain HTTP.
+
+Set `GRIDFPV_SERVER_PUBLIC_URL` to the tunnel's public `https://` name (see **Signing in**),
+so links the server prints are ones people can open.
+
 ## Name your club
 
 ```
