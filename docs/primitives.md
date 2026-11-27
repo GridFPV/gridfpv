@@ -1656,7 +1656,7 @@ reported.
 - **Later, not built:** Grid merging close crossings itself, so the window holds on every
   kind of timer and can be changed after the race.
 
-## 13. The remote server (Agreed 2026-11-26; step 1 built, see §13.12)
+## 13. The remote server (Agreed 2026-11-26; built on `server`, see §13.12)
 
 This is the remote part of §11.1. The rules in §11.7 still hold, and this section builds on
 them.
@@ -1899,8 +1899,8 @@ even when the two clocks differ.
 - **The server says which pilot is asking.** The Director trusts the server it is linked
   to for that, as it does for who holds a pilot (§13.7). It checks that it has that pilot.
 
-**Choices made while building.** Ryan agreed to 1 and 2, changed 3, and said 4 and 7 are
-fine for now (2026-11-27). 5 and 6 are not confirmed.
+**Choices made while building.** Ryan agreed to 1, 2, 8 and 9, changed 3 and 10, and said
+4 and 7 are fine for now (2026-11-27). 5 and 6 are not confirmed.
 
 1. **Every event is sent** once a server is linked. There is no switch for one event, and
    no "unlisted" yet (§13.9).
@@ -1918,8 +1918,53 @@ fine for now (2026-11-27). 5 and 6 are not confirmed.
 6. **Removing an event on the Director does not remove it from the server.**
 7. **Link tokens are made on the server's command line.** There is no page for the owner
    yet.
-8. **The Director hears over a stream, not a WebSocket** (§13.4). Not yet confirmed.
+8. **The Director hears over a stream, not a WebSocket** (§13.4). Agreed (Ryan,
+   2026-11-27).
 9. **There is no switch for sign-up through the server.** With a server linked, a pilot
-   can sign up from it wherever the director opened sign-up on a phase. Not yet confirmed.
-10. **Check-in to an open seat (§11.9) is not offered on the server.** It is for a pilot
-    standing at the race. Not yet confirmed.
+   can sign up from it wherever the director opened sign-up on a phase. Agreed (Ryan,
+   2026-11-27).
+10. **Check-in to an open seat (§11.9) is not offered on the server yet.** The first build
+    left it out on purpose. Ryan changed this on 2026-11-27: it must be a feature, with a
+    way to know the pilot is at the race. See §13.13.
+
+### 13.13 A race day with no Wi-Fi for pilots (Wanted 2026-11-27, not built)
+
+Ryan, 2026-11-27: "Ideally, I would not have to run a wlan for people, but we need to make
+sure that we can do everything we want from local and then server is just an option."
+
+**The picture.** The director's laptop reaches the server over a phone hotspot or
+Starlink. Pilots use their own phone data and open the server's page. Nobody joins a
+network the director runs.
+
+**Two rules.**
+
+- **Local comes first.** Everything a pilot can do works at the race with no server at
+  all. Nothing is ever built for the server only.
+- **The server is another way in.** What a pilot can do on their phone at the race, they
+  can do from the server's page: watch, sign up, and check in to an open seat. The
+  Director still decides every ask (§13.4).
+
+**Check-in from the server needs proof the pilot is at the race.** Taking an open seat
+gives a pilot the laps flown on it (§11.9). Someone at home must not be able to take one.
+Sign-up does not need this proof: a pilot may sign up for a heat before they arrive.
+
+**How the proof could work (proposed, not agreed).**
+
+- **A race code.** The Director makes a short code for the event and shows it at the
+  race: on the director's screen, on the kiosk, or printed as a QR code. A pilot scans it
+  or types it once on the server's page. After that their phone counts as **at the race**
+  for that event, for the day.
+- **The Director checks the code,** not the server. The code rides along with the ask.
+  The server only passes it on, as it does for sign-up.
+- **The director can make a new code** at any time. Old ones stop working.
+- **The director can also mark a pilot as here** by hand, for a pilot who cannot scan.
+- **Not a phone's location.** A browser's location is easy to fake and many pilots refuse
+  to share it.
+
+**Other things this picture needs, to be checked when it is built.**
+
+- Everything the pilot's page at the race shows (§11.3) must show on the server's page
+  too, such as "My practice".
+- The Director's use of the connection must stay small enough for a phone hotspot.
+- The server's page is about a second behind the race. That is fine for sign-up and
+  check-in. Lap callouts stay on the director's computer.
