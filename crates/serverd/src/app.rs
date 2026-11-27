@@ -242,7 +242,24 @@ pub fn router(state: AppState) -> Router {
             "/api/clubs/{club}/invites/{id}",
             axum::routing::delete(people::delete_club_invite),
         )
-        .route("/api/clubs/{club}/members", get(people::get_members))
+        .route(
+            "/api/clubs/{club}/members",
+            get(people::get_members).post(crate::join::post_member),
+        )
+        .route(
+            "/api/clubs/{club}/open",
+            axum::routing::put(crate::join::put_open),
+        )
+        .route(
+            "/api/clubs/{club}/join",
+            axum::routing::post(crate::join::post_join).delete(crate::join::delete_join),
+        )
+        .route("/api/clubs/{club}/join-asks", get(crate::join::get_asks))
+        .route(
+            "/api/clubs/{club}/join-asks/{account}",
+            axum::routing::put(crate::join::put_ask).delete(crate::join::delete_ask),
+        )
+        .route("/api/clubs/{club}/people", get(crate::join::get_people))
         .route(
             "/api/clubs/{club}/members/{account}",
             axum::routing::put(people::put_member).delete(people::delete_member),

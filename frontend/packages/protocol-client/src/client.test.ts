@@ -565,6 +565,51 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     expect(seen[6].init?.method).toBe('POST');
   });
 
+  it('joining a club, and running who joins, go to the right addresses', async () => {
+    const {
+      setServerClubOpen,
+      joinServerClub,
+      leaveServerClub,
+      listClubJoinAsks,
+      answerClubJoinAsk,
+      findClubPeople,
+      addClubMember
+    } = await import('./client.js');
+    const { seen, fetch } = recorder(200, []);
+    const base = 'https://grid.example.org';
+
+    await setServerClubOpen(`${base}/`, 'north club', true, { fetch });
+    expect(seen[0].url).toBe(`${base}/api/clubs/north%20club/open`);
+    expect(seen[0].init?.method).toBe('PUT');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({ open: true });
+
+    await joinServerClub(base, 'north', { fetch });
+    expect(seen[1].url).toBe(`${base}/api/clubs/north/join`);
+    expect(seen[1].init?.method).toBe('POST');
+    await leaveServerClub(base, 'north', { fetch });
+    expect(seen[2].url).toBe(`${base}/api/clubs/north/join`);
+    expect(seen[2].init?.method).toBe('DELETE');
+
+    await listClubJoinAsks(base, 'north', { fetch });
+    expect(seen[3].url).toBe(`${base}/api/clubs/north/join-asks`);
+    expect(seen[3].init?.method ?? 'GET').toBe('GET');
+    // Yes is a PUT and no is a DELETE, to the same address.
+    await answerClubJoinAsk(base, 'north', 'acct a/b', true, { fetch });
+    await answerClubJoinAsk(base, 'north', 'acct a/b', false, { fetch });
+    expect(seen[4].url).toBe(`${base}/api/clubs/north/join-asks/acct%20a%2Fb`);
+    expect(seen[4].init?.method).toBe('PUT');
+    expect(seen[5].url).toBe(seen[4].url);
+    expect(seen[5].init?.method).toBe('DELETE');
+
+    // What is typed is sent whole, whatever is in it.
+    await findClubPeople(base, 'north', 'a&b=c %', { fetch });
+    expect(seen[6].url).toBe(`${base}/api/clubs/north/people?q=a%26b%3Dc%20%25`);
+    await addClubMember(base, 'north', 'acct_pia', { fetch });
+    expect(seen[7].url).toBe(`${base}/api/clubs/north/members`);
+    expect(seen[7].init?.method).toBe('POST');
+    expect(JSON.parse(seen[7].init?.body as string)).toEqual({ account: 'acct_pia' });
+  });
+
   it('a pilot profile and the sign-up setting go to the right addresses', async () => {
     const { setServerProfile, getServerInfo, setServerOpenSignUp } = await import('./client.js');
     const me = recorder(200, { account: { id: 'acct_1', profile: { callsign: 'Ace' } } });

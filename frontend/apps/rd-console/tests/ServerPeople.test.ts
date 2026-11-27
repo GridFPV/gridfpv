@@ -227,8 +227,8 @@ describe('the account page', () => {
     const clubs = within(screen.getByRole('list', { name: 'Your clubs' })).getAllByRole('listitem');
     // With two clubs, one is marked primary and the other can be made so.
     expect(clubs.map((row) => row.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-      'North FPV Director Primary',
-      'South FPV Pilot Make primary'
+      'North FPV Director Primary Leave…',
+      'South FPV Pilot Make primary Leave…'
     ]);
     const signIns = screen.getByRole('list', { name: 'How you sign in' });
     expect(signIns.textContent).toContain('Discord');

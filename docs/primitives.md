@@ -2055,9 +2055,29 @@ code of §13.13.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
     sign-in and send a link to re-connect. Built for server owners and not for a club's
     directors, for the reason in §13.8. Agreed (Ryan, 2026-11-27).
+16. **Pilots on a server (§13.7), second step: public and private clubs.** Built: a
+    director sets their club public or private; anyone with an account joins a public
+    club; a private club is asked, and a director says yes or no; a director finds an
+    account by name or callsign and adds it; a member leaves. Choices made while
+    building, not confirmed:
+    - **A club starts private.**
+    - **Private is about joining only.** It does not hide the club or its events from
+      visitors. They are as open as before.
+    - Everyone who joins these ways joins as a pilot. An owner may run a club without
+      being a member of it, as before.
+    - An ask gives nothing while it waits. The person is told they asked, and can take
+      it back. A no is not kept: they may ask again.
+    - An invite used, or being added, answers an ask that was waiting.
+    - A club that goes public keeps the asks it had. Each is answered by a yes, a no, or
+      the person pressing **Join**.
+    - Archiving a club drops the asks to join it. An archived club takes nobody.
+    - A director looking for someone to add types at least two letters, and is shown
+      twenty people at most: a name, and a callsign when there is one. The server's
+      accounts are never listed whole.
+    - Leaving a club lets go of the pilots held there, as being removed does. A club's
+      only director cannot leave.
 15. **Pilots on a server (§13.7), first step: the pilot profile and open sign-up.**
-    Built. Not built yet: public and private clubs, asking to join, a director pulling
-    someone in, and the account's callsign winning in results and in Grid. Choices made
+    Built. Not built yet: the account's callsign winning in results and in Grid. Choices made
     while building, not confirmed:
     - The profile is callsign, colour (`#RRGGBB`), MultiGP id and Velocidrone id. All of
       it may be left empty. A callsign or an id is 40 characters at most, and an id has no

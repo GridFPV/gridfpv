@@ -45,7 +45,8 @@ const BEE: MyAccount = {
   sign_ins: [{ provider: 'discord', subject: '1', label: 'bea' }],
   clubs: [{ club: CLUB, role: 'Pilot' }],
   pilots: [{ club: CLUB, id: 'p-bee', callsign: 'Bee', held: true }],
-  profile: {}
+  profile: {},
+  join_asks: []
 };
 
 /** A store that works like the browser's, kept by the test. */

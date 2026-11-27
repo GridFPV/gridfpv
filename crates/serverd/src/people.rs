@@ -138,6 +138,9 @@ pub struct MyAccount {
     /// have elsewhere. The same in every club.
     #[serde(default)]
     pub profile: PilotProfile,
+    /// The clubs they asked to join and have not heard from (§13.7).
+    #[serde(default)]
+    pub join_asks: Vec<PushClub>,
 }
 
 /// `GET /api/server`: what anyone may know of how this server is run.
@@ -293,6 +296,7 @@ impl From<AccountError> for ApiError {
             | AccountError::ReconnectDoesNotWork
             | AccountError::NoSuchAccount
             | AccountError::NotAMember
+            | AccountError::NoSuchAsk
             | AccountError::NoSuchPilot
             | AccountError::NoSuchClaim => (StatusCode::NOT_FOUND, ErrorCode::UnknownScope),
             AccountError::SignInTaken
@@ -533,7 +537,31 @@ fn my_account(state: &AppState, standing: &Standing) -> Result<Option<MyAccount>
         primary: primary_of(state, standing)?,
         pilots: crate::claims::my_pilots(state, &standing.account)?,
         profile: state.accounts.profile(&standing.account)?,
+        join_asks: state
+            .accounts
+            .my_join_asks(&standing.account)?
+            .iter()
+            // An ask to a club that is gone, or archived, has no answer coming.
+            .filter(|club| {
+                state
+                    .book
+                    .club(club)
+                    .is_some_and(|found| found.archived_at.is_none())
+            })
+            .filter_map(|club| club_of(state, club))
+            .collect(),
     }))
+}
+
+/// An account as its own browser is shown it, read fresh: after a change to which clubs
+/// it is in, the standing a request came with is out of date.
+pub(crate) fn me_of(state: &AppState, account: &AccountId) -> Result<Me, ApiError> {
+    let Some(standing) = state.accounts.standing(account)? else {
+        return Ok(Me { account: None });
+    };
+    Ok(Me {
+        account: my_account(state, &standing)?,
+    })
 }
 
 /// Whether an account may have a club as its primary one: a club that is on the list, and

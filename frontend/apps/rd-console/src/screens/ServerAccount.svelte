@@ -6,10 +6,11 @@
    * An account can hold several sign-ins and keeps at least one. Another is added here,
    * signed in: that is the only way two sign-ins come to belong to one account.
    */
-  import { Badge, Banner, Button, Card, Input } from '@gridfpv/components';
-  import type { Me, MyAccount, SignInProvider } from '@gridfpv/types';
+  import { Badge, Banner, Button, Card, Dialog, Input } from '@gridfpv/components';
+  import type { Me, MyAccount, MyClub, SignInProvider } from '@gridfpv/types';
   import { formatServerHash } from '../lib/serverHome.js';
   import { lookedAfterClubs, providerName, roleWord, type PeopleApi } from '../lib/serverPeople.js';
+  import ServerJoinClubs from './ServerJoinClubs.svelte';
   import ServerMyPilots from './ServerMyPilots.svelte';
   import ServerProfile from './ServerProfile.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
@@ -34,6 +35,9 @@
       | 'dropClaim'
       | 'setPrimary'
       | 'setProfile'
+      | 'serverClubs'
+      | 'joinClub'
+      | 'leaveClub'
     >;
     account: MyAccount;
     providers: readonly SignInProvider[] | undefined;
@@ -50,6 +54,8 @@
   let editing = $state(false);
   let error = $state<string | undefined>(undefined);
   let busy = $state(false);
+  /** The club the person is about to leave. */
+  let leaving = $state<MyClub | undefined>(undefined);
 
   const say = (err: unknown): string => (err instanceof Error ? err.message : String(err));
   const lookedAfter = $derived(lookedAfterClubs(account, clubs));
@@ -77,6 +83,12 @@
   async function saveName(e: Event) {
     e.preventDefault();
     if (await run(() => api.rename(name))) editing = false;
+  }
+
+  async function leave() {
+    const target = leaving;
+    if (!target) return;
+    if (await run(() => api.leaveClub(target.club.id))) leaving = undefined;
   }
 
   async function signOut() {
@@ -118,7 +130,9 @@
     <div class="block">
       <h2>Clubs</h2>
       {#if account.clubs.length === 0}
-        <p class="muted">You are not in a club yet. A club's director can invite you.</p>
+        <p class="muted">
+          You are not in a club yet. Join one below, or use an invite from a club's director.
+        </p>
       {:else}
         <ul aria-label="Your clubs">
           {#each account.clubs as entry (entry.club.id)}
@@ -138,6 +152,13 @@
                   >
                 {/if}
               {/if}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                aria-label="Leave {entry.club.name}"
+                onclick={() => ((error = undefined), (leaving = entry))}>Leave…</Button
+              >
             </li>
           {/each}
         </ul>
@@ -158,6 +179,8 @@
       {/if}
     </div>
   </Card>
+
+  <ServerJoinClubs {api} {account} {onchange} />
 
   <ServerProfile {api} {account} {onchange} />
 
@@ -194,6 +217,23 @@
     <Button variant="ghost" disabled={busy} onclick={signOut}>Sign out</Button>
   </div>
 </div>
+
+{#if leaving}
+  {@const target = leaving}
+  <Dialog open={true} title="Leave {target.club.name}?" onclose={() => (leaving = undefined)}>
+    <p>You will not be in {target.club.name} any more.</p>
+    <p>
+      Pilots you hold in this club are let go, so its results no longer show under your account. The
+      results themselves stay with the club.
+    </p>
+    <p class="muted">Your account and your other clubs stay as they are.</p>
+    {#if error}<Banner tone="danger">{error}</Banner>{/if}
+    {#snippet footer()}
+      <Button variant="ghost" onclick={() => (leaving = undefined)}>Cancel</Button>
+      <Button variant="danger" disabled={busy} onclick={leave}>Leave</Button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <style>
   .account,

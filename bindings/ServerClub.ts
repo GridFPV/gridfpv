@@ -15,4 +15,9 @@ word: string,
 /**
  * Read-only, and off the list of clubs.
  */
-archived: boolean, };
+archived: boolean, 
+/**
+ * A public club: anyone with an account may join it. Otherwise a person asks to
+ * join, uses an invite, or is added by a director (§13.7).
+ */
+open: boolean, };

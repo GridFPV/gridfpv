@@ -33,6 +33,7 @@
     roleWord,
     type PeopleApi
   } from '../lib/serverPeople.js';
+  import ServerClubJoin from './ServerClubJoin.svelte';
   import ServerClubManage from './ServerClubManage.svelte';
   import ServerClubPilots from './ServerClubPilots.svelte';
   import ServerMemberSignIns from './ServerMemberSignIns.svelte';
@@ -72,9 +73,14 @@
       | 'dropSignIn'
       | 'makeReconnect'
       | 'revokeReconnect'
+      | 'setClubOpen'
+      | 'joinAsks'
+      | 'answerJoinAsk'
+      | 'findPeople'
+      | 'addMember'
     >;
     /** The club. Its friendly address and whether it is archived are shown when given. */
-    club: { id: string; name: string; word?: string; archived?: boolean };
+    club: { id: string; name: string; word?: string; archived?: boolean; open?: boolean };
     /** The signed-in account's id, to mark its own row. */
     me: string;
     /** Whether the person runs the club. A claims approver does not: they see only pilots. */
@@ -236,6 +242,14 @@
   {#if !runs}
     <ServerClubPilots {api} {club} {me} runs={false} />
   {:else}
+    <ServerClubJoin
+      {api}
+      {club}
+      onchange={async () => {
+        await load();
+        onchange?.();
+      }}
+    />
     <Card elevation="sm">
       <div class="block">
         <h2>Members</h2>

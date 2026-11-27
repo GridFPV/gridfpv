@@ -311,6 +311,23 @@ gridfpv-serverctl sign-up invite
 The first one says how it is set now. If you turn it off again, accounts already made
 stay.
 
+**Public and private clubs.** A club's director chooses, on the club's page under **Who
+can join**. A club starts private.
+
+- **Public:** anyone with an account on your server can join. They press **Join** on
+  their account page, or at the club's own address.
+- **Private:** a person presses **Ask to join**. The director sees them under **Asked to
+  join** and presses **Let in** or **No**.
+
+Either way a director can still invite people. A director can also add someone who has
+an account: under **Add someone**, type part of their name or callsign and press **Find**,
+then **Add**. Everyone who joins these ways joins as a pilot. The director can change
+their role after.
+
+A member can leave a club from their account page. A club's only director cannot leave.
+
+Private is about who can join. It does not hide the club or its events from visitors.
+
 **The pilot profile.** Each person fills in their own on their account page: a callsign,
 a colour, a MultiGP id and a Velocidrone id. All of it is optional. It belongs to the
 account, so it is the same in every club on your server. The ids are there so a race
@@ -470,5 +487,4 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
   event.
 - A pilot's profile is kept, and not used yet. Results still show the callsign the event
   was run with, and Grid does not yet pull the profile down.
-- A pilot cannot yet join a club by themselves. They need an invite.
 - Videos are not stored.
