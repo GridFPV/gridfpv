@@ -35,10 +35,14 @@ import {
   dropAccountSignIn,
   makeAccountReconnect,
   revokeAccountReconnect,
-  getServerReconnect
+  getServerReconnect,
+  listServerClubs,
+  makeServerClub,
+  setServerClubArchived
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
+  ServerClub,
   ReconnectMade,
   ReconnectView,
   ClubPilotView,
@@ -109,6 +113,12 @@ export interface PeopleApi {
   revokeReconnect(account: string): Promise<void>;
   /** Whose account a re-connect link is for. For whoever opens the link. */
   reconnect(secret: string): Promise<ReconnectView>;
+  /** The clubs on the server. An owner is given the archived ones too. */
+  serverClubs(): Promise<ServerClub[]>;
+  /** Make a club. For an owner of the server, as is archiving one. */
+  makeClub(name: string): Promise<ServerClub>;
+  /** Archive a club, or bring it back. */
+  archiveClub(club: string, archived: boolean): Promise<ServerClub>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -149,6 +159,9 @@ export function peopleApi(baseUrl: string): PeopleApi {
     makeReconnect: (account) => makeAccountReconnect(baseUrl, account),
     revokeReconnect: (account) => revokeAccountReconnect(baseUrl, account),
     reconnect: (secret) => getServerReconnect(baseUrl, secret),
+    serverClubs: () => listServerClubs(baseUrl),
+    makeClub: (name) => makeServerClub(baseUrl, name),
+    archiveClub: (club, archived) => setServerClubArchived(baseUrl, club, archived),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }
@@ -204,6 +217,14 @@ export function inviteStanding(invite: InviteView, now: number): string {
   if (invite.max_uses === 1) return 'Not used yet';
   return `${invite.uses} of ${invite.max_uses} used`;
 }
+
+/** A club's friendly address, as a person would open it. */
+export function clubLink(origin: string, word: string): string {
+  return `${origin.replace(/\/$/, '')}/#/c/${encodeURIComponent(word)}`;
+}
+
+/** What everyone who signs in or runs a club here is told about the server's owners. */
+export const OWNERS_SEE_ALL = 'The owners of this server can see and change everything on it.';
 
 /** The link for a re-connect link's secret, as a person would open it. */
 export function reconnectLink(origin: string, secret: string): string {

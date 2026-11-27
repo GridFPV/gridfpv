@@ -38,8 +38,71 @@ pub struct ClubId(pub String);
 /// A club: the owner of events, tokens and, later, invites and pilot lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Club {
+    /// Never changes. The site's own links use it.
     pub id: ClubId,
     pub name: String,
+    /// The club's friendly address: a short word made from its name, for handing out. It
+    /// follows the name when the club is renamed.
+    #[serde(default)]
+    pub word: String,
+    /// Friendly addresses the club had before a rename. Each still leads to the club,
+    /// until another club takes the word.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub old_words: Vec<String>,
+    /// When an owner archived the club. An archived club is read-only and off the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+}
+
+/// The longest a friendly address may be.
+const WORD_MAX: usize = 40;
+
+/// The friendly address a name makes: its letters and digits in lower case, with one `-`
+/// wherever anything else was. A name with none of either makes `club`.
+pub fn word_of(name: &str) -> String {
+    let mut word = String::new();
+    for c in name.trim().chars() {
+        if c.is_alphanumeric() {
+            word.extend(c.to_lowercase());
+        } else if !word.is_empty() && !word.ends_with('-') {
+            word.push('-');
+        }
+        if word.chars().count() >= WORD_MAX {
+            break;
+        }
+    }
+    let word = word.trim_end_matches('-');
+    if word.is_empty() {
+        "club".to_owned()
+    } else {
+        word.to_owned()
+    }
+}
+
+/// `word`, or `word-2`, `word-3`…: the first that no club in `taken` has as its address now.
+fn free_word(word: &str, taken: &[&str]) -> String {
+    if !taken.contains(&word) {
+        return word.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{word}-{n}"))
+        .find(|tried| !taken.contains(&tried.as_str()))
+        .expect("there is always another number")
+}
+
+/// Give every club that has no friendly address one. A book written before clubs had them
+/// is read this way.
+fn give_words(clubs: &mut [Club]) {
+    for at in 0..clubs.len() {
+        if !clubs[at].word.is_empty() {
+            continue;
+        }
+        let word = {
+            let taken: Vec<&str> = clubs.iter().map(|club| club.word.as_str()).collect();
+            free_word(&word_of(&clubs[at].name), &taken)
+        };
+        clubs[at].word = word;
+    }
 }
 
 /// A link token, as it is kept. The token itself is not here.
@@ -169,6 +232,9 @@ impl Book {
             held.pages.clubs.push(Club {
                 id: ClubId("club".into()),
                 name: "My club".into(),
+                word: word_of("My club"),
+                old_words: Vec::new(),
+                archived_at: None,
             });
             book.write_file(&mut held)?;
         }
@@ -176,10 +242,13 @@ impl Book {
     }
 
     fn parse(&self, bytes: &[u8]) -> Result<Pages, BookError> {
-        serde_json::from_slice(bytes).map_err(|e| BookError::Unreadable {
-            path: self.path.display().to_string(),
-            why: e.to_string(),
-        })
+        let mut pages: Pages =
+            serde_json::from_slice(bytes).map_err(|e| BookError::Unreadable {
+                path: self.path.display().to_string(),
+                why: e.to_string(),
+            })?;
+        give_words(&mut pages.clubs);
+        Ok(pages)
     }
 
     /// Write the whole book: to a new file first, then moved over the old one, so a crash
@@ -237,7 +306,72 @@ impl Book {
         self.clubs().into_iter().find(|club| &club.id == id)
     }
 
-    /// Give a club another name.
+    /// The club a friendly address leads to: the club that has the word now, or else the
+    /// one that had it before a rename.
+    pub fn club_by_word(&self, word: &str) -> Option<Club> {
+        let word = word.trim().to_lowercase();
+        let clubs = self.clubs();
+        clubs
+            .iter()
+            .find(|club| club.word == word)
+            .or_else(|| clubs.iter().find(|club| club.old_words.contains(&word)))
+            .cloned()
+    }
+
+    /// Make a club. Its id is random and never changes; its friendly address comes from
+    /// its name.
+    pub fn new_club(&self, name: &str) -> Result<Club, BookError> {
+        let name = clean(
+            name,
+            "A club needs a name.",
+            "A club's name is 80 characters at most, on one line.",
+        )?;
+        self.change(|pages| {
+            let id = loop {
+                // Lower-case letters and digits only: safe as a folder name everywhere.
+                let mut buf = [0u8; 6];
+                getrandom::fill(&mut buf).expect("the operating system gives random bytes");
+                let id = ClubId(format!(
+                    "c{}",
+                    buf.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                ));
+                if !pages.clubs.iter().any(|club| club.id == id) {
+                    break id;
+                }
+            };
+            let word = Self::take_word(pages, &id, &word_of(&name));
+            let club = Club {
+                id,
+                name,
+                word,
+                old_words: Vec::new(),
+                archived_at: None,
+            };
+            pages.clubs.push(club.clone());
+            Ok(club)
+        })
+    }
+
+    /// The friendly address a club gets for `wanted`: that word, or it with a number when
+    /// another club has it now. Whoever only *had* the word before a rename loses it.
+    fn take_word(pages: &mut Pages, id: &ClubId, wanted: &str) -> String {
+        let word = {
+            let taken: Vec<&str> = pages
+                .clubs
+                .iter()
+                .filter(|club| &club.id != id)
+                .map(|club| club.word.as_str())
+                .collect();
+            free_word(wanted, &taken)
+        };
+        for club in &mut pages.clubs {
+            club.old_words.retain(|old| old != &word);
+        }
+        word
+    }
+
+    /// Give a club another name. Its friendly address follows, and the old one still leads
+    /// to it.
     pub fn rename_club(&self, id: &ClubId, name: &str) -> Result<Club, BookError> {
         let name = clean(
             name,
@@ -245,12 +379,52 @@ impl Book {
             "A club's name is 80 characters at most, on one line.",
         )?;
         self.change(|pages| {
+            let before = pages
+                .clubs
+                .iter()
+                .find(|club| &club.id == id)
+                .ok_or_else(|| BookError::NoSuchClub(id.0.clone()))?
+                .word
+                .clone();
+            let wanted = word_of(&name);
+            // A new name that makes the same word, or the same word with the number it
+            // already has, keeps the address.
+            let word = if wanted == before
+                || before
+                    .strip_prefix(&format!("{wanted}-"))
+                    .is_some_and(|n| n.parse::<u32>().is_ok())
+            {
+                before.clone()
+            } else {
+                Self::take_word(pages, id, &wanted)
+            };
+            let club = pages
+                .clubs
+                .iter_mut()
+                .find(|club| &club.id == id)
+                .expect("found above");
+            club.name = name;
+            if word != before {
+                club.old_words.push(before);
+                club.word = word;
+            }
+            Ok(club.clone())
+        })
+    }
+
+    /// Archive a club, or bring it back. An archived club is read-only and off the list.
+    pub fn archive_club(&self, id: &ClubId, archived: bool) -> Result<Club, BookError> {
+        self.change(|pages| {
             let club = pages
                 .clubs
                 .iter_mut()
                 .find(|club| &club.id == id)
                 .ok_or_else(|| BookError::NoSuchClub(id.0.clone()))?;
-            club.name = name;
+            match (archived, club.archived_at) {
+                (true, None) => club.archived_at = Some(now_ms()),
+                (false, Some(_)) => club.archived_at = None,
+                _ => {}
+            }
             Ok(club.clone())
         })
     }
@@ -433,7 +607,10 @@ mod tests {
             book.clubs(),
             vec![Club {
                 id: club(),
-                name: "My club".into()
+                name: "My club".into(),
+                word: "my-club".into(),
+                old_words: vec![],
+                archived_at: None,
             }]
         );
         assert!(book.tokens().is_empty());

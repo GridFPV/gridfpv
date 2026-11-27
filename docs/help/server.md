@@ -106,6 +106,14 @@ from two computers.
 Grid will not write over it by itself. Press **Replace the server's copy** if this
 computer's copy is the right one. The server's copy is removed and yours is sent.
 
+## The club is archived
+
+Grid says **Not connected**, and that your club is archived on the server. An owner of the
+server archived it. The server keeps what it has, and takes nothing new. Your own copy is
+not touched.
+
+Ask an owner of the server to bring the club back. Grid then carries on by itself.
+
 ## Removed on the server
 
 Someone who runs your club removed this event on the server's page. Grid sends none of it

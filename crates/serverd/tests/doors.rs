@@ -99,6 +99,21 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
         (Method::POST, "/api/sign-out", Anyone, None),
         (Method::GET, "/api/invites/{secret}", Anyone, None),
         (Method::GET, "/api/reconnect/{secret}", Anyone, None),
+        (Method::GET, "/api/clubs/{club}", Anyone, None),
+        (Method::GET, "/api/club-words/{word}", Anyone, None),
+        // ── Clubs themselves ────────────────────────────────────────────────
+        (
+            Method::POST,
+            "/api/clubs",
+            Owner,
+            Some(json!({"name": "West FPV"})),
+        ),
+        (
+            Method::PUT,
+            "/api/clubs/{club}/archived",
+            Owner,
+            Some(json!({"archived": true})),
+        ),
         // ── Helping someone who cannot sign in ──────────────────────────────
         (Method::GET, "/api/accounts/{account}/sign-ins", Owner, None),
         (
@@ -492,6 +507,7 @@ fn address(path: &str) -> String {
         .replace("{provider}", "discord")
         .replace("{subject}", "nobody")
         .replace("{secret}", "no-such-invite")
+        .replace("{word}", "north-fpv")
         // An event id for a Director's own routes; a token or an invite id elsewhere.
         .replace("{id}", "friday")
 }

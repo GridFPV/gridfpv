@@ -248,3 +248,6 @@ export type * from '@bindings/CertificateRequest';
 export type * from '@bindings/AccountSignIns';
 export type * from '@bindings/ReconnectMade';
 export type * from '@bindings/ReconnectView';
+export type * from '@bindings/ServerClub';
+export type * from '@bindings/NewClub';
+export type * from '@bindings/ClubArchived';

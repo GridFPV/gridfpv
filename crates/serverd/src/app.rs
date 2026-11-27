@@ -145,11 +145,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/push/events/{id}/log", axum::routing::post(push::post_log))
         .route("/push/events", get(push::get_events))
-        .route("/api/clubs", get(read::get_clubs))
+        .route("/api/clubs", get(read::get_clubs).post(manage::post_club))
         .route(
             "/api/clubs/{club}",
-            axum::routing::patch(manage::patch_club),
+            get(read::get_club).patch(manage::patch_club),
         )
+        .route(
+            "/api/clubs/{club}/archived",
+            axum::routing::put(manage::put_archived),
+        )
+        .route("/api/club-words/{word}", get(read::get_club_by_word))
         .route(
             "/api/clubs/{club}/tokens",
             get(manage::get_tokens).post(manage::post_token),
@@ -261,6 +266,10 @@ pub fn router(state: AppState) -> Router {
             "/push/pilots/{pilot}/account",
             axum::routing::put(claims::put_push_account).delete(claims::delete_push_account),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            manage::not_archived,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             people::same_site,

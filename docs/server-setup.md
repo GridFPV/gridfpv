@@ -320,7 +320,46 @@ On the club's page, under **Events**, a director or an owner can:
 
 The club's name is changed at the bottom of the same page.
 
-### 8. Help someone who cannot sign in
+### 8. More than one club
+
+A server can hold several clubs. Only an **owner** of the server makes one.
+
+**As an owner you can see and change everything in every club on your server.** A club
+you host has to be fine with that. The page tells people so where they sign in.
+
+On your account page, find **Clubs on this server**.
+
+- **Make a club:** type its name and press **Make the club**. Then open the club and
+  invite its director. The director makes link tokens for their own Grid.
+- **The club's address** is shown under its name, like `https://your-server/#/c/recon-fpv`.
+  Hand it out. It shows that club's events alone. The address follows the club's name. If
+  the club is renamed, the old address keeps working until another club takes that word.
+- **Archive** a club you no longer run. It leaves the list of clubs, and nothing in it can
+  be changed. Its director's Grid can send no more and is told why. Its invites stop
+  working. Its events still open by their links. **Bring back** undoes it, and invites are
+  made again. A club cannot be deleted yet.
+
+One club's director has no say in another club, and one club's link token sends only into
+that club.
+
+The same on the command line:
+
+```
+gridfpv-serverctl club list
+gridfpv-serverctl club new "North Whoops"
+gridfpv-serverctl club archive north-whoops
+gridfpv-serverctl club restore north-whoops
+```
+
+With more than one club, say which club a token or a new name is for. Use the word from
+`club list`, as the last word:
+
+```
+gridfpv-serverctl token new "North laptop" north-whoops
+gridfpv-serverctl club name "Northern Whoops" north-whoops
+```
+
+### 9. Help someone who cannot sign in
 
 There are no passwords on a Grid server, so there is no password to reset. People sign in
 with Discord or Google. If someone loses that account, or it is stolen, an **owner** of the
@@ -396,5 +435,7 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
   the director shows at the race. Seasons and records come later.
 - A director still sends events with a link token. Anyone with its link can look at an
   event.
-- There is one club on a server.
+- A person cannot yet pick which club the front page opens on. It lists every club.
+- Grid sends every event to one club. It cannot yet keep a list of clubs and pick one
+  for each event.
 - Videos are not stored.

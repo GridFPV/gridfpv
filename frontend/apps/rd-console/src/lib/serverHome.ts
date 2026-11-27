@@ -8,6 +8,8 @@ import type { MyAccount, Pilot, PublicPilot, ServerEvent } from '@gridfpv/types'
 export type ServerPlace =
   /** The list of events. */
   | { kind: 'list' }
+  /** One club, by its friendly address (§13.2). */
+  | { kind: 'c'; word: string }
   /** One event of one club. */
   | { kind: 'event'; club: string; event: string }
   /**
@@ -32,6 +34,7 @@ export type ServerPlace =
  * Read the part of the address after the `#`. Anything that is not one of the pages is the
  * list.
  *
+ * - `#/c/‹word›`: one club, by its friendly address
  * - `#/e/‹club›/‹event›`: one event
  * - `#/here/‹club›/‹event›/‹code›`: one event, with the race code shown at the race
  * - `#/sign-in`, `#/sign-in?problem=‹code›`
@@ -47,6 +50,7 @@ export function parseServerHash(hash: string): ServerPlace {
   try {
     const [first, ...rest] = parts.map((part) => decodeURIComponent(part));
     if (first === 'e' && rest.length === 2) return { kind: 'event', club: rest[0], event: rest[1] };
+    if (first === 'c' && rest.length === 1) return { kind: 'c', word: rest[0] };
     if (first === 'here' && rest.length === 3) {
       return { kind: 'here', club: rest[0], event: rest[1], code: rest[2] };
     }
@@ -71,6 +75,8 @@ export function formatServerHash(place: ServerPlace): string {
       return '#/';
     case 'event':
       return `#/e/${encodeURIComponent(place.club)}/${encodeURIComponent(place.event)}`;
+    case 'c':
+      return `#/c/${encodeURIComponent(place.word)}`;
     case 'here':
       return `#/here/${encodeURIComponent(place.club)}/${encodeURIComponent(place.event)}/${encodeURIComponent(place.code)}`;
     case 'sign-in':

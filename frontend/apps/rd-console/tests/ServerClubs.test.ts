@@ -1,0 +1,273 @@
+/**
+ * More than one club on a server (docs/primitives.md §13.2): the owner's list of clubs, a
+ * club's friendly address, an archived club, and what people are told about owners.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import type { MyAccount, ServerClub, ServerEvent } from '@gridfpv/types';
+import ServerHome from '../src/screens/ServerHome.svelte';
+import { formatServerHash, parseServerHash } from '../src/lib/serverHome.js';
+import { OWNERS_SEE_ALL, clubLink } from '../src/lib/serverPeople.js';
+import { eventView } from './competition.js';
+import { ACE, fakePeople, fakeServer, serverEvent, type FakeServer } from './serverPeopleFake.js';
+import { fakeLiveSession } from './support.js';
+
+const OZ: MyAccount = {
+  id: 'acct_oz',
+  name: 'Oz',
+  owner: true,
+  sign_ins: [{ provider: 'discord', subject: '900', label: 'oz' }],
+  clubs: [],
+  pilots: []
+};
+
+beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  location.hash = '';
+});
+afterEach(() => {
+  cleanup();
+  location.hash = '';
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+/** The page, reading its clubs and events from the stand-in server as the real one would. */
+function open(hash: string, server: FakeServer) {
+  location.hash = hash;
+  const people = fakePeople(server);
+  const load = {
+    clubs: vi.fn(() => people.serverClubs()),
+    clubByWord: vi.fn(
+      async (word: string): Promise<ServerClub | undefined> =>
+        server.clubList.find((club) => club.word === word.toLowerCase())
+    ),
+    events: vi.fn(async (club: string): Promise<ServerEvent[]> => server.events[club] ?? [])
+  };
+  render(ServerHome, {
+    baseUrl: 'https://grid.example.org',
+    load,
+    people,
+    sourceFor: () => fakeLiveSession(eventView({}), { subscribeChanges: vi.fn(() => vi.fn()) })
+  });
+  return { people, server, load };
+}
+
+const owned = () => screen.getAllByTestId('owned-club');
+const names = () => owned().map((row) => within(row).getByRole('link').textContent);
+
+describe('a club address', () => {
+  it('goes there and back, and is safe whatever the word', () => {
+    expect(clubLink('https://grid.example.org/', 'recon-fpv')).toBe(
+      'https://grid.example.org/#/c/recon-fpv'
+    );
+    for (const word of ['recon-fpv', 'ålesund-drone', 'a b/c']) {
+      const hash = formatServerHash({ kind: 'c', word });
+      expect(parseServerHash(hash)).toEqual({ kind: 'c', word });
+      expect(parseServerHash(new URL(clubLink('https://x.example', word)).hash)).toEqual({
+        kind: 'c',
+        word
+      });
+    }
+    expect(parseServerHash('#/c')).toEqual({ kind: 'list' });
+    expect(parseServerHash('#/c/a/b')).toEqual({ kind: 'list' });
+  });
+});
+
+describe("the owner's list of clubs", () => {
+  it('is on the account page of an owner, with each club and its address', async () => {
+    open('#/account', fakeServer({ account: OZ }));
+    const card = await screen.findByTestId('server-clubs');
+    await within(card).findAllByTestId('owned-club');
+    expect(names()).toEqual(['North FPV', 'South FPV']);
+    expect(within(owned()[0]).getByTestId('club-address')).toHaveTextContent(
+      `${location.origin}/#/c/north-fpv`
+    );
+    expect(within(owned()[0]).getByRole('link').getAttribute('href')).toBe('#/club/north');
+    expect(card).toHaveTextContent('you can see and change everything in each one');
+    // Never the club's id as words on the page.
+    expect(card.textContent).not.toMatch(/\bnorth\b(?!-)/);
+  });
+
+  it('is not shown to anyone who is not an owner', async () => {
+    const { people } = open('#/account', fakeServer({ account: ACE }));
+    await screen.findByTestId('server-account');
+    expect(screen.queryByTestId('server-clubs')).toBeNull();
+    expect(people.makeClub).not.toHaveBeenCalled();
+  });
+
+  it('makes a club, which then shows in the list with its own address', async () => {
+    const { people, server } = open('#/account', fakeServer({ account: OZ }));
+    const card = await screen.findByTestId('server-clubs');
+    await within(card).findAllByTestId('owned-club');
+    const make = within(card).getByRole('button', { name: 'Make the club' });
+    expect(make).toBeDisabled();
+    await fireEvent.input(within(card).getByLabelText('New club'), {
+      target: { value: '  West FPV ' }
+    });
+    await fireEvent.click(make);
+    await waitFor(() => expect(names()).toEqual(['North FPV', 'South FPV', 'West FPV']));
+    expect(people.makeClub).toHaveBeenCalledWith('West FPV');
+    expect(server.clubList).toHaveLength(3);
+    expect(within(owned()[2]).getByTestId('club-address')).toHaveTextContent('/#/c/west-fpv');
+    expect(within(card).getByLabelText('New club')).toHaveValue('');
+  });
+
+  it("shows the server's words when a club cannot be made, and keeps what was typed", async () => {
+    const { people } = open('#/account', fakeServer({ account: OZ }));
+    const card = await screen.findByTestId('server-clubs');
+    await within(card).findAllByTestId('owned-club');
+    people.makeClub.mockRejectedValueOnce(new Error("A club's name is 80 characters at most."));
+    await fireEvent.input(within(card).getByLabelText('New club'), { target: { value: 'West' } });
+    await fireEvent.click(within(card).getByRole('button', { name: 'Make the club' }));
+    expect(await within(card).findByTestId('clubs-error')).toHaveTextContent(
+      "A club's name is 80 characters at most."
+    );
+    expect(within(card).getByLabelText('New club')).toHaveValue('West');
+    expect(names()).toEqual(['North FPV', 'South FPV']);
+  });
+
+  it('asks before archiving, says what it does, and does nothing on Cancel', async () => {
+    const { people } = open('#/account', fakeServer({ account: OZ }));
+    await screen.findAllByTestId('owned-club');
+    await fireEvent.click(screen.getByRole('button', { name: 'Archive North FPV' }));
+    const sure = await screen.findByRole('dialog');
+    expect(within(sure).getByRole('heading', { name: 'Archive North FPV?' })).toBeInTheDocument();
+    expect(sure).toHaveTextContent('nothing in it can be changed');
+    expect(sure).toHaveTextContent('Its events still open by their links.');
+    expect(sure).toHaveTextContent('You can bring it back at any time.');
+    await fireEvent.click(within(sure).getByRole('button', { name: 'Cancel' }));
+    expect(people.archiveClub).not.toHaveBeenCalled();
+    expect(screen.queryByText('Archived')).toBeNull();
+  });
+
+  it('archives a club, marks it, and brings it back', async () => {
+    const { people, server } = open('#/account', fakeServer({ account: OZ }));
+    await screen.findAllByTestId('owned-club');
+    await fireEvent.click(screen.getByRole('button', { name: 'Archive North FPV' }));
+    await fireEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Archive' })
+    );
+    await waitFor(() => expect(owned()[0]).toHaveTextContent('Archived'));
+    expect(people.archiveClub).toHaveBeenCalledWith('north', true);
+    expect(server.clubList[0].archived).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Archive North FPV' })).toBeNull();
+    expect(owned()[1]).not.toHaveTextContent('Archived');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Bring back North FPV' }));
+    await waitFor(() => expect(owned()[0]).not.toHaveTextContent('Archived'));
+    expect(people.archiveClub).toHaveBeenLastCalledWith('north', false);
+    expect(screen.getByRole('button', { name: 'Archive North FPV' })).toBeInTheDocument();
+  });
+});
+
+describe('an archived club', () => {
+  const archived = (account: MyAccount | undefined) => {
+    const server = fakeServer({ account });
+    server.clubList[0].archived = true;
+    server.events = {
+      north: [serverEvent('friday', 'Friday Night')],
+      south: [serverEvent('sunday', 'Sunday Race')]
+    };
+    return server;
+  };
+
+  it('is off the front page for a visitor', async () => {
+    open('#/', archived(undefined));
+    await screen.findByText('Sunday Race');
+    expect(screen.queryByText('North FPV')).toBeNull();
+    expect(screen.queryByText('Friday Night')).toBeNull();
+  });
+
+  it('is on the front page for an owner, marked', async () => {
+    open('#/', archived(OZ));
+    const section = await screen.findByRole('region', { name: 'North FPV' });
+    expect(section).toHaveTextContent('Archived');
+    expect(section).toHaveTextContent('Friday Night');
+    expect(screen.getByRole('region', { name: 'South FPV' })).not.toHaveTextContent('Archived');
+  });
+
+  it('still opens by its friendly address, marked, with its events', async () => {
+    open('#/c/north-fpv', archived(undefined));
+    const club = await screen.findByTestId('server-one-club');
+    expect(club).toHaveTextContent('North FPV');
+    expect(club).toHaveTextContent('Archived');
+    expect(club).toHaveTextContent('This club is archived. Its events can still be looked at.');
+    const link = within(club).getByTestId('server-event-link');
+    expect(link).toHaveTextContent('Friday Night');
+    expect(link.getAttribute('href')).toBe('#/e/north/friday');
+  });
+
+  it('says so on its own page, for the owner who can bring it back', async () => {
+    open('#/club/north', archived(OZ));
+    expect(await screen.findByTestId('club-archived')).toHaveTextContent(
+      'Nothing in it can be changed'
+    );
+  });
+});
+
+describe("a club's friendly address", () => {
+  it('opens that club alone, with a link to each of its events by the id that never changes', async () => {
+    const server = fakeServer();
+    server.events = {
+      north: [serverEvent('friday', 'Friday Night'), serverEvent('sat', 'Saturday')],
+      south: [serverEvent('sunday', 'Sunday Race')]
+    };
+    const { load } = open('#/c/South-FPV', server);
+    const club = await screen.findByTestId('server-one-club');
+    expect(load.clubByWord).toHaveBeenCalledWith('South-FPV');
+    expect(club).toHaveTextContent('South FPV');
+    expect(club).not.toHaveTextContent('Archived');
+    const links = within(club).getAllByTestId('server-event-link');
+    expect(links.map((link) => link.getAttribute('href'))).toEqual(['#/e/south/sunday']);
+    expect(screen.queryByText('Friday Night')).toBeNull();
+  });
+
+  it('says so when the club has no events yet', async () => {
+    open('#/c/north-fpv', fakeServer());
+    expect(await screen.findByTestId('server-one-club')).toHaveTextContent('No events yet.');
+  });
+
+  it('says so when no club has that address', async () => {
+    open('#/c/nowhere', fakeServer());
+    expect(await screen.findByText('This club is not here')).toBeInTheDocument();
+    expect(screen.queryByTestId('server-one-club')).toBeNull();
+  });
+
+  it("is shown on the club's own page to those who run it, to hand out", async () => {
+    open('#/club/north', fakeServer({ account: ACE }));
+    expect(await screen.findByTestId('club-own-address')).toHaveTextContent(
+      `${location.origin}/#/c/north-fpv`
+    );
+  });
+});
+
+describe('what people are told about owners', () => {
+  it('is said where someone signs in', async () => {
+    open('#/sign-in', fakeServer());
+    expect(await screen.findByTestId('owners-see-all')).toHaveTextContent(OWNERS_SEE_ALL);
+    expect(OWNERS_SEE_ALL).toBe('The owners of this server can see and change everything on it.');
+  });
+
+  it('is said where someone accepts an invite', async () => {
+    const server = fakeServer();
+    server.links.gfi_x = {
+      id: 'inv',
+      kind: 'Personal',
+      club: { id: 'north', name: 'North FPV' },
+      role: 'Pilot',
+      label: 'Ace',
+      max_uses: 1,
+      uses: 0,
+      revoked: false,
+      works: true
+    };
+    open('#/invite/gfi_x', server);
+    expect(await screen.findByTestId('owners-see-all')).toHaveTextContent(OWNERS_SEE_ALL);
+  });
+
+  it("is said on a club's page to its director", async () => {
+    open('#/club/north', fakeServer({ account: ACE }));
+    expect(await screen.findByTestId('owners-see-all')).toHaveTextContent(OWNERS_SEE_ALL);
+  });
+});

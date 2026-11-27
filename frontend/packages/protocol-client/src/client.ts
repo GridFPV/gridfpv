@@ -43,6 +43,7 @@ import type {
   InviteMade,
   ReconnectMade,
   ReconnectView,
+  ServerClub,
   LinkTokenMade,
   LinkTokenView,
   InviteRequest,
@@ -70,7 +71,6 @@ import type {
   PublicHello,
   PullRequest,
   PublicPilot,
-  PushClub,
   RaceCodeView,
   RaceId,
   RaceSignal,
@@ -844,8 +844,62 @@ export async function deleteDataImport(
 export async function listServerClubs(
   baseUrl: string,
   options: { fetch?: FetchLike } = {}
-): Promise<PushClub[]> {
-  return apiJson<PushClub[]>(baseUrl, '/api/clubs', options, 'read the clubs');
+): Promise<ServerClub[]> {
+  return apiJson<ServerClub[]>(baseUrl, '/api/clubs', options, 'read the clubs');
+}
+
+/**
+ * The club a friendly address leads to (`GET /api/club-words/{word}`). `undefined` when no
+ * club has that word, or ever had it.
+ */
+export async function getServerClubByWord(
+  baseUrl: string,
+  word: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerClub | undefined> {
+  try {
+    return await apiJson<ServerClub>(
+      baseUrl,
+      `/api/club-words/${encodeURIComponent(word)}`,
+      options,
+      'read the club'
+    );
+  } catch (err) {
+    if (isRequestFailure(err) && err.status === 404) return undefined;
+    throw err;
+  }
+}
+
+/** Make a club (`POST /api/clubs`). For an owner of the server. */
+export async function makeServerClub(
+  baseUrl: string,
+  name: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerClub> {
+  return apiJson<ServerClub>(
+    baseUrl,
+    '/api/clubs',
+    { method: 'POST', body: { name }, fetch: options.fetch },
+    'make the club'
+  );
+}
+
+/**
+ * Archive a club, or bring it back (`PUT /api/clubs/{club}/archived`). For an owner. An
+ * archived club is read-only and off the list.
+ */
+export async function setServerClubArchived(
+  baseUrl: string,
+  club: string,
+  archived: boolean,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerClub> {
+  return apiJson<ServerClub>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}/archived`,
+    { method: 'PUT', body: { archived }, fetch: options.fetch },
+    archived ? 'archive the club' : 'bring the club back'
+  );
 }
 
 /** A club's events on a remote server, newest first (`GET /api/clubs/{club}/events`). */
@@ -1131,8 +1185,8 @@ export async function renameServerClub(
   club: string,
   name: string,
   options: { fetch?: FetchLike } = {}
-): Promise<PushClub> {
-  return apiJson<PushClub>(
+): Promise<ServerClub> {
+  return apiJson<ServerClub>(
     baseUrl,
     `/api/clubs/${encodeURIComponent(club)}`,
     { method: 'PATCH', body: { name }, fetch: options.fetch },

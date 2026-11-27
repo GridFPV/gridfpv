@@ -23,12 +23,15 @@ pub enum PushError {
     Server(String),
     /// The server did not take the token.
     Token,
+    /// The server takes nothing from this Director for now, and says why: its club is
+    /// archived (§13.2). The token is right. Nothing is sent until that changes.
+    Closed(String),
 }
 
 impl std::fmt::Display for PushError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Server(why) => f.write_str(why),
+            Self::Server(why) | Self::Closed(why) => f.write_str(why),
             Self::Token => f.write_str(
                 "The server did not take the link token. It may have been taken back, or it is for another server.",
             ),
@@ -98,6 +101,20 @@ impl Client {
         })?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(PushError::Token);
+        }
+        // The token is right and the server still turns the Director away, whatever was
+        // asked. Its own words say why.
+        if response.status() == reqwest::StatusCode::FORBIDDEN {
+            let said = response
+                .json::<crate::error::ProtocolError>()
+                .await
+                .map(|e| e.message)
+                .unwrap_or_default();
+            return Err(PushError::Closed(if said.is_empty() {
+                "The server takes nothing from this Grid right now.".to_owned()
+            } else {
+                format!("The server said: {said}")
+            }));
         }
         Ok(response)
     }

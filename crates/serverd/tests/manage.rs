@@ -410,15 +410,15 @@ async fn a_new_name_shows_everywhere_the_club_is_named() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({ "id": "north", "name": "Northern Lights FPV" })
+        json!({ "id": "north", "name": "Northern Lights FPV", "word": "northern-lights-fpv", "archived": false })
     );
 
     let (_, clubs) = send(&rig, By::Nobody, Method::GET, "/api/clubs", None).await;
     assert_eq!(
         clubs,
         json!([
-            { "id": "north", "name": "Northern Lights FPV" },
-            { "id": "south", "name": "South FPV" },
+            { "id": "north", "name": "Northern Lights FPV", "word": "northern-lights-fpv", "archived": false },
+            { "id": "south", "name": "South FPV", "word": "south-fpv", "archived": false },
         ])
     );
     let (_, hello) = send(
@@ -1060,4 +1060,564 @@ async fn records_written_before_events_were_noted_still_open() {
     assert!(state.book.event_notes(&club("north")).is_empty());
     let note = state.book.event_note(&club("north"), "open-day");
     assert!(!note.hidden && note.removed_at.is_none());
+}
+
+// ── Clubs themselves: made, found by a friendly address, archived (§13.2) ───
+
+use gridfpv_serverd::book::word_of;
+
+async fn clubs_as(rig: &Rig, by: By<'_>) -> Vec<String> {
+    let (status, body) = send(rig, by, Method::GET, "/api/clubs", None).await;
+    assert_eq!(status, StatusCode::OK);
+    body.as_array()
+        .unwrap()
+        .iter()
+        .map(|club| {
+            let name = club["name"].as_str().unwrap();
+            if club["archived"] == json!(true) {
+                format!("{name} (archived)")
+            } else {
+                name.to_owned()
+            }
+        })
+        .collect()
+}
+
+async fn archive(rig: &Rig, owner: &str, club: &str, archived: bool) -> (StatusCode, Value) {
+    send(
+        rig,
+        By::Session(owner),
+        Method::PUT,
+        &format!("/api/clubs/{club}/archived"),
+        Some(json!({"archived": archived})),
+    )
+    .await
+}
+
+#[test]
+fn a_friendly_address_is_the_names_letters_and_digits() {
+    for (name, word) in [
+        ("Recon FPV", "recon-fpv"),
+        ("  North   FPV!  ", "north-fpv"),
+        ("Whoop & Co. (2026)", "whoop-co-2026"),
+        ("ÅLESUND Drone", "ålesund-drone"),
+        ("---", "club"),
+        ("🚁", "club"),
+        ("a/b?c#d", "a-b-c-d"),
+    ] {
+        assert_eq!(word_of(name), word, "{name:?}");
+    }
+    // Never long, and never ending on a dash.
+    let long = word_of(&"abcdefghi ".repeat(9));
+    assert!(long.chars().count() <= 40, "{long}");
+    assert!(!long.ends_with('-'), "{long}");
+    // Safe in an address as it stands.
+    for name in ["Recon FPV", "a/b?c#d", "x%20y", "<b>"] {
+        assert!(
+            word_of(name)
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-')
+        );
+    }
+}
+
+#[tokio::test]
+async fn clubs_written_before_they_had_addresses_get_one_each_and_no_two_the_same() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(BOOK_FILE),
+        r#"{"clubs":[{"id":"a","name":"Whoop Club"},{"id":"b","name":"Whoop club"},{"id":"c","name":"Whoop Club"}]}"#,
+    )
+    .unwrap();
+    let state = AppState::open(dir.path()).unwrap();
+    let words: Vec<String> = state.book.clubs().into_iter().map(|c| c.word).collect();
+    assert_eq!(words, ["whoop-club", "whoop-club-2", "whoop-club-3"]);
+    // The same every time it is read, with nothing written yet.
+    let again = AppState::open(dir.path()).unwrap();
+    assert_eq!(
+        again
+            .book
+            .clubs()
+            .into_iter()
+            .map(|c| c.word)
+            .collect::<Vec<_>>(),
+        words
+    );
+    assert_eq!(
+        again.book.club_by_word("whoop-club-2").unwrap().id,
+        club("b")
+    );
+}
+
+#[tokio::test]
+async fn only_an_owner_makes_a_club_and_it_is_a_club_like_any_other() {
+    let rig = rig();
+    let owner = rig.owner("Oz");
+    let director = rig.member("Dee", "north", Role::Director);
+    let body = || Some(json!({"name": "West FPV"}));
+    let (status, _) = send(&rig, By::Nobody, Method::POST, "/api/clubs", body()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(
+        &rig,
+        By::Token(&rig.north),
+        Method::POST,
+        "/api/clubs",
+        body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, said) = send(
+        &rig,
+        By::Session(&director),
+        Method::POST,
+        "/api/clubs",
+        body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(said["message"].as_str().unwrap().contains("owner"));
+    assert_eq!(clubs_as(&rig, By::Nobody).await, ["North FPV", "South FPV"]);
+
+    let (status, made) = send(
+        &rig,
+        By::Session(&owner),
+        Method::POST,
+        "/api/clubs",
+        body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{made}");
+    assert_eq!(made["name"], "West FPV");
+    assert_eq!(made["word"], "west-fpv");
+    assert_eq!(made["archived"], false);
+    let id = made["id"].as_str().unwrap().to_owned();
+    // A random id that is safe as a folder name on any computer.
+    assert_eq!(id.len(), 13);
+    assert!(id.starts_with('c'));
+    assert!(
+        id[1..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
+    assert_eq!(
+        clubs_as(&rig, By::Nobody).await,
+        ["North FPV", "South FPV", "West FPV"]
+    );
+
+    // It takes a token, an event, an invite and a director, as the first club does.
+    let (status, token) = send(
+        &rig,
+        By::Session(&owner),
+        Method::POST,
+        &format!("/api/clubs/{id}/tokens"),
+        Some(json!({"label": "West laptop"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = token["secret"].as_str().unwrap().to_owned();
+    send_event(&rig, &token, "west-night", "West Night", 3).await;
+    assert_eq!(listed(&rig, By::Nobody, &id).await, ["West Night"]);
+    assert!(listed(&rig, By::Nobody, "north").await.is_empty());
+    assert_eq!(opens(&rig, &id, "west-night").await, StatusCode::OK);
+    let (status, invite) = send(
+        &rig,
+        By::Session(&owner),
+        Method::POST,
+        &format!("/api/clubs/{id}/invites"),
+        Some(json!({"kind": "Personal", "label": "Wes", "role": "Director"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invite}");
+    // North's director has no say in it.
+    let (status, _) = send(
+        &rig,
+        By::Session(&director),
+        Method::PATCH,
+        &format!("/api/clubs/{id}"),
+        Some(json!({"name": "Mine now"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // And it is still there after a restart, events and all.
+    let rig = rig.restarted();
+    assert_eq!(
+        clubs_as(&rig, By::Nobody).await,
+        ["North FPV", "South FPV", "West FPV"]
+    );
+    assert_eq!(listed(&rig, By::Nobody, &id).await, ["West Night"]);
+}
+
+#[tokio::test]
+async fn two_clubs_of_one_name_get_two_ids_and_two_addresses_and_a_bad_name_makes_none() {
+    let rig = rig();
+    let owner = rig.owner("Oz");
+    let make = |name: &str| {
+        send(
+            &rig,
+            By::Session(&owner),
+            Method::POST,
+            "/api/clubs",
+            Some(json!({"name": name})),
+        )
+    };
+    let (_, first) = make("North FPV").await;
+    let (_, second) = make("north fpv").await;
+    assert_eq!(first["word"], "north-fpv-2", "North already has north-fpv");
+    assert_eq!(second["word"], "north-fpv-3");
+    assert_ne!(first["id"], second["id"]);
+    for bad in ["", "   ", &"x".repeat(81), "two\nlines"] {
+        let (status, said) = make(bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
+        assert!(said["message"].as_str().unwrap().contains("name"));
+    }
+    assert_eq!(clubs_as(&rig, By::Nobody).await.len(), 4);
+}
+
+async fn by_word(rig: &Rig, word: &str) -> (StatusCode, Value) {
+    send(
+        rig,
+        By::Nobody,
+        Method::GET,
+        &format!("/api/club-words/{word}"),
+        None,
+    )
+    .await
+}
+
+async fn rename(rig: &Rig, owner: &str, club: &str, name: &str) -> (StatusCode, Value) {
+    send(
+        rig,
+        By::Session(owner),
+        Method::PATCH,
+        &format!("/api/clubs/{club}"),
+        Some(json!({"name": name})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_friendly_address_follows_the_name_and_the_old_one_still_leads_there() {
+    let rig = rig();
+    let owner = rig.owner("Oz");
+    let (status, found) = by_word(&rig, "north-fpv").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(found["id"], "north");
+    // However it is typed.
+    assert_eq!(by_word(&rig, "North-FPV").await.1["id"], "north");
+    assert_eq!(by_word(&rig, "nowhere").await.0, StatusCode::NOT_FOUND);
+
+    let (status, renamed) = rename(&rig, &owner, "north", "Northern Whoops").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed["id"], "north", "the id never changes");
+    assert_eq!(renamed["word"], "northern-whoops");
+    assert_eq!(by_word(&rig, "northern-whoops").await.1["id"], "north");
+    assert_eq!(
+        by_word(&rig, "north-fpv").await.1["id"],
+        "north",
+        "a link posted before the rename still works"
+    );
+    assert_eq!(
+        by_word(&rig, "north-fpv").await.1["name"],
+        "Northern Whoops"
+    );
+
+    // A change that makes the same word changes no address.
+    let (_, same) = rename(&rig, &owner, "north", "Northern   WHOOPS!").await;
+    assert_eq!(same["word"], "northern-whoops");
+    assert_eq!(same["name"], "Northern   WHOOPS!");
+
+    // Another club takes the old word: now it leads there.
+    let (_, taken) = rename(&rig, &owner, "south", "North FPV").await;
+    assert_eq!(taken["word"], "north-fpv");
+    assert_eq!(by_word(&rig, "north-fpv").await.1["id"], "south");
+    assert_eq!(by_word(&rig, "south-fpv").await.1["id"], "south");
+    assert_eq!(by_word(&rig, "northern-whoops").await.1["id"], "north");
+
+    // A club cannot take a word another club has now: it gets a number, and keeps it
+    // when it is renamed to the same thing again.
+    let (_, clash) = rename(&rig, &owner, "north", "North FPV").await;
+    assert_eq!(clash["word"], "north-fpv-2");
+    let (_, again) = rename(&rig, &owner, "north", "North FPV").await;
+    assert_eq!(again["word"], "north-fpv-2");
+    assert_eq!(by_word(&rig, "north-fpv").await.1["id"], "south");
+
+    // All of it is kept.
+    let rig = rig.restarted();
+    let (_, found) = send(
+        &rig,
+        By::Nobody,
+        Method::GET,
+        "/api/club-words/northern-whoops",
+        None,
+    )
+    .await;
+    assert_eq!(found["id"], "north");
+    let (_, found) = send(
+        &rig,
+        By::Nobody,
+        Method::GET,
+        "/api/club-words/south-fpv",
+        None,
+    )
+    .await;
+    assert_eq!(found["id"], "south");
+}
+
+#[tokio::test]
+async fn only_an_owner_archives_a_club_and_one_that_is_not_there_is_not_found() {
+    let rig = rig();
+    let owner = rig.owner("Oz");
+    let director = rig.member("Dee", "north", Role::Director);
+    let (status, _) = archive(&rig, &director, "north", true).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "not even its own director");
+    let (status, _) = send(
+        &rig,
+        By::Nobody,
+        Method::PUT,
+        "/api/clubs/north/archived",
+        Some(json!({"archived": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(clubs_as(&rig, By::Nobody).await, ["North FPV", "South FPV"]);
+    let (status, _) = archive(&rig, &owner, "nowhere", true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // Bringing back a club that is not archived changes nothing.
+    let (status, same) = archive(&rig, &owner, "north", false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(same["archived"], false);
+}
+
+#[tokio::test]
+async fn an_archived_club_is_off_the_list_and_read_only_and_its_events_still_open() {
+    let rig = rig();
+    let owner = rig.owner("Oz");
+    let director = rig.member("Dee", "north", Role::Director);
+    send_event(&rig, &rig.north, "friday", "Friday", 3).await;
+    let (_, invite) = send(
+        &rig,
+        By::Session(&director),
+        Method::POST,
+        "/api/clubs/north/invites",
+        Some(json!({"kind": "Group", "label": "Discord", "max_uses": 20, "days": 7})),
+    )
+    .await;
+    let invite = invite["secret"].as_str().unwrap().to_owned();
+
+    let (status, done) = archive(&rig, &owner, "north", true).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["archived"], true);
+
+    // Off the list for everyone but an owner, who can bring it back.
+    assert_eq!(clubs_as(&rig, By::Nobody).await, ["South FPV"]);
+    assert_eq!(clubs_as(&rig, By::Session(&director)).await, ["South FPV"]);
+    assert_eq!(
+        clubs_as(&rig, By::Session(&owner)).await,
+        ["North FPV (archived)", "South FPV"]
+    );
+    // Still there by its link, marked, with its events.
+    let (status, found) = send(&rig, By::Nobody, Method::GET, "/api/clubs/north", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(found["archived"], true);
+    let (_, found) = send(
+        &rig,
+        By::Nobody,
+        Method::GET,
+        "/api/club-words/north-fpv",
+        None,
+    )
+    .await;
+    assert_eq!(found["archived"], true);
+    assert_eq!(listed(&rig, By::Nobody, "north").await, ["Friday"]);
+    assert_eq!(opens(&rig, "north", "friday").await, StatusCode::OK);
+
+    // A Director's pushes are refused, and it is told why: not that its token is wrong.
+    for (method, path, body) in [
+        (Method::GET, "/push/hello".to_owned(), None),
+        (Method::GET, "/push/events".to_owned(), None),
+        (
+            Method::PUT,
+            "/push/events/saturday".to_owned(),
+            Some(header("saturday", "Saturday", 2)),
+        ),
+        (
+            Method::POST,
+            "/push/events/friday/log".to_owned(),
+            Some(batch(&entries(5), 3)),
+        ),
+        (Method::DELETE, "/push/events/friday".to_owned(), None),
+    ] {
+        let (status, said) = send(&rig, By::Token(&rig.north), method, &path, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+        let said = said["message"].as_str().unwrap();
+        assert!(said.contains("North FPV is archived"), "{path}: {said}");
+    }
+    // South's Director is not touched.
+    let (status, _) = send(
+        &rig,
+        By::Token(&rig.south),
+        Method::GET,
+        "/push/hello",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Nothing in the club can be changed, by its director or by an owner.
+    let tok = token_id(&rig, "north");
+    for by in [&director, &owner] {
+        for (method, path, body) in manage_routes("north", &tok, "friday") {
+            if method == Method::GET {
+                continue;
+            }
+            let (status, said) = send(&rig, By::Session(by), method.clone(), &path, body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{method} {path}");
+            assert!(
+                said["message"].as_str().unwrap().contains("archived"),
+                "{method} {path}: {said}"
+            );
+        }
+        for (method, path, body) in [
+            (
+                Method::POST,
+                "/api/clubs/north/invites",
+                Some(json!({"kind": "Personal", "label": "New"})),
+            ),
+            (Method::POST, "/api/clubs/north/pilots/ace-1/claim", None),
+            (
+                Method::POST,
+                "/api/clubs/north/events/friday/public/pilot/signup/next",
+                Some(json!({})),
+            ),
+        ] {
+            let (status, _) = send(&rig, By::Session(by), method, path, body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path}");
+        }
+    }
+    assert_eq!(
+        listed(&rig, By::Nobody, "north").await,
+        ["Friday"],
+        "nothing was removed"
+    );
+    // Reading is as it was for those who run it.
+    let (status, _) = send(
+        &rig,
+        By::Session(&director),
+        Method::GET,
+        "/api/clubs/north/members",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The invite that was out no longer works.
+    let (status, _) = send(
+        &rig,
+        By::Nobody,
+        Method::GET,
+        &format!("/api/invites/{invite}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // South's things are as they were.
+    let (status, _) = send(
+        &rig,
+        By::Session(&owner),
+        Method::PATCH,
+        "/api/clubs/south",
+        Some(json!({"name": "South Whoops"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // It is still archived after a restart.
+    let rig = rig.restarted();
+    assert_eq!(clubs_as(&rig, By::Nobody).await, ["South Whoops"]);
+    let (status, _) = send(
+        &rig,
+        By::Token(&rig.north),
+        Method::GET,
+        "/push/hello",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_club_brought_back_works_again_and_invites_are_made_anew() {
+    let rig = rig();
+    let owner = rig.owner("Oz");
+    let director = rig.member("Dee", "north", Role::Director);
+    send_event(&rig, &rig.north, "friday", "Friday", 3).await;
+    let (_, invite) = send(
+        &rig,
+        By::Session(&director),
+        Method::POST,
+        "/api/clubs/north/invites",
+        Some(json!({"kind": "Personal", "label": "Ace"})),
+    )
+    .await;
+    let old = invite["secret"].as_str().unwrap().to_owned();
+    archive(&rig, &owner, "north", true).await;
+    // Archiving twice is the same as once.
+    let (status, twice) = archive(&rig, &owner, "north", true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(twice["archived"], true);
+
+    let (status, back) = archive(&rig, &owner, "north", false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(back["archived"], false);
+    assert_eq!(clubs_as(&rig, By::Nobody).await, ["North FPV", "South FPV"]);
+
+    // The Director carries on from where it was, with the same token.
+    let (status, hello) = send(
+        &rig,
+        By::Token(&rig.north),
+        Method::GET,
+        "/push/hello",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{hello}");
+    let (status, _) = send(
+        &rig,
+        By::Token(&rig.north),
+        Method::POST,
+        "/push/events/friday/log",
+        Some(batch(&entries(5), 3)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // The director runs it again.
+    let (status, _) = send(
+        &rig,
+        By::Session(&director),
+        Method::PATCH,
+        "/api/clubs/north",
+        Some(json!({"name": "North Again"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // The old invite stays dead, and a new one is made.
+    let (status, _) = send(
+        &rig,
+        By::Nobody,
+        Method::GET,
+        &format!("/api/invites/{old}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(
+        &rig,
+        By::Session(&director),
+        Method::POST,
+        "/api/clubs/north/invites",
+        Some(json!({"kind": "Personal", "label": "Ace"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }
