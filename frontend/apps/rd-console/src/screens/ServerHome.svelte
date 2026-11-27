@@ -16,6 +16,7 @@
     dropSeat,
     getServerEvent,
     listServerClubs,
+    getServerClubByWord,
     listServerEvents,
     serverEventBase,
     takeSeatOnServer
@@ -24,6 +25,7 @@
     AdapterId,
     MyAccount,
     PushClub,
+    ServerClub as ClubOnServer,
     RaceId,
     SeatRef,
     ServerEvent,
@@ -51,6 +53,7 @@
   import ServerClub from './ServerClub.svelte';
   import ServerInvite from './ServerInvite.svelte';
   import ServerReconnect from './ServerReconnect.svelte';
+  import ServerClubs from './ServerClubs.svelte';
   import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
   import SpectatorView from './SpectatorView.svelte';
@@ -58,6 +61,9 @@
   /** An event's reads, with the three things a pilot can ask for when they are there. */
   type EventSource = LiveSession &
     Partial<Pick<PublicSource, 'takeSpot' | 'takeNextSpot' | 'leaveSpot'>>;
+
+  /** A club in the list: its friendly address and whether it is archived, when told. */
+  type ListedClub = PushClub & Partial<Pick<ClubOnServer, 'word' | 'archived'>>;
 
   /** How a pilot asks the Director for an open seat from here, and gives one up. */
   interface SeatAsks {
@@ -81,6 +87,7 @@
     baseUrl,
     load = {
       clubs: () => listServerClubs(baseUrl),
+      clubByWord: (word: string) => getServerClubByWord(baseUrl, word),
       events: (club: string) => listServerEvents(baseUrl, club),
       event: (club: string, event: string) => getServerEvent(baseUrl, club, event)
     },
@@ -98,7 +105,9 @@
     baseUrl: string;
     /** How the lists are read. A test passes its own. */
     load?: {
-      clubs: () => Promise<PushClub[]>;
+      clubs: () => Promise<ListedClub[]>;
+      /** The club a friendly address leads to. `undefined` when there is none. */
+      clubByWord?: (word: string) => Promise<ClubOnServer | undefined>;
       events: (club: string) => Promise<ServerEvent[]>;
       /** One event by its address. `undefined` when the server holds none. */
       event?: (club: string, event: string) => Promise<ServerEvent | undefined>;
@@ -152,6 +161,7 @@
       place.kind === 'event' ||
       place.kind === 'account' ||
       place.kind === 'club' ||
+      place.kind === 'c' ||
       place.kind === 'invite' ||
       place.kind === 'reconnect' ||
       place.kind === 'results'
@@ -170,7 +180,7 @@
 
   // ── The clubs and their events ─────────────────────────────────────────────
   interface ClubEvents {
-    club: PushClub;
+    club: ListedClub;
     events: ServerEvent[];
   }
   let clubs = $state<ClubEvents[] | undefined>(undefined);
@@ -206,6 +216,41 @@
       clearInterval(timer);
     };
   });
+
+  // ── One club, opened by its friendly address ───────────────────────────────
+  /**
+   * The club the address names, with its events. `club` is `null` once the server has
+   * said no club has that word. An archived club is not in the list above and still opens
+   * here.
+   */
+  let worded = $state<
+    { word: string; club: ClubOnServer | null; events: ServerEvent[] } | undefined
+  >(undefined);
+  $effect(() => {
+    if (place.kind !== 'c') return;
+    const word = place.word;
+    void account?.id;
+    void listAgain;
+    let stopped = false;
+    const read = async () => {
+      try {
+        const club = (await load.clubByWord?.(word)) ?? null;
+        const events = club ? await load.events(club.id) : [];
+        if (!stopped) worded = { word, club, events };
+      } catch {
+        // Not reachable right now. What was shown stays.
+      }
+    };
+    void read();
+    const timer = setInterval(read, LIST_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  });
+  const wordedNow = $derived(
+    place.kind === 'c' && worded?.word === place.word ? worded : undefined
+  );
 
   const total = $derived(clubs?.reduce((sum, club) => sum + club.events.length, 0) ?? 0);
 
@@ -487,9 +532,43 @@
           go({ kind: 'list' });
         }}
       />
+      {#if account.owner}
+        <ServerClubs
+          api={people}
+          onchange={() => {
+            listAgain += 1;
+          }}
+        />
+      {/if}
     {:else if account === null}
       <p class="event">Sign in</p>
       <ServerSignIn api={people} {providers} />
+    {/if}
+  {:else if place.kind === 'c'}
+    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+    {#if !wordedNow}
+      <p class="muted" role="status">Loading…</p>
+    {:else if !wordedNow.club}
+      <Card elevation="sm">
+        <p class="event">This club is not here</p>
+        <p>The address may not be right.</p>
+      </Card>
+    {:else}
+      {@const club = wordedNow.club}
+      <section aria-label={club.name} data-testid="server-one-club">
+        <p class="event">
+          {club.name}
+          {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
+        </p>
+        {#if club.archived}
+          <p class="muted">This club is archived. Its events can still be looked at.</p>
+        {/if}
+        {#if wordedNow.events.length === 0}
+          <p class="muted">No events yet.</p>
+        {:else}
+          {@render eventRows(club.id, wordedNow.events)}
+        {/if}
+      </section>
     {/if}
   {:else if place.kind === 'club'}
     {@const wanted = place.club}
@@ -562,27 +641,34 @@
     {#each clubs as { club, events } (club.id)}
       {#if events.length > 0}
         <section aria-label={club.name}>
-          <h2>{club.name}</h2>
-          <ul>
-            {#each events as event (event.id)}
-              <li>
-                <a
-                  class="row"
-                  href={formatServerHash({ kind: 'event', club: club.id, event: event.id })}
-                  data-testid="server-event-link"
-                >
-                  <span class="name">{event.name}</span>
-                  {#if event.hidden}<Badge tone="neutral">Hidden</Badge>{/if}
-                  {#if eventDetail(event)}<span class="muted">{eventDetail(event)}</span>{/if}
-                </a>
-              </li>
-            {/each}
-          </ul>
+          <h2>
+            {club.name}
+            {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
+          </h2>
+          {@render eventRows(club.id, events)}
         </section>
       {/if}
     {/each}
   {/if}
 </main>
+
+{#snippet eventRows(club: string, events: readonly ServerEvent[])}
+  <ul>
+    {#each events as event (event.id)}
+      <li>
+        <a
+          class="row"
+          href={formatServerHash({ kind: 'event', club, event: event.id })}
+          data-testid="server-event-link"
+        >
+          <span class="name">{event.name}</span>
+          {#if event.hidden}<Badge tone="neutral">Hidden</Badge>{/if}
+          {#if eventDetail(event)}<span class="muted">{eventDetail(event)}</span>{/if}
+        </a>
+      </li>
+    {/each}
+  </ul>
+{/snippet}
 
 {#if wanting}
   <Dialog open={true} title="Are you at the race?" onclose={stopWanting}>

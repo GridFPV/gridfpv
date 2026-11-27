@@ -26,6 +26,8 @@
   } from '@gridfpv/types';
   import {
     ROLES,
+    OWNERS_SEE_ALL,
+    clubLink,
     inviteLink,
     inviteStanding,
     roleWord,
@@ -71,7 +73,8 @@
       | 'makeReconnect'
       | 'revokeReconnect'
     >;
-    club: { id: string; name: string };
+    /** The club. Its friendly address and whether it is archived are shown when given. */
+    club: { id: string; name: string; word?: string; archived?: boolean };
     /** The signed-in account's id, to mark its own row. */
     me: string;
     /** Whether the person runs the club. A claims approver does not: they see only pilots. */
@@ -208,6 +211,23 @@
 
 <div class="club" data-testid="server-club">
   <p class="lead">{club.name}</p>
+  {#if club.archived}
+    <Banner tone="warn" title="This club is archived.">
+      <span data-testid="club-archived"
+        >Nothing in it can be changed, and its director's Grid can send no more. Its events still
+        open by their links. An owner of this server can bring it back.</span
+      >
+    </Banner>
+  {/if}
+  {#if runs && club.word}
+    {@const address = clubLink(origin, club.word)}
+    <p class="address">
+      <span class="muted">The club's address, to hand out:</span>
+      <code data-testid="club-own-address">{address}</code>
+      <Button size="sm" variant="ghost" onclick={() => copy(address)}>Copy</Button>
+    </p>
+  {/if}
+  {#if runs}<p class="muted" data-testid="owners-see-all">{OWNERS_SEE_ALL}</p>{/if}
   {#if loadError}
     <Banner tone="danger" title="This club's members could not be read.">{loadError}</Banner>
   {/if}
@@ -409,6 +429,16 @@
 {/if}
 
 <style>
+  .address {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  .address code {
+    overflow-wrap: anywhere;
+    user-select: all;
+  }
   .club,
   .block,
   form {

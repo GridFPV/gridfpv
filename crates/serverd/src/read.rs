@@ -32,7 +32,9 @@ use gridfpv_server::error::ErrorCode;
 use gridfpv_server::events::EventId;
 use gridfpv_server::pilots::Pilot;
 use gridfpv_server::public::{Caller, PublicHello};
-use gridfpv_server::remote::{PushClub, PushHeader, ServerEvent};
+use gridfpv_server::remote::{PushHeader, ServerEvent};
+
+use crate::manage::ServerClub;
 use gridfpv_server::spectate::{
     self, Mentioned, PublicEvent, PublicEventName, class_for_visitors, pilot_for_visitors,
     timer_for_visitors,
@@ -108,19 +110,46 @@ impl Shown {
     }
 }
 
-/// `GET /api/clubs`.
-pub async fn get_clubs(State(state): State<AppState>) -> Json<Vec<PushClub>> {
+/// `GET /api/clubs`: the clubs on this server. An archived club is listed only for an
+/// owner of the server, who is the one who can bring it back.
+pub async fn get_clubs(
+    State(state): State<AppState>,
+    crate::people::MaybeSigned(standing): crate::people::MaybeSigned,
+) -> Json<Vec<ServerClub>> {
+    let owner = standing.is_some_and(|s| s.may(crate::accounts::Act::RunServer));
     Json(
         state
             .book
             .clubs()
             .into_iter()
-            .map(|club| PushClub {
-                id: club.id.0,
-                name: club.name,
-            })
+            .filter(|club| owner || club.archived_at.is_none())
+            .map(ServerClub::from)
             .collect(),
     )
+}
+
+/// `GET /api/clubs/{club}`: one club, archived or not. Its events still open by link.
+pub async fn get_club(
+    State(state): State<AppState>,
+    Path(club): Path<String>,
+) -> Result<Json<ServerClub>, ApiError> {
+    state
+        .book
+        .club(&ClubId(club))
+        .map(|club| Json(club.into()))
+        .ok_or_else(|| not_found("This server has no such club."))
+}
+
+/// `GET /api/club-words/{word}`: the club a friendly address leads to.
+pub async fn get_club_by_word(
+    State(state): State<AppState>,
+    Path(word): Path<String>,
+) -> Result<Json<ServerClub>, ApiError> {
+    state
+        .book
+        .club_by_word(&word)
+        .map(|club| Json(club.into()))
+        .ok_or_else(|| not_found("This server has no such club."))
 }
 
 /// `GET /api/clubs/{club}/events`: newest first. A hidden event is listed only for someone

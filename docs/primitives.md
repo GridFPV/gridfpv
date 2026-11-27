@@ -1696,7 +1696,9 @@ A server can hold more than one club, and a director usually belongs to one.
 - **The first build has one club,** made when the server is set up. Events are stored
   under a club from the start, so adding more clubs later changes nothing already stored.
 
-**More than one club (decided 2026-11-28, not built).** Ryan's answers:
+**More than one club (decided 2026-11-28).** Built: making a club, its id and friendly
+address, archiving, and telling people about owners. Not built yet: the primary club and
+the new front page, and the list of clubs in Grid. Ryan's answers:
 
 - **Who it is for.** First, an owner who hosts a few clubs they know. A big shared server
   where strangers ask for a club comes later and stays small at first. No open sign-up
@@ -1995,6 +1997,19 @@ code of §13.13.
     club on a server, a director who could not do these would have to ask the owner for
     every laptop. Not confirmed.
 
+13. **How more than one club was built (§13.2).** Choices made while building, not
+    confirmed:
+    - A club's id is `c` and twelve random letters and digits. The first club keeps the
+      id `club`.
+    - The friendly address is `#/c/<word>`. The word is the name's letters and digits in
+      lower case. Two clubs of one name get `word` and `word-2`.
+    - Archiving takes back every invite the club had out. They are made again when the
+      club is brought back.
+    - An archived club refuses every change under its address, for owners too. Bringing
+      it back is the one change it takes.
+    - Grid says **Not connected** and gives the server's reason. It tries again by itself.
+    - A director of an archived club cannot open its members page: the club is off the
+      list they are given. An owner can.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
     sign-in and send a link to re-connect. Built for server owners and not for a club's
     directors, for the reason in §13.8. Not confirmed.

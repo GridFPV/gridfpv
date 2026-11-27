@@ -270,7 +270,8 @@ pub async fn sync_all(
         let known = memory.events.entry(meta.id.clone()).or_default();
         let (len, sent, state) = match sync_event(registry, &desk, client, known, &meta.id).await {
             Ok(done) => done,
-            Err(PushError::Token) => return Err(PushError::Token),
+            // Not about this event: the server takes nothing from this Director at all.
+            Err(whole @ (PushError::Token | PushError::Closed(_))) => return Err(whole),
             Err(PushError::Server(why)) => {
                 let sent = known.server.map_or(0, |(sent, _)| sent);
                 desk.report_event(LinkEvent {
@@ -443,7 +444,7 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                     break;
                 }
                 // The events are up. Pilots come after, and never hold them back.
-                if let Err(PushError::Token) =
+                if let Err(PushError::Token | PushError::Closed(_)) =
                     sync_pilots(&registry, &client, &mut memory, false).await
                 {
                     // The token was taken back between two requests. The next look says so.

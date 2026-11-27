@@ -6,6 +6,7 @@
 import { vi } from 'vitest';
 import type {
   AccountSignIns,
+  ServerClub,
   MySignIn,
   ReconnectMade,
   ReconnectView,
@@ -65,6 +66,8 @@ export interface FakeServer {
   events: Record<string, ServerEvent[]>;
   /** Events removed from the server, as `club/event`. */
   removed: string[];
+  /** The clubs on the server, archived ones too. */
+  clubList: ServerClub[];
   /** How each account signs in, by account id. */
   signIns: Record<string, MySignIn[]>;
   /** Re-connect links that work: secret to the account it is for. */
@@ -114,6 +117,10 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     },
     reconnects: {},
     signedOut: [],
+    clubList: [
+      { ...NORTH, word: 'north-fpv', archived: false },
+      { ...SOUTH, word: 'south-fpv', archived: false }
+    ],
     ...over
   };
 }
@@ -406,6 +413,36 @@ export function fakePeople(server: FakeServer) {
     reconnect: vi.fn(async (secret: string): Promise<ReconnectView> => {
       const account = server.reconnects[secret] ?? refuse('That re-connect link does not work.');
       return { name: accountName(account) };
+    }),
+    serverClubs: vi.fn(async (): Promise<ServerClub[]> => {
+      const owner = server.account?.owner === true;
+      return server.clubList.filter((club) => owner || !club.archived).map((c) => ({ ...c }));
+    }),
+    makeClub: vi.fn(async (name: string): Promise<ServerClub> => {
+      if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');
+      if (name.trim() === '') refuse('A club needs a name.');
+      made += 1;
+      const base = name
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+      const taken = server.clubList.some((c) => c.word === base);
+      const club = {
+        id: `cmade${made}`,
+        name: name.trim(),
+        word: taken ? `${base}-2` : base,
+        archived: false
+      };
+      server.clubList.push(club);
+      return { ...club };
+    }),
+    archiveClub: vi.fn(async (club: string, archived: boolean): Promise<ServerClub> => {
+      if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');
+      const found =
+        server.clubList.find((c) => c.id === club) ?? refuse('This server has no such club.');
+      found.archived = archived;
+      return { ...found };
     })
   } satisfies PeopleApi;
   return api;

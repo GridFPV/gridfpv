@@ -835,7 +835,7 @@ async fn what_is_not_there_is_not_found() {
     // The clubs are listed.
     assert_eq!(
         read_ok(&s, "/api/clubs").await,
-        json!([{"id": "club", "name": "My club"}])
+        json!([{"id": "club", "name": "My club", "word": "my-club", "archived": false}])
     );
 }
 
@@ -863,7 +863,13 @@ async fn reading_needs_no_token_and_cannot_change_anything() {
                 .body(Body::empty())
                 .unwrap();
             let status = s.app.clone().oneshot(request).await.unwrap().status();
-            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+            // An owner makes a club with a POST there (§13.2). Nobody else does.
+            let want = if method == Method::POST && path == "/api/clubs" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::METHOD_NOT_ALLOWED
+            };
+            assert_eq!(status, want, "{method} {path}");
         }
     }
     assert_eq!(
@@ -873,6 +879,11 @@ async fn reading_needs_no_token_and_cannot_change_anything() {
             .unwrap()
             .len(),
         1
+    );
+    assert_eq!(
+        read_ok(&s, "/api/clubs").await.as_array().unwrap().len(),
+        1,
+        "no club was made"
     );
 }
 

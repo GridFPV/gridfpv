@@ -6,6 +6,16 @@
 //! gridfpv-server token list            the tokens that were made
 //! gridfpv-server token revoke <id>     take a token back
 //! gridfpv-server club name <name>      name the club
+//! gridfpv-server club list             the clubs, with each one's address
+//! gridfpv-server club new <name>       make another club
+//! gridfpv-server club archive <club>   make a club read-only and take it off the list
+//! gridfpv-server club restore <club>   bring an archived club back
+//! ```
+//!
+//! With more than one club, `token new` and `club name` take the club's address (the word
+//! `club list` shows) as one more word at the end: `token new "Ryan's laptop" recon-fpv`.
+//!
+//! ```text
 //! gridfpv-server owner invite          make a link that makes whoever opens it an owner
 //! gridfpv-server account list          the accounts, and how each signs in
 //! gridfpv-server account reconnect <id>   make a link that lets someone back in to an account
@@ -45,6 +55,10 @@ const USAGE: &str = "usage:
   gridfpv-server token list            list the tokens
   gridfpv-server token revoke <id>     take a token back
   gridfpv-server club name <name>      name the club
+  gridfpv-server club list             list the clubs, with each one's address
+  gridfpv-server club new <name>       make another club
+  gridfpv-server club archive <club>   make a club read-only and take it off the list
+  gridfpv-server club restore <club>   bring an archived club back
   gridfpv-server owner invite          make a link that makes its user an owner
   gridfpv-server account list          list the accounts, and how each signs in
   gridfpv-server account reconnect <id>   make a link that lets someone back in";
@@ -61,10 +75,16 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let done = match args.as_slice() {
         [] | ["serve"] => serve(),
-        ["token", "new", label] => token_new(label),
+        ["token", "new", label] => token_new(label, None),
+        ["token", "new", label, club] => token_new(label, Some(club)),
         ["token", "list"] => token_list(),
         ["token", "revoke", id] => token_revoke(id),
-        ["club", "name", name] => club_name(name),
+        ["club", "name", name] => club_name(name, None),
+        ["club", "name", name, club] => club_name(name, Some(club)),
+        ["club", "list"] => club_list(),
+        ["club", "new", name] => club_new(name),
+        ["club", "archive", club] => club_archive(club, true),
+        ["club", "restore", club] => club_archive(club, false),
         ["owner", "invite"] => owner_invite(),
         ["account", "list"] => account_list(),
         ["account", "reconnect", id] => account_reconnect(id),
@@ -147,14 +167,27 @@ fn serve() -> Done {
     })
 }
 
-fn token_new(label: &str) -> Done {
+/// The club a command is about: the one named by its address, or the only one there is.
+fn pick_club(book: &Book, word: Option<&str>) -> Result<gridfpv_serverd::book::Club, String> {
+    let clubs = book.clubs();
+    match word {
+        Some(word) => book.club_by_word(word).ok_or_else(|| {
+            format!("there is no club with the address {word:?}. See them with: gridfpv-server club list")
+        }),
+        None => match clubs.as_slice() {
+            [] => Err("this server has no club".to_owned()),
+            [only] => Ok(only.clone()),
+            _ => Err(
+                "this server has more than one club. Say which, by its address, as the last word. See them with: gridfpv-server club list"
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
+fn token_new(label: &str, club: Option<&str>) -> Done {
     let book = Book::open(&data_dir())?;
-    // The first build has one club (§13.2).
-    let club = book
-        .clubs()
-        .into_iter()
-        .next()
-        .ok_or("this server has no club")?;
+    let club = pick_club(&book, club)?;
     let (record, secret) = book.new_token(&club.id, label)?;
     println!(
         "Link token for {} ({}), id {}:",
@@ -293,14 +326,54 @@ fn account_reconnect(id: &str) -> Done {
     Ok(())
 }
 
-fn club_name(name: &str) -> Done {
+fn club_name(name: &str, club: Option<&str>) -> Done {
     let book = Book::open(&data_dir())?;
-    let club = book
-        .clubs()
-        .into_iter()
-        .next()
-        .ok_or("this server has no club")?;
+    let club = pick_club(&book, club)?;
     let club = book.rename_club(&club.id, name)?;
     println!("The club is now called {}.", club.name);
+    println!("Its address is {}/#/c/{}", link_base(), club.word);
+    Ok(())
+}
+
+fn club_list() -> Done {
+    let book = Book::open(&data_dir())?;
+    for club in book.clubs() {
+        let archived = if club.archived_at.is_some() {
+            "  archived"
+        } else {
+            ""
+        };
+        println!("{}  {}{archived}", club.word, club.name);
+    }
+    Ok(())
+}
+
+fn club_new(name: &str) -> Done {
+    let book = Book::open(&data_dir())?;
+    let club = book.new_club(name)?;
+    println!("Made the club {}.", club.name);
+    println!("Its address is {}/#/c/{}", link_base(), club.word);
+    println!(
+        "Make a link token for its director: gridfpv-server token new <label> {}",
+        club.word
+    );
+    Ok(())
+}
+
+fn club_archive(word: &str, archived: bool) -> Done {
+    let book = Book::open(&data_dir())?;
+    let club = pick_club(&book, Some(word))?;
+    let club = book.archive_club(&club.id, archived)?;
+    if archived {
+        use gridfpv_serverd::accounts::Accounts;
+        Accounts::open(&data_dir())?
+            .revoke_invites_of(&club.id, gridfpv_serverd::people::now_ms())?;
+        println!(
+            "{} is archived. It is off the list and nothing in it can be changed. Its events still open by their links.",
+            club.name
+        );
+    } else {
+        println!("{} is back.", club.name);
+    }
     Ok(())
 }

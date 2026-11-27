@@ -101,16 +101,28 @@ impl FromRequestParts<AppState> for Pusher {
                 let (scheme, token) = value.split_once(' ')?;
                 scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
             });
-        token
+        let club = token
             .and_then(|token| state.book.club_for_token(token))
-            .map(Pusher)
             .ok_or_else(|| {
                 ApiError::new(
                     StatusCode::UNAUTHORIZED,
                     ErrorCode::Unauthorized,
                     "A link token is needed to push to this server. It may have been taken back.",
                 )
-            })
+            })?;
+        // An archived club is read-only (§13.2). The token is right, so the Director is
+        // told the real reason and not that its token is wrong.
+        if club.archived_at.is_some() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                ErrorCode::Forbidden,
+                format!(
+                    "{} is archived on this server and takes nothing new. An owner of the server can bring it back.",
+                    club.name
+                ),
+            ));
+        }
+        Ok(Pusher(club))
     }
 }
 

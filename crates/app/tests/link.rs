@@ -1248,6 +1248,43 @@ async fn a_token_the_server_does_not_take_stops_the_sync_and_says_so() {
 }
 
 #[tokio::test]
+async fn an_archived_club_takes_nothing_and_the_director_is_told_why_and_carries_on_when_it_is_back()
+ {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    let before = s.held(&event).unwrap();
+
+    // An owner archives the club (§13.2). The token is still right.
+    let club = s.state.book.clubs()[0].clone();
+    s.state.book.archive_club(&club.id, true).unwrap();
+    passes(&d, &event, 2).await;
+    let told = |err: PushError| match err {
+        PushError::Closed(why) => why,
+        other => panic!("the token was blamed, or only one event: {other:?}"),
+    };
+    let why = told(client.hello().await.unwrap_err());
+    assert!(why.contains("is archived on this server"), "{why}");
+    assert!(why.contains(&club.name), "{why}");
+    let why = told(
+        sync_all(&d.registry, &client, &mut memory)
+            .await
+            .unwrap_err(),
+    );
+    assert!(why.contains("is archived"), "{why}");
+    assert_eq!(s.held(&event).unwrap(), before, "nothing new was taken");
+
+    // Brought back, the same Director sends what it had waiting.
+    s.state.book.archive_club(&club.id, false).unwrap();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(s.held(&event).unwrap(), log_of(&d, &event));
+}
+
+#[tokio::test]
 async fn a_server_that_is_not_there_is_an_error_and_not_a_hang() {
     let d = director();
     event(&d, "Friday").await;

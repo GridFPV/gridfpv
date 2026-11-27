@@ -1238,6 +1238,17 @@ impl Accounts {
         Ok(out)
     }
 
+    /// Take back every invite to a club that still stands. Returns how many.
+    pub fn revoke_invites_of(&self, club: &ClubId, now: i64) -> Result<usize> {
+        let mut gone = 0;
+        for invite in self.invites_of(club)? {
+            if invite.stands(now) && self.revoke_invite(&invite.id, now)? {
+                gone += 1;
+            }
+        }
+        Ok(gone)
+    }
+
     /// Take an invite back, by its id. `false` when there is none that still stands.
     pub fn revoke_invite(&self, id: &str, now: i64) -> Result<bool> {
         Ok(self.lock().execute(

@@ -3,6 +3,8 @@
 //!
 //! | route | what |
 //! |-------|------|
+//! | `POST /api/clubs` | make a club. For an owner of the server |
+//! | `PUT /api/clubs/{club}/archived` | archive a club, or bring it back. For an owner |
 //! | `PATCH /api/clubs/{club}` | give the club a new name |
 //! | `GET /api/clubs/{club}/tokens` | the club's link tokens, those taken back too |
 //! | `POST /api/clubs/{club}/tokens` | make one. The token itself is in the answer, once |
@@ -10,7 +12,15 @@
 //! | `PUT /api/clubs/{club}/events/{event}/listing` | hide an event from the list, or show it |
 //! | `DELETE /api/clubs/{club}/events/{event}` | remove an event from the server |
 //!
-//! Every one is for a director of the club, or an owner of the server (§13.2). A director
+//! Every one but the first two is for a director of the club, or an owner of the server
+//! (§13.2). Only an owner makes a club or archives one.
+//!
+//! **An archived club** is read-only and off the list of clubs. Nothing in it can be
+//! changed ([`not_archived`]), a Director's pushes are refused (`push`), and its invites
+//! stop working. Its events still open by their links. An owner can bring it back; invites
+//! are made again.
+//!
+//! The rest: A director
 //! makes the tokens their own Grid pushes with (§13.6).
 //!
 //! **A hidden event** is left out of the club's list for everyone else. Anyone who has its
@@ -24,16 +34,132 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use gridfpv_server::error::ErrorCode;
 use gridfpv_server::events::EventId;
-use gridfpv_server::remote::PushClub;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
 use crate::accounts::Act;
 use crate::app::AppState;
-use crate::book::{BookError, LinkToken};
+use crate::book::{BookError, Club, ClubId, LinkToken};
 use crate::people::{Signed, in_club};
 use crate::push::ApiError;
 use crate::store::valid_event_id;
+
+/// A club, as the server's page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerClub {
+    /// Never changes. The page's own links use it.
+    pub id: String,
+    pub name: String,
+    /// The friendly address, for handing out: `…/#/c/<word>`. It follows the name.
+    pub word: String,
+    /// Read-only, and off the list of clubs.
+    pub archived: bool,
+}
+
+impl From<Club> for ServerClub {
+    fn from(club: Club) -> Self {
+        Self {
+            id: club.id.0,
+            name: club.name,
+            word: club.word,
+            archived: club.archived_at.is_some(),
+        }
+    }
+}
+
+/// `POST /api/clubs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct NewClub {
+    pub name: String,
+}
+
+/// `PUT /api/clubs/{club}/archived`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ClubArchived {
+    pub archived: bool,
+}
+
+pub(crate) const ARCHIVED: &str = "This club is archived, so nothing in it can be changed. An owner of this server can bring it back.";
+
+fn only_owners() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        ErrorCode::Forbidden,
+        "Only an owner of this server can do that.",
+    )
+}
+
+/// Refuse a request that would change something in an archived club.
+///
+/// It looks only at the address: anything under `/api/clubs/{club}/` that is not a read.
+/// So a route added later is covered without being told. Bringing the club back is the one
+/// change let through.
+pub async fn not_archived(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let reads = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    if !reads {
+        let mut parts = request.uri().path().split('/').skip(1);
+        let under_club = parts.next() == Some("api") && parts.next() == Some("clubs");
+        if under_club && let Some(club) = parts.next() {
+            let rest: Vec<&str> = parts.collect();
+            let archived = state
+                .book
+                .club(&ClubId(club.to_owned()))
+                .is_some_and(|club| club.archived_at.is_some());
+            if archived && rest != ["archived"] {
+                return ApiError::new(StatusCode::CONFLICT, ErrorCode::Refused, ARCHIVED)
+                    .into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
+
+/// `POST /api/clubs`.
+pub async fn post_club(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Json(new): Json<NewClub>,
+) -> Result<Json<ServerClub>, ApiError> {
+    if !standing.may(Act::RunServer) {
+        return Err(only_owners());
+    }
+    Ok(Json(
+        state.book.new_club(&new.name).map_err(book_error)?.into(),
+    ))
+}
+
+/// `PUT /api/clubs/{club}/archived`.
+pub async fn put_archived(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Path(club): Path<String>,
+    Json(change): Json<ClubArchived>,
+) -> Result<Json<ServerClub>, ApiError> {
+    if !standing.may(Act::RunServer) {
+        return Err(only_owners());
+    }
+    let club = state
+        .book
+        .archive_club(&ClubId(club), change.archived)
+        .map_err(book_error)?;
+    if change.archived {
+        // An invite to a club nobody can join is no invite.
+        state
+            .accounts
+            .revoke_invites_of(&club.id, crate::people::now_ms())?;
+    }
+    Ok(Json(club.into()))
+}
 
 /// A link token as a list shows it. The token itself is never in this.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -124,16 +250,13 @@ pub async fn patch_club(
     Signed(standing): Signed,
     Path(club): Path<String>,
     Json(change): Json<ClubChange>,
-) -> Result<Json<PushClub>, ApiError> {
+) -> Result<Json<ServerClub>, ApiError> {
     let club = in_club(&state, club, |c| standing.may(Act::RunClub(c)))?;
     let club = state
         .book
         .rename_club(&club, &change.name)
         .map_err(book_error)?;
-    Ok(Json(PushClub {
-        id: club.id.0,
-        name: club.name,
-    }))
+    Ok(Json(club.into()))
 }
 
 /// `GET /api/clubs/{club}/tokens`: newest first.

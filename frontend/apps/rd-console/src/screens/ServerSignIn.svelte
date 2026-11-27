@@ -7,7 +7,7 @@
    */
   import { Banner } from '@gridfpv/components';
   import type { SignInProvider } from '@gridfpv/types';
-  import type { PeopleApi } from '../lib/serverPeople.js';
+  import { OWNERS_SEE_ALL, type PeopleApi } from '../lib/serverPeople.js';
 
   let {
     api,
@@ -46,6 +46,7 @@
         </li>
       {/each}
     </ul>
+    {#if !add}<p class="muted" data-testid="owners-see-all">{OWNERS_SEE_ALL}</p>{/if}
   {/if}
 </div>
 
