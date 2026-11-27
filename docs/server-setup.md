@@ -320,6 +320,37 @@ On the club's page, under **Events**, a director or an owner can:
 
 The club's name is changed at the bottom of the same page.
 
+### 8. Help someone who cannot sign in
+
+There are no passwords on a Grid server, so there is no password to reset. People sign in
+with Discord or Google. If someone loses that account, or it is stolen, an **owner** of the
+server gets them back in.
+
+On the club's page, under **Members**, press **Sign-ins…** next to the person. You can:
+
+- **Take off** a sign-in. The person is signed out everywhere at once, and that sign-in no
+  longer opens their account. Do this when a Discord or Google account was stolen.
+- **Make a re-connect link** and send it to the person. They open it and sign in with an
+  account they can still use. From then on, that is how they sign in. Their clubs, pilots
+  and results stay as they are.
+
+The link works once, and for seven days. Whoever opens it gets into the account, so send
+it only to the person it is for. A new link stops the one before it. You can also take a
+link back.
+
+Only an owner can do this. A director cannot, because an account is for the whole server
+and not for one club.
+
+**If you are the owner and you are locked out**, use the command line on the server:
+
+```
+gridfpv-serverctl account list
+gridfpv-serverctl account reconnect <id>
+```
+
+The first shows every account with its id and how it signs in. The second prints a
+re-connect link for the account you name.
+
 ## What is kept
 
 The clubs and tokens are in one file, and each event has a file of its own. The server

@@ -5,6 +5,10 @@
  */
 import { vi } from 'vitest';
 import type {
+  AccountSignIns,
+  MySignIn,
+  ReconnectMade,
+  ReconnectView,
   ClubPilotView,
   ClubRole,
   InviteMade,
@@ -37,6 +41,9 @@ export const ACE: MyAccount = {
   pilots: []
 };
 
+/** When a re-connect link made here stops working: 4 December 2026, midday. */
+export const LINK_UNTIL = Date.UTC(2026, 11, 4, 12);
+
 export interface FakeServer {
   account: MyAccount | undefined;
   providers: SignInProvider[];
@@ -58,6 +65,12 @@ export interface FakeServer {
   events: Record<string, ServerEvent[]>;
   /** Events removed from the server, as `club/event`. */
   removed: string[];
+  /** How each account signs in, by account id. */
+  signIns: Record<string, MySignIn[]>;
+  /** Re-connect links that work: secret to the account it is for. */
+  reconnects: Record<string, string>;
+  /** Accounts that were signed out everywhere, by an owner taking a sign-in off. */
+  signedOut: string[];
 }
 
 /** An event a club holds on the server. */
@@ -92,6 +105,15 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     secrets: { tok1: 'gfs_first' },
     events: { north: [] },
     removed: [],
+    signIns: {
+      acct_ace: [{ provider: 'discord', subject: '111', label: 'ace_fpv' }],
+      acct_bee: [
+        { provider: 'discord', subject: '222', label: 'bee_fpv' },
+        { provider: 'google', subject: 'g-bee', label: 'Bee B' }
+      ]
+    },
+    reconnects: {},
+    signedOut: [],
     ...over
   };
 }
@@ -143,6 +165,22 @@ export function fakePeople(server: FakeServer) {
         }))
     );
     server.account = { ...account, pilots };
+  };
+  const accountName = (account: string): string =>
+    Object.values(server.members)
+      .flat()
+      .find((m) => m.id === account)?.name ?? account;
+  /** Only an owner of the server helps an account. */
+  const signInsOf = (account: string): AccountSignIns => {
+    if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');
+    const held = server.signIns[account] ?? refuse('There is no such account.');
+    const waiting = Object.values(server.reconnects).includes(account);
+    return {
+      id: account,
+      name: accountName(account),
+      sign_ins: [...held],
+      ...(waiting ? { link_until: LINK_UNTIL } : {})
+    };
   };
   const api = {
     me: vi.fn(async () => me()),
@@ -336,6 +374,38 @@ export function fakePeople(server: FakeServer) {
       }
       server.events[club] = server.events[club].filter((e) => e.id !== event);
       server.removed.push(`${club}/${event}`);
+    }),
+    accountSignIns: vi.fn(async (account: string) => signInsOf(account)),
+    dropSignIn: vi.fn(async (account: string, provider: string, subject: string) => {
+      const before = signInsOf(account).sign_ins;
+      if (account === server.account?.id && before.length <= 1) {
+        return refuse('An account must keep at least one way to sign in.');
+      }
+      server.signIns[account] = before.filter(
+        (s) => !(s.provider === provider && s.subject === subject)
+      );
+      if (server.signIns[account].length < before.length) server.signedOut.push(account);
+      return signInsOf(account);
+    }),
+    makeReconnect: vi.fn(async (account: string): Promise<ReconnectMade> => {
+      signInsOf(account);
+      // An account has one link at a time.
+      for (const [secret, whose] of Object.entries(server.reconnects)) {
+        if (whose === account) delete server.reconnects[secret];
+      }
+      made += 1;
+      const secret = `gfr_secret${made}`;
+      server.reconnects[secret] = account;
+      return { secret, expires_at: LINK_UNTIL };
+    }),
+    revokeReconnect: vi.fn(async (account: string) => {
+      const found = Object.entries(server.reconnects).find(([, whose]) => whose === account);
+      if (!found) return refuse('That re-connect link does not work.');
+      delete server.reconnects[found[0]];
+    }),
+    reconnect: vi.fn(async (secret: string): Promise<ReconnectView> => {
+      const account = server.reconnects[secret] ?? refuse('That re-connect link does not work.');
+      return { name: accountName(account) };
     })
   } satisfies PeopleApi;
   return api;

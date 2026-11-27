@@ -256,6 +256,7 @@ impl From<AccountError> for ApiError {
     fn from(e: AccountError) -> Self {
         let (status, code) = match &e {
             AccountError::InviteDoesNotWork
+            | AccountError::ReconnectDoesNotWork
             | AccountError::NoSuchAccount
             | AccountError::NotAMember
             | AccountError::NoSuchPilot

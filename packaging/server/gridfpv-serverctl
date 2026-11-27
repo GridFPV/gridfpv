@@ -6,6 +6,8 @@
 #   gridfpv-serverctl token revoke <id>
 #   gridfpv-serverctl club name "Recon FPV"
 #   gridfpv-serverctl owner invite
+#   gridfpv-serverctl account list
+#   gridfpv-serverctl account reconnect <id>
 #
 # It is the same as running gridfpv-server yourself, with the data folder and the user the
 # service uses. Running it as another user would leave files the service cannot change.

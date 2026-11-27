@@ -18,6 +18,7 @@ use crate::page::Page;
 use crate::people;
 use crate::push;
 use crate::read;
+use crate::recover;
 use crate::signin::{self, Provider};
 use crate::store::Store;
 
@@ -200,6 +201,19 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(people::delete_my_sign_in),
         )
         .route("/api/sign-out", axum::routing::post(people::post_sign_out))
+        .route(
+            "/api/accounts/{account}/sign-ins",
+            get(recover::get_sign_ins),
+        )
+        .route(
+            "/api/accounts/{account}/sign-ins/{provider}/{subject}",
+            axum::routing::delete(recover::delete_sign_in),
+        )
+        .route(
+            "/api/accounts/{account}/reconnect",
+            axum::routing::post(recover::post_reconnect).delete(recover::delete_reconnect),
+        )
+        .route("/api/reconnect/{secret}", get(recover::get_reconnect))
         .route("/api/invites/{secret}", get(people::get_invite))
         .route(
             "/api/invites/{secret}/accept",

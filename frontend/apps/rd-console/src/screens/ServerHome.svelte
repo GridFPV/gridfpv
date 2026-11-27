@@ -50,6 +50,7 @@
   import ServerAccount from './ServerAccount.svelte';
   import ServerClub from './ServerClub.svelte';
   import ServerInvite from './ServerInvite.svelte';
+  import ServerReconnect from './ServerReconnect.svelte';
   import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
   import SpectatorView from './SpectatorView.svelte';
@@ -152,6 +153,7 @@
       place.kind === 'account' ||
       place.kind === 'club' ||
       place.kind === 'invite' ||
+      place.kind === 'reconnect' ||
       place.kind === 'results'
     ) {
       void readMe();
@@ -460,6 +462,16 @@
         }}
       />
     {/if}
+  {:else if place.kind === 'reconnect'}
+    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+    {#if account !== undefined}
+      <ServerReconnect
+        api={people}
+        secret={place.secret}
+        account={account ?? undefined}
+        {providers}
+      />
+    {/if}
   {:else if place.kind === 'account'}
     <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
     {#if account}
@@ -490,6 +502,8 @@
         club={found}
         me={account.id}
         runs={say === 'runs'}
+        owner={account.owner}
+        {providers}
         onchange={() => {
           listAgain += 1;
           void readMe();

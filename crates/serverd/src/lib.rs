@@ -12,6 +12,7 @@
 //!   account.
 //! - [`asks`]: a pilot asking for something only the Director can do, and the Director's
 //!   answer.
+//! - [`recover`]: an owner helping someone who can no longer sign in.
 //! - [`signin`]: signing in with a provider, Discord or Google.
 //! - [`push`]: the routes a Director pushes to.
 //! - [`read`]: the routes anyone may read: an event, as a visitor may see it.
@@ -31,5 +32,6 @@ pub mod page;
 pub mod people;
 pub mod push;
 pub mod read;
+pub mod recover;
 pub mod signin;
 pub mod store;

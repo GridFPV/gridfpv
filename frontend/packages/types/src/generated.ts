@@ -245,3 +245,6 @@ export type * from '@bindings/PushHeld';
 export type * from '@bindings/RaceCodeView';
 export type * from '@bindings/CertificateLook';
 export type * from '@bindings/CertificateRequest';
+export type * from '@bindings/AccountSignIns';
+export type * from '@bindings/ReconnectMade';
+export type * from '@bindings/ReconnectView';

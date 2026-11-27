@@ -21,7 +21,8 @@
     InviteFor,
     InviteMade,
     InviteView,
-    MemberView
+    MemberView,
+    SignInProvider
   } from '@gridfpv/types';
   import {
     ROLES,
@@ -32,12 +33,15 @@
   } from '../lib/serverPeople.js';
   import ServerClubManage from './ServerClubManage.svelte';
   import ServerClubPilots from './ServerClubPilots.svelte';
+  import ServerMemberSignIns from './ServerMemberSignIns.svelte';
 
   let {
     api,
     club,
     me,
     runs = true,
+    owner = false,
+    providers = undefined,
     origin = location.origin,
     onchange
   }: {
@@ -62,12 +66,23 @@
       | 'clubEvents'
       | 'hideEvent'
       | 'removeEvent'
+      | 'accountSignIns'
+      | 'dropSignIn'
+      | 'makeReconnect'
+      | 'revokeReconnect'
     >;
     club: { id: string; name: string };
     /** The signed-in account's id, to mark its own row. */
     me: string;
     /** Whether the person runs the club. A claims approver does not: they see only pilots. */
     runs?: boolean;
+    /**
+     * Whether the person is an owner of the server. Only an owner helps a member who can
+     * no longer sign in (§13.8).
+     */
+    owner?: boolean;
+    /** The providers the server offers, to name a sign-in by. */
+    providers?: readonly SignInProvider[] | undefined;
     /** This server's address, for the link shown. A test passes its own. */
     origin?: string;
   } = $props();
@@ -79,6 +94,8 @@
   let busy = $state(false);
   /** The member about to be removed. */
   let removing = $state<MemberView | undefined>(undefined);
+  /** The member whose sign-ins an owner is looking at. */
+  let helping = $state<MemberView | undefined>(undefined);
   /** The invite just made, with its link. It is not shown again. */
   let made = $state<InviteMade | undefined>(undefined);
 
@@ -228,6 +245,15 @@
                   aria-label="Remove {member.name}"
                   onclick={() => (removing = member)}>Remove</Button
                 >
+                {#if owner}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label="How {member.name} signs in"
+                    onclick={() => (helping = member)}>Sign-ins…</Button
+                  >
+                {/if}
               </li>
             {/each}
           </ul>
@@ -369,6 +395,17 @@
       <Button variant="danger" disabled={busy} onclick={remove}>Remove</Button>
     {/snippet}
   </Dialog>
+{/if}
+
+{#if helping}
+  <ServerMemberSignIns
+    {api}
+    member={helping}
+    {me}
+    {providers}
+    {origin}
+    onclose={() => (helping = undefined)}
+  />
 {/if}
 
 <style>
