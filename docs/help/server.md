@@ -75,7 +75,8 @@ the race. The **race code** is how Grid knows.
 - Press **New code** if the code got out. The old one stops working straight away. Pilots
   who have a seat keep it.
 - After five wrong codes in a row, a pilot waits a minute.
-- You can still drop anyone from a seat on the Run page.
+- You can still drop anyone from a seat on the Run page, and put a pilot on a seat there
+  yourself if their phone will not do it.
 
 If the internet drops, keep racing. Grid sends what was missed when it is back.
 

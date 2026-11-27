@@ -1994,6 +1994,8 @@ Sign-up does not need this proof: a pilot may sign up for a heat before they arr
 - **Five wrong codes in a row** and that pilot waits a minute. Other pilots are not held
   up.
 - **Giving a seat up needs no code.**
+- **A pilot who cannot scan or type** is put on a seat by the director, on the Run page.
+  That was already so (§11.9), and needs no code.
 - **Not a phone's location.** A browser's location is easy to fake and many pilots refuse
   to share it.
 
@@ -2003,7 +2005,6 @@ anyone from a seat on the Run page, and make a new code.
 
 **Not built yet.**
 
-- The director marking a pilot as here by hand, for one who cannot scan or type.
 - "My practice" on the server's page is the same page as at the race, but has not been
   checked through on a real race day.
 - How much data the Director uses on a phone hotspot has not been measured.
