@@ -37,6 +37,7 @@ pub mod events;
 pub mod http;
 pub mod library;
 pub mod link;
+pub mod link_cert;
 pub mod link_client;
 pub mod link_pilots;
 pub mod network;

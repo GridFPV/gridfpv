@@ -12,6 +12,8 @@
  */
 
 import type {
+  CertificateLook,
+  CertificateRequest,
   ActiveEvent,
   AdapterId,
   AddressRequest,
@@ -1342,6 +1344,25 @@ export async function pullFromServer(
     '/server-link/pull',
     { method: 'POST', body: request, token, fetch: options.fetch },
     'add pilots from the server'
+  );
+}
+
+/**
+ * Read the certificate the server at an address shows (`POST /server-link/certificate`), so
+ * the director can check its fingerprint and accept it. Nothing is trusted or changed by
+ * looking. RD-gated.
+ */
+export async function lookAtServerCertificate(
+  baseUrl: string,
+  request: CertificateRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<CertificateLook> {
+  return apiJson<CertificateLook>(
+    baseUrl,
+    '/server-link/certificate',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    "look at the server's certificate"
   );
 }
 

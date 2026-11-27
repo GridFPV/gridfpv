@@ -80,7 +80,8 @@ export function formOf(view: LinkView): LinkForm {
   return { url: view.url, token: '', on: view.on, extra: pem !== '', pem };
 }
 
-function trustOf(form: LinkForm): LinkTrust {
+/** The trust a form asks for. */
+export function trustOf(form: LinkForm): LinkTrust {
   return form.extra && form.pem.trim() !== ''
     ? { ExtraAuthorities: { pem: form.pem.trim() } }
     : 'System';
@@ -130,4 +131,32 @@ export function formProblem(form: LinkForm, view: LinkView): string | undefined 
     return 'That is not a certificate. It should start with -----BEGIN CERTIFICATE-----';
   }
   return undefined;
+}
+
+/** What a look at a server's certificate found, as the page says it. */
+export type CertificateVerdict =
+  /** Grid takes it already. Nothing to accept. */
+  | 'trusted'
+  /** The server made it for itself. Accepting this one certificate is enough. */
+  | 'accept'
+  /** Signed by an authority this computer does not know, or for another address. */
+  | 'authority';
+
+export function certificateVerdict(look: {
+  trusted: boolean;
+  stands_alone: boolean;
+}): CertificateVerdict {
+  if (look.trusted) return 'trusted';
+  return look.stands_alone ? 'accept' : 'authority';
+}
+
+/**
+ * A fingerprint in short rows, so two people can read it to each other: eight pairs to a
+ * row.
+ */
+export function fingerprintRows(fingerprint: string): string[] {
+  const pairs = fingerprint.split(':').filter((pair) => pair !== '');
+  const rows: string[] = [];
+  for (let at = 0; at < pairs.length; at += 8) rows.push(pairs.slice(at, at + 8).join(':'));
+  return rows;
 }
