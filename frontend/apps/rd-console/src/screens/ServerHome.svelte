@@ -11,8 +11,13 @@
    * event has it (§13.4). What they ask for goes to the Director, which decides it as it
    * would at the race. Nothing else can be changed from this page.
    */
-  import { Card } from '@gridfpv/components';
-  import { listServerClubs, listServerEvents, serverEventBase } from '@gridfpv/protocol-client';
+  import { Badge, Card } from '@gridfpv/components';
+  import {
+    getServerEvent,
+    listServerClubs,
+    listServerEvents,
+    serverEventBase
+  } from '@gridfpv/protocol-client';
   import type { MyAccount, PushClub, ServerEvent, SignInProvider } from '@gridfpv/types';
   import { EventLive, type LiveSession } from '../lib/eventLive.svelte.js';
   import {
@@ -45,7 +50,8 @@
     baseUrl,
     load = {
       clubs: () => listServerClubs(baseUrl),
-      events: (club: string) => listServerEvents(baseUrl, club)
+      events: (club: string) => listServerEvents(baseUrl, club),
+      event: (club: string, event: string) => getServerEvent(baseUrl, club, event)
     },
     sourceFor = (club: string, event: string) =>
       publicSource(serverEventBase(baseUrl, club, event)),
@@ -57,6 +63,8 @@
     load?: {
       clubs: () => Promise<PushClub[]>;
       events: (club: string) => Promise<ServerEvent[]>;
+      /** One event by its address. `undefined` when the server holds none. */
+      event?: (club: string, event: string) => Promise<ServerEvent | undefined>;
     };
     /**
      * Where one event is read from, and where a pilot's sign-up is sent. A test passes its
@@ -124,7 +132,14 @@
   /** Whether the last try to reach the server failed. What is shown may be old. */
   let offline = $state(false);
 
+  /** Counted up to read the lists again now: a club was renamed, an event hidden or removed. */
+  let listAgain = $state(0);
+
   $effect(() => {
+    // Who is signed in changes what they may see: a hidden event is listed for those who
+    // run its club.
+    void account?.id;
+    void listAgain;
     let stopped = false;
     const read = async () => {
       try {
@@ -151,19 +166,56 @@
 
   // ── The event that is open on the page ─────────────────────────────────────
   const picked = $derived(place.kind === 'event' ? place : undefined);
-  /** The picked event as the list knows it, for its name. */
-  const pickedEvent = $derived(
+  const pickedKey = $derived(picked ? `${picked.club}/${picked.event}` : undefined);
+  /** The picked event as the list knows it. */
+  const pickedListed = $derived(
     picked &&
       clubs
         ?.find((entry) => entry.club.id === picked.club)
         ?.events.find((event) => event.id === picked.event)
   );
-  /** The list has been read and the picked event is not in it. */
-  const gone = $derived(picked !== undefined && clubs !== undefined && pickedEvent === undefined);
+  /**
+   * The picked event asked for by its own address, when the list does not have it: a
+   * hidden event is left out of the list and still opens for anyone who has its link.
+   * `null` once the server has said it holds no such event.
+   */
+  let asked = $state<{ key: string; event: ServerEvent | null } | undefined>(undefined);
+  $effect(() => {
+    const at = picked;
+    const key = pickedKey;
+    // Asked again each time the list is read: an event can be removed while it is open.
+    if (!at || key === undefined || clubs === undefined || pickedListed) return;
+    if (!load.event) {
+      asked = { key, event: null };
+      return;
+    }
+    let stopped = false;
+    load
+      .event(at.club, at.event)
+      .then((event) => {
+        if (!stopped) asked = { key, event: event ?? null };
+      })
+      // The server did not answer. That is not the same as the event being gone.
+      .catch(() => {});
+    return () => {
+      stopped = true;
+    };
+  });
+  /** The picked event, for its name. */
+  const pickedEvent = $derived(
+    pickedListed ?? (asked?.key === pickedKey ? (asked?.event ?? undefined) : undefined)
+  );
+  /** The server has said it holds no such event. */
+  const gone = $derived(
+    picked !== undefined &&
+      clubs !== undefined &&
+      pickedListed === undefined &&
+      asked?.key === pickedKey &&
+      asked?.event === null
+  );
 
   let live = $state.raw<EventLive | undefined>(undefined);
   let source = $state.raw<EventSource | undefined>(undefined);
-  const pickedKey = $derived(picked ? `${picked.club}/${picked.event}` : undefined);
   $effect(() => {
     const at = picked;
     // One live store per event. `pickedKey` is what says the event changed.
@@ -287,7 +339,16 @@
     <p class="back"><a href={formatServerHash({ kind: 'account' })}>← Your account</a></p>
     {@const say = sayIn(account ?? undefined, wanted)}
     {#if account && found && say}
-      <ServerClub api={people} club={found} me={account.id} runs={say === 'runs'} />
+      <ServerClub
+        api={people}
+        club={found}
+        me={account.id}
+        runs={say === 'runs'}
+        onchange={() => {
+          listAgain += 1;
+          void readMe();
+        }}
+      />
     {:else if account && found}
       <Card elevation="sm"><p>Only those who look after this club can open this page.</p></Card>
     {:else if account === null}
@@ -351,6 +412,7 @@
                   data-testid="server-event-link"
                 >
                   <span class="name">{event.name}</span>
+                  {#if event.hidden}<Badge tone="neutral">Hidden</Badge>{/if}
                   {#if eventDetail(event)}<span class="muted">{eventDetail(event)}</span>{/if}
                 </a>
               </li>

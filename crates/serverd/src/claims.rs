@@ -425,7 +425,11 @@ pub async fn get_my_results(
                 };
                 results.push(MyResult {
                     club: club.clone(),
-                    event: server_event(event.clone(), shown.header.meta.clone()),
+                    event: server_event(
+                        event.clone(),
+                        shown.header.meta.clone(),
+                        state.book.event_note(&club_id, &event.0).hidden,
+                    ),
                     callsign,
                     classes,
                 });

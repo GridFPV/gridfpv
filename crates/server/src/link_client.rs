@@ -12,8 +12,8 @@ use gridfpv_storage::{Chain, RawEntry};
 use crate::events::EventId;
 use crate::link::{LinkStored, LinkTrust};
 use crate::remote::{
-    PushAccount, PushAnswer, PushHeader, PushHello, PushPilot, PushPilotAccount, PushRefused,
-    PushRequest, PushStatus,
+    PushAccount, PushAnswer, PushHeader, PushHeld, PushHello, PushPilot, PushPilotAccount,
+    PushRefusal, PushRefused, PushRequest, PushStatus,
 };
 
 /// What went wrong talking to the server, in words for the director.
@@ -34,6 +34,16 @@ impl std::fmt::Display for PushError {
             ),
         }
     }
+}
+
+/// What a server says it holds of one event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Held {
+    /// None of it.
+    Nothing,
+    Some(PushStatus),
+    /// It was removed on the server, which takes none of it until told to.
+    Removed,
 }
 
 /// A connection to one server, with one token.
@@ -129,10 +139,40 @@ impl Client {
         Self::read(response).await
     }
 
-    /// How much of an event the server holds. `None` when it holds none of it.
-    pub async fn held(&self, event: &EventId) -> Result<Option<PushStatus>, PushError> {
+    /// How much of an event the server holds.
+    pub async fn held(&self, event: &EventId) -> Result<Held, PushError> {
         let path = format!("/push/events/{}", event.0);
         let response = self.send(self.request(reqwest::Method::GET, &path)).await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Held::Nothing);
+        }
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Self::refused(response).await.map(|()| Held::Removed);
+        }
+        if !response.status().is_success() {
+            return Err(Self::unexpected(response).await);
+        }
+        Self::read(response).await.map(Held::Some)
+    }
+
+    /// A `409` that is not about a batch can only be the event having been removed on the
+    /// server. Anything else is an answer this Director does not know.
+    async fn refused(response: reqwest::Response) -> Result<(), PushError> {
+        let refused: PushRefused = Self::read(response).await?;
+        match refused.reason {
+            PushRefusal::Removed => Ok(()),
+            other => Err(PushError::Server(format!(
+                "The server gave an answer that was not expected ({other:?})."
+            ))),
+        }
+    }
+
+    /// What the server knows of every event of the club. `None` from a server too old to
+    /// say.
+    pub async fn events(&self) -> Result<Option<Vec<PushHeld>>, PushError> {
+        let response = self
+            .send(self.request(reqwest::Method::GET, "/push/events"))
+            .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -142,16 +182,24 @@ impl Client {
         Self::read(response).await.map(Some)
     }
 
-    /// Send an event's header.
-    pub async fn put_header(&self, event: &EventId, header: &PushHeader) -> Result<(), PushError> {
+    /// Send an event's header. `false` when the event was removed on the server, which
+    /// then takes nothing.
+    pub async fn put_header(
+        &self,
+        event: &EventId,
+        header: &PushHeader,
+    ) -> Result<bool, PushError> {
         let path = format!("/push/events/{}", event.0);
         let response = self
             .send(self.request(reqwest::Method::PUT, &path).json(header))
             .await?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Self::refused(response).await.map(|()| false);
+        }
         if !response.status().is_success() {
             return Err(Self::unexpected(response).await);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Send a run of entries that starts at `from`, where `before` is the chain of what is

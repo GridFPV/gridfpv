@@ -347,6 +347,86 @@ async fn until(what: &str, seconds: u64, mut check: impl FnMut() -> bool) {
     }
 }
 
+/// Someone who runs the club does `method` to an event on the server's page.
+async fn on_the_page(s: &Server, method: Method, path: &str, body: Option<Value>) {
+    use gridfpv_serverd::accounts::{InviteKind, NewInvite, NewSignIn};
+    use gridfpv_serverd::people::{SESSION_COOKIE, now_ms};
+    let now = now_ms();
+    let (_, secret) = s
+        .state
+        .accounts
+        .new_invite(
+            NewInvite {
+                kind: InviteKind::Owner,
+                label: "owner".into(),
+                max_uses: 1,
+                expires_at: None,
+            },
+            None,
+            now,
+        )
+        .unwrap();
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let subject = format!(
+        "owner-{}",
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let session = s
+        .state
+        .accounts
+        .join_with_invite(
+            &secret,
+            &NewSignIn {
+                provider: "discord",
+                subject: &subject,
+                label: "Oz",
+            },
+            "Oz",
+            now,
+        )
+        .unwrap()
+        .2;
+    let request = Request::builder()
+        .method(method.clone())
+        .uri(path)
+        .header(header::COOKIE, format!("{SESSION_COOKIE}={session}"));
+    let request = match body {
+        Some(body) => request
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+        None => request.body(Body::empty()).unwrap(),
+    };
+    let response = router(s.state.clone()).oneshot(request).await.unwrap();
+    assert!(
+        response.status().is_success(),
+        "{method} {path}: {}",
+        response.status()
+    );
+}
+
+async fn remove_on_the_page(s: &Server, event: &str) {
+    on_the_page(
+        s,
+        Method::DELETE,
+        &format!("/api/clubs/club/events/{event}"),
+        None,
+    )
+    .await;
+}
+
+async fn send_it_again(d: &Director, event: &str) {
+    let (status, _) = ask(
+        d,
+        true,
+        Method::POST,
+        &format!("/server-link/events/{event}/replace"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 // ── One sync at a time ──────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -709,6 +789,203 @@ async fn a_server_that_lost_its_copy_is_sent_it_again() {
     sync_all(&d.registry, &client, &mut memory).await.unwrap();
     assert_eq!(s.held(&event).unwrap(), log_of(&d, &event));
     assert_eq!(status_of(&d, &event).2, LinkEventState::Sent);
+}
+
+#[tokio::test]
+async fn an_event_removed_on_the_server_is_not_put_back_until_the_director_says() {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    let other = self::event(&d, "Saturday").await;
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Sent);
+
+    remove_on_the_page(&s, &event).await;
+    assert!(s.held(&event).is_none());
+
+    // More is raced. The Director still thinks the server has the start, and tries.
+    passes(&d, &event, 2).await;
+    for round in 0..3 {
+        sync_all(&d.registry, &client, &mut memory).await.unwrap();
+        let (len, sent, state) = status_of(&d, &event);
+        assert_eq!(state, LinkEventState::Removed, "round {round}");
+        assert_eq!(sent, 0);
+        assert_eq!(len, log_of(&d, &event).len() as u64);
+        assert!(s.held(&event).is_none(), "put back in round {round}");
+        assert!(s.header(&event).is_none());
+    }
+    // The other event is not held up by it.
+    assert_eq!(status_of(&d, &other).2, LinkEventState::Sent);
+    passes(&d, &other, 1).await;
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(s.held(&other).unwrap(), log_of(&d, &other));
+
+    send_it_again(&d, &event).await;
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(s.held(&event).unwrap(), log_of(&d, &event));
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Sent);
+    assert_eq!(s.header(&event).unwrap()["meta"]["name"], "Friday");
+    // And it keeps up from there as any event does.
+    passes(&d, &event, 1).await;
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(s.held(&event).unwrap(), log_of(&d, &event));
+}
+
+#[tokio::test]
+async fn a_director_with_nothing_new_to_send_still_learns_its_event_was_removed() {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+
+    remove_on_the_page(&s, &event).await;
+    // Before it is time to ask again, the Director has no way to know.
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Sent);
+    // When it asks what the server holds, it finds out.
+    memory.check_now();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Removed);
+    assert!(s.held(&event).is_none());
+}
+
+#[tokio::test]
+async fn a_director_started_after_its_event_was_removed_does_not_send_it() {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    sync_all(&d.registry, &client, &mut Memory::default())
+        .await
+        .unwrap();
+    remove_on_the_page(&s, &event).await;
+
+    // Nothing remembered: as after the Director is started again.
+    let mut memory = Memory::default();
+    for _ in 0..2 {
+        sync_all(&d.registry, &client, &mut memory).await.unwrap();
+        assert_eq!(status_of(&d, &event).2, LinkEventState::Removed);
+        assert!(s.held(&event).is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_new_name_alone_does_not_put_a_removed_event_back() {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    remove_on_the_page(&s, &event).await;
+
+    // Only the header changes: no entry is sent, so the header is what is refused.
+    let pilot = gridfpv_server::link::header(&d.registry, &EventId(event.clone()))
+        .await
+        .unwrap()
+        .pilots[0]
+        .id
+        .0
+        .clone();
+    let len = log_of(&d, &event).len();
+    direct(
+        &d,
+        Method::PUT,
+        &format!("/pilots/{pilot}"),
+        json!({"callsign": "Renamed"}),
+    )
+    .await;
+    assert_eq!(log_of(&d, &event).len(), len);
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Removed);
+    assert!(s.held(&event).is_none());
+    assert!(s.header(&event).is_none());
+}
+
+#[tokio::test]
+async fn a_director_with_nothing_new_to_send_notices_the_server_lost_its_copy() {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+
+    // The copy is gone with nobody having removed it: a server put back from a backup.
+    s.state
+        .store
+        .delete(&ClubId("club".into()), &EventId(event.clone()))
+        .unwrap();
+    memory.check_now();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(s.held(&event).unwrap(), log_of(&d, &event));
+    assert_eq!(s.header(&event).unwrap()["meta"]["name"], "Friday");
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Sent);
+}
+
+#[tokio::test]
+async fn a_director_notices_a_copy_that_was_changed_under_it() {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    let id = EventId(event.clone());
+    let club = ClubId("club".into());
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+
+    // The server's copy is swapped for another log, as an old backup would be.
+    s.state.store.delete(&club, &id).unwrap();
+    let other = s.state.store.get_or_create(&club, &id).unwrap().unwrap();
+    other
+        .append(
+            0,
+            Chain::start(),
+            &[(r#"{"AdapterConnected":{"adapter":"old"}}"#.to_owned(), None)],
+        )
+        .unwrap()
+        .unwrap();
+    drop(other);
+
+    memory.check_now();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Different);
+    assert_eq!(s.held(&event).unwrap().len(), 1, "never overwritten");
+}
+
+#[tokio::test]
+async fn a_hidden_event_is_still_kept_up_to_date() {
+    let s = server().await;
+    let d = director();
+    let event = event(&d, "Friday").await;
+    link(&d, &s.url(), &s.token, true);
+    let client = client(&d);
+    let mut memory = Memory::default();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    on_the_page(
+        &s,
+        Method::PUT,
+        &format!("/api/clubs/club/events/{event}/listing"),
+        Some(json!({ "hidden": true })),
+    )
+    .await;
+    passes(&d, &event, 2).await;
+    memory.check_now();
+    sync_all(&d.registry, &client, &mut memory).await.unwrap();
+    assert_eq!(s.held(&event).unwrap(), log_of(&d, &event));
+    assert_eq!(status_of(&d, &event).2, LinkEventState::Sent);
+    let (_, list) = s.read("/api/clubs/club/events").await;
+    assert_eq!(list, json!([]), "still hidden from the list");
 }
 
 #[tokio::test]

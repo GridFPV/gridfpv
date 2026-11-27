@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use gridfpv_server::events::{EventId, EventRegistry};
 use gridfpv_server::link::{LinkDesk, LinkEvent, LinkEventState, LinkState};
-pub use gridfpv_server::link_client::{Client, PushError, log_body};
+pub use gridfpv_server::link_client::{Client, Held, PushError, log_body};
 use gridfpv_server::remote::PushRefusal;
 use gridfpv_storage::{Chain, RawEntry};
 use sha2::{Digest, Sha256};
@@ -37,6 +37,9 @@ const TICK: Duration = Duration::from_secs(1);
 
 /// How often the server is asked who holds which pilot.
 const ACCOUNTS_EVERY: Duration = Duration::from_secs(15);
+
+/// How often the server is asked what it holds of every event.
+const HELD_EVERY: Duration = Duration::from_secs(15);
 
 /// How long to wait before reaching for a server that did not answer.
 const RETRY: Duration = Duration::from_secs(5);
@@ -62,6 +65,8 @@ struct Known {
     header: Option<[u8; 32]>,
     /// The server holds a different log under this id.
     different: bool,
+    /// The event was removed on the server. Nothing is sent until a replace is asked for.
+    removed: bool,
 }
 
 /// Everything remembered while connected to one server. Dropped when the link changes.
@@ -72,6 +77,16 @@ pub struct Memory {
     pilots: Option<[u8; 32]>,
     /// When the server was last asked who holds which pilot.
     accounts_asked: Option<std::time::Instant>,
+    /// When the server was last asked what it holds of every event.
+    held_asked: Option<std::time::Instant>,
+}
+
+impl Memory {
+    /// Ask the server what it holds of every event at the next look, whether or not it is
+    /// time to.
+    pub fn check_now(&mut self) {
+        self.held_asked = None;
+    }
 }
 
 /// An event's log from `start` on, as stored.
@@ -114,16 +129,23 @@ async fn sync_event(
     let all = read_raw(registry, event, 0)?;
     let len = all.len() as u64;
 
+    if known.removed {
+        return Ok((len, 0, LinkEventState::Removed));
+    }
     let (mut sent, mut chain) = match known.server {
         Some(server) => server,
         None => match client.held(event).await? {
-            Some(status) => {
+            Held::Some(status) => {
                 let chain = Chain::from_hex(&status.chain).ok_or_else(|| {
                     PushError::Server("The server's answer could not be read.".into())
                 })?;
                 (status.len, chain)
             }
-            None => (0, Chain::start()),
+            Held::Nothing => (0, Chain::start()),
+            Held::Removed => {
+                known.removed = true;
+                return Ok((len, 0, LinkEventState::Removed));
+            }
         },
     };
     // Is what the server holds the start of this log?
@@ -159,6 +181,10 @@ async fn sync_event(
                         known.different = true;
                         Ok((len, refused.held.len, LinkEventState::Different))
                     }
+                    PushRefusal::Removed => {
+                        known.removed = true;
+                        Ok((len, 0, LinkEventState::Removed))
+                    }
                     // The server lost some of it (its copy was removed). Start over next time.
                     PushRefusal::Gap => Err(PushError::Server(
                         "The server holds less than was sent. It will be sent again.".into(),
@@ -173,10 +199,57 @@ async fn sync_event(
         Sha256::digest(serde_json::to_vec(&header).map_err(|e| PushError::Server(e.to_string()))?)
             .into();
     if known.header != Some(mark) {
-        client.put_header(event, &header).await?;
+        if !client.put_header(event, &header).await? {
+            *known = Known {
+                removed: true,
+                ..Known::default()
+            };
+            return Ok((len, 0, LinkEventState::Removed));
+        }
         known.header = Some(mark);
     }
     Ok((len, sent, LinkEventState::Sent))
+}
+
+/// Now and then, ask the server what it holds of every event, and forget what was
+/// remembered about any that changed there. An event can change under a Director that
+/// sends nothing new: someone removed it on the server's page, the server was put back
+/// from a backup, or another Director sent to it.
+async fn check_held(client: &Client, memory: &mut Memory) -> Result<(), PushError> {
+    let due = memory
+        .held_asked
+        .is_none_or(|asked| asked.elapsed() >= HELD_EVERY);
+    if !due {
+        return Ok(());
+    }
+    memory.held_asked = Some(std::time::Instant::now());
+    // An older server cannot say. Then each event is found out as it is sent, as before.
+    let Some(all) = client.events().await? else {
+        return Ok(());
+    };
+    for (id, known) in memory.events.iter_mut() {
+        let theirs = all.iter().find(|held| &held.id == id);
+        let removed = theirs.is_some_and(|held| held.removed);
+        if removed != known.removed {
+            *known = Known {
+                removed,
+                ..Known::default()
+            };
+            continue;
+        }
+        let Some((len, chain)) = known.server else {
+            continue;
+        };
+        let same = match theirs {
+            Some(held) => held.len == len && held.chain == chain.to_hex(),
+            // Nothing there is the same as an empty copy, but the header is gone too.
+            None => false,
+        };
+        if !same {
+            *known = Known::default();
+        }
+    }
+    Ok(())
 }
 
 /// Look at every event once, and bring the server's copies up. `Err` only for what stops
@@ -191,6 +264,7 @@ pub async fn sync_all(
     let ids: Vec<EventId> = events.iter().map(|meta| meta.id.clone()).collect();
     memory.events.retain(|id, _| ids.contains(id));
     desk.keep_events(&ids);
+    check_held(client, memory).await?;
 
     for meta in events {
         let known = memory.events.entry(meta.id.clone()).or_default();

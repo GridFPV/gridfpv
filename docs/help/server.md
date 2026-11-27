@@ -10,7 +10,9 @@ The Server page is under **Setup**.
 ## What you need
 
 - **The server's address.** It looks like `https://grid.example.org`.
-- **A link token.** It starts with `gfs_`. Whoever runs the server makes one for you.
+- **A link token.** It starts with `gfs_`. Whoever runs the server makes one for you. If
+  you are a director of your club on the server, you can make one yourself: open your
+  club's page there and look for **Link tokens**.
 
 ## Linking Grid to a server
 
@@ -65,6 +67,7 @@ Under the link, each event shows where it stands.
 - **Sending:** some is still on its way.
 - **Not sent:** the last try failed. Grid tries again by itself.
 - **A different event is on the server:** see the next part.
+- **Removed on the server:** see the part after that.
 
 ## A different event is on the server
 
@@ -74,6 +77,17 @@ from two computers.
 
 Grid will not write over it by itself. Press **Replace the server's copy** if this
 computer's copy is the right one. The server's copy is removed and yours is sent.
+
+## Removed on the server
+
+Someone who runs your club removed this event on the server's page. Grid sends none of it
+while it says this. Your own copy is not touched.
+
+Press **Send it again** if it should be on the server after all.
+
+A director can also **hide** an event on the server's page. A hidden event is left out of
+the list there, but anyone who has its link can still open it. Grid keeps sending a hidden
+event as usual.
 
 ## A server with its own certificate
 

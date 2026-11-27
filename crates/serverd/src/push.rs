@@ -7,6 +7,12 @@
 //! | `PUT /push/events/{id}` | the event's header, in place of the one before |
 //! | `POST /push/events/{id}/log` | a run of log entries |
 //! | `DELETE /push/events/{id}` | remove the server's copy, so it can be sent again |
+//! | `GET /push/events` | every event the server knows of for the club |
+//!
+//! **An event removed on the server is not taken again by itself.** Someone who runs the
+//! club removed it (`manage`), and a Director that still holds it would put it straight
+//! back. So its routes answer `409` with [`PushRefusal::Removed`] until the Director's
+//! `DELETE` says its director wants it sent again.
 //!
 //! Every one needs a link token (`Authorization: Bearer gfs_…`), and reaches only the
 //! events of the club that token belongs to (§13.6).
@@ -25,7 +31,7 @@ use gridfpv_events::Event;
 use gridfpv_server::error::{ErrorCode, ProtocolError};
 use gridfpv_server::events::EventId;
 use gridfpv_server::remote::{
-    PushClub, PushHeader, PushHello, PushLog, PushRefusal, PushRefused, PushStatus,
+    PushClub, PushHeader, PushHeld, PushHello, PushLog, PushRefusal, PushRefused, PushStatus,
 };
 use gridfpv_storage::Chain;
 
@@ -132,6 +138,57 @@ fn event_id(id: String) -> Result<EventId, ApiError> {
     }
 }
 
+/// The answer for an event that was removed on the server.
+fn removed() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(PushRefused {
+            reason: PushRefusal::Removed,
+            held: status(Held {
+                len: 0,
+                chain: Chain::start(),
+            }),
+        }),
+    )
+        .into_response()
+}
+
+fn is_removed(state: &AppState, club: &Club, id: &EventId) -> bool {
+    state.book.event_note(&club.id, &id.0).removed_at.is_some()
+}
+
+/// `GET /push/events`: what the server holds of each of the club's events, and the ones
+/// removed here. A Director reads it now and then, to notice a copy that changed under it.
+pub async fn get_events(
+    State(state): State<AppState>,
+    Pusher(club): Pusher,
+) -> Result<Json<Vec<PushHeld>>, ApiError> {
+    let mut all = Vec::new();
+    for id in state.store.list(&club.id)? {
+        let Some(copy) = state.store.get(&club.id, &id)? else {
+            continue;
+        };
+        let held = copy.held();
+        all.push(PushHeld {
+            id,
+            len: held.len,
+            chain: held.chain.to_hex(),
+            removed: false,
+        });
+    }
+    for note in state.book.event_notes(&club.id) {
+        if note.removed_at.is_some() && !all.iter().any(|held| held.id.0 == note.event) {
+            all.push(PushHeld {
+                id: EventId(note.event),
+                len: 0,
+                chain: Chain::start().to_hex(),
+                removed: true,
+            });
+        }
+    }
+    Ok(Json(all))
+}
+
 /// `GET /push/hello`.
 pub async fn get_hello(Pusher(club): Pusher) -> Json<PushHello> {
     Json(PushHello {
@@ -148,13 +205,16 @@ pub async fn get_event(
     State(state): State<AppState>,
     Pusher(club): Pusher,
     Path(id): Path<String>,
-) -> Result<Json<PushStatus>, ApiError> {
+) -> Result<Response, ApiError> {
     let id = event_id(id)?;
+    if is_removed(&state, &club, &id) {
+        return Ok(removed());
+    }
     let copy = state
         .store
         .get(&club.id, &id)?
         .ok_or_else(|| ApiError::not_held(&id.0))?;
-    Ok(Json(status(copy.held())))
+    Ok(Json(status(copy.held())).into_response())
 }
 
 /// `PUT /push/events/{id}`.
@@ -163,8 +223,11 @@ pub async fn put_event(
     Pusher(club): Pusher,
     Path(id): Path<String>,
     Json(header): Json<PushHeader>,
-) -> Result<Json<PushStatus>, ApiError> {
+) -> Result<Response, ApiError> {
     let id = event_id(id)?;
+    if is_removed(&state, &club, &id) {
+        return Ok(removed());
+    }
     if header.meta.id != id {
         return Err(ApiError::bad(
             "The header is for another event than the one in the address.",
@@ -178,7 +241,7 @@ pub async fn put_event(
     copy.set_header(&json)?;
     // The club now knows these pilots, whatever becomes of the event (§13.7).
     crate::claims::note(&state, &club.id, header.pilots.iter())?;
-    Ok(Json(status(copy.held())))
+    Ok(Json(status(copy.held())).into_response())
 }
 
 /// `POST /push/events/{id}/log`.
@@ -189,6 +252,9 @@ pub async fn post_log(
     Json(log): Json<PushLog>,
 ) -> Result<Response, ApiError> {
     let id = event_id(id)?;
+    if is_removed(&state, &club, &id) {
+        return Ok(removed());
+    }
     let before = Chain::from_hex(&log.before)
         .ok_or_else(|| ApiError::bad("`before` is not a chain value."))?;
     if log.entries.len() > BATCH_MAX {
@@ -243,7 +309,15 @@ pub async fn delete_event(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = event_id(id)?;
-    if state.store.delete(&club.id, &id)? {
+    // The director says to send it again: an event removed here may come back.
+    let was_removed = is_removed(&state, &club, &id);
+    if was_removed {
+        state
+            .book
+            .note_event(&club.id, &id.0, |note| note.removed_at = None)
+            .map_err(crate::manage::book_error)?;
+    }
+    if state.store.delete(&club.id, &id)? || was_removed {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_held(&id.0))

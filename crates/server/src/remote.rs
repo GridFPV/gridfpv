@@ -53,6 +53,20 @@ pub struct PushStatus {
     pub chain: String,
 }
 
+/// One event a server knows of for a club (`GET /push/events`): what it holds, or that it
+/// was removed there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PushHeld {
+    pub id: crate::events::EventId,
+    #[ts(type = "number")]
+    pub len: u64,
+    pub chain: String,
+    /// Someone who runs the club removed it from the server. Then `len` is 0.
+    #[serde(default)]
+    pub removed: bool,
+}
+
 /// An event's header: what the log refers to but does not hold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
@@ -123,6 +137,10 @@ pub struct ServerEvent {
     /// When the Director made the event, in milliseconds since 1970.
     #[ts(type = "number")]
     pub created_at: i64,
+    /// Left out of the list for everyone but those who run the club (§13.9). Anyone with
+    /// its address can still open it.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// An account on a server, as a Director needs to know it: enough to show who it is.
@@ -214,6 +232,9 @@ pub enum PushRefusal {
     /// The server holds a different log under this event's id. Nothing was changed. The
     /// director decides whether the server's copy is replaced.
     Different,
+    /// Someone who runs the club removed this event from the server. Nothing is taken
+    /// until the director says to send it again.
+    Removed,
 }
 
 /// A batch the server did not take (`409`), and what it holds.

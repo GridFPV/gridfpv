@@ -34,6 +34,7 @@ export function eventLabel(event: LinkEvent): string {
   if (state === 'Sent') return 'On the server';
   if (state === 'Sending') return `Sending, ${event.sent} of ${event.len}`;
   if (state === 'Different') return 'A different event is on the server';
+  if (state === 'Removed') return 'Removed on the server';
   return 'Not sent';
 }
 
@@ -41,7 +42,7 @@ export function eventTone(event: LinkEvent): Tone {
   const state = event.state;
   if (state === 'Sent') return 'success';
   if (state === 'Sending') return 'info';
-  if (state === 'Different') return 'warn';
+  if (state === 'Different' || state === 'Removed') return 'warn';
   return 'danger';
 }
 
@@ -54,7 +55,8 @@ export function eventProblem(event: LinkEvent): string | undefined {
 export function refreshEvery(view: LinkView | undefined): number {
   if (!view || !view.on) return 5000;
   const settled =
-    view.state === 'Connected' && view.events.every((event) => event.state === 'Sent');
+    view.state === 'Connected' &&
+    view.events.every((event) => event.state === 'Sent' || event.state === 'Removed');
   return settled ? 4000 : 1000;
 }
 

@@ -163,14 +163,21 @@ gridfpv-serverctl club name "Recon FPV"
 
 ## Make a link token for a director
 
-A director needs a **link token** to send events. Make one for each director:
+A director needs a **link token** to send events. Make one for each computer that runs
+Grid.
+
+There are two ways. Once people can sign in (see **Signing in**), the page is the easy
+one.
+
+**On the server's page.** A director of the club, or an owner, opens the club's page and
+finds **Link tokens**. Type what the token is for and press **Make a link token**. To take
+one back, press **Take back** beside it.
+
+**On the command line.**
 
 ```
 gridfpv-serverctl token new "Ryan's laptop"
 ```
-
-It prints a token that starts with `gfs_`. **It is shown once.** Give it to the director
-in a safe way. They paste it into Grid, on **Setup → Server**, with your server's address.
 
 To see the tokens you have made:
 
@@ -183,6 +190,9 @@ To take one back, use the short id from that list:
 ```
 gridfpv-serverctl token revoke tN81uJZy
 ```
+
+Either way, the token starts with `gfs_` and **is shown once**. Give it to the director in
+a safe way. They paste it into Grid, on **Setup → Server**, with your server's address.
 
 A token that is taken back stops working straight away.
 
@@ -298,6 +308,18 @@ Knowing a callsign is never enough: someone the club trusts always says yes.
 
 An approver cannot answer their own ask. A director can take a pilot back at any time.
 
+### 7. Hide or remove an event
+
+On the club's page, under **Events**, a director or an owner can:
+
+- **Hide** an event. It leaves the list for everyone else. Anyone who has its link can
+  still open it. **Show** puts it back.
+- **Remove** an event. It is taken off the server. The director's own copy in Grid is not
+  touched. Grid says the event was removed, and does not send it again by itself. The
+  director can send it again from **Setup → Server**.
+
+The club's name is changed at the bottom of the same page.
+
 ## What is kept
 
 The clubs and tokens are in one file, and each event has a file of its own. The server
@@ -326,6 +348,7 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
 
 - A signed-in pilot sees the events they flew and where they placed, and can sign up for a
   heat while the director's Grid is connected. Seasons and records come later.
-- A director still sends events with a link token. Anyone can look at an event.
+- A director still sends events with a link token. Anyone with its link can look at an
+  event.
 - There is one club on a server.
 - Videos are not stored.

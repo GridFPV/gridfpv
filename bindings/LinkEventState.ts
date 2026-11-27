@@ -3,4 +3,4 @@
 /**
  * How one event stands on the server.
  */
-export type LinkEventState = "Sent" | "Sending" | "Different" | { "Failed": { message: string, } };
+export type LinkEventState = "Sent" | "Sending" | "Different" | "Removed" | { "Failed": { message: string, } };
