@@ -30,7 +30,6 @@
 </script>
 
 <div class="results" data-testid="server-results">
-  <p class="lead">Your results</p>
   {#if error}
     <Banner tone="danger" title="Your results could not be read.">{error}</Banner>
   {:else if results === undefined}
@@ -38,10 +37,6 @@
   {:else if results.length === 0}
     <Card elevation="sm">
       <p>No results yet.</p>
-      <p class="muted">
-        They show here once you hold a pilot and that pilot has flown in an event. Find yourself
-        from your account page.
-      </p>
     </Card>
   {:else}
     <ul aria-label="Your results">
@@ -79,10 +74,6 @@
   }
   p {
     margin: 0;
-  }
-  .lead {
-    font-size: var(--gf-font-size-xl);
-    font-weight: var(--gf-font-weight-bold);
   }
   ul {
     list-style: none;

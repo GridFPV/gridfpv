@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Browser, Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -85,8 +86,10 @@ test('an owner runs the club from the page, and Grid goes along with it', async 
   await ryan.getByRole('link', { name: 'Continue with Test login' }).click();
   await expect(ryan.getByTestId('server-who')).toHaveText('Ryan');
   await ryan.getByTestId('server-who').click();
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(ryan, 'Club');
+  await openServerPage(ryan, 'Events');
   await expect(ryan.getByText('No events yet.')).toBeVisible();
+  await openServerPage(ryan, 'Link tokens');
   // The token made on the command line when the server was set up.
   await expect(ryan.getByTestId('link-token')).toHaveCount(1);
 
@@ -118,11 +121,12 @@ test('an owner runs the club from the page, and Grid goes along with it', async 
 
   // ── Hidden: off the list for a visitor, still there for the owner and by its link. ──
   await ryan.reload();
+  await openServerPage(ryan, 'Events');
   const event = ryan.getByTestId('manage-event').filter({ hasText: E2E_EVENT_NAME });
   await event.getByRole('button', { name: `Hide ${E2E_EVENT_NAME}` }).click();
   await expect(event).toContainText('Hidden');
   expect(await listed(visitor)).toEqual([]);
-  await visitor.goto(`${server.baseUrl}/#/e/club/${director.event}`);
+  await visitor.goto(`${server.baseUrl}/#/event/club/${director.event}`);
   await expect(visitor.getByTestId('server-event')).toHaveText(E2E_EVENT_NAME);
   // The owner's own list still has it, marked.
   const owner = await ryan.context().newPage();
@@ -143,7 +147,7 @@ test('an owner runs the club from the page, and Grid goes along with it', async 
   await expect(sure).toHaveCount(0);
   await expect(ryan.getByText('No events yet.')).toBeVisible();
   expect(await listed(visitor)).toEqual([]);
-  await visitor.goto(`${server.baseUrl}/#/e/club/${director.event}`);
+  await visitor.goto(`${server.baseUrl}/#/event/club/${director.event}`);
   await expect(visitor.getByTestId('server-event')).toHaveCount(0);
 
   // Grid notices by itself, with nothing new to send.
@@ -174,13 +178,17 @@ test('an owner runs the club from the page, and Grid goes along with it', async 
 
   // ── A new name for the club shows to everyone. ────────────────────────────
   await ryan.reload();
+  await openServerPage(ryan, 'Settings');
   await ryan.getByLabel('Name', { exact: true }).fill('Recon Whoop Club');
   await ryan.getByRole('form', { name: 'Club name' }).getByRole('button', { name: 'Save' }).click();
-  await expect(ryan.getByTestId('server-club').locator('.lead')).toHaveText('Recon Whoop Club');
+  // The club's address follows its name, and the page goes along.
+  await expect(ryan).toHaveURL(/#\/manage\/recon-whoop-club\/settings$/);
+  await expect(ryan.getByText('Recon Whoop Club', { exact: true })).toBeVisible();
   await listed(visitor);
   await expect(visitor.getByRole('heading', { name: 'Recon Whoop Club' })).toBeVisible();
 
   // ── The token is taken back. Grid can send no more, and says why. ─────────
+  await openServerPage(ryan, 'Link tokens');
   await ryan.getByRole('button', { name: "Take back the token for Ryan's laptop" }).click();
   await ryan.getByRole('dialog').getByRole('button', { name: 'Take back' }).click();
   await expect(ryan.getByRole('dialog')).toHaveCount(0);

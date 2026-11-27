@@ -5,7 +5,7 @@
    *
    * With `invite`, the invite goes along, so that someone new gets their account.
    */
-  import { Banner } from '@gridfpv/components';
+  import { Banner, InfoTip } from '@gridfpv/components';
   import type { Me, SignInProvider } from '@gridfpv/types';
   import { OWNERS_SEE_ALL, type PeopleApi } from '../lib/serverPeople.js';
   import ServerPassword from './ServerPassword.svelte';
@@ -72,10 +72,10 @@
         mode={reconnecting ? 'make' : 'sign-in'}
         {invite}
         canMake={!reconnecting && (invite !== undefined || canMake)}
-        makeWords={reconnecting ? 'Set the username and password' : 'Make the account'}
+        makeWords={reconnecting ? 'Set the username and password' : 'Create account'}
         ondone={onsignedin}
       />
-      {#if providers.length > 0}<p class="muted or">Or use one of these:</p>{/if}
+      {#if providers.length > 0}<p class="or"><span>or</span></p>{/if}
     {/if}
     <ul>
       {#each providers as provider (provider.id)}
@@ -87,11 +87,37 @@
         </li>
       {/each}
     </ul>
-    {#if !add}<p class="muted" data-testid="owners-see-all">{OWNERS_SEE_ALL}</p>{/if}
+    {#if !add}
+      <p class="muted fine" data-testid="owners-see-all">
+        Who can see my account?
+        <InfoTip text={OWNERS_SEE_ALL} label="Who can see my account" />
+      </p>
+    {/if}
   {/if}
 </div>
 
 <style>
+  .or {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-3);
+    margin: 0;
+    color: var(--gf-text-faint, var(--gf-text-muted));
+    font-size: var(--gf-font-size-sm);
+    max-width: 22rem;
+  }
+  .or::before,
+  .or::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--gf-border);
+  }
+  .fine {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+    font-size: var(--gf-font-size-xs, var(--gf-font-size-sm));
+  }
   .sign-in {
     display: grid;
     gap: var(--gf-space-3);

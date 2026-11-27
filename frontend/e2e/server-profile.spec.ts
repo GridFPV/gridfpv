@@ -13,6 +13,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -50,9 +51,7 @@ test('an owner lets anyone make an account, and a pilot fills in their own profi
   expect(server.run(['sign-up'])).toContain('An account needs an invite.');
   const early = await fresh(browser);
   await early.goto(`${server.baseUrl}/#/sign-in`);
-  await expect(early.getByTestId('sign-up-line')).toHaveText(
-    'You need an invite from your club to make an account.'
-  );
+  await expect(early.getByTestId('sign-up-line')).toHaveText('New here? You need an invite.');
   await continueAs(early, { sub: 'sub-early', name: 'Early' });
   await expect(early.getByTestId('sign-in-problem')).toContainText('You need an invite');
 
@@ -61,10 +60,11 @@ test('an owner lets anyone make an account, and a pilot fills in their own profi
   const ryan = await fresh(browser);
   await ryan.goto(setup);
   await continueAs(ryan, { sub: 'sub-ryan', name: 'Ryan' });
-  await ryan.getByTestId('server-who').click();
+  await openServerPart(ryan, 'Server');
+  await openServerPage(ryan, 'Sign-in');
   const setting = ryan.getByTestId('sign-up-setting');
   await expect(setting.getByTestId('sign-up-state')).toHaveText('Invite only');
-  await setting.getByRole('button', { name: 'Let anyone make an account…' }).click();
+  await setting.getByRole('switch', { name: 'Let anyone make an account' }).click();
   const sure = ryan.getByRole('dialog');
   await expect(sure).toContainText('Let anyone make an account?');
   await sure.getByRole('button', { name: 'Let anyone in' }).click();
@@ -81,21 +81,21 @@ test('an owner lets anyone make an account, and a pilot fills in their own profi
   const pia = await fresh(browser);
   await pia.goto(server.baseUrl);
   await pia.getByTestId('server-sign-in').click();
-  await expect(pia.getByTestId('sign-up-line')).toHaveText(
-    'No account yet? Sign in, and one is made for you.'
-  );
+  // Nothing about invites now: signing in is all it takes.
+  await expect(pia.getByRole('link', { name: 'Continue with Test login' })).toBeVisible();
+  await expect(pia.getByTestId('sign-up-line')).toHaveCount(0);
   await continueAs(pia, { sub: 'sub-pia', name: 'Pia' });
   // She lands on her account, where the profile is.
   await expect(pia.getByTestId('account-name')).toHaveText('Pia');
   await expect.poll(() => new URL(pia.url()).hash).toBe('#/account');
-  await expect(pia.getByText('You are not in a club yet.')).toBeVisible();
-  // She is an owner of nothing.
-  await expect(pia.getByTestId('sign-up-setting')).toHaveCount(0);
-  await expect(pia.getByText('You are an owner of this server.')).toHaveCount(0);
+  // She is an owner of nothing, and runs no club.
+  await expect(pia.getByText('Server owner')).toHaveCount(0);
+  await expect(pia.getByRole('link', { name: 'Server', exact: true })).toHaveCount(0);
+  await expect(pia.getByRole('link', { name: 'Club', exact: true })).toHaveCount(0);
 
   // ── She fills in her pilot profile. ───────────────────────────────────────
   const profile = pia.getByTestId('pilot-profile');
-  await expect(profile.getByTestId('profile-empty')).toContainText('You are shown as Pia.');
+  await expect(profile.getByTestId('profile-empty')).toContainText('Shown as Pia.');
   await profile.getByRole('button', { name: 'Fill it in' }).click();
   await pia.getByLabel('Colour', { exact: true }).fill('purple');
   await expect(profile.getByRole('alert')).toContainText('A colour is a # and six');
@@ -136,7 +136,7 @@ test('an owner lets anyone make an account, and a pilot fills in their own profi
   // ── The owner goes back to invites. The next stranger gets nothing. ───────
   await ryan
     .getByTestId('sign-up-setting')
-    .getByRole('button', { name: 'Ask for an invite again' })
+    .getByRole('switch', { name: 'Let anyone make an account' })
     .click();
   await expect(ryan.getByTestId('sign-up-setting').getByTestId('sign-up-state')).toHaveText(
     'Invite only'
@@ -155,7 +155,8 @@ test('an owner lets anyone make an account, and a pilot fills in their own profi
   expect(server.run(['sign-up', 'open'])).toContain('Anyone who can sign in');
   await late.goto(`${server.baseUrl}/#/sign-in`);
   await late.reload();
-  await expect(late.getByTestId('sign-up-line')).toContainText('one is made for you');
+  await expect(late.getByRole('link', { name: 'Continue with Test login' })).toBeVisible();
+  await expect(late.getByTestId('sign-up-line')).toHaveCount(0);
   await continueAs(late, { sub: 'sub-late', name: 'Late' });
   await expect(late.getByTestId('account-name')).toHaveText('Late');
 });

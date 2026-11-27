@@ -116,7 +116,7 @@ describe('joining a club from the account page', () => {
       club({ id: 'east', name: 'East FPV' }),
       club({ id: 'old', name: 'Old Club' }, { archived: true })
     ];
-    open('#/account', server);
+    open('#/account/clubs', server);
     const card = await joinCard();
     const rows = within(card).getAllByTestId('join-club');
     // Not the club she is in, and not the archived one.
@@ -129,7 +129,7 @@ describe('joining a club from the account page', () => {
   it('joins a public club with one press', async () => {
     const server = fakeServer({ account: PIA });
     server.clubList = [club(NORTH, { open: true }), club(SOUTH)];
-    const { people } = open('#/account', server);
+    const { people } = open('#/account/clubs', server);
     const card = await joinCard();
     expect(screen.getByText(/You are not in a club yet/)).toBeTruthy();
 
@@ -145,7 +145,7 @@ describe('joining a club from the account page', () => {
 
   it('asks a private club, says so, and takes the ask back', async () => {
     const server = fakeServer({ account: PIA });
-    const { people } = open('#/account', server);
+    const { people } = open('#/account/clubs', server);
     const card = await joinCard();
     await fireEvent.click(within(card).getByRole('button', { name: 'Ask to join North FPV' }));
     await waitFor(() => expect(people.joinClub).toHaveBeenCalledWith('north'));
@@ -173,14 +173,14 @@ describe('joining a club from the account page', () => {
   });
 
   it('shows an ask that was made before, when the page is opened again', async () => {
-    open('#/account', fakeServer({ account: { ...PIA, join_asks: [NORTH] } }));
+    open('#/account/clubs', fakeServer({ account: { ...PIA, join_asks: [NORTH] } }));
     const card = await joinCard();
     expect(rowOf(card, 'North FPV')).toHaveTextContent('You asked to join.');
   });
 
   it("says the server's words when joining is refused", async () => {
     const server = fakeServer({ account: PIA });
-    const { people } = open('#/account', server);
+    const { people } = open('#/account/clubs', server);
     people.joinClub.mockRejectedValueOnce(new Error('This club is archived.'));
     const card = await joinCard();
     await fireEvent.click(within(card).getByRole('button', { name: 'Ask to join North FPV' }));
@@ -196,15 +196,15 @@ describe('joining a club from the account page', () => {
         { club: SOUTH, role: 'Pilot' }
       ]
     };
-    open('#/account', fakeServer({ account: both }));
-    await screen.findByTestId('pilot-profile');
+    open('#/account/clubs', fakeServer({ account: both }));
+    await screen.findByRole('list', { name: 'Your clubs' });
     expect(screen.queryByTestId('join-clubs')).toBeNull();
   });
 
   it('says there is no club to join when the server has none for someone in no club', async () => {
     const server = fakeServer({ account: PIA });
     server.clubList = [];
-    open('#/account', server);
+    open('#/account/clubs', server);
     expect(await joinCard()).toHaveTextContent('There is no club to join on this server yet.');
   });
 });
@@ -215,7 +215,7 @@ describe('leaving a club', () => {
   it('is asked about first, and then the club is offered to join again', async () => {
     const server = fakeServer({ account: pilot });
     server.clubList = [club(NORTH, { open: true })];
-    const { people } = open('#/account', server);
+    const { people } = open('#/account/clubs', server);
     await fireEvent.click(await screen.findByRole('button', { name: 'Leave North FPV' }));
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveTextContent('Leave North FPV?');
@@ -240,7 +240,7 @@ describe('leaving a club', () => {
 
   it('says why the only director cannot leave, and keeps them in', async () => {
     const server = fakeServer({ account: ACE });
-    open('#/account', server);
+    open('#/account/clubs', server);
     await fireEvent.click(await screen.findByRole('button', { name: 'Leave North FPV' }));
     const dialog = screen.getByRole('dialog');
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Leave' }));
@@ -251,14 +251,14 @@ describe('leaving a club', () => {
 
 describe("joining from a club's own address", () => {
   it('offers a visitor to sign in, and says the club by name', async () => {
-    open('#/c/north-fpv', fakeServer());
+    open('#/club/north-fpv', fakeServer());
     const control = await screen.findByTestId('club-join');
     const link = within(control).getByRole('link', { name: 'Sign in to join North FPV' });
     expect(link.getAttribute('href')).toBe('#/sign-in');
   });
 
   it('lets a signed-in person ask, right there', async () => {
-    const { people } = open('#/c/north-fpv', fakeServer({ account: PIA }));
+    const { people } = open('#/club/north-fpv', fakeServer({ account: PIA }));
     const control = await screen.findByTestId('club-join');
     await fireEvent.click(within(control).getByRole('button', { name: 'Ask to join North FPV' }));
     await waitFor(() => expect(people.joinClub).toHaveBeenCalledWith('north'));
@@ -268,14 +268,14 @@ describe("joining from a club's own address", () => {
   });
 
   it('says so to someone who is already in the club', async () => {
-    open('#/c/north-fpv', fakeServer({ account: ACE }));
+    open('#/club/north-fpv', fakeServer({ account: ACE }));
     expect(await screen.findByTestId('club-join')).toHaveTextContent('You are in this club.');
   });
 
   it('offers nothing at an archived club', async () => {
     const server = fakeServer({ account: PIA });
     server.clubList = [club(NORTH, { archived: true, open: true })];
-    open('#/c/north-fpv', server);
+    open('#/club/north-fpv', server);
     await screen.findByTestId('server-one-club');
     expect(screen.queryByTestId('club-join')).toBeNull();
   });
@@ -283,6 +283,8 @@ describe("joining from a club's own address", () => {
 
 describe("who can join, on a club's own page", () => {
   const setting = () => screen.findByTestId('club-join-setting');
+  const asking = () => screen.findByTestId('club-join-asks');
+  const adding = () => screen.findByTestId('club-add-someone');
   const PEOPLE = [
     { id: 'acct_pia', name: 'Pia', callsign: 'PiaFPV' },
     { id: 'acct_quin', name: 'Quin' },
@@ -290,18 +292,14 @@ describe("who can join, on a club's own page", () => {
   ];
 
   it('starts private, and a director makes it public and private again', async () => {
-    const { people, server } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people, server } = open('#/manage/north/settings', fakeServer({ account: ACE }));
     // The page is drawn again after each change, so the card is looked up each time.
     const state = async () => within(await setting()).getByTestId('club-open-state');
     expect(await state()).toHaveTextContent('Private');
-    expect(await setting()).toHaveTextContent('People ask to join North FPV');
 
     await fireEvent.click(within(await setting()).getByRole('button', { name: 'Make it public' }));
     await waitFor(() => expect(people.setClubOpen).toHaveBeenCalledWith('north', true));
     await waitFor(async () => expect(await state()).toHaveTextContent('Public'));
-    expect(await setting()).toHaveTextContent(
-      'Anyone with an account on this server can join North FPV'
-    );
     expect(server.clubList[0].open).toBe(true);
 
     await fireEvent.click(within(await setting()).getByRole('button', { name: 'Make it private' }));
@@ -313,13 +311,13 @@ describe("who can join, on a club's own page", () => {
   it('opens on a club that is already public', async () => {
     const server = fakeServer({ account: ACE });
     server.clubList = [club(NORTH, { open: true }), club(SOUTH)];
-    open('#/club/north', server);
+    open('#/manage/north/settings', server);
     expect(within(await setting()).getByTestId('club-open-state')).toHaveTextContent('Public');
   });
 
   it('says nobody is waiting when nobody is', async () => {
-    open('#/club/north', fakeServer({ account: ACE }));
-    expect(await within(await setting()).findByTestId('no-join-asks')).toHaveTextContent(
+    open('#/manage/north', fakeServer({ account: ACE }));
+    expect(await within(await asking()).findByTestId('no-join-asks')).toHaveTextContent(
       'Nobody is waiting.'
     );
   });
@@ -332,8 +330,8 @@ describe("who can join, on a club's own page", () => {
         { id: 'acct_quin', name: 'Quin', asked_at: 2 }
       ]
     };
-    const { people } = open('#/club/north', server);
-    const card = await setting();
+    const { people } = open('#/manage/north', server);
+    const card = await asking();
     const asks = await within(card).findAllByTestId('join-ask');
     // The first to ask is at the top. A callsign shows beside the name.
     expect(asks.map((row) => row.querySelector('.name')?.textContent)).toEqual([
@@ -361,8 +359,8 @@ describe("who can join, on a club's own page", () => {
   it('reads the list again when an answer is refused, so a stale row does not stay', async () => {
     const server = fakeServer({ account: ACE });
     server.joinAsks = { north: [{ id: 'acct_pia', name: 'Pia', asked_at: 1 }] };
-    open('#/club/north', server);
-    const card = await setting();
+    open('#/manage/north', server);
+    const card = await asking();
     await within(card).findByTestId('join-ask');
     // She took her ask back a moment ago.
     server.joinAsks.north = [];
@@ -373,8 +371,8 @@ describe("who can join, on a club's own page", () => {
 
   it('finds someone by name or callsign and adds them as a pilot', async () => {
     const server = fakeServer({ account: ACE, people: PEOPLE });
-    const { people } = open('#/club/north', server);
-    const card = await setting();
+    const { people } = open('#/manage/north', server);
+    const card = await adding();
     const find = within(card).getByRole('button', { name: 'Find' }) as HTMLButtonElement;
     const box = within(card).getByLabelText('Name or callsign') as HTMLInputElement;
     // One letter is too little to look with.
@@ -403,8 +401,8 @@ describe("who can join, on a club's own page", () => {
 
   it('does not offer someone who is already in the club, and says when nobody matches', async () => {
     const server = fakeServer({ account: ACE, people: PEOPLE });
-    open('#/club/north', server);
-    const card = await setting();
+    open('#/manage/north', server);
+    const card = await adding();
     const box = within(card).getByLabelText('Name or callsign');
     // Bee is a member of North already.
     await fireEvent.input(box, { target: { value: 'bee' } });
@@ -421,8 +419,8 @@ describe("who can join, on a club's own page", () => {
 
   it("says the server's words when adding is refused", async () => {
     const server = fakeServer({ account: ACE, people: PEOPLE });
-    const { people } = open('#/club/north', server);
-    const card = await setting();
+    const { people } = open('#/manage/north', server);
+    const card = await adding();
     await fireEvent.input(within(card).getByLabelText('Name or callsign'), {
       target: { value: 'quin' }
     });
@@ -437,19 +435,20 @@ describe("who can join, on a club's own page", () => {
 
   it('is not shown to a claims approver, who does not run the club', async () => {
     open(
-      '#/club/north',
+      '#/manage/north',
       fakeServer({ account: { ...ACE, clubs: [{ club: NORTH, role: 'Approver' }] } })
     );
     await screen.findByTestId('server-club');
-    expect(screen.queryByTestId('club-join-setting')).toBeNull();
+    expect(screen.queryByTestId('club-join-asks')).toBeNull();
+    expect(screen.queryByTestId('club-add-someone')).toBeNull();
   });
 
   it('can change nothing in an archived club', async () => {
     const server = fakeServer({ account: { ...ACE, owner: true } });
     server.clubList = [club(NORTH, { archived: true })];
     server.joinAsks = { north: [{ id: 'acct_pia', name: 'Pia', asked_at: 1 }] };
-    open('#/club/north', server);
-    const card = await setting();
+    open('#/manage/north', server);
+    const card = await asking();
     await within(card).findByTestId('join-ask');
     for (const button of within(card).getAllByRole('button')) {
       expect((button as HTMLButtonElement).disabled, button.textContent ?? '').toBe(true);

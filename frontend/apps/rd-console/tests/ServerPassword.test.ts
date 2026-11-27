@@ -63,6 +63,12 @@ const withAce = (over: Partial<FakeServer> = {}): FakeServer =>
 const form = () => screen.findByTestId('password-form');
 const box = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
 const type = (label: string, value: string) => fireEvent.input(box(label), { target: { value } });
+/** The tabs above the form: signing in, or creating an account. */
+const tab = async (name: string) => fireEvent.click(await screen.findByRole('tab', { name }));
+const go = (hash: string) => {
+  location.hash = hash;
+  window.dispatchEvent(new Event('hashchange'));
+};
 const press = async (name: string | RegExp) =>
   fireEvent.click(within(await form()).getByRole('button', { name }));
 
@@ -104,7 +110,7 @@ describe('signing in with a password', () => {
     const { people } = open('#/sign-in', withAce());
     await form();
     // The other ways to sign in are still there.
-    expect(screen.getByText('Or use one of these:')).toBeTruthy();
+    expect(screen.getByText('or')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Continue with Discord' })).toBeTruthy();
     expect(box('Password').type).toBe('password');
     // Nothing to send until both are typed.
@@ -161,16 +167,16 @@ describe('making an account with a password', () => {
   it('is not offered on the sign-in page of a server that asks for an invite', async () => {
     open('#/sign-in', withAce());
     await form();
-    expect(screen.queryByRole('button', { name: /Make one with a username/ })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'Create account' })).toBeNull();
   });
 
   it('makes an account in no club when the owner lets anyone in, and lands on it', async () => {
     const { people, server } = open('#/sign-in', withAce({ openSignUp: true }));
-    await press(/Make one with a username and password/);
-    expect(screen.getByRole('form', { name: 'Make the account' })).toBeTruthy();
+    await tab('Create account');
+    expect(screen.getByRole('form', { name: 'Create account' })).toBeTruthy();
     const make = () =>
       within(screen.getByTestId('password-form')).getByRole('button', {
-        name: 'Make the account'
+        name: 'Create account'
       }) as HTMLButtonElement;
     expect(make().disabled).toBe(true);
 
@@ -201,9 +207,9 @@ describe('making an account with a password', () => {
 
   it('goes back to signing in, with the passwords emptied', async () => {
     open('#/sign-in', withAce({ openSignUp: true }));
-    await press(/Make one with a username and password/);
+    await tab('Create account');
     await type('Password', PW);
-    await press('Sign in');
+    await tab('Sign in');
     expect(screen.getByRole('form', { name: 'Sign in' })).toBeTruthy();
     expect(box('Password').value).toBe('');
     expect(screen.queryByLabelText('The same password again')).toBeNull();
@@ -211,11 +217,11 @@ describe('making an account with a password', () => {
 
   it("says the server's words when the username is taken, and keeps what was typed", async () => {
     open('#/sign-in', withAce({ openSignUp: true }));
-    await press(/Make one with a username and password/);
+    await tab('Create account');
     await type('Username', 'ace');
     await type('Password', PW2);
     await type('The same password again', PW2);
-    await press('Make the account');
+    await press('Create account');
     expect(await screen.findByTestId('password-error')).toHaveTextContent(
       'That sign-in already belongs to an account.'
     );
@@ -238,11 +244,11 @@ describe('making an account with a password', () => {
     };
     const { people } = open('#/invite/abc', server);
     await form();
-    await press(/Make one with a username and password/);
+    await tab('Create account');
     await type('Username', 'pia');
     await type('Password', PW);
     await type('The same password again', PW);
-    await press('Make the account');
+    await press('Create account');
     await waitFor(() =>
       expect(people.passwordSignUp).toHaveBeenCalledWith({
         username: 'pia',
@@ -250,8 +256,10 @@ describe('making an account with a password', () => {
         invite: 'abc'
       })
     );
+    // They land on their clubs, signed in under the name they typed.
     await waitFor(() => expect(screen.getByTestId('my-club')).toHaveTextContent('North FPV'));
-    expect(screen.getByTestId('account-name')).toHaveTextContent('pia');
+    expect(location.hash).toBe('#/account/clubs');
+    expect(screen.getByTestId('server-who')).toHaveTextContent('pia');
   });
 
   it('lets someone with an account sign in on an invite page, and then accept it', async () => {
@@ -281,10 +289,12 @@ describe('a forgotten password', () => {
     const server = withAce({ reconnects: { gfr_abc: 'acct_ace' } });
     const { people } = open('#/reconnect/gfr_abc', server);
     await form();
-    expect(screen.getByTestId('reconnect-password')).toHaveTextContent('Forgot your password?');
+    expect(screen.getByTestId('reconnect-password')).toHaveTextContent(
+      'Type your username and a new password.'
+    );
     // A link is not signed in with: it only sets a way back in.
     expect(screen.getByRole('form', { name: 'Set the username and password' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Make one with/ })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'Create account' })).toBeNull();
     await type('Username', 'ace');
     await type('Password', PW2);
     await type('The same password again', PW2);
@@ -296,7 +306,9 @@ describe('a forgotten password', () => {
         invite: 'gfr_abc'
       })
     );
-    await waitFor(() => expect(screen.getByTestId('account-name')).toHaveTextContent('Ace'));
+    // They land on how they sign in, as the account the link was for.
+    await waitFor(() => expect(location.hash).toBe('#/account/sign-in'));
+    await waitFor(() => expect(screen.getByTestId('server-who')).toHaveTextContent('Ace'));
     expect(server.passwords.ace.password).toBe(PW2);
     expect(server.reconnects.gfr_abc).toBeUndefined();
   });
@@ -313,7 +325,7 @@ describe('a password on the account page', () => {
   const signIns = () => screen.getByRole('list', { name: 'How you sign in' });
 
   it('is added to an account that signs in another way', async () => {
-    const { people } = open('#/account', fakeServer({ account: ACE, passwordOn: true }));
+    const { people } = open('#/account/sign-in', fakeServer({ account: ACE, passwordOn: true }));
     await fireEvent.click(
       await screen.findByRole('button', { name: 'Add a username and password' })
     );
@@ -332,13 +344,13 @@ describe('a password on the account page', () => {
   });
 
   it('is not offered on a server with passwords off', async () => {
-    open('#/account', fakeServer({ account: ACE }));
+    open('#/account/sign-in', fakeServer({ account: ACE }));
     await screen.findByTestId('server-account');
     expect(screen.queryByRole('button', { name: 'Add a username and password' })).toBeNull();
   });
 
   it('is changed by giving the one there is', async () => {
-    const { people, server } = open('#/account', withAce({ account: ACE_PW }));
+    const { people, server } = open('#/account/sign-in', withAce({ account: ACE_PW }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Change password' }));
     // The username is not asked for: it stays.
     expect(screen.queryByLabelText('Username')).toBeNull();
@@ -362,7 +374,7 @@ describe('a password on the account page', () => {
   });
 
   it('closes the form on Cancel and changes nothing', async () => {
-    const { people } = open('#/account', withAce({ account: ACE_PW }));
+    const { people } = open('#/account/sign-in', withAce({ account: ACE_PW }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Change password' }));
     await type('New password', PW2);
     await press('Cancel');
@@ -371,7 +383,7 @@ describe('a password on the account page', () => {
   });
 
   it('cannot be taken off when it is the only way in', async () => {
-    open('#/account', withAce({ account: ACE_PW }));
+    open('#/account/sign-in', withAce({ account: ACE_PW }));
     await screen.findByTestId('server-account');
     expect(within(signIns()).queryByRole('button', { name: /^Remove/ })).toBeNull();
   });
@@ -380,34 +392,40 @@ describe('a password on the account page', () => {
 describe('the owner switching passwords on and off', () => {
   const OWNER: MyAccount = { ...ACE, id: 'acct_oz', name: 'Oz', owner: true, clubs: [] };
   const setting = () => screen.findByTestId('password-setting');
+  const flip = (card: HTMLElement) =>
+    within(card).getByRole('switch', {
+      name: 'Let people sign in with a password'
+    }) as HTMLInputElement;
 
   it('is not shown to someone who is not an owner', async () => {
-    open('#/account', fakeServer({ account: ACE }));
-    await screen.findByTestId('server-account');
+    open('#/admin/sign-in', fakeServer({ account: ACE }));
+    await screen.findByTestId('server-who');
     expect(screen.queryByTestId('password-setting')).toBeNull();
   });
 
   it('starts off, and is switched on with one press', async () => {
-    const { people, server } = open('#/account', fakeServer({ account: OWNER }));
+    const { people, server } = open('#/admin/sign-in', fakeServer({ account: OWNER }));
     const card = await setting();
     await waitFor(() =>
       expect(within(card).getByTestId('password-state')).toHaveTextContent('Off')
     );
-    expect(card).toHaveTextContent('never the password itself');
-    await fireEvent.click(within(card).getByRole('button', { name: 'Let people use a password' }));
+    await fireEvent.click(flip(card));
     await waitFor(() => expect(people.setPasswordSignIn).toHaveBeenCalledWith(true));
     await waitFor(() => expect(within(card).getByTestId('password-state')).toHaveTextContent('On'));
     expect(server.passwordOn).toBe(true);
     // The owner can now add one to their own account, with no reload.
+    go('#/account/sign-in');
     expect(await screen.findByRole('button', { name: 'Add a username and password' })).toBeTruthy();
   });
 
   it('is switched off only after the owner is told who is locked out', async () => {
-    const { people, server } = open('#/account', fakeServer({ account: OWNER, passwordOn: true }));
-    const card = await setting();
-    await fireEvent.click(
-      await within(card).findByRole('button', { name: 'Switch passwords off…' })
+    const { people, server } = open(
+      '#/admin/sign-in',
+      fakeServer({ account: OWNER, passwordOn: true })
     );
+    const card = await setting();
+    await waitFor(() => expect(flip(card).checked).toBe(true));
+    await fireEvent.click(flip(card));
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveTextContent('Anyone whose only way in is a password is locked out');
     expect(people.setPasswordSignIn).not.toHaveBeenCalled();
@@ -415,7 +433,7 @@ describe('the owner switching passwords on and off', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(server.passwordOn).toBe(true);
 
-    await fireEvent.click(within(card).getByRole('button', { name: 'Switch passwords off…' }));
+    await fireEvent.click(flip(card));
     await fireEvent.click(
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Switch off' })
     );
@@ -429,11 +447,10 @@ describe('the owner switching passwords on and off', () => {
       ...OWNER,
       sign_ins: [{ provider: 'password', subject: 'oz', label: 'oz' }]
     };
-    const { server } = open('#/account', fakeServer({ account: owner, passwordOn: true }));
+    const { server } = open('#/admin/sign-in', fakeServer({ account: owner, passwordOn: true }));
     const card = await setting();
-    await fireEvent.click(
-      await within(card).findByRole('button', { name: 'Switch passwords off…' })
-    );
+    await waitFor(() => expect(flip(card).checked).toBe(true));
+    await fireEvent.click(flip(card));
     const dialog = screen.getByRole('dialog');
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Switch off' }));
     expect(await within(dialog).findByText(/you would lock yourself out/)).toBeTruthy();

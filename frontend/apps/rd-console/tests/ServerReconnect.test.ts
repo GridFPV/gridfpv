@@ -60,7 +60,7 @@ function open(hash: string, server: FakeServer) {
 
 /** The owner opens North's page and the dialog for one member. */
 async function help(name: string, server: FakeServer = fakeServer({ account: OZ })) {
-  const opened = open('#/club/north', server);
+  const opened = open('#/manage/north', server);
   await fireEvent.click(await screen.findByRole('button', { name: `How ${name} signs in` }));
   const dialog = await screen.findByRole('dialog');
   await within(dialog).findByText('Re-connect link');
@@ -81,13 +81,13 @@ describe('reconnectLink and untilDay', () => {
 
 describe('who is offered it', () => {
   it('gives an owner a button for each member', async () => {
-    open('#/club/north', fakeServer({ account: OZ }));
+    open('#/manage/north', fakeServer({ account: OZ }));
     expect(await screen.findByRole('button', { name: 'How Ace signs in' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'How Bee signs in' })).toBeInTheDocument();
   });
 
   it("gives a club's director none: an account is for the whole server", async () => {
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people } = open('#/manage/north', fakeServer({ account: ACE }));
     await screen.findByRole('button', { name: 'Remove Bee' });
     expect(screen.queryByRole('button', { name: /signs in$/ })).toBeNull();
     expect(people.accountSignIns).not.toHaveBeenCalled();
@@ -170,7 +170,7 @@ describe("an owner looking at a member's sign-ins", () => {
   it('says so when the account could not be read', async () => {
     const server = fakeServer({ account: OZ });
     delete server.signIns.acct_bee;
-    open('#/club/north', server);
+    open('#/manage/north', server);
     await fireEvent.click(await screen.findByRole('button', { name: 'How Bee signs in' }));
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByTestId('sign-ins-error')).toHaveTextContent(
@@ -248,7 +248,7 @@ describe('the page a re-connect link opens', () => {
     expect(await screen.findByTestId('reconnect-for')).toHaveTextContent('Get back in to Bee');
     expect(people.reconnect).toHaveBeenCalledWith('gfr_x');
     const page = screen.getByTestId('server-reconnect');
-    expect(page).toHaveTextContent('Your clubs, pilots and results stay as they are.');
+    expect(page).toHaveTextContent('This link works once.');
     expect(page).not.toHaveTextContent('gfr_x');
     const discord = within(page).getByRole('link', { name: 'Continue with Discord' });
     expect(discord.getAttribute('href')).toBe('/auth/discord/start?invite=gfr_x');

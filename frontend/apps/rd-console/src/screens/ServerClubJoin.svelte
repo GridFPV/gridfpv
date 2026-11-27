@@ -6,17 +6,20 @@
    * someone who runs the club says yes). Either way a director can add someone they find
    * by name, and invites work as before.
    */
-  import { Badge, Banner, Button, Card, Input } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, InfoTip, Input } from '@gridfpv/components';
   import type { PersonView } from '@gridfpv/types';
   import { personLabel, type PeopleApi } from '../lib/serverPeople.js';
 
   let {
     api,
     club,
+    part,
     onchange
   }: {
     api: Pick<PeopleApi, 'setClubOpen' | 'joinAsks' | 'answerJoinAsk' | 'findPeople' | 'addMember'>;
     club: { id: string; name: string; open?: boolean; archived?: boolean };
+    /** `setting`: public or private. `people`: who asked to join, and adding someone. */
+    part: 'setting' | 'people';
     /** Told when the club's members, or whether it is public, changed. */
     onchange?: () => void | Promise<void>;
   } = $props();
@@ -40,26 +43,36 @@
 
   async function load() {
     try {
-      asks = await api.joinAsks(club.id);
+      asks = await api.joinAsks(clubId);
       loadError = undefined;
     } catch (err) {
       loadError = say(err);
     }
   }
+  /**
+   * The club by its id alone. The page hands over the club afresh each time it reads its
+   * lists, and that is not another club: nothing here is thrown away for it.
+   */
+  const clubId = $derived(club.id);
   $effect(() => {
-    void club.id;
-    void load();
+    void clubId;
+    if (part === 'people') void load();
   });
 
-  async function run(what: () => Promise<unknown>): Promise<boolean> {
+  /** What went wrong finding or adding someone. It shows in that card, not the one above. */
+  let addError = $state<string | undefined>(undefined);
+
+  async function run(what: () => Promise<unknown>, adding = false): Promise<boolean> {
     if (busy) return false;
     busy = true;
     error = undefined;
+    addError = undefined;
     try {
       await what();
       return true;
     } catch (err) {
-      error = say(err);
+      if (adding) addError = say(err);
+      else error = say(err);
       return false;
     } finally {
       busy = false;
@@ -87,11 +100,11 @@
     await run(async () => {
       found = await api.findPeople(club.id, wanted);
       lookedFor = wanted;
-    });
+    }, true);
   }
 
   async function add(person: PersonView) {
-    const added = await run(() => api.addMember(club.id, person.id));
+    const added = await run(() => api.addMember(club.id, person.id), true);
     if (!added) return;
     found = found?.filter((other) => other.id !== person.id);
     await load();
@@ -99,109 +112,114 @@
   }
 </script>
 
-<Card elevation="sm">
-  <div class="block" data-testid="club-join-setting">
-    <div class="row">
-      <h2>Who can join</h2>
-      <Badge tone={isOpen ? 'info' : 'neutral'}>
-        <span data-testid="club-open-state">{isOpen ? 'Public' : 'Private'}</span>
-      </Badge>
+{#if part === 'setting'}
+  <Card elevation="sm">
+    <div class="block" data-testid="club-join-setting">
+      <div class="row">
+        <h2>Who can join</h2>
+        <InfoTip
+          text="Public: anyone with an account joins. Private: people ask, and you say yes or no. Either way you can invite and add people."
+          label="About public and private"
+        />
+        <Badge tone={isOpen ? 'info' : 'neutral'}>
+          <span data-testid="club-open-state">{isOpen ? 'Public' : 'Private'}</span>
+        </Badge>
+      </div>
+      {#if error}<Banner tone="danger">{error}</Banner>{/if}
+      <div>
+        <Button size="sm" disabled={busy || club.archived} onclick={() => setOpen(!isOpen)}
+          >{isOpen ? 'Make it private' : 'Make it public'}</Button
+        >
+      </div>
     </div>
-    {#if error}<Banner tone="danger">{error}</Banner>{/if}
-    {#if isOpen}
-      <p>Anyone with an account on this server can join {club.name}, as a pilot.</p>
-      <div>
-        <Button size="sm" disabled={busy || club.archived} onclick={() => setOpen(false)}
-          >Make it private</Button
-        >
-      </div>
-    {:else}
-      <p>
-        People ask to join {club.name}, and you say yes or no. You can also invite them, or add them
-        below.
-      </p>
-      <div>
-        <Button size="sm" disabled={busy || club.archived} onclick={() => setOpen(true)}
-          >Make it public</Button
-        >
-      </div>
-    {/if}
-
-    <h3>Asked to join</h3>
-    {#if loadError}
-      <p class="muted">{loadError}</p>
-    {:else if asks === undefined}
-      <p class="muted" role="status">Loading…</p>
-    {:else if asks.length === 0}
-      <p class="muted" data-testid="no-join-asks">Nobody is waiting.</p>
-    {:else}
-      <ul aria-label="People who asked to join">
-        {#each asks as person (person.id)}
-          <li data-testid="join-ask">
-            <span class="name">{personLabel(person)}</span>
-            <span class="grow"></span>
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={busy || club.archived}
-              aria-label="Let {personLabel(person)} in"
-              onclick={() => answer(person, true)}>Let in</Button
-            >
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy || club.archived}
-              aria-label="Say no to {personLabel(person)}"
-              onclick={() => answer(person, false)}>No</Button
-            >
-          </li>
-        {/each}
-      </ul>
-    {/if}
-
-    <h3>Add someone</h3>
-    <p class="muted">
-      Find someone who has an account on this server, by their name or callsign. They join as a
-      pilot.
-    </p>
-    <form class="row" onsubmit={look} aria-label="Find someone to add">
-      <label class="visually-hidden" for="find-person-{club.id}">Name or callsign</label>
-      <Input
-        id="find-person-{club.id}"
-        maxlength={80}
-        autocomplete="off"
-        placeholder="Name or callsign"
-        bind:value={text}
-        disabled={busy || club.archived}
-      />
-      <Button size="sm" type="submit" disabled={busy || club.archived || text.trim().length < 2}
-        >Find</Button
-      >
-    </form>
-    {#if found !== undefined}
-      {#if found.length === 0}
-        <p class="muted" data-testid="nobody-found">
-          Nobody outside the club matches “{lookedFor}”.
-        </p>
+  </Card>
+{:else}
+  <Card elevation="sm">
+    <div class="block" data-testid="club-join-asks">
+      <h2>Asked to join</h2>
+      {#if error}<Banner tone="danger">{error}</Banner>{/if}
+      {#if loadError}
+        <p class="muted">{loadError}</p>
+      {:else if asks === undefined}
+        <p class="muted" role="status">Loading…</p>
+      {:else if asks.length === 0}
+        <p class="muted" data-testid="no-join-asks">Nobody is waiting.</p>
       {:else}
-        <ul aria-label="People found">
-          {#each found as person (person.id)}
-            <li data-testid="found-person">
+        <ul aria-label="People who asked to join">
+          {#each asks as person (person.id)}
+            <li data-testid="join-ask">
               <span class="name">{personLabel(person)}</span>
               <span class="grow"></span>
               <Button
                 size="sm"
+                variant="primary"
                 disabled={busy || club.archived}
-                aria-label="Add {personLabel(person)} to {club.name}"
-                onclick={() => add(person)}>Add</Button
+                aria-label="Let {personLabel(person)} in"
+                onclick={() => answer(person, true)}>Let in</Button
+              >
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy || club.archived}
+                aria-label="Say no to {personLabel(person)}"
+                onclick={() => answer(person, false)}>No</Button
               >
             </li>
           {/each}
         </ul>
       {/if}
-    {/if}
-  </div>
-</Card>
+    </div>
+  </Card>
+
+  <Card elevation="sm">
+    <div class="block" data-testid="club-add-someone">
+      <div class="row">
+        <h2>Add someone</h2>
+        <InfoTip
+          text="Find someone who has an account on this server. They join as a pilot."
+          label="About adding someone"
+        />
+      </div>
+      {#if addError}<Banner tone="danger">{addError}</Banner>{/if}
+      <form class="row" onsubmit={look} aria-label="Find someone to add">
+        <label class="visually-hidden" for="find-person-{club.id}">Name or callsign</label>
+        <Input
+          id="find-person-{club.id}"
+          maxlength={80}
+          autocomplete="off"
+          placeholder="Name or callsign"
+          bind:value={text}
+          disabled={busy || club.archived}
+        />
+        <Button size="sm" type="submit" disabled={busy || club.archived || text.trim().length < 2}
+          >Find</Button
+        >
+      </form>
+      {#if found !== undefined}
+        {#if found.length === 0}
+          <p class="muted" data-testid="nobody-found">
+            Nobody outside the club matches “{lookedFor}”.
+          </p>
+        {:else}
+          <ul aria-label="People found">
+            {#each found as person (person.id)}
+              <li data-testid="found-person">
+                <span class="name">{personLabel(person)}</span>
+                <span class="grow"></span>
+                <Button
+                  size="sm"
+                  disabled={busy || club.archived}
+                  aria-label="Add {personLabel(person)} to {club.name}"
+                  onclick={() => add(person)}>Add</Button
+                >
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
+    </div>
+  </Card>
+{/if}
 
 <style>
   .block {
@@ -217,10 +235,6 @@
     flex: 1;
     margin: 0;
     font-size: var(--gf-font-size-lg);
-  }
-  h3 {
-    margin: var(--gf-space-2) 0 0;
-    font-size: var(--gf-font-size-md);
   }
   p {
     margin: 0;

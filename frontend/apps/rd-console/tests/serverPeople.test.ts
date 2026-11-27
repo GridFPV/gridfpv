@@ -40,8 +40,21 @@ describe('the account pages have addresses', () => {
       kind: 'invite',
       secret: 'gfi_abc-DEF_123'
     });
-    expect(parseServerHash('#/account')).toEqual({ kind: 'account' });
-    expect(parseServerHash('#/club/north')).toEqual({ kind: 'club', club: 'north' });
+    expect(parseServerHash('#/account')).toEqual({ kind: 'account', page: 'profile' });
+    expect(parseServerHash('#/account/clubs')).toEqual({ kind: 'account', page: 'clubs' });
+    expect(parseServerHash('#/account/sign-in')).toEqual({ kind: 'account', page: 'sign-in' });
+    expect(parseServerHash('#/manage/north')).toEqual({
+      kind: 'manage',
+      club: 'north',
+      page: 'members'
+    });
+    expect(parseServerHash('#/manage/north/tokens')).toEqual({
+      kind: 'manage',
+      club: 'north',
+      page: 'tokens'
+    });
+    expect(parseServerHash('#/admin')).toEqual({ kind: 'admin', page: 'clubs' });
+    expect(parseServerHash('#/admin/email')).toEqual({ kind: 'admin', page: 'email' });
     // The server sends a browser back to `#/` after signing in.
     expect(parseServerHash('#/')).toEqual({ kind: 'list' });
   });
@@ -51,7 +64,11 @@ describe('the account pages have addresses', () => {
       '#/invite',
       '#/invite/a/b',
       '#/club',
-      '#/club/a/b',
+      '#/manage',
+      '#/manage/a/b',
+      '#/manage/a/members/b',
+      '#/admin/x',
+      '#/admin/clubs/x',
       '#/account/x',
       '#/sign-in/x',
       '#/Account',
@@ -70,8 +87,13 @@ describe('the account pages have addresses', () => {
       { kind: 'sign-in', problem: 'taken' },
       { kind: 'invite', secret: 'gfi_abc-DEF_123' },
       { kind: 'reconnect', secret: 'gfr_abc-DEF_123' },
-      { kind: 'account' },
-      { kind: 'club', club: 'north club/1' }
+      { kind: 'account', page: 'profile' },
+      { kind: 'account', page: 'clubs' },
+      { kind: 'account', page: 'sign-in' },
+      { kind: 'manage', club: 'north club/1', page: 'members' },
+      { kind: 'manage', club: 'north', page: 'settings' },
+      { kind: 'admin', page: 'clubs' },
+      { kind: 'admin', page: 'sign-in' }
     ];
     for (const place of places) expect(parseServerHash(formatServerHash(place))).toEqual(place);
   });

@@ -55,7 +55,7 @@ pub struct ServerClub {
     /// Never changes. The page's own links use it.
     pub id: String,
     pub name: String,
-    /// The friendly address, for handing out: `…/#/c/<word>`. It follows the name.
+    /// The friendly address, for handing out: `…/#/club/<word>`. It follows the name.
     pub word: String,
     /// Read-only, and off the list of clubs.
     pub archived: bool,

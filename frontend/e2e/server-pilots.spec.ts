@@ -14,6 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Browser, Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -71,6 +72,7 @@ async function continueAs(page: Page, who: Person): Promise<void> {
 
 /** On a club's page on the server: make a plain invite, and give back its link. */
 async function invite(page: Page, label: string): Promise<string> {
+  await openServerPage(page, 'Invites');
   await page.getByLabel('Who it is for').fill(label);
   await page.getByRole('button', { name: 'Make the invite' }).click();
   const link = (await page.getByTestId('invite-link').innerText()).trim();
@@ -169,7 +171,7 @@ test('a pilot tied to an account on the Pilots page sees where they placed', asy
   await ryan.goto(setup);
   await continueAs(ryan, { sub: 'sub-ryan', name: 'Ryan' });
   await ryan.getByTestId('server-who').click();
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(ryan, 'Club');
   const pia = await join(browser, ryan, { sub: 'sub-pia', name: 'Pia' });
   const quin = await join(browser, ryan, { sub: 'sub-quin', name: 'Quin' });
   await join(browser, ryan, { sub: 'sub-ray', name: 'Ray' });
@@ -206,6 +208,7 @@ test('a pilot tied to an account on the Pilots page sees where they placed', asy
 
   // ── A claim made on the server shows up on the Director by itself. ────────
   await ryan.reload();
+  await openServerPage(ryan, 'Pilots');
   await ryan.getByLabel('Give Tardy to').selectOption({ label: 'Quin' });
   await expect(holderOf(ryan, 'Tardy')).toHaveText('Quin');
   await expect(async () => {

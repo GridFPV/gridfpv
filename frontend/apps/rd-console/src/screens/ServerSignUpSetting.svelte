@@ -6,7 +6,8 @@
    * A server starts by asking for an invite. An owner may let anyone who can sign in make
    * an account. Invites work either way.
    */
-  import { Badge, Banner, Button, Card, Dialog } from '@gridfpv/components';
+  import { Banner, Button, Card, Dialog, InfoTip } from '@gridfpv/components';
+  import Switch from '../lib/Switch.svelte';
   import type { PeopleApi } from '../lib/serverPeople.js';
 
   let {
@@ -56,40 +57,34 @@
 <Card elevation="sm">
   <div class="block" data-testid="sign-up-setting">
     <div class="row">
-      <h2>Who may make an account</h2>
+      <h2>Open sign-up</h2>
+      <InfoTip
+        text="On: anyone who can sign in gets an account, in no club. Off: an account needs an invite. Invites work either way."
+        label="About open sign-up"
+      />
+      <span class="grow"></span>
       {#if open !== undefined}
-        <Badge tone={open ? 'info' : 'neutral'}>
-          <span data-testid="sign-up-state">{open ? 'Anyone' : 'Invite only'}</span>
-        </Badge>
+        <span class="state" data-testid="sign-up-state">{open ? 'Anyone' : 'Invite only'}</span>
+        <Switch
+          checked={open}
+          label="Let anyone make an account"
+          disabled={busy}
+          onchange={(next) => {
+            error = undefined;
+            if (next) asking = true;
+            else void set(false);
+          }}
+        />
       {/if}
     </div>
     {#if loadError}<Banner tone="danger">{loadError}</Banner>{/if}
     {#if error && !asking}<Banner tone="danger">{error}</Banner>{/if}
-    {#if open === true}
-      <p>
-        Anyone who can sign in may make an account. A new account is in no club until it joins one.
-      </p>
-      <div>
-        <Button size="sm" disabled={busy} onclick={() => set(false)}>Ask for an invite again</Button
-        >
-      </div>
-    {:else if open === false}
-      <p>An account needs an invite. You, and each club's director, hand them out.</p>
-      <div>
-        <Button size="sm" disabled={busy} onclick={() => ((error = undefined), (asking = true))}
-          >Let anyone make an account…</Button
-        >
-      </div>
-    {/if}
-    <p class="muted">Invites work either way.</p>
   </div>
 </Card>
 
 {#if asking}
   <Dialog open={true} title="Let anyone make an account?" onclose={() => (asking = false)}>
-    <p>Anyone who can sign in with one of this server's sign-in services gets an account.</p>
-    <p>A new account is in no club. It sees what any visitor sees until it joins a club.</p>
-    <p class="muted">You can go back to invites at any time. Accounts already made stay.</p>
+    <p>Anyone who can sign in gets an account. A new account is in no club.</p>
     {#if error}<Banner tone="danger">{error}</Banner>{/if}
     {#snippet footer()}
       <Button variant="ghost" onclick={() => (asking = false)}>Cancel</Button>
@@ -108,8 +103,10 @@
     align-items: center;
     gap: var(--gf-space-3);
   }
-  h2 {
+  .grow {
     flex: 1;
+  }
+  h2 {
     margin: 0;
     font-size: var(--gf-font-size-lg);
   }
@@ -117,7 +114,7 @@
     margin: 0;
     max-width: 65ch;
   }
-  .muted {
+  .state {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }

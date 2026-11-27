@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Browser, Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -56,7 +57,8 @@ test('an owner gets a pilot who lost their sign-in back into the same account', 
   await ryan.getByRole('link', { name: 'Continue with Test login' }).click();
   await expect(ryan.getByTestId('server-who')).toHaveText('Ryan');
   await ryan.getByTestId('server-who').click();
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(ryan, 'Club');
+  await openServerPage(ryan, 'Invites');
   await ryan.getByLabel('Who it is for').fill('Mateo');
   await ryan.getByRole('button', { name: 'Make the invite' }).click();
   const invite = (await ryan.getByTestId('invite-link').innerText()).trim();
@@ -69,6 +71,7 @@ test('an owner gets a pilot who lost their sign-in back into the same account', 
 
   // ── The owner takes Mateo's sign-in off. It was the only one. ─────────────
   await ryan.reload();
+  await openServerPage(ryan, 'Members');
   await ryan.getByRole('button', { name: 'How Mateo signs in' }).click();
   const help = ryan.getByRole('dialog');
   await expect(help.getByTestId('member-sign-in')).toHaveCount(1);
@@ -107,9 +110,10 @@ test('an owner gets a pilot who lost their sign-in back into the same account', 
   await mateo.getByRole('link', { name: 'Continue with Test login' }).click();
   // The same account: its name, and its place in the club.
   await expect(mateo.getByTestId('server-who')).toHaveText('Mateo');
-  await expect(mateo).toHaveURL(/#\/account$/);
-  await expect(mateo.getByTestId('server-account')).toContainText('Recon FPV');
+  await expect(mateo).toHaveURL(/#\/account\/sign-in$/);
   await expect(mateo.getByTestId('server-account')).toContainText('Mateo on Google');
+  await openServerPage(mateo, 'Clubs');
+  await expect(mateo.getByTestId('server-account')).toContainText('Recon FPV');
   // The members list still has one Mateo, not two.
   await ryan.reload();
   await expect(ryan.getByTestId('club-member').filter({ hasText: 'Mateo' })).toHaveCount(1);
@@ -139,6 +143,6 @@ test('an owner gets a pilot who lost their sign-in back into the same account', 
   await expect(laptop.getByTestId('server-who')).toHaveText('Ryan');
   // Still an owner: the club page opens, with the owner's button.
   await laptop.getByTestId('server-who').click();
-  await laptop.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(laptop, 'Club');
   await expect(laptop.getByRole('button', { name: 'How Mateo signs in' })).toBeVisible();
 });

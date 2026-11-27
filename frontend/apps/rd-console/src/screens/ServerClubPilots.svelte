@@ -7,7 +7,7 @@
    * the results flown under it. A director gives a pilot to a member, or takes it back. A
    * claims approver only answers the members who asked, and not their own ask.
    */
-  import { Banner, Button, Card, Dialog } from '@gridfpv/components';
+  import { Banner, Button, Card, Dialog, InfoTip } from '@gridfpv/components';
   import type { ClubPilotView, MemberView, PushAccount } from '@gridfpv/types';
   import type { PeopleApi } from '../lib/serverPeople.js';
 
@@ -42,14 +42,19 @@
 
   async function load() {
     try {
-      pilots = await api.clubPilots(club.id);
+      pilots = await api.clubPilots(clubId);
       loadError = undefined;
     } catch (err) {
       loadError = say(err);
     }
   }
+  /**
+   * The club by its id alone. The page hands over the club afresh each time it reads its
+   * lists, and that is not another club: nothing here is thrown away for it.
+   */
+  const clubId = $derived(club.id);
   $effect(() => {
-    void club.id;
+    void clubId;
     pilots = undefined;
     void load();
   });
@@ -97,10 +102,13 @@
 
 <Card elevation="sm">
   <div class="block" data-testid="club-pilots">
-    <h2>Pilots</h2>
-    <p class="muted">
-      The account that holds a pilot gets the results flown under that pilot's name.
-    </p>
+    <div class="head">
+      <h2>Pilots</h2>
+      <InfoTip
+        text="The account that holds a pilot gets the results flown under that pilot's name."
+        label="About pilots"
+      />
+    </div>
     {#if loadError}
       <Banner tone="danger" title="This club's pilots could not be read.">{loadError}</Banner>
     {/if}
@@ -109,7 +117,7 @@
     {#if pilots === undefined}
       {#if !loadError}<p class="muted" role="status">Loading…</p>{/if}
     {:else if pilots.length === 0}
-      <p>No pilots yet. They show here once a director sends an event or their pilot list.</p>
+      <p class="muted">No pilots yet.</p>
     {:else}
       {#if asks.length > 0}
         <h3>Waiting for an answer</h3>
@@ -202,6 +210,11 @@
 {/if}
 
 <style>
+  .head {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
   .block {
     display: grid;
     gap: var(--gf-space-3);

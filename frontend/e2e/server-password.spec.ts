@@ -12,6 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startServer, type RemoteServer } from '../test-harness/server.js';
 
@@ -60,13 +61,18 @@ test('a server with no sign-in service runs on usernames and passwords alone', a
   const setup = /http:\/\/\S+\/#\/invite\/\S+/.exec(server.run(['owner', 'invite']))![0];
   const ryan = await fresh(browser);
   await ryan.goto(setup);
-  await ryan.getByRole('button', { name: 'Make one with a username and password' }).click();
+  await ryan.getByRole('tab', { name: 'Create account' }).click();
   // What is wrong is said before anything is sent.
   await fill(ryan, 'Ryan', 'short');
   await expect(ryan.getByTestId('password-form').getByRole('alert')).toContainText('at least 10');
   await fill(ryan, 'Ryan', OWNER_PW, true);
-  await ryan.getByRole('button', { name: 'Make the account' }).click();
-  await expect(ryan.getByText('You are an owner of this server.')).toBeVisible();
+  await ryan.getByRole('button', { name: 'Create account' }).click();
+  await expect(ryan.getByTestId('server-who')).toHaveText('Ryan');
+  // An owner has the Server part.
+  await expect(ryan.getByRole('link', { name: 'Server', exact: true })).toBeVisible();
+  await ryan.getByTestId('server-who').click();
+  await expect(ryan.getByText('Server owner')).toBeVisible();
+  await openServerPage(ryan, 'Sign-in');
   // The username is how the account signs in, in lower case. The password is nowhere.
   const signIns = ryan.getByRole('list', { name: 'How you sign in' });
   await expect(signIns).toContainText('Username and password');
@@ -97,10 +103,11 @@ test('a server with no sign-in service runs on usernames and passwords alone', a
   await expect(ryan.getByTestId('server-who')).toHaveText('Ryan');
 
   // ── The owner cannot switch passwords off: it is their only way in. ───────
-  await ryan.getByTestId('server-who').click();
+  await openServerPart(ryan, 'Server');
+  await openServerPage(ryan, 'Sign-in');
   const setting = ryan.getByTestId('password-setting');
   await expect(setting.getByTestId('password-state')).toHaveText('On');
-  await setting.getByRole('button', { name: 'Switch passwords off…' }).click();
+  await setting.getByRole('switch', { name: 'Let people sign in with a password' }).click();
   await ryan.getByRole('dialog').getByRole('button', { name: 'Switch off' }).click();
   await expect(ryan.getByRole('dialog')).toContainText('you would lock yourself out');
   await ryan.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
@@ -110,10 +117,10 @@ test('a server with no sign-in service runs on usernames and passwords alone', a
   const pia = await fresh(browser);
   await pia.goto(`${server.baseUrl}/#/sign-in`);
   await expect(pia.getByTestId('password-form')).toBeVisible();
-  await expect(pia.getByRole('button', { name: /Make one with a username/ })).toHaveCount(0);
+  await expect(pia.getByRole('tab', { name: 'Create account' })).toHaveCount(0);
   await ryan
     .getByTestId('sign-up-setting')
-    .getByRole('button', { name: 'Let anyone make an account…' })
+    .getByRole('switch', { name: 'Let anyone make an account' })
     .click();
   await ryan.getByRole('dialog').getByRole('button', { name: 'Let anyone in' }).click();
   await expect(ryan.getByTestId('sign-up-setting').getByTestId('sign-up-state')).toHaveText(
@@ -122,20 +129,23 @@ test('a server with no sign-in service runs on usernames and passwords alone', a
 
   // ── A pilot makes her own account. ────────────────────────────────────────
   await pia.reload();
-  await pia.getByRole('button', { name: 'Make one with a username and password' }).click();
+  await pia.getByRole('tab', { name: 'Create account' }).click();
   // A username someone has is refused, in words.
   await fill(pia, 'ryan', PIA_PW, true);
-  await pia.getByRole('button', { name: 'Make the account' }).click();
+  await pia.getByRole('button', { name: 'Create account' }).click();
   await expect(pia.getByTestId('password-error')).toContainText('already belongs to an account');
   await fill(pia, 'pia', PIA_PW, true);
-  await pia.getByRole('button', { name: 'Make the account' }).click();
+  await pia.getByRole('button', { name: 'Create account' }).click();
   await expect(pia.getByTestId('account-name')).toHaveText('pia');
+  // She is in no club, and running the server is not hers.
+  await expect(pia.getByRole('link', { name: 'Server', exact: true })).toHaveCount(0);
+  await openServerPage(pia, 'Clubs');
   await expect(pia.getByText('You are not in a club yet.')).toBeVisible();
-  await expect(pia.getByTestId('password-setting')).toHaveCount(0);
   // The owner's password was not changed by the try at their username.
   expect(server.run(['account', 'list'])).toContain('pia');
 
   // ── She changes her password. The old one stops working. ──────────────────
+  await openServerPage(pia, 'Sign-in');
   await pia.getByRole('button', { name: 'Change password' }).click();
   await pia.getByLabel('The password you have now').fill(PIA_PW);
   await pia.getByLabel('New password').fill(PIA_NEW);
@@ -164,7 +174,7 @@ test('a server with no sign-in service runs on usernames and passwords alone', a
   const third = 'the third long password';
   await fill(lost, 'pia', third, true);
   await lost.getByRole('button', { name: 'Set the username and password' }).click();
-  await expect(lost.getByTestId('account-name')).toHaveText('pia');
+  await expect(lost.getByTestId('server-who')).toHaveText('pia');
   // It is the same account, not a second one.
   expect(
     server

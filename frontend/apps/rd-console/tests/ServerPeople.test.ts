@@ -172,8 +172,7 @@ describe('an invite link', () => {
     await fireEvent.click(await screen.findByRole('button', { name: 'Accept as Ace' }));
     await waitFor(() => expect(people.acceptInvite).toHaveBeenCalledWith('gfi_abc'));
     // They land on their account, which now has the club.
-    await waitFor(() => expect(location.hash).toBe('#/account'));
-    go('#/account');
+    await waitFor(() => expect(location.hash).toBe('#/account/clubs'));
     expect(
       await within(await screen.findByRole('list', { name: 'Your clubs' })).findByText('South FPV')
     ).toBeVisible();
@@ -208,6 +207,9 @@ describe('an invite link', () => {
   });
 });
 
+/** The switch between the parts of the server, at the top. */
+const parts = () => within(screen.getByRole('navigation', { name: 'Parts of this server' }));
+
 describe('the account page', () => {
   it('shows the name, the clubs with the role in each, and how the account signs in', async () => {
     open(
@@ -224,20 +226,27 @@ describe('the account page', () => {
       })
     );
     expect(await screen.findByTestId('account-name')).toHaveTextContent('Ace');
-    const clubs = within(screen.getByRole('list', { name: 'Your clubs' })).getAllByRole('listitem');
+    // Each part of the account is a page of its own.
+    expect(screen.queryByRole('list', { name: 'Your clubs' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'How you sign in' })).toBeNull();
+    go('#/account/clubs');
+    const clubs = within(await screen.findByRole('list', { name: 'Your clubs' })).getAllByRole(
+      'listitem'
+    );
     // With two clubs, one is marked primary and the other can be made so.
     expect(clubs.map((row) => row.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
       'North FPV Director Primary Leave…',
       'South FPV Pilot Make primary Leave…'
     ]);
-    const signIns = screen.getByRole('list', { name: 'How you sign in' });
+    go('#/account/sign-in');
+    const signIns = await screen.findByRole('list', { name: 'How you sign in' });
     expect(signIns.textContent).toContain('Discord');
     expect(signIns.textContent).toContain('ace_fpv');
     // The provider's own id for the person is not something to show.
     expect(document.body.textContent).not.toContain('111');
   });
 
-  it('links a director to the clubs they run, and to no others', async () => {
+  it('gives a director the Club part, on the club they run', async () => {
     open(
       '#/account',
       fakeServer({
@@ -250,44 +259,55 @@ describe('the account page', () => {
         }
       })
     );
-    const run = await screen.findByRole('list', { name: 'Clubs you look after' });
-    const links = within(run).getAllByRole('link');
-    expect(links).toHaveLength(1);
-    expect(links[0]).toHaveTextContent('Members, invites and pilots of North FPV');
-    expect(links[0].getAttribute('href')).toBe('#/club/north');
+    const club = await parts().findByRole('link', { name: 'Club' });
+    expect(club.getAttribute('href')).toBe('#/manage/north');
+    // Running the server is not theirs.
+    expect(parts().queryByRole('link', { name: 'Server' })).toBeNull();
+    // One club to run: nothing to pick.
+    go('#/manage/north');
+    await screen.findAllByTestId('club-member');
+    expect(screen.queryByTestId('club-pick')).toBeNull();
   });
 
-  it('links an owner to every club, and says they are an owner', async () => {
+  it('gives an owner the Server part, and every club to run', async () => {
     open('#/account', fakeServer({ account: { ...ACE, owner: true, clubs: [] } }));
-    expect(await screen.findByText('You are an owner of this server.')).toBeVisible();
-    const links = await waitFor(() => {
-      const found = within(screen.getByRole('list', { name: 'Clubs you look after' })).getAllByRole(
-        'link'
-      );
-      expect(found).toHaveLength(2);
-      return found;
-    });
-    expect(links.map((link) => link.getAttribute('href'))).toEqual([
-      '#/club/north',
-      '#/club/south'
+    expect(await screen.findByText('Server owner')).toBeVisible();
+    const server = await parts().findByRole('link', { name: 'Server' });
+    expect(server.getAttribute('href')).toBe('#/admin');
+    const club = await parts().findByRole('link', { name: 'Club' });
+    expect(club.getAttribute('href')).toBe('#/manage/north');
+    go('#/manage/north');
+    const pick = (await screen.findByTestId('club-pick')) as HTMLSelectElement;
+    expect([...pick.options].map((option) => option.textContent)).toEqual([
+      'North FPV',
+      'South FPV'
     ]);
+    // Picking the other club goes to the same page of it.
+    await fireEvent.change(pick, { target: { value: 'south' } });
+    await waitFor(() => expect(location.hash).toBe('#/manage/south'));
   });
 
   it('gives a pilot no club to run', async () => {
     open('#/account', fakeServer({ account: { ...ACE, clubs: [{ club: NORTH, role: 'Pilot' }] } }));
     await screen.findByTestId('account-name');
-    expect(screen.queryByRole('list', { name: 'Clubs you look after' })).toBeNull();
+    expect(parts().queryByRole('link', { name: 'Club' })).toBeNull();
+    expect(parts().queryByRole('link', { name: 'Server' })).toBeNull();
   });
 
-  it('links a claims approver to the pilots of their club, and to nothing more of it', async () => {
+  it('sends a claims approver to the pilots of their club, and to nothing more of it', async () => {
     open(
       '#/account',
       fakeServer({ account: { ...ACE, clubs: [{ club: NORTH, role: 'Approver' }] } })
     );
-    const list = await screen.findByRole('list', { name: 'Clubs you look after' });
-    const link = within(list).getByRole('link');
-    expect(link).toHaveTextContent(/^Pilots of North FPV$/);
-    expect(link.getAttribute('href')).toBe('#/club/north');
+    const club = await parts().findByRole('link', { name: 'Club' });
+    expect(club.getAttribute('href')).toBe('#/manage/north/pilots');
+    go('#/manage/north/pilots');
+    await screen.findByTestId('club-pilots');
+    expect(
+      within(screen.getByRole('navigation', { name: 'Pages' }))
+        .getAllByRole('link')
+        .map((link) => link.textContent)
+    ).toEqual(['Pilots']);
   });
 
   it('changes the name', async () => {
@@ -306,7 +326,7 @@ describe('the account page', () => {
   });
 
   it('offers to add the providers the account does not sign in with yet', async () => {
-    open('#/account', fakeServer({ account: ACE }));
+    open('#/account/sign-in', fakeServer({ account: ACE }));
     const add = await screen.findByRole('link', { name: 'Add Google' });
     expect(add.getAttribute('href')).toBe('/auth/google/start?add=1');
     expect(screen.queryByRole('link', { name: 'Add Discord' })).toBeNull();
@@ -317,12 +337,12 @@ describe('the account page', () => {
       ...ACE,
       sign_ins: [...ACE.sign_ins, { provider: 'google', subject: 'g-1', label: 'ace@example.org' }]
     };
-    const first = open('#/account', fakeServer({ account: ACE }));
-    await screen.findByTestId('account-name');
+    const first = open('#/account/sign-in', fakeServer({ account: ACE }));
+    await screen.findByRole('list', { name: 'How you sign in' });
     expect(screen.queryByRole('button', { name: /^Remove/ })).toBeNull();
     cleanup();
 
-    const { people } = open('#/account', fakeServer({ account: two }));
+    const { people } = open('#/account/sign-in', fakeServer({ account: two }));
     await fireEvent.click(
       await screen.findByRole('button', { name: 'Remove Google ace@example.org' })
     );
@@ -339,14 +359,14 @@ describe('the account page', () => {
     await screen.findByTestId('server-who');
     // A director gives them another role while the page is open.
     server.account = { ...server.account!, clubs: [{ club: NORTH, role: 'Approver' }] };
-    go('#/account');
+    go('#/account/clubs');
     await waitFor(() =>
       expect(screen.getByRole('list', { name: 'Your clubs' }).textContent).toContain('Approver')
     );
   });
 
   it('signs out, and goes back to the events', async () => {
-    const { people } = open('#/account', fakeServer({ account: ACE }));
+    const { people } = open('#/account/sign-in', fakeServer({ account: ACE }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
     await waitFor(() => expect(people.signOut).toHaveBeenCalled());
     await waitFor(() => expect(location.hash).toBe('#/'));
@@ -366,7 +386,7 @@ describe("a club's page", () => {
   const roleOf = (name: string) => screen.getByLabelText(`Role of ${name}`) as HTMLSelectElement;
 
   it('lists the members with their roles, and marks the one who is looking', async () => {
-    open('#/club/north', fakeServer({ account: ACE }));
+    open('#/manage/north', fakeServer({ account: ACE }));
     await waitFor(() => expect(members()).toHaveLength(2));
     expect(members()[0].textContent).toContain('Ace');
     expect(members()[0].textContent).toContain('(you)');
@@ -377,7 +397,7 @@ describe("a club's page", () => {
   });
 
   it('gives a member another role', async () => {
-    const { people, server } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people, server } = open('#/manage/north', fakeServer({ account: ACE }));
     await waitFor(() => expect(members()).toHaveLength(2));
     await fireEvent.change(roleOf('Bee'), { target: { value: 'Approver' } });
     await waitFor(() =>
@@ -388,7 +408,7 @@ describe("a club's page", () => {
   });
 
   it("shows the server's words when the last director would be lost, and puts the role back", async () => {
-    open('#/club/north', fakeServer({ account: ACE }));
+    open('#/manage/north', fakeServer({ account: ACE }));
     await waitFor(() => expect(members()).toHaveLength(2));
     await fireEvent.change(roleOf('Ace'), { target: { value: 'Pilot' } });
     expect(await screen.findByTestId('club-error')).toHaveTextContent(
@@ -399,7 +419,7 @@ describe("a club's page", () => {
 
   it('removes a member only after asking, in a dialog of the page', async () => {
     const confirm = vi.spyOn(window, 'confirm');
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people } = open('#/manage/north', fakeServer({ account: ACE }));
     await waitFor(() => expect(members()).toHaveLength(2));
     await fireEvent.click(screen.getByRole('button', { name: 'Remove Bee' }));
     const dialog = screen.getByRole('dialog');
@@ -420,9 +440,10 @@ describe("a club's page", () => {
   });
 
   it('makes an invite for one person and shows its link once', async () => {
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
-    await waitFor(() => expect(members()).toHaveLength(2));
-    const makeButton = screen.getByRole('button', { name: 'Make the invite' }) as HTMLButtonElement;
+    const { people } = open('#/manage/north/invites', fakeServer({ account: ACE }));
+    const makeButton = (await screen.findByRole('button', {
+      name: 'Make the invite'
+    })) as HTMLButtonElement;
     expect(makeButton.disabled).toBe(true);
 
     await fireEvent.input(screen.getByLabelText('Who it is for'), { target: { value: ' Cee ' } });
@@ -453,9 +474,8 @@ describe("a club's page", () => {
   });
 
   it('makes an invite for anyone with the link, with a limit and an end', async () => {
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
-    await waitFor(() => expect(members()).toHaveLength(2));
-    await fireEvent.click(screen.getByRole('radio', { name: 'Anyone with the link' }));
+    const { people } = open('#/manage/north/invites', fakeServer({ account: ACE }));
+    await fireEvent.click(await screen.findByRole('radio', { name: 'Anyone with the link' }));
     expect(screen.queryByLabelText('Joins as')).toBeNull();
     await fireEvent.input(screen.getByLabelText('Where you will post it'), {
       target: { value: 'Club Discord' }
@@ -477,13 +497,14 @@ describe("a club's page", () => {
   });
 
   it('will not make a group invite with no limit or no end', async () => {
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
-    await waitFor(() => expect(members()).toHaveLength(2));
-    await fireEvent.click(screen.getByRole('radio', { name: 'Anyone with the link' }));
+    const { people } = open('#/manage/north/invites', fakeServer({ account: ACE }));
+    await fireEvent.click(await screen.findByRole('radio', { name: 'Anyone with the link' }));
     await fireEvent.input(screen.getByLabelText('Where you will post it'), {
       target: { value: 'Club Discord' }
     });
-    const makeButton = screen.getByRole('button', { name: 'Make the invite' }) as HTMLButtonElement;
+    const makeButton = (await screen.findByRole('button', {
+      name: 'Make the invite'
+    })) as HTMLButtonElement;
     for (const [uses, days] of [
       ['0', '7'],
       ['501', '7'],
@@ -503,7 +524,7 @@ describe("a club's page", () => {
       invite({ id: 'inv9', label: 'Dee' }),
       invite({ id: 'inv8', label: 'Old', uses: 1, works: false })
     ];
-    const { people } = open('#/club/north', server);
+    const { people } = open('#/manage/north/invites', server);
     await waitFor(() => expect(screen.getAllByTestId('club-invite')).toHaveLength(2));
     // One that is used up has nothing to take back.
     expect(screen.queryByRole('button', { name: 'Take back the invite for Old' })).toBeNull();
@@ -517,7 +538,7 @@ describe("a club's page", () => {
 
   it('opens for nobody who does not look after the club, and asks the server nothing', async () => {
     // Ace is a director of North, and has no say in South.
-    const { people } = open('#/club/south', fakeServer({ account: ACE }));
+    const { people } = open('#/manage/south', fakeServer({ account: ACE }));
     expect(
       await screen.findByText('Only those who look after this club can open this page.')
     ).toBeVisible();
@@ -530,16 +551,16 @@ describe("a club's page", () => {
   it("shows the server's refusal when the page thinks more of the account than the server does", async () => {
     // The page was told this account is a director of South. The server says otherwise.
     const account = { ...ACE, clubs: [{ club: SOUTH, role: 'Director' as const }] };
-    open('#/club/south', fakeServer({ account }));
+    open('#/manage/south', fakeServer({ account }));
     expect(await screen.findByText('Only a director of this club can do that.')).toBeVisible();
     expect(screen.queryByTestId('club-member')).toBeNull();
   });
 
   it('asks someone who is not signed in to sign in, and says so for a club that is not there', async () => {
-    open('#/club/north');
+    open('#/manage/north');
     expect(await screen.findByRole('link', { name: 'Continue with Discord' })).toBeVisible();
     cleanup();
-    open('#/club/nowhere', fakeServer({ account: ACE }));
+    open('#/manage/nowhere', fakeServer({ account: ACE }));
     expect(await screen.findByText('This club is not here')).toBeVisible();
   });
 });
@@ -569,7 +590,7 @@ describe('an invite made for a pilot', () => {
       clubPilot('p-cat', 'Cat'),
       clubPilot('p-dog', 'Dog', { holder: { id: 'acct_bee', name: 'Bee' } })
     ];
-    const { people } = open('#/club/north', server);
+    const { people } = open('#/manage/north/invites', server);
     const box = (await screen.findByLabelText('Their pilot')) as HTMLSelectElement;
     // Dog is taken, so only Cat is offered.
     expect([...box.options].map((o) => o.textContent)).toEqual(['Not one of these', 'Cat']);
@@ -591,7 +612,7 @@ describe('an invite made for a pilot', () => {
   });
 
   it('sends no pilot when none is picked, and offers none for a group invite', async () => {
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people } = open('#/manage/north/invites', fakeServer({ account: ACE }));
     await screen.findByLabelText('Their pilot');
     await fireEvent.input(screen.getByLabelText('Who it is for'), { target: { value: 'New' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Make the invite' }));
@@ -618,7 +639,7 @@ describe("a club's pilots", () => {
   };
 
   it('lists each pilot with who holds it, by name', async () => {
-    open('#/club/north', withAsk());
+    open('#/manage/north/pilots', withAsk());
     await waitFor(() => expect(rows()).toHaveLength(2));
     expect(rows()[0]).toHaveTextContent('Cat');
     expect(within(rows()[0]).getByTestId('pilot-holder')).toHaveTextContent('Nobody yet');
@@ -630,12 +651,12 @@ describe("a club's pilots", () => {
   it('says so when the club has no pilots yet', async () => {
     const server = fakeServer({ account: ACE });
     server.pilots.north = [];
-    open('#/club/north', server);
-    expect(await screen.findByText(/No pilots yet\./)).toBeVisible();
+    open('#/manage/north/pilots', server);
+    expect(await screen.findByText('No pilots yet.')).toBeVisible();
   });
 
   it('answers an ask with yes, and the pilot is theirs', async () => {
-    const { people, server } = open('#/club/north', withAsk());
+    const { people, server } = open('#/manage/north/pilots', withAsk());
     const ask = await screen.findByTestId('pilot-ask');
     expect(ask).toHaveTextContent('Bee says they are Cat');
     await fireEvent.click(screen.getByRole('button', { name: 'Yes, Bee is Cat' }));
@@ -646,7 +667,7 @@ describe("a club's pilots", () => {
   });
 
   it('answers an ask with no, and nobody holds the pilot', async () => {
-    const { people, server } = open('#/club/north', withAsk());
+    const { people, server } = open('#/manage/north/pilots', withAsk());
     await screen.findByTestId('pilot-ask');
     await fireEvent.click(screen.getByRole('button', { name: 'No, Bee is not Cat' }));
     await waitFor(() => expect(screen.queryByTestId('pilot-ask')).toBeNull());
@@ -657,7 +678,7 @@ describe("a club's pilots", () => {
   });
 
   it('lets a director give a pilot to a member with no ask', async () => {
-    const { people } = open('#/club/north', withAsk());
+    const { people } = open('#/manage/north/pilots', withAsk());
     const box = (await screen.findByLabelText('Give Cat to')) as HTMLSelectElement;
     expect([...box.options].map((o) => o.textContent)).toEqual(['Give to…', 'Ace', 'Bee']);
     // Dog is Bee's already, so Bee is not offered again for Dog.
@@ -675,7 +696,7 @@ describe("a club's pilots", () => {
 
   it('takes a pilot back only after asking, in a dialog of the page', async () => {
     const confirm = vi.spyOn(window, 'confirm');
-    const { people } = open('#/club/north', withAsk());
+    const { people } = open('#/manage/north/pilots', withAsk());
     await fireEvent.click(await screen.findByRole('button', { name: 'Take Dog back from Bee' }));
     const dialog = await screen.findByRole('dialog');
     expect(dialog).toHaveTextContent('Take Dog back from Bee?');
@@ -696,7 +717,7 @@ describe("a club's pilots", () => {
   });
 
   it("shows the server's words when it refuses, and what is so afterwards", async () => {
-    const { people } = open('#/club/north', withAsk());
+    const { people } = open('#/manage/north/pilots', withAsk());
     await screen.findByTestId('pilot-ask');
     people.giveTo.mockRejectedValueOnce(new Error('That pilot already belongs to an account.'));
     await fireEvent.click(screen.getByRole('button', { name: 'Yes, Bee is Cat' }));
@@ -716,7 +737,7 @@ describe("a club's pilots", () => {
     };
 
     it('shows the pilots and the asks, and nothing of members or invites', async () => {
-      const { people } = open('#/club/north', approver());
+      const { people } = open('#/manage/north/pilots', approver());
       await screen.findByTestId('pilot-ask');
       expect(screen.queryByTestId('club-member')).toBeNull();
       expect(screen.queryByRole('form', { name: 'New invite' })).toBeNull();
@@ -726,7 +747,7 @@ describe("a club's pilots", () => {
     });
 
     it('answers an ask, and has no way to give or take with none', async () => {
-      const { people } = open('#/club/north', approver());
+      const { people } = open('#/manage/north/pilots', approver());
       await screen.findByTestId('pilot-ask');
       expect(screen.queryByLabelText('Give Cat to')).toBeNull();
       expect(screen.queryByRole('button', { name: /^Take Dog back/ })).toBeNull();
@@ -738,7 +759,7 @@ describe("a club's pilots", () => {
     it('cannot answer their own ask', async () => {
       const server = approver();
       server.pilots.north[0].asks = [{ id: ACE.id, name: 'Ace' }];
-      open('#/club/north', server);
+      open('#/manage/north/pilots', server);
       const ask = await screen.findByTestId('pilot-ask');
       expect(ask).toHaveTextContent('Someone else must answer your own ask.');
       expect(within(ask).queryByRole('button')).toBeNull();
@@ -892,7 +913,7 @@ describe('the results page', () => {
     expect(places[0]).toHaveTextContent('Open: 2nd of 12');
     // Racing has not placed anyone in Spec, so no place is claimed.
     expect(places[1]).toHaveTextContent('Spec: Not placed yet');
-    expect(within(rows[0]).getByRole('link').getAttribute('href')).toBe('#/e/north/summer');
+    expect(within(rows[0]).getByRole('link').getAttribute('href')).toBe('#/event/north/summer');
     // With no date or place, the line is the club alone.
     expect(rows[1]).toHaveTextContent('Flew as Kitten');
     expect(rows[1].textContent).not.toContain(' · ');

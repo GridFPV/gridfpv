@@ -10,6 +10,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Browser, Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -118,7 +119,8 @@ test('a pilot signs up on the server, and the Director decides', async ({ browse
   await ryan.goto(setup);
   await continueAs(ryan, { sub: 'sub-ryan', name: 'Ryan' });
   await ryan.getByTestId('server-who').click();
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(ryan, 'Club');
+  await openServerPage(ryan, 'Invites');
   await ryan.getByLabel('Who it is for').fill('Pia');
   await ryan.getByRole('button', { name: 'Make the invite' }).click();
   const link = (await ryan.getByTestId('invite-link').innerText()).trim();
@@ -150,13 +152,13 @@ test('a pilot signs up on the server, and the Director decides', async ({ browse
 
   // ── Someone who is only looking sees the event, and no way to sign up. ────
   const onlooker = await fresh(browser);
-  await onlooker.goto(`${server.baseUrl}/#/e/club/${event}`);
+  await onlooker.goto(`${server.baseUrl}/#/event/club/${event}`);
   await expect(onlooker.getByTestId('server-event')).toHaveText('Sign-up Night');
   await expect(onlooker.getByRole('tab', { name: 'Results' })).toBeVisible();
   await expect(onlooker.getByRole('tab', { name: 'Sign up' })).toHaveCount(0);
 
   // ── Pia, signed in and tied to Dash, signs up from the server's page. ─────
-  await pia.goto(`${server.baseUrl}/#/e/club/${event}`);
+  await pia.goto(`${server.baseUrl}/#/event/club/${event}`);
   await pia.getByRole('tab', { name: 'Sign up' }).click();
   const take = pia.getByRole('button', { name: /^Take .+ in Qualifying Heat 1$/ });
   await expect(take).toHaveCount(2);

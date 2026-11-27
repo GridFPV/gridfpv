@@ -10,7 +10,7 @@
    * A hidden event is left out of the club's list for everyone else, and still opens for
    * anyone who has its address. A removed event is gone from the server.
    */
-  import { Badge, Banner, Button, Card, Dialog, Input, toast } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Dialog, InfoTip, Input, toast } from '@gridfpv/components';
   import type { LinkTokenMade, LinkTokenView, ServerEvent } from '@gridfpv/types';
   import { formatServerHash } from '../lib/serverHome.js';
   import { tokenStanding, type PeopleApi } from '../lib/serverPeople.js';
@@ -18,6 +18,7 @@
   let {
     api,
     club,
+    section,
     onchange
   }: {
     api: Pick<
@@ -31,6 +32,8 @@
       | 'removeEvent'
     >;
     club: { id: string; name: string };
+    /** Which card to show: the club's events, its link tokens, or its name. */
+    section: 'events' | 'tokens' | 'settings';
     /** Told when the club's name or its list of events changed. */
     onchange?: () => void;
   } = $props();
@@ -51,14 +54,19 @@
 
   async function load() {
     try {
-      [tokens, events] = await Promise.all([api.linkTokens(club.id), api.clubEvents(club.id)]);
+      [tokens, events] = await Promise.all([api.linkTokens(clubId), api.clubEvents(clubId)]);
       loadError = undefined;
     } catch (err) {
       loadError = say(err);
     }
   }
+  /**
+   * The club by its id alone. The page hands over the club afresh each time it reads its
+   * lists, and that is not another club: nothing here is thrown away for it.
+   */
+  const clubId = $derived(club.id);
   $effect(() => {
-    void club.id;
+    void clubId;
     tokens = undefined;
     events = undefined;
     made = undefined;
@@ -154,122 +162,127 @@
 {/if}
 {#if error}<Banner tone="danger"><span data-testid="manage-error">{error}</span></Banner>{/if}
 
-<Card elevation="sm">
-  <div class="block">
-    <h2>Events</h2>
-    {#if events === undefined}
-      {#if !loadError}<p class="muted" role="status">Loading…</p>{/if}
-    {:else if events.length === 0}
-      <p class="muted">No events yet. They show here once a director's Grid has sent one.</p>
-    {:else}
-      <ul aria-label="Events of {club.name}">
-        {#each events as event (event.id)}
-          <li data-testid="manage-event">
-            <a
-              class="who"
-              href={formatServerHash({ kind: 'event', club: club.id, event: event.id })}
-              >{event.name}</a
-            >
-            {#if event.hidden}<Badge tone="neutral">Hidden</Badge>{/if}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              aria-label="{event.hidden ? 'Show' : 'Hide'} {event.name}"
-              onclick={() => hide(event, !event.hidden)}>{event.hidden ? 'Show' : 'Hide'}</Button
-            >
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              aria-label="Remove {event.name}"
-              onclick={() => (removing = event)}>Remove…</Button
-            >
-          </li>
-        {/each}
-      </ul>
-      <p class="muted">
-        A hidden event is left out of the list. Anyone who has its link can still open it.
-      </p>
-    {/if}
-  </div>
-</Card>
-
-<Card elevation="sm">
-  <div class="block">
-    <h2>Link tokens</h2>
-    <p class="muted">
-      A director pastes a link token into Grid, on Setup → Server, to send events here.
-    </p>
-    <form onsubmit={make} aria-label="New link token">
-      <div class="fields">
-        <label for="token-label">What it is for</label>
-        <Input
-          id="token-label"
-          maxlength={80}
-          placeholder="Ryan's laptop"
-          bind:value={label}
-          disabled={busy}
-        />
-      </div>
-      <div>
-        <Button variant="primary" size="sm" type="submit" disabled={busy || label.trim() === ''}
-          >Make a link token</Button
-        >
-      </div>
-    </form>
-
-    {#if made}
-      <div class="made" data-testid="token-made">
-        <p>
-          This is the token for <strong>{made.token.label}</strong>. It is shown this once.
-        </p>
-        <code data-testid="token-secret">{made.secret}</code>
-        <div class="row">
-          <Button size="sm" onclick={() => copy(made?.secret ?? '')}>Copy</Button>
-          <Button size="sm" variant="ghost" onclick={() => (made = undefined)}>Done</Button>
-        </div>
-      </div>
-    {/if}
-
-    {#if tokens && tokens.length > 0}
-      <ul aria-label="Link tokens">
-        {#each tokens as token (token.id)}
-          {@const works = token.revoked_at === undefined}
-          <li data-testid="link-token" class:spent={!works}>
-            <span class="who">{token.label}</span>
-            <span class="muted">Made {day(token.created_at)}</span>
-            <span class="muted">{tokenStanding(token)}</span>
-            {#if works}
+{#if section === 'events'}
+  <Card elevation="sm">
+    <div class="block">
+      <h2>Events</h2>
+      {#if events === undefined}
+        {#if !loadError}<p class="muted" role="status">Loading…</p>{/if}
+      {:else if events.length === 0}
+        <p class="muted">No events yet.</p>
+      {:else}
+        <ul aria-label="Events of {club.name}">
+          {#each events as event (event.id)}
+            <li data-testid="manage-event">
+              <a
+                class="who"
+                href={formatServerHash({ kind: 'event', club: club.id, event: event.id })}
+                >{event.name}</a
+              >
+              {#if event.hidden}<Badge tone="neutral">Hidden</Badge>{/if}
               <Button
                 size="sm"
                 variant="ghost"
                 disabled={busy}
-                aria-label="Take back the token for {token.label}"
-                onclick={() => (revoking = token)}>Take back…</Button
+                aria-label="{event.hidden ? 'Show' : 'Hide'} {event.name}"
+                onclick={() => hide(event, !event.hidden)}>{event.hidden ? 'Show' : 'Hide'}</Button
               >
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </div>
-</Card>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                aria-label="Remove {event.name}"
+                onclick={() => (removing = event)}>Remove…</Button
+              >
+            </li>
+          {/each}
+        </ul>
+        <p class="muted">
+          A hidden event is left out of the list. Anyone who has its link can still open it.
+        </p>
+      {/if}
+    </div>
+  </Card>
+{:else if section === 'tokens'}
+  <Card elevation="sm">
+    <div class="block">
+      <div class="row">
+        <h2>Link tokens</h2>
+        <InfoTip
+          text="A director pastes a link token into Grid, on Setup → Server, to send events here."
+          label="About link tokens"
+        />
+      </div>
+      <form onsubmit={make} aria-label="New link token">
+        <div class="fields">
+          <label for="token-label">What it is for</label>
+          <Input
+            id="token-label"
+            maxlength={80}
+            placeholder="Ryan's laptop"
+            bind:value={label}
+            disabled={busy}
+          />
+        </div>
+        <div>
+          <Button variant="primary" size="sm" type="submit" disabled={busy || label.trim() === ''}
+            >Make a link token</Button
+          >
+        </div>
+      </form>
 
-<Card elevation="sm">
-  <div class="block">
-    <h2>Club name</h2>
-    <form onsubmit={rename} aria-label="Club name">
-      <div class="fields">
-        <label for="club-name">Name</label>
-        <Input id="club-name" maxlength={80} bind:value={name} disabled={busy} />
-      </div>
-      <div>
-        <Button size="sm" type="submit" disabled={busy || !canRename}>Save</Button>
-      </div>
-    </form>
-  </div>
-</Card>
+      {#if made}
+        <div class="made" data-testid="token-made">
+          <p>
+            This is the token for <strong>{made.token.label}</strong>. It is shown this once.
+          </p>
+          <code data-testid="token-secret">{made.secret}</code>
+          <div class="row">
+            <Button size="sm" onclick={() => copy(made?.secret ?? '')}>Copy</Button>
+            <Button size="sm" variant="ghost" onclick={() => (made = undefined)}>Done</Button>
+          </div>
+        </div>
+      {/if}
+
+      {#if tokens && tokens.length > 0}
+        <ul aria-label="Link tokens">
+          {#each tokens as token (token.id)}
+            {@const works = token.revoked_at === undefined}
+            <li data-testid="link-token" class:spent={!works}>
+              <span class="who">{token.label}</span>
+              <span class="muted">Made {day(token.created_at)}</span>
+              <span class="muted">{tokenStanding(token)}</span>
+              {#if works}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label="Take back the token for {token.label}"
+                  onclick={() => (revoking = token)}>Take back…</Button
+                >
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  </Card>
+{:else}
+  <Card elevation="sm">
+    <div class="block">
+      <h2>Club name</h2>
+      <form onsubmit={rename} aria-label="Club name">
+        <div class="fields">
+          <label for="club-name">Name</label>
+          <Input id="club-name" maxlength={80} bind:value={name} disabled={busy} />
+        </div>
+        <div>
+          <Button size="sm" type="submit" disabled={busy || !canRename}>Save</Button>
+        </div>
+      </form>
+    </div>
+  </Card>
+{/if}
 
 {#if revoking}
   {@const target = revoking}

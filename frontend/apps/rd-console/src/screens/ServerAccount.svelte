@@ -6,12 +6,11 @@
    * An account can hold several sign-ins and keeps at least one. Another is added here,
    * signed in: that is the only way two sign-ins come to belong to one account.
    */
-  import { Badge, Banner, Button, Card, Dialog, Input } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Dialog, InfoTip, Input } from '@gridfpv/components';
+  import type { AccountPage } from '../lib/serverHome.js';
   import type { Me, MyAccount, MyClub, SignInProvider } from '@gridfpv/types';
-  import { formatServerHash } from '../lib/serverHome.js';
   import {
     PASSWORD_PROVIDER,
-    lookedAfterClubs,
     providerName,
     roleWord,
     type PeopleApi
@@ -26,10 +25,10 @@
   let {
     api,
     account,
+    section = 'profile',
     providers,
     password = false,
     email = false,
-    clubs,
     onchange,
     onreread,
     onsignedout
@@ -55,13 +54,13 @@
       | 'removeEmail'
     >;
     account: MyAccount;
+    /** Which of the account's pages this is. */
+    section?: AccountPage;
     providers: readonly SignInProvider[] | undefined;
     /** Whether this server lets people sign in with a username and password. */
     password?: boolean;
     /** Whether this server sends email. */
     email?: boolean;
-    /** Every club on the server, for an owner's links. */
-    clubs: readonly { id: string; name: string }[];
     /** The account changed: here it is as it now stands. */
     onchange: (me: Me) => void;
     /** Something about the account changed on the server: read it again. */
@@ -82,7 +81,6 @@
   let leaving = $state<MyClub | undefined>(undefined);
 
   const say = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-  const lookedAfter = $derived(lookedAfterClubs(account, clubs));
   /** The providers the account does not sign in with yet. */
   const toAdd = $derived(
     providers?.filter((p) => !account.sign_ins.some((held) => held.provider === p.id))
@@ -120,53 +118,68 @@
   }
 </script>
 
-<div class="account" data-testid="server-account">
+<div class="cards" data-testid="server-account">
   {#if error}<Banner tone="danger">{error}</Banner>{/if}
 
-  <Card elevation="sm">
-    <div class="block">
-      {#if editing}
-        <form class="row" onsubmit={saveName} aria-label="Change your name">
-          <label class="visually-hidden" for="account-name">Your name</label>
-          <Input id="account-name" maxlength={80} bind:value={name} disabled={busy} />
-          <Button variant="primary" size="sm" type="submit" disabled={busy || name.trim() === ''}
-            >Save</Button
-          >
-          <Button variant="ghost" size="sm" disabled={busy} onclick={() => (editing = false)}
-            >Cancel</Button
-          >
-        </form>
-      {:else}
+  {#if section === 'profile'}
+    <Card elevation="sm">
+      <div class="block">
         <div class="row">
-          <p class="name" data-testid="account-name">{account.name}</p>
-          <Button
-            size="sm"
-            variant="ghost"
-            onclick={() => ((name = account.name), (editing = true))}>Change name</Button
-          >
+          <h2>Name</h2>
+          {#if account.owner}<Badge tone="info">Server owner</Badge>{/if}
         </div>
-      {/if}
-      {#if account.owner}<p class="muted">You are an owner of this server.</p>{/if}
-    </div>
-  </Card>
+        {#if editing}
+          <form class="row" onsubmit={saveName} aria-label="Change your name">
+            <label class="visually-hidden" for="account-name">Your name</label>
+            <Input id="account-name" maxlength={80} bind:value={name} disabled={busy} />
+            <Button variant="primary" size="sm" type="submit" disabled={busy || name.trim() === ''}
+              >Save</Button
+            >
+            <Button variant="ghost" size="sm" disabled={busy} onclick={() => (editing = false)}
+              >Cancel</Button
+            >
+          </form>
+        {:else}
+          <div class="row">
+            <p class="name" data-testid="account-name">{account.name}</p>
+            <Button
+              size="sm"
+              variant="ghost"
+              onclick={() => ((name = account.name), (editing = true))}>Change name</Button
+            >
+          </div>
+        {/if}
+      </div>
+    </Card>
 
-  <Card elevation="sm">
-    <div class="block">
-      <h2>Clubs</h2>
-      {#if account.clubs.length === 0}
-        <p class="muted">
-          You are not in a club yet. Join one below, or use an invite from a club's director.
-        </p>
-      {:else}
-        <ul aria-label="Your clubs">
-          {#each account.clubs as entry (entry.club.id)}
-            <li data-testid="my-club">
-              <span>{entry.club.name}</span>
-              <span class="muted">{roleWord(entry.role)}</span>
-              {#if account.clubs.length > 1}
-                {#if account.primary === entry.club.id}
+    <ServerProfile {api} {account} {onchange} />
+
+    <ServerMyPilots {api} {account} onchange={onreread} />
+  {:else if section === 'clubs'}
+    <Card elevation="sm">
+      <div class="block">
+        <div class="row">
+          <h2>Your clubs</h2>
+          {#if account.clubs.length > 1}
+            <InfoTip
+              text="The Events page opens on your primary club."
+              label="About the primary club"
+            />
+          {/if}
+        </div>
+        {#if account.clubs.length === 0}
+          <p class="muted" data-testid="no-clubs">You are not in a club yet.</p>
+        {:else}
+          <ul aria-label="Your clubs">
+            {#each account.clubs as entry (entry.club.id)}
+              <li data-testid="my-club">
+                <span class="strong">{entry.club.name}</span>
+                <span class="muted">{roleWord(entry.role)}</span>
+                {#if account.clubs.length > 1 && account.primary === entry.club.id}
                   <Badge tone="neutral">Primary</Badge>
-                {:else}
+                {/if}
+                <span class="grow"></span>
+                {#if account.clubs.length > 1 && account.primary !== entry.club.id}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -175,100 +188,87 @@
                     onclick={() => run(() => api.setPrimary(entry.club.id))}>Make primary</Button
                   >
                 {/if}
-              {/if}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                aria-label="Leave {entry.club.name}"
-                onclick={() => ((error = undefined), (leaving = entry))}>Leave…</Button
-              >
-            </li>
-          {/each}
-        </ul>
-        {#if account.clubs.length > 1}
-          <p class="muted">The front page opens on your primary club.</p>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label="Leave {entry.club.name}"
+                  onclick={() => ((error = undefined), (leaving = entry))}>Leave…</Button
+                >
+              </li>
+            {/each}
+          </ul>
         {/if}
-      {/if}
-      {#if lookedAfter.length > 0}
-        <ul aria-label="Clubs you look after">
-          {#each lookedAfter as { club, runs } (club.id)}
+      </div>
+    </Card>
+
+    <ServerJoinClubs {api} {account} {onchange} />
+  {:else}
+    <Card elevation="sm">
+      <div class="block">
+        <h2>How you sign in</h2>
+        <ul aria-label="How you sign in">
+          {#each account.sign_ins as held (held.provider + ':' + held.subject)}
             <li>
-              <a href={formatServerHash({ kind: 'club', club: club.id })}
-                >{runs ? 'Members, invites and pilots' : 'Pilots'} of {club.name}</a
-              >
+              <span class="strong">{providerName(held.provider, providers ?? [])}</span>
+              <span class="muted">{held.label}</span>
+              <span class="grow"></span>
+              {#if held.provider === PASSWORD_PROVIDER && password && passwordForm === undefined}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  onclick={() => (passwordForm = 'change')}>Change password</Button
+                >
+              {/if}
+              {#if account.sign_ins.length > 1}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label="Remove {providerName(held.provider, providers ?? [])} {held.label}"
+                  onclick={() => run(() => api.removeSignIn(held.provider, held.subject))}
+                  >Remove</Button
+                >
+              {/if}
             </li>
           {/each}
         </ul>
-      {/if}
-    </div>
-  </Card>
+        {#if passwordForm}
+          <ServerPassword
+            {api}
+            mode={passwordForm}
+            oncancel={() => (passwordForm = undefined)}
+            ondone={(me) => {
+              passwordForm = undefined;
+              onchange(me);
+            }}
+          />
+        {:else if password && !hasPassword}
+          <div>
+            <Button size="sm" disabled={busy} onclick={() => (passwordForm = 'add')}
+              >Add a username and password</Button
+            >
+          </div>
+        {/if}
+        {#if toAdd && toAdd.length > 0}
+          <ServerSignIn {api} providers={toAdd} add />
+        {/if}
+      </div>
+    </Card>
 
-  <ServerJoinClubs {api} {account} {onchange} />
+    {#if email || account.email}
+      <ServerEmail {api} {account} {onchange} />
+    {/if}
 
-  <ServerProfile {api} {account} {onchange} />
-
-  <ServerMyPilots {api} {account} onchange={onreread} />
-
-  <Card elevation="sm">
-    <div class="block">
-      <h2>How you sign in</h2>
-      <ul aria-label="How you sign in">
-        {#each account.sign_ins as held (held.provider + ':' + held.subject)}
-          <li>
-            <span>{providerName(held.provider, providers ?? [])}</span>
-            <span class="muted">{held.label}</span>
-            {#if held.provider === PASSWORD_PROVIDER && password && passwordForm === undefined}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                onclick={() => (passwordForm = 'change')}>Change password</Button
-              >
-            {/if}
-            {#if account.sign_ins.length > 1}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                aria-label="Remove {providerName(held.provider, providers ?? [])} {held.label}"
-                onclick={() => run(() => api.removeSignIn(held.provider, held.subject))}
-                >Remove</Button
-              >
-            {/if}
-          </li>
-        {/each}
-      </ul>
-      {#if passwordForm}
-        <ServerPassword
-          {api}
-          mode={passwordForm}
-          oncancel={() => (passwordForm = undefined)}
-          ondone={(me) => {
-            passwordForm = undefined;
-            onchange(me);
-          }}
-        />
-      {:else if password && !hasPassword}
-        <div>
-          <Button size="sm" disabled={busy} onclick={() => (passwordForm = 'add')}
-            >Add a username and password</Button
-          >
-        </div>
-      {/if}
-      {#if toAdd && toAdd.length > 0}
-        <ServerSignIn {api} providers={toAdd} add />
-      {/if}
-    </div>
-  </Card>
-
-  {#if email || account.email}
-    <ServerEmail {api} {account} {onchange} />
+    <Card elevation="sm">
+      <div class="row">
+        <h2>Sign out</h2>
+        <span class="grow"></span>
+        <Button disabled={busy} onclick={signOut}>Sign out</Button>
+      </div>
+    </Card>
   {/if}
-
-  <div>
-    <Button variant="ghost" disabled={busy} onclick={signOut}>Sign out</Button>
-  </div>
 </div>
 
 {#if leaving}
@@ -289,14 +289,27 @@
 {/if}
 
 <style>
-  .account,
+  /* Cards side by side on a wide screen, one under the other on a narrow one. */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
+    gap: var(--gf-space-4);
+    align-items: start;
+  }
   .block {
     display: grid;
     gap: var(--gf-space-3);
   }
+  .grow {
+    flex: 1;
+  }
+  .strong {
+    font-weight: var(--gf-font-weight-semibold);
+  }
   h2 {
     margin: 0;
     font-size: var(--gf-font-size-lg);
+    flex: 1;
   }
   p {
     margin: 0;

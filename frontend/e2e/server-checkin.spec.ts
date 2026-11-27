@@ -21,6 +21,7 @@ import { startServer, type RemoteServer } from '../test-harness/server.js';
 import { linkTo, unlink } from './link.js';
 import { openPage } from './nav.js';
 import { expect, test } from './observability.js';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 const dist = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'apps', 'rd-console', 'dist');
 
@@ -129,7 +130,8 @@ test('a pilot takes a seat from the server with the race code shown at the race'
   await ryan.goto(setup);
   await continueAs(ryan, { sub: 'sub-ryan', name: 'Ryan' });
   await ryan.getByTestId('server-who').click();
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(ryan, 'Club');
+  await openServerPage(ryan, 'Invites');
   await ryan.getByLabel('Who it is for').fill('Pia');
   await ryan.getByRole('button', { name: 'Make the invite' }).click();
   const link = (await ryan.getByTestId('invite-link').innerText()).trim();
@@ -178,7 +180,7 @@ test('a pilot takes a seat from the server with the race code shown at the race'
   await page.getByRole('dialog').getByRole('button', { name: 'Done' }).click();
 
   // ── Pia asks for a seat on the server's page, and is asked for the code. ──
-  await pia.goto(`${server.baseUrl}/#/e/club/${event}`);
+  await pia.goto(`${server.baseUrl}/#/event/club/${event}`);
   await pia.getByRole('tab', { name: 'Me' }).click();
   const fly = pia.getByRole('region', { name: 'Fly now' });
   await fly.getByRole('button', { name: 'Take Seat 1' }).click();
@@ -257,7 +259,7 @@ test('a pilot takes a seat from the server with the race code shown at the race'
   await pia.goto(view.link!);
   await expect(pia.getByTestId('server-event')).toHaveText('Practice Night');
   // The code is taken out of the address.
-  await expect.poll(() => new URL(pia.url()).hash).toBe(`#/e/club/${event}`);
+  await expect.poll(() => new URL(pia.url()).hash).toBe(`#/event/club/${event}`);
   await pia.getByRole('tab', { name: 'Me' }).click();
   await pia
     .getByRole('region', { name: 'Fly now' })
