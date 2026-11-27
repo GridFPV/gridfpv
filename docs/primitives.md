@@ -2055,6 +2055,26 @@ code of §13.13.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
     sign-in and send a link to re-connect. Built for server owners and not for a club's
     directors, for the reason in §13.8. Agreed (Ryan, 2026-11-27).
+17. **Pilots on a server (§13.7), third step: the account wins.** Built. A pilot an
+    account holds is shown on the server under the account's callsign and colour: on an
+    event's pages, in the club's list, and in the pilot's own results. A Director takes
+    the account's callsign, colour, MultiGP id and Velocidrone id for a pilot it holds:
+    when it pulls from the server, when the director ties a pilot to a member, and when
+    pilots are brought in. Choices made while building, not confirmed:
+    - **The event's own record is not rewritten.** The server changes how a held pilot
+      is shown, not the header the Director sent. The header changes when the Director
+      next sends it, with the pilot's new callsign.
+    - **Only what the profile says wins.** A part the pilot left empty leaves the
+      Director's own. Clearing a part on the server does not clear it on the Director.
+    - **A director's change to a tied pilot's callsign, colour or ids is replaced** at
+      the next pull, about every 15 seconds while connected. The pilot editor says so.
+    - What a Director never sends stays the Director's: real name, team, country.
+    - **A pilot that is let go keeps what it took.** It does not go back to the old
+      callsign on the Director. On the server it is shown as the event had it again.
+    - A claim is still kept club by club. The account is what makes the pilot one person:
+      their profile shows wherever they hold a pilot. The MultiGP and Velocidrone ids go
+      to a club's Director, and never to a visitor or a plain member.
+    - Nothing is pushed to MultiGP yet, and Velocidrone racing does not use the id yet.
 16. **Pilots on a server (§13.7), second step: public and private clubs.** Built: a
     director sets their club public or private; anyone with an account joins a public
     club; a private club is asked, and a director says yes or no; a director finds an
@@ -2077,7 +2097,7 @@ code of §13.13.
     - Leaving a club lets go of the pilots held there, as being removed does. A club's
       only director cannot leave.
 15. **Pilots on a server (§13.7), first step: the pilot profile and open sign-up.**
-    Built. Not built yet: the account's callsign winning in results and in Grid. Choices made
+    Built. Choices made
     while building, not confirmed:
     - The profile is callsign, colour (`#RRGGBB`), MultiGP id and Velocidrone id. All of
       it may be left empty. A callsign or an id is 40 characters at most, and an id has no

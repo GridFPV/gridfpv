@@ -101,7 +101,8 @@
         {/each}
       </select>
       <p class="muted">
-        {pilot.callsign}'s results on the server show on this person's account.
+        {pilot.callsign}'s results on the server show on this person's account. The pilot takes the
+        callsign, colour and ids that person has filled in on the server.
       </p>
     {/if}
   </div>

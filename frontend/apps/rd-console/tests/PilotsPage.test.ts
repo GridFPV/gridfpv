@@ -176,6 +176,39 @@ describe("a pilot's account on the server", () => {
     expect(document.body.textContent).not.toContain('acct_');
   });
 
+  it('says in the editor of a tied pilot that the account on the server wins', async () => {
+    linked();
+    const dialog = await open('Ace');
+    await waitFor(() => expect(box().options).toHaveLength(3));
+    // The dialog says what tying does to the pilot.
+    expect(dialog).toHaveTextContent(
+      'The pilot takes the callsign, colour and ids that person has filled in on the server.'
+    );
+    await fireEvent.change(box(), { target: { value: 'acct_pia' } });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await screen.findByTestId('pilot-server-account');
+
+    // Ace is tied: the editor says where its callsign, colour and ids come from.
+    const rows = screen.getAllByRole('listitem');
+    const ace = rows.find((row) => row.textContent?.includes('Pia on the server')) as HTMLElement;
+    await fireEvent.click(within(ace).getByRole('button', { name: /Edit/ }));
+    const note = await screen.findByTestId('pilot-from-account');
+    expect(note).toHaveTextContent('This pilot is Pia on the server.');
+    expect(note).toHaveTextContent('replaced the next time Grid hears from the server');
+    expect(note.textContent).not.toContain('acct_');
+  });
+
+  it('says nothing of the server in the editor of a pilot nobody holds', async () => {
+    linked();
+    await screen.findByText('Bee');
+    const rows = screen.getAllByRole('listitem');
+    const bee = rows.find((row) => row.textContent?.includes('Bee')) as HTMLElement;
+    await fireEvent.click(within(bee).getByRole('button', { name: /Edit/ }));
+    await screen.findByRole('form', { name: 'Edit pilot' });
+    expect(screen.queryByTestId('pilot-from-account')).toBeNull();
+  });
+
   it('starts from what the server says now, and can be set back to nobody', async () => {
     const { setPilotServerAccountImpl } = linked({
       pilots: [

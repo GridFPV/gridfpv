@@ -268,6 +268,14 @@
 <!-- The add / edit dialog stacks above whatever embeds the manager. -->
 <Dialog bind:open={formOpen} title={editing ? 'Edit pilot' : 'Add pilot'}>
   <form class="pilot-form" onsubmit={submitForm} aria-label={editing ? 'Edit pilot' : 'Add pilot'}>
+    {#if editing?.server_account}
+      <!-- The account wins where it exists (docs/primitives.md §13.7). -->
+      <p class="from-account" data-testid="pilot-from-account">
+        This pilot is {editing.server_account.name} on the server. Their callsign, colour, MultiGP id
+        and Velocidrone id come from their account there when they have filled them in. A change you make
+        to one of those here is replaced the next time Grid hears from the server.
+      </p>
+    {/if}
     <Field label="Callsign" required error={formError}>
       <Input
         bind:value={form.callsign}
@@ -373,6 +381,14 @@
 </Dialog>
 
 <style>
+  .from-account {
+    margin: 0;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border-left: 3px solid var(--gf-accent);
+    background: var(--gf-surface-sunken);
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
   .on-server {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);

@@ -30,6 +30,16 @@ their account there. The pilot then sees their own race results when they sign i
 Both ask the club of the open event when you press them, so the server must be in reach.
 Racing does not need it.
 
+**The account wins.** A pilot who is tied to an account takes what that person filled in
+on the server: their callsign, colour, MultiGP id and Velocidrone id. Grid takes these
+again each time it hears from the server.
+
+- If you change one of those here for a tied pilot, it is replaced at the next pull. Ask
+  the pilot to change it in their account on the server.
+- What they left empty on the server stays as you have it.
+- Real name, team and country are yours. The server never has them.
+- An untied pilot keeps the callsign it took.
+
 A pilot can also get tied on the server's own page, with an invite made for them or by
 asking the club. Grid picks that up by itself in a few seconds.
 

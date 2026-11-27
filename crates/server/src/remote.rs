@@ -150,6 +150,11 @@ pub struct PushAccount {
     pub id: String,
     /// What the person is called on the server.
     pub name: String,
+    /// What they say of themselves as a pilot (§13.7). Where it says something, it wins
+    /// over what a Director has for a pilot this account holds.
+    #[serde(default, skip_serializing_if = "PilotProfile::is_empty")]
+    #[ts(as = "Option<PilotProfile>", optional)]
+    pub profile: PilotProfile,
 }
 
 /// What a pilot says of themselves on a server (§13.7): how they are shown, and the ids
