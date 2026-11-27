@@ -204,6 +204,159 @@ async fn a_director_that_goes_away_is_no_longer_listening() {
 
 // ── Over HTTP ───────────────────────────────────────────────────────────────
 
+#[tokio::test]
+async fn a_pilot_has_one_ask_waiting_at_a_time_and_is_told_at_once_about_a_second() {
+    let asks = Arc::new(Asks::default());
+    let _listener = asks.listen(&club("north"));
+    let wait = |pilot: &str, event: &str| {
+        let asks = Arc::clone(&asks);
+        let (pilot, event) = (pilot.to_owned(), event.to_owned());
+        tokio::spawn(async move {
+            asks.ask(
+                &club("north"),
+                EventId(event),
+                PilotId(pilot),
+                leave("h"),
+                None,
+                Duration::from_secs(5),
+            )
+            .await
+        })
+    };
+    let first = wait("ace", "friday");
+    while asks.waiting(&club("north")).is_empty() {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // The same pilot, the same event: turned away at once, and nothing more is waiting.
+    let began = Instant::now();
+    assert_eq!(
+        wait("ace", "friday").await.unwrap(),
+        Err(NoAnswer::AlreadyAsking)
+    );
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(asks.waiting(&club("north")).len(), 1);
+
+    // Another pilot, and the same pilot in another event, are not held up by it.
+    let other = wait("bee", "friday");
+    let elsewhere = wait("ace", "sunday");
+    while asks.waiting(&club("north")).len() < 3 {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // Once the first is answered the pilot may ask again.
+    for request in asks.waiting(&club("north")) {
+        assert!(asks.answer(&club("north"), &request.id, PushAnswer::default()));
+    }
+    for asked in [first, other, elsewhere] {
+        assert_eq!(asked.await.unwrap(), Ok(PushAnswer::default()));
+    }
+    let again = wait("ace", "friday");
+    while asks.waiting(&club("north")).is_empty() {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let id = asks.waiting(&club("north"))[0].id.clone();
+    assert!(asks.answer(&club("north"), &id, PushAnswer::default()));
+    assert_eq!(again.await.unwrap(), Ok(PushAnswer::default()));
+}
+
+#[tokio::test]
+async fn a_pilot_whose_ask_was_given_up_may_ask_again() {
+    let asks = Arc::new(Asks::default());
+    let _listener = asks.listen(&club("north"));
+    let ask = |within: Duration| {
+        let asks = Arc::clone(&asks);
+        async move {
+            asks.ask(
+                &club("north"),
+                EventId("friday".into()),
+                PilotId("ace".into()),
+                leave("h"),
+                None,
+                within,
+            )
+            .await
+        }
+    };
+    // Nobody answers. The ask is given up and taken off the desk.
+    assert_eq!(ask(SOON).await, Err(NoAnswer::TooSlow));
+    assert!(asks.waiting(&club("north")).is_empty());
+    // So the pilot is not shut out by an ask that is no longer there.
+    assert_eq!(ask(SOON).await, Err(NoAnswer::TooSlow));
+
+    // The same when the pilot's request is dropped part-way.
+    let dropped = tokio::spawn(ask(Duration::from_secs(30)));
+    while asks.waiting(&club("north")).is_empty() {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    dropped.abort();
+    let _ = dropped.await;
+    assert!(asks.waiting(&club("north")).is_empty());
+    assert_eq!(ask(SOON).await, Err(NoAnswer::TooSlow));
+}
+
+#[tokio::test]
+async fn a_club_has_only_so_many_asks_waiting_and_another_club_is_not_held_up() {
+    use gridfpv_serverd::asks::WAITING_MAX;
+    let asks = Arc::new(Asks::default());
+    let _north = asks.listen(&club("north"));
+    let _south = asks.listen(&club("south"));
+    let wait = |of: &str, pilot: String| {
+        let asks = Arc::clone(&asks);
+        let of = club(of);
+        tokio::spawn(async move {
+            asks.ask(
+                &of,
+                EventId("friday".into()),
+                PilotId(pilot),
+                leave("h"),
+                None,
+                Duration::from_secs(10),
+            )
+            .await
+        })
+    };
+    let waiting: Vec<_> = (0..WAITING_MAX)
+        .map(|n| wait("north", format!("pilot-{n}")))
+        .collect();
+    while asks.waiting(&club("north")).len() < WAITING_MAX {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // One more is turned away at once, and is not added.
+    let began = Instant::now();
+    assert_eq!(
+        wait("north", "one-too-many".into()).await.unwrap(),
+        Err(NoAnswer::TooManyWaiting)
+    );
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(asks.waiting(&club("north")).len(), WAITING_MAX);
+
+    // South's pilots are not held up by North's.
+    let south = wait("south", "sal".into());
+    while asks.waiting(&club("south")).is_empty() {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let id = asks.waiting(&club("south"))[0].id.clone();
+    assert!(asks.answer(&club("south"), &id, PushAnswer::default()));
+    assert_eq!(south.await.unwrap(), Ok(PushAnswer::default()));
+
+    // The Director answers one of North's, and there is room for one more.
+    let id = asks.waiting(&club("north"))[0].id.clone();
+    assert!(asks.answer(&club("north"), &id, PushAnswer::default()));
+    let next = wait("north", "next-in-line".into());
+    while asks.waiting(&club("north")).len() < WAITING_MAX {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    for request in asks.waiting(&club("north")) {
+        asks.answer(&club("north"), &request.id, PushAnswer::default());
+    }
+    assert_eq!(next.await.unwrap(), Ok(PushAnswer::default()));
+    for asked in waiting {
+        assert_eq!(asked.await.unwrap(), Ok(PushAnswer::default()));
+    }
+}
+
 struct Rig {
     _dir: tempfile::TempDir,
     state: AppState,
@@ -607,6 +760,65 @@ async fn a_refusal_about_the_race_code_has_its_own_status_so_the_page_can_ask_fo
         answer,
         json!({"code": "Refused", "message": "That is not the race code."})
     );
+}
+
+#[tokio::test]
+async fn a_second_ask_while_the_first_waits_is_told_to_wait_and_does_not_reach_the_director() {
+    let rig = rig().await;
+    let pia = rig.member("Pia", "north", Some("ace-1"));
+    // A Director that is connected and slow to answer.
+    let _listener = rig.state.asks.listen(&club("north"));
+    let first = {
+        let app = rig.app.clone();
+        let session = pia.session.clone();
+        tokio::spawn(async move {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(TAKE)
+                .header(header::HOST, "grid.example.org")
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={session}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(take_body().to_string()))
+                .unwrap();
+            app.oneshot(request).await.unwrap().status()
+        })
+    };
+    while rig.state.asks.waiting(&club("north")).is_empty() {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // Tapped again, on any of the asks: told at once, in words, and not passed on.
+    for path in [
+        TAKE,
+        "/api/clubs/north/events/friday/public/pilot/signup/leave",
+        "/api/clubs/north/events/friday/public/pilot/checkin/drop",
+    ] {
+        let body = match path {
+            TAKE => take_body(),
+            p if p.ends_with("leave") => json!({"heat": "quali/heat-1"}),
+            _ => json!({"race": "practice#1"}),
+        };
+        let (status, answer) = send(&rig, By::Person(&pia), Method::POST, path, Some(body)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path}");
+        assert_eq!(answer["code"], "TooManyRequests");
+        assert!(
+            answer["message"]
+                .as_str()
+                .unwrap()
+                .contains("still waiting"),
+            "{answer}"
+        );
+    }
+    assert_eq!(rig.state.asks.waiting(&club("north")).len(), 1);
+
+    // The first is still answered as if nothing had happened.
+    let id = rig.state.asks.waiting(&club("north"))[0].id.clone();
+    assert!(
+        rig.state
+            .asks
+            .answer(&club("north"), &id, PushAnswer::default())
+    );
+    assert_eq!(first.await.unwrap(), StatusCode::OK);
 }
 
 #[tokio::test]

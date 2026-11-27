@@ -1912,6 +1912,8 @@ club, or an owner of the server.
   refused. An ask for an event the Director does not have is left for the Director that
   does.
 - **Nothing about an ask is kept on the server.** It lives only while the pilot waits.
+- **Asks cannot pile up.** A pilot has one ask waiting at a time in an event, and a club
+  has at most 64 waiting in all. One more is turned away at once, in words.
 - **The server says which pilot is asking.** The Director trusts the server it is linked
   to for that, as it does for who holds a pilot (§13.7). It checks that it has that pilot.
 

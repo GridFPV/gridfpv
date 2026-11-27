@@ -22,6 +22,9 @@
 //! Nothing here is kept. An ask lives only as long as the pilot's request waits. If no
 //! Director is listening, the pilot is told so at once.
 //!
+//! **Asks cannot pile up.** A pilot has one ask waiting at a time in an event, and a club
+//! has at most [`WAITING_MAX`] waiting in all. One more is turned away at once (`429`).
+//!
 //! **Who is asking** is decided here and nowhere else: the pilot of this club that the
 //! signed-in account holds, and that the event names (§13.7). Nothing in the request's
 //! body names a pilot.
@@ -94,7 +97,16 @@ pub enum NoAnswer {
     NobodyListening,
     /// A Director is connected and did not answer in time.
     TooSlow,
+    /// This pilot's last ask for the event is still waiting. One at a time.
+    AlreadyAsking,
+    /// Too many asks are waiting for the club's Director already.
+    TooManyWaiting,
 }
+
+/// The most asks that may wait for one club's Director at once. A race day has a few at
+/// a time. This only stops a flood from filling the server's memory and the Director's
+/// time.
+pub const WAITING_MAX: usize = 64;
 
 /// One Director listening. Dropping it says the Director has gone.
 pub struct Listener {
@@ -180,6 +192,18 @@ impl Asks {
             let desk = clubs.entry(club.clone()).or_default();
             if desk.listeners == 0 {
                 return Err(NoAnswer::NobodyListening);
+            }
+            // One ask at a time for a pilot in an event: a page that is tapped twice, or
+            // a program that asks in a loop, does not pile asks up before the Director.
+            if desk
+                .waiting
+                .iter()
+                .any(|w| w.request.pilot == pilot && w.request.event == event)
+            {
+                return Err(NoAnswer::AlreadyAsking);
+            }
+            if desk.waiting.len() >= WAITING_MAX {
+                return Err(NoAnswer::TooManyWaiting);
             }
             desk.waiting.push(Waiting {
                 request: PushRequest {
@@ -308,6 +332,14 @@ pub struct LeaveBody {
     pub heat: PhaseId,
 }
 
+fn busy(message: impl Into<String>) -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        ErrorCode::TooManyRequests,
+        message,
+    )
+}
+
 fn refused(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::CONFLICT, ErrorCode::Refused, message)
 }
@@ -380,6 +412,12 @@ async fn put_before_director(
         )),
         Err(NoAnswer::TooSlow) => Err(refused(
             "The race computer did not answer. Look at the list again before you try once more.",
+        )),
+        Err(NoAnswer::AlreadyAsking) => Err(busy(
+            "Your last ask is still waiting for the race computer. Give it a moment.",
+        )),
+        Err(NoAnswer::TooManyWaiting) => Err(busy(
+            "The race computer has a lot waiting right now. Try again in a moment.",
         )),
     }
 }
