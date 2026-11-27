@@ -1375,10 +1375,7 @@ async fn only_an_owner_says_whether_an_account_needs_an_invite() {
     // A server starts by asking for an invite, and anyone may know.
     let (status, info) = call(&rig, None, Method::GET, "/api/server", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        info,
-        json!({"open_sign_up": false, "password_sign_in": false})
-    );
+    assert_eq!(info["open_sign_up"], false);
 
     let change = |open: bool| Some(json!({"open": open}));
     let (status, _) = call(&rig, None, Method::PUT, "/api/server/sign-up", change(true)).await;
@@ -1409,15 +1406,9 @@ async fn only_an_owner_says_whether_an_account_needs_an_invite() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        info,
-        json!({"open_sign_up": true, "password_sign_in": false})
-    );
+    assert_eq!(info["open_sign_up"], true);
     let (_, info) = call(&rig, Some(&pilot), Method::GET, "/api/server", None).await;
-    assert_eq!(
-        info,
-        json!({"open_sign_up": true, "password_sign_in": false})
-    );
+    assert_eq!(info["open_sign_up"], true);
     // Kept: a server started again on the same data still has it on.
     assert!(AppState::open(rig._dir.path()).unwrap().book.open_sign_up());
     // The clubs in the same file were not touched by it.
@@ -1432,10 +1423,7 @@ async fn only_an_owner_says_whether_an_account_needs_an_invite() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        info,
-        json!({"open_sign_up": false, "password_sign_in": false})
-    );
+    assert_eq!(info["open_sign_up"], false);
     // Something that is not a yes or a no is refused.
     let (status, _) = call(
         &rig,

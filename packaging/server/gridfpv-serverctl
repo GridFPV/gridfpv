@@ -23,7 +23,8 @@ DATA=/var/lib/gridfpv-server
 USER_NAME=gridfpv
 
 # The server's own address, so a link it prints is one people can open. Only that one
-# setting is read from the file: the rest of it is secrets this command has no use for.
+# setting is read from the file for most commands: the rest of it is secrets they have no
+# use for.
 ENV_FILE=/etc/gridfpv-server.env
 PUBLIC_URL=
 if [ -r "$ENV_FILE" ]; then
@@ -31,13 +32,57 @@ if [ -r "$ENV_FILE" ]; then
 fi
 
 if [ "$#" -eq 0 ]; then
-    echo "usage: gridfpv-serverctl token new <label> | token list | token revoke <id> | club name <name> | owner invite" >&2
+    echo "usage: gridfpv-serverctl token new <label> | token list | token revoke <id> | club name <name> | owner invite | password on | sign-up open | email test <address>" >&2
     exit 2
 fi
+
+# `email test` sends a mail, so it alone is given the email settings too.
+set -- GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_PUBLIC_URL="$PUBLIC_URL" -- "$@"
+if [ "${4:-}" = email ] && [ -r "$ENV_FILE" ]; then
+    for key in HOST PORT USER PASSWORD FROM TLS; do
+        value=$(sed -n "s/^GRIDFPV_SERVER_SMTP_$key=//p" "$ENV_FILE" | tail -n 1)
+        if [ -n "$value" ]; then
+            set -- "GRIDFPV_SERVER_SMTP_$key=$value" "$@"
+        fi
+    done
+fi
+# What is before the `--` is settings, and what is after is the command.
+SETTINGS=0
+for word in "$@"; do
+    [ "$word" = -- ] && break
+    SETTINGS=$((SETTINGS + 1))
+done
+
+run_as_is() {
+    # Settings first, then the program and its command, with the `--` dropped.
+    n=0
+    for word in "$@"; do
+        n=$((n + 1))
+        if [ "$n" -le "$SETTINGS" ]; then
+            export "$word"
+        fi
+    done
+    shift $((SETTINGS + 1))
+    exec /usr/local/bin/gridfpv-server "$@"
+}
+
 if [ "$(id -un)" = "$USER_NAME" ]; then
-    GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_PUBLIC_URL="$PUBLIC_URL" exec /usr/local/bin/gridfpv-server "$@"
+    run_as_is "$@"
 fi
+# For another user, `env` takes the settings and then the program.
+n=0
+for word in "$@"; do
+    n=$((n + 1))
+    if [ "$n" -le "$SETTINGS" ]; then
+        set -- "$@" "$word"
+    elif [ "$n" -eq $((SETTINGS + 1)) ]; then
+        set -- "$@" /usr/local/bin/gridfpv-server
+    else
+        set -- "$@" "$word"
+    fi
+done
+shift "$n"
 if command -v runuser >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
-    exec runuser -u "$USER_NAME" -- env GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_PUBLIC_URL="$PUBLIC_URL" /usr/local/bin/gridfpv-server "$@"
+    exec runuser -u "$USER_NAME" -- env "$@"
 fi
-exec sudo -u "$USER_NAME" env GRIDFPV_SERVER_DATA_DIR="$DATA" GRIDFPV_SERVER_PUBLIC_URL="$PUBLIC_URL" /usr/local/bin/gridfpv-server "$@"
+exec sudo -u "$USER_NAME" env "$@"

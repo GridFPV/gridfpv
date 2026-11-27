@@ -6,6 +6,7 @@
 import { vi } from 'vitest';
 import type {
   AccountSignIns,
+  EmailConfirmed,
   ServerClub,
   MySignIn,
   ReconnectMade,
@@ -89,6 +90,12 @@ export interface FakeServer {
   people: PersonView[];
   /** Whether people may sign in with a username and password. */
   passwordOn: boolean;
+  /** Whether the server sends email. */
+  emailOn: boolean;
+  /** Links sent to confirm an address: secret to the address. */
+  emailLinks: Record<string, string>;
+  /** Who a link to set a new password was asked for, in order. */
+  forgotten: string[];
   /** Each username's password, and the account it signs in to. */
   passwords: Record<string, { password: string; account: MyAccount }>;
 }
@@ -138,6 +145,9 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     joinAsks: {},
     people: [],
     passwordOn: false,
+    emailOn: false,
+    emailLinks: {},
+    forgotten: [],
     passwords: {},
     clubList: [
       { ...NORTH, word: 'north-fpv', archived: false, open: false },
@@ -150,6 +160,7 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
 const ARCHIVED =
   'This club is archived, so nothing in it can be changed. An owner of this server can bring it back.';
 
+const NO_EMAIL = 'This server does not send email. Ask an owner of the server for help.';
 const PASSWORDS_OFF = 'Signing in with a password is switched off on this server.';
 
 const refuse = (message: string): never => {
@@ -161,8 +172,10 @@ export function fakePeople(server: FakeServer) {
   const me = (): Me => (server.account ? { account: server.account } : {});
   const info = (): ServerInfo => ({
     open_sign_up: server.openSignUp,
-    password_sign_in: server.passwordOn
+    password_sign_in: server.passwordOn,
+    email: server.emailOn
   });
+  let mailed = 0;
   const clubs: Record<string, { id: string; name: string }> = {
     north: { ...NORTH },
     south: { ...SOUTH }
@@ -591,6 +604,41 @@ export function fakePeople(server: FakeServer) {
       }
       server.passwordOn = on;
       return info();
+    }),
+    setEmail: vi.fn(async (address: string) => {
+      const account = server.account ?? refuse('Sign in first.');
+      if (!server.emailOn) refuse(NO_EMAIL);
+      const tidy = address.trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(tidy)) {
+        refuse('That is not an email address. It looks like you@example.org');
+      }
+      const same = account.email?.address === tidy;
+      if (!(same && account.email?.confirmed)) {
+        mailed += 1;
+        server.emailLinks[`gfe_${mailed}`] = tidy;
+        server.account = { ...account, email: { address: tidy, confirmed: false } };
+      }
+      return me();
+    }),
+    removeEmail: vi.fn(async () => {
+      const account = server.account ?? refuse('Sign in first.');
+      const { email: _email, ...rest } = account;
+      server.account = rest;
+      return me();
+    }),
+    confirmEmail: vi.fn(async (secret: string): Promise<EmailConfirmed> => {
+      const address =
+        server.emailLinks[secret] ??
+        refuse('That link does not work. It may have been used already, or have run out.');
+      delete server.emailLinks[secret];
+      if (server.account?.email?.address === address) {
+        server.account = { ...server.account, email: { address, confirmed: true } };
+      }
+      return { address };
+    }),
+    forgotPassword: vi.fn(async (who: string) => {
+      if (!server.emailOn) refuse(NO_EMAIL);
+      server.forgotten.push(who);
     }),
     passwordSignIn: vi.fn(async (username: string, password: string) => {
       if (!server.passwordOn) refuse(PASSWORDS_OFF);

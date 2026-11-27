@@ -53,7 +53,11 @@ import {
   signInWithPassword,
   signUpWithPassword,
   setServerPassword,
-  setServerPasswordSignIn
+  setServerPasswordSignIn,
+  setServerEmail,
+  removeServerEmail,
+  confirmServerEmail,
+  forgotServerPassword
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
@@ -71,6 +75,7 @@ import type {
   MemberView,
   MyAccount,
   MyClassResult,
+  EmailConfirmed,
   MyResult,
   PasswordChange,
   PasswordSignUp,
@@ -169,6 +174,14 @@ export interface PeopleApi {
   setPassword(change: PasswordChange): Promise<Me>;
   /** Switch signing in with a password on or off. For an owner. */
   setPasswordSignIn(on: boolean): Promise<ServerInfo>;
+  /** Give the signed-in account an email address. A link is sent to confirm it. */
+  setEmail(address: string): Promise<Me>;
+  /** Take the signed-in account's email address off. */
+  removeEmail(): Promise<Me>;
+  /** Confirm an email address with the link that was sent to it. */
+  confirmEmail(secret: string): Promise<EmailConfirmed>;
+  /** Ask for a link to set a new password, by username or email address. */
+  forgotPassword(who: string): Promise<void>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -227,6 +240,10 @@ export function peopleApi(baseUrl: string): PeopleApi {
     passwordSignUp: (given) => signUpWithPassword(baseUrl, given),
     setPassword: (change) => setServerPassword(baseUrl, change),
     setPasswordSignIn: (on) => setServerPasswordSignIn(baseUrl, on),
+    setEmail: (address) => setServerEmail(baseUrl, address),
+    removeEmail: () => removeServerEmail(baseUrl),
+    confirmEmail: (secret) => confirmServerEmail(baseUrl, secret),
+    forgotPassword: (who) => forgotServerPassword(baseUrl, who),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }
@@ -471,6 +488,20 @@ export function providerName(id: string, providers: readonly SignInProvider[]): 
 
 /** The `provider` of a sign-in that is a username and a password kept on the server. */
 export const PASSWORD_PROVIDER = 'password';
+
+/** What is wrong with an email address, in words, before it is sent. */
+export function emailProblem(address: string): string | undefined {
+  const text = address.trim();
+  if (text === '') return undefined;
+  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(text)) {
+    return 'That is not an email address. It looks like you@example.org';
+  }
+  return undefined;
+}
+
+/** What is said after someone asks for a link to set a new password, whoever they named. */
+export const FORGOT_SENT =
+  'If that account has a confirmed email address, a link is on its way. It works once, and for one hour.';
 
 /** The shortest password a server takes. */
 export const PASSWORD_MIN = 10;

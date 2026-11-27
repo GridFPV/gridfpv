@@ -307,10 +307,8 @@ async fn only_an_owner_switches_it_and_not_so_as_to_lock_themselves_out() {
 
     let (status, info) = call(&rig, Some(&owner), Method::PUT, path, change(true)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        info,
-        json!({"open_sign_up": false, "password_sign_in": true})
-    );
+    assert_eq!(info["password_sign_in"], true);
+    assert_eq!(info["open_sign_up"], false);
     // Kept: a server started again on the same data still has it on.
     assert!(
         AppState::open(rig._dir.path())

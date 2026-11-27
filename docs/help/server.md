@@ -77,8 +77,9 @@ pilots in from the server with **Add from the server**.
 ## Someone cannot sign in
 
 People sign in to a server with Discord or Google, or with a username and password if
-the server's owner has switched that on. If someone in your club forgets their password,
-or loses their Discord or Google account, ask an owner of the server. On the server's
+the server's owner has switched that on. Someone who forgot their password can press
+**Forgot your password?** on the sign-in page, if they gave the server their email address.
+Otherwise, or if they lost their Discord or Google account, ask an owner of the server. On the server's
 page, the owner can send the person a **re-connect link**. The person opens it, signs in
 another way or types a new password, and is back in their own account with their results.
 

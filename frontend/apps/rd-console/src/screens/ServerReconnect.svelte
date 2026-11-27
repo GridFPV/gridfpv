@@ -18,16 +18,21 @@
     account,
     providers,
     password = false,
+    email = false,
     onsignedin = undefined
   }: {
     api: Pick<PeopleApi, 'reconnect' | 'signInUrl'> &
-      Partial<Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>>;
+      Partial<
+        Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword' | 'forgotPassword'>
+      >;
     secret: string;
     /** The account this browser is signed in as now, if it is. */
     account: MyAccount | undefined;
     providers: readonly SignInProvider[] | undefined;
     /** Whether this server lets people sign in with a username and password. */
     password?: boolean;
+    /** Whether this server sends email. */
+    email?: boolean;
     /** Someone set a username and password with the link, and is signed in. */
     onsignedin?: ((me: Me) => void) | undefined;
   } = $props();
@@ -84,7 +89,7 @@
           <strong>{link.name}</strong>.
         </p>
       {/if}
-      <ServerSignIn {api} {providers} invite={secret} {password} {onsignedin} />
+      <ServerSignIn {api} {providers} invite={secret} {password} {email} {onsignedin} />
     {/if}
   </div>
 </Card>

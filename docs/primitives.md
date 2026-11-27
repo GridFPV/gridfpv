@@ -1846,7 +1846,10 @@ Video is not stored. It comes later (§11.7).
   - A username is a sign-in like any other. An account may have one beside Discord or
     Google, and keeps at least one way in.
   - **A forgotten password is set again with the re-connect link** an owner makes (below).
-    The server sends no email yet, so nobody resets their own.
+  - **A server may send email** (Ryan, 2026-11-27), when its owner gives it an email
+    account to send from. It is used to confirm an address a person gave, and to send that
+    person a link to set a forgotten password. Nothing else. An address is shown to nobody
+    but its own account, and is never what joins two accounts.
 - **Someone who can no longer sign in is helped by an owner of the server** (Ryan,
   2026-11-28). The owner does two things,
   from the club's members list:
@@ -2082,8 +2085,23 @@ code of §13.13.
     - An owner whose only way in is a password cannot switch passwords off from the page.
       The command line can.
     - Switching it off keeps the passwords. They work again when it is back on.
-    - **No email yet.** That is the next step: a server's own email settings, an email on
-      an account, and a reset link sent by email.
+    - Email came after: see the next item.
+20. **Email (§13.8).** Built. Choices made while building, not confirmed:
+    - The settings are in the environment (`GRIDFPV_SERVER_SMTP_HOST`, `_PORT`, `_USER`,
+      `_PASSWORD`, `_FROM`, `_TLS`), beside the sign-in settings. A setting that makes no
+      sense stops the server from starting. `gridfpv-server email test <address>` sends
+      one mail to check them.
+    - The connection is encrypted (STARTTLS on 587, or TLS on 465). Without TLS only to an
+      email program on the same computer.
+    - An address is optional and is the person's to give. It does nothing until the link
+      sent to it is opened. That link works once, for a day.
+    - **Forgot your password** takes a username or an address. A link goes only to a
+      confirmed address of an account that signs in with a password. It is the re-connect
+      link with an hour to use it, and no more than one each five minutes for an account.
+    - The answer is the same whoever is asked about.
+    - An address on two accounts sends each its own link.
+    - Nothing else is mailed: no invites, no news of results.
+    - Still not tried with a real email provider.
 18. **A server behind a Cloudflare Tunnel was tried for real** (2026-11-27), on a test
     server: the standalone install, plain HTTP on the home network, the tunnel giving
     HTTPS. A Director sent an event through it, a lap showed on the public side in about

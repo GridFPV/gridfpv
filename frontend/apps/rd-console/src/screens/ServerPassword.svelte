@@ -13,6 +13,7 @@
   import { Button, Input } from '@gridfpv/components';
   import type { Me } from '@gridfpv/types';
   import {
+    FORGOT_SENT,
     PASSWORD_MIN,
     passwordProblem,
     usernameProblem,
@@ -27,15 +28,22 @@
     invite = undefined,
     canMake = false,
     makeWords = 'Make the account',
+    forgot = undefined,
     oncancel = undefined,
     ondone
   }: {
-    api: Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>;
+    api: Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'> &
+      Partial<Pick<PeopleApi, 'forgotPassword'>>;
     mode: Mode;
     /** The invite, or the re-connect link, the person came with. */
     invite?: string | undefined;
     /** Whether someone signing in may make an account here instead. */
     canMake?: boolean;
+    /**
+     * What someone who forgot their password can do here: `email` when the server sends a
+     * link, `owner` when an owner has to make one. Nothing is said when left out.
+     */
+    forgot?: 'email' | 'owner' | undefined;
     /** What the button says when an account is being made. */
     makeWords?: string;
     /** Shown as a Cancel button when given. */
@@ -112,6 +120,29 @@
     }
   }
 
+  // ── A forgotten password ────────────────────────────────────────────────────
+  /** The form that asks for a link, when it is open. */
+  let asking = $state(false);
+  let who = $state('');
+  /** A link was asked for: the same words whoever was named. */
+  let asked = $state(false);
+
+  async function ask(e: Event) {
+    e.preventDefault();
+    const named = who.trim();
+    if (named === '' || busy || !api.forgotPassword) return;
+    busy = true;
+    error = undefined;
+    try {
+      await api.forgotPassword(named);
+      asked = true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      busy = false;
+    }
+  }
+
   function switchTo(next: Mode) {
     mode = next;
     error = undefined;
@@ -119,78 +150,133 @@
   }
 </script>
 
-<!-- A refusal is about what was in the form then. Typing again clears it. -->
-<form
-  class="password"
-  onsubmit={submit}
-  oninput={() => (error = undefined)}
-  aria-label={words}
-  data-testid="password-form"
->
-  {#if mode !== 'change'}
-    <label for="pw-username">Username</label>
+{#if asking}
+  <form
+    class="password"
+    onsubmit={ask}
+    oninput={() => (error = undefined)}
+    aria-label="Forgot your password"
+    data-testid="forgot-form"
+  >
+    {#if asked}
+      <p data-testid="forgot-sent">{FORGOT_SENT}</p>
+      <p class="muted">No mail? Ask an owner of this server for a re-connect link.</p>
+    {:else}
+      <label for="pw-who">Your username, or your email address</label>
+      <Input
+        id="pw-who"
+        maxlength={254}
+        autocomplete="username"
+        autocapitalize="none"
+        spellcheck="false"
+        bind:value={who}
+        disabled={busy}
+      />
+      {#if error}<p class="error" role="alert" data-testid="password-error">{error}</p>{/if}
+    {/if}
+    <div class="actions">
+      {#if !asked}
+        <Button variant="primary" size="sm" type="submit" disabled={busy || who.trim() === ''}
+          >Send me a link</Button
+        >
+      {/if}
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={busy}
+        onclick={() => ((asking = false), (asked = false), (error = undefined))}
+        >Back to signing in</Button
+      >
+    </div>
+  </form>
+{:else}
+  <!-- A refusal is about what was in the form then. Typing again clears it. -->
+  <form
+    class="password"
+    onsubmit={submit}
+    oninput={() => (error = undefined)}
+    aria-label={words}
+    data-testid="password-form"
+  >
+    {#if mode !== 'change'}
+      <label for="pw-username">Username</label>
+      <Input
+        id="pw-username"
+        maxlength={32}
+        autocomplete="username"
+        autocapitalize="none"
+        spellcheck="false"
+        bind:value={username}
+        disabled={busy}
+      />
+    {:else}
+      <label for="pw-current">The password you have now</label>
+      <Input
+        id="pw-current"
+        type="password"
+        autocomplete="current-password"
+        bind:value={current}
+        disabled={busy}
+      />
+    {/if}
+    <label for="pw-password">{mode === 'change' ? 'New password' : 'Password'}</label>
     <Input
-      id="pw-username"
-      maxlength={32}
-      autocomplete="username"
-      autocapitalize="none"
-      spellcheck="false"
-      bind:value={username}
-      disabled={busy}
-    />
-  {:else}
-    <label for="pw-current">The password you have now</label>
-    <Input
-      id="pw-current"
-      type="password"
-      autocomplete="current-password"
-      bind:value={current}
-      disabled={busy}
-    />
-  {/if}
-  <label for="pw-password">{mode === 'change' ? 'New password' : 'Password'}</label>
-  <Input
-    id="pw-password"
-    type="password"
-    maxlength={200}
-    autocomplete={setting ? 'new-password' : 'current-password'}
-    bind:value={password}
-    disabled={busy}
-  />
-  {#if setting}
-    <label for="pw-again">The same password again</label>
-    <Input
-      id="pw-again"
+      id="pw-password"
       type="password"
       maxlength={200}
-      autocomplete="new-password"
-      bind:value={again}
+      autocomplete={setting ? 'new-password' : 'current-password'}
+      bind:value={password}
       disabled={busy}
     />
-    <p class="muted">At least {PASSWORD_MIN} characters. A few words in a row is a good one.</p>
-  {/if}
-  {#if problem}<p class="error" role="alert">{problem}</p>{/if}
-  {#if error}<p class="error" role="alert" data-testid="password-error">{error}</p>{/if}
-  <div class="actions">
-    <Button variant="primary" size="sm" type="submit" disabled={busy || !ready}>{words}</Button>
-    {#if oncancel}
-      <Button variant="ghost" size="sm" disabled={busy} onclick={oncancel}>Cancel</Button>
+    {#if setting}
+      <label for="pw-again">The same password again</label>
+      <Input
+        id="pw-again"
+        type="password"
+        maxlength={200}
+        autocomplete="new-password"
+        bind:value={again}
+        disabled={busy}
+      />
+      <p class="muted">At least {PASSWORD_MIN} characters. A few words in a row is a good one.</p>
     {/if}
-  </div>
-  {#if canMake && start === 'sign-in'}
-    <p class="muted">
-      {#if mode === 'sign-in'}
-        No account yet?
-        <button type="button" class="link" onclick={() => switchTo('make')}
-          >Make one with a username and password</button
-        >
-      {:else}
-        Have an account already?
-        <button type="button" class="link" onclick={() => switchTo('sign-in')}>Sign in</button>
+    {#if problem}<p class="error" role="alert">{problem}</p>{/if}
+    {#if error}<p class="error" role="alert" data-testid="password-error">{error}</p>{/if}
+    <div class="actions">
+      <Button variant="primary" size="sm" type="submit" disabled={busy || !ready}>{words}</Button>
+      {#if oncancel}
+        <Button variant="ghost" size="sm" disabled={busy} onclick={oncancel}>Cancel</Button>
       {/if}
-    </p>
-  {/if}
-</form>
+    </div>
+    {#if mode === 'sign-in' && forgot === 'email' && api.forgotPassword}
+      <p class="muted">
+        <button
+          type="button"
+          class="link"
+          onclick={() => ((asking = true), (who = username.trim()), (error = undefined))}
+          >Forgot your password?</button
+        >
+      </p>
+    {:else if mode === 'sign-in' && forgot === 'owner'}
+      <p class="muted" data-testid="forgot-owner">
+        Forgot your password? Ask an owner of this server for a re-connect link.
+      </p>
+    {/if}
+    {#if canMake && start === 'sign-in'}
+      <p class="muted">
+        {#if mode === 'sign-in'}
+          No account yet?
+          <button type="button" class="link" onclick={() => switchTo('make')}
+            >Make one with a username and password</button
+          >
+        {:else}
+          Have an account already?
+          <button type="button" class="link" onclick={() => switchTo('sign-in')}>Sign in</button>
+        {/if}
+      </p>
+    {/if}
+  </form>
+{/if}
 
 <style>
   .password {

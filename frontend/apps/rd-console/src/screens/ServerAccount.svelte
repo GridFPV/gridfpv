@@ -16,6 +16,7 @@
     roleWord,
     type PeopleApi
   } from '../lib/serverPeople.js';
+  import ServerEmail from './ServerEmail.svelte';
   import ServerJoinClubs from './ServerJoinClubs.svelte';
   import ServerMyPilots from './ServerMyPilots.svelte';
   import ServerPassword from './ServerPassword.svelte';
@@ -27,6 +28,7 @@
     account,
     providers,
     password = false,
+    email = false,
     clubs,
     onchange,
     onreread,
@@ -49,11 +51,15 @@
       | 'passwordSignIn'
       | 'passwordSignUp'
       | 'setPassword'
+      | 'setEmail'
+      | 'removeEmail'
     >;
     account: MyAccount;
     providers: readonly SignInProvider[] | undefined;
     /** Whether this server lets people sign in with a username and password. */
     password?: boolean;
+    /** Whether this server sends email. */
+    email?: boolean;
     /** Every club on the server, for an owner's links. */
     clubs: readonly { id: string; name: string }[];
     /** The account changed: here it is as it now stands. */
@@ -255,6 +261,10 @@
       {/if}
     </div>
   </Card>
+
+  {#if email || account.email}
+    <ServerEmail {api} {account} {onchange} />
+  {/if}
 
   <div>
     <Button variant="ghost" disabled={busy} onclick={signOut}>Sign out</Button>
