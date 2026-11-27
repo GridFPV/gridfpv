@@ -16,6 +16,25 @@ A pilot is put into a race in one of two ways. A heat can name them directly on 
 [Phases](#/help/phases) page. Or they are put on a class's roster on the
 [Details](#/help/event) page, and a heat is filled from that class.
 
+## Pilots and your server
+
+If Grid is linked to a [server](#/help/server), a pilot can be tied to their account
+there. The pilot then sees their own race results when they sign in to the server.
+
+- **Account**, beside a pilot, asks **Who is this on the server?** Pick one of your club's
+  members by name, or **Nobody**. The pilot's row then says whose account it is.
+- **Add from the server** brings pilots in that the server has and Grid does not. They
+  come in already tied to their accounts. It also offers members who have no pilot yet,
+  and makes a pilot for each one you pick.
+
+Both ask the server when you press them, so the server must be in reach. Racing does not
+need it.
+
+A pilot can also get tied on the server's own page, with an invite made for them or by
+asking the club. Grid picks that up by itself in a few seconds.
+
+Only a callsign and a colour are sent to the server. Real names stay on your computer.
+
 ## Classes
 
 The **Classes** page, also under Setup, holds the classes an event can race. The standard FPV classes

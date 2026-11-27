@@ -229,3 +229,7 @@ export type * from '@bindings/MyResult';
 export type * from '@bindings/PushAccount';
 export type * from '@bindings/PushPilot';
 export type * from '@bindings/PushPilotAccount';
+export type * from '@bindings/LinkPeople';
+export type * from '@bindings/PilotAccount';
+export type * from '@bindings/PilotAccountChange';
+export type * from '@bindings/PullRequest';

@@ -42,6 +42,7 @@ import type {
   InviteView,
   KioskPassView,
   KioskView,
+  LinkPeople,
   LinkSettings,
   LinkView,
   MainsRequest,
@@ -60,6 +61,7 @@ import type {
   ProtocolError,
   PublicEvent,
   PublicHello,
+  PullRequest,
   PublicPilot,
   PushClub,
   RaceId,
@@ -1168,6 +1170,61 @@ export async function putServerLink(
     '/server-link',
     { method: 'PUT', body: settings, token, fetch: options.fetch },
     'change the server setting'
+  );
+}
+
+/**
+ * The linked server's club: its members, and its pilots with the account that holds each
+ * (`GET /server-link/people`), RD-gated. Asks the server there and then.
+ */
+export async function getServerPeople(
+  baseUrl: string,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<LinkPeople> {
+  return apiJson<LinkPeople>(
+    baseUrl,
+    '/server-link/people',
+    { token, fetch: options.fetch },
+    "read the server's members"
+  );
+}
+
+/**
+ * Say which member of the club holds a pilot on the linked server, or with no account that
+ * nobody does (`PUT /pilots/{id}/server-account`), RD-gated. Nothing changes here unless the
+ * server agreed.
+ */
+export async function setPilotServerAccount(
+  baseUrl: string,
+  id: PilotId,
+  account: string | undefined,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Pilot> {
+  return apiJson<Pilot>(
+    baseUrl,
+    `/pilots/${encodeURIComponent(id)}/server-account`,
+    { method: 'PUT', body: { account: account ?? null }, token, fetch: options.fetch },
+    "change the pilot's account"
+  );
+}
+
+/**
+ * Bring pilots in from the linked server, already tied to their accounts
+ * (`POST /server-link/pull`), RD-gated. Resolves to the pilots that were added.
+ */
+export async function pullFromServer(
+  baseUrl: string,
+  request: PullRequest,
+  token?: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Pilot[]> {
+  return apiJson<Pilot[]>(
+    baseUrl,
+    '/server-link/pull',
+    { method: 'POST', body: request, token, fetch: options.fetch },
+    'add pilots from the server'
   );
 }
 

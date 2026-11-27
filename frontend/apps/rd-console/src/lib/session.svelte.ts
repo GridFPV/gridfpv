@@ -73,6 +73,9 @@ import {
   getServerLink,
   putServerLink,
   replaceOnServer,
+  getServerPeople,
+  setPilotServerAccount,
+  pullFromServer,
   putDoor,
   putAccessToken,
   putPublicAddress,
@@ -132,6 +135,7 @@ import type {
   Door,
   DoorRequest,
   NetworkView,
+  LinkPeople,
   LinkSettings,
   LinkView,
   OverlayLook,
@@ -141,6 +145,7 @@ import type {
   PilotAccessView,
   PilotCodeView,
   PilotId,
+  PullRequest,
   PublicHello,
   PublicPilot,
   RaceId,
@@ -267,6 +272,9 @@ const realApi = {
   getServerLink,
   putServerLink,
   replaceOnServer,
+  getServerPeople,
+  setPilotServerAccount,
+  pullFromServer,
   putDoor,
   putAccessToken,
   putPublicAddress,
@@ -727,6 +735,29 @@ export class Session {
     return this.#privilegedWrite((token) =>
       this.#api.replaceOnServer(this.baseUrl, eventId, token)
     );
+  }
+
+  /**
+   * The linked server's club: its members, and its pilots with who holds each. Asks the
+   * server there and then. `undefined` on a cancelled prompt.
+   */
+  getServerPeople(): Promise<LinkPeople | undefined> {
+    return this.#privilegedWrite((token) => this.#api.getServerPeople(this.baseUrl, token));
+  }
+
+  /**
+   * Say which member holds a pilot on the linked server, or with no account that nobody
+   * does. Nothing changes here unless the server agreed.
+   */
+  setPilotServerAccount(id: PilotId, account: string | undefined): Promise<Pilot | undefined> {
+    return this.#privilegedWrite((token) =>
+      this.#api.setPilotServerAccount(this.baseUrl, id, account, token)
+    );
+  }
+
+  /** Bring pilots in from the linked server, already tied to their accounts. */
+  pullFromServer(request: PullRequest): Promise<Pilot[] | undefined> {
+    return this.#privilegedWrite((token) => this.#api.pullFromServer(this.baseUrl, request, token));
   }
 
   /** The two doors other devices come in by, and where their listeners stand. */

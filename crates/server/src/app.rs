@@ -174,6 +174,13 @@ pub fn router(registry: EventRegistry) -> Router {
             "/server-link/events/{id}/replace",
             post(crate::link::post_replace),
         )
+        // Pilots and the accounts that hold them on that server (§13.7).
+        .route("/server-link/people", get(crate::link_pilots::get_people))
+        .route("/server-link/pull", post(crate::link_pilots::post_pull))
+        .route(
+            "/pilots/{pilot_id}/server-account",
+            put(crate::link_pilots::put_account),
+        )
         // What a visitor on the network may ask for.
         .route("/public/hello", get(crate::public::get_hello))
         // A QR code that opens the public pages, for a kiosk to show.

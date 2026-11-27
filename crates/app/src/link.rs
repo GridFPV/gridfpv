@@ -19,8 +19,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gridfpv_server::events::{EventId, EventRegistry};
-use gridfpv_server::link::{LinkDesk, LinkEvent, LinkEventState, LinkState, LinkStored, LinkTrust};
-use gridfpv_server::remote::{PushHeader, PushHello, PushRefusal, PushRefused, PushStatus};
+use gridfpv_server::link::{LinkDesk, LinkEvent, LinkEventState, LinkState};
+pub use gridfpv_server::link_client::{Client, PushError, log_body};
+use gridfpv_server::remote::PushRefusal;
 use gridfpv_storage::{Chain, RawEntry};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
@@ -34,228 +35,11 @@ const BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// How often every event is looked at, when nothing says to look sooner.
 const TICK: Duration = Duration::from_secs(1);
 
+/// How often the server is asked who holds which pilot.
+const ACCOUNTS_EVERY: Duration = Duration::from_secs(15);
+
 /// How long to wait before reaching for a server that did not answer.
 const RETRY: Duration = Duration::from_secs(5);
-
-/// What went wrong talking to the server, in words for the director.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PushError {
-    /// The server could not be reached, or what it said made no sense. Worth trying again.
-    Server(String),
-    /// The server did not take the token.
-    Token,
-}
-
-impl std::fmt::Display for PushError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Server(why) => f.write_str(why),
-            Self::Token => f.write_str(
-                "The server did not take the link token. It may have been taken back, or it is for another server.",
-            ),
-        }
-    }
-}
-
-/// A connection to one server, with one token.
-pub struct Client {
-    http: reqwest::Client,
-    base: String,
-    token: String,
-}
-
-impl Client {
-    /// A client for the server in the settings. Fails only when the settings cannot make
-    /// one (extra authorities that are not certificates).
-    pub fn new(stored: &LinkStored) -> Result<Self, PushError> {
-        let mut builder = gridfpv_server::http::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
-            // The desk let through plain HTTP only for this same computer (§13.5).
-            .https_only(stored.url.starts_with("https://"));
-        match &stored.trust {
-            LinkTrust::System => {}
-            LinkTrust::ExtraAuthorities { pem } => {
-                let certs = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
-                    .ok()
-                    .filter(|certs| !certs.is_empty())
-                    .ok_or_else(|| {
-                        PushError::Server(
-                            "The extra certificate authorities could not be read.".into(),
-                        )
-                    })?;
-                builder = builder.tls_certs_merge(certs);
-            }
-        }
-        let http = builder
-            .build()
-            .map_err(|e| PushError::Server(format!("The connection could not be set up: {e}")))?;
-        Ok(Self {
-            http,
-            base: stored.url.clone(),
-            token: stored.token.clone(),
-        })
-    }
-
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .request(method, format!("{}{path}", self.base))
-            .bearer_auth(&self.token)
-    }
-
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response, PushError> {
-        let response = request.send().await.map_err(|e| {
-            PushError::Server(format!("The server could not be reached: {}", plain(e)))
-        })?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(PushError::Token);
-        }
-        Ok(response)
-    }
-
-    /// Whatever else the server answered, as a reason.
-    async fn unexpected(response: reqwest::Response) -> PushError {
-        let status = response.status();
-        let said = response
-            .json::<gridfpv_server::error::ProtocolError>()
-            .await
-            .map(|e| e.message)
-            .unwrap_or_default();
-        PushError::Server(if said.is_empty() {
-            format!("The server answered {status}.")
-        } else {
-            format!("The server said: {said}")
-        })
-    }
-
-    async fn read<T: serde::de::DeserializeOwned>(
-        response: reqwest::Response,
-    ) -> Result<T, PushError> {
-        response.json::<T>().await.map_err(|e| {
-            PushError::Server(format!(
-                "The server's answer could not be read. Is this a Grid server? ({})",
-                plain(e)
-            ))
-        })
-    }
-
-    /// Which club the token pushes into.
-    pub async fn hello(&self) -> Result<PushHello, PushError> {
-        let response = self
-            .send(self.request(reqwest::Method::GET, "/push/hello"))
-            .await?;
-        if !response.status().is_success() {
-            return Err(Self::unexpected(response).await);
-        }
-        Self::read(response).await
-    }
-
-    /// How much of an event the server holds. `None` when it holds none of it.
-    pub async fn held(&self, event: &EventId) -> Result<Option<PushStatus>, PushError> {
-        let path = format!("/push/events/{}", event.0);
-        let response = self.send(self.request(reqwest::Method::GET, &path)).await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !response.status().is_success() {
-            return Err(Self::unexpected(response).await);
-        }
-        Self::read(response).await.map(Some)
-    }
-
-    /// Send an event's header.
-    pub async fn put_header(&self, event: &EventId, header: &PushHeader) -> Result<(), PushError> {
-        let path = format!("/push/events/{}", event.0);
-        let response = self
-            .send(self.request(reqwest::Method::PUT, &path).json(header))
-            .await?;
-        if !response.status().is_success() {
-            return Err(Self::unexpected(response).await);
-        }
-        Ok(())
-    }
-
-    /// Send a run of entries that starts at `from`, where `before` is the chain of what is
-    /// ahead of them. `Ok(Err(..))` is the server saying it did not take them, and why.
-    pub async fn post_log(
-        &self,
-        event: &EventId,
-        from: u64,
-        before: Chain,
-        entries: &[RawEntry],
-    ) -> Result<Result<PushStatus, PushRefused>, PushError> {
-        let path = format!("/push/events/{}/log", event.0);
-        let response = self
-            .send(
-                self.request(reqwest::Method::POST, &path)
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .body(log_body(from, before, entries, now_micros())),
-            )
-            .await?;
-        if response.status() == reqwest::StatusCode::CONFLICT {
-            return Self::read(response).await.map(Err);
-        }
-        if !response.status().is_success() {
-            return Err(Self::unexpected(response).await);
-        }
-        Self::read(response).await.map(Ok)
-    }
-
-    /// Remove the server's copy of an event. Holding none is as good.
-    pub async fn delete(&self, event: &EventId) -> Result<(), PushError> {
-        let path = format!("/push/events/{}", event.0);
-        let response = self
-            .send(self.request(reqwest::Method::DELETE, &path))
-            .await?;
-        if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(());
-        }
-        Err(Self::unexpected(response).await)
-    }
-}
-
-/// A network error without the address in it twice, and with its cause.
-fn plain(error: reqwest::Error) -> String {
-    use std::error::Error;
-    let error = error.without_url();
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        text = format!("{text}: {cause}");
-        source = cause.source();
-    }
-    text
-}
-
-fn now_micros() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(0)
-}
-
-/// The body of a log push. It is built as text so each entry goes as it is stored:
-/// passing an entry through a JSON value would write its keys in another order, and the
-/// server would hold other text than the chain was worked out from.
-pub fn log_body(from: u64, before: Chain, entries: &[RawEntry], sent_at: i64) -> String {
-    let mut body = format!(
-        "{{\"from\":{from},\"before\":\"{}\",\"entries\":[",
-        before.to_hex()
-    );
-    for (i, entry) in entries.iter().enumerate() {
-        if i > 0 {
-            body.push(',');
-        }
-        match entry.recorded_at {
-            Some(at) => body.push_str(&format!("{{\"recorded_at\":{at},\"event\":")),
-            None => body.push_str("{\"event\":"),
-        }
-        body.push_str(&entry.json);
-        body.push('}');
-    }
-    body.push_str(&format!("],\"sent_at\":{sent_at}}}"));
-    body
-}
 
 /// How many of `entries` go in the next batch: at least one, and no more than fit.
 fn batch_len(entries: &[RawEntry]) -> usize {
@@ -284,6 +68,10 @@ struct Known {
 #[derive(Default)]
 pub struct Memory {
     events: HashMap<EventId, Known>,
+    /// A mark of the pilot list last sent, so it is sent again only when it changes.
+    pilots: Option<[u8; 32]>,
+    /// When the server was last asked who holds which pilot.
+    accounts_asked: Option<std::time::Instant>,
 }
 
 /// An event's log from `start` on, as stored.
@@ -442,6 +230,66 @@ pub async fn sync_all(
     Ok(())
 }
 
+/// Keep the server and the Director agreed about pilots (§13.7):
+///
+/// - **the pilots this Director has** go up when they change, so the club knows a pilot
+///   before any event names them;
+/// - **who holds each pilot** comes down now and then, so a pilot who claimed their results
+///   on the server shows as tied on the Pilots page.
+///
+/// With `now` true the server is asked who holds what whether or not it is time.
+///
+/// Nothing here holds racing or the events up. A server that does not answer these (an
+/// older one has no such routes) is asked again later.
+pub async fn sync_pilots(
+    registry: &EventRegistry,
+    client: &Client,
+    memory: &mut Memory,
+    now: bool,
+) -> Result<(), PushError> {
+    let pilots = registry.pilots();
+    let ours: Vec<_> = pilots
+        .list()
+        .iter()
+        .map(gridfpv_server::link_pilots::push_pilot)
+        .collect();
+    let mark: [u8; 32] =
+        Sha256::digest(serde_json::to_vec(&ours).map_err(|e| PushError::Server(e.to_string()))?)
+            .into();
+    if memory.pilots != Some(mark) {
+        client.put_pilots(&ours).await?;
+        memory.pilots = Some(mark);
+    }
+
+    let due = memory
+        .accounts_asked
+        .is_none_or(|asked| asked.elapsed() >= ACCOUNTS_EVERY);
+    if now || due {
+        // Whether or not it answers, it is not asked again at once.
+        memory.accounts_asked = Some(std::time::Instant::now());
+        let before = pilots.account_mark();
+        let held = client
+            .pilots()
+            .await?
+            .into_iter()
+            .filter_map(|pilot| {
+                let account = pilot.account?;
+                Some((
+                    pilot.id,
+                    gridfpv_server::pilots::PilotAccount {
+                        id: account.id,
+                        name: account.name,
+                    },
+                ))
+            })
+            .collect();
+        pilots
+            .take_server_accounts(before, &held)
+            .map_err(|e| PushError::Server(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Start pushing. Runs until aborted.
 pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -505,6 +353,13 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                         gone = changed.changed() => if gone.is_err() { return },
                     }
                     break;
+                }
+                // The events are up. Pilots come after, and never hold them back.
+                if let Err(PushError::Token) =
+                    sync_pilots(&registry, &client, &mut memory, false).await
+                {
+                    // The token was taken back between two requests. The next look says so.
+                    continue;
                 }
                 // Every other reason to look (another event, a pilot renamed) waits for
                 // the tick.
