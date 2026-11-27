@@ -218,15 +218,17 @@ describe('the account page', () => {
           clubs: [
             { club: NORTH, role: 'Director' },
             { club: SOUTH, role: 'Pilot' }
-          ]
+          ],
+          primary: 'north'
         }
       })
     );
     expect(await screen.findByTestId('account-name')).toHaveTextContent('Ace');
     const clubs = within(screen.getByRole('list', { name: 'Your clubs' })).getAllByRole('listitem');
+    // With two clubs, one is marked primary and the other can be made so.
     expect(clubs.map((row) => row.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-      'North FPV Director',
-      'South FPV Pilot'
+      'North FPV Director Primary',
+      'South FPV Pilot Make primary'
     ]);
     const signIns = screen.getByRole('list', { name: 'How you sign in' });
     expect(signIns.textContent).toContain('Discord');

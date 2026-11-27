@@ -125,6 +125,12 @@ pub struct MyAccount {
     pub owner: bool,
     pub sign_ins: Vec<MySignIn>,
     pub clubs: Vec<MyClub>,
+    /// The club the front page opens on for this account (§13.2): the one it marked, or
+    /// else the one it joined first. Never an archived club. Absent for an account in no
+    /// club that has marked none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub primary: Option<String>,
     /// The pilots this account holds, and those it has asked for.
     #[serde(default)]
     pub pilots: Vec<crate::claims::MyPilot>,
@@ -138,6 +144,13 @@ pub struct Me {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub account: Option<MyAccount>,
+}
+
+/// `PUT /api/me/primary-club`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PrimaryClub {
+    pub club: String,
 }
 
 /// `PATCH /api/me`.
@@ -496,8 +509,35 @@ fn my_account(state: &AppState, standing: &Standing) -> Result<Option<MyAccount>
                 })
             })
             .collect(),
+        primary: primary_of(state, standing)?,
         pilots: crate::claims::my_pilots(state, &standing.account)?,
     }))
+}
+
+/// Whether an account may have a club as its primary one: a club that is on the list, and
+/// that the account is in. An owner, who looks after every club, may pick any.
+fn may_be_primary(state: &AppState, standing: &Standing, club: &ClubId) -> bool {
+    state
+        .book
+        .club(club)
+        .is_some_and(|found| found.archived_at.is_none())
+        && (standing.owner || standing.role_in(club).is_some())
+}
+
+/// The club an account's front page opens on. What it marked, while that still holds;
+/// otherwise the first club it joined that is still on the list.
+fn primary_of(state: &AppState, standing: &Standing) -> Result<Option<String>, ApiError> {
+    if let Some(marked) = state.accounts.primary_club(&standing.account)?
+        && may_be_primary(state, standing, &marked)
+    {
+        return Ok(Some(marked.0));
+    }
+    Ok(state
+        .accounts
+        .clubs_joined(&standing.account)?
+        .into_iter()
+        .find(|club| may_be_primary(state, standing, club))
+        .map(|club| club.0))
 }
 
 /// The club in the address, and the right to do `act` in it.
@@ -538,6 +578,28 @@ pub async fn patch_me(
     Json(change): Json<MeChange>,
 ) -> Result<Json<Me>, ApiError> {
     state.accounts.rename(&standing.account, &change.name)?;
+    Ok(Json(Me {
+        account: my_account(&state, &standing)?,
+    }))
+}
+
+/// `PUT /api/me/primary-club`: mark the club the front page opens on.
+pub async fn put_primary_club(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Json(change): Json<PrimaryClub>,
+) -> Result<Json<Me>, ApiError> {
+    let club = ClubId(change.club);
+    if !may_be_primary(&state, &standing, &club) {
+        // The same answer for a club that is not there, one that is archived, and one the
+        // account is not in.
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Refused,
+            "Pick a club you are in. An archived club cannot be picked.",
+        ));
+    }
+    state.accounts.set_primary_club(&standing.account, &club)?;
     Ok(Json(Me {
         account: my_account(&state, &standing)?,
     }))

@@ -147,6 +147,12 @@ fn doors() -> Vec<(Method, &'static str, Door, Option<Value>)> {
             Account,
             None,
         ),
+        (
+            Method::PUT,
+            "/api/me/primary-club",
+            Account,
+            Some(json!({"club": "north"})),
+        ),
         (Method::POST, "/api/invites/{secret}/accept", Account, None),
         (Method::GET, "/api/me/results", Account, None),
         // ── Running a club ──────────────────────────────────────────────────

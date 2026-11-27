@@ -437,6 +437,14 @@ export function fakePeople(server: FakeServer) {
       server.clubList.push(club);
       return { ...club };
     }),
+    setPrimary: vi.fn(async (club: string) => {
+      const account = server.account ?? refuse('Sign in first.');
+      if (!account.owner && !account.clubs.some((entry) => entry.club.id === club)) {
+        refuse('Pick a club you are in. An archived club cannot be picked.');
+      }
+      server.account = { ...account, primary: club };
+      return me();
+    }),
     archiveClub: vi.fn(async (club: string, archived: boolean): Promise<ServerClub> => {
       if (server.account?.owner !== true) refuse('Only an owner of this server can do that.');
       const found =

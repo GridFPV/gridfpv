@@ -1697,8 +1697,8 @@ A server can hold more than one club, and a director usually belongs to one.
   under a club from the start, so adding more clubs later changes nothing already stored.
 
 **More than one club (decided 2026-11-28).** Built: making a club, its id and friendly
-address, archiving, and telling people about owners. Not built yet: the primary club and
-the new front page, and the list of clubs in Grid. Ryan's answers:
+address, archiving, telling people about owners, and the primary club with the front
+page that opens on it. Not built yet: the list of clubs in Grid. Ryan's answers:
 
 - **Who it is for.** First, an owner who hosts a few clubs they know. A big shared server
   where strangers ask for a club comes later and stays small at first. No open sign-up
@@ -2008,6 +2008,12 @@ code of §13.13.
     - An archived club refuses every change under its address, for owners too. Bringing
       it back is the one change it takes.
     - Grid says **Not connected** and gives the server's reason. It tries again by itself.
+    - The front page shows a signed-in person their primary club alone, with a link to
+      every club (`#/clubs`). **A visitor still sees every club with its events**, and not
+      a bare list of club names: one tap fewer to reach a race.
+    - An owner in no club has no primary club until they mark one. They may mark any.
+    - An archived club is never primary. The mark is kept, and holds again when the club
+      is brought back.
     - A director of an archived club cannot open its members page: the club is off the
       list they are given. An owner can.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a

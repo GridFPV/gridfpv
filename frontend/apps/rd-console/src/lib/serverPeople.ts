@@ -38,7 +38,8 @@ import {
   getServerReconnect,
   listServerClubs,
   makeServerClub,
-  setServerClubArchived
+  setServerClubArchived,
+  setServerPrimaryClub
 } from '@gridfpv/protocol-client';
 import type {
   AccountSignIns,
@@ -119,6 +120,8 @@ export interface PeopleApi {
   makeClub(name: string): Promise<ServerClub>;
   /** Archive a club, or bring it back. */
   archiveClub(club: string, archived: boolean): Promise<ServerClub>;
+  /** Mark the club the signed-in account's front page opens on. */
+  setPrimary(club: string): Promise<Me>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -162,6 +165,7 @@ export function peopleApi(baseUrl: string): PeopleApi {
     serverClubs: () => listServerClubs(baseUrl),
     makeClub: (name) => makeServerClub(baseUrl, name),
     archiveClub: (club, archived) => setServerClubArchived(baseUrl, club, archived),
+    setPrimary: (club) => setServerPrimaryClub(baseUrl, club),
     removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }

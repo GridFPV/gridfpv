@@ -251,3 +251,4 @@ export type * from '@bindings/ReconnectView';
 export type * from '@bindings/ServerClub';
 export type * from '@bindings/NewClub';
 export type * from '@bindings/ClubArchived';
+export type * from '@bindings/PrimaryClub';

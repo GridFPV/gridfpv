@@ -473,6 +473,10 @@ impl Accounts {
                 used_at    INTEGER,
                 revoked_at INTEGER
             );
+            CREATE TABLE IF NOT EXISTS primary_clubs (
+                account TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                club    TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS club_pilots (
                 club     TEXT NOT NULL,
                 pilot    TEXT NOT NULL,
@@ -581,6 +585,48 @@ impl Accounts {
     /// What an account may do. `None` when there is no such account.
     pub fn standing(&self, id: &AccountId) -> Result<Option<Standing>> {
         Self::standing_in(&self.lock(), id)
+    }
+
+    /// Mark a club as the one an account's front page opens on (§13.2). Whether the
+    /// account may pick it is the caller's to check.
+    pub fn set_primary_club(&self, account: &AccountId, club: &ClubId) -> Result<()> {
+        let conn = self.lock();
+        if Self::account_in(&conn, account)?.is_none() {
+            return Err(AccountError::NoSuchAccount);
+        }
+        conn.execute(
+            "INSERT INTO primary_clubs (account, club) VALUES (?1, ?2)
+             ON CONFLICT(account) DO UPDATE SET club = excluded.club",
+            params![account.0, club.0],
+        )?;
+        Ok(())
+    }
+
+    /// The club an account marked as primary, if it marked one. It may no longer be a
+    /// club the account is in: the caller checks.
+    pub fn primary_club(&self, account: &AccountId) -> Result<Option<ClubId>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT club FROM primary_clubs WHERE account = ?1",
+                params![account.0],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(ClubId))
+    }
+
+    /// The clubs an account is in, the one it joined first coming first.
+    pub fn clubs_joined(&self, account: &AccountId) -> Result<Vec<ClubId>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT club FROM members WHERE account = ?1 ORDER BY added_at, rowid")?;
+        let rows = stmt.query_map(params![account.0], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(ClubId)
+            .collect())
     }
 
     /// Whether this server has an owner yet.

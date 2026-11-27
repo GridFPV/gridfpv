@@ -1085,3 +1085,144 @@ async fn a_session_is_not_a_link_token_and_a_link_token_is_not_a_session() {
     let ((_, me), _) = call_with(&rig, Some(&token), Method::GET, "/api/me", None, &[]).await;
     assert_eq!(me, json!({}));
 }
+
+// ── The primary club: where the front page opens (§13.2) ────────────────────
+
+impl Rig {
+    /// Put someone who has an account into another club too.
+    async fn also_joins(&self, who: &Person, club_id: &str, role: Role) {
+        let (_, link) = self
+            .state
+            .accounts
+            .new_invite(
+                NewInvite {
+                    kind: InviteKind::Personal {
+                        club: club(club_id),
+                        role,
+                        pilot: None,
+                    },
+                    label: "again".into(),
+                    max_uses: 1,
+                    expires_at: None,
+                },
+                None,
+                now_ms(),
+            )
+            .unwrap();
+        let (status, _) = call(
+            self,
+            Some(who),
+            Method::POST,
+            &format!("/api/invites/{link}/accept"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+async fn primary(rig: &Rig, who: &Person) -> Value {
+    call(rig, Some(who), Method::GET, "/api/me", None).await.1["account"]["primary"].clone()
+}
+
+async fn pick(rig: &Rig, who: Option<&Person>, club_id: &str) -> (StatusCode, Value) {
+    call(
+        rig,
+        who,
+        Method::PUT,
+        "/api/me/primary-club",
+        Some(json!({"club": club_id})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn the_primary_club_is_the_first_one_joined_until_another_is_marked() {
+    let rig = rig();
+    // South first, though North sorts before it.
+    let ace = rig.member("Ace", "south", Role::Pilot);
+    assert_eq!(primary(&rig, &ace).await, "south");
+    rig.also_joins(&ace, "north", Role::Director).await;
+    assert_eq!(
+        primary(&rig, &ace).await,
+        "south",
+        "joining another changes nothing"
+    );
+
+    let (status, me) = pick(&rig, Some(&ace), "north").await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(me["account"]["primary"], "north");
+    assert_eq!(primary(&rig, &ace).await, "north");
+    // It is the account's own: nobody else's changes.
+    let bee = rig.member("Bee", "south", Role::Pilot);
+    assert_eq!(primary(&rig, &bee).await, "south");
+    // Marking it again, or back, is fine.
+    assert_eq!(pick(&rig, Some(&ace), "north").await.0, StatusCode::OK);
+    assert_eq!(pick(&rig, Some(&ace), "south").await.0, StatusCode::OK);
+    assert_eq!(primary(&rig, &ace).await, "south");
+}
+
+#[tokio::test]
+async fn only_a_club_the_account_is_in_can_be_marked_and_the_answer_tells_nothing_else() {
+    let rig = rig();
+    let ace = rig.member("Ace", "north", Role::Pilot);
+    assert_eq!(pick(&rig, None, "north").await.0, StatusCode::UNAUTHORIZED);
+    let mut said = Vec::new();
+    // A club Ace is not in, and one that is not there, are refused in the same words.
+    for wrong in ["south", "nowhere", "", "../north"] {
+        let (status, body) = pick(&rig, Some(&ace), wrong).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{wrong:?}");
+        said.push(body["message"].as_str().unwrap().to_owned());
+    }
+    assert!(said.iter().all(|words| words == &said[0]), "{said:?}");
+    assert_eq!(primary(&rig, &ace).await, "north");
+}
+
+#[tokio::test]
+async fn someone_in_no_club_has_no_primary_club_and_an_owner_may_mark_any() {
+    let rig = rig();
+    let oz = rig.owner("Oz");
+    assert_eq!(primary(&rig, &oz).await, Value::Null);
+    let (status, me) = pick(&rig, Some(&oz), "south").await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(primary(&rig, &oz).await, "south");
+    assert_eq!(
+        pick(&rig, Some(&oz), "nowhere").await.0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn a_primary_club_that_is_archived_or_left_gives_way_to_the_next_one_and_comes_back() {
+    let rig = rig();
+    let ace = rig.member("Ace", "north", Role::Pilot);
+    let dee = rig.member("Dee", "south", Role::Director);
+    rig.also_joins(&ace, "south", Role::Pilot).await;
+    assert_eq!(pick(&rig, Some(&ace), "south").await.0, StatusCode::OK);
+
+    // South is archived: the front page opens on North, and South cannot be marked.
+    rig.state.book.archive_club(&club("south"), true).unwrap();
+    assert_eq!(primary(&rig, &ace).await, "north");
+    assert_eq!(
+        pick(&rig, Some(&ace), "south").await.0,
+        StatusCode::CONFLICT
+    );
+    // Dee has no other club.
+    assert_eq!(primary(&rig, &dee).await, Value::Null);
+    // Brought back, the mark Ace made holds again.
+    rig.state.book.archive_club(&club("south"), false).unwrap();
+    assert_eq!(primary(&rig, &ace).await, "south");
+    assert_eq!(primary(&rig, &dee).await, "south");
+
+    // Removed from South: it is no longer Ace's to open on.
+    let (status, _) = call(
+        &rig,
+        Some(&dee),
+        Method::DELETE,
+        &format!("/api/clubs/south/members/{}", ace.id.0),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(primary(&rig, &ace).await, "north");
+}
