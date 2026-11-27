@@ -396,6 +396,9 @@ fn clean(text: &str, empty: &'static str) -> Result<String> {
     Ok(text.to_owned())
 }
 
+/// The `provider` of a username-and-password sign-in. Its `subject` is the username.
+pub const PASSWORD_PROVIDER: &str = "password";
+
 /// The longest callsign, or id from elsewhere, a profile may hold.
 const PROFILE_MAX: usize = 40;
 
@@ -490,6 +493,11 @@ impl Accounts {
                 color          TEXT,
                 multigp_id     TEXT,
                 velocidrone_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS passwords (
+                account TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+                hash    TEXT NOT NULL,
+                set_at  INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS join_asks (
                 account  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -974,6 +982,13 @@ impl Accounts {
             "DELETE FROM sign_ins WHERE account = ?1 AND provider = ?2 AND subject = ?3",
             params![account.0, provider, subject],
         )?;
+        if provider == PASSWORD_PROVIDER {
+            // A password with no username opens nothing. It is not kept.
+            tx.execute(
+                "DELETE FROM passwords WHERE account = ?1",
+                params![account.0],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1012,6 +1027,12 @@ impl Accounts {
             params![account.0, provider, subject],
         )? > 0;
         if gone {
+            if provider == PASSWORD_PROVIDER {
+                tx.execute(
+                    "DELETE FROM passwords WHERE account = ?1",
+                    params![account.0],
+                )?;
+            }
             tx.execute(
                 "DELETE FROM sessions WHERE account = ?1",
                 params![account.0],
@@ -1197,6 +1218,74 @@ impl Accounts {
             return Err(AccountError::NoSuchAccount);
         }
         Ok(Self::account_in(&conn, account)?.expect("just updated"))
+    }
+
+    // ── A username and password (§13.8) ─────────────────────────────────────
+
+    /// The account a username signs in to, and the hash of its password. The username
+    /// is a sign-in like any other (`provider` is [`PASSWORD_PROVIDER`]): it is taken off
+    /// and counted the same way. The hash is kept beside it, by account.
+    ///
+    /// `None` for a username nobody has. An account whose hash is missing cannot sign in
+    /// with a password until one is set again.
+    pub fn password_of(&self, username: &str) -> Result<Option<(AccountId, Option<String>)>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT s.account, p.hash FROM sign_ins s
+                 LEFT JOIN passwords p ON p.account = s.account
+                 WHERE s.provider = ?1 AND s.subject = ?2",
+                params![PASSWORD_PROVIDER, username],
+                |row| Ok((AccountId(row.get(0)?), row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The username an account signs in with, when it has one.
+    pub fn username_of(&self, account: &AccountId) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT subject FROM sign_ins WHERE account = ?1 AND provider = ?2",
+                params![account.0, PASSWORD_PROVIDER],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Keep the hash of an account's password. The account must already have a username:
+    /// a hash with no username opens nothing.
+    pub fn set_password_hash(&self, account: &AccountId, hash: &str, now: i64) -> Result<()> {
+        let conn = self.lock();
+        let has_username: bool = conn
+            .query_row(
+                "SELECT 1 FROM sign_ins WHERE account = ?1 AND provider = ?2",
+                params![account.0, PASSWORD_PROVIDER],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !has_username {
+            return Err(AccountError::Invalid(
+                "This account has no username to set a password for.",
+            ));
+        }
+        conn.execute(
+            "INSERT INTO passwords (account, hash, set_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (account) DO UPDATE SET hash = excluded.hash, set_at = excluded.set_at",
+            params![account.0, hash, now],
+        )?;
+        Ok(())
+    }
+
+    /// End every session of an account but one: after a password is changed, whoever
+    /// else was signed in with the old one is signed out.
+    pub fn end_other_sessions(&self, account: &AccountId, keep: &str) -> Result<usize> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "DELETE FROM sessions WHERE account = ?1 AND hash != ?2",
+            params![account.0, hash(keep)],
+        )?)
     }
 
     // ── Joining a club (§13.7) ──────────────────────────────────────────────

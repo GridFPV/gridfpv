@@ -150,6 +150,18 @@ pub struct ServerInfo {
     /// Whether someone with no invite may make an account here (§13.7). The owner's
     /// choice. When `false`, an account needs an invite.
     pub open_sign_up: bool,
+    /// Whether people may sign in with a username and password kept here (§13.8). The
+    /// owner's choice.
+    #[serde(default)]
+    pub password_sign_in: bool,
+}
+
+/// How a server is run, as anyone may know it.
+pub(crate) fn server_info(state: &AppState) -> ServerInfo {
+    ServerInfo {
+        open_sign_up: state.book.open_sign_up(),
+        password_sign_in: state.book.password_sign_in(),
+    }
 }
 
 /// `PUT /api/server/sign-up`.
@@ -647,9 +659,7 @@ pub async fn put_profile(
 
 /// `GET /api/server`.
 pub async fn get_server(State(state): State<AppState>) -> Json<ServerInfo> {
-    Json(ServerInfo {
-        open_sign_up: state.book.open_sign_up(),
-    })
+    Json(server_info(&state))
 }
 
 /// `PUT /api/server/sign-up`: an owner says whether an account needs an invite.
@@ -665,11 +675,11 @@ pub async fn put_sign_up(
             "Only an owner of this server can do that.",
         ));
     }
-    let open_sign_up = state
+    state
         .book
         .set_open_sign_up(change.open)
         .map_err(crate::manage::book_error)?;
-    Ok(Json(ServerInfo { open_sign_up }))
+    Ok(Json(server_info(&state)))
 }
 
 /// `PUT /api/me/primary-club`: mark the club the front page opens on.

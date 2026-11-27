@@ -60,6 +60,9 @@ const USAGE: &str = "usage:
   gridfpv-server club archive <club>   make a club read-only and take it off the list
   gridfpv-server club restore <club>   bring an archived club back
   gridfpv-server owner invite          make a link that makes its user an owner
+  gridfpv-server password              say whether people may sign in with a password
+  gridfpv-server password on           let people sign in with a username and password
+  gridfpv-server password off          sign in with Discord, Google and the like only
   gridfpv-server sign-up               say who may make an account
   gridfpv-server sign-up open          let anyone who can sign in make an account
   gridfpv-server sign-up invite        an account needs an invite (how a server starts)
@@ -89,6 +92,9 @@ fn main() -> ExitCode {
         ["club", "archive", club] => club_archive(club, true),
         ["club", "restore", club] => club_archive(club, false),
         ["owner", "invite"] => owner_invite(),
+        ["password"] => password(None),
+        ["password", "on"] => password(Some(true)),
+        ["password", "off"] => password(Some(false)),
         ["sign-up"] => sign_up(None),
         ["sign-up", "open"] => sign_up(Some(true)),
         ["sign-up", "invite"] => sign_up(Some(false)),
@@ -145,7 +151,13 @@ fn serve() -> Done {
             (None, false) => println!(
                 "  Sign-in is off: set GRIDFPV_SERVER_PUBLIC_URL to the address people open."
             ),
-            (_, true) => println!("  Sign-in is off: no provider is set up."),
+            (_, true) if state.book.password_sign_in() => {}
+            (_, true) => println!(
+                "  Sign-in is off: no provider is set up, and passwords are off (gridfpv-server password on)."
+            ),
+        }
+        if state.book.password_sign_in() {
+            println!("  sign-in with a username and password");
         }
         if state.book.open_sign_up() {
             println!("  Anyone who can sign in may make an account.");
@@ -332,6 +344,25 @@ fn account_reconnect(id: &str) -> Done {
     println!("  {}/#/reconnect/{secret}", link_base());
     println!();
     println!("It works once, and for seven days. It is not kept here and cannot be shown again.");
+    Ok(())
+}
+
+/// Say whether people may sign in with a username and password, after changing it when
+/// asked to.
+fn password(on: Option<bool>) -> Done {
+    let book = Book::open(&data_dir())?;
+    let on = match on {
+        Some(on) => book.set_password_sign_in(on)?,
+        None => book.password_sign_in(),
+    };
+    if on {
+        println!("People may sign in with a username and a password kept on this server.");
+        println!("To switch it off: gridfpv-server password off");
+    } else {
+        println!("Signing in with a password is off.");
+        println!("To switch it on: gridfpv-server password on");
+        println!("Anyone whose only way in is a password cannot sign in while it is off.");
+    }
     Ok(())
 }
 

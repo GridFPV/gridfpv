@@ -53,6 +53,9 @@ import type {
   LinkPeople,
   ClubSettings,
   PilotProfile,
+  PasswordChange,
+  PasswordSignIn,
+  PasswordSignUp,
   PersonView,
   ServerInfo,
   LinkView,
@@ -1141,6 +1144,75 @@ export async function addClubMember(
     `/api/clubs/${encodeURIComponent(club)}/members`,
     { method: 'POST', body: { account }, fetch: options.fetch },
     'add them to the club'
+  );
+}
+
+/**
+ * Sign in to a server with a username and a password it keeps
+ * (`POST /api/sign-in/password`). The answer sets the session cookie.
+ */
+export async function signInWithPassword(
+  baseUrl: string,
+  given: PasswordSignIn,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/sign-in/password',
+    { method: 'POST', body: given, fetch: options.fetch },
+    'sign in'
+  );
+}
+
+/**
+ * Make an account on a server with a username and a password
+ * (`POST /api/sign-up/password`). With a re-connect link as `invite`, it sets a way in to
+ * the account the link is for.
+ */
+export async function signUpWithPassword(
+  baseUrl: string,
+  given: PasswordSignUp,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/sign-up/password',
+    { method: 'POST', body: given, fetch: options.fetch },
+    'make the account'
+  );
+}
+
+/**
+ * Add a username and password to the signed-in account, or change its password
+ * (`PUT /api/me/password`).
+ */
+export async function setServerPassword(
+  baseUrl: string,
+  change: PasswordChange,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/me/password',
+    { method: 'PUT', body: change, fetch: options.fetch },
+    'save the password'
+  );
+}
+
+/**
+ * Switch signing in with a password on or off (`PUT /api/server/password-sign-in`). For
+ * an owner of the server.
+ */
+export async function setServerPasswordSignIn(
+  baseUrl: string,
+  on: boolean,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerInfo> {
+  return apiJson<ServerInfo>(
+    baseUrl,
+    '/api/server/password-sign-in',
+    { method: 'PUT', body: { on }, fetch: options.fetch },
+    'change how people sign in'
   );
 }
 

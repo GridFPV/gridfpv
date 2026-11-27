@@ -30,6 +30,7 @@ pub mod claims;
 pub mod join;
 pub mod manage;
 pub mod page;
+pub mod password;
 pub mod people;
 pub mod push;
 pub mod read;

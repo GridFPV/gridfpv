@@ -610,6 +610,47 @@ describe('other devices on the network (docs/primitives.md §11)', () => {
     expect(JSON.parse(seen[7].init?.body as string)).toEqual({ account: 'acct_pia' });
   });
 
+  it('password sign-in goes to the right addresses, with the password only in the body', async () => {
+    const { signInWithPassword, signUpWithPassword, setServerPassword, setServerPasswordSignIn } =
+      await import('./client.js');
+    const { seen, fetch } = recorder(200, { account: { id: 'acct_1' } });
+    const base = 'https://grid.example.org';
+    await signInWithPassword(`${base}/`, { username: 'ace', password: 'correct horse' }, { fetch });
+    expect(seen[0].url).toBe(`${base}/api/sign-in/password`);
+    expect(seen[0].init?.method).toBe('POST');
+    expect(JSON.parse(seen[0].init?.body as string)).toEqual({
+      username: 'ace',
+      password: 'correct horse'
+    });
+    // A password is never put in an address, where it would be logged.
+    expect(seen[0].url).not.toContain('correct');
+
+    const up = { username: 'pia', password: 'correct horse', invite: 'gfr_abc' };
+    await signUpWithPassword(base, up, { fetch });
+    expect(seen[1].url).toBe(`${base}/api/sign-up/password`);
+    expect(JSON.parse(seen[1].init?.body as string)).toEqual(up);
+
+    await setServerPassword(base, { current: 'old one', password: 'new one' }, { fetch });
+    expect(seen[2].url).toBe(`${base}/api/me/password`);
+    expect(seen[2].init?.method).toBe('PUT');
+
+    await setServerPasswordSignIn(base, true, { fetch });
+    expect(seen[3].url).toBe(`${base}/api/server/password-sign-in`);
+    expect(seen[3].init?.method).toBe('PUT');
+    expect(JSON.parse(seen[3].init?.body as string)).toEqual({ on: true });
+  });
+
+  it("a wrong password is said in the server's own words", async () => {
+    const { signInWithPassword } = await import('./client.js');
+    const { fetch } = recorder(401, {
+      code: 'Unauthorized',
+      message: 'That username and password do not match.'
+    });
+    await expect(
+      signInWithPassword('https://grid.example.org', { username: 'a', password: 'b' }, { fetch })
+    ).rejects.toThrow('That username and password do not match.');
+  });
+
   it('a pilot profile and the sign-up setting go to the right addresses', async () => {
     const { setServerProfile, getServerInfo, setServerOpenSignUp } = await import('./client.js');
     const me = recorder(200, { account: { id: 'acct_1', profile: { callsign: 'Ace' } } });

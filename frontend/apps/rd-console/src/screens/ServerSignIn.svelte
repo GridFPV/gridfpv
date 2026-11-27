@@ -6,17 +6,22 @@
    * With `invite`, the invite goes along, so that someone new gets their account.
    */
   import { Banner } from '@gridfpv/components';
-  import type { SignInProvider } from '@gridfpv/types';
+  import type { Me, SignInProvider } from '@gridfpv/types';
   import { OWNERS_SEE_ALL, type PeopleApi } from '../lib/serverPeople.js';
+  import ServerPassword from './ServerPassword.svelte';
 
   let {
     api,
     providers,
     invite = undefined,
     add = false,
-    problem = undefined
+    problem = undefined,
+    password = false,
+    canMake = false,
+    onsignedin = undefined
   }: {
-    api: Pick<PeopleApi, 'signInUrl'>;
+    api: Pick<PeopleApi, 'signInUrl'> &
+      Partial<Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>>;
     /** The providers the server offers. `undefined` while that is being read. */
     providers: readonly SignInProvider[] | undefined;
     /** The invite the person came with. */
@@ -25,7 +30,25 @@
     add?: boolean;
     /** Why the last try did not work, in words. */
     problem?: string | undefined;
+    /** Whether this server lets people sign in with a username and password. */
+    password?: boolean;
+    /** Whether someone with no invite may make an account here. */
+    canMake?: boolean;
+    /** Someone signed in with a password: here is their account. */
+    onsignedin?: ((me: Me) => void) | undefined;
   } = $props();
+
+  /** A re-connect link sets a way back in. It is not signed in with. */
+  const reconnecting = $derived(invite?.startsWith('gfr_') ?? false);
+  /** The password form is offered where the server allows it, and not when adding. */
+  const withPassword = $derived(
+    password &&
+      !add &&
+      onsignedin !== undefined &&
+      api.passwordSignIn !== undefined &&
+      api.passwordSignUp !== undefined &&
+      api.setPassword !== undefined
+  );
 </script>
 
 <div class="sign-in">
@@ -33,9 +56,20 @@
     >{/if}
   {#if providers === undefined}
     <p class="muted" role="status">Loading…</p>
-  {:else if providers.length === 0}
+  {:else if providers.length === 0 && !withPassword}
     <p class="muted" data-testid="sign-in-off">Signing in is not set up on this server.</p>
   {:else}
+    {#if withPassword && onsignedin}
+      <ServerPassword
+        api={api as Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>}
+        mode={reconnecting ? 'make' : 'sign-in'}
+        {invite}
+        canMake={!reconnecting && (invite !== undefined || canMake)}
+        makeWords={reconnecting ? 'Set the username and password' : 'Make the account'}
+        ondone={onsignedin}
+      />
+      {#if providers.length > 0}<p class="muted or">Or use one of these:</p>{/if}
+    {/if}
     <ul>
       {#each providers as provider (provider.id)}
         <li>

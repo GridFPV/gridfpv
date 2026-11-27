@@ -42,3 +42,10 @@ gridfpv-server = { path = "crates/server" }
 # Third-party.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Hashing a password is slow on purpose, and many times slower again when it is built with
+# no optimisation. Build just these with it, so the tests that sign in do not crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

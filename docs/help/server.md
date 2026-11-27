@@ -76,10 +76,11 @@ pilots in from the server with **Add from the server**.
 
 ## Someone cannot sign in
 
-There are no passwords on a server. People sign in with Discord or Google. If someone in
-your club loses that account, ask an owner of the server. On the server's page, the owner
-can take the old sign-in off and send the person a **re-connect link**. The person opens
-it, signs in another way, and is back in their own account with their results.
+People sign in to a server with Discord or Google, or with a username and password if
+the server's owner has switched that on. If someone in your club forgets their password,
+or loses their Discord or Google account, ask an owner of the server. On the server's
+page, the owner can send the person a **re-connect link**. The person opens it, signs in
+another way or types a new password, and is back in their own account with their results.
 
 ## Signing up from anywhere
 

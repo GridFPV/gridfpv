@@ -141,6 +141,10 @@ struct Pages {
     /// Off until they switch it on.
     #[serde(default)]
     open_sign_up: bool,
+    /// Whether people may sign in with a username and a password kept here (§13.8). The
+    /// owner's choice. Off until they switch it on.
+    #[serde(default)]
+    password_sign_in: bool,
 }
 
 /// What the server notes about one event of a club, apart from the event itself.
@@ -427,6 +431,20 @@ impl Book {
     pub fn open_sign_up(&self) -> bool {
         self.refresh();
         self.held.read().expect("book lock").pages.open_sign_up
+    }
+
+    /// Whether people may sign in with a username and password kept on this server.
+    pub fn password_sign_in(&self) -> bool {
+        self.refresh();
+        self.held.read().expect("book lock").pages.password_sign_in
+    }
+
+    /// Switch signing in with a username and password on or off.
+    pub fn set_password_sign_in(&self, on: bool) -> Result<bool, BookError> {
+        self.change(|pages| {
+            pages.password_sign_in = on;
+            Ok(on)
+        })
     }
 
     /// Let anyone who can sign in make an account, or only those with an invite.

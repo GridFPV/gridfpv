@@ -221,11 +221,46 @@ A token that is taken back stops working straight away.
 
 ## Signing in
 
-People can have an account on your server. They sign in with Discord or Google. Grid never
-sees a password. A server starts with invites only: nobody can make an account without
-one. You can change that. See **Let anyone make an account** below.
+People can have an account on your server. There are two ways to let them sign in. You can
+use either, or both.
 
-The server's page has **Sign in** at the top once a provider is set up.
+- **Discord or Google.** People use an account they already have. Grid never sees a
+  password. You register a free app with Discord or Google once. Steps 1 to 3 below.
+- **A username and a password.** The server keeps them itself. It needs nothing outside
+  your server. See **Usernames and passwords** just below.
+
+A server starts with invites only: nobody can make an account without one. You can change
+that. See **Let anyone make an account** further down.
+
+The server's page has **Sign in** at the top once one of the two ways is set up.
+
+### Usernames and passwords
+
+This is off on a new server. Switch it on:
+
+```
+gridfpv-serverctl password on
+```
+
+That is all the setup there is. You can skip steps 1 to 3 if this is the only way you
+want. Then make yourself the owner (step 4): open the setup link and press **Make one with
+a username and password**.
+
+Once you are an owner you can also switch it on and off on your account page, under
+**Signing in with a password**.
+
+- A username is 3 to 32 letters and digits. A password is at least 10 characters.
+- The server keeps a scrambled form of each password, never the password itself. Nobody
+  can read a password off the server, you included.
+- After five wrong passwords in a row, a username waits a minute.
+- Someone who signs in with Discord or Google can add a username and password too, on
+  their account page.
+- **If someone forgets their password,** send them a re-connect link. See **Help someone
+  who cannot sign in**. They open it and type a new password.
+- If you switch passwords off, anyone whose only way in is a password is locked out
+  until you switch it on again. Their passwords are kept.
+
+Use HTTPS. A password typed over plain `http://` can be read on the way.
 
 ### 1. Tell the server its own address
 
@@ -439,16 +474,17 @@ gridfpv-serverctl club name "Northern Whoops" north-whoops
 
 ### 9. Help someone who cannot sign in
 
-There are no passwords on a Grid server, so there is no password to reset. People sign in
-with Discord or Google. If someone loses that account, or it is stolen, an **owner** of the
-server gets them back in.
+A Grid server sends no email, so nobody can reset their own password or get back in by
+themselves. If someone forgets their password, or loses the Discord or Google account they
+sign in with, an **owner** of the server gets them back in.
 
 On the club's page, under **Members**, press **Sign-ins…** next to the person. You can:
 
 - **Take off** a sign-in. The person is signed out everywhere at once, and that sign-in no
   longer opens their account. Do this when a Discord or Google account was stolen.
 - **Make a re-connect link** and send it to the person. They open it and sign in with an
-  account they can still use. From then on, that is how they sign in. Their clubs, pilots
+  account they can still use. Or, when passwords are on, they type their username and a
+  new password. From then on, that is how they sign in. Their clubs, pilots
   and results stay as they are.
 
 The link works once, and for seven days. Whoever opens it gets into the account, so send

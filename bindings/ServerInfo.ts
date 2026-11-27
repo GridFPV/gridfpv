@@ -8,4 +8,9 @@ export type ServerInfo = {
  * Whether someone with no invite may make an account here (§13.7). The owner's
  * choice. When `false`, an account needs an invite.
  */
-open_sign_up: boolean, };
+open_sign_up: boolean, 
+/**
+ * Whether people may sign in with a username and password kept here (§13.8). The
+ * owner's choice.
+ */
+password_sign_in: boolean, };

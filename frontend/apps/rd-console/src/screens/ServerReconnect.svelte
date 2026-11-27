@@ -8,7 +8,7 @@
    * their old account. Nothing on the account changes.
    */
   import { Card } from '@gridfpv/components';
-  import type { MyAccount, ReconnectView, SignInProvider } from '@gridfpv/types';
+  import type { Me, MyAccount, ReconnectView, SignInProvider } from '@gridfpv/types';
   import type { PeopleApi } from '../lib/serverPeople.js';
   import ServerSignIn from './ServerSignIn.svelte';
 
@@ -16,13 +16,20 @@
     api,
     secret,
     account,
-    providers
+    providers,
+    password = false,
+    onsignedin = undefined
   }: {
-    api: Pick<PeopleApi, 'reconnect' | 'signInUrl'>;
+    api: Pick<PeopleApi, 'reconnect' | 'signInUrl'> &
+      Partial<Pick<PeopleApi, 'passwordSignIn' | 'passwordSignUp' | 'setPassword'>>;
     secret: string;
     /** The account this browser is signed in as now, if it is. */
     account: MyAccount | undefined;
     providers: readonly SignInProvider[] | undefined;
+    /** Whether this server lets people sign in with a username and password. */
+    password?: boolean;
+    /** Someone set a username and password with the link, and is signed in. */
+    onsignedin?: ((me: Me) => void) | undefined;
   } = $props();
 
   let link = $state<ReconnectView | undefined>(undefined);
@@ -66,13 +73,18 @@
         >. Your clubs, pilots and results stay as they are.
       </p>
       <p class="muted">This link works once. Use a sign-in that no account here uses yet.</p>
+      {#if password}
+        <p class="muted" data-testid="reconnect-password">
+          Forgot your password? Type your username and a new password below.
+        </p>
+      {/if}
       {#if account}
         <p data-testid="reconnect-signed-in">
           This browser is signed in as <strong>{account.name}</strong> now. Going on signs it in as
           <strong>{link.name}</strong>.
         </p>
       {/if}
-      <ServerSignIn {api} {providers} invite={secret} />
+      <ServerSignIn {api} {providers} invite={secret} {password} {onsignedin} />
     {/if}
   </div>
 </Card>
