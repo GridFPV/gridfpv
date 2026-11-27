@@ -10,7 +10,7 @@ use gridfpv_events::PilotId;
 use gridfpv_storage::{Chain, RawEntry};
 
 use crate::events::EventId;
-use crate::link::{LinkStored, LinkTrust};
+use crate::link::{LinkTrust, SavedClub};
 use crate::remote::{
     PushAccount, PushAnswer, PushHeader, PushHeld, PushHello, PushPilot, PushPilotAccount,
     PushRefusal, PushRefused, PushRequest, PushStatus,
@@ -49,17 +49,19 @@ pub enum Held {
     Removed,
 }
 
-/// A connection to one server, with one token.
+/// A connection to one server, with one token: one saved club.
 pub struct Client {
     http: reqwest::Client,
     base: String,
     token: String,
+    /// The saved club this is for, by its id on the desk.
+    club: String,
 }
 
 impl Client {
-    /// A client for the server in the settings. Fails only when the settings cannot make
-    /// one (extra authorities that are not certificates).
-    pub fn new(stored: &LinkStored) -> Result<Self, PushError> {
+    /// A client for a saved club. Fails only when its settings cannot make one (extra
+    /// authorities that are not certificates).
+    pub fn new(stored: &SavedClub) -> Result<Self, PushError> {
         let mut builder = crate::http::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
@@ -86,7 +88,13 @@ impl Client {
             http,
             base: stored.url.clone(),
             token: stored.token.clone(),
+            club: stored.id.clone(),
         })
+    }
+
+    /// The saved club this client is for, by its id on the desk.
+    pub fn club(&self) -> &str {
+        &self.club
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {

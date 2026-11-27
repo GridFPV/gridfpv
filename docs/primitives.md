@@ -1696,9 +1696,9 @@ A server can hold more than one club, and a director usually belongs to one.
 - **The first build has one club,** made when the server is set up. Events are stored
   under a club from the start, so adding more clubs later changes nothing already stored.
 
-**More than one club (decided 2026-11-28).** Built: making a club, its id and friendly
-address, archiving, telling people about owners, and the primary club with the front
-page that opens on it. Not built yet: the list of clubs in Grid. Ryan's answers:
+**More than one club (decided 2026-11-27).** Built: making a club, its id and friendly
+address, archiving, telling people about owners, the primary club with the front page
+that opens on it, and the list of clubs in Grid. Ryan's answers:
 
 - **Who it is for.** First, an owner who hosts a few clubs they know. A big shared server
   where strangers ask for a club comes later and stays small at first. No open sign-up
@@ -1716,14 +1716,17 @@ page that opens on it. Not built yet: the list of clubs in Grid. Ryan's answers:
 - **A club can be archived.** It leaves the main list and becomes read-only: pushes are
   refused with a plain reason, and there are no new invites, sign-ups or check-ins. Its
   results still open by link. An owner can bring it back. There is no true delete yet.
-- **Grid keeps a list of clubs.** In Grid's settings a director saves several clubs (an
-  address, a link token and a name). Each event picks one of them, or none. Today Grid
-  holds one link and sends every event to it.
-- **One person, several clubs.** One account, and a separate pilot entry in each club,
-  because each club's Director keeps its own pilot list. The account is what ties the
-  person together: their results page shows every club's events. The server never merges
-  two clubs' pilot entries, a callsign may differ from club to club, and no standings run
-  across clubs.
+- **Grid keeps a list of clubs.** On Grid's Server page a director saves several clubs
+  (an address, a link token and a name). Each event picks one of them, or none.
+  - **An event does not need a club.** A director can run an event with none. To send
+    it to a server they pick the club.
+  - **A new event goes to none** until the director picks.
+  - **Only the club of the open event is connected.** Grid does not keep every saved
+    club talking all the time. While connected it keeps every event of that club up to
+    date. To send an event of another club, the director opens it.
+- **One person, several clubs.** One account for the whole server. Today each club still
+  keeps its own pilot entries, and the account ties them together: a person's results
+  page shows every club's events. This is to change: see **Pilots on a server** in §13.7.
 
 ### 13.3 What a server stores
 
@@ -1786,6 +1789,19 @@ Video is not stored. It comes later (§11.7).
      yes. This does not have to be the director: a server has roles, and a role says what
      a person may do.
 - **Knowing an id is never enough to claim.** Anyone can type an id.
+- **Pilots on a server (wanted, Ryan 2026-11-27; not built).** Today a club learns of a
+  pilot when a Director sends an event that names them. Ryan: driven only by the
+  Director's events is the wrong way round. What is wanted:
+  - **The pilot list is for the whole server,** not one per club.
+  - **A pilot makes their own account on the server,** tied to no club.
+  - **A pilot gets into a club by being given a role in it.** They ask to join, or
+    someone who runs the club pulls them in. A pilot can be in several clubs.
+  - **On race day a director pulls their club's pilots from the server** to bring Grid's
+    list up to date.
+  - The first step is taken: a Director no longer sends its whole pilot list to a club.
+    Only the pilots in an event go up, with that event.
+  - Still to settle: who may make an account on a server with no invite, how a club says
+    yes to someone who asks, and what becomes of the per-club claims that are built.
 - **Roles** (§13.2): server owner; and in a club, director (may push events, invite, and
   approve claims in that club), claims approver (may approve claims in that club) and
   pilot.
@@ -1920,8 +1936,10 @@ even when the two clocks differ.
   club's members for a pilot, by name. **Add from the server** brings in pilots the club
   has there, under the ids they have there, already tied to their accounts; and makes a
   pilot for a member who has none.
-- **The Director's pilot list goes up** by callsign and colour, so the server knows a
-  pilot before any event names them. A pilot removed on the Director stays on the server.
+- **The Director's whole pilot list does not go up** (changed 2026-11-27; it did at
+  first). A club learns of a pilot from an event sent to it, by callsign and colour, or
+  when a director ties a pilot to an account. A pilot removed on the Director stays on
+  the server.
 
 **Running a club from the server's page** (§13.2, §13.6, §13.9). For a director of the
 club, or an owner of the server.
@@ -1995,10 +2013,11 @@ code of §13.13.
 11. **A director may hide and remove their club's events, rename the club and make link
     tokens.** The design gave tokens and clubs to owners first (§13.2, §13.6). With one
     club on a server, a director who could not do these would have to ask the owner for
-    every laptop. Not confirmed.
+    every laptop. Agreed (Ryan, 2026-11-27).
 
-13. **How more than one club was built (§13.2).** Choices made while building, not
-    confirmed:
+13. **How more than one club was built (§13.2).** Choices made while building. Ryan
+    agreed to the archiving ones on 2026-11-27, and said the visitor's front page is
+    fine for now:
     - A club's id is `c` and twelve random letters and digits. The first club keeps the
       id `club`.
     - The friendly address is `#/c/<word>`. The word is the name's letters and digits in
@@ -2018,7 +2037,28 @@ code of §13.13.
       list they are given. An owner can.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
     sign-in and send a link to re-connect. Built for server owners and not for a club's
-    directors, for the reason in §13.8. Not confirmed.
+    directors, for the reason in §13.8. Agreed (Ryan, 2026-11-27).
+14. **How the list of clubs in Grid was built (§13.2).** Choices made while building, not
+    confirmed:
+    - The list and each event's club are kept in Grid's `server-link.json`, not in the
+      event. An event's club is this computer's business and is not sent anywhere.
+    - **The one link Grid had before is not carried over.** The file of an older build
+      reads as no clubs. The director saves the club again and picks it for each event.
+    - There is no default club for new events, and no switch to pause sending. Picking
+      **Not sent** stops an event.
+    - A saved club remembers the name the server gave the club, so the list reads well
+      before Grid connects. The director's own name for it wins when they give one.
+    - Two clubs on one server are two saved clubs, each with its own link token.
+    - Removing a saved club leaves its events going nowhere. Nothing on the server is
+      removed.
+    - Moving an event from one club to another sends all of it to the new club. The old
+      club keeps its copy.
+    - The Pilots page's **Account** and **Add from the server** ask the club of the open
+      event.
+    - A club only says who holds the pilots it has heard of. A pilot it has never heard
+      of keeps the account another club gave them in Grid.
+    - A pilot's ask from a server is answered only for an event that still goes to that
+      club.
 
 ### 13.13 A race day with no Wi-Fi for pilots (Wanted 2026-11-27; check-in built)
 

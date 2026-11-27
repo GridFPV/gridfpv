@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { LinkPeople, LinkView, Pilot } from '@gridfpv/types';
 import { addWords, heldElsewhere, serverLinked, toBringIn } from '../src/lib/serverPilots.js';
 
-const view = (state: LinkView['state']): LinkView => ({
-  url: 'https://grid.example.org',
-  has_token: true,
-  on: true,
-  trust: 'System',
+/** The link as it stands with Friday open. `sent` says whether Friday goes to a club. */
+const view = (state: LinkView['state'], sent = true): LinkView => ({
+  clubs: [{ id: 'k1', name: '', url: 'https://grid.example.org', trust: 'System' }],
+  open: 'friday',
+  ...(sent ? { club: 'k1' } : {}),
   state,
   events: []
 });
@@ -22,10 +22,12 @@ const mine = (id: string, callsign: string, over: Partial<Pilot> = {}): Pilot =>
 });
 
 describe('serverLinked', () => {
-  it('is so once a server is set and switched on, answering or not', () => {
+  it('is so once the open event goes to a club, answering or not', () => {
     expect(serverLinked(undefined)).toBe(false);
-    expect(serverLinked(view('NotSet'))).toBe(false);
-    expect(serverLinked(view('Off'))).toBe(false);
+    // A club is saved, and the open event does not go to it.
+    expect(serverLinked(view('NotSet', false))).toBe(false);
+    // No event is open.
+    expect(serverLinked({ clubs: view('NotSet').clubs, state: 'NotSet', events: [] })).toBe(false);
     expect(serverLinked(view('Connecting'))).toBe(true);
     expect(serverLinked(view('Connected'))).toBe(true);
     // A server that is away is still the one that is linked: asking it says what is wrong.

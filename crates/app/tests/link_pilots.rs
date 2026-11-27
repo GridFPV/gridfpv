@@ -14,7 +14,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use gridfpv_app::director::build_app;
 use gridfpv_app::link::{Client, Memory, spawn, sync_all, sync_pilots};
 use gridfpv_server::events::{EventId, EventRegistry};
-use gridfpv_server::link::{LinkSettings, LinkTrust};
+use gridfpv_server::link::{ClubSettings, LinkTrust};
 use gridfpv_serverd::accounts::{AccountId, InviteKind, NewInvite, NewSignIn, Role};
 use gridfpv_serverd::app::{AppState, router};
 use gridfpv_serverd::book::ClubId;
@@ -126,6 +126,19 @@ impl Server {
             .collect()
     }
 
+    /// The club has heard of a pilot: an event that names them was sent to it.
+    fn knows(&self, pilot: &str, callsign: &str) {
+        let known = gridfpv_serverd::accounts::ClubPilot {
+            pilot: pilot.into(),
+            callsign: callsign.into(),
+            color: None,
+        };
+        self.state
+            .accounts
+            .note_pilots(&club(), &[known], 3)
+            .unwrap();
+    }
+
     fn holder_of(&self, pilot: &str) -> Option<String> {
         self.pilots()
             .into_iter()
@@ -233,20 +246,66 @@ async fn pilot_of(d: &Director, id: &str) -> Value {
         .unwrap_or_else(|| panic!("no pilot {id}"))
 }
 
+/// Save the server as the Director's one club. With `on`, every event the Director has
+/// now goes to it. Without, none does.
+fn link_to(registry: &EventRegistry, url: &str, token: Option<&str>, on: bool, trust: LinkTrust) {
+    let desk = registry.link();
+    let settings = ClubSettings {
+        name: String::new(),
+        url: url.to_owned(),
+        token: token.map(str::to_owned),
+        trust,
+    };
+    let saved = desk.stored().clubs.first().map(|club| club.id.clone());
+    let id = desk.save_club(saved.as_deref(), settings).unwrap();
+    for meta in registry.list() {
+        desk.set_event_club(&meta.id, on.then_some(id.as_str()))
+            .unwrap();
+    }
+}
+
+/// A client for the saved club, as the pusher would make one. An event made since the
+/// club was saved goes to it too: these tests send every event.
+fn client_of(registry: &EventRegistry) -> Client {
+    let desk = registry.link();
+    let club = desk
+        .stored()
+        .clubs
+        .first()
+        .cloned()
+        .expect("a club is saved");
+    for meta in registry.list() {
+        if desk.club_id_of(&meta.id).is_none() {
+            desk.set_event_club(&meta.id, Some(&club.id)).unwrap();
+        }
+    }
+    desk.begin(&club);
+    Client::new(&club).unwrap()
+}
+
+/// The Director sends to the server's club, and has an event open that goes to it: Grid
+/// talks to the club of the open event, and to no other.
 fn link(d: &Director, s: &Server) {
-    d.registry
-        .link()
-        .save(LinkSettings {
-            url: s.url(),
-            token: Some(s.token.clone()),
-            on: true,
-            trust: LinkTrust::System,
-        })
-        .unwrap();
+    if d.registry.active().is_none() {
+        let meta = d
+            .registry
+            .create(&gridfpv_server::events::CreateEventRequest::named(
+                "Race day",
+            ))
+            .unwrap();
+        d.registry.set_active(&meta.id).unwrap();
+    }
+    link_to(
+        &d.registry,
+        &s.url(),
+        Some(&s.token),
+        true,
+        LinkTrust::System,
+    );
 }
 
 fn client(d: &Director) -> Client {
-    Client::new(&d.registry.link().stored()).unwrap()
+    client_of(&d.registry)
 }
 
 async fn until(what: &str, seconds: u64, mut check: impl FnMut() -> bool) {
@@ -268,10 +327,10 @@ async fn set_account(d: &Director, pilot: &str, account: Value) -> (StatusCode, 
     .await
 }
 
-// ── The pilot list goes up ──────────────────────────────────────────────────
+// ── Which pilots a club hears of ─────────────────────────────────────────────
 
 #[tokio::test]
-async fn the_directors_pilots_go_up_as_a_visitor_may_see_them() {
+async fn a_club_hears_only_of_the_pilots_in_the_events_sent_to_it() {
     let s = server().await;
     let d = director();
     let ace = pilot(&d, "Ace").await;
@@ -279,16 +338,42 @@ async fn the_directors_pilots_go_up_as_a_visitor_may_see_them() {
     link(&d, &s);
     let mut memory = Memory::default();
 
+    // The Director's pilot list does not go up: a pilot who never flew for this club is
+    // not put in its list.
+    sync_all(&d.registry, &client(&d), &mut memory)
+        .await
+        .unwrap();
     sync_pilots(&d.registry, &client(&d), &mut memory, true)
         .await
         .unwrap();
-    assert_eq!(
-        s.pilots(),
-        vec![
-            (ace.clone(), "Ace".to_owned(), None),
-            (bee.clone(), "Bee".to_owned(), None)
-        ]
-    );
+    assert_eq!(s.pilots(), vec![]);
+
+    // Ace is put in an event that goes to the club. Ace goes up with it, and Bee does not.
+    let class = direct(
+        &d,
+        Method::POST,
+        "/classes",
+        json!({"name": "Open", "source": "Custom"}),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let event = d.registry.active().unwrap().id.0;
+    direct(
+        &d,
+        Method::POST,
+        &format!("/events/{event}/commands"),
+        json!({"Record": {"RosterSet": {"class": class, "pilots": [ace]}}}),
+    )
+    .await;
+    sync_all(&d.registry, &client(&d), &mut memory)
+        .await
+        .unwrap();
+    sync_pilots(&d.registry, &client(&d), &mut memory, true)
+        .await
+        .unwrap();
+    assert_eq!(s.pilots(), vec![(ace.clone(), "Ace".to_owned(), None)]);
     // A callsign and a colour went. Nothing else about a pilot did.
     let (status, sent) = {
         let request = Request::builder()
@@ -303,13 +388,13 @@ async fn the_directors_pilots_go_up_as_a_visitor_may_see_them() {
     };
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        sent[0],
-        json!({"id": ace, "callsign": "Ace", "color": "#FF0000"})
+        sent,
+        json!([{"id": ace, "callsign": "Ace", "color": "#FF0000"}])
     );
     assert!(!sent.to_string().contains(MARK), "{sent}");
+    assert!(!sent.to_string().contains(&bee), "{sent}");
 
-    // A renamed pilot goes up on the next look. A pilot removed here stays there: results
-    // flown under it are still the club's.
+    // A renamed pilot goes up with the event's next look.
     direct(
         &d,
         Method::PUT,
@@ -317,17 +402,45 @@ async fn the_directors_pilots_go_up_as_a_visitor_may_see_them() {
         json!({"callsign": "Ace Two"}),
     )
     .await;
-    let (status, _) = ask(&d, true, Method::DELETE, &format!("/pilots/{bee}"), None).await;
-    assert_eq!(status, StatusCode::OK);
-    sync_pilots(&d.registry, &client(&d), &mut memory, false)
+    sync_all(&d.registry, &client(&d), &mut memory)
         .await
         .unwrap();
+    assert_eq!(s.pilots(), vec![(ace, "Ace Two".to_owned(), None)]);
+}
+
+#[tokio::test]
+async fn a_club_that_never_heard_of_a_pilot_does_not_say_who_holds_them() {
+    let s = server().await;
+    let d = director();
+    let ace = pilot(&d, "Ace").await;
+    let bee = pilot(&d, "Bee").await;
+    link(&d, &s);
+    let pia = s.member("Pia");
+    // Bee is tied to an account by another club. This club knows Ace only.
+    d.registry
+        .pilots()
+        .set_server_account(
+            &gridfpv_events::PilotId(bee.clone()),
+            Some(gridfpv_server::pilots::PilotAccount {
+                id: "acct_elsewhere".into(),
+                name: "Bee at North".into(),
+            }),
+        )
+        .unwrap();
+    s.knows(&ace, "Ace");
+    s.state
+        .accounts
+        .give_pilot(&club(), &ace, &pia, None, 5)
+        .unwrap();
+
+    sync_pilots(&d.registry, &client(&d), &mut Memory::default(), true)
+        .await
+        .unwrap();
+    assert_eq!(pilot_of(&d, &ace).await["server_account"]["name"], "Pia");
     assert_eq!(
-        s.pilots(),
-        vec![
-            (ace, "Ace Two".to_owned(), None),
-            (bee, "Bee".to_owned(), None)
-        ]
+        pilot_of(&d, &bee).await["server_account"],
+        json!({"id": "acct_elsewhere", "name": "Bee at North"}),
+        "this club cannot say who holds a pilot it has never heard of"
     );
 }
 
@@ -347,6 +460,8 @@ async fn a_claim_made_on_the_server_shows_on_the_directors_pilot() {
     let ace = pilot(&d, "Ace").await;
     let bee = pilot(&d, "Bee").await;
     link(&d, &s);
+    s.knows(&ace, "Ace");
+    s.knows(&bee, "Bee");
     let pia = s.member("Pia");
     let mut memory = Memory::default();
     look(&d, &mut memory).await;
@@ -381,6 +496,7 @@ async fn the_server_is_not_asked_who_holds_what_on_every_look() {
     let d = director();
     let ace = pilot(&d, "Ace").await;
     link(&d, &s);
+    s.knows(&ace, "Ace");
     let pia = s.member("Pia");
     let mut memory = Memory::default();
     // The first look asks, because it never has.
@@ -516,18 +632,29 @@ async fn nothing_changes_here_unless_the_server_agreed() {
     let ace = pilot(&d, "Ace").await;
     let pia = s.member("Pia");
 
-    // No server is linked.
+    // No event is open, so there is no club to ask.
+    let not_sent = "The open event is not sent to a server";
     let (status, why) = set_account(&d, &ace, json!(pia.0)).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(
-        why["message"]
-            .as_str()
-            .unwrap()
-            .contains("No server is linked"),
-        "{why}"
-    );
+    assert!(why["message"].as_str().unwrap().contains(not_sent), "{why}");
     let (status, _) = ask(&d, true, Method::GET, "/server-link/people", None).await;
     assert_eq!(status, StatusCode::CONFLICT);
+
+    // A club is saved and an event is open, and the event goes to no club: the same.
+    link(&d, &s);
+    link_to(&d.registry, &s.url(), None, false, LinkTrust::System);
+    let (status, why) = set_account(&d, &ace, json!(pia.0)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(why["message"].as_str().unwrap().contains(not_sent), "{why}");
+    for (method, uri) in [
+        (Method::GET, "/server-link/people"),
+        (Method::POST, "/server-link/pull"),
+    ] {
+        let (status, why) = ask(&d, true, method, uri, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}");
+        assert!(why["message"].as_str().unwrap().contains(not_sent), "{why}");
+    }
+    assert_eq!(s.pilots(), vec![]);
 
     link(&d, &s);
     // An account that is not a member of the club, and one that does not exist.
@@ -752,7 +879,7 @@ async fn asking_for_what_the_server_does_not_have_brings_nothing_in() {
 // ── The task, left to run ───────────────────────────────────────────────────
 
 #[tokio::test]
-async fn left_running_the_pilots_go_up_and_a_claim_comes_down() {
+async fn left_running_a_claim_comes_down_and_the_pilot_list_stays_here() {
     let s = server().await;
     let d = director();
     let ace = pilot(&d, "Ace").await;
@@ -783,12 +910,13 @@ async fn left_running_the_pilots_go_up_and_a_claim_comes_down() {
     })
     .await;
 
-    // A pilot added while it runs goes up without anyone asking.
+    // A pilot added while it runs is in no event of the club. They stay on the Director.
     let bee = pilot(&d, "Bee").await;
-    until("the new pilot is on the server", 10, || {
-        s.pilots().iter().any(|(id, _, _)| id == &bee)
-    })
-    .await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(
+        !s.pilots().iter().any(|(id, _, _)| id == &bee),
+        "a pilot in none of the club's events is not put in its list"
+    );
     task.abort();
 }
 

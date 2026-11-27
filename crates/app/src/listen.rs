@@ -35,6 +35,10 @@ pub async fn answer_waiting(registry: &EventRegistry, client: &Client) -> Result
         if registry.meta_of(&request.event).is_none() {
             continue;
         }
+        // And so is one this Director no longer sends to this club.
+        if registry.link().club_id_of(&request.event).as_deref() != Some(client.club()) {
+            continue;
+        }
         let answer = gridfpv_server::signup::decide(registry, &request);
         // The pilot may have stopped waiting. The log says what was done either way, and
         // it goes up with the next push.

@@ -18,6 +18,7 @@ import type { Browser, Page } from '@playwright/test';
 
 import { startProvider, type FakeProvider } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
+import { linkOnPage, openEvent, unlink } from './link.js';
 import { gotoPage } from './nav.js';
 import { E2E_EVENT_NAME, expect, test } from './observability.js';
 
@@ -37,13 +38,13 @@ test.afterAll(async () => {
   await server?.stop();
   await provider?.stop();
 });
+// The specs here send the Director's own event, so it is the one that is open.
+test.beforeEach(async ({ director }) => {
+  await openEvent(director.baseUrl, director.event);
+});
 // The Director is shared by every spec in the worker: leave it pushing to nothing.
 test.afterEach(async ({ director }) => {
-  await fetch(`${director.baseUrl}/server-link`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: '', token: '', on: false })
-  });
+  await unlink(director.baseUrl);
 });
 
 async function fresh(browser: Browser): Promise<Page> {
@@ -104,10 +105,7 @@ test('an owner runs the club from the page, and Grid goes along with it', async 
 
   // ── The director's Grid sends with it. ────────────────────────────────────
   await gotoPage(page, 'Server');
-  await page.getByLabel('Address').fill(server.baseUrl);
-  await page.getByLabel('Link token').fill(token);
-  await page.getByRole('button', { name: 'Save' }).click();
-  await page.getByRole('switch', { name: 'Send events to the server' }).click();
+  await linkOnPage(page, server.baseUrl, token, E2E_EVENT_NAME);
   await expect(page.getByTestId('link-state')).toHaveText('Connected to Recon FPV', {
     timeout: 20_000
   });

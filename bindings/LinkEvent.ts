@@ -3,9 +3,13 @@ import type { EventId } from "./EventId";
 import type { LinkEventState } from "./LinkEventState";
 
 /**
- * One event, and how much of it the server holds.
+ * One event, where it goes, and how much of it the server holds.
  */
 export type LinkEvent = { id: EventId, name: string, 
+/**
+ * The saved club it goes to, by [`LinkClub::id`]. Left out when it goes to none.
+ */
+club?: string, 
 /**
  * How many entries the event's log holds here.
  */

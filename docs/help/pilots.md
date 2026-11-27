@@ -18,8 +18,8 @@ A pilot is put into a race in one of two ways. A heat can name them directly on 
 
 ## Pilots and your server
 
-If Grid is linked to a [server](#/help/server), a pilot can be tied to their account
-there. The pilot then sees their own race results when they sign in to the server.
+If the open event is sent to a club on a [server](#/help/server), a pilot can be tied to
+their account there. The pilot then sees their own race results when they sign in to the server.
 
 - **Account**, beside a pilot, asks **Who is this on the server?** Pick one of your club's
   members by name, or **Nobody**. The pilot's row then says whose account it is.
@@ -27,8 +27,8 @@ there. The pilot then sees their own race results when they sign in to the serve
   come in already tied to their accounts. It also offers members who have no pilot yet,
   and makes a pilot for each one you pick.
 
-Both ask the server when you press them, so the server must be in reach. Racing does not
-need it.
+Both ask the club of the open event when you press them, so the server must be in reach.
+Racing does not need it.
 
 A pilot can also get tied on the server's own page, with an invite made for them or by
 asking the club. Grid picks that up by itself in a few seconds.

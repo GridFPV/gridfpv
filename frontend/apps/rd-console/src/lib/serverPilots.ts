@@ -5,11 +5,11 @@
 import type { LinkPeople, LinkView, Pilot, PushAccount, PushPilot } from '@gridfpv/types';
 
 /**
- * Whether a server is linked and switched on, so the Pilots page can offer what needs
- * one. A server that is not answering right now still counts: asking it says so.
+ * Whether the open event goes to a club on a server, so the Pilots page can offer what
+ * needs one. A server that is not answering right now still counts: asking it says so.
  */
 export function serverLinked(view: LinkView | undefined): boolean {
-  return view !== undefined && view.state !== 'NotSet' && view.state !== 'Off';
+  return view !== undefined && view.club !== undefined;
 }
 
 /** What can be brought in from the server. */

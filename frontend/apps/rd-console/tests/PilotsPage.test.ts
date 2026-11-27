@@ -56,10 +56,10 @@ const QUIN = { id: 'acct_quin', name: 'Quin' };
 
 function linkView(state: LinkView['state']): LinkView {
   return {
-    url: 'https://grid.example.org',
-    has_token: true,
-    on: true,
-    trust: 'System',
+    clubs: [{ id: 'k1', name: '', url: 'https://grid.example.org', trust: 'System' }],
+    open: 'friday',
+    // The open event goes to the club, unless nothing is set.
+    ...(state === 'NotSet' ? {} : { club: 'k1' }),
     state,
     events: []
   };
@@ -118,14 +118,12 @@ function linked(over: Partial<LinkPeople> = {}, state: LinkView['state'] = 'Conn
 
 describe('PilotsPage with no server linked', () => {
   it('offers nothing that needs a server', async () => {
-    for (const state of ['NotSet', 'Off'] as const) {
-      const { getServerPeopleImpl } = linked({}, state);
-      await screen.findByText('Ace');
-      expect(screen.queryByRole('button', { name: 'Add from the server' })).toBeNull();
-      expect(screen.queryByRole('button', { name: /^Account of/ })).toBeNull();
-      expect(getServerPeopleImpl).not.toHaveBeenCalled();
-      cleanup();
-    }
+    // The open event goes to no club.
+    const { getServerPeopleImpl } = linked({}, 'NotSet');
+    await screen.findByText('Ace');
+    expect(screen.queryByRole('button', { name: 'Add from the server' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Account of/ })).toBeNull();
+    expect(getServerPeopleImpl).not.toHaveBeenCalled();
   });
 
   it('works as it always has when the link cannot be read', async () => {

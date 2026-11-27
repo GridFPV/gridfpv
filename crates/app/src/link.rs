@@ -1,8 +1,10 @@
 //! Pushing events to a remote server (docs/primitives.md §13.4).
 //!
-//! One task, for as long as the Director runs. While a server is set and switched on
-//! (`gridfpv_server::link`), it keeps the server's copy of **every event** up with the
-//! Director's: the log, entry for entry, and the header that names what the log refers to.
+//! One task, for as long as the Director runs. It connects to **the club the open event
+//! goes to** (`gridfpv_server::link`), and to no other. While connected it keeps the
+//! server's copy of **every event that goes to that club** up with the Director's: the log,
+//! entry for entry, and the header that names what the log refers to. An event of another
+//! club waits until one of that club's events is open.
 //!
 //! - **The Director connects outward.** Nothing here listens.
 //! - **It is always safe to stop and start.** How far the server has got is asked of the
@@ -19,7 +21,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gridfpv_server::events::{EventId, EventRegistry};
-use gridfpv_server::link::{LinkDesk, LinkEvent, LinkEventState, LinkState};
+use gridfpv_server::link::{LinkDesk, LinkEvent, LinkEventState, LinkState, SavedClub};
 pub use gridfpv_server::link_client::{Client, Held, PushError, log_body};
 use gridfpv_server::remote::PushRefusal;
 use gridfpv_storage::{Chain, RawEntry};
@@ -73,8 +75,6 @@ struct Known {
 #[derive(Default)]
 pub struct Memory {
     events: HashMap<EventId, Known>,
-    /// A mark of the pilot list last sent, so it is sent again only when it changes.
-    pilots: Option<[u8; 32]>,
     /// When the server was last asked who holds which pilot.
     accounts_asked: Option<std::time::Instant>,
     /// When the server was last asked what it holds of every event.
@@ -252,15 +252,20 @@ async fn check_held(client: &Client, memory: &mut Memory) -> Result<(), PushErro
     Ok(())
 }
 
-/// Look at every event once, and bring the server's copies up. `Err` only for what stops
-/// all of them: the server is unreachable, or the token is not taken.
+/// Look once at every event that goes to the client's club, and bring the server's copies
+/// up. `Err` only for what stops all of them: the server is unreachable, or the token is
+/// not taken.
 pub async fn sync_all(
     registry: &EventRegistry,
     client: &Client,
     memory: &mut Memory,
 ) -> Result<(), PushError> {
     let desk = registry.link();
-    let events = registry.list();
+    let events: Vec<_> = registry
+        .list()
+        .into_iter()
+        .filter(|meta| desk.club_id_of(&meta.id).as_deref() == Some(client.club()))
+        .collect();
     let ids: Vec<EventId> = events.iter().map(|meta| meta.id.clone()).collect();
     memory.events.retain(|id, _| ids.contains(id));
     desk.keep_events(&ids);
@@ -277,6 +282,7 @@ pub async fn sync_all(
                 desk.report_event(LinkEvent {
                     id: meta.id.clone(),
                     name: meta.name.clone(),
+                    club: Some(client.club().to_owned()),
                     len: registry
                         .log(&meta.id)
                         .and_then(|log| log.lock().ok()?.len().ok())
@@ -297,6 +303,7 @@ pub async fn sync_all(
         desk.report_event(LinkEvent {
             id: meta.id,
             name: meta.name,
+            club: Some(client.club().to_owned()),
             len,
             sent,
             state,
@@ -305,17 +312,21 @@ pub async fn sync_all(
     Ok(())
 }
 
-/// Keep the server and the Director agreed about pilots (§13.7):
+/// Bring down who holds each pilot in the connected club (§13.7), so a pilot who claimed
+/// their results on the server shows as tied on the Pilots page.
 ///
-/// - **the pilots this Director has** go up when they change, so the club knows a pilot
-///   before any event names them;
-/// - **who holds each pilot** comes down now and then, so a pilot who claimed their results
-///   on the server shows as tied on the Pilots page.
+/// **Nothing about pilots goes up here.** A club learns of a pilot from the events sent
+/// to it, and from a director tying a pilot to an account. The Director's whole pilot list
+/// is not sent: with more than one club, it would put one club's pilots in another's list
+/// (Ryan, 2026-11-27).
 ///
-/// With `now` true the server is asked who holds what whether or not it is time.
+/// A pilot the club has never heard of is left as it is here: the club cannot say who
+/// holds them.
 ///
-/// Nothing here holds racing or the events up. A server that does not answer these (an
-/// older one has no such routes) is asked again later.
+/// With `now` true the server is asked whether or not it is time.
+///
+/// Nothing here holds racing or the events up. A server that does not answer is asked
+/// again later.
 pub async fn sync_pilots(
     registry: &EventRegistry,
     client: &Client,
@@ -323,19 +334,6 @@ pub async fn sync_pilots(
     now: bool,
 ) -> Result<(), PushError> {
     let pilots = registry.pilots();
-    let ours: Vec<_> = pilots
-        .list()
-        .iter()
-        .map(gridfpv_server::link_pilots::push_pilot)
-        .collect();
-    let mark: [u8; 32] =
-        Sha256::digest(serde_json::to_vec(&ours).map_err(|e| PushError::Server(e.to_string()))?)
-            .into();
-    if memory.pilots != Some(mark) {
-        client.put_pilots(&ours).await?;
-        memory.pilots = Some(mark);
-    }
-
     let due = memory
         .accounts_asked
         .is_none_or(|asked| asked.elapsed() >= ACCOUNTS_EVERY);
@@ -343,9 +341,9 @@ pub async fn sync_pilots(
         // Whether or not it answers, it is not asked again at once.
         memory.accounts_asked = Some(std::time::Instant::now());
         let before = pilots.account_mark();
-        let held = client
-            .pilots()
-            .await?
+        let theirs = client.pilots().await?;
+        let known = theirs.iter().map(|pilot| pilot.id.clone()).collect();
+        let held = theirs
             .into_iter()
             .filter_map(|pilot| {
                 let account = pilot.account?;
@@ -359,10 +357,15 @@ pub async fn sync_pilots(
             })
             .collect();
         pilots
-            .take_server_accounts(before, &held)
+            .take_server_accounts(before, &known, &held)
             .map_err(|e| PushError::Server(e.to_string()))?;
     }
     Ok(())
+}
+
+/// The club to be connected to now: the one the open event goes to.
+fn wanted(registry: &EventRegistry, desk: &LinkDesk) -> Option<SavedClub> {
+    desk.club_of(&registry.active()?.id)
 }
 
 /// The task that listens to the server, stopped when this is dropped.
@@ -381,17 +384,23 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
         let mut changed = desk.watch();
         loop {
             changed.borrow_and_update();
-            let stored = desk.stored();
-            if !stored.ready() {
-                // The desk shows "not set" or "off" from the settings themselves.
-                if changed.changed().await.is_err() {
-                    return;
+            let Some(club) = wanted(&registry, &desk) else {
+                // The desk shows "not set" from the settings themselves. Which event is
+                // open is not something the desk says, so it is looked at on the tick.
+                tokio::select! {
+                    _ = tokio::time::sleep(TICK) => {}
+                    gone = changed.changed() => if gone.is_err() { return },
                 }
                 continue;
-            }
-            desk.report(LinkState::Connecting);
+            };
+            // Still the club to be connected to? Asked while waiting, so opening an event
+            // of another club does not wait out a retry.
+            let still = |registry: &EventRegistry| {
+                wanted(registry, &desk).is_some_and(|now| now.same_wire(&club))
+            };
+            desk.begin(&club);
             let connected = async {
-                let client = Client::new(&stored)?;
+                let client = Client::new(&club)?;
                 let hello = client.hello().await?;
                 Ok::<_, PushError>((client, hello))
             };
@@ -401,9 +410,8 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                     desk.report(LinkState::Failed {
                         message: why.to_string(),
                     });
-                    tokio::select! {
-                        _ = tokio::time::sleep(RETRY) => {}
-                        gone = changed.changed() => if gone.is_err() { return },
+                    if !wait_to_retry(&registry, &mut changed, &still).await {
+                        return;
                     }
                     continue;
                 }
@@ -412,17 +420,20 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
             desk.report(LinkState::Connected);
             // While connected, hear what pilots ask for on the server (§13.4). It stops
             // when this connection is given up, below.
-            let _listening = Client::new(&stored)
+            let _listening = Client::new(&club)
                 .ok()
                 .map(|client| Listening(crate::listen::spawn(registry.clone(), client)));
 
-            // Connected. Push until the settings change or the server stops answering.
+            // Connected. Push until another club is wanted or the server stops answering.
             let mut memory = Memory::default();
             // The open event says when its log grows, so a lap goes up at once. It is
             // listened to from BEFORE each look, not after: a lap that lands while a look
             // is under way must not wait for the next tick.
             let mut open: Option<(EventId, tokio::sync::watch::Receiver<u64>)> = None;
             loop {
+                if !still(&registry) {
+                    break;
+                }
                 let active = registry.active().map(|event| event.id);
                 if open.as_ref().map(|(id, _)| id) != active.as_ref() {
                     open = active.and_then(|id| {
@@ -437,9 +448,8 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                     desk.report(LinkState::Failed {
                         message: why.to_string(),
                     });
-                    tokio::select! {
-                        _ = tokio::time::sleep(RETRY) => {}
-                        gone = changed.changed() => if gone.is_err() { return },
+                    if !wait_to_retry(&registry, &mut changed, &still).await {
+                        return;
                     }
                     break;
                 }
@@ -466,15 +476,33 @@ pub fn spawn(registry: EventRegistry) -> JoinHandle<()> {
                 tokio::select! {
                     _ = tokio::time::sleep(TICK) => {}
                     _ = grew => {}
-                    gone = changed.changed() => {
-                        if gone.is_err() { return }
-                        // A replace was asked for, or the settings changed.
-                        if desk.stored() != stored { break }
-                    }
+                    // A replace was asked for, or the settings changed. The top of the
+                    // loop sees which.
+                    gone = changed.changed() => if gone.is_err() { return },
                 }
             }
         }
     })
+}
+
+/// Wait before reaching for the server again. Stops early when the settings change, or
+/// when another club is wanted. Returns `false` when the Director is going away.
+async fn wait_to_retry(
+    registry: &EventRegistry,
+    changed: &mut tokio::sync::watch::Receiver<u64>,
+    still: &impl Fn(&EventRegistry) -> bool,
+) -> bool {
+    let until = tokio::time::Instant::now() + RETRY;
+    while tokio::time::Instant::now() < until {
+        if !still(registry) {
+            break;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(TICK.min(until - tokio::time::Instant::now())) => {}
+            gone = changed.changed() => return gone.is_ok(),
+        }
+    }
+    true
 }
 
 #[cfg(test)]
