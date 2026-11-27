@@ -1811,3 +1811,164 @@ async fn a_link_runs_out_after_seven_days() {
         Err(AccountError::NoSuchAccount)
     );
 }
+
+// ── Open sign-up (§13.7) ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn with_open_sign_up_someone_new_gets_an_account_in_no_club() {
+    let rig = rig().await;
+    rig.state.book.set_open_sign_up(true).unwrap();
+    let mut browser = Browser::default();
+    let went = browser
+        .sign_in(&rig, "discord", "", discord_user("111", "Stranger"))
+        .await;
+    // They land on their account page, where the pilot profile is.
+    assert_eq!(went.location, format!("{PUBLIC}/#/account"));
+    assert!(signed_in(&went));
+    let me = browser.me(&rig).await;
+    assert_eq!(me["account"]["name"], "Stranger");
+    // In no club, an owner of nothing, holding nothing.
+    assert_eq!(me["account"]["clubs"], json!([]));
+    assert_eq!(me["account"]["owner"], false);
+    assert_eq!(me["account"]["pilots"], json!([]));
+    assert_eq!(me["account"]["profile"], json!({}));
+    assert!(me["account"].get("primary").is_none());
+    assert_eq!(rig.accounts_made(), 0, "they are a member of no club");
+    let id = me["account"]["id"].as_str().unwrap().to_owned();
+
+    // Coming back signs in to the same account. It does not make a second.
+    let mut later = Browser::default();
+    let went = later
+        .sign_in(&rig, "discord", "", discord_user("111", "Stranger"))
+        .await;
+    assert_eq!(went.location, format!("{PUBLIC}/#/"));
+    assert_eq!(later.me(&rig).await["account"]["id"], id);
+    assert_eq!(rig.state.accounts.all_accounts().unwrap().len(), 1);
+
+    // Someone else is someone else.
+    let mut other = Browser::default();
+    other
+        .sign_in(&rig, "google", "", google_user("111", "Another"))
+        .await;
+    assert_ne!(other.me(&rig).await["account"]["id"], id);
+    assert_eq!(rig.state.accounts.all_accounts().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_name_the_provider_does_not_give_still_makes_an_account() {
+    let rig = rig().await;
+    rig.state.book.set_open_sign_up(true).unwrap();
+    let mut browser = Browser::default();
+    let went = browser
+        .sign_in(&rig, "discord", "", discord_user("222", ""))
+        .await;
+    assert!(signed_in(&went), "{}", went.location);
+    let name = browser.me(&rig).await["account"]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!name.trim().is_empty());
+}
+
+#[tokio::test]
+async fn open_sign_up_switched_off_again_stops_new_accounts_and_keeps_the_ones_made() {
+    let rig = rig().await;
+    rig.state.book.set_open_sign_up(true).unwrap();
+    let mut early = Browser::default();
+    early
+        .sign_in(&rig, "discord", "", discord_user("111", "Early"))
+        .await;
+    rig.state.book.set_open_sign_up(false).unwrap();
+
+    let mut late = Browser::default();
+    let went = late
+        .sign_in(&rig, "discord", "", discord_user("999", "Late"))
+        .await;
+    assert_eq!(
+        went.location,
+        format!("{PUBLIC}/#/sign-in?problem=need-invite")
+    );
+    assert!(!signed_in(&went));
+    assert_eq!(rig.state.accounts.all_accounts().unwrap().len(), 1);
+
+    // The account made while it was open still signs in.
+    let mut back = Browser::default();
+    let went = back
+        .sign_in(&rig, "discord", "", discord_user("111", "Early"))
+        .await;
+    assert!(signed_in(&went));
+    assert_eq!(back.me(&rig).await["account"]["name"], "Early");
+}
+
+#[tokio::test]
+async fn with_open_sign_up_an_invite_still_gives_what_it_gives() {
+    let rig = rig().await;
+    rig.state.book.set_open_sign_up(true).unwrap();
+    let (_, link) = rig.invite(InviteKind::Personal {
+        club: club("north"),
+        role: Role::Director,
+        pilot: None,
+    });
+    let mut browser = Browser::default();
+    let went = browser
+        .sign_in(
+            &rig,
+            "discord",
+            &format!("?invite={link}"),
+            discord_user("111", "Dee"),
+        )
+        .await;
+    assert!(signed_in(&went));
+    let me = browser.me(&rig).await;
+    assert_eq!(me["account"]["clubs"][0]["role"], "Director");
+
+    // An invite that does not work is still said to be one. No account is made by the
+    // back door of open sign-up.
+    let mut other = Browser::default();
+    let went = other
+        .sign_in(
+            &rig,
+            "discord",
+            "?invite=not-an-invite",
+            discord_user("222", "Sly"),
+        )
+        .await;
+    assert_eq!(went.location, format!("{PUBLIC}/#/sign-in?problem=invite"));
+    assert!(!signed_in(&went));
+    assert_eq!(rig.state.accounts.all_accounts().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn open_sign_up_makes_nobody_an_owner_and_does_not_change_adding_a_sign_in() {
+    let rig = rig().await;
+    rig.state.book.set_open_sign_up(true).unwrap();
+    // Adding a sign-in still needs someone signed in to add it to.
+    let mut nobody = Browser::default();
+    let went = nobody.start(&rig, "google", "?add=1").await;
+    assert_eq!(
+        went.location,
+        format!("{PUBLIC}/#/sign-in?problem=not-signed-in")
+    );
+    assert!(rig.state.accounts.all_accounts().unwrap().is_empty());
+
+    // Someone who signed up adds Google. It joins their account and makes no second one.
+    let mut ace = Browser::default();
+    ace.sign_in(&rig, "discord", "", discord_user("111", "Ace"))
+        .await;
+    let went = ace
+        .sign_in(&rig, "google", "?add=1", google_user("g-ace", "Ace G"))
+        .await;
+    assert!(
+        went.location.starts_with(&format!("{PUBLIC}/#/account")),
+        "{}",
+        went.location
+    );
+    let me = ace.me(&rig).await;
+    assert_eq!(me["account"]["sign_ins"].as_array().unwrap().len(), 2);
+    assert_eq!(me["account"]["owner"], false);
+    assert_eq!(rig.state.accounts.all_accounts().unwrap().len(), 1);
+    // What only an owner may do is refused to them.
+    let mut asked = ace.clone();
+    let went = asked.get(&rig, "/api/accounts/acct_x/sign-ins").await;
+    assert_eq!(went.status, StatusCode::FORBIDDEN);
+}

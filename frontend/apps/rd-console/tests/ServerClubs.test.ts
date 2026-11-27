@@ -18,7 +18,8 @@ const OZ: MyAccount = {
   owner: true,
   sign_ins: [{ provider: 'discord', subject: '900', label: 'oz' }],
   clubs: [],
-  pilots: []
+  pilots: [],
+  profile: {}
 };
 
 beforeEach(() => {

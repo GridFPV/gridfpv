@@ -1789,19 +1789,36 @@ Video is not stored. It comes later (§11.7).
      yes. This does not have to be the director: a server has roles, and a role says what
      a person may do.
 - **Knowing an id is never enough to claim.** Anyone can type an id.
-- **Pilots on a server (wanted, Ryan 2026-11-27; not built).** Today a club learns of a
-  pilot when a Director sends an event that names them. Ryan: driven only by the
-  Director's events is the wrong way round. What is wanted:
-  - **The pilot list is for the whole server,** not one per club.
-  - **A pilot makes their own account on the server,** tied to no club.
-  - **A pilot gets into a club by being given a role in it.** They ask to join, or
-    someone who runs the club pulls them in. A pilot can be in several clubs.
+- **Pilots on a server (decided, Ryan 2026-11-27; being built, see §13.12).** At first a
+  club learned of a pilot only when a Director sent an event that named them. Ryan: driven
+  only by the Director's events is the wrong way round.
+  - **A pilot is one person for the whole server:** their account. The account holds
+    their **pilot profile**: callsign, colour, and the ids they have elsewhere (MultiGP,
+    Velocidrone). They fill these in themselves. The ids are there so that results can
+    later be pushed to MultiGP, and so a Director can use them for MultiGP sync and
+    Velocidrone racing.
+  - **A pilot makes their own account,** tied to no club.
+    - **Open sign-up is the server owner's choice,** and starts off. With it on, anyone
+      who can sign in with a provider gets an account. With it off, an account needs an
+      invite.
+    - **Invites always work.** An owner can always send one, and a director can for their
+      own club.
+  - **A pilot gets into a club by being given a role in it.** A director sets their club
+    **public** or **private**.
+    - **Public:** anyone with an account can join.
+    - **Private:** a pilot asks to join and a director says yes, or uses an invite, or a
+      director pulls them in.
+    - A pilot can be in several clubs.
+  - **The account wins where it exists.** Once a pilot holds results, the server shows
+    them under the account's callsign and colour, whatever callsign the event was run
+    with. When a Director next pulls from the server, its own pilot takes the account's
+    callsign, colour and ids.
+  - **A pilot with no account stays as now:** known to the club by the events they flew.
+    They claim those results after they make an account (below).
   - **On race day a director pulls their club's pilots from the server** to bring Grid's
     list up to date.
-  - The first step is taken: a Director no longer sends its whole pilot list to a club.
-    Only the pilots in an event go up, with that event.
-  - Still to settle: who may make an account on a server with no invite, how a club says
-    yes to someone who asks, and what becomes of the per-club claims that are built.
+  - A Director does not send its whole pilot list to a club. Only the pilots in an event
+    go up, with that event.
 - **Roles** (§13.2): server owner; and in a club, director (may push events, invite, and
   approve claims in that club), claims approver (may approve claims in that club) and
   pilot.
@@ -2038,6 +2055,22 @@ code of §13.13.
 12. **Getting back in is for owners only.** Ryan asked for an admin who can remove a
     sign-in and send a link to re-connect. Built for server owners and not for a club's
     directors, for the reason in §13.8. Agreed (Ryan, 2026-11-27).
+15. **Pilots on a server (§13.7), first step: the pilot profile and open sign-up.**
+    Built. Not built yet: public and private clubs, asking to join, a director pulling
+    someone in, and the account's callsign winning in results and in Grid. Choices made
+    while building, not confirmed:
+    - The profile is callsign, colour (`#RRGGBB`), MultiGP id and Velocidrone id. All of
+      it may be left empty. A callsign or an id is 40 characters at most, and an id has no
+      spaces. The account keeps its own name too: it is what is shown until a callsign is
+      given.
+    - A profile is saved whole. A part left empty is cleared.
+    - Open sign-up is kept with the server's other settings and is off on a new server.
+      An owner changes it on their account page, after being asked once, or with
+      `gridfpv-server sign-up open|invite`.
+    - Anyone may ask a server whether sign-up is open (`GET /api/server`), so the sign-in
+      page can say the right thing.
+    - Someone who signs up lands on their account page, where the profile is.
+    - With sign-up open, an invite that does not work still makes no account.
 14. **How the list of clubs in Grid was built (§13.2).** Choices made while building, not
     confirmed:
     - The list and each event's club are kept in Grid's `server-link.json`, not in the

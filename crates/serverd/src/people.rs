@@ -38,7 +38,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use gridfpv_server::error::ErrorCode;
-use gridfpv_server::remote::PushClub;
+use gridfpv_server::remote::{PilotProfile, PushClub};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -134,6 +134,27 @@ pub struct MyAccount {
     /// The pilots this account holds, and those it has asked for.
     #[serde(default)]
     pub pilots: Vec<crate::claims::MyPilot>,
+    /// What they say of themselves as a pilot (§13.7): callsign, colour, and the ids they
+    /// have elsewhere. The same in every club.
+    #[serde(default)]
+    pub profile: PilotProfile,
+}
+
+/// `GET /api/server`: what anyone may know of how this server is run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct ServerInfo {
+    /// Whether someone with no invite may make an account here (§13.7). The owner's
+    /// choice. When `false`, an account needs an invite.
+    pub open_sign_up: bool,
+}
+
+/// `PUT /api/server/sign-up`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct SignUpChange {
+    /// Let anyone who can sign in make an account.
+    pub open: bool,
 }
 
 /// `GET /api/me`.
@@ -511,6 +532,7 @@ fn my_account(state: &AppState, standing: &Standing) -> Result<Option<MyAccount>
             .collect(),
         primary: primary_of(state, standing)?,
         pilots: crate::claims::my_pilots(state, &standing.account)?,
+        profile: state.accounts.profile(&standing.account)?,
     }))
 }
 
@@ -581,6 +603,45 @@ pub async fn patch_me(
     Ok(Json(Me {
         account: my_account(&state, &standing)?,
     }))
+}
+
+/// `PUT /api/me/profile`: set the pilot profile, all of it. A part left out is cleared.
+pub async fn put_profile(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Json(profile): Json<PilotProfile>,
+) -> Result<Json<Me>, ApiError> {
+    state.accounts.set_profile(&standing.account, profile)?;
+    Ok(Json(Me {
+        account: my_account(&state, &standing)?,
+    }))
+}
+
+/// `GET /api/server`.
+pub async fn get_server(State(state): State<AppState>) -> Json<ServerInfo> {
+    Json(ServerInfo {
+        open_sign_up: state.book.open_sign_up(),
+    })
+}
+
+/// `PUT /api/server/sign-up`: an owner says whether an account needs an invite.
+pub async fn put_sign_up(
+    State(state): State<AppState>,
+    Signed(standing): Signed,
+    Json(change): Json<SignUpChange>,
+) -> Result<Json<ServerInfo>, ApiError> {
+    if !standing.may(Act::RunServer) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
+            "Only an owner of this server can do that.",
+        ));
+    }
+    let open_sign_up = state
+        .book
+        .set_open_sign_up(change.open)
+        .map_err(crate::manage::book_error)?;
+    Ok(Json(ServerInfo { open_sign_up }))
 }
 
 /// `PUT /api/me/primary-club`: mark the club the front page opens on.

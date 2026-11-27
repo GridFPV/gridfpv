@@ -132,6 +132,10 @@ struct Pages {
     /// noted has no entry.
     #[serde(default)]
     events: Vec<EventNote>,
+    /// Whether someone with no invite may make an account (§13.7). The owner's choice.
+    /// Off until they switch it on.
+    #[serde(default)]
+    open_sign_up: bool,
 }
 
 /// What the server notes about one event of a club, apart from the event itself.
@@ -409,6 +413,20 @@ impl Book {
                 club.word = word;
             }
             Ok(club.clone())
+        })
+    }
+
+    /// Whether someone with no invite may make an account on this server (§13.7).
+    pub fn open_sign_up(&self) -> bool {
+        self.refresh();
+        self.held.read().expect("book lock").pages.open_sign_up
+    }
+
+    /// Let anyone who can sign in make an account, or only those with an invite.
+    pub fn set_open_sign_up(&self, open: bool) -> Result<bool, BookError> {
+        self.change(|pages| {
+            pages.open_sign_up = open;
+            Ok(open)
         })
     }
 

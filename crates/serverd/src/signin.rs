@@ -18,8 +18,8 @@
 //!   person came with is used as that account.
 //! - **It belongs to none, and the person came with an invite that works:** an account is
 //!   made, with what the invite gives.
-//! - **It belongs to none, and there is no invite:** nothing is made. An account needs an
-//!   invite (§13.8).
+//! - **It belongs to none, and there is no invite:** nothing is made, unless the server's
+//!   owner switched open sign-up on (§13.7). Then an account is made, in no club.
 //! - **Adding:** it is attached to the account that asked, if that account is still the
 //!   one signed in and no other account has it.
 //!
@@ -608,6 +608,19 @@ pub async fn get_callback(
                 Err(AccountError::InviteDoesNotWork) => {
                     go_problem(&state, &headers, Problem::Invite)
                 }
+                Err(_) => go_problem(&state, &headers, Problem::Provider),
+            }
+        }
+        // Nobody yet, and no invite. The owner says whether that is enough (§13.7).
+        (None, None) if state.book.open_sign_up() => {
+            let name = if vouched.label.is_empty() {
+                "Pilot"
+            } else {
+                &vouched.label
+            };
+            match accounts.join_open(&sign_in, name, now) {
+                // A new account has a profile to fill in: they land on their account page.
+                Ok((_, session)) => done("account", Some(&session)),
                 Err(_) => go_problem(&state, &headers, Problem::Provider),
             }
         }

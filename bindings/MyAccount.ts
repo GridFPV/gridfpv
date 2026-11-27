@@ -2,6 +2,7 @@
 import type { MyClub } from "./MyClub";
 import type { MyPilot } from "./MyPilot";
 import type { MySignIn } from "./MySignIn";
+import type { PilotProfile } from "./PilotProfile";
 
 /**
  * The account this browser is signed in as.
@@ -20,4 +21,9 @@ primary?: string,
 /**
  * The pilots this account holds, and those it has asked for.
  */
-pilots: Array<MyPilot>, };
+pilots: Array<MyPilot>, 
+/**
+ * What they say of themselves as a pilot (§13.7): callsign, colour, and the ids they
+ * have elsewhere. The same in every club.
+ */
+profile: PilotProfile, };

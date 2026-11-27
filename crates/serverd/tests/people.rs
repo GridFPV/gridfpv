@@ -1226,3 +1226,213 @@ async fn a_primary_club_that_is_archived_or_left_gives_way_to_the_next_one_and_c
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(primary(&rig, &ace).await, "north");
 }
+
+// ── The pilot profile (§13.7) ───────────────────────────────────────────────
+
+async fn profile_of(rig: &Rig, who: &Person) -> Value {
+    call(rig, Some(who), Method::GET, "/api/me", None).await.1["account"]["profile"].clone()
+}
+
+async fn set_profile(rig: &Rig, who: Option<&Person>, profile: Value) -> (StatusCode, Value) {
+    call(rig, who, Method::PUT, "/api/me/profile", Some(profile)).await
+}
+
+#[tokio::test]
+async fn a_pilot_fills_in_their_own_profile_and_it_is_tidied() {
+    let rig = rig();
+    let ace = rig.member("Ace", "north", Role::Pilot);
+    let bee = rig.member("Bee", "north", Role::Pilot);
+    // Nothing is filled in to start with.
+    assert_eq!(profile_of(&rig, &ace).await, json!({}));
+
+    let (status, me) = set_profile(
+        &rig,
+        Some(&ace),
+        json!({
+            "callsign": "  AceOfSpades ",
+            "color": " #ff8800 ",
+            "multigp_id": " 12345 ",
+            "velocidrone_id": "ace.fpv"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    let kept = json!({
+        "callsign": "AceOfSpades",
+        "color": "#FF8800",
+        "multigp_id": "12345",
+        "velocidrone_id": "ace.fpv"
+    });
+    assert_eq!(me["account"]["profile"], kept);
+    assert_eq!(profile_of(&rig, &ace).await, kept);
+    // The account's own name is another thing, and is not changed by it.
+    assert_eq!(me["account"]["name"], "Ace");
+    // It is Ace's alone.
+    assert_eq!(profile_of(&rig, &bee).await, json!({}));
+
+    // The whole profile is set each time: a part left out, empty or `null` is cleared.
+    let (status, me) = set_profile(
+        &rig,
+        Some(&ace),
+        json!({"callsign": "Ace", "color": "", "multigp_id": null, "velocidrone_id": "   "}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["account"]["profile"], json!({"callsign": "Ace"}));
+    let (status, me) = set_profile(&rig, Some(&ace), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["account"]["profile"], json!({}));
+
+    // It is still there after the server is started again on the same data.
+    set_profile(&rig, Some(&ace), json!({"multigp_id": "777"})).await;
+    let again = AppState::open(rig._dir.path()).unwrap();
+    assert_eq!(
+        again
+            .accounts
+            .profile(&ace.id)
+            .unwrap()
+            .multigp_id
+            .as_deref(),
+        Some("777")
+    );
+
+    let (status, _) = set_profile(&rig, None, json!({"callsign": "X"})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_profile_that_is_not_right_is_refused_and_nothing_of_it_is_kept() {
+    let rig = rig();
+    let ace = rig.member("Ace", "north", Role::Pilot);
+    let good = json!({"callsign": "Ace", "color": "#00FF00", "multigp_id": "1"});
+    set_profile(&rig, Some(&ace), good.clone()).await;
+
+    let long = "x".repeat(41);
+    for (bad, word) in [
+        (json!({"callsign": long}), "callsign"),
+        (json!({"callsign": "two\nlines"}), "callsign"),
+        (json!({"color": "red"}), "colour"),
+        (json!({"color": "#12345"}), "colour"),
+        (json!({"color": "#1234567"}), "colour"),
+        (json!({"color": "#GGGGGG"}), "colour"),
+        (json!({"color": "FF8800"}), "colour"),
+        (json!({"multigp_id": long}), "MultiGP"),
+        (json!({"multigp_id": "12 34"}), "MultiGP"),
+        (json!({"velocidrone_id": long}), "Velocidrone"),
+        (json!({"velocidrone_id": "a\tb"}), "Velocidrone"),
+        // One bad part refuses the good ones beside it.
+        (
+            json!({"callsign": "Better", "color": "nope", "multigp_id": "2"}),
+            "colour",
+        ),
+    ] {
+        let (status, body) = set_profile(&rig, Some(&ace), bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        assert!(
+            body["message"].as_str().unwrap().contains(word),
+            "{bad}: {body}"
+        );
+        assert_eq!(profile_of(&rig, &ace).await, good, "{bad}");
+    }
+    // Forty of any letter is as long as it gets.
+    let (status, _) = set_profile(&rig, Some(&ace), json!({"callsign": "é".repeat(40)})).await;
+    assert_eq!(status, StatusCode::OK);
+    // Something that is not a profile at all is refused too.
+    let (status, _) = set_profile(&rig, Some(&ace), json!({"callsign": 7})).await;
+    assert!(status.is_client_error(), "{status}");
+}
+
+#[tokio::test]
+async fn a_profile_goes_with_its_account_when_the_account_goes() {
+    let rig = rig();
+    let ace = rig.member("Ace", "north", Role::Pilot);
+    set_profile(&rig, Some(&ace), json!({"callsign": "Ace"})).await;
+    assert_eq!(rig.state.accounts.profiles().unwrap().len(), 1);
+    // An account that is not there has no profile to set.
+    let nobody = AccountId("acct_nobody".into());
+    assert!(
+        rig.state
+            .accounts
+            .set_profile(
+                &nobody,
+                serde_json::from_value(json!({"callsign": "X"})).unwrap()
+            )
+            .is_err()
+    );
+    assert!(rig.state.accounts.profile(&nobody).unwrap().is_empty());
+    assert_eq!(rig.state.accounts.profiles().unwrap().len(), 1);
+}
+
+// ── Who may make an account (§13.7) ─────────────────────────────────────────
+
+#[tokio::test]
+async fn only_an_owner_says_whether_an_account_needs_an_invite() {
+    let rig = rig();
+    let owner = rig.owner("Oz");
+    let director = rig.member("Dee", "north", Role::Director);
+    let pilot = rig.member("Ace", "north", Role::Pilot);
+
+    // A server starts by asking for an invite, and anyone may know.
+    let (status, info) = call(&rig, None, Method::GET, "/api/server", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(info, json!({"open_sign_up": false}));
+
+    let change = |open: bool| Some(json!({"open": open}));
+    let (status, _) = call(&rig, None, Method::PUT, "/api/server/sign-up", change(true)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    for who in [&director, &pilot] {
+        let (status, body) = call(
+            &rig,
+            Some(who),
+            Method::PUT,
+            "/api/server/sign-up",
+            change(true),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body["message"].as_str().unwrap().contains("owner"),
+            "{body}"
+        );
+    }
+    assert!(!rig.state.book.open_sign_up());
+
+    let (status, info) = call(
+        &rig,
+        Some(&owner),
+        Method::PUT,
+        "/api/server/sign-up",
+        change(true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(info, json!({"open_sign_up": true}));
+    let (_, info) = call(&rig, Some(&pilot), Method::GET, "/api/server", None).await;
+    assert_eq!(info, json!({"open_sign_up": true}));
+    // Kept: a server started again on the same data still has it on.
+    assert!(AppState::open(rig._dir.path()).unwrap().book.open_sign_up());
+    // The clubs in the same file were not touched by it.
+    assert_eq!(rig.state.book.clubs().len(), 2);
+
+    let (status, info) = call(
+        &rig,
+        Some(&owner),
+        Method::PUT,
+        "/api/server/sign-up",
+        change(false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(info, json!({"open_sign_up": false}));
+    // Something that is not a yes or a no is refused.
+    let (status, _) = call(
+        &rig,
+        Some(&owner),
+        Method::PUT,
+        "/api/server/sign-up",
+        Some(json!({"open": "yes"})),
+    )
+    .await;
+    assert!(status.is_client_error(), "{status}");
+    assert!(!rig.state.book.open_sign_up());
+}
