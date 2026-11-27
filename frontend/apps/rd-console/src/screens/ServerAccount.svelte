@@ -6,7 +6,7 @@
    * An account can hold several sign-ins and keeps at least one. Another is added here,
    * signed in: that is the only way two sign-ins come to belong to one account.
    */
-  import { Banner, Button, Card, Input } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Input } from '@gridfpv/components';
   import type { Me, MyAccount, SignInProvider } from '@gridfpv/types';
   import { formatServerHash } from '../lib/serverHome.js';
   import { lookedAfterClubs, providerName, roleWord, type PeopleApi } from '../lib/serverPeople.js';
@@ -24,7 +24,14 @@
   }: {
     api: Pick<
       PeopleApi,
-      'rename' | 'removeSignIn' | 'signOut' | 'signInUrl' | 'clubPilots' | 'askFor' | 'dropClaim'
+      | 'rename'
+      | 'removeSignIn'
+      | 'signOut'
+      | 'signInUrl'
+      | 'clubPilots'
+      | 'askFor'
+      | 'dropClaim'
+      | 'setPrimary'
     >;
     account: MyAccount;
     providers: readonly SignInProvider[] | undefined;
@@ -113,12 +120,28 @@
       {:else}
         <ul aria-label="Your clubs">
           {#each account.clubs as entry (entry.club.id)}
-            <li>
+            <li data-testid="my-club">
               <span>{entry.club.name}</span>
               <span class="muted">{roleWord(entry.role)}</span>
+              {#if account.clubs.length > 1}
+                {#if account.primary === entry.club.id}
+                  <Badge tone="neutral">Primary</Badge>
+                {:else}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label="Make {entry.club.name} your primary club"
+                    onclick={() => run(() => api.setPrimary(entry.club.id))}>Make primary</Button
+                  >
+                {/if}
+              {/if}
             </li>
           {/each}
         </ul>
+        {#if account.clubs.length > 1}
+          <p class="muted">The front page opens on your primary club.</p>
+        {/if}
       {/if}
       {#if lookedAfter.length > 0}
         <ul aria-label="Clubs you look after">

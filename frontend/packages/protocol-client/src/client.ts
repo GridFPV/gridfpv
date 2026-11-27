@@ -964,6 +964,23 @@ export async function removeServerSignIn(
   );
 }
 
+/**
+ * Mark the club the front page opens on for the signed-in account
+ * (`PUT /api/me/primary-club`).
+ */
+export async function setServerPrimaryClub(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<Me> {
+  return apiJson<Me>(
+    baseUrl,
+    '/api/me/primary-club',
+    { method: 'PUT', body: { club }, fetch: options.fetch },
+    'mark the club as primary'
+  );
+}
+
 /** Sign this browser out of a server (`POST /api/sign-out`). */
 export async function signOutOfServer(
   baseUrl: string,

@@ -339,6 +339,10 @@ On your account page, find **Clubs on this server**.
   working. Its events still open by their links. **Bring back** undoes it, and invites are
   made again. A club cannot be deleted yet.
 
+**Primary club.** Someone in more than one club picks their primary club on their account
+page. The front page opens on that club, with a link to every club. It starts as the first
+club they joined. A visitor who is not signed in sees every club.
+
 One club's director has no say in another club, and one club's link token sends only into
 that club.
 
@@ -435,7 +439,6 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
   the director shows at the race. Seasons and records come later.
 - A director still sends events with a link token. Anyone with its link can look at an
   event.
-- A person cannot yet pick which club the front page opens on. It lists every club.
 - Grid sends every event to one club. It cannot yet keep a list of clubs and pick one
   for each event.
 - Videos are not stored.

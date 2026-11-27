@@ -271,3 +271,107 @@ describe('what people are told about owners', () => {
     expect(await screen.findByTestId('owners-see-all')).toHaveTextContent(OWNERS_SEE_ALL);
   });
 });
+
+describe('the primary club', () => {
+  const BOTH: MyAccount = {
+    ...ACE,
+    clubs: [
+      { club: { id: 'north', name: 'North FPV' }, role: 'Director' },
+      { club: { id: 'south', name: 'South FPV' }, role: 'Pilot' }
+    ],
+    primary: 'north'
+  };
+  const withEvents = (account: MyAccount | undefined) => {
+    const server = fakeServer({ account });
+    server.events = {
+      north: [serverEvent('friday', 'Friday Night')],
+      south: [serverEvent('sunday', 'Sunday Race')]
+    };
+    return server;
+  };
+
+  it('is marked on the account page, and another club can be made primary', async () => {
+    const { people, server } = open('#/account', fakeServer({ account: BOTH }));
+    await screen.findByTestId('server-account');
+    const rows = () => screen.getAllByTestId('my-club');
+    expect(rows()[0]).toHaveTextContent('North FPV');
+    expect(rows()[0]).toHaveTextContent('Primary');
+    expect(within(rows()[0]).queryByRole('button')).toBeNull();
+    expect(rows()[1]).not.toHaveTextContent('Primary');
+    expect(screen.getByText('The front page opens on your primary club.')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Make South FPV your primary club' }));
+    await waitFor(() => expect(rows()[1]).toHaveTextContent('Primary'));
+    expect(people.setPrimary).toHaveBeenCalledWith('south');
+    expect(server.account?.primary).toBe('south');
+    expect(rows()[0]).not.toHaveTextContent('Primary');
+    expect(
+      screen.getByRole('button', { name: 'Make North FPV your primary club' })
+    ).toBeInTheDocument();
+  });
+
+  it('is not offered to someone in one club: there is nothing to pick', async () => {
+    open('#/account', fakeServer({ account: { ...ACE, primary: 'north' } }));
+    await screen.findByTestId('server-account');
+    expect(screen.getByTestId('my-club')).not.toHaveTextContent('Primary');
+    expect(screen.queryByRole('button', { name: /primary club/ })).toBeNull();
+    expect(screen.queryByText('The front page opens on your primary club.')).toBeNull();
+  });
+
+  it("shows the server's words when it refuses", async () => {
+    const { people } = open('#/account', fakeServer({ account: BOTH }));
+    await screen.findByTestId('server-account');
+    people.setPrimary.mockRejectedValueOnce(new Error('Pick a club you are in.'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Make South FPV your primary club' }));
+    expect(await screen.findByText('Pick a club you are in.')).toBeInTheDocument();
+    expect(screen.getAllByTestId('my-club')[0]).toHaveTextContent('Primary');
+  });
+
+  it('is what the front page opens on, with a way to every club', async () => {
+    open('#/', withEvents(BOTH));
+    await screen.findByText('Friday Night');
+    expect(screen.queryByText('Sunday Race')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'South FPV' })).toBeNull();
+    const all = screen.getByTestId('all-clubs');
+    expect(all).toHaveTextContent('This is your primary club.');
+    expect(within(all).getByRole('link').getAttribute('href')).toBe('#/clubs');
+  });
+
+  it('gives way to every club at its own address, with a way back', async () => {
+    open('#/clubs', withEvents(BOTH));
+    await screen.findByText('Friday Night');
+    expect(screen.getByText('Sunday Race')).toBeInTheDocument();
+    expect(screen.queryByTestId('all-clubs')).toBeNull();
+    expect(screen.getByRole('link', { name: '← Your club' }).getAttribute('href')).toBe('#/');
+  });
+
+  it('says so when the primary club has no events, and does not show the others', async () => {
+    const server = withEvents({ ...BOTH, primary: 'north' });
+    server.events.north = [];
+    open('#/', server);
+    expect(await screen.findByTestId('no-events')).toHaveTextContent('No events yet.');
+    expect(screen.getByText('North FPV')).toBeInTheDocument();
+    expect(screen.queryByText('Sunday Race')).toBeNull();
+    expect(screen.getByTestId('all-clubs')).toBeInTheDocument();
+  });
+
+  it('shows a visitor every club, and offers them no primary club', async () => {
+    open('#/', withEvents(undefined));
+    await screen.findByText('Friday Night');
+    expect(screen.getByText('Sunday Race')).toBeInTheDocument();
+    expect(screen.queryByTestId('all-clubs')).toBeNull();
+  });
+
+  it('shows every club when the primary one is not on the list any more', async () => {
+    const server = withEvents({ ...BOTH, primary: 'gone' });
+    open('#/', server);
+    await screen.findByText('Friday Night');
+    expect(screen.getByText('Sunday Race')).toBeInTheDocument();
+    expect(screen.queryByTestId('all-clubs')).toBeNull();
+  });
+
+  it('reads the address of every club there and back', () => {
+    expect(parseServerHash('#/clubs')).toEqual({ kind: 'clubs' });
+    expect(formatServerHash({ kind: 'clubs' })).toBe('#/clubs');
+  });
+});

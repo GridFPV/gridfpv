@@ -252,7 +252,18 @@
     place.kind === 'c' && worded?.word === place.word ? worded : undefined
   );
 
-  const total = $derived(clubs?.reduce((sum, club) => sum + club.events.length, 0) ?? 0);
+  /**
+   * The signed-in person's primary club, when the front page is open and the club is on
+   * the list (§13.2). The front page then shows that club alone.
+   */
+  const primary = $derived(
+    place.kind === 'list' && account?.primary !== undefined
+      ? clubs?.find((entry) => entry.club.id === account?.primary)
+      : undefined
+  );
+  /** The clubs the page lists now: the primary one, or all of them. */
+  const shown = $derived(primary ? [primary] : clubs);
+  const total = $derived(shown?.reduce((sum, club) => sum + club.events.length, 0) ?? 0);
 
   // ── The event that is open on the page ─────────────────────────────────────
   // A link from the race code's QR: keep the code in this browser, and go on to the event.
@@ -630,15 +641,24 @@
         <SpectatorView {live} {pilot} {signup} {checkin} />
       {/if}
     {/if}
-  {:else if clubs === undefined}
+  {:else if clubs === undefined || shown === undefined}
     {#if !offline}<p class="muted" role="status">Loading…</p>{/if}
-  {:else if total === 0}
-    <Card elevation="sm">
-      <p class="event">No events yet</p>
-      <p>When a director sends one, it will show here.</p>
-    </Card>
   {:else}
-    {#each clubs as { club, events } (club.id)}
+    {#if place.kind === 'clubs' && account?.primary !== undefined}
+      <p class="back"><a href={formatServerHash({ kind: 'list' })}>← Your club</a></p>
+    {/if}
+    {#if total === 0}
+      <Card elevation="sm">
+        {#if primary}
+          <p class="event">{primary.club.name}</p>
+          <p data-testid="no-events">No events yet.</p>
+        {:else}
+          <p class="event">No events yet</p>
+          <p>When a director sends one, it will show here.</p>
+        {/if}
+      </Card>
+    {/if}
+    {#each shown as { club, events } (club.id)}
       {#if events.length > 0}
         <section aria-label={club.name}>
           <h2>
@@ -649,6 +669,12 @@
         </section>
       {/if}
     {/each}
+    {#if primary && clubs.length > 1}
+      <p class="muted" data-testid="all-clubs">
+        This is your primary club.
+        <a href={formatServerHash({ kind: 'clubs' })}>Every club on this server</a>
+      </p>
+    {/if}
   {/if}
 </main>
 

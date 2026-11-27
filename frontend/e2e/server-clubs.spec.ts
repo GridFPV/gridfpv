@@ -184,4 +184,43 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   });
   await expect(row).toContainText('On the server', { timeout: 20_000 });
   expect(server.run(['club', 'list'])).toMatch(/recon-fpv\s+Recon FPV/);
+
+  // ── A pilot in both clubs: the front page opens on their primary club. ────
+  const inviteFrom = async (clubPage: string): Promise<string> => {
+    await ryan.goto(clubPage);
+    await ryan.reload();
+    await ryan.getByLabel('Who it is for').fill('Mateo');
+    await ryan.getByRole('button', { name: 'Make the invite' }).click();
+    return (await ryan.getByTestId('invite-link').innerText()).trim();
+  };
+  const mateo = await fresh(browser);
+  await mateo.goto(await inviteFrom(`${server.baseUrl}/#/club/club`));
+  provider.person = { sub: 'sub-mateo', name: 'Mateo' };
+  await mateo.getByRole('link', { name: 'Continue with Test login' }).click();
+  await expect(mateo.getByTestId('server-who')).toHaveText('Mateo');
+  // Recon FPV was joined first, so it is primary. It has no events.
+  await mateo.goto(`${server.baseUrl}/#/`);
+  await expect(mateo.getByTestId('no-events')).toBeVisible();
+  await expect(mateo.getByTestId('all-clubs')).toContainText('This is your primary club.');
+  await expect(mateo.getByTestId('server-event-link')).toHaveCount(0);
+  // Every club is one step away.
+  await mateo.getByRole('link', { name: 'Every club on this server' }).click();
+  await expect(mateo.getByTestId('server-event-link')).toContainText(E2E_EVENT_NAME);
+
+  // Mateo joins the other club too, and makes it primary.
+  await mateo.goto(await inviteFrom(northPage));
+  await mateo.getByRole('button', { name: 'Accept as Mateo' }).click();
+  await expect(mateo.getByTestId('my-club')).toHaveCount(2);
+  await expect(mateo.getByTestId('my-club').filter({ hasText: 'Recon FPV' })).toContainText(
+    'Primary'
+  );
+  await mateo.getByRole('button', { name: 'Make Northern Whoops your primary club' }).click();
+  await expect(mateo.getByTestId('my-club').filter({ hasText: 'Northern Whoops' })).toContainText(
+    'Primary'
+  );
+  await mateo.goto(`${server.baseUrl}/#/`);
+  await mateo.reload();
+  await expect(mateo.getByTestId('server-event-link')).toContainText(E2E_EVENT_NAME);
+  await expect(mateo.getByRole('region', { name: 'Northern Whoops' })).toBeVisible();
+  await expect(mateo.getByTestId('all-clubs')).toBeVisible();
 });

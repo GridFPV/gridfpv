@@ -205,6 +205,10 @@ pub fn router(state: AppState) -> Router {
             "/api/me/sign-ins/{provider}/{subject}",
             axum::routing::delete(people::delete_my_sign_in),
         )
+        .route(
+            "/api/me/primary-club",
+            axum::routing::put(people::put_primary_club),
+        )
         .route("/api/sign-out", axum::routing::post(people::post_sign_out))
         .route(
             "/api/accounts/{account}/sign-ins",

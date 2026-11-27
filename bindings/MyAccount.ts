@@ -12,6 +12,12 @@ export type MyAccount = { id: string, name: string,
  */
 owner: boolean, sign_ins: Array<MySignIn>, clubs: Array<MyClub>, 
 /**
+ * The club the front page opens on for this account (§13.2): the one it marked, or
+ * else the one it joined first. Never an archived club. Absent for an account in no
+ * club that has marked none.
+ */
+primary?: string, 
+/**
  * The pilots this account holds, and those it has asked for.
  */
 pilots: Array<MyPilot>, };

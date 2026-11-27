@@ -65,6 +65,7 @@ export {
   signOutOfServer,
   listSignInProviders,
   signInUrl,
+  setServerPrimaryClub,
   getServerClubByWord,
   makeServerClub,
   setServerClubArchived,
