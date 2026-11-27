@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -88,6 +89,7 @@ async function sendRaceDay(): Promise<void> {
 
 /** On a club's page: make an invite for one person, and give back its link. */
 async function invite(page: Page, label: string, role: string, pilot?: string): Promise<string> {
+  await openServerPage(page, 'Invites');
   await page.getByLabel('Who it is for').fill(label);
   await page.getByLabel('Joins as').selectOption(role);
   if (pilot) await page.getByLabel('Their pilot').selectOption({ label: pilot });
@@ -117,7 +119,8 @@ test('results reach the account that holds the pilot: by invite, and by asking',
   await ryan.goto(setup);
   await continueAs(ryan, { sub: 'sub-ryan', name: 'Ryan' });
   await ryan.getByTestId('server-who').click();
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(ryan, 'Club');
+  await openServerPage(ryan, 'Pilots');
 
   // The club's pilots are there, by callsign, and nobody holds one.
   await expect(ryan.getByTestId('club-pilot')).toHaveCount(3);
@@ -180,7 +183,8 @@ test('results reach the account that holds the pilot: by invite, and by asking',
   await dana.goto(await invite(ryan, 'Dana', 'Approver'));
   await continueAs(dana, { sub: 'sub-dana', name: 'Dana' });
   await dana.getByTestId('server-who').click();
-  await dana.getByRole('link', { name: 'Pilots of Recon FPV' }).click();
+  // An approver's Club part is the club's pilots.
+  await openServerPart(dana, 'Club');
   await expect(dana.getByTestId('pilot-ask')).toContainText('Don says they are Dog');
   // An approver sees the pilots, and nothing of members or invites.
   await expect(dana.getByTestId('club-pilot')).toHaveCount(3);
@@ -199,6 +203,7 @@ test('results reach the account that holds the pilot: by invite, and by asking',
 
   // ── The owner takes Dog back, and gives Eel by hand. ──────────────────────
   await ryan.reload();
+  await openServerPage(ryan, 'Pilots');
   await ryan.getByRole('button', { name: 'Take Dog back from Don' }).click();
   await ryan.getByRole('dialog').getByRole('button', { name: 'Take back' }).click();
   await expect(ryan.getByTestId('pilot-holder')).toHaveText(['Cara', 'Nobody yet', 'Nobody yet']);

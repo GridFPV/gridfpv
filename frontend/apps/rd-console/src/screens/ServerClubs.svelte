@@ -6,7 +6,7 @@
    * out, which follows its name. An archived club is read-only and off the list of clubs:
    * its events still open by their links, and an owner can bring it back.
    */
-  import { Badge, Banner, Button, Card, Dialog, Input, toast } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Dialog, InfoTip, Input, toast } from '@gridfpv/components';
   import type { ServerClub } from '@gridfpv/types';
   import { formatServerHash } from '../lib/serverHome.js';
   import { clubLink, type PeopleApi } from '../lib/serverPeople.js';
@@ -88,10 +88,27 @@
 
 <Card elevation="sm">
   <div class="block" data-testid="server-clubs">
-    <h2>Clubs on this server</h2>
-    <p class="muted">
-      As an owner you make clubs here, and you can see and change everything in each one.
-    </p>
+    <div class="row">
+      <h2>Clubs</h2>
+      <InfoTip
+        text="As an owner you can see and change everything in each club. A club's address follows its name, and an old address keeps working."
+        label="About clubs"
+      />
+      <span class="grow"></span>
+      <form class="row new" onsubmit={make} aria-label="Make a club">
+        <label class="visually-hidden" for="new-club-name">New club</label>
+        <Input
+          id="new-club-name"
+          maxlength={80}
+          placeholder="New club's name"
+          bind:value={name}
+          disabled={busy}
+        />
+        <Button variant="primary" size="sm" type="submit" disabled={busy || name.trim() === ''}
+          >Make the club</Button
+        >
+      </form>
+    </div>
     {#if loadError}
       <Banner tone="danger" title="The clubs could not be read.">{loadError}</Banner>
     {/if}
@@ -103,61 +120,41 @@
         {#each clubs as club (club.id)}
           {@const link = clubLink(origin, club.word)}
           <li data-testid="owned-club" class:archived={club.archived}>
-            <div class="row">
-              <a class="who" href={formatServerHash({ kind: 'club', club: club.id })}>{club.name}</a
-              >
-              {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
-              {#if club.archived}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busy}
-                  aria-label="Bring back {club.name}"
-                  onclick={() => run(() => api.archiveClub(club.id, false))}>Bring back</Button
-                >
-              {:else}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busy}
-                  aria-label="Archive {club.name}"
-                  onclick={() => (archiving = club)}>Archive…</Button
-                >
-              {/if}
-            </div>
-            <div class="row">
-              <code data-testid="club-address">{link}</code>
+            <a
+              class="who"
+              href={formatServerHash({ kind: 'manage', club: club.word, page: 'members' })}
+              >{club.name}</a
+            >
+            {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
+            <code data-testid="club-address">{link}</code>
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label="Copy the address of {club.name}"
+              onclick={() => copy(link)}>Copy</Button
+            >
+            <span class="grow"></span>
+            {#if club.archived}
               <Button
                 size="sm"
                 variant="ghost"
-                aria-label="Copy the address of {club.name}"
-                onclick={() => copy(link)}>Copy</Button
+                disabled={busy}
+                aria-label="Bring back {club.name}"
+                onclick={() => run(() => api.archiveClub(club.id, false))}>Bring back</Button
               >
-            </div>
+            {:else}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                aria-label="Archive {club.name}"
+                onclick={() => (archiving = club)}>Archive…</Button
+              >
+            {/if}
           </li>
         {/each}
       </ul>
     {/if}
-
-    <form onsubmit={make} aria-label="Make a club">
-      <label for="new-club-name">New club</label>
-      <div class="row">
-        <Input
-          id="new-club-name"
-          maxlength={80}
-          placeholder="The club's name"
-          bind:value={name}
-          disabled={busy}
-        />
-        <Button variant="primary" size="sm" type="submit" disabled={busy || name.trim() === ''}
-          >Make the club</Button
-        >
-      </div>
-      <p class="muted">
-        Then open the club and invite its director. A club's address follows its name, and an old
-        address keeps working.
-      </p>
-    </form>
   </div>
 </Card>
 
@@ -177,8 +174,7 @@
 {/if}
 
 <style>
-  .block,
-  form {
+  .block {
     display: grid;
     gap: var(--gf-space-3);
   }
@@ -197,8 +193,27 @@
     gap: var(--gf-space-3);
   }
   li {
-    display: grid;
-    gap: var(--gf-space-1);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--gf-space-2) var(--gf-space-3);
+    padding: var(--gf-space-2) 0;
+    border-top: 1px solid var(--gf-border);
+  }
+  .grow {
+    flex: 1;
+  }
+  .new {
+    flex-wrap: nowrap;
+    min-width: min(24rem, 100%);
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .row {
     display: flex;
@@ -221,8 +236,5 @@
   .muted {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
-  }
-  label {
-    font-weight: var(--gf-font-weight-bold);
   }
 </style>

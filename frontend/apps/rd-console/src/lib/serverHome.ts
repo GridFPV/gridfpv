@@ -4,14 +4,33 @@
  */
 import type { MyAccount, Pilot, PublicPilot, ServerEvent } from '@gridfpv/types';
 
+/** The pages of the signed-in account. */
+export const ACCOUNT_PAGES = ['profile', 'clubs', 'sign-in'] as const;
+export type AccountPage = (typeof ACCOUNT_PAGES)[number];
+
+/** The pages a club is run from, for those who look after it. */
+export const MANAGE_PAGES = [
+  'members',
+  'invites',
+  'pilots',
+  'events',
+  'tokens',
+  'settings'
+] as const;
+export type ManagePage = (typeof MANAGE_PAGES)[number];
+
+/** The pages the server itself is run from, for its owners. */
+export const ADMIN_PAGES = ['clubs', 'sign-in', 'email'] as const;
+export type AdminPage = (typeof ADMIN_PAGES)[number];
+
 /** Where the page is. */
 export type ServerPlace =
   /** The front page: the signed-in person's primary club, or every club. */
   | { kind: 'list' }
-  /** Every club on the server, with its events. */
+  /** Every club on the server. */
   | { kind: 'clubs' }
-  /** One club, by its friendly address (§13.2). */
-  | { kind: 'c'; word: string }
+  /** One club, by its friendly address (§13.2): its events, and the way in. */
+  | { kind: 'club'; word: string }
   /** One event of one club. */
   | { kind: 'event'; club: string; event: string }
   /**
@@ -27,37 +46,70 @@ export type ServerPlace =
   | { kind: 'reconnect'; secret: string }
   /** The link sent to an email address, to confirm it. */
   | { kind: 'confirm-email'; secret: string }
-  /** The signed-in account. */
-  | { kind: 'account' }
-  /** A club's members, invites and pilots, for those who look after it. */
-  | { kind: 'club'; club: string }
+  /** The signed-in account's own settings. */
+  | { kind: 'account'; page: AccountPage }
+  /** Running a club, for those who look after it. `club` is its friendly address. */
+  | { kind: 'manage'; club: string; page: ManagePage }
+  /** Running the server, for its owners. */
+  | { kind: 'admin'; page: AdminPage }
   /** The events the signed-in account's pilots flew. */
   | { kind: 'results' };
+
+/** The four parts of the page. Each has a row of pages of its own. */
+export type ServerSide = 'events' | 'account' | 'club' | 'server';
+
+/** Which part a place belongs to. A link someone was sent (an invite, say) is on none. */
+export function sideOfPlace(place: ServerPlace): ServerSide | undefined {
+  switch (place.kind) {
+    case 'list':
+    case 'clubs':
+    case 'club':
+    case 'event':
+    case 'here':
+    case 'results':
+      return 'events';
+    case 'account':
+      return 'account';
+    case 'manage':
+      return 'club';
+    case 'admin':
+      return 'server';
+    default:
+      return undefined;
+  }
+}
+
+/** A page of a part, when the word after it names one. The first page when there is none. */
+function pageOf<T extends string>(pages: readonly T[], word: string | undefined): T | undefined {
+  if (word === undefined) return pages[0];
+  return pages.find((page) => page === word);
+}
 
 /**
  * Read the part of the address after the `#`. Anything that is not one of the pages is the
  * list.
  *
  * - `#/clubs`: every club
- * - `#/c/‹word›`: one club, by its friendly address
- * - `#/e/‹club›/‹event›`: one event
+ * - `#/club/‹word›`: one club, by its friendly address
+ * - `#/event/‹club›/‹event›`: one event
  * - `#/here/‹club›/‹event›/‹code›`: one event, with the race code shown at the race
- * - `#/sign-in`, `#/sign-in?problem=‹code›`
- * - `#/invite/‹secret›`
- * - `#/reconnect/‹secret›`
- * - `#/confirm-email/‹secret›`
- * - `#/account`
- * - `#/club/‹club›`
  * - `#/results`
+ * - `#/sign-in`, `#/sign-in?problem=‹code›`
+ * - `#/invite/‹secret›`, `#/reconnect/‹secret›`, `#/confirm-email/‹secret›`
+ * - `#/account`, `#/account/clubs`, `#/account/sign-in`
+ * - `#/manage/‹word›`, `#/manage/‹word›/‹page›`: running a club
+ * - `#/admin`, `#/admin/sign-in`, `#/admin/email`: running the server
  */
 export function parseServerHash(hash: string): ServerPlace {
   const [path, query = ''] = hash.replace(/^#\/?/, '').split('?');
   const parts = path.split('/').filter((part) => part !== '');
   try {
     const [first, ...rest] = parts.map((part) => decodeURIComponent(part));
-    if (first === 'e' && rest.length === 2) return { kind: 'event', club: rest[0], event: rest[1] };
+    if (first === 'event' && rest.length === 2) {
+      return { kind: 'event', club: rest[0], event: rest[1] };
+    }
     if (first === 'clubs' && rest.length === 0) return { kind: 'clubs' };
-    if (first === 'c' && rest.length === 1) return { kind: 'c', word: rest[0] };
+    if (first === 'club' && rest.length === 1) return { kind: 'club', word: rest[0] };
     if (first === 'here' && rest.length === 3) {
       return { kind: 'here', club: rest[0], event: rest[1], code: rest[2] };
     }
@@ -70,8 +122,18 @@ export function parseServerHash(hash: string): ServerPlace {
     if (first === 'confirm-email' && rest.length === 1) {
       return { kind: 'confirm-email', secret: rest[0] };
     }
-    if (first === 'account' && rest.length === 0) return { kind: 'account' };
-    if (first === 'club' && rest.length === 1) return { kind: 'club', club: rest[0] };
+    if (first === 'account' && rest.length <= 1) {
+      const page = pageOf(ACCOUNT_PAGES, rest[0]);
+      if (page) return { kind: 'account', page };
+    }
+    if (first === 'manage' && (rest.length === 1 || rest.length === 2)) {
+      const page = pageOf(MANAGE_PAGES, rest[1]);
+      if (page) return { kind: 'manage', club: rest[0], page };
+    }
+    if (first === 'admin' && rest.length <= 1) {
+      const page = pageOf(ADMIN_PAGES, rest[0]);
+      if (page) return { kind: 'admin', page };
+    }
     if (first === 'results' && rest.length === 0) return { kind: 'results' };
   } catch {
     // A badly written address is the list.
@@ -84,11 +146,11 @@ export function formatServerHash(place: ServerPlace): string {
     case 'list':
       return '#/';
     case 'event':
-      return `#/e/${encodeURIComponent(place.club)}/${encodeURIComponent(place.event)}`;
+      return `#/event/${encodeURIComponent(place.club)}/${encodeURIComponent(place.event)}`;
     case 'clubs':
       return '#/clubs';
-    case 'c':
-      return `#/c/${encodeURIComponent(place.word)}`;
+    case 'club':
+      return `#/club/${encodeURIComponent(place.word)}`;
     case 'here':
       return `#/here/${encodeURIComponent(place.club)}/${encodeURIComponent(place.event)}/${encodeURIComponent(place.code)}`;
     case 'sign-in':
@@ -100,9 +162,13 @@ export function formatServerHash(place: ServerPlace): string {
     case 'confirm-email':
       return `#/confirm-email/${encodeURIComponent(place.secret)}`;
     case 'account':
-      return '#/account';
-    case 'club':
-      return `#/club/${encodeURIComponent(place.club)}`;
+      return place.page === ACCOUNT_PAGES[0] ? '#/account' : `#/account/${place.page}`;
+    case 'manage': {
+      const club = `#/manage/${encodeURIComponent(place.club)}`;
+      return place.page === MANAGE_PAGES[0] ? club : `${club}/${place.page}`;
+    }
+    case 'admin':
+      return place.page === ADMIN_PAGES[0] ? '#/admin' : `#/admin/${place.page}`;
     case 'results':
       return '#/results';
   }

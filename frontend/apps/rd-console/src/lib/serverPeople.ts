@@ -345,12 +345,12 @@ export function personLabel(person: { name: string; callsign?: string }): string
   return callsign && callsign !== person.name ? `${person.name} (${callsign})` : person.name;
 }
 
-/** What the sign-in page says of making an account, by the owner's choice. */
+/**
+ * What the sign-in page says of making an account. Only a server that asks for an invite
+ * says anything: where anyone may sign up, the way in is already on the page.
+ */
 export function signUpLine(open: boolean | undefined): string {
-  if (open === undefined) return '';
-  return open
-    ? 'No account yet? Sign in, and one is made for you.'
-    : 'You need an invite from your club to make an account.';
+  return open === false ? 'New here? You need an invite.' : '';
 }
 
 /** Why a sign-in did not work, in words, from the code the server put in the address. */
@@ -407,7 +407,7 @@ export function inviteStanding(invite: InviteView, now: number): string {
 
 /** A club's friendly address, as a person would open it. */
 export function clubLink(origin: string, word: string): string {
-  return `${origin.replace(/\/$/, '')}/#/c/${encodeURIComponent(word)}`;
+  return `${origin.replace(/\/$/, '')}/#/club/${encodeURIComponent(word)}`;
 }
 
 /** What everyone who signs in or runs a club here is told about the server's owners. */
@@ -429,8 +429,17 @@ export function inviteLink(origin: string, secret: string): string {
 }
 
 /** A club an account looks after, and how far its say goes there. */
+/** A club as a list has it: its friendly address and standing too, when the list says. */
+export interface ClubRef {
+  id: string;
+  name: string;
+  word?: string;
+  archived?: boolean;
+  open?: boolean;
+}
+
 export interface LookedAfter {
-  club: { id: string; name: string };
+  club: ClubRef;
   /** Runs the club: members, invites and pilots. Otherwise only says yes or no to claims. */
   runs: boolean;
 }
@@ -441,13 +450,17 @@ export interface LookedAfter {
  */
 export function lookedAfterClubs(
   account: MyAccount | undefined,
-  all: readonly { id: string; name: string }[]
+  all: readonly ClubRef[]
 ): LookedAfter[] {
   if (!account) return [];
   if (account.owner) return all.map((club) => ({ club, runs: true }));
   return account.clubs
     .filter((entry) => entry.role !== 'Pilot')
-    .map((entry) => ({ club: entry.club, runs: entry.role === 'Director' }));
+    .map((entry) => ({
+      // The club as the list has it, which knows its friendly address too.
+      club: all.find((club) => club.id === entry.club.id) ?? entry.club,
+      runs: entry.role === 'Director'
+    }));
 }
 
 /** How far an account's say goes in one club. `undefined` when it has none. */

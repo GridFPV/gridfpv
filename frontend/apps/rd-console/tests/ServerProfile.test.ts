@@ -114,8 +114,9 @@ describe('the words of a pilot profile', () => {
   });
 
   it("says how an account is made, by the owner's choice", () => {
-    expect(signUpLine(true)).toContain('one is made for you');
     expect(signUpLine(false)).toContain('need an invite');
+    // Where anyone may sign up, the way in is already on the page.
+    expect(signUpLine(true)).toBe('');
     // Not known yet: nothing is said that may turn out wrong.
     expect(signUpLine(undefined)).toBe('');
   });
@@ -125,9 +126,7 @@ describe('the pilot profile on the account page', () => {
   it('says nothing is filled in, and how the pilot is shown until it is', async () => {
     open('#/account', fakeServer({ account: ACE }));
     const profile = await card();
-    expect(within(profile).getByTestId('profile-empty')).toHaveTextContent(
-      'Nothing is filled in yet. You are shown as Ace.'
-    );
+    expect(within(profile).getByTestId('profile-empty')).toHaveTextContent('Shown as Ace.');
     expect(within(profile).getByRole('button', { name: 'Fill it in' })).toBeTruthy();
     expect(screen.queryByLabelText('Callsign')).toBeNull();
   });
@@ -256,28 +255,29 @@ describe('the pilot profile on the account page', () => {
   });
 });
 
+/** The switch on the owner's card for who may make an account. */
+const flip = (block: HTMLElement) =>
+  within(block).getByRole('switch', { name: 'Let anyone make an account' }) as HTMLInputElement;
+
 describe('who may make an account', () => {
   const setting = () => screen.findByTestId('sign-up-setting');
 
   it('is not shown to someone who is not an owner', async () => {
-    const { people } = open('#/account', fakeServer({ account: ACE }));
-    await card();
+    const { people } = open('#/admin/sign-in', fakeServer({ account: ACE }));
+    await screen.findByTestId('server-who');
     expect(screen.queryByTestId('sign-up-setting')).toBeNull();
     expect(people.setOpenSignUp).not.toHaveBeenCalled();
   });
 
   it('starts as invite only, and an owner lets anyone in after being asked', async () => {
-    const { people, server } = open('#/account', fakeServer({ account: OWNER }));
+    const { people, server } = open('#/admin/sign-in', fakeServer({ account: OWNER }));
     const block = await setting();
     await waitFor(() =>
       expect(within(block).getByTestId('sign-up-state')).toHaveTextContent('Invite only')
     );
-    expect(block).toHaveTextContent('An account needs an invite.');
     expect(block).toHaveTextContent('Invites work either way.');
 
-    await fireEvent.click(
-      within(block).getByRole('button', { name: /Let anyone make an account/ })
-    );
+    await fireEvent.click(flip(block));
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveTextContent('Let anyone make an account?');
     expect(dialog).toHaveTextContent('A new account is in no club.');
@@ -289,26 +289,27 @@ describe('who may make an account', () => {
     expect(people.setOpenSignUp).not.toHaveBeenCalled();
     expect(server.openSignUp).toBe(false);
 
-    await fireEvent.click(
-      within(block).getByRole('button', { name: /Let anyone make an account/ })
-    );
+    await fireEvent.click(flip(block));
     await fireEvent.click(
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Let anyone in' })
     );
     await waitFor(() => expect(people.setOpenSignUp).toHaveBeenCalledWith(true));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(within(block).getByTestId('sign-up-state')).toHaveTextContent('Anyone');
-    expect(block).toHaveTextContent('Anyone who can sign in may make an account.');
+    expect(flip(block).checked).toBe(true);
     expect(server.openSignUp).toBe(true);
   });
 
   it('goes back to invites at once, with no question', async () => {
-    const { people, server } = open('#/account', fakeServer({ account: OWNER, openSignUp: true }));
+    const { people, server } = open(
+      '#/admin/sign-in',
+      fakeServer({ account: OWNER, openSignUp: true })
+    );
     const block = await setting();
     await waitFor(() =>
       expect(within(block).getByTestId('sign-up-state')).toHaveTextContent('Anyone')
     );
-    await fireEvent.click(within(block).getByRole('button', { name: 'Ask for an invite again' }));
+    await fireEvent.click(flip(block));
     await waitFor(() => expect(people.setOpenSignUp).toHaveBeenCalledWith(false));
     expect(screen.queryByRole('dialog')).toBeNull();
     await waitFor(() =>
@@ -318,12 +319,11 @@ describe('who may make an account', () => {
   });
 
   it('says why when the server refuses, and changes nothing', async () => {
-    const { people } = open('#/account', fakeServer({ account: OWNER }));
+    const { people } = open('#/admin/sign-in', fakeServer({ account: OWNER }));
     const block = await setting();
     people.setOpenSignUp.mockRejectedValueOnce(new Error('The server could not save that.'));
-    await fireEvent.click(
-      await within(block).findByRole('button', { name: /Let anyone make an account/ })
-    );
+    await waitFor(() => expect(within(block).queryByRole('switch')).not.toBeNull());
+    await fireEvent.click(flip(block));
     const dialog = screen.getByRole('dialog');
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Let anyone in' }));
     expect(await within(dialog).findByText('The server could not save that.')).toBeTruthy();
@@ -332,7 +332,7 @@ describe('who may make an account', () => {
 
   it('says so when the setting cannot be read', async () => {
     const server = fakeServer({ account: OWNER });
-    location.hash = '#/account';
+    location.hash = '#/admin/sign-in';
     const people = fakePeople(server);
     people.serverInfo.mockRejectedValue(new Error('The server is not answering.'));
     render(ServerHome, {
@@ -347,7 +347,7 @@ describe('who may make an account', () => {
     const block = await setting();
     expect(await within(block).findByText('The server is not answering.')).toBeTruthy();
     // Neither choice is offered while it is not known which holds.
-    expect(within(block).queryByRole('button')).toBeNull();
+    expect(within(block).queryByRole('switch')).toBeNull();
   });
 });
 
@@ -355,30 +355,23 @@ describe('the sign-in page', () => {
   it('says an invite is needed on a server that asks for one', async () => {
     open('#/sign-in');
     await waitFor(() =>
-      expect(screen.getByTestId('sign-up-line')).toHaveTextContent(
-        'You need an invite from your club to make an account.'
-      )
+      expect(screen.getByTestId('sign-up-line')).toHaveTextContent('New here? You need an invite.')
     );
   });
 
-  it('says an account is made for you on a server that lets anyone in', async () => {
+  it('says nothing of invites on a server that lets anyone in', async () => {
     open('#/sign-in', fakeServer({ openSignUp: true }));
-    await waitFor(() =>
-      expect(screen.getByTestId('sign-up-line')).toHaveTextContent(
-        'No account yet? Sign in, and one is made for you.'
-      )
-    );
     // The sign-in itself is the same: no invite goes along.
     const link = await screen.findByRole('link', { name: 'Continue with Discord' });
     expect(link.getAttribute('href')).not.toContain('invite');
+    expect(screen.queryByTestId('sign-up-line')).toBeNull();
   });
 
   it('follows the owner changing it, without the page being opened again', async () => {
-    open('#/account', fakeServer({ account: OWNER, openSignUp: true }));
+    open('#/admin/sign-in', fakeServer({ account: OWNER, openSignUp: true }));
     const block = await screen.findByTestId('sign-up-setting');
-    await fireEvent.click(
-      await within(block).findByRole('button', { name: 'Ask for an invite again' })
-    );
+    await waitFor(() => expect(flip(block).checked).toBe(true));
+    await fireEvent.click(flip(block));
     await waitFor(() =>
       expect(within(block).getByTestId('sign-up-state')).toHaveTextContent('Invite only')
     );

@@ -87,7 +87,7 @@ function open({
   account = BEE as MyAccount | null,
   right = 'ABC234',
   kept = undefined as string | undefined,
-  hash = '#/e/club/friday',
+  hash = '#/event/club/friday',
   start = practice()
 } = {}) {
   let view = start;
@@ -308,7 +308,7 @@ describe('the link in the QR code shown at the race', () => {
   it('keeps the code, opens the event, and takes the code out of the address', async () => {
     const { seats, codes } = open({ hash: '#/here/club/friday/abc234' });
     expect(await screen.findByTestId('server-event')).toHaveTextContent('Friday Night');
-    expect(location.hash).toBe('#/e/club/friday');
+    expect(location.hash).toBe('#/event/club/friday');
     expect(codes.all).toEqual({ 'gridfpv.race-code.club/friday': 'ABC234' });
 
     // So a seat is taken with no typing.

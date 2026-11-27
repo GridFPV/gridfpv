@@ -11,7 +11,8 @@
    * event has it (§13.4). What they ask for goes to the Director, which decides it as it
    * would at the race. Nothing else can be changed from this page.
    */
-  import { Badge, Banner, Button, Card, Dialog, Input } from '@gridfpv/components';
+  import { Badge, Banner, Button, Card, Dialog, InfoTip, Input, Select } from '@gridfpv/components';
+  import Page from '../Page.svelte';
   import {
     dropSeat,
     getServerEvent,
@@ -46,11 +47,14 @@
     formatServerHash,
     parseServerHash,
     pilotHere,
+    type AccountPage,
+    type AdminPage,
+    type ManagePage,
     type ServerPlace
   } from '../lib/serverHome.js';
   import {
+    lookedAfterClubs,
     peopleApi,
-    sayIn,
     signInProblem,
     signUpLine,
     type PeopleApi
@@ -59,6 +63,7 @@
   import ServerAccount from './ServerAccount.svelte';
   import ServerClub from './ServerClub.svelte';
   import ServerInvite from './ServerInvite.svelte';
+  import ServerNav from './ServerNav.svelte';
   import ServerJoin from './ServerJoin.svelte';
   import ServerReconnect from './ServerReconnect.svelte';
   import ServerClubs from './ServerClubs.svelte';
@@ -195,7 +200,8 @@
       place.kind === 'event' ||
       place.kind === 'account' ||
       place.kind === 'club' ||
-      place.kind === 'c' ||
+      place.kind === 'manage' ||
+      place.kind === 'admin' ||
       place.kind === 'invite' ||
       place.kind === 'reconnect' ||
       place.kind === 'results'
@@ -261,7 +267,7 @@
     { word: string; club: ClubOnServer | null; events: ServerEvent[] } | undefined
   >(undefined);
   $effect(() => {
-    if (place.kind !== 'c') return;
+    if (place.kind !== 'club') return;
     const word = place.word;
     void account?.id;
     void listAgain;
@@ -283,8 +289,61 @@
     };
   });
   const wordedNow = $derived(
-    place.kind === 'c' && worded?.word === place.word ? worded : undefined
+    place.kind === 'club' && worded?.word === place.word ? worded : undefined
   );
+
+  // ── The clubs the signed-in person looks after ─────────────────────────────
+  const lookedAfter = $derived(
+    lookedAfterClubs(account ?? undefined, clubs?.map((entry) => entry.club) ?? [])
+  );
+  /** The club an address under `#/manage/` names: by its friendly word, or else its id. */
+  const managedWord = $derived(place.kind === 'manage' ? place.club : undefined);
+  const managedClub = $derived(
+    managedWord === undefined
+      ? undefined
+      : clubs?.find((entry) => entry.club.word === managedWord || entry.club.id === managedWord)
+          ?.club
+  );
+  /**
+   * A club's address follows its name. When the club on the page is renamed, the address
+   * in the bar is the old one: go on to the new one, on the same page of the club.
+   */
+  let lastManaged: { word: string; id: string } | undefined;
+  $effect(() => {
+    if (place.kind !== 'manage' || clubs === undefined) return;
+    if (managedClub) {
+      lastManaged = { word: place.club, id: managedClub.id };
+      return;
+    }
+    const before = lastManaged;
+    if (!before || before.word !== place.club) return;
+    const now = clubs.find((entry) => entry.club.id === before.id)?.club;
+    if (now?.word && now.word !== place.club) {
+      location.replace(formatServerHash({ kind: 'manage', club: now.word, page: place.page }));
+    }
+  });
+
+  /** That club, when the signed-in person looks after it. */
+  const managed = $derived(lookedAfter.find((mine) => mine.club.id === managedClub?.id));
+
+  const ACCOUNT_TITLES: Record<AccountPage, string> = {
+    profile: 'Profile',
+    clubs: 'Clubs',
+    'sign-in': 'Sign-in'
+  };
+  const MANAGE_TITLES: Record<ManagePage, string> = {
+    members: 'Members',
+    invites: 'Invites',
+    pilots: 'Pilots',
+    events: 'Events',
+    tokens: 'Link tokens',
+    settings: 'Settings'
+  };
+  const ADMIN_TITLES: Record<AdminPage, string> = {
+    clubs: 'Clubs',
+    'sign-in': 'Sign-in',
+    email: 'Email'
+  };
 
   /**
    * The signed-in person's primary club, when the front page is open and the club is on
@@ -506,160 +565,253 @@
   }
 </script>
 
-<main class="server">
-  <header class="top">
-    <h1><a href="#/">Grid<span class="accent">FPV</span></a></h1>
-    {#if account}
-      <a class="who" href={formatServerHash({ kind: 'account' })} data-testid="server-who"
-        >{account.name}</a
-      >
-    {:else if account === null && canSignIn}
-      <a class="who" href={formatServerHash({ kind: 'sign-in' })} data-testid="server-sign-in"
-        >Sign in</a
-      >
-    {/if}
-  </header>
+<ServerNav {place} {account} {canSignIn} myClubs={lookedAfter} />
 
-  {#if offline}
-    <p class="offline" role="status" data-testid="server-offline">
-      Not connected right now. Trying again.
-    </p>
-  {/if}
+{#if offline}
+  <p class="offline" role="status" data-testid="server-offline">
+    Not connected right now. Trying again.
+  </p>
+{/if}
 
-  {#if place.kind === 'sign-in'}
-    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+{#if place.kind === 'sign-in'}
+  <Page title="Sign in">
     {#if account}
       <Card elevation="sm">
         <p>You are signed in as <strong>{account.name}</strong>.</p>
         {#if signInProblem(place.problem)}<p class="muted">{signInProblem(place.problem)}</p>{/if}
       </Card>
     {:else}
-      <p class="event">Sign in</p>
-      <ServerSignIn
-        api={people}
-        {providers}
-        problem={signInProblem(place.problem)}
-        password={passwordOn}
-        email={emailOn}
-        canMake={openSignUp === true}
-        onsignedin={(me) => signedIn(me, { kind: me.account?.clubs.length ? 'list' : 'account' })}
-      />
-      <p class="muted" data-testid="sign-up-line">{signUpLine(openSignUp)}</p>
+      <div class="narrow">
+        <Card elevation="md">
+          <div class="block">
+            <ServerSignIn
+              api={people}
+              {providers}
+              problem={signInProblem(place.problem)}
+              password={passwordOn}
+              email={emailOn}
+              canMake={openSignUp === true}
+              onsignedin={(me) =>
+                signedIn(
+                  me,
+                  me.account?.clubs.length ? { kind: 'list' } : { kind: 'account', page: 'profile' }
+                )}
+            />
+            {#if signUpLine(openSignUp) !== ''}
+              <p class="muted" data-testid="sign-up-line">{signUpLine(openSignUp)}</p>
+            {/if}
+          </div>
+        </Card>
+      </div>
     {/if}
-  {:else if place.kind === 'invite'}
-    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+  </Page>
+{:else if place.kind === 'invite'}
+  <Page title="Invite">
     {#if account !== undefined}
-      <ServerInvite
-        api={people}
-        secret={place.secret}
-        account={account ?? undefined}
-        {providers}
-        password={passwordOn}
-        email={emailOn}
-        onsignedin={(me) => signedIn(me, { kind: 'account' })}
-        onjoined={async () => {
-          await readMe();
-          go({ kind: 'account' });
-        }}
-      />
+      <div class="narrow">
+        <ServerInvite
+          api={people}
+          secret={place.secret}
+          account={account ?? undefined}
+          {providers}
+          password={passwordOn}
+          email={emailOn}
+          onsignedin={(me) => signedIn(me, { kind: 'account', page: 'clubs' })}
+          onjoined={async () => {
+            await readMe();
+            go({ kind: 'account', page: 'clubs' });
+          }}
+        />
+      </div>
     {/if}
-  {:else if place.kind === 'confirm-email'}
-    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
-    <ServerConfirmEmail api={people} secret={place.secret} onconfirmed={readMe} />
-  {:else if place.kind === 'reconnect'}
-    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+  </Page>
+{:else if place.kind === 'confirm-email'}
+  <Page title="Email">
+    <div class="narrow">
+      <ServerConfirmEmail api={people} secret={place.secret} onconfirmed={readMe} />
+    </div>
+  </Page>
+{:else if place.kind === 'reconnect'}
+  <Page title="Get back in">
     {#if account !== undefined}
-      <ServerReconnect
-        api={people}
-        secret={place.secret}
-        account={account ?? undefined}
-        {providers}
-        password={passwordOn}
-        email={emailOn}
-        onsignedin={(me) => signedIn(me, { kind: 'account' })}
-      />
+      <div class="narrow">
+        <ServerReconnect
+          api={people}
+          secret={place.secret}
+          account={account ?? undefined}
+          {providers}
+          password={passwordOn}
+          email={emailOn}
+          onsignedin={(me) => signedIn(me, { kind: 'account', page: 'sign-in' })}
+        />
+      </div>
     {/if}
-  {:else if place.kind === 'account'}
-    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+  </Page>
+{:else if place.kind === 'account'}
+  <Page title={ACCOUNT_TITLES[place.page]}>
     {#if account}
       <ServerAccount
         api={people}
         {account}
+        section={place.page}
         {providers}
         password={passwordOn}
         email={emailOn}
-        clubs={clubs?.map((entry) => entry.club) ?? []}
-        onchange={(me) => (account = me.account ?? null)}
+        onchange={(me) => {
+          account = me.account ?? null;
+          listAgain += 1;
+        }}
         onreread={readMe}
         onsignedout={() => {
           account = null;
           go({ kind: 'list' });
         }}
       />
-      {#if account.owner}
-        <ServerSignUpSetting api={people} onchange={(open) => (openSignUp = open)} />
-        <ServerPasswordSetting api={people} onchange={(on) => (passwordOn = on)} />
+    {:else if account === null}
+      {@render signInFirst()}
+    {/if}
+  </Page>
+{:else if place.kind === 'admin'}
+  <Page title={ADMIN_TITLES[place.page]}>
+    {#if account?.owner}
+      {#if place.page === 'clubs'}
         <ServerClubs
           api={people}
           onchange={() => {
             listAgain += 1;
           }}
         />
+      {:else if place.page === 'sign-in'}
+        <div class="cards">
+          <ServerSignUpSetting api={people} onchange={(open) => (openSignUp = open)} />
+          <ServerPasswordSetting api={people} onchange={(on) => (passwordOn = on)} />
+          <Card elevation="sm">
+            <div class="block" data-testid="sign-in-services">
+              <div class="head">
+                <h2>Sign-in services</h2>
+                <InfoTip
+                  text="Discord, Google and the like. They are set in the server's settings file."
+                  label="About sign-in services"
+                />
+              </div>
+              {#if providers === undefined}
+                <p class="muted" role="status">Loading…</p>
+              {:else if providers.length === 0}
+                <p class="muted">None set up.</p>
+              {:else}
+                <ul>
+                  {#each providers as provider (provider.id)}
+                    <li>{provider.name}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </Card>
+        </div>
+      {:else}
+        <div class="cards">
+          <Card elevation="sm">
+            <div class="block" data-testid="email-setting">
+              <div class="head">
+                <h2>Email</h2>
+                <InfoTip
+                  text="Used to confirm an address, and to send a link for a forgotten password. It is set in the server's settings file."
+                  label="About email"
+                />
+                <Badge tone={emailOn ? 'success' : 'neutral'}>
+                  <span data-testid="email-on">{emailOn ? 'On' : 'Off'}</span>
+                </Badge>
+              </div>
+            </div>
+          </Card>
+        </div>
       {/if}
+    {:else if account}
+      <Card elevation="sm"><p>Only an owner of this server can open this page.</p></Card>
     {:else if account === null}
-      <p class="event">Sign in</p>
-      <ServerSignIn
-        api={people}
-        {providers}
-        password={passwordOn}
-        email={emailOn}
-        canMake={openSignUp === true}
-        onsignedin={(me) => signedIn(me)}
-      />
+      {@render signInFirst()}
     {/if}
-  {:else if place.kind === 'c'}
-    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
-    {#if !wordedNow}
-      <p class="muted" role="status">Loading…</p>
-    {:else if !wordedNow.club}
+  </Page>
+{:else if place.kind === 'club'}
+  {#if !wordedNow}
+    <Page title="Club"><p class="muted" role="status">Loading…</p></Page>
+  {:else if !wordedNow.club}
+    <Page title="Club">
       <Card elevation="sm">
         <p class="event">This club is not here</p>
         <p>The address may not be right.</p>
       </Card>
-    {:else}
-      {@const club = wordedNow.club}
-      <section aria-label={club.name} data-testid="server-one-club">
-        <p class="event">
-          {club.name}
-          {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
-        </p>
-        {#if club.archived}
-          <p class="muted">This club is archived. Its events can still be looked at.</p>
+    </Page>
+  {:else}
+    {@const club = wordedNow.club}
+    <Page title={club.name}>
+      {#snippet actions()}
+        {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
+        {#if lookedAfter.some((mine) => mine.club.id === club.id)}
+          <a
+            class="manage"
+            href={formatServerHash({
+              kind: 'manage',
+              club: club.word,
+              page: lookedAfter.find((mine) => mine.club.id === club.id)?.runs
+                ? 'members'
+                : 'pilots'
+            })}>Manage</a
+          >
         {/if}
+      {/snippet}
+      <section aria-label={club.name} data-testid="server-one-club" class="stack">
         <ServerJoin
           api={people}
           {club}
           {account}
           onchange={(me) => (account = me.account ?? null)}
         />
-        {#if wordedNow.events.length === 0}
-          <p class="muted">No events yet.</p>
-        {:else}
-          {@render eventRows(club.id, wordedNow.events)}
-        {/if}
+        <Card elevation="sm">
+          <div class="block">
+            <h2>Events</h2>
+            {#if wordedNow.events.length === 0}
+              <p class="muted">No events yet.</p>
+            {:else}
+              {@render eventRows(club.id, wordedNow.events)}
+            {/if}
+          </div>
+        </Card>
       </section>
-    {/if}
-  {:else if place.kind === 'club'}
-    {@const wanted = place.club}
-    {@const found = clubs?.find((entry) => entry.club.id === wanted)?.club}
-    <p class="back"><a href={formatServerHash({ kind: 'account' })}>← Your account</a></p>
-    {@const say = sayIn(account ?? undefined, wanted)}
-    {#if account && found && say}
+    </Page>
+  {/if}
+{:else if place.kind === 'manage'}
+  {@const mine = managed}
+  {@const page = place.page}
+  <Page title={MANAGE_TITLES[page]} lede={lookedAfter.length > 1 ? undefined : mine?.club.name}>
+    {#snippet actions()}
+      {#if mine && lookedAfter.length > 1}
+        <span class="club-pick">
+          <Select
+            size="sm"
+            value={mine.club.word ?? mine.club.id}
+            aria-label="Club"
+            data-testid="club-pick"
+            onchange={(e: Event) => {
+              const word = (e.currentTarget as HTMLSelectElement).value;
+              const next = lookedAfter.find((other) => (other.club.word ?? other.club.id) === word);
+              if (next) go({ kind: 'manage', club: word, page: next.runs ? page : 'pilots' });
+            }}
+          >
+            {#each lookedAfter as other (other.club.id)}
+              <option value={other.club.word ?? other.club.id}>{other.club.name}</option>
+            {/each}
+          </Select>
+        </span>
+      {/if}
+    {/snippet}
+    {#if account && mine}
       <ServerClub
         api={people}
-        club={found}
+        club={mine.club}
+        section={mine.runs ? place.page : 'pilots'}
         me={account.id}
-        runs={say === 'runs'}
+        runs={mine.runs}
         owner={account.owner}
         {providers}
         onchange={() => {
@@ -667,38 +819,24 @@
           void readMe();
         }}
       />
-    {:else if account && found}
+    {:else if account && managedClub}
       <Card elevation="sm"><p>Only those who look after this club can open this page.</p></Card>
     {:else if account === null}
-      <p class="event">Sign in</p>
-      <ServerSignIn
-        api={people}
-        {providers}
-        password={passwordOn}
-        email={emailOn}
-        canMake={openSignUp === true}
-        onsignedin={(me) => signedIn(me)}
-      />
+      {@render signInFirst()}
     {:else if account && clubs !== undefined}
       <Card elevation="sm"><p class="event">This club is not here</p></Card>
     {/if}
-  {:else if place.kind === 'results'}
-    <p class="back"><a href={formatServerHash({ kind: 'account' })}>← Your account</a></p>
+  </Page>
+{:else if place.kind === 'results'}
+  <Page title="My results">
     {#if account}
       <ServerResults api={people} />
     {:else if account === null}
-      <p class="event">Sign in</p>
-      <ServerSignIn
-        api={people}
-        {providers}
-        password={passwordOn}
-        email={emailOn}
-        canMake={openSignUp === true}
-        onsignedin={(me) => signedIn(me)}
-      />
+      {@render signInFirst()}
     {/if}
-  {:else if picked}
-    <p class="back"><a href={formatServerHash({ kind: 'list' })}>← All events</a></p>
+  </Page>
+{:else if picked}
+  <Page title={pickedEvent?.name ?? 'Event'}>
     {#if gone}
       <Card elevation="sm">
         <p class="event">This event is not here</p>
@@ -706,11 +844,14 @@
       </Card>
     {:else}
       {#if pickedEvent}
-        <p class="event" data-testid="server-event">{pickedEvent.name}</p>
-        {#if eventDetail(pickedEvent)}<p class="muted">{eventDetail(pickedEvent)}</p>{/if}
-        {#if pickedEvent.organizer?.trim()}
-          <p class="muted" data-testid="server-event-organizer">
-            Run by {pickedEvent.organizer.trim()}
+        <p class="visually-hidden" data-testid="server-event">{pickedEvent.name}</p>
+        {#if eventDetail(pickedEvent) || pickedEvent.organizer?.trim()}
+          <p class="muted">
+            {eventDetail(pickedEvent)}
+            {#if pickedEvent.organizer?.trim()}
+              <span data-testid="server-event-organizer">Run by {pickedEvent.organizer.trim()}</span
+              >
+            {/if}
           </p>
         {/if}
         {#if pickedEvent.description?.trim()}
@@ -723,45 +864,90 @@
         <SpectatorView {live} {pilot} {signup} {checkin} />
       {/if}
     {/if}
-  {:else if clubs === undefined || shown === undefined}
+  </Page>
+{:else if clubs === undefined || shown === undefined}
+  <Page title={place.kind === 'clubs' ? 'Clubs' : 'Events'}>
     {#if !offline}<p class="muted" role="status">Loading…</p>{/if}
-  {:else}
-    {#if place.kind === 'clubs' && account?.primary !== undefined}
-      <p class="back"><a href={formatServerHash({ kind: 'list' })}>← Your club</a></p>
+  </Page>
+{:else if place.kind === 'clubs'}
+  <Page title="Clubs">
+    {#if clubs.length === 0}
+      <Card elevation="sm"><p class="muted">No clubs yet.</p></Card>
     {/if}
+    <div class="cards">
+      {#each clubs as { club, events } (club.id)}
+        <Card elevation="sm">
+          <section class="block" aria-label={club.name} data-testid="club-card">
+            <div class="head">
+              <h2>
+                {#if club.word}
+                  <a href={formatServerHash({ kind: 'club', word: club.word })}>{club.name}</a>
+                {:else}{club.name}{/if}
+              </h2>
+              {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
+              {#if club.open !== undefined}
+                <Badge tone="neutral">{club.open ? 'Public' : 'Private'}</Badge>
+              {/if}
+            </div>
+            {#if events.length === 0}
+              <p class="muted">No events yet.</p>
+            {:else}
+              {@render eventRows(club.id, events)}
+            {/if}
+            <ServerJoin
+              api={people}
+              {club}
+              {account}
+              quiet
+              onchange={(me) => (account = me.account ?? null)}
+            />
+          </section>
+        </Card>
+      {/each}
+    </div>
+  </Page>
+{:else}
+  <Page title={primary ? primary.club.name : 'Events'}>
     {#if total === 0}
       <Card elevation="sm">
-        {#if primary}
-          <p class="event">{primary.club.name}</p>
-          <p data-testid="no-events">No events yet.</p>
-        {:else}
-          <p class="event">No events yet</p>
-          <p>When a director sends one, it will show here.</p>
-        {/if}
+        <p class="muted" data-testid="no-events">No events yet.</p>
       </Card>
     {/if}
-    {#each shown as { club, events } (club.id)}
-      {#if events.length > 0}
-        <section aria-label={club.name}>
-          <h2>
-            {club.name}
-            {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
-          </h2>
-          {@render eventRows(club.id, events)}
-        </section>
-      {/if}
-    {/each}
-    {#if primary && clubs.length > 1}
-      <p class="muted" data-testid="all-clubs">
-        This is your primary club.
-        <a href={formatServerHash({ kind: 'clubs' })}>Every club on this server</a>
-      </p>
-    {/if}
-  {/if}
-</main>
+    <div class="cards">
+      {#each shown as { club, events } (club.id)}
+        {#if events.length > 0}
+          <Card elevation="sm">
+            <section class="block" aria-label={club.name}>
+              {#if !primary}
+                <div class="head">
+                  <h2>{club.name}</h2>
+                  {#if club.archived}<Badge tone="neutral">Archived</Badge>{/if}
+                </div>
+              {/if}
+              {@render eventRows(club.id, events)}
+            </section>
+          </Card>
+        {/if}
+      {/each}
+    </div>
+  </Page>
+{/if}
+
+{#snippet signInFirst()}
+  <div class="narrow">
+    <ServerSignIn
+      api={people}
+      {providers}
+      password={passwordOn}
+      email={emailOn}
+      canMake={openSignUp === true}
+      onsignedin={(me) => signedIn(me)}
+    />
+  </div>
+{/snippet}
 
 {#snippet eventRows(club: string, events: readonly ServerEvent[])}
-  <ul>
+  <ul class="tiles">
     {#each events as event (event.id)}
       <li>
         <a
@@ -822,35 +1008,57 @@
   .race-code p {
     margin: 0;
   }
-  .server {
-    max-width: 40rem;
-    margin: 0 auto;
-    padding: var(--gf-space-5) var(--gf-space-4);
+  /* Cards side by side on a wide screen, one under the other on a narrow one. */
+  .cards {
     display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
     gap: var(--gf-space-4);
-    font-family: var(--gf-font-family);
+    align-items: start;
   }
-  .top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+  .stack,
+  .block {
+    display: grid;
     gap: var(--gf-space-3);
   }
-  h1 {
+  /* A form someone fills in is not stretched across a wide screen. */
+  .narrow {
+    width: min(28rem, 100%);
+    display: grid;
+    gap: var(--gf-space-3);
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  .head h2 {
+    flex: 1;
     margin: 0;
-    font-size: var(--gf-font-size-xl);
   }
-  h1 a {
+  .head h2 a {
     color: inherit;
-    text-decoration: none;
   }
-  .who {
+  .offline {
+    width: min(76rem, 100%);
+    margin: var(--gf-space-3) auto 0;
+    padding: 0 var(--gf-space-6);
+    box-sizing: border-box;
+    color: var(--gf-warn, var(--gf-text-muted));
     font-size: var(--gf-font-size-sm);
-    overflow-wrap: anywhere;
-    min-width: 0;
   }
-  .accent {
-    color: var(--gf-accent);
+  .club-pick {
+    width: 14rem;
+  }
+  .manage {
+    font-size: var(--gf-font-size-md);
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   h2 {
     margin: 0 0 var(--gf-space-2);
@@ -870,20 +1078,8 @@
     white-space: pre-line;
     overflow-wrap: anywhere;
   }
-  .back {
-    margin: 0;
-    font-size: var(--gf-font-size-sm);
-  }
   .muted {
     color: var(--gf-text-muted);
-    font-size: var(--gf-font-size-sm);
-  }
-  .offline {
-    margin: 0;
-    padding: var(--gf-space-2) var(--gf-space-3);
-    border: 1px solid var(--gf-warn);
-    border-radius: var(--gf-radius-sm);
-    color: var(--gf-warn);
     font-size: var(--gf-font-size-sm);
   }
   ul {
@@ -892,6 +1088,10 @@
     padding: 0;
     display: grid;
     gap: var(--gf-space-2);
+  }
+  /* Events side by side on a wide screen. */
+  .tiles {
+    grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr));
   }
   .row {
     display: grid;

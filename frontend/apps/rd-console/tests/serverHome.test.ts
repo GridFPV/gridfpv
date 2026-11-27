@@ -9,23 +9,34 @@ import {
 
 describe('parseServerHash', () => {
   it('reads the list from an empty address', () => {
-    for (const hash of ['', '#', '#/', '#/nothing', '#/e', '#/e/club', '#/e/club/event/more']) {
+    for (const hash of [
+      '',
+      '#',
+      '#/',
+      '#/nothing',
+      '#/e',
+      '#/e/club/x',
+      '#/c/north',
+      '#/event',
+      '#/event/club',
+      '#/event/club/event/more'
+    ]) {
       expect(parseServerHash(hash)).toEqual({ kind: 'list' });
     }
   });
 
   it('reads one event of one club', () => {
-    expect(parseServerHash('#/e/club/friday-night-764c5x')).toEqual({
+    expect(parseServerHash('#/event/club/friday-night-764c5x')).toEqual({
       kind: 'event',
       club: 'club',
       event: 'friday-night-764c5x'
     });
     // With or without the slashes a person might leave or add.
-    expect(parseServerHash('#e/club/x/')).toEqual({ kind: 'event', club: 'club', event: 'x' });
+    expect(parseServerHash('#event/club/x/')).toEqual({ kind: 'event', club: 'club', event: 'x' });
   });
 
   it('undoes what an address has to write another way', () => {
-    expect(parseServerHash('#/e/north%20club/a%2Fb')).toEqual({
+    expect(parseServerHash('#/event/north%20club/a%2Fb')).toEqual({
       kind: 'event',
       club: 'north club',
       event: 'a/b'
@@ -33,7 +44,7 @@ describe('parseServerHash', () => {
   });
 
   it('takes a badly written address as the list', () => {
-    expect(parseServerHash('#/e/club/%E0%A4%A')).toEqual({ kind: 'list' });
+    expect(parseServerHash('#/event/club/%E0%A4%A')).toEqual({ kind: 'list' });
   });
 });
 
@@ -44,7 +55,8 @@ describe('formatServerHash', () => {
       { kind: 'event', club: 'club', event: 'friday-night-764c5x' } as const,
       { kind: 'event', club: 'north club', event: 'a/b?c#d' } as const,
       { kind: 'results' } as const,
-      { kind: 'club', club: 'north club' } as const
+      { kind: 'club', word: 'north club' } as const,
+      { kind: 'clubs' } as const
     ]) {
       expect(parseServerHash(formatServerHash(place))).toEqual(place);
     }

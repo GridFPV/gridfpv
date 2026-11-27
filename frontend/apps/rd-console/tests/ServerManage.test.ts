@@ -80,16 +80,22 @@ function open(hash: string, server: FakeServer) {
   return { people, server, load };
 }
 
+/** Go to another page, as a link would. */
+function go(hash: string) {
+  location.hash = hash;
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
+
 const events = () => screen.queryAllByTestId('manage-event');
 const tokens = () => screen.queryAllByTestId('link-token');
 
 describe("a club's events, for those who run it", () => {
   it('lists every event with a link to it, and marks the hidden ones', async () => {
-    open('#/club/north', fakeServer({ account: ACE, events: TWO_EVENTS() }));
+    open('#/manage/north/events', fakeServer({ account: ACE, events: TWO_EVENTS() }));
     await waitFor(() => expect(events()).toHaveLength(2));
     const [summer, test] = events();
     expect(within(summer).getByRole('link', { name: 'Summer Race' }).getAttribute('href')).toBe(
-      '#/e/north/summer'
+      '#/event/north/summer'
     );
     expect(summer.textContent).not.toContain('Hidden');
     expect(within(summer).getByRole('button', { name: 'Hide Summer Race' })).toBeTruthy();
@@ -100,14 +106,14 @@ describe("a club's events, for those who run it", () => {
   });
 
   it('says so when the club has no events yet', async () => {
-    open('#/club/north', fakeServer({ account: ACE }));
+    open('#/manage/north/events', fakeServer({ account: ACE }));
     expect(await screen.findByText(/No events yet/)).toBeTruthy();
     expect(events()).toHaveLength(0);
   });
 
   it('hides an event and shows it again, and reads the lists again each time', async () => {
     const { people, server, load } = open(
-      '#/club/north',
+      '#/manage/north/events',
       fakeServer({ account: ACE, events: TWO_EVENTS() })
     );
     await waitFor(() => expect(events()).toHaveLength(2));
@@ -132,7 +138,7 @@ describe("a club's events, for those who run it", () => {
   it('removes an event only after asking, in a dialog of the page', async () => {
     const confirm = vi.spyOn(window, 'confirm');
     const { people, server } = open(
-      '#/club/north',
+      '#/manage/north/events',
       fakeServer({ account: ACE, events: TWO_EVENTS() })
     );
     await waitFor(() => expect(events()).toHaveLength(2));
@@ -162,7 +168,7 @@ describe("a club's events, for those who run it", () => {
 
   it("shows the server's words when a change is refused, and what is really there", async () => {
     const { people, server } = open(
-      '#/club/north',
+      '#/manage/north/events',
       fakeServer({ account: ACE, events: TWO_EVENTS() })
     );
     await waitFor(() => expect(events()).toHaveLength(2));
@@ -180,7 +186,7 @@ describe("a club's events, for those who run it", () => {
 
   it('says so when the tokens and events cannot be read', async () => {
     const server = fakeServer({ account: ACE, events: TWO_EVENTS() });
-    location.hash = '#/club/north';
+    location.hash = '#/manage/north/events';
     const people = fakePeople(server);
     people.linkTokens.mockRejectedValue(new Error('The server did not answer.'));
     render(ServerHome, {
@@ -228,20 +234,20 @@ describe('who sees a hidden event in the list of events', () => {
 
 describe('opening an event by its address', () => {
   it('opens a hidden event for someone who is not signed in', async () => {
-    const { load } = open('#/e/north/test-day', fakeServer({ events: TWO_EVENTS() }));
+    const { load } = open('#/event/north/test-day', fakeServer({ events: TWO_EVENTS() }));
     expect(await screen.findByTestId('server-event')).toHaveTextContent('Test Day');
     expect(load.event).toHaveBeenCalledWith('north', 'test-day');
     expect(screen.queryByText('This event is not here')).toBeNull();
   });
 
   it('does not ask for an event the list already has', async () => {
-    const { load } = open('#/e/north/summer', fakeServer({ events: TWO_EVENTS() }));
+    const { load } = open('#/event/north/summer', fakeServer({ events: TWO_EVENTS() }));
     expect(await screen.findByTestId('server-event')).toHaveTextContent('Summer Race');
     expect(load.event).not.toHaveBeenCalled();
   });
 
   it('says an event is not here only once the server has said so', async () => {
-    const { load } = open('#/e/north/long-gone', fakeServer({ events: TWO_EVENTS() }));
+    const { load } = open('#/event/north/long-gone', fakeServer({ events: TWO_EVENTS() }));
     expect(await screen.findByText('This event is not here')).toBeTruthy();
     expect(load.event).toHaveBeenCalledWith('north', 'long-gone');
     expect(screen.queryByTestId('server-event')).toBeNull();
@@ -249,7 +255,7 @@ describe('opening an event by its address', () => {
 
   it('does not call an event gone when the server could not be asked', async () => {
     const server = fakeServer({ events: TWO_EVENTS() });
-    location.hash = '#/e/north/test-day';
+    location.hash = '#/event/north/test-day';
     const people = fakePeople(server);
     const event = vi.fn(async (): Promise<ServerEvent | undefined> => {
       throw new Error('offline');
@@ -266,7 +272,7 @@ describe('opening an event by its address', () => {
   });
 
   it('says so when an event is removed while it is open', async () => {
-    const { server } = open('#/e/north/test-day', fakeServer({ events: TWO_EVENTS() }));
+    const { server } = open('#/event/north/test-day', fakeServer({ events: TWO_EVENTS() }));
     expect(await screen.findByTestId('server-event')).toHaveTextContent('Test Day');
     server.events.north = [];
     // The list is read again every so often, and the event is asked for again with it.
@@ -285,7 +291,7 @@ describe("a club's link tokens", () => {
       created_at: 1_600_000_000_000,
       revoked_at: 1_600_000_500_000
     });
-    open('#/club/north', server);
+    open('#/manage/north/tokens', server);
     await waitFor(() => expect(tokens()).toHaveLength(2));
     const [works, spent] = tokens();
     expect(works.textContent).toContain('Club laptop');
@@ -299,7 +305,7 @@ describe("a club's link tokens", () => {
   });
 
   it('makes one and shows the token once', async () => {
-    const { people, server } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people, server } = open('#/manage/north/tokens', fakeServer({ account: ACE }));
     await waitFor(() => expect(tokens()).toHaveLength(1));
     const make = screen.getByRole('button', { name: 'Make a link token' }) as HTMLButtonElement;
     expect(make.disabled).toBe(true);
@@ -330,7 +336,7 @@ describe("a club's link tokens", () => {
   it('copies the token', async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    const { server } = open('#/club/north', fakeServer({ account: ACE }));
+    const { server } = open('#/manage/north/tokens', fakeServer({ account: ACE }));
     await waitFor(() => expect(tokens()).toHaveLength(1));
     await fireEvent.input(screen.getByLabelText('What it is for'), { target: { value: 'Pi' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Make a link token' }));
@@ -341,7 +347,7 @@ describe("a club's link tokens", () => {
 
   it('takes one back only after asking, and then it has no button', async () => {
     const confirm = vi.spyOn(window, 'confirm');
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people } = open('#/manage/north/tokens', fakeServer({ account: ACE }));
     await waitFor(() => expect(tokens()).toHaveLength(1));
     const name = 'Take back the token for Club laptop';
     await fireEvent.click(screen.getByRole('button', { name }));
@@ -363,7 +369,7 @@ describe("a club's link tokens", () => {
   });
 
   it('stops showing a token that was just made when it is taken back', async () => {
-    open('#/club/north', fakeServer({ account: ACE }));
+    open('#/manage/north/tokens', fakeServer({ account: ACE }));
     await waitFor(() => expect(tokens()).toHaveLength(1));
     await fireEvent.input(screen.getByLabelText('What it is for'), { target: { value: 'Oops' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Make a link token' }));
@@ -384,7 +390,7 @@ describe("a club's link tokens", () => {
 
 describe("a club's name", () => {
   it('saves a new name, trimmed, and the page shows it', async () => {
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people } = open('#/manage/north/settings', fakeServer({ account: ACE }));
     const box = (await screen.findByLabelText('Name')) as HTMLInputElement;
     await waitFor(() => expect(box.value).toBe('North FPV'));
     const form = screen.getByRole('form', { name: 'Club name' });
@@ -400,17 +406,40 @@ describe("a club's name", () => {
     expect(save.disabled).toBe(false);
     await fireEvent.click(save);
     await waitFor(() => expect(people.renameClub).toHaveBeenCalledWith('north', 'Northern Lights'));
-    await waitFor(() =>
-      expect(screen.getByTestId('server-club').querySelector('.lead')?.textContent).toBe(
-        'Northern Lights'
-      )
-    );
+    await waitFor(() => expect(screen.getByText('Northern Lights')).toBeVisible());
     await waitFor(() => expect(box.value).toBe('Northern Lights'));
     expect(save.disabled).toBe(true);
   });
 
+  it('follows the club to its new address when its name changes', async () => {
+    const server = fakeServer({ account: ACE });
+    const people = fakePeople(server);
+    // The list gives each club its friendly address, which follows the name.
+    let north = { ...NORTH, word: 'north-fpv' };
+    location.hash = '#/manage/north-fpv/settings';
+    render(ServerHome, {
+      baseUrl: 'https://grid.example.org',
+      load: {
+        clubs: vi.fn(async (): Promise<PushClub[]> => [north, SOUTH]),
+        events: vi.fn(async () => [])
+      },
+      people,
+      sourceFor: () => fakeLiveSession(eventView({}), { subscribeChanges: vi.fn(() => vi.fn()) })
+    });
+    const box = (await screen.findByLabelText('Name')) as HTMLInputElement;
+    people.renameClub.mockImplementationOnce(async () => {
+      north = { ...north, name: 'Northern Lights', word: 'northern-lights' };
+    });
+    await fireEvent.input(box, { target: { value: 'Northern Lights' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(location.hash).toBe('#/manage/northern-lights/settings'));
+    // Still the club's settings, not a page that says the club is gone.
+    expect(await screen.findByLabelText('Name')).toBeTruthy();
+    expect(screen.queryByText('This club is not here')).toBeNull();
+  });
+
   it("shows the server's words when the name is refused, and keeps what was typed", async () => {
-    const { people } = open('#/club/north', fakeServer({ account: ACE }));
+    const { people } = open('#/manage/north/settings', fakeServer({ account: ACE }));
     const box = (await screen.findByLabelText('Name')) as HTMLInputElement;
     await waitFor(() => expect(box.value).toBe('North FPV'));
     people.renameClub.mockRejectedValueOnce(
@@ -424,20 +453,22 @@ describe("a club's name", () => {
       expect(screen.getByTestId('manage-error').textContent).toContain('80 characters at most')
     );
     expect(box.value).toBe('Too long');
-    expect(screen.getByTestId('server-club').querySelector('.lead')?.textContent).toBe('North FPV');
+    expect(screen.getByText('North FPV')).toBeVisible();
   });
 });
 
 describe('who may run a club', () => {
   it('an owner runs a club they are not a member of', async () => {
-    open('#/club/north', fakeServer({ account: OZ, events: TWO_EVENTS() }));
+    open('#/manage/north/events', fakeServer({ account: OZ, events: TWO_EVENTS() }));
     await waitFor(() => expect(events()).toHaveLength(2));
+    go('#/manage/north/tokens');
     await waitFor(() => expect(tokens()).toHaveLength(1));
-    expect(screen.getByLabelText('Name')).toBeTruthy();
+    go('#/manage/north/settings');
+    expect(await screen.findByLabelText('Name')).toBeTruthy();
   });
 
   it('a claims approver is shown none of it, and none of it is asked for', async () => {
-    const { people } = open('#/club/north', fakeServer({ account: APP, events: TWO_EVENTS() }));
+    const { people } = open('#/manage/north', fakeServer({ account: APP, events: TWO_EVENTS() }));
     await screen.findByTestId('server-club');
     await waitFor(() => expect(people.clubPilots).toHaveBeenCalled());
     expect(screen.queryByText('Link tokens')).toBeNull();
@@ -447,7 +478,7 @@ describe('who may run a club', () => {
   });
 
   it('a pilot cannot open the page at all', async () => {
-    const { people } = open('#/club/north', fakeServer({ account: BEE, events: TWO_EVENTS() }));
+    const { people } = open('#/manage/north', fakeServer({ account: BEE, events: TWO_EVENTS() }));
     expect(await screen.findByText(/Only those who look after this club/)).toBeTruthy();
     expect(people.linkTokens).not.toHaveBeenCalled();
   });

@@ -6,7 +6,8 @@
    * Off on a new server. Switching it off locks out anyone whose only way in is a
    * password, so the owner is asked first.
    */
-  import { Badge, Banner, Button, Card, Dialog } from '@gridfpv/components';
+  import { Banner, Button, Card, Dialog, InfoTip } from '@gridfpv/components';
+  import Switch from '../lib/Switch.svelte';
   import type { PeopleApi } from '../lib/serverPeople.js';
 
   let {
@@ -56,45 +57,34 @@
 <Card elevation="sm">
   <div class="block" data-testid="password-setting">
     <div class="row">
-      <h2>Signing in with a password</h2>
+      <h2>Passwords</h2>
+      <InfoTip
+        text="People sign in with a username and a password this server keeps. Only a scrambled form is kept. A forgotten one is set again with a re-connect link."
+        label="About passwords"
+      />
+      <span class="grow"></span>
       {#if on !== undefined}
-        <Badge tone={on ? 'info' : 'neutral'}>
-          <span data-testid="password-state">{on ? 'On' : 'Off'}</span>
-        </Badge>
+        <span class="state" data-testid="password-state">{on ? 'On' : 'Off'}</span>
+        <Switch
+          checked={on}
+          label="Let people sign in with a password"
+          disabled={busy}
+          onchange={(next) => {
+            error = undefined;
+            if (next) void set(true);
+            else asking = true;
+          }}
+        />
       {/if}
     </div>
     {#if loadError}<Banner tone="danger">{loadError}</Banner>{/if}
     {#if error && !asking}<Banner tone="danger">{error}</Banner>{/if}
-    {#if on === true}
-      <p>People may sign in with a username and a password that this server keeps.</p>
-      <div>
-        <Button size="sm" disabled={busy} onclick={() => ((error = undefined), (asking = true))}
-          >Switch passwords off…</Button
-        >
-      </div>
-    {:else if on === false}
-      <p>
-        People sign in only with the sign-in services set up for this server, such as Discord or
-        Google.
-      </p>
-      <div>
-        <Button size="sm" disabled={busy} onclick={() => set(true)}
-          >Let people use a password</Button
-        >
-      </div>
-    {/if}
-    <p class="muted">
-      The server keeps a scrambled form of each password, never the password itself. If someone
-      forgets theirs, send them a re-connect link from the club's Members list.
-    </p>
   </div>
 </Card>
 
 {#if asking}
   <Dialog open={true} title="Switch passwords off?" onclose={() => (asking = false)}>
-    <p>Nobody can sign in with a username and password while this is off.</p>
     <p>Anyone whose only way in is a password is locked out until you switch it on again.</p>
-    <p class="muted">Their passwords are kept, and work again when it is back on.</p>
     {#if error}<Banner tone="danger">{error}</Banner>{/if}
     {#snippet footer()}
       <Button variant="ghost" onclick={() => (asking = false)}>Cancel</Button>
@@ -113,8 +103,10 @@
     align-items: center;
     gap: var(--gf-space-3);
   }
-  h2 {
+  .grow {
     flex: 1;
+  }
+  h2 {
     margin: 0;
     font-size: var(--gf-font-size-lg);
   }
@@ -122,7 +114,7 @@
     margin: 0;
     max-width: 65ch;
   }
-  .muted {
+  .state {
     color: var(--gf-text-muted);
     font-size: var(--gf-font-size-sm);
   }

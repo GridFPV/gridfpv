@@ -558,7 +558,8 @@ pub async fn get_callback(
             return go_problem(&state, &headers, Problem::NotSignedIn);
         }
         return match accounts.add_sign_in(account, &sign_in, now) {
-            Ok(()) => done("account", None),
+            // Back on the page they added it from: how the account signs in.
+            Ok(()) => done("account/sign-in", None),
             Err(AccountError::SignInTaken) => go_problem(&state, &headers, Problem::Taken),
             Err(_) => go_problem(&state, &headers, Problem::Provider),
         };
@@ -573,7 +574,7 @@ pub async fn get_callback(
         .filter(|secret| secret.starts_with(RECONNECT_PREFIX))
     {
         return match accounts.reconnect(link, &sign_in, now) {
-            Ok((_, session)) => done("account", Some(&session)),
+            Ok((_, session)) => done("account/sign-in", Some(&session)),
             Err(AccountError::SignInTaken) => go_problem(&state, &headers, Problem::Taken),
             Err(AccountError::ReconnectDoesNotWork) => go_problem(&state, &headers, Problem::Link),
             Err(_) => go_problem(&state, &headers, Problem::Provider),

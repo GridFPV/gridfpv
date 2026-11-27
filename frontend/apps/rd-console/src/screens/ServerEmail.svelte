@@ -6,7 +6,7 @@
    * link is opened. After that the person can set a forgotten password by themselves.
    * Nobody else is shown the address.
    */
-  import { Badge, Button, Card, Input } from '@gridfpv/components';
+  import { Badge, Button, Card, InfoTip, Input } from '@gridfpv/components';
   import type { Me, MyAccount } from '@gridfpv/types';
   import { emailProblem, type PeopleApi } from '../lib/serverPeople.js';
 
@@ -65,16 +65,17 @@
   <div class="block" data-testid="account-email">
     <div class="row">
       <h2>Email</h2>
+      <InfoTip
+        text="Optional. With a confirmed address you can set a forgotten password by yourself. Nobody else is shown it."
+        label="About email"
+      />
+      <span class="grow"></span>
       {#if email}
         <Badge tone={email.confirmed ? 'success' : 'warn'}>
           <span data-testid="email-state">{email.confirmed ? 'Confirmed' : 'Not confirmed'}</span>
         </Badge>
       {/if}
     </div>
-    <p class="muted">
-      Optional. With a confirmed address you can set a forgotten password by yourself. Nobody else
-      is shown it.
-    </p>
     {#if error}<p class="error" role="alert" data-testid="email-error">{error}</p>{/if}
 
     {#if typing !== undefined}
@@ -159,8 +160,10 @@
     flex-wrap: wrap;
     gap: var(--gf-space-2) var(--gf-space-3);
   }
-  h2 {
+  .grow {
     flex: 1;
+  }
+  h2 {
     margin: 0;
     font-size: var(--gf-font-size-lg);
   }
@@ -170,10 +173,6 @@
   }
   .address {
     font-weight: var(--gf-font-weight-semibold);
-  }
-  .muted {
-    color: var(--gf-text-muted);
-    font-size: var(--gf-font-size-sm);
   }
   .error {
     color: var(--gf-danger);

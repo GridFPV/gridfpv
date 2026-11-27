@@ -6,7 +6,7 @@
    * It belongs to the account, so it is the same in every club on the server. Every part
    * may be left empty.
    */
-  import { Button, Card, Input } from '@gridfpv/components';
+  import { Button, Card, InfoTip, Input } from '@gridfpv/components';
   import type { Me, MyAccount } from '@gridfpv/types';
   import {
     profileChanged,
@@ -57,6 +57,11 @@
   <div class="block" data-testid="pilot-profile">
     <div class="row">
       <h2>Pilot profile</h2>
+      <InfoTip
+        text="How you are shown as a pilot, in every club on this server. The ids let a race director match you to MultiGP and Velocidrone."
+        label="About the pilot profile"
+      />
+      <span class="grow"></span>
       {#if !form}
         <Button
           size="sm"
@@ -66,7 +71,6 @@
         >
       {/if}
     </div>
-    <p class="muted">How you are shown as a pilot, in every club on this server.</p>
 
     {#if form}
       <!-- A refusal is about what was in the form then. Typing again clears it. -->
@@ -119,10 +123,6 @@
             disabled={busy}
           />
         </div>
-        <p class="muted">
-          The ids let a race director match you to MultiGP and Velocidrone. Leave empty what you do
-          not have.
-        </p>
         {#if problem}<p class="error" role="alert">{problem}</p>{/if}
         {#if error}<p class="error" role="alert" data-testid="profile-error">{error}</p>{/if}
         <div class="actions">
@@ -138,9 +138,7 @@
         </div>
       </form>
     {:else if empty}
-      <p class="muted" data-testid="profile-empty">
-        Nothing is filled in yet. You are shown as {account.name}.
-      </p>
+      <p class="muted" data-testid="profile-empty">Shown as {account.name}.</p>
     {:else}
       <dl>
         <dt>Callsign</dt>
@@ -174,8 +172,10 @@
     align-items: center;
     gap: var(--gf-space-3);
   }
-  h2 {
+  .grow {
     flex: 1;
+  }
+  h2 {
     margin: 0;
     font-size: var(--gf-font-size-lg);
   }

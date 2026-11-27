@@ -15,12 +15,15 @@
     api,
     club,
     account,
+    quiet = false,
     onchange
   }: {
     api: Pick<PeopleApi, 'joinClub' | 'leaveClub'>;
     club: { id: string; name: string; open?: boolean; archived?: boolean };
     /** Who is signed in. `null` for nobody, `undefined` while that is not known. */
     account: MyAccount | null | undefined;
+    /** In a list of clubs: say nothing to someone who is in the club, or is not signed in. */
+    quiet?: boolean;
     /** The account changed: here it is as it now stands. */
     onchange: (me: Me) => void;
   } = $props();
@@ -43,7 +46,7 @@
   }
 </script>
 
-{#if standing && standing !== 'closed'}
+{#if standing && standing !== 'closed' && !(quiet && (standing === 'signed-out' || standing === 'member'))}
   <div class="join" data-testid="club-join">
     {#if standing === 'signed-out'}
       <a href={formatServerHash({ kind: 'sign-in' })}>Sign in to join {club.name}</a>

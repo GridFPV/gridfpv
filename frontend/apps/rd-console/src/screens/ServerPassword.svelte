@@ -10,7 +10,7 @@
    *
    * A password is typed, sent once, and never shown again.
    */
-  import { Button, Input } from '@gridfpv/components';
+  import { Button, InfoTip, Input } from '@gridfpv/components';
   import type { Me } from '@gridfpv/types';
   import {
     FORGOT_SENT,
@@ -27,7 +27,7 @@
     mode: start,
     invite = undefined,
     canMake = false,
-    makeWords = 'Make the account',
+    makeWords = 'Create account',
     forgot = undefined,
     oncancel = undefined,
     ondone
@@ -190,6 +190,24 @@
     </div>
   </form>
 {:else}
+  {#if canMake && start === 'sign-in'}
+    <div class="tabs" role="tablist" aria-label="Sign in or create an account">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === 'sign-in'}
+        class:active={mode === 'sign-in'}
+        onclick={() => switchTo('sign-in')}>Sign in</button
+      >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === 'make'}
+        class:active={mode === 'make'}
+        onclick={() => switchTo('make')}>Create account</button
+      >
+    </div>
+  {/if}
   <!-- A refusal is about what was in the form then. Typing again clears it. -->
   <form
     class="password"
@@ -219,7 +237,22 @@
         disabled={busy}
       />
     {/if}
-    <label for="pw-password">{mode === 'change' ? 'New password' : 'Password'}</label>
+    <span class="labelled">
+      <label for="pw-password">{mode === 'change' ? 'New password' : 'Password'}</label>
+      {#if setting}
+        <InfoTip
+          text="At least {PASSWORD_MIN} characters. A few words in a row is a good one."
+          label="About passwords"
+        />
+      {:else if forgot === 'owner'}
+        <span data-testid="forgot-owner">
+          <InfoTip
+            text="Forgot it? Ask an owner of this server for a re-connect link."
+            label="A forgotten password"
+          />
+        </span>
+      {/if}
+    </span>
     <Input
       id="pw-password"
       type="password"
@@ -238,12 +271,11 @@
         bind:value={again}
         disabled={busy}
       />
-      <p class="muted">At least {PASSWORD_MIN} characters. A few words in a row is a good one.</p>
     {/if}
     {#if problem}<p class="error" role="alert">{problem}</p>{/if}
     {#if error}<p class="error" role="alert" data-testid="password-error">{error}</p>{/if}
     <div class="actions">
-      <Button variant="primary" size="sm" type="submit" disabled={busy || !ready}>{words}</Button>
+      <Button variant="primary" type="submit" disabled={busy || !ready}>{words}</Button>
       {#if oncancel}
         <Button variant="ghost" size="sm" disabled={busy} onclick={oncancel}>Cancel</Button>
       {/if}
@@ -256,23 +288,6 @@
           onclick={() => ((asking = true), (who = username.trim()), (error = undefined))}
           >Forgot your password?</button
         >
-      </p>
-    {:else if mode === 'sign-in' && forgot === 'owner'}
-      <p class="muted" data-testid="forgot-owner">
-        Forgot your password? Ask an owner of this server for a re-connect link.
-      </p>
-    {/if}
-    {#if canMake && start === 'sign-in'}
-      <p class="muted">
-        {#if mode === 'sign-in'}
-          No account yet?
-          <button type="button" class="link" onclick={() => switchTo('make')}
-            >Make one with a username and password</button
-          >
-        {:else}
-          Have an account already?
-          <button type="button" class="link" onclick={() => switchTo('sign-in')}>Sign in</button>
-        {/if}
       </p>
     {/if}
   </form>
@@ -290,6 +305,37 @@
   }
   p {
     margin: 0;
+  }
+  .labelled {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
+  .tabs {
+    display: flex;
+    border: 1px solid var(--gf-border);
+    border-radius: var(--gf-radius-md);
+    overflow: hidden;
+    max-width: 22rem;
+    margin-bottom: var(--gf-space-3);
+  }
+  .tabs button {
+    flex: 1;
+    padding: var(--gf-space-2) var(--gf-space-3);
+    border: 0;
+    background: none;
+    color: var(--gf-text-muted);
+    font: inherit;
+    font-weight: var(--gf-font-weight-semibold);
+    cursor: pointer;
+  }
+  .tabs button + button {
+    border-left: 1px solid var(--gf-border);
+  }
+  .tabs button.active {
+    color: var(--gf-text);
+    background: var(--gf-surface);
+    box-shadow: inset 0 -2px 0 var(--gf-accent);
   }
   .actions {
     display: flex;

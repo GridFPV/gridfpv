@@ -12,6 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -69,23 +70,26 @@ test('pilots make their own accounts and get into a club the ways a club allows'
   await ryan.goto(setup);
   await continueAs(ryan, { sub: 'sub-ryan', name: 'Ryan' });
   await ryan.getByTestId('server-who').click();
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
-  const joining = ryan.getByTestId('club-join-setting');
-  // A club starts private, and nobody is waiting.
-  await expect(joining.getByTestId('club-open-state')).toHaveText('Private');
-  await expect(joining.getByTestId('no-join-asks')).toBeVisible();
+  await openServerPart(ryan, 'Club');
+  // Nobody is waiting, and a club starts private.
+  await expect(ryan.getByTestId('no-join-asks')).toBeVisible();
   const clubPage = ryan.url();
+  await openServerPage(ryan, 'Settings');
+  const joining = ryan.getByTestId('club-join-setting');
+  await expect(joining.getByTestId('club-open-state')).toHaveText('Private');
 
   // ── Three pilots make their own accounts. Each is in no club. ─────────────
   const pia = await signUp(browser, { sub: 'sub-pia', name: 'Pia' });
   const quin = await signUp(browser, { sub: 'sub-quin', name: 'Quin' });
   const ray = await signUp(browser, { sub: 'sub-ray', name: 'Ray' });
+  for (const page of [pia, quin]) await openServerPage(page, 'Clubs');
   await expect(pia.getByText('You are not in a club yet.')).toBeVisible();
   // Ray gives himself a callsign: it is how the director will find him.
   await ray.getByTestId('pilot-profile').getByRole('button', { name: 'Fill it in' }).click();
   await ray.getByLabel('Callsign').fill('Rotorhead');
   await ray.getByTestId('pilot-profile').getByRole('button', { name: 'Save' }).click();
   await expect(ray.getByTestId('profile-callsign')).toHaveText('Rotorhead');
+  await openServerPage(ray, 'Clubs');
 
   // ── Pia and Quin ask to join. Asking puts nobody in. ──────────────────────
   for (const page of [pia, quin]) {
@@ -114,8 +118,8 @@ test('pilots make their own accounts and get into a club the ways a club allows'
   await ryan.getByRole('button', { name: 'Let Pia in' }).click();
   await expect(ryan.getByTestId('join-ask')).toHaveCount(1);
   // It worked, and the page does not say otherwise.
-  await expect(ryan.getByTestId('club-join-setting').getByRole('alert')).toHaveCount(0);
-  await expect(ryan.getByTestId('club-join-setting')).not.toContainText('JSON');
+  await expect(ryan.getByTestId('club-join-asks').getByRole('alert')).toHaveCount(0);
+  await expect(ryan.getByTestId('club-join-asks')).not.toContainText('JSON');
   await expect(ryan.getByRole('list', { name: 'Members' })).toContainText('Pia');
   await ryan.getByRole('button', { name: 'Say no to Quin' }).click();
   await expect(ryan.getByTestId('no-join-asks')).toBeVisible();
@@ -132,22 +136,23 @@ test('pilots make their own accounts and get into a club the ways a club allows'
 
   // ── The director finds Ray by his callsign and adds him. ──────────────────
   await ryan.getByLabel('Name or callsign').fill('rotor');
-  await ryan.getByTestId('club-join-setting').getByRole('button', { name: 'Find' }).click();
+  await ryan.getByTestId('club-add-someone').getByRole('button', { name: 'Find' }).click();
   const foundRay = ryan.getByTestId('found-person');
   await expect(foundRay).toHaveCount(1);
   await expect(foundRay).toContainText('Ray (Rotorhead)');
   await ryan.getByRole('button', { name: 'Add Ray (Rotorhead) to Recon FPV' }).click();
-  await expect(ryan.getByTestId('club-join-setting')).not.toContainText('JSON');
+  await expect(ryan.getByTestId('club-add-someone')).not.toContainText('JSON');
   await expect(ryan.getByRole('list', { name: 'Members' })).toContainText('Ray');
   expect(await memberNames(ryan)).toEqual(['Pia', 'Ray']);
   await ray.reload();
   await expect(ray.getByTestId('my-club')).toContainText('Recon FPV');
   // Someone in the club is not offered again.
   await ryan.getByLabel('Name or callsign').fill('rotor');
-  await ryan.getByTestId('club-join-setting').getByRole('button', { name: 'Find' }).click();
+  await ryan.getByTestId('club-add-someone').getByRole('button', { name: 'Find' }).click();
   await expect(ryan.getByTestId('nobody-found')).toContainText('rotor');
 
   // ── The club goes public. Joining is one press, from the club's own address. ──
+  await openServerPage(ryan, 'Settings');
   await ryan
     .getByTestId('club-join-setting')
     .getByRole('button', { name: 'Make it public' })
@@ -155,7 +160,7 @@ test('pilots make their own accounts and get into a club the ways a club allows'
   await expect(ryan.getByTestId('club-join-setting').getByTestId('club-open-state')).toHaveText(
     'Public'
   );
-  await quin.goto(`${server.baseUrl}/#/c/recon-fpv`);
+  await quin.goto(`${server.baseUrl}/#/club/recon-fpv`);
   await quin.reload();
   await quin.getByTestId('club-join').getByRole('button', { name: 'Join Recon FPV' }).click();
   await expect(quin.getByTestId('club-join')).toContainText('You are in this club.');
@@ -163,11 +168,12 @@ test('pilots make their own accounts and get into a club the ways a club allows'
 
   // A visitor at that address is told to sign in to join.
   const visitor = await fresh(browser);
-  await visitor.goto(`${server.baseUrl}/#/c/recon-fpv`);
+  await visitor.goto(`${server.baseUrl}/#/club/recon-fpv`);
   await expect(visitor.getByRole('link', { name: 'Sign in to join Recon FPV' })).toBeVisible();
 
   // ── Quin leaves, after being asked. He can join again. ────────────────────
   await quin.getByTestId('server-who').click();
+  await openServerPage(quin, 'Clubs');
   await quin.getByRole('button', { name: 'Leave Recon FPV' }).click();
   const sure = quin.getByRole('dialog');
   await expect(sure).toContainText('Leave Recon FPV?');

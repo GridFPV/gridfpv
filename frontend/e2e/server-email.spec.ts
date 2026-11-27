@@ -13,6 +13,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import { openServerPage } from './serverPages.js';
 
 import { startServer, type RemoteServer } from '../test-harness/server.js';
 import { linkIn, startMail, type FakeMail } from '../test-harness/smtp.js';
@@ -58,14 +59,15 @@ test('a pilot confirms her email and sets a forgotten password with a link sent 
   // ── She makes her account. ────────────────────────────────────────────────
   const pia = await fresh(browser);
   await pia.goto(`${server.baseUrl}/#/sign-in`);
-  await pia.getByRole('button', { name: 'Make one with a username and password' }).click();
+  await pia.getByRole('tab', { name: 'Create account' }).click();
   await pia.getByLabel('Username', { exact: true }).fill('pia');
   await pia.getByLabel('Password', { exact: true }).fill(FIRST);
   await pia.getByLabel('The same password again').fill(FIRST);
-  await pia.getByRole('button', { name: 'Make the account' }).click();
+  await pia.getByRole('button', { name: 'Create account' }).click();
   await expect(pia.getByTestId('account-name')).toHaveText('pia');
 
   // ── She gives her email address. A link is sent, and nothing else. ────────
+  await openServerPage(pia, 'Sign-in');
   const card = pia.getByTestId('account-email');
   await card.getByRole('button', { name: 'Add an email address' }).click();
   await card.getByLabel('Email address').fill('not an address');
@@ -142,7 +144,9 @@ test('a pilot confirms her email and sets a forgotten password with a link sent 
   await lost.getByLabel('Password', { exact: true }).fill(SECOND);
   await lost.getByLabel('The same password again').fill(SECOND);
   await lost.getByRole('button', { name: 'Set the username and password' }).click();
-  await expect(lost.getByTestId('account-name')).toHaveText('pia');
+  // She lands on how she signs in, as herself.
+  await expect(lost).toHaveURL(/#\/account\/sign-in$/);
+  await expect(lost.getByTestId('server-who')).toHaveText('pia');
   // The same account: her confirmed address is still on it.
   await expect(lost.getByTestId('account-email').getByTestId('email-state')).toHaveText(
     'Confirmed'

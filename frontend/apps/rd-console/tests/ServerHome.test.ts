@@ -2,7 +2,7 @@
  * The page a remote server shows: its events, and one of them when it is picked.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import type { PushClub, ServerEvent } from '@gridfpv/types';
 import ServerHome from '../src/screens/ServerHome.svelte';
 import { eventView, heat, race, raceSeat } from './competition.js';
@@ -80,6 +80,9 @@ const go = (hash: string) => {
 };
 const links = () => screen.getAllByTestId('server-event-link') as HTMLAnchorElement[];
 
+/** The row of pages at the top. */
+const pagesNav = () => within(screen.getByRole('navigation', { name: 'Pages' }));
+
 describe('ServerHome', () => {
   it('lists the events under their club, in the order the server gave, each a link', async () => {
     open();
@@ -87,7 +90,7 @@ describe('ServerHome', () => {
     expect(screen.getByRole('heading', { name: 'Recon FPV' })).toBeVisible();
     expect(links()[0].textContent).toContain('Friday Night Whoops');
     expect(links()[0].textContent).toContain('2026-11-27 · Main field');
-    expect(links()[0].getAttribute('href')).toBe('#/e/club/friday-night-764c5x');
+    expect(links()[0].getAttribute('href')).toBe('#/event/club/friday-night-764c5x');
     expect(links()[1].textContent).toContain('Sunday Cup');
     // An event is shown by its name. Its id is only in the address.
     expect(document.body.textContent).not.toContain('764c5x');
@@ -95,7 +98,7 @@ describe('ServerHome', () => {
 
   it('says so when there are no events', async () => {
     open({ club: [] });
-    await waitFor(() => expect(screen.getByText('No events yet')).toBeVisible());
+    await waitFor(() => expect(screen.getByTestId('no-events')).toBeVisible());
     expect(screen.queryByRole('heading', { name: 'Recon FPV' })).toBeNull();
   });
 
@@ -109,11 +112,11 @@ describe('ServerHome', () => {
     expect(screen.getByRole('heading', { name: 'North' })).toBeVisible();
     expect(screen.getByRole('heading', { name: 'East' })).toBeVisible();
     expect(screen.queryByRole('heading', { name: 'South' })).toBeNull();
-    expect(links()[1].getAttribute('href')).toBe('#/e/east/sunday-cup-11aa22');
+    expect(links()[1].getAttribute('href')).toBe('#/event/east/sunday-cup-11aa22');
   });
 
   it('opens an event from its address, with its name and the race on it', async () => {
-    location.hash = '#/e/club/friday-night-764c5x';
+    location.hash = '#/event/club/friday-night-764c5x';
     const { sourceFor } = open();
     await waitFor(() =>
       expect(screen.getByTestId('server-event')).toHaveTextContent('Friday Night Whoops')
@@ -123,12 +126,12 @@ describe('ServerHome', () => {
     // The same view a visitor at the race gets: the heat, and who is in it.
     await waitFor(() => expect(document.body.textContent).toContain('Qualifying Heat 1'));
     await waitFor(() => expect(document.body.textContent).toContain('Ace'));
-    expect(screen.getByRole('link', { name: '← All events' }).getAttribute('href')).toBe('#/');
+    expect(pagesNav().getByRole('link', { name: 'Events' }).getAttribute('href')).toBe('#/');
     expect(screen.queryByTestId('server-event-link')).toBeNull();
   });
 
   it('shows who runs the event and what the director wrote about it, when given', async () => {
-    location.hash = '#/e/club/friday-night-764c5x';
+    location.hash = '#/event/club/friday-night-764c5x';
     open({
       club: [
         { ...FRIDAY, organizer: ' Recon FPV ', description: 'Whoops only.\nBring spare props.' },
@@ -142,14 +145,14 @@ describe('ServerHome', () => {
       'Whoops only.\nBring spare props.'
     );
     // An event with neither has neither line.
-    go('#/e/club/sunday-cup-11aa22');
+    go('#/event/club/sunday-cup-11aa22');
     await waitFor(() => expect(screen.getByTestId('server-event')).toHaveTextContent('Sunday Cup'));
     expect(screen.queryByTestId('server-event-organizer')).toBeNull();
     expect(screen.queryByTestId('server-event-description')).toBeNull();
   });
 
   it('shows a description as text, whatever is in it', async () => {
-    location.hash = '#/e/club/friday-night-764c5x';
+    location.hash = '#/event/club/friday-night-764c5x';
     open({ club: [{ ...FRIDAY, description: '<img src=x onerror=alert(1)>', organizer: '   ' }] });
     await waitFor(() =>
       expect(screen.getByTestId('server-event-description').textContent).toContain('<img src=x')
@@ -163,11 +166,11 @@ describe('ServerHome', () => {
     await waitFor(() => expect(links()).toHaveLength(2));
     expect(sourceFor).not.toHaveBeenCalled();
 
-    go('#/e/club/sunday-cup-11aa22');
+    go('#/event/club/sunday-cup-11aa22');
     await waitFor(() => expect(screen.getByTestId('server-event')).toHaveTextContent('Sunday Cup'));
     expect(sourceFor).toHaveBeenCalledTimes(1);
 
-    go('#/e/club/friday-night-764c5x');
+    go('#/event/club/friday-night-764c5x');
     await waitFor(() =>
       expect(screen.getByTestId('server-event')).toHaveTextContent('Friday Night Whoops')
     );
@@ -180,12 +183,12 @@ describe('ServerHome', () => {
   });
 
   it('says so when the address is for an event that is not here', async () => {
-    location.hash = '#/e/club/gone-000000';
+    location.hash = '#/event/club/gone-000000';
     open();
     await waitFor(() => expect(screen.getByText('This event is not here')).toBeVisible());
-    expect(screen.getByRole('link', { name: '← All events' })).toBeVisible();
+    expect(pagesNav().getByRole('link', { name: 'Events' })).toBeVisible();
     // Another club's event under this club's address is not here either.
-    go('#/e/other/friday-night-764c5x');
+    go('#/event/other/friday-night-764c5x');
     await waitFor(() => expect(screen.getByText('This event is not here')).toBeVisible());
   });
 
@@ -220,7 +223,7 @@ describe('ServerHome', () => {
     });
     await waitFor(() => expect(screen.getByTestId('server-offline')).toBeVisible());
     expect(screen.queryByText('Loading…')).toBeNull();
-    expect(screen.queryByText('No events yet')).toBeNull();
+    expect(screen.queryByTestId('no-events')).toBeNull();
   });
 
   it('shows names as text, whatever is in them', async () => {
@@ -234,7 +237,7 @@ describe('ServerHome', () => {
   });
 
   it('has nothing on it that changes anything, and no way in for a director or a pilot', async () => {
-    location.hash = '#/e/club/friday-night-764c5x';
+    location.hash = '#/event/club/friday-night-764c5x';
     open();
     await waitFor(() => expect(screen.getByTestId('server-event')).toBeVisible());
     expect(screen.queryByRole('button', { name: /pilot|sign|director/i })).toBeNull();
@@ -272,7 +275,7 @@ describe('signing up from the server', () => {
         view = { ...view, cursor: view.cursor + 1 };
       })
     };
-    location.hash = '#/e/club/friday-night-764c5x';
+    location.hash = '#/event/club/friday-night-764c5x';
     render(ServerHome, {
       baseUrl: 'https://grid.example.org',
       load: {

@@ -2050,7 +2050,7 @@ code of §13.13.
     fine for now:
     - A club's id is `c` and twelve random letters and digits. The first club keeps the
       id `club`.
-    - The friendly address is `#/c/<word>`. The word is the name's letters and digits in
+    - The friendly address is `#/club/<word>`. The word is the name's letters and digits in
       lower case. Two clubs of one name get `word` and `word-2`.
     - Archiving takes back every invite the club had out. They are made again when the
       club is brought back.
@@ -2159,11 +2159,17 @@ code of §13.13.
       given.
     - A profile is saved whole. A part left empty is cleared.
     - Open sign-up is kept with the server's other settings and is off on a new server.
-      An owner changes it on their account page, after being asked once, or with
+      An owner changes it on the server's Sign-in page, after being asked once, or with
       `gridfpv-server sign-up open|invite`.
     - Anyone may ask a server whether sign-up is open (`GET /api/server`), so the sign-in
       page can say the right thing.
     - Someone who signs up lands on their account page, where the profile is.
+    - The page has four parts, each with its own row of pages, so using it and setting
+      it up are apart: **Events** (events, clubs, my results), **Account** (profile,
+      clubs, sign-in), **Club** for those who run one (members, invites, pilots, events,
+      link tokens, settings), and **Server** for owners (clubs, sign-in, email).
+      Addresses use whole words: `#/club/<word>`, `#/event/<club>/<event>`,
+      `#/manage/<word>/<page>`, `#/admin/<page>`.
     - With sign-up open, an invite that does not work still makes no account.
 14. **How the list of clubs in Grid was built (§13.2).** Choices made while building, not
     confirmed:

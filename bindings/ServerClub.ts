@@ -9,7 +9,7 @@ export type ServerClub = {
  */
 id: string, name: string, 
 /**
- * The friendly address, for handing out: `…/#/c/<word>`. It follows the name.
+ * The friendly address, for handing out: `…/#/club/<word>`. It follows the name.
  */
 word: string, 
 /**

@@ -13,6 +13,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider, type Person } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -51,6 +52,7 @@ async function continueAs(page: Page, who: Person): Promise<void> {
 
 /** On a club's page: make an invite for one person, and give back its link. */
 async function invite(page: Page, label: string, role: string): Promise<string> {
+  await openServerPage(page, 'Invites');
   await page.getByLabel('Who it is for').fill(label);
   await page.getByLabel('Joins as').selectOption(role);
   await page.getByRole('button', { name: 'Make the invite' }).click();
@@ -83,7 +85,7 @@ test('an owner, a director and a pilot each get their account by invite and thei
   await continueAs(ryan, RYAN);
   await expect(ryan.getByTestId('server-who')).toHaveText('Ryan');
   await ryan.getByTestId('server-who').click();
-  await expect(ryan.getByText('You are an owner of this server.')).toBeVisible();
+  await expect(ryan.getByText('Server owner')).toBeVisible();
 
   // The setup link is spent.
   const late = await fresh(browser);
@@ -91,7 +93,7 @@ test('an owner, a director and a pilot each get their account by invite and thei
   await expect(late.getByText('This invite does not work')).toBeVisible();
 
   // ── The owner invites a director to the club. ─────────────────────────────
-  await ryan.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(ryan, 'Club');
   await expect(ryan.getByTestId('server-club')).toBeVisible();
   await expect(ryan.getByTestId('club-member')).toHaveCount(0);
   const directorLink = await invite(ryan, 'Dana', 'Director');
@@ -110,7 +112,7 @@ test('an owner, a director and a pilot each get their account by invite and thei
 
   // ── The director invites a pilot. ─────────────────────────────────────────
   await dana.getByTestId('server-who').click();
-  await dana.getByRole('link', { name: 'Members, invites and pilots of Recon FPV' }).click();
+  await openServerPart(dana, 'Club');
   await expect(dana.getByTestId('club-member')).toHaveCount(1);
   await expect(dana.getByTestId('club-member')).toContainText('(you)');
   const pilotLink = await invite(dana, 'Ace', 'Pilot');
@@ -123,10 +125,11 @@ test('an owner, a director and a pilot each get their account by invite and thei
 
   // ── A pilot has no club to run, and the server refuses them if they try. ──
   await ace.getByTestId('server-who').click();
+  await openServerPage(ace, 'Clubs');
   await expect(ace.getByRole('list', { name: 'Your clubs' })).toContainText('Recon FPV');
   await expect(ace.getByRole('list', { name: 'Your clubs' })).toContainText('Pilot');
-  await expect(ace.getByRole('list', { name: 'Clubs you look after' })).toHaveCount(0);
-  await ace.goto(`${server.baseUrl}/#/club/club`);
+  await expect(ace.getByRole('link', { name: 'Club', exact: true })).toHaveCount(0);
+  await ace.goto(`${server.baseUrl}/#/manage/club`);
   await expect(
     ace.getByText('Only those who look after this club can open this page.')
   ).toBeVisible();
@@ -138,10 +141,11 @@ test('an owner, a director and a pilot each get their account by invite and thei
 
   // ── The director sees the pilot, and changes their role. ──────────────────
   await dana.reload();
+  await openServerPage(dana, 'Members');
   await expect(dana.getByTestId('club-member')).toHaveCount(2);
   await dana.getByLabel('Role of Ace').selectOption('Approver');
   await expect(dana.getByLabel('Role of Ace')).toHaveValue('Approver');
-  await ace.goto(`${server.baseUrl}/#/account`);
+  await ace.goto(`${server.baseUrl}/#/account/clubs`);
   await expect(ace.getByRole('list', { name: 'Your clubs' })).toContainText('Approver');
 
   // The only director cannot make themselves a pilot: the server says why.
@@ -150,6 +154,7 @@ test('an owner, a director and a pilot each get their account by invite and thei
   await expect(dana.getByLabel('Role of Dana')).toHaveValue('Director');
 
   // ── Signing out, and back in with no invite. ──────────────────────────────
+  await openServerPage(ace, 'Sign-in');
   await ace.getByRole('button', { name: 'Sign out' }).click();
   await expect(ace.getByTestId('server-sign-in')).toBeVisible();
   await ace.goto(`${server.baseUrl}/#/account`);

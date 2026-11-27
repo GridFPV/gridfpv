@@ -10,6 +10,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Page } from '@playwright/test';
+import { openServerPage } from './serverPages.js';
 
 import { startServer, type RemoteServer } from '../test-harness/server.js';
 import { addClubOnPage, linkOnPage, openEvent, unlink, whereSent } from './link.js';
@@ -131,22 +132,24 @@ test("the server's own page lists the event and shows it as a visitor at the rac
   const link = page.getByTestId('server-event-link').filter({ hasText: E2E_EVENT_NAME });
   await expect(link).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('heading', { name: server.club })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Pages' })).toHaveCount(0);
+  // The server's own page, with its own parts, and none of the console's.
+  await expect(page.getByRole('navigation', { name: 'Parts of this server' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Setup', exact: true })).toHaveCount(0);
 
   await link.click();
   await expect(page.getByTestId('server-event')).toHaveText(E2E_EVENT_NAME);
-  await expect.poll(() => new URL(page.url()).hash).toBe(`#/e/club/${director.event}`);
+  await expect.poll(() => new URL(page.url()).hash).toBe(`#/event/club/${director.event}`);
   // The same tabs a visitor at the race gets.
   await expect(page.getByRole('tab').first()).toBeVisible();
 
   // A refresh stays on the event, and the way back is there.
   await page.reload();
   await expect(page.getByTestId('server-event')).toHaveText(E2E_EVENT_NAME, { timeout: 15_000 });
-  await page.getByRole('link', { name: '← All events' }).click();
+  await openServerPage(page, 'Events');
   await expect(link).toBeVisible();
 
   // An address for an event that is not there says so.
-  await page.goto(`${server.baseUrl}/#/e/club/no-such-event`);
+  await page.goto(`${server.baseUrl}/#/event/club/no-such-event`);
   await expect(page.getByText('This event is not here')).toBeVisible();
 });
 

@@ -72,13 +72,16 @@ describe('the words and addresses of email', () => {
 
 describe('the email card on the account page', () => {
   it('is not shown on a server that sends no email', async () => {
-    open('#/account', fakeServer({ account: ACE }));
+    open('#/account/sign-in', fakeServer({ account: ACE }));
     await screen.findByTestId('server-account');
     expect(screen.queryByTestId('account-email')).toBeNull();
   });
 
   it('takes an address, and says a link is on its way', async () => {
-    const { people, server } = open('#/account', fakeServer({ account: ACE, emailOn: true }));
+    const { people, server } = open(
+      '#/account/sign-in',
+      fakeServer({ account: ACE, emailOn: true })
+    );
     const block = await card();
     expect(block).toHaveTextContent('Nobody else is shown it.');
     expect(within(block).queryByTestId('email-state')).toBeNull();
@@ -107,7 +110,10 @@ describe('the email card on the account page', () => {
   });
 
   it('sends the link again when asked', async () => {
-    const { people, server } = open('#/account', fakeServer({ account: WAITING, emailOn: true }));
+    const { people, server } = open(
+      '#/account/sign-in',
+      fakeServer({ account: WAITING, emailOn: true })
+    );
     const block = await card();
     expect(within(block).getByTestId('email-waiting')).toHaveTextContent(
       'A link was sent to this address.'
@@ -121,7 +127,7 @@ describe('the email card on the account page', () => {
   });
 
   it('shows a confirmed address, with nothing to send again', async () => {
-    open('#/account', fakeServer({ account: WITH, emailOn: true }));
+    open('#/account/sign-in', fakeServer({ account: WITH, emailOn: true }));
     const block = await card();
     expect(within(block).getByTestId('email-state')).toHaveTextContent('Confirmed');
     expect(within(block).queryByTestId('email-waiting')).toBeNull();
@@ -129,7 +135,7 @@ describe('the email card on the account page', () => {
   });
 
   it('changes the address, which then needs confirming again', async () => {
-    const { people } = open('#/account', fakeServer({ account: WITH, emailOn: true }));
+    const { people } = open('#/account/sign-in', fakeServer({ account: WITH, emailOn: true }));
     const block = await card();
     await fireEvent.click(within(block).getByRole('button', { name: 'Change' }));
     const box = within(block).getByLabelText('Email address') as HTMLInputElement;
@@ -144,7 +150,7 @@ describe('the email card on the account page', () => {
   });
 
   it('cancels a change and keeps what there was', async () => {
-    const { people } = open('#/account', fakeServer({ account: WITH, emailOn: true }));
+    const { people } = open('#/account/sign-in', fakeServer({ account: WITH, emailOn: true }));
     const block = await card();
     await fireEvent.click(within(block).getByRole('button', { name: 'Change' }));
     await fireEvent.input(within(block).getByLabelText('Email address'), {
@@ -156,7 +162,10 @@ describe('the email card on the account page', () => {
   });
 
   it('takes the address off', async () => {
-    const { people, server } = open('#/account', fakeServer({ account: WITH, emailOn: true }));
+    const { people, server } = open(
+      '#/account/sign-in',
+      fakeServer({ account: WITH, emailOn: true })
+    );
     const block = await card();
     await fireEvent.click(within(block).getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(people.removeEmail).toHaveBeenCalled());
@@ -167,7 +176,7 @@ describe('the email card on the account page', () => {
   });
 
   it("says the server's words when the mail could not be sent, and keeps what was typed", async () => {
-    const { people } = open('#/account', fakeServer({ account: ACE, emailOn: true }));
+    const { people } = open('#/account/sign-in', fakeServer({ account: ACE, emailOn: true }));
     people.setEmail.mockRejectedValueOnce(
       new Error('The email could not be sent. Check the address, or try again later.')
     );
@@ -186,7 +195,7 @@ describe('the email card on the account page', () => {
   });
 
   it('still shows an address, to take off, on a server that stopped sending email', async () => {
-    open('#/account', fakeServer({ account: WITH }));
+    open('#/account/sign-in', fakeServer({ account: WITH }));
     const block = await card();
     expect(within(block).getByTestId('email-address')).toHaveTextContent('ace@example.org');
     expect(within(block).getByRole('button', { name: 'Remove' })).toBeTruthy();
@@ -206,7 +215,7 @@ describe('the link that confirms an address', () => {
     );
     expect(people.confirmEmail).toHaveBeenCalledWith('gfe_abc');
     expect(people.confirmEmail).toHaveBeenCalledTimes(1);
-    go('#/account');
+    go('#/account/sign-in');
     await waitFor(async () =>
       expect(within(await card()).getByTestId('email-state')).toHaveTextContent('Confirmed')
     );
@@ -236,7 +245,7 @@ describe('a forgotten password on the sign-in page', () => {
   it('says to ask an owner on a server that sends no email', async () => {
     open('#/sign-in', on());
     expect(await screen.findByTestId('forgot-owner')).toHaveTextContent(
-      'Forgot your password? Ask an owner of this server for a re-connect link.'
+      'Ask an owner of this server for a re-connect link.'
     );
     expect(screen.queryByRole('button', { name: 'Forgot your password?' })).toBeNull();
   });

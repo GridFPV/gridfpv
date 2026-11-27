@@ -14,7 +14,7 @@
    * An invite's link is shown once, when it is made. After that the list has only what it
    * is for and how it stands.
    */
-  import { Banner, Button, Card, Dialog, Input, toast } from '@gridfpv/components';
+  import { Banner, Button, Card, Dialog, InfoTip, Input, toast } from '@gridfpv/components';
   import type {
     ClubPilotView,
     ClubRole,
@@ -26,13 +26,13 @@
   } from '@gridfpv/types';
   import {
     ROLES,
-    OWNERS_SEE_ALL,
     clubLink,
     inviteLink,
     inviteStanding,
     roleWord,
     type PeopleApi
   } from '../lib/serverPeople.js';
+  import type { ManagePage } from '../lib/serverHome.js';
   import ServerClubJoin from './ServerClubJoin.svelte';
   import ServerClubManage from './ServerClubManage.svelte';
   import ServerClubPilots from './ServerClubPilots.svelte';
@@ -41,6 +41,7 @@
   let {
     api,
     club,
+    section = 'members',
     me,
     runs = true,
     owner = false,
@@ -81,6 +82,8 @@
     >;
     /** The club. Its friendly address and whether it is archived are shown when given. */
     club: { id: string; name: string; word?: string; archived?: boolean; open?: boolean };
+    /** Which of the club's pages this is. Someone who does not run the club sees only its pilots. */
+    section?: ManagePage;
     /** The signed-in account's id, to mark its own row. */
     me: string;
     /** Whether the person runs the club. A claims approver does not: they see only pilots. */
@@ -117,19 +120,24 @@
     // Only someone who runs the club may read its members and invites.
     if (!runs) return;
     try {
-      [members, invites] = await Promise.all([api.members(club.id), api.clubInvites(club.id)]);
+      [members, invites] = await Promise.all([api.members(clubId), api.clubInvites(clubId)]);
       loadError = undefined;
       // The invite form offers these. Without them an invite is still made, for no pilot.
       freePilots = await api
-        .clubPilots(club.id)
+        .clubPilots(clubId)
         .then((all) => all.filter((pilot) => !pilot.taken))
         .catch(() => []);
     } catch (err) {
       loadError = say(err);
     }
   }
+  /**
+   * The club by its id alone. The page hands over the club afresh each time it reads its
+   * lists, and that is not another club: nothing here is thrown away for it.
+   */
+  const clubId = $derived(club.id);
   $effect(() => {
-    void club.id;
+    void clubId;
     void runs;
     members = undefined;
     invites = undefined;
@@ -215,47 +223,39 @@
   const now = $derived(Date.now());
 </script>
 
-<div class="club" data-testid="server-club">
-  <p class="lead">{club.name}</p>
+<div class="cards" data-testid="server-club">
   {#if club.archived}
-    <Banner tone="warn" title="This club is archived.">
-      <span data-testid="club-archived"
-        >Nothing in it can be changed, and its director's Grid can send no more. Its events still
-        open by their links. An owner of this server can bring it back.</span
-      >
-    </Banner>
+    <div class="wide">
+      <Banner tone="warn" title="This club is archived.">
+        <span data-testid="club-archived"
+          >Nothing in it can be changed. An owner of this server can bring it back.</span
+        >
+      </Banner>
+    </div>
   {/if}
-  {#if runs && club.word}
-    {@const address = clubLink(origin, club.word)}
-    <p class="address">
-      <span class="muted">The club's address, to hand out:</span>
-      <code data-testid="club-own-address">{address}</code>
-      <Button size="sm" variant="ghost" onclick={() => copy(address)}>Copy</Button>
-    </p>
-  {/if}
-  {#if runs}<p class="muted" data-testid="owners-see-all">{OWNERS_SEE_ALL}</p>{/if}
   {#if loadError}
-    <Banner tone="danger" title="This club's members could not be read.">{loadError}</Banner>
+    <div class="wide">
+      <Banner tone="danger" title="This club's members could not be read.">{loadError}</Banner>
+    </div>
   {/if}
-  {#if error}<Banner tone="danger"><span data-testid="club-error">{error}</span></Banner>{/if}
+  {#if error}
+    <div class="wide">
+      <Banner tone="danger"><span data-testid="club-error">{error}</span></Banner>
+    </div>
+  {/if}
 
   {#if !runs}
     <ServerClubPilots {api} {club} {me} runs={false} />
-  {:else}
-    <ServerClubJoin
-      {api}
-      {club}
-      onchange={async () => {
-        await load();
-        onchange?.();
-      }}
-    />
+  {:else if section === 'members'}
     <Card elevation="sm">
       <div class="block">
         <h2>Members</h2>
         {#if members === undefined}
           {#if !loadError}<p class="muted" role="status">Loading…</p>{/if}
         {:else}
+          {#if members.length === 0}
+            <p class="muted" data-testid="no-members">No members yet.</p>
+          {/if}
           <ul aria-label="Members">
             {#each members as member (member.id)}
               <li data-testid="club-member">
@@ -295,6 +295,16 @@
       </div>
     </Card>
 
+    <ServerClubJoin
+      {api}
+      {club}
+      part="people"
+      onchange={async () => {
+        await load();
+        onchange?.();
+      }}
+    />
+  {:else if section === 'invites'}
     <Card elevation="sm">
       <div class="block">
         <h2>Invite someone</h2>
@@ -410,9 +420,31 @@
         {/if}
       </div>
     </Card>
-
+  {:else if section === 'pilots'}
     <ServerClubPilots {api} {club} {me} runs {members} onchange={load} />
-    <ServerClubManage {api} {club} {onchange} />
+  {:else if section === 'events' || section === 'tokens'}
+    <ServerClubManage {api} {club} {section} {onchange} />
+  {:else}
+    <ServerClubManage {api} {club} section="settings" {onchange} />
+    <ServerClubJoin {api} {club} part="setting" {onchange} />
+    {#if club.word}
+      {@const address = clubLink(origin, club.word)}
+      <Card elevation="sm">
+        <div class="block">
+          <div class="row">
+            <h2>Address</h2>
+            <InfoTip
+              text="Hand this out. It follows the club's name, and an old address keeps working."
+              label="About the club's address"
+            />
+          </div>
+          <p class="address">
+            <code data-testid="club-own-address">{address}</code>
+            <Button size="sm" variant="ghost" onclick={() => copy(address)}>Copy</Button>
+          </p>
+        </div>
+      </Card>
+    {/if}
   {/if}
 </div>
 
@@ -453,7 +485,21 @@
     overflow-wrap: anywhere;
     user-select: all;
   }
-  .club,
+  /* Cards side by side on a wide screen, one under the other on a narrow one. */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(26rem, 100%), 1fr));
+    gap: var(--gf-space-4);
+    align-items: start;
+  }
+  .wide {
+    grid-column: 1 / -1;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
   .block,
   form {
     display: grid;
@@ -465,11 +511,6 @@
   }
   p {
     margin: 0;
-  }
-  .lead {
-    font-size: var(--gf-font-size-xl);
-    font-weight: var(--gf-font-weight-bold);
-    overflow-wrap: anywhere;
   }
   ul {
     list-style: none;

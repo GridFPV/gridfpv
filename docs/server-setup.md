@@ -192,8 +192,8 @@ Grid.
 There are two ways. Once people can sign in (see **Signing in**), the page is the easy
 one.
 
-**On the server's page.** A director of the club, or an owner, opens the club's page and
-finds **Link tokens**. Type what the token is for and press **Make a link token**. To take
+**On the server's page.** A director of the club, or an owner, opens
+**Club → Link tokens**. Type what the token is for and press **Make a link token**. To take
 one back, press **Take back** beside it.
 
 **On the command line.**
@@ -219,6 +219,23 @@ a safe way. They paste it into Grid, on **Setup → Server**, with your server's
 
 A token that is taken back stops working straight away.
 
+## Finding your way around the page
+
+The top of the server's page has up to four parts. You see only the ones that are yours.
+
+| Part | Who sees it | What is there |
+| --- | --- | --- |
+| **Events** | everyone | events, clubs, and your own results |
+| **Account** | anyone signed in | your profile, your clubs, and how you sign in |
+| **Club** | directors and approvers | members, invites, pilots, events, link tokens, settings |
+| **Server** | owners | clubs, sign-in, email |
+
+Each part has its own row of pages beside it. If you run more than one club, the **Club**
+part has a box to pick which one.
+
+Most headings have a small **?** beside them. Point at it, or press it, to read what
+that part does.
+
 ## Signing in
 
 People can have an account on your server. There are two ways to let them sign in. You can
@@ -243,18 +260,18 @@ gridfpv-serverctl password on
 ```
 
 That is all the setup there is. You can skip steps 1 to 3 if this is the only way you
-want. Then make yourself the owner (step 4): open the setup link and press **Make one with
-a username and password**.
+want. Then make yourself the owner (step 4): open the setup link and press **Create
+account**.
 
-Once you are an owner you can also switch it on and off on your account page, under
-**Signing in with a password**.
+Once you are an owner you can also switch it on and off under **Server → Sign-in**, with
+the **Passwords** switch.
 
 - A username is 3 to 32 letters and digits. A password is at least 10 characters.
 - The server keeps a scrambled form of each password, never the password itself. Nobody
   can read a password off the server, you included.
 - After five wrong passwords in a row, a username waits a minute.
-- Someone who signs in with Discord or Google can add a username and password too, on
-  their account page.
+- Someone who signs in with Discord or Google can add a username and password too, under
+  **Account → Sign-in**.
 - **If someone forgets their password,** send them a re-connect link. See **Help someone
   who cannot sign in**. They open it and type a new password.
 - If you switch passwords off, anyone whose only way in is a password is locked out
@@ -267,7 +284,7 @@ Use HTTPS. A password typed over plain `http://` can be read on the way.
 A server can send email, if you give it an email account to send from. It is optional. It
 is used for two things only:
 
-- **To confirm an address.** A person can give their email address on their account page.
+- **To confirm an address.** A person can give their email address under **Account → Sign-in**.
   The server sends a link to it, and the address counts once they open the link.
 - **To set a forgotten password.** On the sign-in page, **Forgot your password?** sends a
   link to the person's confirmed address. Without email, you send them a re-connect link
@@ -405,7 +422,7 @@ touch another club. A club always keeps at least one director.
 
 Invites work either way. You can always send one, and so can a club's director.
 
-To change it, open your account page and find **Who may make an account**. Or on the
+To change it, open **Server → Sign-in** and use the **Open sign-up** switch. Or on the
 command line:
 
 ```
@@ -417,24 +434,24 @@ gridfpv-serverctl sign-up invite
 The first one says how it is set now. If you turn it off again, accounts already made
 stay.
 
-**Public and private clubs.** A club's director chooses, on the club's page under **Who
+**Public and private clubs.** A club's director chooses, under **Club → Settings**, at **Who
 can join**. A club starts private.
 
-- **Public:** anyone with an account on your server can join. They press **Join** on
-  their account page, or at the club's own address.
-- **Private:** a person presses **Ask to join**. The director sees them under **Asked to
-  join** and presses **Let in** or **No**.
+- **Public:** anyone with an account on your server can join. They press **Join** under
+  **Account → Clubs**, or at the club's own address.
+- **Private:** a person presses **Ask to join**. The director sees them under **Club → Members**, at
+  **Asked to join**, and presses **Let in** or **No**.
 
 Either way a director can still invite people. A director can also add someone who has
-an account: under **Add someone**, type part of their name or callsign and press **Find**,
+an account: under **Club → Members**, at **Add someone**, type part of their name or callsign and press **Find**,
 then **Add**. Everyone who joins these ways joins as a pilot. The director can change
 their role after.
 
-A member can leave a club from their account page. A club's only director cannot leave.
+A member can leave a club under **Account → Clubs**. A club's only director cannot leave.
 
 Private is about who can join. It does not hide the club or its events from visitors.
 
-**The pilot profile.** Each person fills in their own on their account page: a callsign,
+**The pilot profile.** Each person fills in their own under **Account → Profile**: a callsign,
 a colour, a MultiGP id and a Velocidrone id. All of it is optional. It belongs to the
 account, so it is the same in every club on your server. The ids are there so a race
 director can match a pilot to MultiGP and Velocidrone later.
@@ -452,11 +469,11 @@ There are three ways an account comes to hold one:
 
 - **An invite made for the pilot.** When you invite one person, pick **Their pilot**.
   Whoever uses the link gets that pilot's results in the same step.
-- **A director gives it.** On the club's page, under **Pilots**, pick a member beside the
+- **A director gives it.** Under **Club → Pilots**, pick a member beside the
   pilot. Or in Grid itself, on **Setup → Pilots**, press **Account** beside the pilot.
-- **The person asks.** On their account page they press **Find yourself in** the club and
+- **The person asks.** Under **Account → Profile** they press **Find yourself in** the club and
   pick their callsign. Nothing is theirs yet. A director, or a member with the
-  **Approver** role, answers **Yes** or **No** on the club's page.
+  **Approver** role, answers **Yes** or **No** under **Club → Pilots**.
 
 Knowing a callsign is never enough: someone the club trusts always says yes.
 
@@ -464,7 +481,7 @@ An approver cannot answer their own ask. A director can take a pilot back at any
 
 ### 7. Hide or remove an event
 
-On the club's page, under **Events**, a director or an owner can:
+Under **Club → Events**, a director or an owner can:
 
 - **Hide** an event. It leaves the list for everyone else. Anyone who has its link can
   still open it. **Show** puts it back.
@@ -481,11 +498,11 @@ A server can hold several clubs. Only an **owner** of the server makes one.
 **As an owner you can see and change everything in every club on your server.** A club
 you host has to be fine with that. The page tells people so where they sign in.
 
-On your account page, find **Clubs on this server**.
+Open **Server → Clubs**.
 
 - **Make a club:** type its name and press **Make the club**. Then open the club and
   invite its director. The director makes link tokens for their own Grid.
-- **The club's address** is shown under its name, like `https://your-server/#/c/recon-fpv`.
+- **The club's address** is shown beside its name, like `https://your-server/#/club/recon-fpv`.
   Hand it out. It shows that club's events alone. The address follows the club's name. If
   the club is renamed, the old address keeps working until another club takes that word.
 - **Archive** a club you no longer run. It leaves the list of clubs, and nothing in it can
@@ -527,7 +544,7 @@ password by themselves (see **Email**). Everyone else needs you. If someone forg
 password, or loses the Discord or Google account they sign in with, an **owner** of the
 server gets them back in.
 
-On the club's page, under **Members**, press **Sign-ins…** next to the person. You can:
+Under **Club → Members**, press **Sign-ins…** next to the person. You can:
 
 - **Take off** a sign-in. The person is signed out everywhere at once, and that sign-in no
   longer opens their account. Do this when a Discord or Google account was stolen.

@@ -882,7 +882,7 @@ async fn a_signed_in_account_adds_google_and_then_signs_in_either_way() {
     let went = browser
         .sign_in(&rig, "google", "?add=1", google_user("g-ace", "Ace G"))
         .await;
-    assert_eq!(went.location, format!("{PUBLIC}/#/account"));
+    assert_eq!(went.location, format!("{PUBLIC}/#/account/sign-in"));
     let me = browser.me(&rig).await;
     assert_eq!(me["account"]["id"], id);
     assert_eq!(me["account"]["sign_ins"].as_array().unwrap().len(), 2);
@@ -1429,7 +1429,7 @@ async fn someone_who_lost_their_sign_in_gets_back_into_the_same_account_with_a_l
             google_user("g-ace", "Ace G"),
         )
         .await;
-    assert_eq!(went.location, format!("{PUBLIC}/#/account"));
+    assert_eq!(went.location, format!("{PUBLIC}/#/account/sign-in"));
     assert!(signed_in(&went));
     let me = phone.me(&rig).await;
     assert_eq!(me["account"]["id"], id.as_str());

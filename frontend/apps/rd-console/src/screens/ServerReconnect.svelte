@@ -72,17 +72,14 @@
       <p class="muted" role="status">Loading…</p>
     {:else}
       <p class="lead" data-testid="reconnect-for">Get back in to {link.name}</p>
-      <p>
-        Sign in below with an account you can still use. From then on, that is how you sign in as <strong
-          >{link.name}</strong
-        >. Your clubs, pilots and results stay as they are.
+      <p class="muted">
+        {#if password}
+          <span data-testid="reconnect-password">Type your username and a new password.</span>
+        {:else}
+          Sign in with an account you can still use.
+        {/if}
+        This link works once.
       </p>
-      <p class="muted">This link works once. Use a sign-in that no account here uses yet.</p>
-      {#if password}
-        <p class="muted" data-testid="reconnect-password">
-          Forgot your password? Type your username and a new password below.
-        </p>
-      {/if}
       {#if account}
         <p data-testid="reconnect-signed-in">
           This browser is signed in as <strong>{account.name}</strong> now. Going on signs it in as

@@ -7,7 +7,7 @@
    * one. Otherwise the person finds themselves in their club's list and asks. Asking gives
    * nothing: a director or a claims approver of the club must say yes.
    */
-  import { Banner, Button, Card, Dialog } from '@gridfpv/components';
+  import { Banner, Button, Card, Dialog, InfoTip } from '@gridfpv/components';
   import type { ClubPilotView, MyAccount, MyPilot } from '@gridfpv/types';
   import { formatServerHash } from '../lib/serverHome.js';
   import type { PeopleApi } from '../lib/serverPeople.js';
@@ -81,13 +81,16 @@
 
 <Card elevation="sm">
   <div class="block" data-testid="my-pilots">
-    <h2>Your pilots</h2>
+    <div class="head">
+      <h2>Your pilots</h2>
+      <InfoTip
+        text="Find yourself in your club's list. The results flown under that pilot then show on your account."
+        label="About your pilots"
+      />
+    </div>
     {#if error}<Banner tone="danger">{error}</Banner>{/if}
     {#if account.pilots.length === 0}
-      <p class="muted">
-        None yet. Find yourself in your club's list, and your race results will show on this
-        account.
-      </p>
+      <p class="muted">None yet.</p>
     {:else}
       <ul aria-label="Your pilots">
         {#each account.pilots as pilot (pilot.club.id + ':' + pilot.id)}
@@ -182,6 +185,11 @@
 {/if}
 
 <style>
+  .head {
+    display: flex;
+    align-items: center;
+    gap: var(--gf-space-2);
+  }
   .block {
     display: grid;
     gap: var(--gf-space-3);

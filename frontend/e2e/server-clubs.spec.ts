@@ -14,6 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Browser, Page } from '@playwright/test';
+import { openServerPage, openServerPart } from './serverPages.js';
 
 import { startProvider, type FakeProvider } from '../test-harness/provider.js';
 import { startServer, type RemoteServer } from '../test-harness/server.js';
@@ -72,13 +73,13 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   const ryan = await fresh(browser);
   await ryan.goto(setup);
   // People are told about owners where they sign in.
-  await expect(ryan.getByTestId('owners-see-all')).toHaveText(
+  await expect(ryan.getByTestId('owners-see-all')).toContainText(
     'The owners of this server can see and change everything on it.'
   );
   provider.person = { sub: 'sub-ryan', name: 'Ryan' };
   await ryan.getByRole('link', { name: 'Continue with Test login' }).click();
   await expect(ryan.getByTestId('server-who')).toHaveText('Ryan');
-  await ryan.getByTestId('server-who').click();
+  await openServerPart(ryan, 'Server');
   const clubs = ryan.getByTestId('server-clubs');
   await expect(clubs.getByTestId('owned-club')).toHaveCount(1);
   await expect(clubs.getByTestId('owned-club')).toContainText('Recon FPV');
@@ -86,16 +87,20 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   await clubs.getByRole('button', { name: 'Make the club' }).click();
   await expect(clubs.getByTestId('owned-club')).toHaveCount(2);
   const north = clubs.getByTestId('owned-club').filter({ hasText: 'North Whoops' });
-  await expect(north.getByTestId('club-address')).toHaveText(`${server.baseUrl}/#/c/north-whoops`);
+  await expect(north.getByTestId('club-address')).toHaveText(
+    `${server.baseUrl}/#/club/north-whoops`
+  );
 
   // ── A link token for the new club, made on its page. ──────────────────────
   await north.getByRole('link', { name: 'North Whoops' }).click();
-  await expect(ryan.getByTestId('server-club').locator('.lead')).toHaveText('North Whoops');
+  // The club is in the address by its word, and the box at the top says which club it is.
+  await expect(ryan).toHaveURL(/#\/manage\/north-whoops$/);
+  await expect(ryan.getByTestId('club-pick').locator('option:checked')).toHaveText('North Whoops');
+  await openServerPage(ryan, 'Settings');
   await expect(ryan.getByTestId('club-own-address')).toHaveText(
-    `${server.baseUrl}/#/c/north-whoops`
+    `${server.baseUrl}/#/club/north-whoops`
   );
-  const northPage = ryan.url();
-  expect(northPage).toMatch(/#\/club\/c[0-9a-f]{12}$/);
+  await openServerPage(ryan, 'Link tokens');
   await ryan.getByLabel('What it is for').fill('North laptop');
   await ryan.getByRole('button', { name: 'Make a link token' }).click();
   const token = (await ryan.getByTestId('token-secret').innerText()).trim();
@@ -121,29 +126,34 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   expect(other.status).toBe(404);
 
   // The club's own address shows it alone.
-  await visitor.goto(`${server.baseUrl}/#/c/north-whoops`);
+  await visitor.goto(`${server.baseUrl}/#/club/north-whoops`);
   const one = visitor.getByTestId('server-one-club');
-  await expect(one).toContainText('North Whoops');
+  await expect(visitor.getByRole('heading', { name: 'North Whoops', level: 1 })).toBeVisible();
   await expect(one.getByTestId('server-event-link')).toHaveCount(1);
-  await visitor.goto(`${server.baseUrl}/#/c/recon-fpv`);
+  await visitor.goto(`${server.baseUrl}/#/club/recon-fpv`);
   await expect(visitor.getByTestId('server-one-club')).toContainText('No events yet.');
-  await visitor.goto(`${server.baseUrl}/#/c/nowhere`);
+  await visitor.goto(`${server.baseUrl}/#/club/nowhere`);
   await expect(visitor.getByText('This club is not here')).toBeVisible();
 
   // ── Renamed: a new address, and the old one still opens. ──────────────────
+  await openServerPage(ryan, 'Settings');
   await ryan.getByLabel('Name', { exact: true }).fill('Northern Whoops');
   await ryan.getByRole('form', { name: 'Club name' }).getByRole('button', { name: 'Save' }).click();
-  await expect(ryan.getByTestId('server-club').locator('.lead')).toHaveText('Northern Whoops');
-  expect(ryan.url()).toBe(northPage);
+  // The page goes on to the club's new address, on the same page of it.
+  await expect(ryan).toHaveURL(/#\/manage\/northern-whoops\/settings$/);
+  await expect(ryan.getByTestId('club-pick').locator('option:checked')).toHaveText(
+    'Northern Whoops'
+  );
+  const northPage = `${server.baseUrl}/#/manage/northern-whoops`;
   for (const word of ['northern-whoops', 'north-whoops', 'North-Whoops']) {
-    await visitor.goto(`${server.baseUrl}/#/c/${word}`);
+    await visitor.goto(`${server.baseUrl}/#/club/${word}`);
     await visitor.reload();
-    await expect(visitor.getByTestId('server-one-club')).toContainText('Northern Whoops');
+    await expect(visitor.getByRole('heading', { name: 'Northern Whoops', level: 1 })).toBeVisible();
     await expect(visitor.getByTestId('server-one-club')).toContainText(E2E_EVENT_NAME);
   }
 
   // ── Archived: off the list, still opens, and Grid is told why. ────────────
-  await ryan.getByTestId('server-who').click();
+  await openServerPart(ryan, 'Server');
   const northRow = clubs.getByTestId('owned-club').filter({ hasText: 'Northern Whoops' });
   await northRow.getByRole('button', { name: 'Archive Northern Whoops' }).click();
   const sure = ryan.getByRole('dialog');
@@ -153,9 +163,10 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   await expect(northRow).toContainText('Archived');
 
   expect(await listed(visitor)).toEqual([]);
-  await visitor.goto(`${server.baseUrl}/#/c/northern-whoops`);
+  await visitor.goto(`${server.baseUrl}/#/club/northern-whoops`);
   await visitor.reload();
-  await expect(visitor.getByTestId('server-one-club')).toContainText('Archived');
+  await expect(visitor.getByTestId('server-one-club')).toBeVisible();
+  await expect(visitor.getByText('Archived', { exact: true })).toBeVisible();
   await visitor.getByTestId('server-event-link').click();
   await expect(visitor.getByTestId('server-event')).toHaveText(E2E_EVENT_NAME);
 
@@ -164,6 +175,7 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   // Nothing in it can be changed, even by the owner, and the page says why.
   await ryan.goto(northPage);
   await expect(ryan.getByTestId('club-archived')).toBeVisible();
+  await openServerPage(ryan, 'Link tokens');
   await ryan.getByLabel('What it is for').fill('Another laptop');
   await ryan.getByRole('button', { name: 'Make a link token' }).click();
   await expect(
@@ -173,7 +185,7 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   expect(server.run(['club', 'list'])).toMatch(/northern-whoops\s+Northern Whoops\s+archived/);
 
   // ── Brought back: on the list again, and Grid carries on by itself. ───────
-  await ryan.getByTestId('server-who').click();
+  await openServerPart(ryan, 'Server');
   await northRow.getByRole('button', { name: 'Bring back Northern Whoops' }).click();
   await expect(northRow).not.toContainText('Archived');
   expect(await listed(visitor)).toEqual([E2E_EVENT_NAME]);
@@ -185,24 +197,24 @@ test('an owner makes a second club, a director sends to it, and it is archived a
 
   // ── A pilot in both clubs: the front page opens on their primary club. ────
   const inviteFrom = async (clubPage: string): Promise<string> => {
-    await ryan.goto(clubPage);
+    await ryan.goto(`${clubPage}/invites`);
     await ryan.reload();
     await ryan.getByLabel('Who it is for').fill('Mateo');
     await ryan.getByRole('button', { name: 'Make the invite' }).click();
     return (await ryan.getByTestId('invite-link').innerText()).trim();
   };
   const mateo = await fresh(browser);
-  await mateo.goto(await inviteFrom(`${server.baseUrl}/#/club/club`));
+  await mateo.goto(await inviteFrom(`${server.baseUrl}/#/manage/club`));
   provider.person = { sub: 'sub-mateo', name: 'Mateo' };
   await mateo.getByRole('link', { name: 'Continue with Test login' }).click();
   await expect(mateo.getByTestId('server-who')).toHaveText('Mateo');
   // Recon FPV was joined first, so it is primary. It has no events.
   await mateo.goto(`${server.baseUrl}/#/`);
   await expect(mateo.getByTestId('no-events')).toBeVisible();
-  await expect(mateo.getByTestId('all-clubs')).toContainText('This is your primary club.');
+  await expect(mateo.getByRole('heading', { name: 'Recon FPV', level: 1 })).toBeVisible();
   await expect(mateo.getByTestId('server-event-link')).toHaveCount(0);
   // Every club is one step away.
-  await mateo.getByRole('link', { name: 'Every club on this server' }).click();
+  await openServerPage(mateo, 'Clubs');
   await expect(mateo.getByTestId('server-event-link')).toContainText(E2E_EVENT_NAME);
 
   // Mateo joins the other club too, and makes it primary.
@@ -219,6 +231,5 @@ test('an owner makes a second club, a director sends to it, and it is archived a
   await mateo.goto(`${server.baseUrl}/#/`);
   await mateo.reload();
   await expect(mateo.getByTestId('server-event-link')).toContainText(E2E_EVENT_NAME);
-  await expect(mateo.getByRole('region', { name: 'Northern Whoops' })).toBeVisible();
-  await expect(mateo.getByTestId('all-clubs')).toBeVisible();
+  await expect(mateo.getByRole('heading', { name: 'Northern Whoops', level: 1 })).toBeVisible();
 });

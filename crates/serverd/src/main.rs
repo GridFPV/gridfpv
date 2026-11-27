@@ -427,7 +427,7 @@ fn club_name(name: &str, club: Option<&str>) -> Done {
     let club = pick_club(&book, club)?;
     let club = book.rename_club(&club.id, name)?;
     println!("The club is now called {}.", club.name);
-    println!("Its address is {}/#/c/{}", link_base(), club.word);
+    println!("Its address is {}/#/club/{}", link_base(), club.word);
     Ok(())
 }
 
@@ -448,7 +448,7 @@ fn club_new(name: &str) -> Done {
     let book = Book::open(&data_dir())?;
     let club = book.new_club(name)?;
     println!("Made the club {}.", club.name);
-    println!("Its address is {}/#/c/{}", link_base(), club.word);
+    println!("Its address is {}/#/club/{}", link_base(), club.word);
     println!(
         "Make a link token for its director: gridfpv-server token new <label> {}",
         club.word

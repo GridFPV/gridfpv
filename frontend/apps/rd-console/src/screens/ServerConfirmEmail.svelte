@@ -51,14 +51,14 @@
     {#if address}
       <p class="lead" data-testid="email-confirmed">{address} is confirmed.</p>
       <p>If you forget your password, you can now have a link sent to this address.</p>
-      <p><a href={formatServerHash({ kind: 'account' })}>Your account</a></p>
+      <p><a href={formatServerHash({ kind: 'account', page: 'sign-in' })}>Your account</a></p>
     {:else if dead}
       <p class="lead" data-testid="email-link-dead">This link does not work</p>
       <p>
         It may have been used already, or have run out. On your account page, press
         <strong>Send the link again</strong>.
       </p>
-      <p><a href={formatServerHash({ kind: 'account' })}>Your account</a></p>
+      <p><a href={formatServerHash({ kind: 'account', page: 'sign-in' })}>Your account</a></p>
     {:else}
       <p class="muted" role="status">Confirming…</p>
     {/if}
