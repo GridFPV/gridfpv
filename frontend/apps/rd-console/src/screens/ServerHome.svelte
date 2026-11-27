@@ -7,7 +7,9 @@
    * by the same `SpectatorView` a Director's visitors get, from the same reads; only the
    * address in front of them differs (§11.7).
    *
-   * Nothing can be changed from this page.
+   * Anyone may look. A signed-in pilot who is in the event also gets **Sign up**, where the
+   * event has it (§13.4). What they ask for goes to the Director, which decides it as it
+   * would at the race. Nothing else can be changed from this page.
    */
   import { Card } from '@gridfpv/components';
   import { listServerClubs, listServerEvents, serverEventBase } from '@gridfpv/protocol-client';
@@ -17,16 +19,24 @@
     eventDetail,
     formatServerHash,
     parseServerHash,
+    pilotHere,
     type ServerPlace
   } from '../lib/serverHome.js';
   import { peopleApi, sayIn, signInProblem, type PeopleApi } from '../lib/serverPeople.js';
-  import { publicSource } from '../lib/spectator.js';
+  import { publicSource, type PublicSource } from '../lib/spectator.js';
   import ServerAccount from './ServerAccount.svelte';
   import ServerClub from './ServerClub.svelte';
   import ServerInvite from './ServerInvite.svelte';
   import ServerResults from './ServerResults.svelte';
   import ServerSignIn from './ServerSignIn.svelte';
   import SpectatorView from './SpectatorView.svelte';
+
+  /** An event's reads, with the three things a pilot can ask for when they are there. */
+  type EventSource = LiveSession &
+    Partial<Pick<PublicSource, 'takeSpot' | 'takeNextSpot' | 'leaveSpot'>>;
+
+  /** How long a pilot's change may take to come back from the Director, in milliseconds. */
+  const BACK_WITHIN_MS = 4_000;
 
   /** How often the list of events is read again, in milliseconds. */
   const LIST_POLL_MS = 15_000;
@@ -48,8 +58,11 @@
       clubs: () => Promise<PushClub[]>;
       events: (club: string) => Promise<ServerEvent[]>;
     };
-    /** Where one event is read from. A test passes its own. */
-    sourceFor?: (club: string, event: string) => LiveSession;
+    /**
+     * Where one event is read from, and where a pilot's sign-up is sent. A test passes its
+     * own; one with no sign-up calls only shows the event.
+     */
+    sourceFor?: (club: string, event: string) => EventSource;
     /** Accounts: who is signed in, invites, members. A test passes its own. */
     people?: PeopleApi;
   } = $props();
@@ -80,9 +93,11 @@
   };
 
   // A page about the account reads it again on the way in: a role may have been given or
-  // taken since the page was opened, and what it shows must be what is so.
+  // taken since the page was opened, and what it shows must be what is so. An event does
+  // too: whether the person may sign up there depends on the pilots they hold now.
   $effect(() => {
     if (
+      place.kind === 'event' ||
       place.kind === 'account' ||
       place.kind === 'club' ||
       place.kind === 'invite' ||
@@ -147,19 +162,58 @@
   const gone = $derived(picked !== undefined && clubs !== undefined && pickedEvent === undefined);
 
   let live = $state.raw<EventLive | undefined>(undefined);
+  let source = $state.raw<EventSource | undefined>(undefined);
   const pickedKey = $derived(picked ? `${picked.club}/${picked.event}` : undefined);
   $effect(() => {
     const at = picked;
     // One live store per event. `pickedKey` is what says the event changed.
     if (pickedKey === undefined || at === undefined) {
       live = undefined;
+      source = undefined;
       return;
     }
-    const store = new EventLive(sourceFor(at.club, at.event), at.event, { pollTimers: false });
+    const from = sourceFor(at.club, at.event);
+    const store = new EventLive(from, at.event, { pollTimers: false });
+    source = from;
     live = store;
     store.start();
     return () => store.stop();
   });
+
+  // ── A pilot signing up ─────────────────────────────────────────────────────
+  /** The pilot the signed-in account is in the event that is open on the page. */
+  const pilot = $derived(picked && live ? pilotHere(account, picked.club, live.pilots) : undefined);
+
+  /**
+   * Wait for what the Director decided to come back. The Director said yes, and the
+   * change reaches this server with its next push. Until the page has it, the sheet would
+   * still show the old spots, and a pilot would tap again.
+   */
+  async function comeBack(before: number | undefined) {
+    const end = Date.now() + BACK_WITHIN_MS;
+    await live?.reload();
+    while (live?.view?.cursor === before && Date.now() < end) {
+      await new Promise((done) => setTimeout(done, 100));
+      await live?.reload();
+    }
+  }
+
+  const sent =
+    <A extends unknown[]>(what: ((...args: A) => Promise<unknown>) | undefined) =>
+    async (...args: A) => {
+      const before = live?.view?.cursor;
+      await what?.(...args);
+      await comeBack(before);
+    };
+  const signup = $derived(
+    pilot && source?.takeSpot && source.takeNextSpot && source.leaveSpot
+      ? {
+          take: sent(source.takeSpot),
+          next: sent(source.takeNextSpot),
+          leave: sent(source.leaveSpot)
+        }
+      : undefined
+  );
 </script>
 
 <main class="server">
@@ -273,7 +327,7 @@
         {/if}
       {/if}
       {#if live}
-        <SpectatorView {live} />
+        <SpectatorView {live} {pilot} {signup} />
       {/if}
     {/if}
   {:else if clubs === undefined}

@@ -324,8 +324,8 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
 
 ## What it does not do yet
 
-- A signed-in pilot sees the events they flew and where they placed. Seasons and records
-  come later.
+- A signed-in pilot sees the events they flew and where they placed, and can sign up for a
+  heat while the director's Grid is connected. Seasons and records come later.
 - A director still sends events with a link token. Anyone can look at an event.
 - There is one club on a server.
 - Videos are not stored.

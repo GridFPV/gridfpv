@@ -161,6 +161,50 @@ pub struct PushPilotAccount {
     pub account: String,
 }
 
+/// What a pilot asks for on a server, for the Director to decide (§13.4): the same three
+/// things a pilot asks for at the race (§11.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub enum PilotAsk {
+    /// Take a seat in a heat.
+    Take {
+        heat: gridfpv_events::PhaseId,
+        seat: gridfpv_events::SignupSeat,
+    },
+    /// Take the first free spot on a seat.
+    Next {
+        phase: gridfpv_events::PhaseId,
+        seat: gridfpv_events::SignupSeat,
+    },
+    /// Give a spot up.
+    Leave { heat: gridfpv_events::PhaseId },
+}
+
+/// One ask waiting on a server for the Director (`GET /push/requests`).
+///
+/// **The server says who is asking.** It is the pilot the signed-in account holds in the
+/// club (§13.7). The Director decides the ask as that pilot's own, under every rule of the
+/// phase, and never as the director's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PushRequest {
+    /// Names this one ask, to answer it by.
+    pub id: String,
+    pub event: crate::events::EventId,
+    pub pilot: gridfpv_events::PilotId,
+    pub ask: PilotAsk,
+}
+
+/// The Director's answer to an ask (`POST /push/requests/{id}`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PushAnswer {
+    /// Why it was not done, in words for the pilot. Left out when it was done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refused: Option<String>,
+}
+
 /// Why a server did not take a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]

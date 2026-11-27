@@ -1,6 +1,11 @@
 /** The small decisions of the page a remote server shows (`lib/serverHome.ts`). */
 import { describe, expect, it } from 'vitest';
-import { eventDetail, formatServerHash, parseServerHash } from '../src/lib/serverHome.js';
+import {
+  eventDetail,
+  formatServerHash,
+  parseServerHash,
+  pilotHere
+} from '../src/lib/serverHome.js';
 
 describe('parseServerHash', () => {
   it('reads the list from an empty address', () => {
@@ -59,5 +64,47 @@ describe('eventDetail', () => {
     expect(eventDetail({ location: 'Main field' })).toBe('Main field');
     expect(eventDetail({})).toBe('');
     expect(eventDetail({ date: '  ', location: ' Main field ' })).toBe('Main field');
+  });
+});
+
+describe('pilotHere', () => {
+  const NORTH = { id: 'north', name: 'North FPV' };
+  const SOUTH = { id: 'south', name: 'South FPV' };
+  const event = [
+    { id: 'p-ace', callsign: 'Acey' },
+    { id: 'p-bee', callsign: 'Bee' }
+  ];
+  const holds = (club: typeof NORTH, id: string, held = true) => ({
+    club,
+    id,
+    callsign: 'As the club has it',
+    held
+  });
+
+  it('is the pilot the account holds in that club, as the event names them', () => {
+    expect(pilotHere({ pilots: [holds(NORTH, 'p-ace')] }, 'north', event)).toEqual({
+      id: 'p-ace',
+      callsign: 'Acey'
+    });
+  });
+
+  it('is nobody for someone who is only looking', () => {
+    expect(pilotHere(undefined, 'north', event)).toBeUndefined();
+    expect(pilotHere(null, 'north', event)).toBeUndefined();
+    expect(pilotHere({ pilots: [] }, 'north', event)).toBeUndefined();
+  });
+
+  it("is nobody when the pilot is another club's, is not in the event, or is only asked for", () => {
+    // The same id in another club is another pilot.
+    expect(pilotHere({ pilots: [holds(SOUTH, 'p-ace')] }, 'north', event)).toBeUndefined();
+    expect(pilotHere({ pilots: [holds(NORTH, 'p-zed')] }, 'north', event)).toBeUndefined();
+    expect(pilotHere({ pilots: [holds(NORTH, 'p-ace', false)] }, 'north', event)).toBeUndefined();
+  });
+
+  it('picks the one that is in the event when the account holds several', () => {
+    const account = {
+      pilots: [holds(NORTH, 'p-zed'), holds(SOUTH, 'p-ace'), holds(NORTH, 'p-bee')]
+    };
+    expect(pilotHere(account, 'north', event)?.id).toBe('p-bee');
   });
 });

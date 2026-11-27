@@ -182,6 +182,9 @@ Pilots only see heats that are still open. A heat you have closed, started or fl
 off their list. A full heat stays on it, in case someone leaves. You always see every heat.
 Spectators do not see sign-up at all.
 
+With a [server](#/help/server) linked, a pilot who is tied to their account there gets the
+same tab on the server's page, and can sign up from anywhere.
+
 ### Turning it off
 
 **Rules**, then **Turn sign-up off**. The heats and who is in them stay.

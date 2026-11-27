@@ -2,11 +2,12 @@
  * The page a remote server shows: its events, and one of them when it is picked.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import type { PushClub, ServerEvent } from '@gridfpv/types';
 import ServerHome from '../src/screens/ServerHome.svelte';
 import { eventView, heat, race, raceSeat } from './competition.js';
-import { fakePeople, fakeServer } from './serverPeopleFake.js';
+import { ACE, fakePeople, fakeServer } from './serverPeopleFake.js';
+import { GATE, SIGNUP_PILOTS, signupEvent, signupSheet } from './signupFixtures.js';
 import { fakeLiveSession } from './support.js';
 
 beforeEach(() => {
@@ -232,5 +233,123 @@ describe('ServerHome', () => {
     await waitFor(() => expect(screen.getByTestId('server-event')).toBeVisible());
     expect(screen.queryByRole('button', { name: /pilot|sign|director/i })).toBeNull();
     expect(document.body.textContent).not.toMatch(/director|sign in/i);
+  });
+});
+
+// ── A pilot signing up on the server (docs/primitives.md §13.4) ─────────────
+
+describe('signing up from the server', () => {
+  const BEE = {
+    ...ACE,
+    name: 'Bea',
+    clubs: [{ club: CLUB, role: 'Pilot' as const }],
+    pilots: [{ club: CLUB, id: 'p-bee', callsign: 'Bee', held: true }]
+  };
+
+  /** Open Friday, whose qualifying has sign-up, as `account` (or as nobody). */
+  function openSheet(account?: typeof BEE, calls = true) {
+    let view = signupEvent(signupSheet());
+    const reads = fakeLiveSession(view, {
+      getEventState: vi.fn(async () => view),
+      listPilots: vi.fn(async () => SIGNUP_PILOTS),
+      listTimers: vi.fn(async () => [GATE])
+    });
+    const asks = {
+      // The Director said yes. What it decided comes back with its next push.
+      takeSpot: vi.fn(async () => {
+        view = { ...view, cursor: view.cursor + 1 };
+      }),
+      takeNextSpot: vi.fn(async () => {
+        view = { ...view, cursor: view.cursor + 1 };
+      }),
+      leaveSpot: vi.fn(async () => {
+        view = { ...view, cursor: view.cursor + 1 };
+      })
+    };
+    location.hash = '#/e/club/friday-night-764c5x';
+    render(ServerHome, {
+      baseUrl: 'https://grid.example.org',
+      load: {
+        clubs: vi.fn(async (): Promise<PushClub[]> => [CLUB]),
+        events: vi.fn(async (): Promise<ServerEvent[]> => [FRIDAY])
+      },
+      sourceFor: () => (calls ? { ...reads, ...asks } : reads),
+      people: fakePeople(fakeServer({ account, providers: [] }))
+    });
+    return { reads, asks };
+  }
+  const signUpTab = () => screen.findByRole('tab', { name: 'Sign up' });
+
+  it('someone who is only looking gets no Sign up tab', async () => {
+    openSheet();
+    await screen.findByRole('tab', { name: 'Results' });
+    expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'Me' })).toBeNull();
+  });
+
+  it('nor does someone signed in who is not a pilot in this event', async () => {
+    // Signed in, with a pilot of the club that this event does not name.
+    openSheet({ ...BEE, pilots: [{ club: CLUB, id: 'p-zed', callsign: 'Zed', held: true }] });
+    await screen.findByTestId('server-who');
+    await screen.findByRole('tab', { name: 'Results' });
+    expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
+  });
+
+  it('nor someone who has only asked for the pilot', async () => {
+    openSheet({ ...BEE, pilots: [{ club: CLUB, id: 'p-bee', callsign: 'Bee', held: false }] });
+    await screen.findByTestId('server-who');
+    await screen.findByRole('tab', { name: 'Results' });
+    expect(screen.queryByRole('tab', { name: 'Sign up' })).toBeNull();
+  });
+
+  it('a pilot in the event takes a seat, and the page waits for it to come back', async () => {
+    const { asks, reads } = openSheet(BEE);
+    await fireEvent.click(await signUpTab());
+    const before = vi.mocked(reads.getEventState).mock.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    await waitFor(() =>
+      expect(asks.takeSpot).toHaveBeenCalledWith('quali/heat-1', { adapter: 'gate', seat: '1' })
+    );
+    // The page read the event again until it had what the Director decided.
+    await waitFor(() =>
+      expect(vi.mocked(reads.getEventState).mock.calls.length).toBeGreaterThan(before)
+    );
+    expect(screen.queryByTestId('signup-error')).toBeNull();
+  });
+
+  it('a pilot leaves a seat and takes the next free one', async () => {
+    const { asks } = openSheet({
+      ...BEE,
+      pilots: [{ club: CLUB, id: 'p-ace', callsign: 'Ace', held: true }]
+    });
+    await fireEvent.click(await signUpTab());
+    await fireEvent.click(screen.getByRole('button', { name: 'Leave Qualifying Heat 1' }));
+    await waitFor(() => expect(asks.leaveSpot).toHaveBeenCalledWith('quali/heat-1'));
+    // One ask at a time: the next is taken once the first has come back.
+    const next = await screen.findByRole('button', { name: 'Next free spot on Seat 3' });
+    await waitFor(() => expect(next).toBeEnabled());
+    await fireEvent.click(next);
+    await waitFor(() =>
+      expect(asks.takeNextSpot).toHaveBeenCalledWith('quali', { adapter: 'gate', seat: '2' })
+    );
+  });
+
+  it("shows the Director's reason when it says no", async () => {
+    const { asks } = openSheet(BEE);
+    asks.takeSpot.mockRejectedValueOnce(
+      new Error('The race computer is not connected right now. Try again in a moment.')
+    );
+    await fireEvent.click(await signUpTab());
+    await fireEvent.click(screen.getByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' }));
+    expect(await screen.findByTestId('signup-error')).toHaveTextContent(
+      'The race computer is not connected right now.'
+    );
+  });
+
+  it('only shows the sheet where there is no way to send an ask', async () => {
+    openSheet(BEE, false);
+    await screen.findByTestId('server-who');
+    await fireEvent.click(await signUpTab());
+    expect(screen.queryByRole('button', { name: 'Take Seat 2 in Qualifying Heat 1' })).toBeNull();
   });
 });

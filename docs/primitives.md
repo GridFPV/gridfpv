@@ -1713,10 +1713,12 @@ Video is not stored. It comes later (§11.7).
 - **The Director is the only writer of an event.** A change asked for on the server, such
   as a pilot signing up for a heat, is a request. The Director fetches it, decides, and the
   result goes back with the next push.
-- **The Director hears of a request at once.** It says which events it wants to hear about,
-  and the server tells it the moment there is something new. It does not wait for a slow
-  poll. This is one long-lived connection the Director opens (a WebSocket), and the
-  Director asks for anything it missed whenever it reconnects.
+- **The Director hears of a request at once.** The server tells it the moment there is
+  something new. It does not wait for a slow poll. This is one long-lived connection the
+  Director opens, and the Director asks for anything it missed whenever it reconnects.
+  (Built as a stream the server writes to, with the answers sent back as ordinary
+  requests. It does the job a WebSocket was first named for, with fewer parts, and goes
+  through the same proxies the pages already need. See §13.12.)
 
 ### 13.5 A secure connection
 
@@ -1828,9 +1830,9 @@ signed-in people only, video.
 
 ### 13.12 What is built (2026-11-27)
 
-Step 1 of §13.10 is built on the `server` branch: a server, a push, and the server's own
-page. Step 2 is built too: accounts, and results that reach them (see **Claims**
-below). Step 3 is not started.
+All three steps of §13.10 are built on the `server` branch: a server, a push and the
+server's own page; accounts, and results that reach them (see **Claims** below); and
+sign-up through the server (see **Sign-up** below).
 
 - **The program** is `gridfpv-server` (crate `gridfpv-serverd`). It keeps the clubs and
   link tokens in one file and each event in its own file, the same kind a Director keeps.
@@ -1878,6 +1880,25 @@ even when the two clocks differ.
 - **The Director's pilot list goes up** by callsign and colour, so the server knows a
   pilot before any event names them. A pilot removed on the Director stays on the server.
 
+**Sign-up: a pilot asks on the server, and the Director decides** (§13.4, §11.5).
+
+- **Who can.** Someone signed in to the server, whose account holds a pilot the event
+  names. On the event's page they get the same **Sign up** tab a pilot gets at the race.
+  Anyone else only looks.
+- **The server changes nothing.** It holds the ask and tells the Director, on the stream
+  the Director opened. The Director decides it as that pilot's own ask, under every rule of
+  the phase, exactly as if it were made at the race. It never acts as the director.
+- **The pilot's request waits for the answer**, up to ten seconds. A yes shows on the page
+  when the Director's next push arrives, about a second later. A no comes back in the
+  Director's own words.
+- **No Director connected:** the pilot is told so at once, and to sign up at the race.
+- **Only the event that is open at the race takes sign-ups.** An ask for another event is
+  refused. An ask for an event the Director does not have is left for the Director that
+  does.
+- **Nothing about an ask is kept on the server.** It lives only while the pilot waits.
+- **The server says which pilot is asking.** The Director trusts the server it is linked
+  to for that, as it does for who holds a pilot (§13.7). It checks that it has that pilot.
+
 **Choices made while building.** Ryan agreed to 1 and 2, changed 3, and said 4 and 7 are
 fine for now (2026-11-27). 5 and 6 are not confirmed.
 
@@ -1897,3 +1918,8 @@ fine for now (2026-11-27). 5 and 6 are not confirmed.
 6. **Removing an event on the Director does not remove it from the server.**
 7. **Link tokens are made on the server's command line.** There is no page for the owner
    yet.
+8. **The Director hears over a stream, not a WebSocket** (§13.4). Not yet confirmed.
+9. **There is no switch for sign-up through the server.** With a server linked, a pilot
+   can sign up from it wherever the director opened sign-up on a phase. Not yet confirmed.
+10. **Check-in to an open seat (§11.9) is not offered on the server.** It is for a pilot
+    standing at the race. Not yet confirmed.

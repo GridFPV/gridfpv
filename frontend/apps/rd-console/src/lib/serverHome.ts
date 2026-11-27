@@ -2,7 +2,7 @@
  * Small decisions for the page a remote server shows (docs/primitives.md §13): where in it
  * the address points, and how an event is listed. Pure, so they can be tested alone.
  */
-import type { ServerEvent } from '@gridfpv/types';
+import type { MyAccount, Pilot, PublicPilot, ServerEvent } from '@gridfpv/types';
 
 /** Where the page is. */
 export type ServerPlace =
@@ -69,6 +69,27 @@ export function formatServerHash(place: ServerPlace): string {
     case 'results':
       return '#/results';
   }
+}
+
+/**
+ * The pilot the signed-in account is in one event (docs/primitives.md §13.7): a pilot of
+ * that club the account holds, and that the event names. `undefined` for anyone else, who
+ * only looks.
+ *
+ * A pilot the account has only asked for is not theirs yet. The callsign is the one the
+ * event has for the pilot, which is what its heats show.
+ */
+export function pilotHere(
+  account: Pick<MyAccount, 'pilots'> | null | undefined,
+  club: string,
+  eventPilots: readonly Pick<Pilot, 'id' | 'callsign'>[]
+): PublicPilot | undefined {
+  for (const mine of account?.pilots ?? []) {
+    if (!mine.held || mine.club.id !== club) continue;
+    const here = eventPilots.find((pilot) => pilot.id === mine.id);
+    if (here) return { id: here.id, callsign: here.callsign };
+  }
+  return undefined;
 }
 
 /** The line under an event's name: its date and its place, whichever were given. */
