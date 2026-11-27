@@ -1867,6 +1867,16 @@ even when the two clocks differ.
   them.
 - **"My results"** is the first thing an account sees of them: the events its pilots flew,
   and their place in each class.
+- **The server is where who holds a pilot is decided.** The Director asks the server to
+  change it, and keeps a copy on the pilot (`server_account`) so the Pilots page can show
+  it. The task that pushes events keeps that copy up with the server, so a claim made on
+  the server's page shows on the Director within seconds.
+- **On the Director's Pilots page**, with a server linked: **Account** picks one of the
+  club's members for a pilot, by name. **Add from the server** brings in pilots the club
+  has there, under the ids they have there, already tied to their accounts; and makes a
+  pilot for a member who has none.
+- **The Director's pilot list goes up** by callsign and colour, so the server knows a
+  pilot before any event names them. A pilot removed on the Director stays on the server.
 
 **Choices made while building.** Ryan agreed to 1 and 2, changed 3, and said 4 and 7 are
 fine for now (2026-11-27). 5 and 6 are not confirmed.

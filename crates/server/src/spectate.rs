@@ -186,6 +186,8 @@ pub fn pilot_for_visitors(pilot: Pilot) -> Pilot {
         vtx_types: _,
         multigp_id: _,
         velocidrone_id: _,
+        // Which account a pilot is on a server is not for a visitor.
+        server_account: _,
     } = pilot;
     Pilot {
         id,
@@ -198,6 +200,7 @@ pub fn pilot_for_visitors(pilot: Pilot) -> Pilot {
         vtx_types: Vec::new(),
         multigp_id: None,
         velocidrone_id: None,
+        server_account: None,
     }
 }
 

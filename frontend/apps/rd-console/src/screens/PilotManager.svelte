@@ -41,6 +41,7 @@
     pilots = $bindable([]),
     onchange,
     rowLead,
+    rowActions,
     listHeader,
     listFooter,
     rowChecked
@@ -52,6 +53,8 @@
     onchange?: (pilots: Pilot[]) => void;
     /** Rendered at the **start** of each row (e.g. a selection checkbox). */
     rowLead?: Snippet<[Pilot]>;
+    /** Rendered among each row's buttons, before Edit. */
+    rowActions?: Snippet<[Pilot]>;
     /** Rendered **above** the list (reserved for selection chrome). */
     listHeader?: Snippet;
     /** Rendered **below** the list (e.g. the selection count + Save). */
@@ -232,10 +235,19 @@
               {#each pilot.vtx_types as vtx (vtx)}
                 <Badge tone={vtxTone(vtx)}>{vtx}</Badge>
               {/each}
+              {#if pilot.server_account}
+                <span
+                  class="on-server"
+                  data-testid="pilot-server-account"
+                  title="Their account on the server"
+                  >{pilot.server_account.name} on the server</span
+                >
+              {/if}
             </div>
             {#if pilot.name}<span class="real-name">{pilot.name}</span>{/if}
           </div>
           <div class="pilot-actions">
+            {@render rowActions?.(pilot)}
             <Button variant="ghost" size="sm" onclick={() => openEdit(pilot)}>Edit</Button>
             <Button
               variant="danger"
@@ -361,6 +373,10 @@
 </Dialog>
 
 <style>
+  .on-server {
+    color: var(--gf-text-muted);
+    font-size: var(--gf-font-size-sm);
+  }
   .pilot-manager {
     display: flex;
     flex-direction: column;

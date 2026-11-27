@@ -31,6 +31,16 @@ second after it is flown.
 - The race itself goes up whole: every lap and every ruling.
 - Pilots go up by callsign and colour only. Real names stay on your computer.
 - An event's name, date, place, description and organizer go up.
+- Your pilot list goes up too, by callsign and colour, so the server knows a pilot before
+  their first race.
+
+## Pilots and their accounts
+
+People in your club can have an account on the server. When a pilot is tied to their
+account, they see the events they flew and where they placed.
+
+You tie them together on the [Pilots](#/help/pilots) page, with **Account**. Or you bring
+pilots in from the server with **Add from the server**.
 
 If the internet drops, keep racing. Grid sends what was missed when it is back.
 

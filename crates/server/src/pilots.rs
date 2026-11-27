@@ -181,6 +181,22 @@ pub struct Pilot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub velocidrone_id: Option<String>,
+    /// The account that holds this pilot on the linked server (docs/primitives.md §13.7):
+    /// one more outside id. **The server is where this is decided.** What is here is the
+    /// Director's copy of it, kept so the Pilots page can show it with no server in reach.
+    /// It is changed by asking the server, never by editing the pilot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub server_account: Option<PilotAccount>,
+}
+
+/// An account on the linked server, as a pilot carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct PilotAccount {
+    pub id: String,
+    /// What the person is called on the server, for showing.
+    pub name: String,
 }
 
 /// The body of `POST /pilots` — the fields a caller supplies to create a pilot (issue #74).
@@ -423,6 +439,9 @@ struct Directory {
     pilots: BTreeMap<PilotId, Pilot>,
     /// Directory `pilots.json` is persisted under; `None` ⇒ in-memory only (no data dir).
     data_dir: Option<PathBuf>,
+    /// Counts every change to a pilot's server account made here. See
+    /// [`PilotDirectory::take_server_accounts`].
+    account_changes: u64,
 }
 
 impl PilotDirectory {
@@ -447,7 +466,11 @@ impl PilotDirectory {
         }
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(Directory { pilots, data_dir })),
+            inner: Arc::new(RwLock::new(Directory {
+                pilots,
+                data_dir,
+                account_changes: 0,
+            })),
         })
     }
 
@@ -496,10 +519,106 @@ impl PilotDirectory {
             vtx_types: normalize_vtx_types(&request.vtx_types),
             multigp_id: normalize_optional(&request.multigp_id),
             velocidrone_id: normalize_optional(&request.velocidrone_id),
+            server_account: None,
         };
         dir.pilots.insert(id, pilot.clone());
         dir.persist()?;
         Ok(pilot)
+    }
+
+    /// Bring in a pilot from the linked server **under the id it has there**, so results
+    /// flown here reach the same pilot on the server (§13.7). `None` when a pilot with that
+    /// id is already here: nothing is changed.
+    pub fn adopt(
+        &self,
+        id: PilotId,
+        callsign: &str,
+        color: Option<String>,
+        server_account: Option<PilotAccount>,
+    ) -> Result<Option<Pilot>, PilotError> {
+        let callsign = callsign.trim();
+        if callsign.is_empty() {
+            return Err(PilotError::invalid("a pilot callsign is required"));
+        }
+        if id.0.is_empty() {
+            return Err(PilotError::invalid("a pilot needs an id"));
+        }
+        // A colour the server holds that this build would not take is dropped, not refused.
+        let color = normalize_color(&color).unwrap_or(None);
+        let mut dir = self.write();
+        if dir.pilots.contains_key(&id) {
+            return Ok(None);
+        }
+        let pilot = Pilot {
+            id: id.clone(),
+            callsign: callsign.to_string(),
+            name: None,
+            phonetic: None,
+            team: None,
+            color,
+            country: None,
+            vtx_types: Vec::new(),
+            multigp_id: None,
+            velocidrone_id: None,
+            server_account,
+        };
+        dir.pilots.insert(id, pilot.clone());
+        dir.account_changes += 1;
+        dir.persist()?;
+        Ok(Some(pilot))
+    }
+
+    /// Note which account holds a pilot on the linked server, after the server agreed.
+    pub fn set_server_account(
+        &self,
+        id: &PilotId,
+        account: Option<PilotAccount>,
+    ) -> Result<Pilot, PilotError> {
+        let mut dir = self.write();
+        let pilot = dir
+            .pilots
+            .get_mut(id)
+            .ok_or_else(|| PilotError::not_found(format!("no pilot with id {:?}", id.0)))?;
+        pilot.server_account = account;
+        let updated = pilot.clone();
+        dir.account_changes += 1;
+        dir.persist()?;
+        Ok(updated)
+    }
+
+    /// A mark to take before asking the server who holds what. Hand it back to
+    /// [`take_server_accounts`](Self::take_server_accounts) with the answer.
+    pub fn account_mark(&self) -> u64 {
+        self.read().account_changes
+    }
+
+    /// Make every pilot's server account what the server says it is: `held` is each pilot
+    /// that has a holder there. A pilot not in it has none.
+    ///
+    /// The answer is dropped when an account was changed here since `mark` was taken: the
+    /// server was asked before that change, so its answer is older than what is here.
+    /// Returns whether anything changed.
+    pub fn take_server_accounts(
+        &self,
+        mark: u64,
+        held: &BTreeMap<PilotId, PilotAccount>,
+    ) -> Result<bool, PilotError> {
+        let mut dir = self.write();
+        if dir.account_changes != mark {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for (id, pilot) in &mut dir.pilots {
+            let now = held.get(id);
+            if pilot.server_account.as_ref() != now {
+                pilot.server_account = now.cloned();
+                changed = true;
+            }
+        }
+        if changed {
+            dir.persist()?;
+        }
+        Ok(changed)
     }
 
     /// Edit a pilot's fields (issue #74), returning the updated [`Pilot`].
@@ -782,6 +901,100 @@ mod tests {
             callsign: callsign.to_string(),
             ..Default::default()
         }
+    }
+
+    fn account(name: &str) -> PilotAccount {
+        PilotAccount {
+            id: format!("acct_{name}"),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_servers_word_on_who_holds_a_pilot_is_taken_whole() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let ace = dir.create(&req("Ace")).unwrap().id;
+        let bee = dir.create(&req("Bee")).unwrap().id;
+        dir.set_server_account(&bee, Some(account("old"))).unwrap();
+
+        // The server says Ace is Pia's and says nothing of Bee: Bee has no holder.
+        let held = BTreeMap::from([(ace.clone(), account("pia"))]);
+        assert!(dir.take_server_accounts(dir.account_mark(), &held).unwrap());
+        assert_eq!(dir.get(&ace).unwrap().server_account, Some(account("pia")));
+        assert_eq!(dir.get(&bee).unwrap().server_account, None);
+        // The same answer again changes nothing.
+        assert!(!dir.take_server_accounts(dir.account_mark(), &held).unwrap());
+        // A pilot the server names and this Director does not have is not made up.
+        let stray = BTreeMap::from([(PilotId("stray".into()), account("x"))]);
+        dir.take_server_accounts(dir.account_mark(), &stray)
+            .unwrap();
+        assert_eq!(dir.list().len(), 2);
+    }
+
+    #[test]
+    fn an_answer_older_than_a_change_made_here_is_dropped() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let ace = dir.create(&req("Ace")).unwrap().id;
+        // The server is asked. Before it answers, the director ties Ace to Pia.
+        let mark = dir.account_mark();
+        dir.set_server_account(&ace, Some(account("pia"))).unwrap();
+        // The answer says nobody holds Ace. It was true when asked, and is not now.
+        assert!(!dir.take_server_accounts(mark, &BTreeMap::new()).unwrap());
+        assert_eq!(dir.get(&ace).unwrap().server_account, Some(account("pia")));
+        // The next answer, asked after, is taken.
+        assert!(
+            dir.take_server_accounts(dir.account_mark(), &BTreeMap::new())
+                .unwrap()
+        );
+        assert_eq!(dir.get(&ace).unwrap().server_account, None);
+    }
+
+    #[test]
+    fn a_pilot_comes_in_under_the_id_given_and_never_over_one_that_is_here() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let id = PilotId("cat-1".into());
+        let cat = dir
+            .adopt(
+                id.clone(),
+                " Cat ",
+                Some("#00ff00".into()),
+                Some(account("pia")),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(cat.id, id);
+        assert_eq!(cat.callsign, "Cat");
+        assert_eq!(cat.color.as_deref(), Some("#00FF00"));
+        assert_eq!(cat.server_account, Some(account("pia")));
+        // The same id again is left alone.
+        assert_eq!(dir.adopt(id.clone(), "Other", None, None).unwrap(), None);
+        assert_eq!(dir.get(&id).unwrap().callsign, "Cat");
+        // A colour this build would not take is dropped, and the pilot still comes in.
+        let odd = dir
+            .adopt(PilotId("dog-2".into()), "Dog", Some("green".into()), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(odd.color, None);
+        assert!(dir.adopt(PilotId("x".into()), "  ", None, None).is_err());
+        assert!(
+            dir.adopt(PilotId(String::new()), "Eel", None, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_pilots_file_from_before_server_accounts_still_loads() {
+        let dir = std::env::temp_dir().join(format!("gridfpv-pilots-test-{}", short_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(PILOTS_FILE),
+            r#"[{"id":"ace-1","callsign":"Ace","vtx_types":[]}]"#,
+        )
+        .unwrap();
+        let pilots = PilotDirectory::new(Some(dir.clone())).unwrap();
+        assert_eq!(pilots.list()[0].callsign, "Ace");
+        assert_eq!(pilots.list()[0].server_account, None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -289,7 +289,7 @@ There are three ways an account comes to hold one:
 - **An invite made for the pilot.** When you invite one person, pick **Their pilot**.
   Whoever uses the link gets that pilot's results in the same step.
 - **A director gives it.** On the club's page, under **Pilots**, pick a member beside the
-  pilot.
+  pilot. Or in Grid itself, on **Setup → Pilots**, press **Account** beside the pilot.
 - **The person asks.** On their account page they press **Find yourself in** the club and
   pick their callsign. Nothing is theirs yet. A director, or a member with the
   **Approver** role, answers **Yes** or **No** on the club's page.
