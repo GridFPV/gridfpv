@@ -1858,13 +1858,14 @@ async fn left_running_only_the_open_events_club_is_connected() {
         held_in(&s, &north_id, &theirs) == Some(log_of(&d, &theirs).len())
             && view(&d).state == LinkState::Connected
             && view(&d).club.as_deref() == Some(to_north.as_str())
+            // The server has the log a moment before the desk is told the event is sent.
+            && state_of(&d, &theirs) == LinkEventState::Sent
     })
     .await;
     until("the Director listens to North and not to Recon", 20, || {
         s.state.asks.listening(&north_id) && !s.state.asks.listening(&recon())
     })
     .await;
-    assert_eq!(state_of(&d, &theirs), LinkEventState::Sent);
     assert_eq!(state_of(&d, &mine), LinkEventState::Waiting);
     // Each club's name came from the server, and is kept with its saved club.
     let names: Vec<_> = view(&d)
