@@ -242,12 +242,53 @@ test('a pilot tied to an account on the Pilots page sees where they placed', asy
   await ryan.reload();
   await expect(holderOf(ryan, 'Ray')).toHaveText('Ray');
 
-  // ── Untying. Pia's results are no longer hers. ────────────────────────────
-  await page.getByRole('button', { name: 'Account of Swift on the server' }).click();
+  // ── The account wins. Pia calls herself PiaFPV on the server. ─────────────
+  // The event was run as Swift. Her results show under her own callsign at once.
+  await pia.getByTestId('server-who').click();
+  await pia.getByTestId('pilot-profile').getByRole('button', { name: 'Fill it in' }).click();
+  await pia.getByLabel('Callsign').fill('PiaFPV');
+  await pia.getByLabel('MultiGP id').fill('24680');
+  await pia.getByTestId('pilot-profile').getByRole('button', { name: 'Save' }).click();
+  await expect(pia.getByTestId('profile-callsign')).toHaveText('PiaFPV');
+  await pia.goto(`${server.baseUrl}/#/results`);
+  await expect(pia.getByTestId('result').filter({ hasText: 'Claims Cup' })).toContainText(
+    'Flew as PiaFPV'
+  );
+  // A visitor looking at the event sees her callsign too, and never her MultiGP id.
+  const shown = await fetch(`${server.baseUrl}/api/clubs/club/events/${event}/public/event/pilots`);
+  const shownText = await shown.text();
+  expect(shownText).toContain('PiaFPV');
+  expect(shownText).not.toContain('Swift');
+  expect(shownText).not.toContain('24680');
+
+  // Grid takes it at its next pull: the pilot is PiaFPV here too, with her MultiGP id.
+  await expect(async () => {
+    await page.reload();
+    await expect(row('PiaFPV').getByTestId('pilot-server-account')).toHaveText(
+      'Pia on the server',
+      { timeout: 2_000 }
+    );
+  }).toPass({ timeout: 40_000 });
+  await expect(row('Swift')).toHaveCount(0);
+  const mine = (await (await fetch(`${director.baseUrl}/pilots`)).json()) as {
+    callsign: string;
+    multigp_id?: string;
+  }[];
+  expect(mine.find((pilot) => pilot.callsign === 'PiaFPV')?.multigp_id).toBe('24680');
+  // The editor says where the callsign comes from.
+  await row('PiaFPV').getByRole('button', { name: /Edit/ }).click();
+  await expect(page.getByTestId('pilot-from-account')).toContainText(
+    'This pilot is Pia on the server.'
+  );
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByTestId('pilot-from-account')).toBeHidden();
+
+  // ── Untying. Pia's results are no longer hers. The pilot keeps the callsign. ──
+  await page.getByRole('button', { name: 'Account of PiaFPV on the server' }).click();
   await expect(page.getByRole('dialog').getByLabel('Account')).not.toHaveValue('');
   await page.getByRole('dialog').getByLabel('Account').selectOption({ label: 'Nobody' });
   await page.getByRole('dialog').getByRole('button', { name: 'Save' }).click();
-  await expect(row('Swift').getByTestId('pilot-server-account')).toHaveCount(0);
+  await expect(row('PiaFPV').getByTestId('pilot-server-account')).toHaveCount(0);
   await pia.reload();
   await expect(pia.getByText('No results yet.')).toBeVisible();
 });

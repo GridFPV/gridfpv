@@ -268,6 +268,8 @@ pub async fn get_pilots(
 ) -> Result<Json<Vec<Pilot>>, ApiError> {
     let shown = shown(&state, &club, &event)?;
     let wanted = shown.mentioned()?.pilots;
+    // A pilot an account holds is shown as that account calls itself (§13.7).
+    let faces = crate::claims::Faces::of(&state, &ClubId(club))?;
     Ok(Json(
         shown
             .header
@@ -275,6 +277,11 @@ pub async fn get_pilots(
             .into_iter()
             .filter(|pilot| wanted.contains(&pilot.id))
             .map(pilot_for_visitors)
+            .map(|pilot| Pilot {
+                callsign: faces.callsign(&pilot.id.0, pilot.callsign),
+                color: faces.color(&pilot.id.0, pilot.color),
+                ..pilot
+            })
             .collect(),
     ))
 }

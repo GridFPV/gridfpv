@@ -27,6 +27,8 @@ use ts_rs::TS;
 
 use gridfpv_events::PilotId;
 
+use crate::remote::PilotProfile;
+
 /// The file name (under the data dir) the pilot directory is persisted to (issue #74).
 pub const PILOTS_FILE: &str = "pilots.json";
 
@@ -586,6 +588,28 @@ impl PilotDirectory {
         Ok(updated)
     }
 
+    /// Tie a pilot to the account that holds it on the server, after the server agreed,
+    /// and take what the account says of itself: where its profile has a callsign, a
+    /// colour or an id, that is the pilot's from now on (§13.7).
+    pub fn tie_to_account(
+        &self,
+        id: &PilotId,
+        account: PilotAccount,
+        profile: &PilotProfile,
+    ) -> Result<Pilot, PilotError> {
+        let mut dir = self.write();
+        let pilot = dir
+            .pilots
+            .get_mut(id)
+            .ok_or_else(|| PilotError::not_found(format!("no pilot with id {:?}", id.0)))?;
+        pilot.server_account = Some(account);
+        apply_profile(pilot, profile);
+        let updated = pilot.clone();
+        dir.account_changes += 1;
+        dir.persist()?;
+        Ok(updated)
+    }
+
     /// A mark to take before asking the server who holds what. Hand it back to
     /// [`take_server_accounts`](Self::take_server_accounts) with the answer.
     pub fn account_mark(&self) -> u64 {
@@ -593,9 +617,14 @@ impl PilotDirectory {
     }
 
     /// Make each pilot's server account what the connected club says it is. `known` is
-    /// every pilot that club has heard of, and `held` each of them that has a holder. A
-    /// known pilot not in `held` has none. A pilot the club has never heard of is left as
-    /// it is: another club may hold them, and this one cannot say.
+    /// every pilot that club has heard of, and `held` each of them that has a holder, with
+    /// what that account says of itself. A known pilot not in `held` has none. A pilot the
+    /// club has never heard of is left as it is: another club may hold them, and this one
+    /// cannot say.
+    ///
+    /// **The account wins where it exists** (§13.7): a held pilot takes the callsign,
+    /// colour and ids its account's profile has. What the profile leaves empty stays as it
+    /// is here. A pilot nobody holds is not touched.
     ///
     /// The answer is dropped when an account was changed here since `mark` was taken: the
     /// server was asked before that change, so its answer is older than what is here.
@@ -604,7 +633,7 @@ impl PilotDirectory {
         &self,
         mark: u64,
         known: &std::collections::BTreeSet<PilotId>,
-        held: &BTreeMap<PilotId, PilotAccount>,
+        held: &BTreeMap<PilotId, (PilotAccount, PilotProfile)>,
     ) -> Result<bool, PilotError> {
         let mut dir = self.write();
         if dir.account_changes != mark {
@@ -616,9 +645,13 @@ impl PilotDirectory {
                 continue;
             }
             let now = held.get(id);
-            if pilot.server_account.as_ref() != now {
-                pilot.server_account = now.cloned();
+            let account = now.map(|(account, _)| account);
+            if pilot.server_account.as_ref() != account {
+                pilot.server_account = account.cloned();
                 changed = true;
+            }
+            if let Some((_, profile)) = now {
+                changed |= apply_profile(pilot, profile);
             }
         }
         if changed {
@@ -790,6 +823,26 @@ impl std::fmt::Display for PilotError {
 impl std::error::Error for PilotError {}
 
 /// Trim an optional field, treating a blank/whitespace-only value as **unset** (`None`).
+/// Give a pilot what its account's profile says: the callsign, the colour and the ids
+/// that are filled in. A part the profile leaves empty, or a colour that is not one, leaves
+/// the pilot's own. Returns whether anything changed.
+fn apply_profile(pilot: &mut Pilot, profile: &PilotProfile) -> bool {
+    let before = pilot.clone();
+    if let Some(callsign) = normalize_optional(&profile.callsign) {
+        pilot.callsign = callsign;
+    }
+    if let Ok(Some(color)) = normalize_color(&profile.color) {
+        pilot.color = Some(color);
+    }
+    if let Some(id) = normalize_optional(&profile.multigp_id) {
+        pilot.multigp_id = Some(id);
+    }
+    if let Some(id) = normalize_optional(&profile.velocidrone_id) {
+        pilot.velocidrone_id = Some(id);
+    }
+    *pilot != before
+}
+
 fn normalize_optional(value: &Option<String>) -> Option<String> {
     value
         .as_deref()
@@ -933,7 +986,7 @@ mod tests {
         // The club knows Ace and Bee. It says Ace is Pia's and nobody holds Bee. It has
         // never heard of Cat, so it cannot say: Cat keeps the holder another club gave.
         let known = ids(&[&ace, &bee]);
-        let held = BTreeMap::from([(ace.clone(), account("pia"))]);
+        let held = BTreeMap::from([(ace.clone(), (account("pia"), PilotProfile::default()))]);
         assert!(
             dir.take_server_accounts(dir.account_mark(), &known, &held)
                 .unwrap()
@@ -960,7 +1013,7 @@ mod tests {
         dir.take_server_accounts(
             dir.account_mark(),
             &ids(&[&stray]),
-            &BTreeMap::from([(stray.clone(), account("x"))]),
+            &BTreeMap::from([(stray.clone(), (account("x"), PilotProfile::default()))]),
         )
         .unwrap();
         assert_eq!(dir.list().len(), 3);
@@ -986,6 +1039,150 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(dir.get(&ace).unwrap().server_account, None);
+    }
+
+    fn profile(callsign: Option<&str>, color: Option<&str>, multigp: Option<&str>) -> PilotProfile {
+        PilotProfile {
+            callsign: callsign.map(str::to_owned),
+            color: color.map(str::to_owned),
+            multigp_id: multigp.map(str::to_owned),
+            velocidrone_id: None,
+        }
+    }
+
+    #[test]
+    fn a_held_pilot_takes_what_its_account_says_and_keeps_the_rest() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let ace = dir
+            .create(&CreatePilotRequest {
+                callsign: "Ace".into(),
+                name: Some("Alex Real".into()),
+                color: Some("#111111".into()),
+                multigp_id: Some("old-mgp".into()),
+                velocidrone_id: Some("old-velo".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let bee = dir.create(&req("Bee")).unwrap().id;
+        let known = ids(&[&ace, &bee]);
+
+        // Pia holds Ace. Her profile has a callsign and a MultiGP id, and nothing else.
+        let held = BTreeMap::from([(
+            ace.clone(),
+            (
+                account("pia"),
+                profile(Some(" PiaFPV "), None, Some("24680")),
+            ),
+        )]);
+        assert!(
+            dir.take_server_accounts(dir.account_mark(), &known, &held)
+                .unwrap()
+        );
+        let now = dir.get(&ace).unwrap();
+        assert_eq!(now.callsign, "PiaFPV");
+        assert_eq!(now.multigp_id.as_deref(), Some("24680"));
+        // What the profile leaves empty stays as the director had it.
+        assert_eq!(now.color.as_deref(), Some("#111111"));
+        assert_eq!(now.velocidrone_id.as_deref(), Some("old-velo"));
+        // What a server never holds is not touched.
+        assert_eq!(now.name.as_deref(), Some("Alex Real"));
+        assert_eq!(now.server_account, Some(account("pia")));
+        // A pilot nobody holds is as it was.
+        assert_eq!(dir.get(&bee).unwrap().callsign, "Bee");
+        // The same answer again changes nothing, and nothing is written.
+        assert!(
+            !dir.take_server_accounts(dir.account_mark(), &known, &held)
+                .unwrap()
+        );
+
+        // The director renames the pilot here. The account still wins at the next look.
+        dir.update(
+            &ace,
+            &UpdatePilotRequest {
+                callsign: Some("Renamed Here".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            dir.take_server_accounts(dir.account_mark(), &known, &held)
+                .unwrap()
+        );
+        assert_eq!(dir.get(&ace).unwrap().callsign, "PiaFPV");
+
+        // She changes her colour on the server. A colour that is not one is not taken.
+        for (given, kept) in [
+            (Some("#abcdef"), "#ABCDEF"),
+            (Some("purple"), "#ABCDEF"),
+            (Some(""), "#ABCDEF"),
+            (None, "#ABCDEF"),
+        ] {
+            let held = BTreeMap::from([(
+                ace.clone(),
+                (
+                    account("pia"),
+                    profile(Some("PiaFPV"), given, Some("24680")),
+                ),
+            )]);
+            dir.take_server_accounts(dir.account_mark(), &known, &held)
+                .unwrap();
+            assert_eq!(
+                dir.get(&ace).unwrap().color.as_deref(),
+                Some(kept),
+                "{given:?}"
+            );
+        }
+
+        // An empty callsign in a profile is no callsign: the pilot keeps the one it has.
+        let held = BTreeMap::from([(
+            ace.clone(),
+            (account("pia"), profile(Some("  "), None, None)),
+        )]);
+        dir.take_server_accounts(dir.account_mark(), &known, &held)
+            .unwrap();
+        assert_eq!(dir.get(&ace).unwrap().callsign, "PiaFPV");
+
+        // She lets go of the pilot. What it took from her stays: it is the pilot's now.
+        dir.take_server_accounts(dir.account_mark(), &known, &BTreeMap::new())
+            .unwrap();
+        let after = dir.get(&ace).unwrap();
+        assert_eq!(after.server_account, None);
+        assert_eq!(after.callsign, "PiaFPV");
+        assert_eq!(after.multigp_id.as_deref(), Some("24680"));
+    }
+
+    #[test]
+    fn tying_a_pilot_to_an_account_takes_the_accounts_profile_at_once() {
+        let dir = PilotDirectory::new(None).unwrap();
+        let ace = dir.create(&req("Ace")).unwrap().id;
+        let mark = dir.account_mark();
+        let tied = dir
+            .tie_to_account(
+                &ace,
+                account("pia"),
+                &profile(Some("PiaFPV"), Some("#aa00ff"), None),
+            )
+            .unwrap();
+        assert_eq!(tied.callsign, "PiaFPV");
+        assert_eq!(tied.color.as_deref(), Some("#AA00FF"));
+        assert_eq!(tied.server_account, Some(account("pia")));
+        // An answer the server gave before this is older than it, and is dropped.
+        assert_ne!(dir.account_mark(), mark);
+        // With nothing in the profile, the pilot is only tied.
+        let bee = dir.create(&req("Bee")).unwrap().id;
+        let tied = dir
+            .tie_to_account(&bee, account("quin"), &PilotProfile::default())
+            .unwrap();
+        assert_eq!(tied.callsign, "Bee");
+        assert!(
+            dir.tie_to_account(
+                &PilotId("nobody".into()),
+                account("x"),
+                &PilotProfile::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]

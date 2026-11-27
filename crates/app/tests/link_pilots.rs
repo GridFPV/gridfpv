@@ -1064,3 +1064,230 @@ async fn where_a_pilot_placed_reaches_the_account_the_director_tied_them_to() {
     assert_eq!(set_account(&d, &swift, Value::Null).await.0, StatusCode::OK);
     assert_eq!(results(pias_session).await, json!([]));
 }
+
+// ── The account wins where it exists (§13.7) ────────────────────────────────
+
+fn profile(value: Value) -> gridfpv_server::remote::PilotProfile {
+    serde_json::from_value(value).unwrap()
+}
+
+/// What the server's page shows a signed-in account of its own results.
+async fn results_of(s: &Server, session: &str) -> Value {
+    let request = Request::builder()
+        .uri("/api/me/results")
+        .header(header::COOKIE, format!("grid_session={session}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(s.state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn a_pilot_who_claims_after_the_race_is_their_account_on_the_server_and_then_in_grid() {
+    let s = server().await;
+    let d = director();
+    // The event is run with the callsign the director had: Swift.
+    let swift = pilot(&d, "Swift").await;
+    let tardy = pilot(&d, "Tardy").await;
+    let event = raced_event(&d, &swift, &tardy).await;
+    link(&d, &s);
+    sync_all(&d.registry, &client(&d), &mut Memory::default())
+        .await
+        .unwrap();
+    let header_on_server = || {
+        s.state
+            .store
+            .get(&club(), &EventId(event.clone()))
+            .unwrap()
+            .unwrap()
+            .header()
+            .unwrap()
+            .unwrap()
+    };
+    assert!(header_on_server().contains("\"Swift\""));
+
+    // Grid is shut off. Later the pilot makes her account, calls herself PiaFPV, and
+    // comes to hold the results on the server.
+    let (pia, session) = s.member_signed_in("Pia");
+    let hers = json!({
+        "callsign": "PiaFPV",
+        "color": "#AA00FF",
+        "multigp_id": "24680",
+        "velocidrone_id": "pia.sim"
+    });
+    s.state
+        .accounts
+        .set_profile(&pia, profile(hers.clone()))
+        .unwrap();
+    s.state
+        .accounts
+        .give_pilot(&club(), &swift, &pia, None, 5)
+        .unwrap();
+    // The server shows the race as hers, under her account's callsign, at once.
+    let results = results_of(&s, &session).await;
+    assert_eq!(results[0]["event"]["name"], "Claims Cup");
+    assert_eq!(results[0]["callsign"], "PiaFPV");
+    assert_eq!(results[0]["classes"][0]["position"], 1);
+
+    // Grid starts again on the same data, and pulls from the server.
+    let again = EventRegistry::new(Some(d._dir.path().join("data"))).unwrap();
+    let before = again
+        .pilots()
+        .get(&gridfpv_events::PilotId(swift.clone()))
+        .unwrap();
+    assert_eq!(before.callsign, "Swift");
+    let client = client_of(&again);
+    let mut memory = Memory::default();
+    sync_pilots(&again, &client, &mut memory, true)
+        .await
+        .unwrap();
+
+    // Grid's pilot is now the account: its callsign, colour and ids.
+    let now = again
+        .pilots()
+        .get(&gridfpv_events::PilotId(swift.clone()))
+        .unwrap();
+    assert_eq!(now.callsign, "PiaFPV");
+    assert_eq!(now.color.as_deref(), Some("#AA00FF"));
+    assert_eq!(now.multigp_id.as_deref(), Some("24680"));
+    assert_eq!(now.velocidrone_id.as_deref(), Some("pia.sim"));
+    assert_eq!(now.server_account.as_ref().unwrap().name, "Pia");
+    // What the server never held stays on the Director as it was.
+    assert_eq!(
+        now.name.as_deref(),
+        Some(format!("{MARK}-realname").as_str())
+    );
+    assert_eq!(now.team.as_deref(), Some(format!("{MARK}-team").as_str()));
+    // A pilot nobody holds is as the director had it.
+    let other = again
+        .pilots()
+        .get(&gridfpv_events::PilotId(tardy.clone()))
+        .unwrap();
+    assert_eq!(other.callsign, "Tardy");
+    assert_eq!(other.color.as_deref(), Some("#FF0000"));
+    // It is kept: a Director started once more still has it, with no server in reach.
+    let third = EventRegistry::new(Some(d._dir.path().join("data"))).unwrap();
+    let kept = third
+        .pilots()
+        .get(&gridfpv_events::PilotId(swift.clone()))
+        .unwrap();
+    assert_eq!(kept.callsign, "PiaFPV");
+
+    // The event goes up again under the new callsign. What a visitor may not see still
+    // does not leave.
+    sync_all(&again, &client, &mut memory).await.unwrap();
+    let header = header_on_server();
+    assert!(header.contains("\"PiaFPV\"") && !header.contains("\"Swift\""));
+    assert!(
+        !header.contains(MARK) && !header.contains("24680"),
+        "{header}"
+    );
+
+    // She changes her callsign on the server. Grid follows at the next pull.
+    s.state
+        .accounts
+        .set_profile(&pia, profile(json!({"callsign": "Pia Two"})))
+        .unwrap();
+    sync_pilots(&again, &client, &mut memory, true)
+        .await
+        .unwrap();
+    let now = again
+        .pilots()
+        .get(&gridfpv_events::PilotId(swift.clone()))
+        .unwrap();
+    assert_eq!(now.callsign, "Pia Two");
+    // A part she cleared on the server is not cleared here: the Director keeps what it has.
+    assert_eq!(now.multigp_id.as_deref(), Some("24680"));
+    assert_eq!(now.color.as_deref(), Some("#AA00FF"));
+}
+
+#[tokio::test]
+async fn tying_or_bringing_in_a_pilot_takes_the_accounts_profile_at_once() {
+    let s = server().await;
+    let d = director();
+    let ace = pilot(&d, "Ace").await;
+    link(&d, &s);
+    let pia = s.member("Pia");
+    let quin = s.member("Quin");
+    let ray = s.member("Ray");
+    let accounts = &s.state.accounts;
+    let pias = json!({"callsign": "PiaFPV", "color": "#00FF7F", "multigp_id": "24680"});
+    accounts.set_profile(&pia, profile(pias)).unwrap();
+    let quins = json!({"callsign": "Quinn", "velocidrone_id": "quin.sim"});
+    accounts.set_profile(&quin, profile(quins)).unwrap();
+
+    // The director says Ace is Pia. Ace takes her callsign, colour and id there and then.
+    let (status, changed) = set_account(&d, &ace, json!(pia.0)).await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["callsign"], "PiaFPV");
+    assert_eq!(changed["color"], "#00FF7F");
+    assert_eq!(changed["multigp_id"], "24680");
+    assert_eq!(
+        changed["server_account"],
+        json!({"id": pia.0, "name": "Pia"})
+    );
+    // The real name the director typed is not the server's to change.
+    assert_eq!(changed["name"], format!("{MARK}-realname"));
+
+    // Members with no pilot are brought in. Each is named as they call themselves, or
+    // else as their account, and comes with their ids.
+    let added = direct(
+        &d,
+        Method::POST,
+        "/server-link/pull",
+        json!({"members": [quin.0, ray.0]}),
+    )
+    .await;
+    let added = added.as_array().unwrap();
+    assert_eq!(added.len(), 2, "{added:?}");
+    assert_eq!(added[0]["callsign"], "Quinn");
+    assert_eq!(added[0]["velocidrone_id"], "quin.sim");
+    assert_eq!(added[0]["server_account"]["name"], "Quin");
+    assert!(added[0].get("multigp_id").is_none());
+    assert_eq!(added[1]["callsign"], "Ray");
+    assert_eq!(added[1]["server_account"]["name"], "Ray");
+    // The server holds each new pilot for its member.
+    let quins_pilot = added[0]["id"].as_str().unwrap();
+    assert_eq!(s.holder_of(quins_pilot), Some("Quin".to_owned()));
+
+    // Untied, Ace keeps what it took: it is the pilot's now.
+    let (status, changed) = set_account(&d, &ace, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(changed.get("server_account").is_none());
+    assert_eq!(changed["callsign"], "PiaFPV");
+}
+
+#[tokio::test]
+async fn a_pilot_of_the_club_held_by_an_account_comes_in_as_that_account() {
+    let s = server().await;
+    let d = director();
+    link(&d, &s);
+    let pia = s.member("Pia");
+    // Another Director of the club sent Cat, and Pia came to hold it.
+    s.knows("cat-1", "Cat");
+    let accounts = &s.state.accounts;
+    accounts
+        .give_pilot(&club(), "cat-1", &pia, None, 4)
+        .unwrap();
+    let hers = json!({"callsign": "PiaFPV", "multigp_id": "24680"});
+    accounts.set_profile(&pia, profile(hers)).unwrap();
+
+    // What the director is offered is already under her callsign.
+    let (_, people) = ask(&d, true, Method::GET, "/server-link/people", None).await;
+    assert_eq!(people["pilots"][0]["callsign"], "PiaFPV");
+    assert_eq!(people["pilots"][0]["id"], "cat-1");
+
+    let added = direct(
+        &d,
+        Method::POST,
+        "/server-link/pull",
+        json!({"pilots": ["cat-1"]}),
+    )
+    .await;
+    assert_eq!(added[0]["id"], "cat-1");
+    assert_eq!(added[0]["callsign"], "PiaFPV");
+    assert_eq!(added[0]["multigp_id"], "24680");
+    assert_eq!(added[0]["server_account"]["name"], "Pia");
+}

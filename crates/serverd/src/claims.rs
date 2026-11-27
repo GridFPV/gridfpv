@@ -39,7 +39,9 @@ use axum::http::StatusCode;
 use gridfpv_events::PilotId;
 use gridfpv_server::error::ErrorCode;
 use gridfpv_server::pilots::Pilot;
-use gridfpv_server::remote::{PushAccount, PushClub, PushPilot, PushPilotAccount, ServerEvent};
+use gridfpv_server::remote::{
+    PilotProfile, PushAccount, PushClub, PushPilot, PushPilotAccount, ServerEvent,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -130,6 +132,58 @@ fn account_ref(account: &crate::accounts::Account) -> PushAccount {
     PushAccount {
         id: account.id.0.clone(),
         name: account.name.clone(),
+        profile: PilotProfile::default(),
+    }
+}
+
+/// Every account's pilot profile, by account.
+type Profiles = std::collections::BTreeMap<AccountId, PilotProfile>;
+
+/// An account with what it says of itself as a pilot: for a Director, which takes it.
+fn account_with_profile(account: &crate::accounts::Account, profiles: &Profiles) -> PushAccount {
+    PushAccount {
+        profile: profiles.get(&account.id).cloned().unwrap_or_default(),
+        ..account_ref(account)
+    }
+}
+
+/// How the held pilots of a club are shown (§13.7): **the account wins where it exists**.
+/// A pilot an account holds is shown under that account's callsign and colour, where its
+/// profile has them, whatever the event was run with.
+pub(crate) struct Faces(std::collections::BTreeMap<String, PilotProfile>);
+
+impl Faces {
+    /// The faces of a club's held pilots.
+    pub(crate) fn of(state: &AppState, club: &ClubId) -> Result<Self, ApiError> {
+        let profiles = state.accounts.profiles()?;
+        Ok(Self(
+            state
+                .accounts
+                .claims_in(club)?
+                .into_iter()
+                .filter(|claim| claim.how.holds())
+                .filter_map(|claim| {
+                    let profile = profiles.get(&claim.account.id)?.clone();
+                    Some((claim.pilot, profile))
+                })
+                .collect(),
+        ))
+    }
+
+    /// The callsign to show for a pilot: the holder's, or else the one given.
+    pub(crate) fn callsign(&self, pilot: &str, theirs: String) -> String {
+        self.0
+            .get(pilot)
+            .and_then(|profile| profile.callsign.clone())
+            .unwrap_or(theirs)
+    }
+
+    /// The colour to show for a pilot: the holder's, or else the one given.
+    pub(crate) fn color(&self, pilot: &str, theirs: Option<String>) -> Option<String> {
+        self.0
+            .get(pilot)
+            .and_then(|profile| profile.color.clone())
+            .or(theirs)
     }
 }
 
@@ -178,6 +232,7 @@ pub(crate) fn note<'a>(
 /// The pilots an account holds or has asked for, for its own page.
 pub(crate) fn my_pilots(state: &AppState, account: &AccountId) -> Result<Vec<MyPilot>, ApiError> {
     let mut out = Vec::new();
+    let mine = state.accounts.profile(account)?;
     for claim in state.accounts.claims_of(account)? {
         // A club that is gone from the server, or a pilot it no longer knows, is not shown.
         let Some(club) = club_of(state, &claim.club) else {
@@ -186,10 +241,16 @@ pub(crate) fn my_pilots(state: &AppState, account: &AccountId) -> Result<Vec<MyP
         let Some(pilot) = state.accounts.club_pilot(&claim.club, &claim.pilot)? else {
             continue;
         };
+        // A pilot they hold is shown as they call themselves. One they only asked for is
+        // still the club's.
+        let callsign = match (claim.how.holds(), &mine.callsign) {
+            (true, Some(callsign)) => callsign.clone(),
+            _ => pilot.callsign,
+        };
         out.push(MyPilot {
             club,
             id: pilot.pilot,
-            callsign: pilot.callsign,
+            callsign,
             held: claim.how.holds(),
         });
     }
@@ -212,6 +273,7 @@ pub async fn get_pilots(
     )?;
     let sees_who = standing.may(Act::ApproveClaim(&club));
     let claims = state.accounts.claims_in(&club)?;
+    let faces = Faces::of(&state, &club)?;
     Ok(Json(
         state
             .accounts
@@ -236,9 +298,9 @@ pub async fn get_pilots(
                     } else {
                         Vec::new()
                     },
+                    callsign: faces.callsign(&pilot.pilot, pilot.callsign),
+                    color: faces.color(&pilot.pilot, pilot.color),
                     id: pilot.pilot,
-                    callsign: pilot.callsign,
-                    color: pilot.color,
                 }
             })
             .collect(),
@@ -380,6 +442,7 @@ pub async fn get_my_results(
                 .push(PilotId(claim.pilot));
         }
     }
+    let mine = state.accounts.profile(&standing.account)?;
     let mut results = Vec::new();
     for (club_id, pilots) in held {
         let Some(club) = club_of(&state, &club_id) else {
@@ -415,10 +478,15 @@ pub async fn get_my_results(
                 if classes.is_empty() {
                     continue;
                 }
-                // The callsign of that day, as the event's own header has it.
-                let callsign = match shown.header.pilots.iter().find(|p| &p.id == pilot) {
-                    Some(found) => found.callsign.clone(),
-                    None => state
+                // Their own callsign, once they have given one (§13.7). Until then, the
+                // callsign of that day, as the event's own header has it.
+                let callsign = match (
+                    &mine.callsign,
+                    shown.header.pilots.iter().find(|p| &p.id == pilot),
+                ) {
+                    (Some(callsign), _) => callsign.clone(),
+                    (None, Some(found)) => found.callsign.clone(),
+                    (None, None) => state
                         .accounts
                         .club_pilot(&club_id, &pilot.0)?
                         .map_or_else(|| "Pilot".to_owned(), |found| found.callsign),
@@ -462,6 +530,8 @@ pub async fn get_push_pilots(
     Pusher(club): Pusher,
 ) -> Result<Json<Vec<PushPilot>>, ApiError> {
     let claims = state.accounts.claims_in(&club.id)?;
+    let profiles = state.accounts.profiles()?;
+    let faces = Faces::of(&state, &club.id)?;
     Ok(Json(
         state
             .accounts
@@ -471,10 +541,10 @@ pub async fn get_push_pilots(
                 account: claims
                     .iter()
                     .find(|claim| claim.pilot == pilot.pilot && claim.how.holds())
-                    .map(|claim| account_ref(&claim.account)),
+                    .map(|claim| account_with_profile(&claim.account, &profiles)),
+                callsign: faces.callsign(&pilot.pilot, pilot.callsign),
+                color: faces.color(&pilot.pilot, pilot.color),
                 id: PilotId(pilot.pilot),
-                callsign: pilot.callsign,
-                color: pilot.color,
             })
             .collect(),
     ))
@@ -504,12 +574,13 @@ pub async fn get_push_members(
     State(state): State<AppState>,
     Pusher(club): Pusher,
 ) -> Result<Json<Vec<PushAccount>>, ApiError> {
+    let profiles = state.accounts.profiles()?;
     Ok(Json(
         state
             .accounts
             .members(&club.id)?
             .iter()
-            .map(|(account, _)| account_ref(account))
+            .map(|(account, _)| account_with_profile(account, &profiles))
             .collect(),
     ))
 }

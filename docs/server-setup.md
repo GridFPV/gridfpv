@@ -333,6 +333,11 @@ a colour, a MultiGP id and a Velocidrone id. All of it is optional. It belongs t
 account, so it is the same in every club on your server. The ids are there so a race
 director can match a pilot to MultiGP and Velocidrone later.
 
+**The account wins.** Once someone holds a pilot, the server shows that pilot's results
+under the callsign and colour in their profile, whatever callsign the event was run with.
+The club's Grid takes the callsign, colour and ids too, the next time it is connected. A
+part of the profile left empty changes nothing.
+
 ### 6. Tie pilots to accounts
 
 A club's pilots show on its page once a director has sent an event they fly in.
@@ -485,6 +490,6 @@ The file is `target/release/gridfpv-server`. The service file, `gridfpv-serverct
   the director shows at the race. Seasons and records come later.
 - A director still sends events with a link token. Anyone with its link can look at an
   event.
-- A pilot's profile is kept, and not used yet. Results still show the callsign the event
-  was run with, and Grid does not yet pull the profile down.
+- Nothing is sent to MultiGP yet. A pilot's MultiGP and Velocidrone ids are kept and
+  given to their club's Grid, ready for that.
 - Videos are not stored.

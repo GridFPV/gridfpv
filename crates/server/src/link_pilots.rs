@@ -152,7 +152,13 @@ pub async fn put_account(
             // The server may not have heard of this pilot yet.
             client.put_pilots(&[push_pilot(&pilot)]).await?;
             client.set_account(&id, Some(&member.id)).await?;
-            Some(account(&member))
+            // The account wins where it says something: the pilot takes its callsign,
+            // colour and ids (§13.7).
+            return Ok(Json(
+                pilots
+                    .tie_to_account(&id, account(&member), &member.profile)
+                    .map_err(pilot_error)?,
+            ));
         }
         None => {
             client.set_account(&id, None).await?;
@@ -215,13 +221,27 @@ pub async fn post_pull(
             )
             .map_err(pilot_error)?
         {
+            // Held by an account: its ids come along too.
+            let pilot = match &theirs.account {
+                Some(holder) => pilots
+                    .tie_to_account(&pilot.id, account(holder), &holder.profile)
+                    .map_err(pilot_error)?,
+                None => pilot,
+            };
             added.push(pilot);
         }
     }
     for member in wanted_members {
+        // Named as the member names themselves as a pilot, or else as their account.
+        let callsign = member
+            .profile
+            .callsign
+            .clone()
+            .filter(|callsign| !callsign.trim().is_empty())
+            .unwrap_or_else(|| member.name.clone());
         let pilot = pilots
             .create(&CreatePilotRequest {
-                callsign: member.name.clone(),
+                callsign,
                 ..CreatePilotRequest::default()
             })
             .map_err(pilot_error)?;
@@ -236,7 +256,7 @@ pub async fn post_pull(
         }
         added.push(
             pilots
-                .set_server_account(&pilot.id, Some(account(member)))
+                .tie_to_account(&pilot.id, account(member), &member.profile)
                 .map_err(pilot_error)?,
         );
     }

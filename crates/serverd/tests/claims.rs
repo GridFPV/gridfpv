@@ -1205,3 +1205,211 @@ async fn the_claims_are_there_when_the_server_starts_again() {
     assert_eq!(claims[0].pilot, "ace-1");
     assert!(claims[0].how.holds());
 }
+
+// ── The account wins where it exists (§13.7) ────────────────────────────────
+
+async fn set_profile(rig: &Rig, who: &Person, profile: Value) {
+    let (status, body) = call(rig, who, Method::PUT, "/api/me/profile", Some(profile)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// The pilots of an event as a visitor is shown them: `(id, callsign, colour)`.
+async fn event_pilots(rig: &Rig, club: &str, event: &str) -> Vec<(String, String, Value)> {
+    let path = format!("/api/clubs/{club}/events/{event}/public/event/pilots");
+    let (status, list) = send(rig, By::Nobody, Method::GET, &path, None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let text = |value: &Value| value.as_str().unwrap().to_owned();
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|pilot| {
+            (
+                text(&pilot["id"]),
+                text(&pilot["callsign"]),
+                pilot.get("color").cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn results_a_pilot_holds_are_shown_under_their_accounts_callsign_and_colour() {
+    let rig = rig();
+    let pia = rig.member("Pia", "north", Role::Pilot);
+    let quin = rig.member("Quin", "north", Role::Pilot);
+    let dee = rig.member("Dee", "north", Role::Director);
+    // The event was run with the callsigns the director had that day.
+    let raced = [("ace-1", "Swift"), ("bee-2", "Bee"), ("cat-3", "Cat")];
+    push_event(&rig, &rig.north, "spring", "Spring Race", 10, &raced).await;
+    // The same pilot id raced in another club. It is not north's.
+    let souths = [("ace-1", "Other Ace")];
+    push_event(&rig, &rig.south, "south-day", "South Day", 40, &souths).await;
+    let callsigns = |pilots: Vec<(String, String, Value)>| -> Vec<String> {
+        let mut names: Vec<String> = pilots.into_iter().map(|(_, name, _)| name).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        callsigns(event_pilots(&rig, "north", "spring").await),
+        ["Bee", "Cat", "Swift"]
+    );
+
+    // Pia calls herself PiaFPV. Until she holds a pilot, that changes nothing shown.
+    set_profile(
+        &rig,
+        &pia,
+        json!({"callsign": "PiaFPV", "color": "#aa00ff"}),
+    )
+    .await;
+    assert_eq!(
+        callsigns(event_pilots(&rig, "north", "spring").await),
+        ["Bee", "Cat", "Swift"]
+    );
+    // Asking for a pilot is not holding it.
+    ask(&rig, &pia, "ace-1").await;
+    assert_eq!(
+        callsigns(event_pilots(&rig, "north", "spring").await),
+        ["Bee", "Cat", "Swift"]
+    );
+    assert_eq!(my_pilots(&rig, &pia).await[0]["callsign"], "Swift");
+
+    // She comes to hold the pilot. The results are shown as hers, under her account.
+    say_yes(&rig, &dee, "ace-1", &pia).await;
+    let shown = event_pilots(&rig, "north", "spring").await;
+    let hers = shown.iter().find(|(id, _, _)| id == "ace-1").unwrap();
+    assert_eq!(hers.1, "PiaFPV");
+    assert_eq!(hers.2, json!("#AA00FF"));
+    assert_eq!(callsigns(shown), ["Bee", "Cat", "PiaFPV"]);
+    // The other club's pilot of the same id is not hers.
+    assert_eq!(
+        callsigns(event_pilots(&rig, "south", "south-day").await),
+        ["Other Ace"]
+    );
+    // Her own pages say the same.
+    assert_eq!(my_pilots(&rig, &pia).await[0]["callsign"], "PiaFPV");
+    let (_, results) = call(&rig, &pia, Method::GET, "/api/me/results", None).await;
+    assert_eq!(results[0]["callsign"], "PiaFPV");
+    // And the club's list, for a member and for the director.
+    for who in [&quin, &dee] {
+        let list = pilots(&rig, who, "north").await;
+        let row = one(&list, "PiaFPV");
+        assert_eq!(row["id"], "ace-1");
+        assert_eq!(row["color"], "#AA00FF");
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .all(|p| p["callsign"] != "Swift")
+        );
+    }
+
+    // The event's own record is not rewritten: only how it is shown.
+    let copy = rig
+        .state
+        .store
+        .get(
+            &club("north"),
+            &gridfpv_server::events::EventId("spring".into()),
+        )
+        .unwrap()
+        .unwrap();
+    let header = copy.header().unwrap().unwrap();
+    assert!(header.contains("\"Swift\"") && !header.contains("PiaFPV"));
+
+    // She changes her callsign. It shows at once, with nothing sent again.
+    set_profile(&rig, &pia, json!({"callsign": "Pia Two"})).await;
+    let shown = event_pilots(&rig, "north", "spring").await;
+    let hers = shown.iter().find(|(id, _, _)| id == "ace-1").unwrap();
+    assert_eq!(hers.1, "Pia Two");
+    // She gave no colour this time, so the colour of the day shows.
+    assert_eq!(hers.2, Value::Null);
+
+    // With no callsign in her profile, the callsign of the day shows again.
+    set_profile(&rig, &pia, json!({"multigp_id": "24680"})).await;
+    assert_eq!(
+        callsigns(event_pilots(&rig, "north", "spring").await),
+        ["Bee", "Cat", "Swift"]
+    );
+    let (_, results) = call(&rig, &pia, Method::GET, "/api/me/results", None).await;
+    assert_eq!(results[0]["callsign"], "Swift");
+
+    // She lets go of the pilot. It is the club's again, as the event had it.
+    set_profile(&rig, &pia, json!({"callsign": "PiaFPV"})).await;
+    let path = "/api/clubs/north/pilots/ace-1/claim";
+    let (status, _) = call(&rig, &pia, Method::DELETE, path, None).await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(
+        callsigns(event_pilots(&rig, "north", "spring").await),
+        ["Bee", "Cat", "Swift"]
+    );
+}
+
+#[tokio::test]
+async fn a_director_is_sent_each_accounts_profile_with_the_pilot_it_holds() {
+    let rig = rig();
+    let pia = rig.member("Pia", "north", Role::Pilot);
+    let quin = rig.member("Quin", "north", Role::Pilot);
+    let dee = rig.member("Dee", "north", Role::Director);
+    let raced = [("ace-1", "Swift"), ("bee-2", "Bee")];
+    push_event(&rig, &rig.north, "spring", "Spring Race", 10, &raced).await;
+    let full = json!({
+        "callsign": "PiaFPV",
+        "color": "#AA00FF",
+        "multigp_id": "24680",
+        "velocidrone_id": "pia.sim"
+    });
+    set_profile(&rig, &pia, full.clone()).await;
+    say_yes(&rig, &dee, "ace-1", &pia).await;
+
+    // The club's pilots: the held one comes as its account calls itself, with the profile.
+    let (status, list) = push(&rig, &rig.north, Method::GET, "/push/pilots", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ace = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pilot| pilot["id"] == "ace-1")
+        .unwrap();
+    assert_eq!(ace["callsign"], "PiaFPV");
+    assert_eq!(ace["color"], "#AA00FF");
+    assert_eq!(ace["account"]["id"], pia.id.0);
+    assert_eq!(ace["account"]["name"], "Pia");
+    assert_eq!(ace["account"]["profile"], full);
+    let bee = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pilot| pilot["id"] == "bee-2")
+        .unwrap();
+    assert_eq!(bee["callsign"], "Bee");
+    assert!(bee.get("account").is_none());
+
+    // The club's members: each with what they say of themselves. Nothing for one who
+    // filled nothing in.
+    let (status, members) = push(&rig, &rig.north, Method::GET, "/push/members", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let by_name = |name: &str| -> Value {
+        members
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_name("Pia")["profile"], full);
+    assert!(by_name("Quin").get("profile").is_none());
+    assert_eq!(by_name("Quin"), json!({"id": quin.id.0, "name": "Quin"}));
+
+    // Another club's token is told nothing of north's members or their profiles.
+    let (_, souths) = push(&rig, &rig.south, Method::GET, "/push/members", None).await;
+    assert!(!souths.to_string().contains("PiaFPV"), "{souths}");
+    // A visitor is never shown the ids: only the callsign and the colour.
+    let path = "/api/clubs/north/events/spring/public/event/pilots";
+    let (_, seen) = send(&rig, By::Nobody, Method::GET, path, None).await;
+    assert!(seen.to_string().contains("PiaFPV"));
+    assert!(!seen.to_string().contains("24680") && !seen.to_string().contains("pia.sim"));
+    // Nor is a plain member of the club.
+    let list = pilots(&rig, &quin, "north").await;
+    assert!(!list.to_string().contains("24680"), "{list}");
+}

@@ -313,7 +313,9 @@ pub async fn sync_all(
 }
 
 /// Bring down who holds each pilot in the connected club (§13.7), so a pilot who claimed
-/// their results on the server shows as tied on the Pilots page.
+/// their results on the server shows as tied on the Pilots page. A held pilot takes what
+/// its account says of itself: the account's callsign, colour and ids win over the
+/// Director's own.
 ///
 /// **Nothing about pilots goes up here.** A club learns of a pilot from the events sent
 /// to it, and from a director tying a pilot to an account. The Director's whole pilot list
@@ -349,10 +351,13 @@ pub async fn sync_pilots(
                 let account = pilot.account?;
                 Some((
                     pilot.id,
-                    gridfpv_server::pilots::PilotAccount {
-                        id: account.id,
-                        name: account.name,
-                    },
+                    (
+                        gridfpv_server::pilots::PilotAccount {
+                            id: account.id,
+                            name: account.name,
+                        },
+                        account.profile,
+                    ),
                 ))
             })
             .collect();
