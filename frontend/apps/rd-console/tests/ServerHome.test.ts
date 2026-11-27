@@ -27,9 +27,15 @@ const FRIDAY: ServerEvent = {
   name: 'Friday Night Whoops',
   date: '2026-11-27',
   location: 'Main field',
-  created_at: 300
+  created_at: 300,
+  hidden: false
 };
-const SUNDAY: ServerEvent = { id: 'sunday-cup-11aa22', name: 'Sunday Cup', created_at: 200 };
+const SUNDAY: ServerEvent = {
+  id: 'sunday-cup-11aa22',
+  name: 'Sunday Cup',
+  created_at: 200,
+  hidden: false
+};
 
 function racing() {
   const on = race('h1', 1, 'Running', {

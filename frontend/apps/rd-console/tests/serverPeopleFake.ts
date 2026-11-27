@@ -10,10 +10,13 @@ import type {
   InviteMade,
   InviteRequest,
   InviteView,
+  LinkTokenMade,
+  LinkTokenView,
   Me,
   MemberView,
   MyAccount,
   MyResult,
+  ServerEvent,
   SignInProvider
 } from '@gridfpv/types';
 import type { PeopleApi } from '../src/lib/serverPeople.js';
@@ -47,7 +50,22 @@ export interface FakeServer {
    */
   pilots: Record<string, ClubPilotView[]>;
   results: MyResult[];
+  /** Each club's link tokens, newest first. */
+  tokens: Record<string, LinkTokenView[]>;
+  /** The tokens themselves, by id: what a Director would paste. */
+  secrets: Record<string, string>;
+  /** Each club's events, hidden ones too. */
+  events: Record<string, ServerEvent[]>;
+  /** Events removed from the server, as `club/event`. */
+  removed: string[];
 }
+
+/** An event a club holds on the server. */
+export const serverEvent = (
+  id: string,
+  name: string,
+  over: Partial<ServerEvent> = {}
+): ServerEvent => ({ id, name, created_at: 1, hidden: false, ...over });
 
 /** A pilot of a club that nobody holds or has asked for. */
 export const clubPilot = (
@@ -70,6 +88,10 @@ export function fakeServer(over: Partial<FakeServer> = {}): FakeServer {
     links: {},
     pilots: { north: [clubPilot('p-cat', 'Cat'), clubPilot('p-dog', 'Dog')] },
     results: [],
+    tokens: { north: [{ id: 'tok1', label: 'Club laptop', created_at: 1_700_000_000_000 }] },
+    secrets: { tok1: 'gfs_first' },
+    events: { north: [] },
+    removed: [],
     ...over
   };
 }
@@ -81,7 +103,10 @@ const refuse = (message: string): never => {
 export function fakePeople(server: FakeServer) {
   let made = 0;
   const me = (): Me => (server.account ? { account: server.account } : {});
-  const clubs: Record<string, { id: string; name: string }> = { north: NORTH, south: SOUTH };
+  const clubs: Record<string, { id: string; name: string }> = {
+    north: { ...NORTH },
+    south: { ...SOUTH }
+  };
   const nameOf = (club: string, account: string): string =>
     server.members[club]?.find((m) => m.id === account)?.name ??
     (server.account?.id === account ? server.account.name : account);
@@ -92,6 +117,14 @@ export function fakePeople(server: FakeServer) {
     if (account.owner) return true;
     const role = account.clubs.find((c) => c.club.id === club)?.role;
     return role === 'Director' || role === 'Approver';
+  };
+  const roleIn = (club: string): ClubRole | undefined =>
+    server.account?.clubs.find((c) => c.club.id === club)?.role;
+  /** Only a director of the club, or an owner, runs it. */
+  const runsClub = (club: string) => {
+    if (server.account?.owner !== true && roleIn(club) !== 'Director') {
+      refuse('You are not allowed to do that.');
+    }
   };
   const pilotOf = (club: string, id: string): ClubPilotView =>
     server.pilots[club]?.find((p) => p.id === id) ?? refuse('This club has no such pilot.');
@@ -247,7 +280,63 @@ export function fakePeople(server: FakeServer) {
       target.asks = target.asks.filter((a) => a.id !== account);
       sync();
     }),
-    results: vi.fn(async () => [...server.results])
+    results: vi.fn(async () => [...server.results]),
+    renameClub: vi.fn(async (club: string, name: string) => {
+      runsClub(club);
+      if (name.trim() === '') refuse('A club needs a name.');
+      clubs[club].name = name.trim();
+      const account = server.account;
+      if (account) {
+        server.account = {
+          ...account,
+          clubs: account.clubs.map((c) =>
+            c.club.id === club ? { ...c, club: { ...c.club, name: name.trim() } } : c
+          )
+        };
+      }
+    }),
+    linkTokens: vi.fn(async (club: string): Promise<LinkTokenView[]> => {
+      runsClub(club);
+      return (server.tokens[club] ?? []).map((token) => ({ ...token }));
+    }),
+    makeLinkToken: vi.fn(async (club: string, label: string): Promise<LinkTokenMade> => {
+      runsClub(club);
+      if (label.trim() === '') refuse('A token needs a label, so it can be told from the others.');
+      made += 1;
+      const token: LinkTokenView = {
+        id: `tok-new-${made}`,
+        label: label.trim(),
+        created_at: 1_700_000_000_000 + made
+      };
+      server.tokens[club] = [token, ...(server.tokens[club] ?? [])];
+      server.secrets[token.id] = `gfs_secret-${made}`;
+      return { token: { ...token }, secret: server.secrets[token.id] };
+    }),
+    revokeLinkToken: vi.fn(async (club: string, id: string) => {
+      runsClub(club);
+      const token = server.tokens[club]?.find((t) => t.id === id && t.revoked_at === undefined);
+      if (!token) refuse('This club has no such link token, or it was already taken back.');
+      else token.revoked_at = 1_700_000_100_000;
+    }),
+    clubEvents: vi.fn(async (club: string): Promise<ServerEvent[]> => {
+      const all = server.events[club] ?? [];
+      const runs = server.account?.owner === true || roleIn(club) === 'Director';
+      return all.filter((event) => runs || !event.hidden).map((event) => ({ ...event }));
+    }),
+    hideEvent: vi.fn(async (club: string, event: string, hidden: boolean) => {
+      runsClub(club);
+      const found = server.events[club]?.find((e) => e.id === event);
+      if (!found) refuse('This server holds no such event.');
+      else found.hidden = hidden;
+    }),
+    removeEvent: vi.fn(async (club: string, event: string) => {
+      runsClub(club);
+      if (!server.events[club]?.some((e) => e.id === event)) {
+        refuse('This server holds no such event.');
+      }
+      server.events[club] = server.events[club].filter((e) => e.id !== event);
+      server.removed.push(`${club}/${event}`);
+    })
   } satisfies PeopleApi;
   return api;
 }

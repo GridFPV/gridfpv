@@ -1811,8 +1811,8 @@ This is one iteration. All three steps are in it.
 3. **Sign-up through the server.** A pilot signs up for a heat on the server, and the
    Director hears of it at once (§13.4). The iteration is not done without this.
 
-The bracket visualizer (#548) is planned for the same stretch of work. It does not depend
-on the server.
+The bracket visualizer (#548) is **not** part of this work (Ryan, 2026-11-27: "lets just
+keep that on backlog for now and put all our focus into getting server right").
 
 **Later, not in this iteration:** linking accounts across servers, the hub, a server
 fetching from another server, directors pushing with their own account, reading for
@@ -1880,6 +1880,20 @@ even when the two clocks differ.
 - **The Director's pilot list goes up** by callsign and colour, so the server knows a
   pilot before any event names them. A pilot removed on the Director stays on the server.
 
+**Running a club from the server's page** (§13.2, §13.6, §13.9). For a director of the
+club, or an owner of the server.
+
+- **Link tokens** are made and taken back on the club's page. A director makes the token
+  their own Grid sends with (the "later" of §13.6, built). A token is shown once.
+- **The club's name** is changed there.
+- **A hidden event** is left out of the club's list for everyone who does not run the
+  club. Anyone who has its link can still open it. This is "unlisted" (§13.9).
+- **A removed event** is deleted from the server. A Director that still holds it is told
+  it was **removed on the server** and sends none of it. Its director can **send it
+  again** from Setup → Server.
+- **A Director asks the server what it holds** every 15 seconds, so it notices an event
+  that was removed, lost or swapped there even when it has nothing new to send.
+
 **Sign-up: a pilot asks on the server, and the Director decides** (§13.4, §11.5).
 
 - **Who can.** Someone signed in to the server, whose account holds a pilot the event
@@ -1900,10 +1914,10 @@ even when the two clocks differ.
   to for that, as it does for who holds a pilot (§13.7). It checks that it has that pilot.
 
 **Choices made while building.** Ryan agreed to 1, 2, 8 and 9, changed 3 and 10, and said
-4 and 7 are fine for now (2026-11-27). 5 and 6 are not confirmed.
+4 and 7 are fine for now (2026-11-27). 5, 6 and 11 are not confirmed.
 
-1. **Every event is sent** once a server is linked. There is no switch for one event, and
-   no "unlisted" yet (§13.9).
+1. **Every event is sent** once a server is linked. There is no switch for one event. An
+   event can be hidden on the server afterwards (§13.9).
 2. **Pilots, classes and timers go up as a visitor may see them:** a callsign and a
    colour, not a real name. The log itself goes up whole, as agreed (§13.3), and the
    server leaves out of every answer what the Director's Public door leaves out.
@@ -1915,9 +1929,10 @@ even when the two clocks differ.
    owed before this ships.
 5. **Plain HTTP is allowed to a server on the same computer** (`http://localhost`), and
    nowhere else. It is how a server is tried out.
-6. **Removing an event on the Director does not remove it from the server.**
-7. **Link tokens are made on the server's command line.** There is no page for the owner
-   yet.
+6. **Removing an event on the Director does not remove it from the server.** It is
+   removed on the server's own page, by someone who runs the club. Not confirmed.
+7. **Link tokens were first made on the server's command line.** Now they are also made
+   on the club's page, by a director or an owner.
 8. **The Director hears over a stream, not a WebSocket** (§13.4). Agreed (Ryan,
    2026-11-27).
 9. **There is no switch for sign-up through the server.** With a server linked, a pilot
@@ -1926,6 +1941,11 @@ even when the two clocks differ.
 10. **Check-in to an open seat (§11.9) is not offered on the server yet.** The first build
     left it out on purpose. Ryan changed this on 2026-11-27: it must be a feature, with a
     way to know the pilot is at the race. See §13.13.
+
+11. **A director may hide and remove their club's events, rename the club and make link
+    tokens.** The design gave tokens and clubs to owners first (§13.2, §13.6). With one
+    club on a server, a director who could not do these would have to ask the owner for
+    every laptop. Not confirmed.
 
 ### 13.13 A race day with no Wi-Fi for pilots (Wanted 2026-11-27, not built)
 

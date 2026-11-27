@@ -510,7 +510,7 @@ describe("a club's page", () => {
     await waitFor(() =>
       expect(screen.getAllByTestId('club-invite')[0].textContent).toContain('Taken back')
     );
-    expect(screen.queryByRole('button', { name: /Take back/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Take back the invite/ })).toBeNull();
   });
 
   it('opens for nobody who does not look after the club, and asks the server nothing', async () => {
@@ -862,6 +862,7 @@ describe('the results page', () => {
     id,
     name,
     created_at: 1,
+    hidden: false,
     ...over
   });
 

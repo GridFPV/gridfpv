@@ -146,7 +146,10 @@ pub enum Act<'a> {
     SeePilots(&'a ClubId),
     /// Say which account holds a pilot of a club, with nobody having asked.
     GivePilot(&'a ClubId),
-    /// Look after the server itself: make clubs, link tokens, owners.
+    /// Run a club's own things on the server: its name, its link tokens, and which of its
+    /// events are listed or removed (§13.6, §13.9).
+    RunClub(&'a ClubId),
+    /// Look after the server itself: make clubs and owners.
     RunServer,
 }
 
@@ -166,7 +169,8 @@ impl Standing {
             Act::Invite(club, _)
             | Act::SeeMembers(club)
             | Act::SetRole(club)
-            | Act::GivePilot(club) => director(club),
+            | Act::GivePilot(club)
+            | Act::RunClub(club) => director(club),
             Act::SeePilots(club) => self.role_in(club).is_some(),
             Act::ApproveClaim(club) => {
                 matches!(self.role_in(club), Some(Role::Director | Role::Approver))

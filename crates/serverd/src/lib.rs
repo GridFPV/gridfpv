@@ -26,6 +26,7 @@ pub mod app;
 pub mod asks;
 pub mod book;
 pub mod claims;
+pub mod manage;
 pub mod page;
 pub mod people;
 pub mod push;

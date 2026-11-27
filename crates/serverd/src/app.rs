@@ -13,6 +13,7 @@ use crate::accounts::Accounts;
 use crate::asks::{self, Asks};
 use crate::book::{Book, BookError};
 use crate::claims;
+use crate::manage;
 use crate::page::Page;
 use crate::people;
 use crate::push;
@@ -142,7 +143,28 @@ pub fn router(state: AppState) -> Router {
                 .delete(push::delete_event),
         )
         .route("/push/events/{id}/log", axum::routing::post(push::post_log))
+        .route("/push/events", get(push::get_events))
         .route("/api/clubs", get(read::get_clubs))
+        .route(
+            "/api/clubs/{club}",
+            axum::routing::patch(manage::patch_club),
+        )
+        .route(
+            "/api/clubs/{club}/tokens",
+            get(manage::get_tokens).post(manage::post_token),
+        )
+        .route(
+            "/api/clubs/{club}/tokens/{id}",
+            axum::routing::delete(manage::delete_token),
+        )
+        .route(
+            "/api/clubs/{club}/events/{event}/listing",
+            axum::routing::put(manage::put_listing),
+        )
+        .route(
+            "/api/clubs/{club}/events/{event}",
+            get(read::get_one_event).delete(manage::delete_event),
+        )
         .route("/api/clubs/{club}/events", get(read::get_events))
         .nest(
             "/api/clubs/{club}/events/{event}/public",

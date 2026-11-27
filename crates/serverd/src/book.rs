@@ -65,6 +65,26 @@ struct Pages {
     clubs: Vec<Club>,
     #[serde(default)]
     tokens: Vec<LinkToken>,
+    /// What is noted about an event, apart from the event itself. An event with nothing
+    /// noted has no entry.
+    #[serde(default)]
+    events: Vec<EventNote>,
+}
+
+/// What the server notes about one event of a club, apart from the event itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventNote {
+    pub club: ClubId,
+    /// The event's id, as the Director gave it.
+    pub event: String,
+    /// Left out of the club's list for everyone but those who run the club (§13.9). It can
+    /// still be opened by its address.
+    #[serde(default)]
+    pub hidden: bool,
+    /// When someone who runs the club removed it from the server. A Director is not let
+    /// send it again until its director says so.
+    #[serde(default)]
+    pub removed_at: Option<i64>,
 }
 
 /// What can go wrong with the book.
@@ -283,6 +303,89 @@ impl Book {
                 }
                 None => Ok(false),
             }
+        })
+    }
+
+    /// Take back a token of one club, by its id. `false` when the club has no such token,
+    /// or it was already taken back.
+    pub fn revoke_club_token(&self, club: &ClubId, id: &str) -> Result<bool, BookError> {
+        self.change(|pages| {
+            match pages
+                .tokens
+                .iter_mut()
+                .find(|t| t.id == id && &t.club == club && t.revoked_at.is_none())
+            {
+                Some(token) => {
+                    token.revoked_at = Some(now_ms());
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        })
+    }
+
+    /// What is noted about an event. Nothing noted reads as not hidden and not removed.
+    pub fn event_note(&self, club: &ClubId, event: &str) -> EventNote {
+        self.refresh();
+        self.held
+            .read()
+            .expect("book lock")
+            .pages
+            .events
+            .iter()
+            .find(|note| &note.club == club && note.event == event)
+            .cloned()
+            .unwrap_or_else(|| EventNote {
+                club: club.clone(),
+                event: event.to_owned(),
+                hidden: false,
+                removed_at: None,
+            })
+    }
+
+    /// Every event of a club that has something noted.
+    pub fn event_notes(&self, club: &ClubId) -> Vec<EventNote> {
+        self.refresh();
+        self.held
+            .read()
+            .expect("book lock")
+            .pages
+            .events
+            .iter()
+            .filter(|note| &note.club == club)
+            .cloned()
+            .collect()
+    }
+
+    /// Change what is noted about an event. A note that says nothing is not kept.
+    pub fn note_event(
+        &self,
+        club: &ClubId,
+        event: &str,
+        change: impl FnOnce(&mut EventNote),
+    ) -> Result<EventNote, BookError> {
+        self.change(|pages| {
+            if !pages.clubs.iter().any(|c| &c.id == club) {
+                return Err(BookError::NoSuchClub(club.0.clone()));
+            }
+            let at = pages
+                .events
+                .iter()
+                .position(|note| &note.club == club && note.event == event);
+            let mut note = match at {
+                Some(at) => pages.events.remove(at),
+                None => EventNote {
+                    club: club.clone(),
+                    event: event.to_owned(),
+                    hidden: false,
+                    removed_at: None,
+                },
+            };
+            change(&mut note);
+            if note.hidden || note.removed_at.is_some() {
+                pages.events.push(note.clone());
+            }
+            Ok(note)
         })
     }
 

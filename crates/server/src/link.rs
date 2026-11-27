@@ -119,6 +119,9 @@ pub enum LinkEventState {
     /// The server holds a different event under this id. Nothing is sent until the
     /// director says to replace the server's copy.
     Different,
+    /// The event was removed on the server by someone who runs the club. Nothing is sent
+    /// until the director says to send it again.
+    Removed,
     /// The last try failed. It is tried again.
     Failed { message: String },
 }

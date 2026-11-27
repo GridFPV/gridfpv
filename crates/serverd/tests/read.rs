@@ -742,7 +742,8 @@ async fn an_event_is_listed_once_its_header_has_arrived() {
             "location": "Main field",
             "description": "Whoops only. Bring spare props.",
             "organizer": "Recon FPV",
-            "created_at": list[0]["created_at"]
+            "created_at": list[0]["created_at"],
+            "hidden": false
         }])
     );
     assert!(list[0]["created_at"].as_i64().unwrap() > 0);

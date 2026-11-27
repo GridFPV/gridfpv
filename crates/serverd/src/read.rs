@@ -5,6 +5,7 @@
 //! |-------|------|
 //! | `GET /api/clubs` | the clubs on this server |
 //! | `GET /api/clubs/{club}/events` | a club's events, newest first |
+//! | `GET /api/clubs/{club}/events/{event}` | one event, as the list shows it |
 //! | `GET /api/clubs/{club}/events/{event}/public/…` | one event, for a visitor |
 //!
 //! **One event is read exactly as a Director's Public door gives its open event**
@@ -63,8 +64,13 @@ pub(crate) struct Shown {
 }
 
 /// An event as a list shows it.
-pub(crate) fn server_event(id: EventId, meta: gridfpv_server::events::EventMeta) -> ServerEvent {
+pub(crate) fn server_event(
+    id: EventId,
+    meta: gridfpv_server::events::EventMeta,
+    hidden: bool,
+) -> ServerEvent {
     ServerEvent {
+        hidden,
         id,
         name: meta.name,
         date: meta.date,
@@ -117,28 +123,57 @@ pub async fn get_clubs(State(state): State<AppState>) -> Json<Vec<PushClub>> {
     )
 }
 
-/// `GET /api/clubs/{club}/events`: newest first.
+/// `GET /api/clubs/{club}/events`: newest first. A hidden event is listed only for someone
+/// who runs the club (§13.9).
 pub async fn get_events(
     State(state): State<AppState>,
+    crate::people::MaybeSigned(standing): crate::people::MaybeSigned,
     Path(club): Path<String>,
 ) -> Result<Json<Vec<ServerEvent>>, ApiError> {
     let club = state
         .book
         .club(&ClubId(club))
         .ok_or_else(|| not_found("This server has no such club."))?;
+    let runs = standing.is_some_and(|s| s.may(crate::accounts::Act::RunClub(&club.id)));
+    let hidden: std::collections::HashSet<String> = state
+        .book
+        .event_notes(&club.id)
+        .into_iter()
+        .filter(|note| note.hidden)
+        .map(|note| note.event)
+        .collect();
     let mut events = Vec::new();
     for id in state.store.list(&club.id)? {
+        let hidden = hidden.contains(&id.0);
+        if hidden && !runs {
+            continue;
+        }
         // One event that cannot be read must not hide the others.
         let Ok(shown) = shown(&state, &club.id.0, &id.0) else {
             continue;
         };
-        events.push(server_event(id, shown.header.meta));
+        events.push(server_event(id, shown.header.meta, hidden));
     }
     events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
     Ok(Json(events))
 }
 
 type EventPath = Path<(String, String)>;
+
+/// `GET /api/clubs/{club}/events/{event}`: one event as a list shows it. For anyone who has
+/// its address, a hidden event too (§13.9: hidden is unlisted, not closed).
+pub async fn get_one_event(
+    State(state): State<AppState>,
+    Path((club, event)): EventPath,
+) -> Result<Json<ServerEvent>, ApiError> {
+    let shown = shown(&state, &club, &event)?;
+    let hidden = state.book.event_note(&ClubId(club), &event).hidden;
+    Ok(Json(server_event(
+        EventId(event),
+        shown.header.meta,
+        hidden,
+    )))
+}
 
 /// `GET …/public/hello`: a reader here is always a visitor, and nobody signs in.
 pub async fn get_hello(

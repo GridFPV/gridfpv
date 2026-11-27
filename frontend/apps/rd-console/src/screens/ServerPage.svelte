@@ -244,6 +244,10 @@
                   <Button size="sm" disabled={busy} onclick={() => (replacing = event)}
                     >Replace the server's copy…</Button
                   >
+                {:else if event.state === 'Removed'}
+                  <Button size="sm" disabled={busy} onclick={() => (replacing = event)}
+                    >Send it again…</Button
+                  >
                 {/if}
               </li>
             {/each}
@@ -256,20 +260,30 @@
 
 {#if replacing}
   {@const target = replacing}
+  {@const again = target.state === 'Removed'}
   <Dialog
     open={true}
-    title="Replace the server's copy of {target.name}?"
+    title={again
+      ? `Send ${target.name} to the server again?`
+      : `Replace the server's copy of ${target.name}?`}
     onclose={() => (replacing = undefined)}
   >
-    <p>
-      The server holds a different event under the same name. It may be an older copy of this one,
-      or one from another computer.
-    </p>
-    <p>Replacing removes what the server holds and sends this computer's copy.</p>
+    {#if again}
+      <p>Someone who runs your club removed this event from the server.</p>
+      <p>Sending it again puts all of it back, for anyone to see.</p>
+    {:else}
+      <p>
+        The server holds a different event under the same name. It may be an older copy of this one,
+        or one from another computer.
+      </p>
+      <p>Replacing removes what the server holds and sends this computer's copy.</p>
+    {/if}
     {#if error}<Banner tone="danger">{error}</Banner>{/if}
     {#snippet footer()}
       <Button variant="ghost" onclick={() => (replacing = undefined)}>Cancel</Button>
-      <Button variant="danger" disabled={busy} onclick={replace}>Replace</Button>
+      <Button variant={again ? 'primary' : 'danger'} disabled={busy} onclick={replace}
+        >{again ? 'Send it again' : 'Replace'}</Button
+      >
     {/snippet}
   </Dialog>
 {/if}

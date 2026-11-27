@@ -3,4 +3,4 @@
 /**
  * Why a server did not take a batch.
  */
-export type PushRefusal = "Gap" | "Different";
+export type PushRefusal = "Gap" | "Different" | "Removed";

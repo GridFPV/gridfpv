@@ -69,6 +69,7 @@ describe('an event in words', () => {
     expect(eventLabel(event())).toBe('On the server');
     expect(eventLabel(event({ state: 'Sending', sent: 4 }))).toBe('Sending, 4 of 10');
     expect(eventLabel(event({ state: 'Different' }))).toBe('A different event is on the server');
+    expect(eventLabel(event({ state: 'Removed', sent: 0 }))).toBe('Removed on the server');
     expect(eventLabel(event({ state: { Failed: { message: 'x' } } }))).toBe('Not sent');
   });
 
@@ -76,6 +77,7 @@ describe('an event in words', () => {
     expect(eventTone(event())).toBe('success');
     expect(eventTone(event({ state: 'Sending' }))).toBe('info');
     expect(eventTone(event({ state: 'Different' }))).toBe('warn');
+    expect(eventTone(event({ state: 'Removed' }))).toBe('warn');
     const failed = event({ state: { Failed: { message: 'It will be sent again.' } } });
     expect(eventTone(failed)).toBe('danger');
     expect(eventProblem(failed)).toBe('It will be sent again.');

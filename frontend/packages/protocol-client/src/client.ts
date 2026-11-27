@@ -38,6 +38,8 @@ import type {
   EventView,
   Format,
   InviteMade,
+  LinkTokenMade,
+  LinkTokenView,
   InviteRequest,
   InviteView,
   KioskPassView,
@@ -1004,6 +1006,120 @@ export async function revokeClubInvite(
     clubPath(club, `invites/${encodeURIComponent(id)}`),
     { method: 'DELETE', fetch: options.fetch },
     'take the invite back'
+  );
+}
+
+/**
+ * One event on a remote server, as its list shows it (`GET /api/clubs/{club}/events/{event}`).
+ * `undefined` when the server holds no such event. A hidden event is not in the list, and
+ * is still read here by anyone who has its address.
+ */
+export async function getServerEvent(
+  baseUrl: string,
+  club: string,
+  event: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<ServerEvent | undefined> {
+  try {
+    return await apiJson<ServerEvent>(
+      baseUrl,
+      clubPath(club, `events/${encodeURIComponent(event)}`),
+      options,
+      'read the event'
+    );
+  } catch (err) {
+    if (isRequestFailure(err) && err.status === 404) return undefined;
+    throw err;
+  }
+}
+
+/** Give a club a new name (`PATCH /api/clubs/{club}`). For those who run it. */
+export async function renameServerClub(
+  baseUrl: string,
+  club: string,
+  name: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<PushClub> {
+  return apiJson<PushClub>(
+    baseUrl,
+    `/api/clubs/${encodeURIComponent(club)}`,
+    { method: 'PATCH', body: { name }, fetch: options.fetch },
+    'rename the club'
+  );
+}
+
+/** A club's link tokens, newest first (`GET /api/clubs/{club}/tokens`). Never the tokens themselves. */
+export async function listClubLinkTokens(
+  baseUrl: string,
+  club: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<LinkTokenView[]> {
+  return apiJson<LinkTokenView[]>(
+    baseUrl,
+    clubPath(club, 'tokens'),
+    options,
+    'read the link tokens'
+  );
+}
+
+/** Make a link token (`POST /api/clubs/{club}/tokens`). The token is given this once. */
+export async function makeClubLinkToken(
+  baseUrl: string,
+  club: string,
+  label: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<LinkTokenMade> {
+  return apiJson<LinkTokenMade>(
+    baseUrl,
+    clubPath(club, 'tokens'),
+    { method: 'POST', body: { label }, fetch: options.fetch },
+    'make the link token'
+  );
+}
+
+/** Take a link token back (`DELETE /api/clubs/{club}/tokens/{id}`). */
+export async function revokeClubLinkToken(
+  baseUrl: string,
+  club: string,
+  id: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    clubPath(club, `tokens/${encodeURIComponent(id)}`),
+    { method: 'DELETE', fetch: options.fetch },
+    'take the link token back'
+  );
+}
+
+/** Hide an event from a club's list, or show it (`PUT …/events/{event}/listing`). */
+export async function setServerEventHidden(
+  baseUrl: string,
+  club: string,
+  event: string,
+  hidden: boolean,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    clubPath(club, `events/${encodeURIComponent(event)}/listing`),
+    { method: 'PUT', body: { hidden }, fetch: options.fetch },
+    hidden ? 'hide the event' : 'show the event'
+  );
+}
+
+/** Remove an event from a server (`DELETE /api/clubs/{club}/events/{event}`). */
+export async function removeServerEvent(
+  baseUrl: string,
+  club: string,
+  event: string,
+  options: { fetch?: FetchLike } = {}
+): Promise<void> {
+  await apiRequest(
+    baseUrl,
+    clubPath(club, `events/${encodeURIComponent(event)}`),
+    { method: 'DELETE', fetch: options.fetch },
+    'remove the event'
   );
 }
 

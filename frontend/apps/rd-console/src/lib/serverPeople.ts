@@ -11,6 +11,13 @@ import {
   getServerMe,
   getServerMyResults,
   listClubInvites,
+  listClubLinkTokens,
+  listServerEvents,
+  makeClubLinkToken,
+  removeServerEvent,
+  renameServerClub,
+  revokeClubLinkToken,
+  setServerEventHidden,
   listClubMembers,
   listClubPilots,
   listSignInProviders,
@@ -31,11 +38,14 @@ import type {
   InviteMade,
   InviteRequest,
   InviteView,
+  LinkTokenMade,
+  LinkTokenView,
   Me,
   MemberView,
   MyAccount,
   MyClassResult,
   MyResult,
+  ServerEvent,
   SignInProvider
 } from '@gridfpv/types';
 import { ordinal } from './names.js';
@@ -71,6 +81,17 @@ export interface PeopleApi {
   refuseAsk(club: string, pilot: string, account: string): Promise<void>;
   /** The events the account's pilots flew, newest first. */
   results(): Promise<MyResult[]>;
+  /** Give a club a new name. For those who run it, as is everything below. */
+  renameClub(club: string, name: string): Promise<void>;
+  /** A club's link tokens, newest first. Never the tokens themselves. */
+  linkTokens(club: string): Promise<LinkTokenView[]>;
+  /** Make a link token. The token itself is in the answer, this once. */
+  makeLinkToken(club: string, label: string): Promise<LinkTokenMade>;
+  revokeLinkToken(club: string, id: string): Promise<void>;
+  /** A club's events as the person signed in may see them: hidden ones too, for those who run it. */
+  clubEvents(club: string): Promise<ServerEvent[]>;
+  hideEvent(club: string, event: string, hidden: boolean): Promise<void>;
+  removeEvent(club: string, event: string): Promise<void>;
 }
 
 /** The real thing, for the server at `baseUrl`. */
@@ -96,7 +117,16 @@ export function peopleApi(baseUrl: string): PeopleApi {
     giveTo: (club, pilot, account) => setClubPilotHolder(baseUrl, club, pilot, account),
     freePilot: (club, pilot) => freeClubPilot(baseUrl, club, pilot),
     refuseAsk: (club, pilot, account) => refuseClubPilotAsk(baseUrl, club, pilot, account),
-    results: () => getServerMyResults(baseUrl)
+    results: () => getServerMyResults(baseUrl),
+    renameClub: async (club, name) => {
+      await renameServerClub(baseUrl, club, name);
+    },
+    linkTokens: (club) => listClubLinkTokens(baseUrl, club),
+    makeLinkToken: (club, label) => makeClubLinkToken(baseUrl, club, label),
+    revokeLinkToken: (club, id) => revokeClubLinkToken(baseUrl, club, id),
+    clubEvents: (club) => listServerEvents(baseUrl, club),
+    hideEvent: (club, event, hidden) => setServerEventHidden(baseUrl, club, event, hidden),
+    removeEvent: (club, event) => removeServerEvent(baseUrl, club, event)
   };
 }
 
@@ -200,6 +230,11 @@ export function pilotStanding(pilot: Pick<ClubPilotView, 'mine' | 'asked' | 'tak
   if (pilot.asked) return 'You asked';
   if (pilot.taken) return 'Taken';
   return '';
+}
+
+/** How a link token stands, in a few words. */
+export function tokenStanding(token: Pick<LinkTokenView, 'revoked_at'>): string {
+  return token.revoked_at === undefined ? 'Works' : 'Taken back';
 }
 
 /** A provider's name for a sign-in an account holds, when the server still offers it. */

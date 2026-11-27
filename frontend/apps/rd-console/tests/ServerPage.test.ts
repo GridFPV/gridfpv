@@ -257,6 +257,41 @@ describe('ServerPage', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
+  it('offers to send an event again when it was removed on the server', async () => {
+    const { session } = fake({
+      ...CONNECTED,
+      events: [
+        { id: 'friday', name: 'Friday Night', len: 40, sent: 0, state: 'Removed' },
+        { id: 'sunday', name: 'Sunday Cup', len: 90, sent: 90, state: 'Sent' }
+      ]
+    });
+    render(ServerPage, { session });
+    await shown();
+    const rows = screen.getAllByTestId('link-event');
+    expect(rows[0].textContent).toContain('Removed on the server');
+    // Only the removed one offers it, and it is not called a replace.
+    expect(within(rows[1]).queryByRole('button')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Replace/ })).toBeNull();
+
+    await fireEvent.click(within(rows[0]).getByRole('button', { name: /Send it again/ }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.textContent).toContain('Send Friday Night to the server again?');
+    expect(dialog.textContent).toContain('removed this event from the server');
+    expect(dialog.textContent).not.toContain('different event');
+    expect(session.replaceOnServer).not.toHaveBeenCalled();
+
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(session.replaceOnServer).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getByRole('button', { name: /Send it again/ }));
+    await fireEvent.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Send it again' })
+    );
+    await waitFor(() => expect(session.replaceOnServer).toHaveBeenCalledWith('friday'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
   it('takes a certificate when the server uses its own', async () => {
     const { session } = fake(CONNECTED);
     render(ServerPage, { session });

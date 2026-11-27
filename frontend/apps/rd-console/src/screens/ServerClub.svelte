@@ -3,7 +3,8 @@
    * ServerClub — a club's members, invites and pilots, for those who look after it
    * (docs/primitives.md §13.2, §13.7, §13.8).
    *
-   * Someone who runs the club (a director, or a server owner) sees all three. A claims
+   * Someone who runs the club (a director, or a server owner) sees all three, and below
+   * them the club's events, link tokens and name (`ServerClubManage`). A claims
    * approver sees only the pilots, to answer the members who asked for one.
    *
    * Only a club's directors hand out its roles and invite to it. A club always keeps at
@@ -29,6 +30,7 @@
     roleWord,
     type PeopleApi
   } from '../lib/serverPeople.js';
+  import ServerClubManage from './ServerClubManage.svelte';
   import ServerClubPilots from './ServerClubPilots.svelte';
 
   let {
@@ -36,8 +38,11 @@
     club,
     me,
     runs = true,
-    origin = location.origin
+    origin = location.origin,
+    onchange
   }: {
+    /** Told when the club's name or its list of events changed. */
+    onchange?: () => void;
     api: Pick<
       PeopleApi,
       | 'members'
@@ -50,6 +55,13 @@
       | 'giveTo'
       | 'freePilot'
       | 'refuseAsk'
+      | 'renameClub'
+      | 'linkTokens'
+      | 'makeLinkToken'
+      | 'revokeLinkToken'
+      | 'clubEvents'
+      | 'hideEvent'
+      | 'removeEvent'
     >;
     club: { id: string; name: string };
     /** The signed-in account's id, to mark its own row. */
@@ -340,6 +352,7 @@
     </Card>
 
     <ServerClubPilots {api} {club} {me} runs {members} onchange={load} />
+    <ServerClubManage {api} {club} {onchange} />
   {/if}
 </div>
 

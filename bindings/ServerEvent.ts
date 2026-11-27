@@ -20,4 +20,9 @@ organizer?: string,
 /**
  * When the Director made the event, in milliseconds since 1970.
  */
-created_at: number, };
+created_at: number, 
+/**
+ * Left out of the list for everyone but those who run the club (§13.9). Anyone with
+ * its address can still open it.
+ */
+hidden: boolean, };
