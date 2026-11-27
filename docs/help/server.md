@@ -57,6 +57,26 @@ It is the same sheet they get on their phone at the race.
 - It works for the event that is **open** in Grid, and only while Grid is connected to the
   server. When it is not, the pilot is told to try again or sign up at the race.
 
+## Taking a seat from anywhere, at the race
+
+In open practice a pilot can take an open seat from the server's page too, on their own
+phone data. You do not need to run Wi-Fi for them.
+
+Taking a seat gives a pilot the laps flown on it, so this is only for pilots who are at
+the race. The **race code** is how Grid knows.
+
+1. Open the event's **Pilot codes** page and find **Race code**. Press **Show**.
+2. Show pilots the code, or press **Show the QR code** and let them scan it.
+3. A pilot opens the event on the server, goes to **Me**, and takes a seat. The first time,
+   the page asks for the race code. A pilot who scanned the QR code is not asked.
+
+- There is one code for the whole event. It is not the same as a pilot's own sign-in code.
+- Grid checks the code on your computer. The server never learns it.
+- Press **New code** if the code got out. The old one stops working straight away. Pilots
+  who have a seat keep it.
+- After five wrong codes in a row, a pilot waits a minute.
+- You can still drop anyone from a seat on the Run page.
+
 If the internet drops, keep racing. Grid sends what was missed when it is back.
 
 ## The list of events

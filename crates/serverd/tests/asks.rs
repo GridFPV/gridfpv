@@ -44,6 +44,7 @@ async fn with_no_director_listening_a_pilot_is_told_at_once() {
             EventId("e".into()),
             PilotId("p".into()),
             leave("h"),
+            None,
             Duration::from_secs(30),
         )
         .await;
@@ -64,6 +65,7 @@ async fn an_ask_waits_for_the_directors_answer_and_gets_it() {
                 EventId("friday".into()),
                 PilotId("ace-1".into()),
                 leave("h1"),
+                None,
                 Duration::from_secs(5),
             )
             .await
@@ -83,12 +85,15 @@ async fn an_ask_waits_for_the_directors_answer_and_gets_it() {
         event,
         pilot,
         ask,
+        code,
     } = waiting[0].clone();
+    assert_eq!(code, None);
     assert_eq!((event.0.as_str(), pilot.0.as_str()), ("friday", "ace-1"));
     assert_eq!(ask, leave("h1"));
 
     let no = PushAnswer {
         refused: Some("That heat is on the timer.".into()),
+        needs_code: false,
     };
     assert!(asks.answer(&club("north"), &id, no.clone()));
     assert_eq!(asking.await.unwrap(), Ok(no));
@@ -107,6 +112,7 @@ async fn an_ask_nobody_answers_is_given_up_and_taken_off_the_desk() {
             EventId("e".into()),
             PilotId("p".into()),
             leave("h"),
+            None,
             SOON,
         )
         .await;
@@ -127,6 +133,7 @@ async fn a_pilot_who_stops_waiting_takes_their_ask_with_them() {
                 EventId("e".into()),
                 PilotId("p".into()),
                 leave("h"),
+                None,
                 Duration::from_secs(30),
             )
             .await
@@ -152,6 +159,7 @@ async fn a_director_hears_only_its_own_clubs_asks() {
             EventId("e".into()),
             PilotId("p".into()),
             leave("h"),
+            None,
             SOON,
         )
         .await;
@@ -165,6 +173,7 @@ async fn a_director_hears_only_its_own_clubs_asks() {
                 EventId("e".into()),
                 PilotId("p".into()),
                 leave("h"),
+                None,
                 Duration::from_secs(5),
             )
             .await
@@ -452,6 +461,155 @@ async fn each_of_the_three_asks_reaches_the_director_as_it_was_made() {
 }
 
 #[tokio::test]
+async fn a_seat_ask_reaches_the_director_with_the_code_as_typed_and_dropping_carries_none() {
+    let rig = rig().await;
+    let pia = rig.member("Pia", "north", Some("ace-1"));
+    let director = rig.director("north", PushAnswer::default());
+    let base = "/api/clubs/north/events/friday/public/pilot/checkin";
+    let seat = |code: Value| {
+        let mut body = json!({"race": "practice#1", "adapter": "bench", "seat": "seat-1"});
+        if !code.is_null() {
+            body["code"] = code;
+        }
+        body
+    };
+    for (route, body) in [
+        ("take", seat(json!("  abc-234 "))),
+        ("take", seat(Value::Null)),
+        ("take", seat(json!("   "))),
+        ("take", seat(json!("x".repeat(500)))),
+        // A code sent with a drop is not passed on: dropping needs none.
+        ("drop", json!({"race": "practice#1", "code": "ABC234"})),
+    ] {
+        let (status, why) = send(
+            &rig,
+            By::Person(&pia),
+            Method::POST,
+            &format!("{base}/{route}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{route}: {why}");
+    }
+    let seen = director.seen.lock().unwrap().clone();
+    let take = json!({"TakeSeat": {"race": "practice#1", "adapter": "bench", "seat": "seat-1"}});
+    let asked: Vec<(Value, Option<String>)> = seen
+        .iter()
+        .map(|request| {
+            assert_eq!(request.pilot.0, "ace-1");
+            assert_eq!(request.event.0, "friday");
+            (
+                serde_json::to_value(&request.ask).unwrap(),
+                request.code.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            // Trimmed, and otherwise as typed: the Director is the one that reads it.
+            (take.clone(), Some("abc-234".to_owned())),
+            (take.clone(), None),
+            (take.clone(), None),
+            (take, Some("x".repeat(64))),
+            (json!({"DropSeat": {"race": "practice#1"}}), None),
+        ]
+    );
+    // An ask with no code is sent with no `code` at all.
+    assert!(
+        serde_json::to_value(&seen[1])
+            .unwrap()
+            .get("code")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_seat_ask_needs_a_sign_in_a_pilot_in_the_event_and_a_body_that_reads() {
+    let rig = rig().await;
+    let pia = rig.member("Pia", "north", Some("ace-1"));
+    let rex = rig.member("Rex", "north", None);
+    let director = rig.director("north", PushAnswer::default());
+    let base = "/api/clubs/north/events/friday/public/pilot/checkin";
+    let body =
+        json!({"race": "practice#1", "adapter": "bench", "seat": "seat-1", "code": "ABC234"});
+    for route in ["take", "drop"] {
+        let path = format!("{base}/{route}");
+        let (status, _) = send(&rig, By::Nobody, Method::POST, &path, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{route}");
+        let (status, _) = send(
+            &rig,
+            By::Token(&rig.north),
+            Method::POST,
+            &path,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a link token is not a pilot: {route}"
+        );
+        let (status, _) = send(
+            &rig,
+            By::Person(&rex),
+            Method::POST,
+            &path,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route}");
+        // What is not a seat ask is refused before it is asked.
+        let (status, _) = send(
+            &rig,
+            By::Person(&pia),
+            Method::POST,
+            &path,
+            Some(json!({"seat": 7})),
+        )
+        .await;
+        assert!(status.is_client_error(), "{route}: {status}");
+        // An event the club does not hold.
+        let (status, _) = send(
+            &rig,
+            By::Person(&pia),
+            Method::POST,
+            &format!("/api/clubs/north/events/no-such/public/pilot/checkin/{route}"),
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{route}");
+    }
+    assert!(director.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_refusal_about_the_race_code_has_its_own_status_so_the_page_can_ask_for_it() {
+    let rig = rig().await;
+    let pia = rig.member("Pia", "north", Some("ace-1"));
+    let _director = rig.director(
+        "north",
+        PushAnswer {
+            refused: Some("That is not the race code.".into()),
+            needs_code: true,
+        },
+    );
+    let (status, answer) = send(
+        &rig,
+        By::Person(&pia),
+        Method::POST,
+        "/api/clubs/north/events/friday/public/pilot/checkin/take",
+        Some(json!({"race": "practice#1", "adapter": "bench", "seat": "seat-1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_REQUIRED);
+    assert_eq!(
+        answer,
+        json!({"code": "Refused", "message": "That is not the race code."})
+    );
+}
+
+#[tokio::test]
 async fn the_directors_reason_is_given_to_the_pilot_in_its_own_words() {
     let rig = rig().await;
     let pia = rig.member("Pia", "north", Some("ace-1"));
@@ -459,6 +617,7 @@ async fn the_directors_reason_is_given_to_the_pilot_in_its_own_words() {
         "north",
         PushAnswer {
             refused: Some("That seat is taken.".into()),
+            needs_code: false,
         },
     );
     let (status, answer) = send(

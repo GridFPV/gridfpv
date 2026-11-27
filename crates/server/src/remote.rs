@@ -179,8 +179,9 @@ pub struct PushPilotAccount {
     pub account: String,
 }
 
-/// What a pilot asks for on a server, for the Director to decide (§13.4): the same three
-/// things a pilot asks for at the race (§11.5).
+/// What a pilot asks for on a server, for the Director to decide (§13.4): the same things
+/// a pilot asks for at the race, signing up for a heat (§11.5) and checking in to an open
+/// seat (§11.9).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "bindings/")]
 pub enum PilotAsk {
@@ -196,6 +197,15 @@ pub enum PilotAsk {
     },
     /// Give a spot up.
     Leave { heat: gridfpv_events::PhaseId },
+    /// Check in to an open seat of a race that is under way (§11.9). The Director takes
+    /// it only with the event's race code, which shows the pilot is at the race (§13.13).
+    TakeSeat {
+        race: gridfpv_events::RaceId,
+        adapter: gridfpv_events::AdapterId,
+        seat: gridfpv_events::SeatRef,
+    },
+    /// Give up the seat the pilot checked in to.
+    DropSeat { race: gridfpv_events::RaceId },
 }
 
 /// One ask waiting on a server for the Director (`GET /push/requests`).
@@ -211,6 +221,11 @@ pub struct PushRequest {
     pub event: crate::events::EventId,
     pub pilot: gridfpv_events::PilotId,
     pub ask: PilotAsk,
+    /// The race code the pilot typed, for an ask that needs one. The server passes it on
+    /// as typed and does not know whether it is right: the Director checks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub code: Option<String>,
 }
 
 /// The Director's answer to an ask (`POST /push/requests/{id}`).
@@ -221,6 +236,10 @@ pub struct PushAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub refused: Option<String>,
+    /// The refusal is about the race code: none was sent, or it was not right (§13.13).
+    /// The page then asks the pilot for the code, where any other refusal is only shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_code: bool,
 }
 
 /// Why a server did not take a batch.

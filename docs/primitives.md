@@ -1906,6 +1906,8 @@ club, or an owner of the server.
   when the Director's next push arrives, about a second later. A no comes back in the
   Director's own words.
 - **No Director connected:** the pilot is told so at once, and to sign up at the race.
+- **Check-in to an open seat goes the same way** (§11.9), and needs the race code as
+  well (§13.13).
 - **Only the event that is open at the race takes sign-ups.** An ask for another event is
   refused. An ask for an event the Director does not have is left for the Director that
   does.
@@ -1914,7 +1916,8 @@ club, or an owner of the server.
   to for that, as it does for who holds a pilot (§13.7). It checks that it has that pilot.
 
 **Choices made while building.** Ryan agreed to 1, 2, 8 and 9, changed 3 and 10, and said
-4 and 7 are fine for now (2026-11-27). 5, 6 and 11 are not confirmed.
+4 and 7 are fine for now (2026-11-27). 5, 6 and 11 are not confirmed, and nor is the race
+code of §13.13.
 
 1. **Every event is sent** once a server is linked. There is no switch for one event. An
    event can be hidden on the server afterwards (§13.9).
@@ -1938,16 +1941,15 @@ club, or an owner of the server.
 9. **There is no switch for sign-up through the server.** With a server linked, a pilot
    can sign up from it wherever the director opened sign-up on a phase. Agreed (Ryan,
    2026-11-27).
-10. **Check-in to an open seat (§11.9) is not offered on the server yet.** The first build
-    left it out on purpose. Ryan changed this on 2026-11-27: it must be a feature, with a
-    way to know the pilot is at the race. See §13.13.
-
+10. **Check-in to an open seat (§11.9) was first left off the server.** Ryan changed
+    this on 2026-11-27: it must be a feature, with a way to know the pilot is at the
+    race. It is built, with a race code as that way. See §13.13.
 11. **A director may hide and remove their club's events, rename the club and make link
     tokens.** The design gave tokens and clubs to owners first (§13.2, §13.6). With one
     club on a server, a director who could not do these would have to ask the owner for
     every laptop. Not confirmed.
 
-### 13.13 A race day with no Wi-Fi for pilots (Wanted 2026-11-27, not built)
+### 13.13 A race day with no Wi-Fi for pilots (Wanted 2026-11-27; check-in built)
 
 Ryan, 2026-11-27: "Ideally, I would not have to run a wlan for people, but we need to make
 sure that we can do everything we want from local and then server is just an option."
@@ -1968,23 +1970,38 @@ network the director runs.
 gives a pilot the laps flown on it (§11.9). Someone at home must not be able to take one.
 Sign-up does not need this proof: a pilot may sign up for a heat before they arrive.
 
-**How the proof could work (proposed, not agreed).**
+**The proof is a race code (built 2026-11-27).** This is how it was built. Ryan asked for
+"a way to validate they are at the race" and has not yet seen this answer to it.
 
-- **A race code.** The Director makes a short code for the event and shows it at the
-  race: on the director's screen, on the kiosk, or printed as a QR code. A pilot scans it
-  or types it once on the server's page. After that their phone counts as **at the race**
-  for that event, for the day.
-- **The Director checks the code,** not the server. The code rides along with the ask.
-  The server only passes it on, as it does for sign-up.
-- **The director can make a new code** at any time. Old ones stop working.
-- **The director can also mark a pilot as here** by hand, for a pilot who cannot scan.
+- **One code for the event.** The Director makes it the first time the director looks at
+  it, on the event's **Pilot codes** page. It is six letters and numbers, like a pilot's
+  own code. The card is closed until the director opens it.
+- **Shown at the race.** As letters to type, or as a QR code. The QR code holds a link to
+  the event's page on the server with the code in it, so a pilot who scans it types
+  nothing.
+- **Typed once.** The pilot's browser keeps the code for that event and sends it with
+  each ask for a seat.
+- **The Director checks it, not the server.** The server passes on what was typed. It
+  never learns the code and keeps nothing. The code is not in the event's log either, so
+  it never goes up with a push.
+- **A new code ends the old one.** The director makes one at any time. A pilot who has a
+  seat keeps it.
+- **Five wrong codes in a row** and that pilot waits a minute. Other pilots are not held
+  up.
+- **Giving a seat up needs no code.**
 - **Not a phone's location.** A browser's location is easy to fake and many pilots refuse
   to share it.
 
-**Other things this picture needs, to be checked when it is built.**
+**What a code cannot stop.** A pilot at the race can send the code to a friend at home.
+The friend still needs an account that holds a pilot in the event. The director can drop
+anyone from a seat on the Run page, and make a new code.
 
-- Everything the pilot's page at the race shows (§11.3) must show on the server's page
-  too, such as "My practice".
-- The Director's use of the connection must stay small enough for a phone hotspot.
-- The server's page is about a second behind the race. That is fine for sign-up and
-  check-in. Lap callouts stay on the director's computer.
+**Not built yet.**
+
+- The director marking a pilot as here by hand, for one who cannot scan or type.
+- "My practice" on the server's page is the same page as at the race, but has not been
+  checked through on a real race day.
+- How much data the Director uses on a phone hotspot has not been measured.
+
+The server's page is about a second behind the race. That is fine for sign-up and
+check-in. Lap callouts stay on the director's computer.

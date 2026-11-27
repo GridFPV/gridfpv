@@ -576,6 +576,7 @@ async fn an_ask_the_director_cannot_stand_behind_is_refused_or_left_alone() {
                 event,
                 gridfpv_events::PilotId("ghost-9".into()),
                 take,
+                None,
                 Duration::from_secs(5),
             )
             .await
@@ -598,6 +599,7 @@ async fn an_ask_the_director_cannot_stand_behind_is_refused_or_left_alone() {
             gridfpv_server::events::EventId("elsewhere".into()),
             gridfpv_events::PilotId("ghost-9".into()),
             take,
+            None,
             Duration::from_millis(400),
         )
         .await
